@@ -69,7 +69,7 @@ export class CustomerReturnCustomerOperationsService {
       || (index > 0 && row.authorizationId >= rows[index - 1].authorizationId))) throw customerReturnUnavailable();
     const page = rows.slice(0, input.pageSize);
     let progress: ReadonlyMap<number, CustomerReturnProgress> | null = null;
-    if (page.length && this.dependencies.historyProgress) {
+    if (page.length && input.includeProgress && this.dependencies.historyProgress) {
       try {
         progress = await this.dependencies.historyProgress.readHistory(this.principal, page, this.workflowNow());
         for (const row of page) {
@@ -84,8 +84,8 @@ export class CustomerReturnCustomerOperationsService {
         progress = null;
       }
     }
-    return customerReturnCustomerHistorySchema.parse({ returns: page.map(row => ({ ...row,
-      ...(this.dependencies.historyProgress ? { progress: progress?.get(row.authorizationId) ?? null } : {}),
+    return customerReturnCustomerHistorySchema.parse({ returns: page.map(({ progress: _priorProgress, ...row }) => ({ ...row,
+      ...(input.includeProgress && this.dependencies.historyProgress ? { progress: progress?.get(row.authorizationId) ?? null } : {}),
     })),
       nextBeforeAuthorizationId: rows.length > input.pageSize ? page[page.length - 1].authorizationId : null,
     });

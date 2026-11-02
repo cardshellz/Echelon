@@ -306,7 +306,7 @@ export function CustomerWorkspace({
     void run(async (signal) => {
       const [page, prior] = await Promise.allSettled([
         api.orderChoices(null, signal),
-        api.history(null, signal),
+        api.history(null, signal, storefront),
       ]);
       if (signal.aborted) return;
       for (const result of [page, prior])
@@ -336,7 +336,7 @@ export function CustomerWorkspace({
       }
     });
     return () => operation.current?.abort();
-  }, [api, run, attempt, command.record !== null, embedded, directOrderId]);
+  }, [api, run, attempt, command.record !== null, embedded, directOrderId, storefront]);
 
   useEffect(() => {
     if (!storefront || command.record || selected || historicalStatus || embedded || directOrderId !== null) return;
@@ -799,6 +799,7 @@ export function CustomerWorkspace({
                   const page = await api.history(
                     history.nextBeforeAuthorizationId,
                     signal,
+                    storefront,
                   );
                   if (!signal.aborted)
                     setHistory((previous) => ({

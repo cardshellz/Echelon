@@ -9,6 +9,7 @@ import type { CustomerAccountRequest } from "../../shared/customer-account/custo
 // Actual compiled theme assets; every service call is synthetic and intercepted.
 async function fixture(page: Page, options: { guest?: boolean; invalid?: boolean; bootstrapFailure?: "session" | "service"; loseSubmit?: boolean; loseLookup?: boolean; loseVerify?: boolean;
   noOrders?: boolean; historyFailure?: boolean; ordersFailure?: boolean; noProgress?: boolean; multiBox?: boolean; staleLabel?: boolean;
+  legacyHistory?: boolean;
 } = {}) {
   const guestCalls: Record<string, any>[] = []; let lookupLost=false, verifyLost=false;
   const calls: CustomerAccountRequest[] = [], errors: string[] = [], external: string[] = [];
@@ -72,6 +73,7 @@ async function fixture(page: Page, options: { guest?: boolean; invalid?: boolean
     }
     if (input.path === "/returns/returns") {
       historyReads++;
+      if (options.legacyHistory && input.query?.progress) return route.fulfill({ status: 400, json: { error: { code: "RETURN_CUSTOMER_INPUT_INVALID" } } });
       if (options.historyFailure && historyReads === 1) return route.fulfill({ status: 503, json: { error: { code: "RETURN_CUSTOMER_UNAVAILABLE" } } });
       return route.fulfill({ json: { returns: [{ authorizationId: 20, authorizationNumber: "RMA-20", omsOrderId: 10, orderReference: "TEST-1001", createdAt: "2026-11-01T12:00:00Z",
         ...(!options.noProgress ? { progress: returnProgress() } : {}) }], nextBeforeAuthorizationId: null } });
@@ -236,13 +238,14 @@ test("the integrated page fits narrow phones with visible shopping and support p
 });
 
 test("old history responses stay usable without claiming label or receipt status", async ({ page }) => {
-  const f = await fixture(page, { noProgress: true });
+  const f = await fixture(page, { noProgress: true, legacyHistory: true });
   const card = page.getByRole("article", { name: "Return RMA-20", exact: true });
   await expect(card.getByRole("button", { name: "View return", exact: true })).toBeVisible();
   await expect(card.getByText("Return label ready", { exact: true })).toHaveCount(0);
   await card.getByRole("button", { name: "View return", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Return RMA-20", exact: true })).toBeVisible();
   expect(f.submissions()).toBe(0);
+  expect(f.calls.filter(call => call.path === "/returns/returns").map(call => call.query?.progress ?? null)).toEqual(["1", null]);
 });
 
 test("failed reads offer retry instead of claiming no eligible orders or no saved returns", async ({ page }) => {

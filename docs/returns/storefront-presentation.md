@@ -34,6 +34,12 @@ progress still render a working "View return" action. A failed progress read is
 logged as `RETURN_HISTORY_PROGRESS_UNAVAILABLE` and does not hide accepted history
 or claim a physical/financial status.
 
+The extension is requested explicitly with `progress=1`. Existing bundles keep
+the exact older response shape and do not incur summary reads. A new native
+bundle encountering an older server's 400/404 response retries the read once
+without that extension. Authentication failures, outages and commands never
+take this fallback path.
+
 A label-ready single-box summary offers "Download label". The action first reads
 current label status and then uses the existing protected artifact downloader.
 A stale summary never grants download access. Multiple boxes open the existing

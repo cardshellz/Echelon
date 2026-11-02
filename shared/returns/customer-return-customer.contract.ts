@@ -28,6 +28,11 @@ export type CustomerReturnCustomerLabelStatus = z.infer<typeof customerReturnCus
 export const customerReturnCustomerHistoryInputSchema = z.object({
   beforeAuthorizationId: z.number().int().positive().safe().optional(),
   pageSize: z.number().int().min(1).max(20).default(10),
+  includeProgress: z.boolean().optional(),
+}).strict();
+export const customerReturnCustomerHistoryQuerySchema = z.object({
+  before: z.coerce.number().int().positive().safe().optional(),
+  progress: z.literal("1").optional(),
 }).strict();
 export const customerReturnCustomerHistoryItemSchema = z.object({
   authorizationId: z.number().int().positive().safe(),

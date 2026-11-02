@@ -49,7 +49,7 @@ describe("customer-bound return operations", () => {
       refund: { code: "not_started" as const, label: "Refund not started" }, quantity: 2, receivedQuantity: 0, parcels: [] };
     const readHistory = vi.fn(async () => new Map([[10, progress]]));
     const service = new CustomerReturnCustomerOperationsService({ ...s.dependencies, historyProgress: { readHistory }, now: () => now });
-    expect(await service.listReturns({ pageSize: 1 })).toMatchObject({ returns: [{ ...row, progress }], nextBeforeAuthorizationId: 10 });
+    expect(await service.listReturns({ pageSize: 1, includeProgress: true })).toMatchObject({ returns: [{ ...row, progress }], nextBeforeAuthorizationId: 10 });
     expect(readHistory).toHaveBeenCalledExactlyOnceWith(principal, [row], now);
     expect(s.resolveOwned).not.toHaveBeenCalled(); expect(s.status).not.toHaveBeenCalled(); expect(s.submitForOrder).not.toHaveBeenCalled();
   });
@@ -62,12 +62,20 @@ describe("customer-bound return operations", () => {
         refund: { code: "not_started" as const, label: "Not started" }, quantity: 2, receivedQuantity: 0, parcels: [] }]]);
     });
     const service = new CustomerReturnCustomerOperationsService({ ...s.dependencies, historyProgress: { readHistory }, reportHistoryUnavailable: report, now: () => now });
-    expect((await service.listReturns()).returns).toMatchObject([{ authorizationId: 10, progress: null }]);
+    expect((await service.listReturns({ includeProgress: true })).returns).toMatchObject([{ authorizationId: 10, progress: null }]);
     expect(report).toHaveBeenCalledOnce();
   });
   it("does not read supplementary progress for an empty history page", async () => {
     const s = setup(), readHistory = vi.fn();
     await new CustomerReturnCustomerOperationsService({ ...s.dependencies, historyProgress: { readHistory } }).listReturns();
+    expect(readHistory).not.toHaveBeenCalled();
+  });
+  it("preserves the strict legacy history response unless summaries are explicitly requested", async () => {
+    const s = setup(), readHistory = vi.fn(), row = { authorizationId: 10, authorizationNumber: "RMA-10", omsOrderId: 100,
+      orderReference: "#TEST-1", createdAt: "2026-11-02T12:00:00Z" };
+    s.listReturns.mockResolvedValue([row]);
+    const result = await new CustomerReturnCustomerOperationsService({ ...s.dependencies, historyProgress: { readHistory } }).listReturns();
+    expect(result.returns).toEqual([row]); expect(result.returns[0]).not.toHaveProperty("progress");
     expect(readHistory).not.toHaveBeenCalled();
   });
   it("keeps verified guests bound to their order even if a read adapter returns another order", async () => {

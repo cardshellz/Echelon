@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { customerReturnCustomerHistoryQuerySchema } from "@shared/returns/customer-return-customer.contract";
 import { CustomerReturnCustomerAccessError } from "../../application/customer-return-customer-auth.service";
 import type { createCustomerReturnCustomerServices } from "../../infrastructure/customer-return-customer.composition";
 const id = z.coerce.number().int().positive().safe();
@@ -32,9 +33,9 @@ export async function dispatchCustomerReturn(input: { path: string; method: "GET
       return returns.operations.queueLabels(omsOrderId, body);
   }
   if (path === "/returns/returns" && read) {
-    const parsed = z.object({ before: id.optional() }).strict().parse(query);
+    const parsed = customerReturnCustomerHistoryQuerySchema.parse(query);
     return returns.operations.listReturns(
-      parsed.before ? { beforeAuthorizationId: parsed.before } : {},
+      { ...(parsed.before ? { beforeAuthorizationId: parsed.before } : {}), ...(parsed.progress ? { includeProgress: true } : {}) },
     );
   }
   const workflow = /^\/returns\/label-requests\/([a-f0-9-]+)(?:\/(retry))?$/.exec(path);
