@@ -38,6 +38,11 @@ import { ebayInventoryOffersPath, publishEbayInventoryQuantity, readEbayInventor
   type EbayInventoryQuantityClient } from "../../adapters/ebay/ebay-inventory-quantity";
 import { AutomaticSyncEbayProvider, automaticSyncOldPhotos, automaticSyncPhotos } from "../fixtures/ebay-automatic-sync-provider.fixture";
 import { PostgresEbayLegacyMaintenanceEvidenceReader } from "../../infrastructure/ebay-legacy-maintenance-evidence";
+import { ChannelRecoverySyncService } from "../../../marketplace-listings/application/channel-recovery-sync.service";
+import { releaseListingWorkPermit, tryAcquireListingWorkPermit, withListingWorkPermit } from "../../../marketplace-listings/listing-work-permits";
+import { proveEbayStockOnlyEffects } from "../../adapters/ebay/ebay-recovery-effects";
+import { ebayListingPublicationScopes } from "../../ebay-listing-request-recovery";
+import type { RetainedPublicationEffectEvidence } from "../../../inventory-planning/application/ebay-publication-reconciliation.service";
 
 const runtime = vi.hoisted(() => ({ pool: null as Pool | null, api: vi.fn() }));
 vi.mock("../../../../db", () => ({
@@ -104,7 +109,8 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
   }, 60_000);
   afterEach(async () => { await database?.close(); runtime.pool = null; vi.unstubAllGlobals(); });
 
-  function fixture(options: { publication?: boolean; provider?: AutomaticSyncEbayProvider; identity?: EbayListingSyncIdentity } = {}) {
+  function fixture(options: { publication?: boolean; provider?: AutomaticSyncEbayProvider; identity?: EbayListingSyncIdentity;
+    quantityRequestIncludesPrice?: boolean } = {}) {
     const requested = options.identity ?? identity;
     const provider = options.provider ?? new AutomaticSyncEbayProvider(clock, options.publication, requested.variants.map(member => member.sku));
     const sourceIdentity: EbayListingSyncIdentity = options.publication ? { ...requested,
@@ -209,6 +215,14 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
       publishAbsolute: async request => {
         expect(request.destination).toEqual({ kind: "channel_connection", channelConnectionId: 9, dropshipStoreConnectionId: null });
         expect(request.externalInventoryItemId).toBe("P5");
+        if (options.quantityRequestIncludesPrice) {
+          const mutation: EbayQuantityHttpRequest = { method: "POST", path: QUANTITY_PATH, body: { requests: [{
+            sku: request.externalInventoryItemId, shipToLocationAvailability: { quantity: request.desiredQuantity },
+            offers: [{ offerId: "offer-P5", availableQuantity: request.desiredQuantity, price: { value: "1.00", currency: "USD" } }],
+          }] } };
+          await observeEbayQuantityRequest(mutation, () => provider.request(mutation));
+          return { publishedQuantity: request.desiredQuantity, providerResponse: {} };
+        }
         const providerResponse = await publishEbayInventoryQuantity(quantityClient, request.externalInventoryItemId, "EBAY_US", request.desiredQuantity);
         return { publishedQuantity: providerResponse.quantity, providerResponse };
       },
@@ -222,10 +236,36 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
     registry.register(transport);
     const outbox = new InventoryPublicationOutboxService(new PostgresInventoryPublicationOutboxRepository(database.pool),
       registry, { now: clock }, randomUUID, admission);
-    const refreshContent = vi.fn(async (input: { productId: number; connectionId: number; accountId: string; commandKey: string }) => {
+    const refreshContent = vi.fn(async (input: { productId: number; connectionId: number; accountId: string; commandKey: string;
+      forceSync?: boolean; scopes?: readonly QuantityPublicationScope[]; effects?: readonly RetainedPublicationEffectEvidence[] }) => {
       expect(input).toMatchObject({ productId: 20, connectionId: 9, accountId: "seller-36" });
-      const job = await service.enqueue(identity, "system:ebay-publication-reconciliation", input.commandKey);
-      return { jobId: job.id };
+      const actor = "system:ebay-publication-reconciliation";
+      const owner = new ChannelRecoverySyncService({
+        receipt: async () => {
+          const prior = await service.getByCommand(input.commandKey, 67, actor, "sync");
+          return prior ? { jobId: prior.id } : null;
+        },
+        inspect: async () => {
+          if (!(execution instanceof EbayExistingListingSyncExecution) || !input.scopes
+            || await store.hasUnfinishedRecoveryWork(67, 20)) return null;
+          const proof = proveEbayStockOnlyEffects({ effects: input.effects ?? [], identity, checkedAt: clock() });
+          if (proof) {
+            const scopes = [...new Map([...input.scopes, ...ebayListingPublicationScopes(identity)]
+              .map(scope => [JSON.stringify(scope), scope])).values()];
+            if (await responseRecovery.hasOutstanding(scopes) || await store.hasUnfinishedRecoveryWork(67, 20)) return null;
+            return proof;
+          }
+          const result = await withListingWorkPermit(database.pool, async () => {
+            const verified = await execution.inspectForRecovery(identity, input.scopes!,
+              scopes => responseRecovery.hasOutstanding(scopes));
+            return verified && !await store.hasUnfinishedRecoveryWork(67, 20) ? verified : null;
+          });
+          return result.available ? result.value : null;
+        },
+        enqueue: async () => ({ jobId: (await service.enqueue(identity, actor, input.commandKey)).id }),
+      });
+      const result = await owner.check(input.forceSync ?? false);
+      return "receipt" in result ? result.receipt : result;
     });
     const reconciliation = new EbayPublicationReconciliationService(
       new PostgresEbayPublicationReconciliationRepository(database.pool), registry, refreshContent, clock);
@@ -460,11 +500,21 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
     await f.service.processDue(1, job.id);
     expect(await f.store.get(job.id)).toMatchObject({ state: "completed" });
     expectCurrentListing(f, 7);
+    // Historical snapshots may predate a later nullable column. Exact
+    // identity and request evidence must remain verifiable after migration.
+    await database.pool.query("ALTER TABLE inventory.quantity_publication_attempts ADD COLUMN synthetic_later_field text");
+    const publishedRead = vi.spyOn(f.client, "getPublishedListingContent");
+    publishedRead.mockClear();
 
     f.provider.deliverLateWrites();
     expect(f.provider.snapshot()).toMatchObject({ item: { availability: { shipToLocationAvailability: { quantity: 17 } } }, offer: { availableQuantity: 17 } });
     advance();
     await f.reconciliation.processDue();
+    const observed = (await database.pool.query("SELECT content_check_kind,content_proof FROM inventory.ebay_publication_reconciliation_cycles")).rows;
+    expect(observed).toMatchObject([{ content_check_kind: "stock_only", content_proof: [
+      { inventoryItemId: "P5", providerResourceId: "offer-P5", desiredQuantity: "17", requestHash: expect.stringMatching(/^[a-f0-9]{64}$/) },
+    ] }]);
+    expect(publishedRead).not.toHaveBeenCalled();
     expect((await f.outbox.processDue()).verified).toBeGreaterThan(0);
     await f.service.processDue();
     expectCurrentListing(f, 7);
@@ -475,7 +525,169 @@ dbDescribe.sequential("automatic existing eBay Sync recovery through PostgreSQL 
     await f.service.processDue();
     expect(f.refreshContent).toHaveBeenCalledTimes(2);
     expect(f.provider.writes).toHaveLength(repairedWrites);
+    await expectUnknownOutcomeRetained({ ...before, record: { ...before.record, synthetic_later_field: null } });
+  });
+
+  it("records repeated matching checks without new Sync jobs and still repairs a later old picture write", async () => {
+    const f = fixture();
+    f.provider.loseNextResponse(ITEM_PATH);
+    await expect(f.client.createOrReplaceInventoryItem("P5", f.provider.snapshot().item)).rejects.toThrow();
+    const before = await uncertainAttempt();
+    const original = await f.service.enqueue(identity, "operator");
+    await f.service.processDue(1, original.id);
+    expect(await f.store.get(original.id)).toMatchObject({ state: "completed" });
+    expectCurrentListing(f, 17);
+
+    const initialWrites = f.provider.writes.length;
+    for (let pass = 0; pass < 3; pass += 1) {
+      advance();
+      expect(await f.reconciliation.processDue()).toEqual({ checked: 1, repaired: 0, blocked: 0 });
+    }
+    const cycles = (await database.pool.query(`SELECT content_job_id,content_check_kind,content_checked_at,content_evidence_hash,content_identity_hash
+      FROM inventory.ebay_publication_reconciliation_cycles ORDER BY cycle`)).rows;
+    expect(cycles).toHaveLength(3);
+    for (const cycle of cycles) expect(cycle).toMatchObject({ content_job_id: null, content_check_kind: "provider_match", content_checked_at: expect.any(Date),
+      content_evidence_hash: expect.stringMatching(/^[a-f0-9]{64}$/), content_identity_hash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_jobs")).rows[0].count).toBe(1);
+    expect(f.provider.writes).toHaveLength(initialWrites);
+    await expect(database.pool.query("UPDATE inventory.ebay_publication_reconciliation_cycles SET content_evidence_hash=repeat('f',64)"))
+      .rejects.toMatchObject({ code: "23514" });
+
+    f.provider.deliverLateWrites();
+    expect(f.provider.snapshot().item.product.imageUrls).toEqual(automaticSyncOldPhotos);
+    advance();
+    expect(await f.reconciliation.processDue()).toEqual({ checked: 1, repaired: 0, blocked: 0 });
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_jobs")).rows[0].count).toBe(2);
+    await f.service.processDue();
+    expectCurrentListing(f, 17);
+    advance();
+    await f.reconciliation.processDue();
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_jobs")).rows[0].count).toBe(2);
     await expectUnknownOutcomeRetained(before);
+  });
+
+  it("keeps the full content duty when a stock-only watch later receives an unknown picture write", async () => {
+    const f = fixture();
+    f.provider.loseNextResponse(QUANTITY_PATH);
+    expect((await f.outbox.processDue()).failed).toBe(1);
+    const first = await f.service.enqueue(identity, "operator");
+    await f.service.processDue(1, first.id);
+    expect(await f.store.get(first.id)).toMatchObject({ state: "completed" });
+    const stale = f.provider.snapshot().item;
+    stale.product.imageUrls = [...automaticSyncOldPhotos];
+    f.provider.loseNextResponse(ITEM_PATH);
+    await expect(f.client.createOrReplaceInventoryItem("P5", stale)).rejects.toThrow();
+    const second = await f.service.enqueue(identity, "operator");
+    await f.service.processDue(1, second.id);
+    expect(await f.store.get(second.id)).toMatchObject({ state: "completed" });
+    advance();
+    await f.reconciliation.processDue();
+    expect((await database.pool.query("SELECT content_check_kind FROM inventory.ebay_publication_reconciliation_cycles ORDER BY cycle DESC LIMIT 1")).rows)
+      .toEqual([{ content_check_kind: "provider_match" }]);
+    f.provider.deliverLateWrites();
+    expect(f.provider.snapshot().item.product.imageUrls).toEqual(automaticSyncOldPhotos);
+    advance();
+    await f.reconciliation.processDue();
+    await f.outbox.processDue();
+    await f.service.processDue();
+    expectCurrentListing(f, 17);
+  });
+
+  it("does not classify a retained bulk request with a price as stock-only", async () => {
+    const f = fixture({ quantityRequestIncludesPrice: true });
+    f.provider.loseNextResponse(QUANTITY_PATH);
+    expect((await f.outbox.processDue()).failed).toBe(1);
+    const original = await f.service.enqueue(identity, "operator");
+    await f.service.processDue(1, original.id);
+    expectCurrentListing(f, 17);
+    advance();
+    await f.reconciliation.processDue();
+    expect((await database.pool.query("SELECT content_check_kind FROM inventory.ebay_publication_reconciliation_cycles")).rows)
+      .toEqual([{ content_check_kind: "provider_match" }]);
+    f.provider.deliverLateWrites();
+    expect(f.provider.snapshot().offer.pricingSummary?.price?.value).toBe("1.00");
+    advance();
+    await f.reconciliation.processDue();
+    const cycle = (await database.pool.query("SELECT content_job_id FROM inventory.ebay_publication_reconciliation_cycles ORDER BY cycle DESC LIMIT 1")).rows[0];
+    expect(cycle.content_job_id).toBeTruthy();
+    await f.service.processDue(1, cycle.content_job_id);
+    expectCurrentListing(f, 17);
+  });
+
+  it("queues the owned Sync if provider readback fails rather than recording a match", async () => {
+    const f = fixture();
+    f.provider.loseNextResponse(ITEM_PATH);
+    await expect(f.client.createOrReplaceInventoryItem("P5", f.provider.snapshot().item)).rejects.toThrow();
+    const original = await f.service.enqueue(identity, "operator");
+    await f.service.processDue(1, original.id);
+    const publishedRead = f.client.getPublishedListingContent!;
+    f.client.getPublishedListingContent = vi.fn().mockRejectedValueOnce(new Error("Synthetic provider read failure"))
+      .mockImplementation(publishedRead);
+    advance();
+    expect((await f.reconciliation.processDue()).checked).toBe(1);
+    const cycle = (await database.pool.query("SELECT content_job_id,content_check_kind FROM inventory.ebay_publication_reconciliation_cycles")).rows[0];
+    expect(cycle.content_job_id).toBeTruthy();
+    expect(cycle.content_check_kind).toBeNull();
+    expect(await f.store.get(cycle.content_job_id)).toMatchObject({ state: "queued" });
+    await f.service.processDue(1, cycle.content_job_id);
+    expect(await f.store.get(cycle.content_job_id)).toMatchObject({ state: "completed" });
+  });
+
+  it("does not replace a newly uncertain request with a matching content observation", async () => {
+    const f = fixture();
+    f.provider.loseNextResponse(ITEM_PATH);
+    await expect(f.client.createOrReplaceInventoryItem("P5", f.provider.snapshot().item)).rejects.toThrow();
+    const original = await f.service.enqueue(identity, "operator");
+    await f.service.processDue(1, original.id);
+    expectCurrentListing(f, 17);
+    f.provider.loseNextResponse(ITEM_PATH);
+    await expect(f.client.createOrReplaceInventoryItem("P5", f.provider.snapshot().item)).rejects.toThrow();
+    const uncertain = await uncertainAttempt();
+    advance();
+    await f.reconciliation.processDue();
+    const cycle = (await database.pool.query("SELECT content_job_id,content_check_kind FROM inventory.ebay_publication_reconciliation_cycles ORDER BY cycle DESC LIMIT 1")).rows[0];
+    expect(cycle.content_job_id).toBeTruthy();
+    expect(cycle.content_check_kind).toBeNull();
+    await f.service.processDue(1, cycle.content_job_id);
+    expect(await f.store.get(cycle.content_job_id)).toMatchObject({ state: "completed" });
+    await expectUnknownOutcomeRetained(uncertain);
+  });
+
+  it("leases a matching recovery check once when workers race", async () => {
+    const f = fixture();
+    f.provider.loseNextResponse(ITEM_PATH);
+    await expect(f.client.createOrReplaceInventoryItem("P5", f.provider.snapshot().item)).rejects.toThrow();
+    const original = await f.service.enqueue(identity, "operator");
+    await f.service.processDue(1, original.id);
+    advance();
+    const results = await Promise.all([f.reconciliation.processDue(1), f.reconciliation.processDue(1)]);
+    expect(results.reduce((sum, result) => sum + result.checked, 0)).toBe(1);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.ebay_publication_reconciliation_cycles")).rows[0].count).toBe(1);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_jobs")).rows[0].count).toBe(1);
+  });
+
+  it("respects the shared listing-work limit and queues recovery when both permits are held", async () => {
+    const f = fixture();
+    f.provider.loseNextResponse(ITEM_PATH);
+    await expect(f.client.createOrReplaceInventoryItem("P5", f.provider.snapshot().item)).rejects.toThrow();
+    const original = await f.service.enqueue(identity, "operator");
+    await f.service.processDue(1, original.id);
+    const first = await database.pool.connect();
+    const second = await database.pool.connect();
+    const firstSlot = await tryAcquireListingWorkPermit(first);
+    const secondSlot = await tryAcquireListingWorkPermit(second);
+    expect(firstSlot).not.toBeNull(); expect(secondSlot).not.toBeNull();
+    try {
+      advance();
+      expect((await f.reconciliation.processDue(1)).checked).toBe(1);
+      const cycle = (await database.pool.query("SELECT content_job_id,content_check_kind FROM inventory.ebay_publication_reconciliation_cycles")).rows[0];
+      expect(cycle.content_job_id).toBeTruthy(); expect(cycle.content_check_kind).toBeNull();
+      expect(await f.store.get(cycle.content_job_id)).toMatchObject({ state: "queued" });
+    } finally {
+      await releaseListingWorkPermit(second, secondSlot!);
+      await releaseListingWorkPermit(first, firstSlot!);
+      second.release(); first.release();
+    }
   });
 
   it("repairs old pictures and stock arriving after success through the same saved Sync flow", async () => {

@@ -102,12 +102,22 @@ export async function sendEbayQuantityUpdates(
   updates: readonly EbayQuantityUpdate[],
 ): Promise<EbayQuantityUpdateResult[]> {
   const validated = validateUpdates(updates);
-  const response = await send({ requests: validated.map(update => ({
+  const response = await send(quantityUpdateRequest(validated));
+  return readEbayQuantityUpdateResults(response, validated);
+}
+
+/** The same quantity-only body is used for publication and for verifying
+ * whether an old request hash proves that no price or content was sent. */
+export function buildEbayQuantityUpdateRequest(updates: readonly EbayQuantityUpdate[]): EbayBulkPriceQuantityRequest {
+  return quantityUpdateRequest(validateUpdates(updates));
+}
+
+function quantityUpdateRequest(updates: readonly EbayQuantityUpdate[]): EbayBulkPriceQuantityRequest {
+  return { requests: updates.map(update => ({
     sku: update.sku,
     shipToLocationAvailability: { quantity: update.quantity },
     offers: [{ offerId: update.offerId, availableQuantity: update.quantity }],
-  })) });
-  return readEbayQuantityUpdateResults(response, validated);
+  })) };
 }
 
 /**

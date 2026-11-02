@@ -109,6 +109,22 @@ export class PostgresEbayListingSyncRepository implements EbayListingSyncStore {
   private readonly clients = new Map<string, PoolClient>();
   constructor(private readonly pool: Pick<Pool, "connect" | "query">,
     private readonly publicationRejections?: EbayPublicationRejectionReader) {}
+  /** Do not replace unfinished lifecycle work with a read-only observation. */
+  async hasUnfinishedRecoveryWork(channelId: number, productId: number): Promise<boolean> {
+    z.number().int().positive().parse(channelId);
+    z.number().int().positive().parse(productId);
+    const row = (await this.pool.query<{ present: boolean }>(
+      `SELECT (EXISTS(SELECT 1 FROM channels.ebay_listing_sync_jobs
+        WHERE channel_id=$1 AND product_id=$2
+          AND (state IN ('queued','running','recovering','awaiting_evidence')
+            OR (operation='publish' AND state='needs_attention')))
+        OR COALESCE((SELECT state='needs_attention' FROM channels.ebay_listing_sync_jobs
+          WHERE channel_id=$1 AND product_id=$2 ORDER BY updated_at DESC,id DESC LIMIT 1),false)) AS present`,
+      [channelId, productId],
+    )).rows[0];
+    if (!row || typeof row.present !== "boolean") throw new Error("Listing recovery status is unavailable.");
+    return row.present;
+  }
   async enqueue(
     identity: EbayListingSyncIdentity,
     commandKey: string,

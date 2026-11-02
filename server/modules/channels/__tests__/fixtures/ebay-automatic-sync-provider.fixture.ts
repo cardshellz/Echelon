@@ -231,6 +231,7 @@ export class AutomaticSyncEbayProvider {
         return { sku: row.sku, statusCode: 200, offers: (row.offers ?? []).map(offer => {
           if (offer.offerId !== current.offer.offerId) throw new Error("Unexpected fake eBay offer.");
           if (offer.availableQuantity !== undefined) current.offer.availableQuantity = offer.availableQuantity;
+          if (offer.price !== undefined) current.offer.pricingSummary = { ...current.offer.pricingSummary, price: offer.price };
           return { offerId: offer.offerId, statusCode: 200 };
         }) };
       }) };

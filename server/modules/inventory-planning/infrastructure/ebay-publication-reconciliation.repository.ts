@@ -4,6 +4,8 @@ import { EBAY_RECONCILIATION_INTERVAL_MS, EBAY_RECONCILIATION_LEASE_MS,
   type EbayPublicationReconciliationStore, type EbayPublicationReconciliationStatus, type EbayReconciliationClaim,
   type EbayReconciliationTarget, type EbayReconciliationObservation, type EbayReconciliationStockResult,
 } from "../application/ebay-publication-reconciliation.service";
+import { reconciliationContentVerificationSchema, retainedPublicationEffectEvidenceSchema,
+  type ReconciliationContentVerification, type RetainedPublicationEffectEvidence } from "../domain/publication-recovery-evidence";
 import { ebayReconciliationCommandKey } from "../domain/ebay-automatic-publication-recovery";
 import { quantityPublicationScopeSchema } from "../domain/quantity-publication-admission";
 import { createTransactionScopedInventoryPublicationService, LATEST_PUBLICATION_ROW_SQL } from "./inventory-availability-runtime-publication.repository";
@@ -104,15 +106,51 @@ export class PostgresEbayPublicationReconciliationRepository implements EbayPubl
     }, true);
   }
 
-  async finish(claim: EbayReconciliationClaim, stock: EbayReconciliationStockResult, contentJobId: string, now: Date): Promise<void> {
-    z.string().uuid().parse(contentJobId);
+  readContentEffects(claim: EbayReconciliationClaim, now: Date):
+    Promise<RetainedPublicationEffectEvidence[]> {
+    return withReconciliationTransaction(this.pool, async client => {
+      await this.lockClaim(client, claim, now);
+      const rows = (await client.query(`SELECT r.attempt_id::text AS "attemptId",
+        r.before_record->>'owner_kind' AS "ownerKind",jsonb_array_length(r.request_evidence) AS "requestCount",
+        r.request_evidence->0->'request_record'->>'method' AS method,
+        r.request_evidence->0->'request_record'->>'path' AS path,
+        r.request_evidence->0->'request_record'->>'request_hash' AS "requestHash",
+        o.desired_quantity::text AS "desiredQuantity",o.external_inventory_item_id_snapshot AS "inventoryItemId",
+        o.product_variant_id AS "productVariantId",o.channel_connection_id_snapshot AS "connectionId",
+        o.external_scope_id_snapshot AS "accountId"
+      FROM inventory.ebay_automatic_publication_recoveries r
+      LEFT JOIN inventory.quantity_publication_attempts a ON a.id=r.attempt_id
+        AND a.state='superseded_unknown' AND a.owner_kind=r.before_record->>'owner_kind'
+        AND a.owner_token::text=r.before_record->>'owner_token' AND a.outbox_id::text=r.before_record->>'outbox_id'
+        AND a.scope=r.before_record->'scope' AND to_jsonb(a.affected_scope_keys)=r.before_record->'affected_scope_keys'
+      LEFT JOIN inventory.inventory_publication_outbox o ON o.id=a.outbox_id
+        AND o.id::text=r.before_record->>'outbox_id'
+        AND o.destination_kind_snapshot='channel_connection' AND o.provider_key_snapshot='ebay'
+        AND o.provider_scope_type_snapshot='account' AND o.channel_connection_id_snapshot=$2
+        AND o.external_scope_id_snapshot=$3 AND o.external_inventory_item_id_snapshot=a.scope->>'externalInventoryItemId'
+        AND o.product_variant_id::text=a.scope->>'productVariantId'
+      WHERE r.watch_id=$1 ORDER BY r.attempt_id LIMIT 251`,
+      [claim.watchId, claim.connectionId, claim.accountId])).rows;
+      // An incomplete scan is not proof that the other requests were stock-only.
+      if (rows.length > 250) return [];
+      return z.array(retainedPublicationEffectEvidenceSchema).parse(rows);
+    }, true);
+  }
+
+  async finish(claim: EbayReconciliationClaim, stock: EbayReconciliationStockResult,
+    content: string | ReconciliationContentVerification, now: Date): Promise<void> {
+    const contentJobId = typeof content === "string" ? z.string().uuid().parse(content) : null;
+    const verification = typeof content === "string" ? null : reconciliationContentVerificationSchema.parse(content);
     if (!stock.current || stock.outboxIds.length === 0) throw reconciliationFailure("PUBLICATION_RECONCILIATION_EVIDENCE_INCOMPLETE", "A current canonical stock check is required before completing this cycle.");
     await withReconciliationTransaction(this.pool, async client => {
       await this.lockClaim(client, claim, now);
       await client.query(`INSERT INTO inventory.ebay_publication_reconciliation_cycles
-        (watch_id,revision,cycle,command_key,content_job_id,stock_state,completed_at) VALUES($1,$2,$3,$4,$5,$6,$7)`,
+        (watch_id,revision,cycle,command_key,content_job_id,stock_state,completed_at,content_check_kind,content_checked_at,content_evidence_hash,content_identity_hash,content_proof)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb)`,
       [claim.watchId, claim.revision, claim.cycle, ebayReconciliationCommandKey(claim.watchId, claim.cycle), contentJobId,
-        stock.repaired ? "repair_queued" : "verified", now.toISOString()]);
+        stock.repaired ? "repair_queued" : "verified", now.toISOString(), verification?.kind ?? null,
+        verification?.checkedAt.toISOString() ?? null, verification?.evidenceHash ?? null, verification?.identityHash ?? null,
+        verification?.proof ? JSON.stringify(verification.proof) : null]);
       await client.query(`UPDATE inventory.ebay_publication_reconciliation_watches SET cycle=cycle+1,attempts=0,
         state=$2,checked_at=$3,verified_outbox_ids=$4,next_check_at=$5,updated_at=$6,lease_token=NULL,lease_expires_at=NULL,
         last_error_code=$7,last_error_message=$8 WHERE id=$1`, [claim.watchId, stock.repaired ? "pending" : "verified",
