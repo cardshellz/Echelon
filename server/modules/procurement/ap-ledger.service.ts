@@ -1432,7 +1432,11 @@ async function approveInvoiceInTransaction(
   tx: ApLedgerDbClient,
   id: number,
   userId?: string,
+  approvedAt: Date = new Date(),
 ): Promise<InvoiceMutationResult> {
+  if (!(approvedAt instanceof Date) || !Number.isFinite(approvedAt.getTime())) {
+    throw new ApLedgerError("A valid invoice approval clock is required", 500, { code: "AP_INVOICE_APPROVAL_CLOCK_INVALID" });
+  }
   const [inv] = await tx
     .select()
     .from(vendorInvoices)
@@ -1458,7 +1462,7 @@ async function approveInvoiceInTransaction(
 
   const [invoice] = await tx
     .update(vendorInvoices)
-    .set({ status: "approved", approvedAt: new Date(), approvedBy: userId, updatedBy: userId, updatedAt: new Date() })
+    .set({ status: "approved", approvedAt, approvedBy: userId, updatedBy: userId, updatedAt: approvedAt })
     .where(eq(vendorInvoices.id, id))
     .returning();
   const affectedPoIds = await getPoIdsForInvoice(id, tx);
@@ -2256,7 +2260,7 @@ export async function executeApInvoiceCommandInTransaction(
   const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
   let mutation: InvoiceMutationResult;
   if (command === "approve_invoice") {
-    mutation = await approveInvoiceInTransaction(tx, invoiceId, input.userId);
+    mutation = await approveInvoiceInTransaction(tx, invoiceId, input.userId, input.now);
   } else if (command === "dispute_invoice") {
     mutation = await disputeInvoiceInTransaction(
       tx,
