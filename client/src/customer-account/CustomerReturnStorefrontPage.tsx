@@ -6,6 +6,8 @@ import { customerAccountAccessNotice, customerAccountSignInUrl, type CustomerAcc
 import { createCustomerAccountTransport, type CustomerAccountTransport } from "./customer-account.transport";
 import type { ReturnPortalPageConfig } from "./return-portal-config";
 import { CustomerReturnGuestAccess } from "./CustomerReturnGuestAccess";
+import { CustomerReturnStorefrontLayout } from "./CustomerReturnStorefrontLayout";
+import { CustomerReturnHeading } from "@/components/returns/CustomerReturnPresentation";
 
 type Bootstrap = Awaited<ReturnType<CustomerAccountTransport["bootstrap"]>>;
 
@@ -19,6 +21,7 @@ export function CustomerReturnStorefrontPage({ config }: { config: ReturnPortalP
   const [session, setSession] = useState<Bootstrap | null>(null);
   const [notice, setNotice] = useState<CustomerAccountAccessNotice | null>(null);
   const [attempt, setAttempt] = useState(0);
+  const [guestLookup, setGuestLookup] = useState(false);
   const loginHref = customerAccountSignInUrl(config.loginPath, `${window.location.pathname}${window.location.search}`);
 
   useEffect(() => {
@@ -36,18 +39,22 @@ export function CustomerReturnStorefrontPage({ config }: { config: ReturnPortalP
 
   const returns = useMemo(() => session?.session.sessionKey && api
     ? api.returns(session.session.sessionKey) : null, [api, session]);
-  if (!api) return <CustomerReturnGuestAccess config={config} loginHref={loginHref} />;
+  if (!api || guestLookup) return <CustomerReturnGuestAccess config={config} loginHref={loginHref}
+    onBackToAccount={api ? () => setGuestLookup(false) : undefined} />;
   if (api && session?.session.sessionKey && returns) return (
+    <CustomerReturnStorefrontLayout sessionTools={<span>Signed in to your store account</span>}>
     <CustomerWorkspace key={session.session.sessionKey}
       sessionKey={session.session.sessionKey} transport={returns} downloadRequest={api.request}
       signOutHref={config.logoutPath}
+      onFindOrder={() => setGuestLookup(true)}
       onDenied={message => { setSession(null); setNotice({ message, action: "retry" }); }}
       onSignedOut={() => { window.location.assign(config.logoutPath); }} />
+    </CustomerReturnStorefrontLayout>
   );
   return (
-    <CustomerReturnSurface shoppingHref="https://www.cardshellz.com/">
+    <CustomerReturnStorefrontLayout><CustomerReturnSurface>
       <div className="csz-return-status">
-        <h1 className="text-2xl font-semibold">Return an order</h1>
+        <CustomerReturnHeading>Return an order</CustomerReturnHeading>
         {notice ? <p role="alert">{notice.message}</p> : <p>
           {api ? "Loading your orders…" : "Sign in to your Card Shellz account to see orders available to return."}
         </p>}
@@ -55,6 +62,6 @@ export function CustomerReturnStorefrontPage({ config }: { config: ReturnPortalP
           <Button asChild><a href={loginHref}>Sign in to your account</a></Button>
         ) : notice ? <Button onClick={() => setAttempt(value => value + 1)}>Try again</Button> : null}
       </div>
-    </CustomerReturnSurface>
+    </CustomerReturnSurface></CustomerReturnStorefrontLayout>
   );
 }

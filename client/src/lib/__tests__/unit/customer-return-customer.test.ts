@@ -19,6 +19,26 @@ import type {
 const identity = "a".repeat(43);
 const commandKey = "dc9b329b-b250-46a1-9b20-3d3149a2846d";
 const storageKey = `customer-return-request:${identity}`;
+describe("optional history summaries during a rolling deployment", () => {
+  it("requests summaries explicitly and falls back once to the legacy read on an older server", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({ error: { code: "RETURN_CUSTOMER_INPUT_INVALID" } }, { status: 400 }))
+      .mockResolvedValueOnce(Response.json({ returns: [], nextBeforeAuthorizationId: null }));
+    expect(await createCustomerReturnTransport(request, identity).history(20, new AbortController().signal, true))
+      .toEqual({ returns: [], nextBeforeAuthorizationId: null });
+    expect(request.mock.calls.map(([url]) => url)).toEqual(["/api/returns/customer/returns?before=20&progress=1", "/api/returns/customer/returns?before=20"]);
+    expect(request.mock.calls.every(([,options]) => options?.method === "GET")).toBe(true);
+  });
+  it.each([401, 403, 503])("does not hide HTTP %s behind a legacy fallback", async status => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ error: { code: "SYNTHETIC_FAILURE" } }, { status }));
+    await expect(createCustomerReturnTransport(request, identity).history(null, new AbortController().signal, true)).rejects.toThrow();
+    expect(request).toHaveBeenCalledOnce();
+  });
+  it("retains the original history request for existing callers", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ returns: [], nextBeforeAuthorizationId: null }));
+    await createCustomerReturnTransport(request, identity).history(null, new AbortController().signal);
+    expect(request.mock.calls[0][0]).toBe("/api/returns/customer/returns");
+  });
+});
 function input(): CustomerReturnCustomerSubmitInput {
   return {
     idempotencyKey: commandKey,

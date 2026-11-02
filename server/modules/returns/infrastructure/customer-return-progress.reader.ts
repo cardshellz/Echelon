@@ -17,6 +17,9 @@ import { returnLabelRecordSchema } from "../../shipping-engine/application/retur
 import { createCarrierTrackingProjectionReader } from "../../shipping/carrier-tracking-projection.repository";
 import { presentCarrierPackageStatus } from "../../shipping/customer-delivery-progress";
 import type { CanonicalCarrierTrackingStatus } from "../../shipping/carrier-tracking.domain";
+import { customerReturnCustomerPrincipalSchema, type CustomerReturnCustomerPrincipal } from "../application/customer-return-customer-operations.service";
+import { returnOwnerPredicate } from "./customer-return-owner-predicate";
+import type { CustomerReturnProgress } from "@shared/customer-account/order-progress";
 
 const id = z.coerce.number().int().positive().safe();
 const count = z.coerce.number().int().nonnegative().safe();
@@ -69,23 +72,40 @@ export class PostgresCustomerReturnProgressReader
   ) {
     const scope = customerAccountProgressScopeSchema.parse(raw),
       now = z.date().parse(instant);
+    return this.readOwned(scope, [scope.channelId, scope.externalCustomerId, JSON.stringify(scope.orders)], owned, now);
+  }
+
+  /** One bounded saved-facts read for the already-owned history page. Guest
+   * scope retains its exact purchase predicate, including stale imported IDs. */
+  async readHistory(rawPrincipal: CustomerReturnCustomerPrincipal, rawRows: readonly { authorizationId: number; omsOrderId: number }[], instant: Date) {
+    const principal = customerReturnCustomerPrincipalSchema.parse(rawPrincipal);
+    const rows = z.array(z.object({ authorizationId: id, omsOrderId: id }).strict()).max(20).parse(rawRows);
+    const orderIds = [...new Set(rows.map(row => row.omsOrderId))];
+    const predicate = returnOwnerPredicate(principal, 3);
+    const ownerQuery = `SELECT o.id FROM oms.oms_orders o WHERE o.channel_id=$1 AND o.id=ANY($2::bigint[]) AND ${predicate.sql}`;
+    const facts = await this.readOwned({ channelId: principal.channelId, orders: orderIds.map(omsOrderId => ({ omsOrderId })) },
+      [principal.channelId, orderIds, ...predicate.values], ownerQuery, z.date().parse(instant));
+    const result = new Map<number, CustomerReturnProgress>();
+    for (const row of rows) {
+      const progress = facts.get(row.omsOrderId)?.returns.find(value => value.key === `authorization:${row.authorizationId}`);
+      if (progress) result.set(row.authorizationId, progress);
+    }
+    return result;
+  }
+
+  private async readOwned(scope: { channelId: number; orders: readonly { omsOrderId: number }[] }, args: unknown[], ownerQuery: string, now: Date) {
     const output = new Map<
       number,
       Pick<CustomerOrderProgress, "returns" | "refunds">
     >();
     if (!scope.orders.length) return output;
-    const args = [
-      scope.channelId,
-      scope.externalCustomerId,
-      JSON.stringify(scope.orders),
-    ];
     const cases = z
       .array(caseRow)
       .max(4000)
       .parse(
         (
           await this.pool.query(
-            `WITH owned AS (${owned})
+            `WITH owned AS (${ownerQuery})
       SELECT rc.id,rc.oms_order_id AS "orderId",rc.case_number AS reference,rc.source_event_type AS "sourceEventType",
         a.id AS "authorizationId",a.authorization_number AS "authorizationNumber",
         rc.case_status AS "caseStatus",rc.approval_status AS "approvalStatus",rc.logistics_status AS "logisticsStatus",
@@ -109,7 +129,7 @@ export class PostgresCustomerReturnProgressReader
       .parse(
         (
           await this.pool.query(
-            `WITH owned AS (${owned})
+            `WITH owned AS (${ownerQuery})
       SELECT a.oms_order_id AS "orderId",a.id AS "authorizationId",p.id,t.status AS "labelStatus",t.result_snapshot AS result,
         l.id AS "shippingLabelId",l.label_status AS "shippingLabelStatus",l.label_direction AS "shippingLabelDirection",capture.last_error_code AS "captureError"
       FROM returns.customer_return_authorizations a JOIN owned o ON o.id=a.oms_order_id
@@ -149,7 +169,7 @@ export class PostgresCustomerReturnProgressReader
       for (const parcel of result.packages)
         tracking.set(id.parse(parcel.providerLabelId), parcel.canonicalStatus);
     }
-    const current = (await this.pool.query(owned, args)).rows;
+    const current = (await this.pool.query(ownerQuery, args)).rows;
     for (const expected of scope.orders) {
       if (!current.some((row) => id.parse(row.id) === expected.omsOrderId))
         continue;

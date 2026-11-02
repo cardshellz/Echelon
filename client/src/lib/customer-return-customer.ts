@@ -309,12 +309,20 @@ export function createCustomerReturnTransport(
         authorizationId,
       );
     },
-    history: (before: number | null, signal: AbortSignal) =>
-      call(
-        `/returns${before === null ? "" : `?before=${id.parse(before)}`}`,
-        signal,
-        customerReturnCustomerHistorySchema,
-      ),
+    async history(before: number | null, signal: AbortSignal, includeProgress = false) {
+      const query = new URLSearchParams();
+      if (before !== null) query.set("before", String(id.parse(before)));
+      const path = () => `/returns${query.size ? `?${query}` : ""}`;
+      if (includeProgress) query.set("progress", "1");
+      try { return await call(path(), signal, customerReturnCustomerHistorySchema); }
+      catch (cause) {
+        // Older strict servers do not recognize this read-only extension. Never
+        // downgrade an authentication failure, outage, timeout or label command.
+        if (!includeProgress || signal.aborted || !(cause instanceof CustomerReturnRequestError) || ![400, 404].includes(cause.status ?? 0)) throw cause;
+        query.delete("progress");
+        return call(path(), signal, customerReturnCustomerHistorySchema);
+      }
+    },
   };
 }
 export type CustomerReturnTransport = ReturnType<
