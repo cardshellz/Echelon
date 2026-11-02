@@ -43,7 +43,10 @@ test("one reviewed supplier split updates stock components and retains the appro
   await expect(review.getByRole("row", { name: /Product amount/ })).toContainText("25.0000 USD");
   await expect(review.getByRole("row", { name: /Product amount/ })).toContainText("20.0000 USD");
   await expect(review.getByRole("row", { name: /Packaging amount/ })).toContainText("5.0000 USD");
-  await expect(review.getByRole("row", { name: /stock units on hand/ })).toBeVisible();
+  await expect(review.getByRole("row", { name: /stock units on hand/ })).toHaveCount(2);
+  await expect(review.getByRole("row").filter({ hasText: String(ownedLots[0].lot_number) })).toContainText("25.0000 USD");
+  const otherLot = before.lots.find(row => row.po_line_id === 22)!;
+  await expect(review.getByRole("row").filter({ hasText: String(otherLot.lot_number) })).toContainText("50.0000 USD");
   expect(await backend.control<State>("workflow-state")).toEqual(before);
   await page.screenshot({ path: info.outputPath("supplier-cost-before-after.png"), fullPage: true });
   await dialog.getByRole("button", { name: "Approve and apply costs", exact: true }).click();

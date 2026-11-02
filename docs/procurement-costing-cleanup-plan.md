@@ -15,7 +15,7 @@ This is the active tracker for consolidating purchase costing from PO through sh
 | Audit | [Purchase costing authority review](procurement-costing-authority-audit-2026-10-30.md) |
 | Stage 1 contract and ownership map | [Contract, compatibility and recognition boundary](procurement-costing-stage-1-contract.md) |
 | Stage 2 compatibility trace | [Recorded authority and selected-input proof](procurement-costing-stage-2-compatibility.md) |
-| Current implementation PR | Supplier-review approval continuation on the branch above; publication and final-head acceptance recorded below when available. [#1983](https://github.com/cardshellz/Echelon/pull/1983) freight reconciliation and [#1979](https://github.com/cardshellz/Echelon/pull/1979) receipt assignment are merged and deployed |
+| Current implementation PR | [#1987](https://github.com/cardshellz/Echelon/pull/1987), supplier-review approval binding; final-head acceptance recorded below. [#1983](https://github.com/cardshellz/Echelon/pull/1983) freight reconciliation and [#1979](https://github.com/cardshellz/Echelon/pull/1979) receipt assignment are merged and deployed |
 | Deployment and live acceptance | [#1983 verification](procurement-costing-deployment-1983.md): v3447 runs exact merge `56c547ae5`, migration succeeded, web/capture processes up on the same release, all 27 deployed-commit checks passed. Read-only counts at 2026-11-02 13:41 UTC: zero receipt assignments/enabled lines/freight approval events. Historical facts and original approvals were preserved. Actual production postings remain unproven; no live financial/stock writes were made |
 
 ## Resume here after a context reset
