@@ -41,6 +41,20 @@ async function publicInput() {
   return publicRequest;
 }
 describe("customer-bound return operations", () => {
+  it("keeps verified guests bound to their order even if a read adapter returns another order", async () => {
+    const s = setup();
+    const service = new CustomerReturnCustomerOperationsService({ ...s.dependencies,
+      principal: { channelId: 36, externalCustomerId: null, orderScope: { omsOrderId: 100, externalOrderId: order.externalOrderId },
+        verifiedPurchase: { email: "guest@example.test", customerId: null } } });
+    await service.submit(100, await publicInput());
+    expect(s.submitForOrder).toHaveBeenCalledWith(expect.anything(), "guest-order:36:100", expect.objectContaining({ externalCustomerId: null, omsOrderId: 100,
+      verifiedPurchase: { email: "guest@example.test", customerId: null } }));
+    s.resolveOwned.mockResolvedValue({ ...order, omsOrderId: 101 });
+    await expect(service.submit(101, await publicInput())).rejects.toMatchObject({ status: 404 });
+    s.readOwnedAuthorization.mockResolvedValue({ authorizationId: 10, omsOrderId: 101 });
+    await expect(service.labelStatus(10)).rejects.toMatchObject({ status: 404 });
+    await expect(service.artifact(10, 11)).rejects.toMatchObject({ status: 404 });
+  });
   it("verifies the canonical order before submit and sends trusted identity with no private URLs", async () => {
     const s = setup();
     const input = await publicInput();

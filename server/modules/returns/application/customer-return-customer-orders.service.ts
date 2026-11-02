@@ -1,8 +1,7 @@
 import { z } from "zod";
 import { customerReturnFlowOrderSchema, customerReturnFlowReviewInputSchema, customerReturnFlowReviewSchema } from "@shared/returns/customer-return-flow.contract";
 import { customerReturnCustomerOrderSchema, customerReturnCustomerOrderPageSchema, customerReturnOrderChoicesSchema } from "@shared/returns/customer-return-access.contract";
-import type { CustomerReturnCustomerSession } from "./customer-return-customer-auth.service";
-import type { CustomerReturnOrderAccessService } from "./customer-return-order-access.service";
+import type { CustomerReturnOrderAccessService, CustomerReturnCanonicalOrderScope } from "./customer-return-order-access.service";
 import type { CustomerReturnLiveService } from "./customer-return-live.service";
 import { CustomerReturnLiveError } from "./customer-return-live-error";
 import { CustomerReturnOrderChoicesError, type CustomerReturnOrderChoicesReader } from "./customer-return-order-choices.ports";
@@ -36,7 +35,7 @@ function inspectionCauseCode(error: unknown): string {
 export const customerReturnCustomerReviewInputSchema = customerReturnFlowReviewInputSchema.omit({ orderReference: true }).strict();
 export class CustomerReturnCustomerOrdersService {
   constructor(private readonly dependencies: {
-    principal: Pick<CustomerReturnCustomerSession, "channelId" | "externalCustomerId">;
+    principal: Pick<CustomerReturnCanonicalOrderScope, "channelId" | "externalCustomerId" | "verifiedPurchase">;
     access: Pick<CustomerReturnOrderAccessService, "list" | "resolveOwned">;
     live: Pick<CustomerReturnLiveService, "lookupCanonical" | "reviewCanonical">;
     shippingVersion: () => Promise<number | null>;

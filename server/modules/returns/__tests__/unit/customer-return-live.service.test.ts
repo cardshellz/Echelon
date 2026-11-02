@@ -25,6 +25,28 @@ function setupCanonical(externalCustomerId = "901") {
   const scope = { channelId: 36, omsOrderId: 100, externalOrderId: "1001", externalCustomerId };
   return { ...s, scope };
 }
+
+describe("verified guest purchase ownership", () => {
+  it("preserves existing signed-in review revisions when contact email is added to the provider snapshot", async () => {
+    const s=setupCanonical();
+    const before=await s.service.lookupCanonical(s.scope);
+    s.shopifyFacts.order.email="guest@example.test";
+    const after=await s.service.lookupCanonical(s.scope);
+    expect(after.sourceRevision).toBe(before.sourceRevision);
+  });
+  it.each([null, gid("Customer", 901)])("uses exact Shopify purchase proof when the imported customer is absent: %s", async customerId => {
+    const s = setup();
+    s.localFacts.order.externalCustomerId = null;
+    s.shopifyFacts.order.customerId = customerId;
+    s.shopifyFacts.order.email = "guest@example.test";
+    const scope = { channelId: 36, omsOrderId: 100, externalOrderId: "1001", externalCustomerId: null,
+      verifiedPurchase: { email: "guest@example.test", customerId } };
+    const result = await s.service.lookupCanonical(scope);
+    expect(result.orderReference).toBe("0012-A");
+    s.shopifyFacts.order.email = "new-owner@example.test";
+    await expect(s.service.lookupCanonical(scope)).rejects.toMatchObject({ code: "RETURN_LIVE_ORDER_NOT_FOUND" });
+  });
+});
 async function reviewInput(service: CustomerReturnLiveService) {
   const order = await service.lookup(lookup);
   return { ...lookup, sourceRevision: order.sourceRevision,

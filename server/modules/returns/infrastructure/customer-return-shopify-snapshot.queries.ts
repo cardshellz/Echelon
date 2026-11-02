@@ -7,7 +7,7 @@ export const SHOPIFY_RETURN_SNAPSHOT_QUERIES = Object.freeze({
     currentAppInstallation { accessScopes { handle } }
   }`,
   order: `query ReturnSnapshotOrder($id: ID!) { order(id: $id) {
-    id name createdAt processedAt updatedAt cancelledAt
+    id name email createdAt processedAt updatedAt cancelledAt
     customer { id }
     shippingAddress { name phone company address1 address2 city provinceCode zip countryCodeV2 }
     fulfillmentsCount { count precision }

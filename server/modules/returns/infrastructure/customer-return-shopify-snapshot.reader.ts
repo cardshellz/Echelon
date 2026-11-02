@@ -133,7 +133,7 @@ export class ShopifyCustomerReturnSnapshotReader implements CustomerReturnShopif
         } catch { fail("RETURN_SHOPIFY_TRANSPORT_FAILED", "transient"); }
         if (!response.ok) fail("RETURN_SHOPIFY_HTTP_REJECTED", response.status === 408 || response.status === 429 || response.status >= 500 ? "transient" : "permanent");
         if (response.headers.get("X-Shopify-API-Version") !== CUSTOMER_RETURN_SHOPIFY_API_VERSION) fail("RETURN_SHOPIFY_VERSION_MISMATCH");
-        const envelope = parse(recordSchema, await readJson(response, signal));
+        const envelope = parse(recordSchema, await readCustomerReturnShopifyJson(response, signal));
         if (envelope.errors !== undefined && (!Array.isArray(envelope.errors) || envelope.errors.length > 0)) {
           const retryable = Array.isArray(envelope.errors) && envelope.errors.length > 0 && envelope.errors.every(error => {
             const parsed = z.object({ extensions: z.object({ code: z.string() }) }).safeParse(error);
@@ -303,7 +303,7 @@ function validateQuantities(snapshot: CustomerReturnShopifySnapshot): void {
   }
 }
 
-async function readJson(response: Response, signal: AbortSignal): Promise<unknown> {
+export async function readCustomerReturnShopifyJson(response: Response, signal: AbortSignal, maxBytes = MAX_RESPONSE_BYTES): Promise<unknown> {
   if (!response.body) fail("RETURN_SHOPIFY_RESPONSE_INVALID");
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -313,7 +313,7 @@ async function readJson(response: Response, signal: AbortSignal): Promise<unknow
       const next = await abortable(reader.read(), signal);
       if (next.done) break;
       bytes += next.value.byteLength;
-      if (bytes > MAX_RESPONSE_BYTES) {
+      if (bytes > maxBytes) {
         // Cancellation is best effort cleanup; a broken transport must not hold the failure response open.
         void reader.cancel().catch(() => undefined);
         fail("RETURN_SHOPIFY_SNAPSHOT_LIMIT");
@@ -333,7 +333,7 @@ async function readJson(response: Response, signal: AbortSignal): Promise<unknow
   }
 }
 
-function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+export function abortable<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const abort = () => reject(new CustomerReturnShopifySnapshotError("RETURN_SHOPIFY_TRANSPORT_FAILED", "transient"));
     // Observe the operation's rejection even if the signal was already aborted.
