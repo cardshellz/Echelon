@@ -17,9 +17,9 @@ import { ShopifyStaffOAuthError, type ShopifyStaffOAuthBinding, type ShopifyStaf
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 if (databaseUrl) validatePostgresTestEnvironment(process.env);
 const integration = databaseUrl ? describe.sequential : describe.skip;
-const draftPath = "docs/reviews/shopify-oauth-trust-boundary-2026-11-03/draft-shopify-oauth.sql";
-const fixtureMigrationName = "shopify-oauth-local-draft.sql";
-const draftSql = readFileSync(draftPath, "utf8");
+const migrationPath = "migrations/900000052000019950001_shopify_oauth_authorization_challenges.sql";
+const migrationName = "900000052000019950001_shopify_oauth_authorization_challenges.sql";
+const migrationSql = readFileSync(migrationPath, "utf8");
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const at = (milliseconds: number) => new Date(Date.UTC(2026, 10, 3, 12) + milliseconds);
 const prerequisites = `
@@ -58,8 +58,8 @@ integration("staff Shopify OAuth durable authorization and audit", () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, true, prerequisites);
     const client = await database.pool.connect();
     try {
-      await executeMigrationWithRetry({ client, file: fixtureMigrationName, sql: draftSql,
-        contentHash: digest(draftSql), options: { maxAttempts: 1, lockTimeoutMs: 5_000,
+      await executeMigrationWithRetry({ client, file: migrationName, sql: migrationSql,
+        contentHash: digest(migrationSql), options: { maxAttempts: 1, lockTimeoutMs: 5_000,
           retryBaseDelayMs: 0, retryMaxDelayMs: 0 } });
     } finally { client.release(); }
     repository = new PostgresShopifyStaffOAuthRepository(drizzle(database.pool), readCommandAuthorityActor);
@@ -122,9 +122,9 @@ integration("staff Shopify OAuth durable authorization and audit", () => {
     return { service, started, callbackInput: { actorId, sessionId, rawQuery } };
   }
 
-  it("applies the exact draft bytes through the release executor and preserves prior audit guards", async () => {
-    expect((await database.pool.query("SELECT content_hash FROM public._migrations WHERE filename=$1", [fixtureMigrationName])).rows)
-      .toEqual([{ content_hash: digest(draftSql) }]);
+  it("applies the allocated migration bytes through the release executor and preserves prior audit guards", async () => {
+    expect((await database.pool.query("SELECT content_hash FROM public._migrations WHERE filename=$1", [migrationName])).rows)
+      .toEqual([{ content_hash: digest(migrationSql) }]);
     const prior = await database.pool.query(`INSERT INTO public.audit_events(actor,action) VALUES($1,'procurement.receiving.source_resolved') RETURNING id`, [actorId]);
     await expect(database.pool.query("DELETE FROM public.audit_events WHERE id=$1", [prior.rows[0].id])).rejects.toMatchObject({ code: "23514" });
   });

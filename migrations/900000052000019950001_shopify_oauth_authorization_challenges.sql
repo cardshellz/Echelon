@@ -1,7 +1,6 @@
--- LOCAL DRAFT ONLY: no PR identity has been allocated; not release-discovered.
--- After PR publication is authorized, allocate the actual migration and preserve
--- these SQL bytes. Requires channels.channel_connections, identity.users and
--- public.audit_events. Never install this from application boot.
+-- Durable staff Shopify OAuth authorization intents and immutable audit evidence.
+-- Requires existing named Channels/Identity schemas and public.audit_events.
+-- Allocated to PR #1995; never installed from application boot.
 CREATE TABLE channels.shopify_oauth_authorizations (
   operation_id uuid PRIMARY KEY,
   state_hash varchar(64) NOT NULL,

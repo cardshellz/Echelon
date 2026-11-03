@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "migration": "900000052000019950001_shopify_oauth_authorization_challenges.sql",
+  "generation": 52,
+  "pr": 1995,
+  "ordinal": 1,
+  "after": [
+    "0000_melodic_mathemanic.sql",
+    "0001_past_molly_hayes.sql",
+    "0107_audit_events.sql",
+    "900000051000019910001_ap_invoice_transition_reviews.sql"
+  ]
+}
