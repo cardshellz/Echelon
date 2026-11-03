@@ -2311,7 +2311,7 @@ export async function executeApInvoiceCommandInTransaction(
     affectedInvoiceIds: [invoiceId],
     affectedPurchaseOrderIds,
   });
-  await appendApLedgerCommandAudit(outcome, input.userId, tx);
+  await appendApLedgerCommandAudit(outcome, input.userId, tx, at);
   return attachApLedgerOutcome({ ...mutation.value, invoiceCostReconciliations: mutation.costReconciliations }, outcome);
 }
 

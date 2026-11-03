@@ -37,12 +37,18 @@ test("AP approval, dispute, restored approval and void share the reviewed costin
     const row = dialog.getByRole("row").filter({ hasText: String(first.lot_number) });
     await expect(row).toContainText(beforeValue); await expect(row).toContainText(afterValue);
     await expect(dialog.getByRole("row").filter({ hasText: String(second.lot_number) })).toContainText("50.0000 USD");
+    await dialog.getByText("Purchase order shares (2)", { exact: true }).click();
+    await expect(dialog.getByRole("row", { name: /PO #11 · invoice share/ })).toContainText(index === 3 ? "0.00 USD" : "30.00 USD");
+    await expect(dialog.getByRole("row", { name: /PO #12 · invoice share/ })).toContainText(index === 3 ? "0.00 USD" : "50.00 USD");
     expect(await backend.control<State>("workflow-state")).toEqual(start);
     if (index === 0) await page.screenshot({ path: info.outputPath("invoice-approval-before-after.png"), fullPage: true });
     await dialog.getByRole("button", { name: `${action} invoice`, exact: true }).click();
     await expect(dialog.getByRole("status")).toContainText("Saved by");
     const saved = await backend.control<State>("workflow-state");
     expect(saved.invoiceTransitionReviews).toHaveLength(index + 1);
+    const retained = saved.invoiceTransitionReviews[index].preview as { purchaseOrders: Array<{ purchaseOrderId: number; after: { evidence: { invoicedAmountCents: number } } }> };
+    expect(retained.purchaseOrders.map(row => ({ id: row.purchaseOrderId, cents: row.after.evidence.invoicedAmountCents })))
+      .toEqual([{ id: 11, cents: index === 3 ? 0 : 3000 }, { id: 12, cents: index === 3 ? 0 : 5000 }]);
     for (const field of ["invoiceLines", "receivingLines", "transactions", "shipments", "shipmentLines", "payments", "paymentAllocations", "historicalCostPostings", "orderCosts"] as const)
       expect(saved[field]).toEqual(before[field]);
     const other = saved.lots.find(row => row.id === second.id)!;
@@ -54,7 +60,7 @@ test("AP approval, dispute, restored approval and void share the reviewed costin
     if (originalApproval) expect(invoice).toMatchObject(originalApproval);
     else originalApproval = { approved_by: invoice.approved_by, approved_at: invoice.approved_at };
     await dialog.getByRole("button", { name: "Close review", exact: true }).click();
-    await expect(page.getByRole("region", { name: "Invoice approval history", exact: true }).locator("details")).toHaveCount(index + 1);
+    await expect(page.getByRole("region", { name: "Invoice approval history", exact: true }).locator(":scope > details")).toHaveCount(index + 1);
   }
   const history = await page.request.get(`${backend.url}/api/vendor-invoices/71/transition-history`);
   expect(history.ok()).toBe(true); expect(await history.json()).toHaveLength(4);

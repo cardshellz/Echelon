@@ -10,6 +10,8 @@ import { readInvoiceTransitionDocuments, readInvoiceTransitionHistory, retainInv
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import { readInvoiceCorrectionInventoryValues } from "./invoice-correction-cost-values";
 import { buildCostDestinationImpact } from "./cost-change-impact";
+import { readPoFinancialEvidenceSourcesWithClient } from "./po-financial-evidence.repository";
+import { buildPoFinancialWorkflow } from "./domain/po-financial-workflow";
 import type { AmendmentDatabase, AmendmentTransaction } from "./po-quantity-amendment.repository";
 
 export const invoiceTransitionIdSchema = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647));
@@ -39,6 +41,12 @@ export async function reviewInvoiceTransitionInTransaction(tx: AmendmentTransact
   const lineIds = [...new Set(before.lines.flatMap(row => row.purchase_order_line_id == null ? [] : [costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1)]))];
   const options = { shipmentIds: before.invoice.inbound_shipment_id == null ? [] : [costInteger(before.invoice.inbound_shipment_id, "shipmentId", 1)] };
   const dependencies = await readPoAmendmentDependencies(tx, lineIds, options);
+  const purchaseOrderIds = [...new Set(before.links.map(row => costInteger(row.purchase_order_id, "purchaseOrderId", 1)))].sort((a, b) => a - b);
+  // Use the canonical attributed financial owner, never the legacy whole-bill
+  // compatibility caches. A shared invoice must not be counted once per PO.
+  const beforeFinancialSources = await readPoFinancialEvidenceSourcesWithClient(tx, purchaseOrderIds);
+  if (beforeFinancialSources.size !== purchaseOrderIds.length) throw new ApLedgerError("A linked purchase order is missing. Review the invoice links.", 409,
+    { code: "AP_INVOICE_TRANSITION_PURCHASE_MISSING" });
   const authority = await readPurchaseInvoiceActionActor(tx, actorId, action === "dispute" ? "edit" : "approve");
   if (!authority.active || !authority.grantIds.length) throw new ApLedgerError("Your current purchasing permission does not allow this invoice action.", 403,
     { code: "AP_INVOICE_TRANSITION_PERMISSION_REQUIRED" });
@@ -46,6 +54,12 @@ export async function reviewInvoiceTransitionInTransaction(tx: AmendmentTransact
   const result = await executeApInvoiceCommandInTransaction(commands[action], { invoiceId, userId: actorId, reason: request.reason, now: at }, tx);
   const after = await readInvoiceTransitionDocuments(tx, invoiceId);
   const afterDependencies = await readPoAmendmentDependencies(tx, lineIds, options);
+  const afterFinancialSources = await readPoFinancialEvidenceSourcesWithClient(tx, purchaseOrderIds);
+  const purchaseOrders = purchaseOrderIds.map(purchaseOrderId => {
+    const previous = beforeFinancialSources.get(purchaseOrderId), next = afterFinancialSources.get(purchaseOrderId);
+    if (!previous || !next) throw new Error("Invoice transition lost a linked purchase financial source");
+    return { purchaseOrderId, before: buildPoFinancialWorkflow(previous), after: buildPoFinancialWorkflow(next) };
+  });
   const impact = buildCostDestinationImpact(dependencies, afterDependencies);
   const afterValues = new Map((await readInvoiceCorrectionInventoryValues(tx, afterDependencies)).map(row => [row.lotId, row]));
   const inventoryValues = beforeValues.map(row => {
@@ -58,10 +72,11 @@ export async function reviewInvoiceTransitionInTransaction(tx: AmendmentTransact
   const costReviews = reconciliations.map(row => ({ purchaseOrderLineId: row.purchaseOrderLineId, state: row.state,
     issues: [...new Map([...row.costSources.flatMap(source => source.contract.issue ? [source.contract.issue] : []),
       ...row.costApplications.flatMap(application => application.issues)].map(issue => [`${issue.code}:${issue.message}`, issue])).values()] }));
-  const measured = { invoiceId, action, reason: request.reason, before: document(before.invoice), after: document(after.invoice), impact, inventoryValues, costReviews };
+  const measured = { invoiceId, action, reason: request.reason, before: document(before.invoice), after: document(after.invoice), impact, inventoryValues, costReviews, purchaseOrders };
   // Clock/generated identities are retained in the receipt, not hashed as
   // economic inputs. Original document approval and all prior evidence ARE bound.
-  const previewVersion = costFingerprint({ contract: 1, invoiceId, action, reason: request.reason, before, dependencies, authority,
+  const previewVersion = costFingerprint({ contract: 2, invoiceId, action, reason: request.reason, before, dependencies, authority,
+    beforePurchaseFinancialSources: [...beforeFinancialSources.entries()], purchaseOrders,
     impact, inventoryValues, costReviews, afterStatus: after.invoice.status,
     sources: reconciliations.flatMap(row => row.costSources.map(source => source.contract)) });
   const validated = apInvoiceTransitionPreviewSchema.safeParse({ ...measured, previewVersion });

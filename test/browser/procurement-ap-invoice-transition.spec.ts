@@ -17,7 +17,7 @@ async function setup(page: Page, options: { lost?: boolean; stale?: boolean; all
     preview = { invoiceId: 71, action: "approve", reason: route.request().postDataJSON().reason.trim(), previewVersion: (++previewCount === 1 ? "a" : "b").repeat(64),
       before: { status: "received", currency: "USD", amountCents: 12000, paidCents: 0, balanceCents: 12000, approvedBy: null, approvedAt: null },
       after: { status: "approved", currency: "USD", amountCents: 12000, paidCents: 0, balanceCents: 12000, approvedBy: "reviewer", approvedAt: "2026-11-03T12:00:00.000Z" },
-      impact: { lots: [], orderCosts: [], historicalCosts: [] }, inventoryValues: [{ lotId: 1, lotNumber: "TEST-LOT", onHandUnits: 2, beforeMills: 1000000, afterMills: 1200000, reviewReason: null }], costReviews: [] };
+      impact: { lots: [], orderCosts: [], historicalCosts: [] }, purchaseOrders: [], inventoryValues: [{ lotId: 1, lotNumber: "TEST-LOT", onHandUnits: 2, beforeMills: 1000000, afterMills: 1200000, reviewReason: null }], costReviews: [] };
     return route.fulfill({ json: preview });
   });
   const receipts = new Map<string, ApInvoiceTransitionReceipt>();

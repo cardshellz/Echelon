@@ -65,6 +65,8 @@ export function registerApInvoiceTransitionCases(fixture: {
       const reviewed = await review("approve");
       expect(reviewed.preview).toMatchObject({ before: { status: "received", amountCents: 13000, paidCents: 0 }, after: { status: "approved", amountCents: 13000, paidCents: 0 } });
       expect(reviewed.preview.inventoryValues).toEqual([expect.objectContaining({ beforeMills: 1100000, afterMills: 1300000, onHandUnits: 2 })]);
+      expect(reviewed.preview.purchaseOrders).toEqual([expect.objectContaining({ purchaseOrderId: 10,
+        before: expect.objectContaining({ state: "awaiting_approval" }), after: expect.objectContaining({ state: "payment_due" }) })]);
       expect(await snapshot()).toEqual(before);
     });
     it("approves through the existing cost owner, retains exact impact and original document and physical facts, then replays safely", async () => {
@@ -78,6 +80,8 @@ export function registerApInvoiceTransitionCases(fixture: {
       expect(await snapshot()).toEqual(after);
       const history = await createInvoiceTransitionHistory(fixture.database())(71);
       expect(history).toHaveLength(1); expect(history[0].approvedAt).toBe(approvedAt.toISOString());
+      const audit = (await query("SELECT timestamp FROM public.audit_events WHERE action='ap_ledger.approve_invoice' AND actor=$1", [fixture.actorId])).rows;
+      expect(audit).toHaveLength(1); expect(audit[0].timestamp.toISOString()).toBe(approvedAt.toISOString());
       expect((await query("SELECT payload_json FROM procurement.po_events WHERE event_type='invoice_transition_reviewed'")).rows[0].payload_json.preview).toMatchObject({ action: "approve", before: { status: "received" }, after: { status: "approved" } });
       for (const text of ["UPDATE procurement.ap_invoice_transition_reviews SET reason='changed'", "DELETE FROM procurement.ap_invoice_transition_reviews", "TRUNCATE procurement.ap_invoice_transition_reviews"])
         await expect(query(text)).rejects.toMatchObject({ code: "23514" });
@@ -98,6 +102,7 @@ export function registerApInvoiceTransitionCases(fixture: {
     it("voids an unpaid approved invoice with reviewed source withdrawal and no invented cash, stock or historical expense", async () => {
       await prepare(); await approve(); const stock = await physical(), reviewed = await review("void");
       expect(reviewed.preview.inventoryValues[0]).toMatchObject({ beforeMills: 1300000, afterMills: 1100000 });
+      expect(reviewed.preview.purchaseOrders[0].after).toMatchObject({ state: "unbilled", evidence: { invoicedAmountCents: 0, outstandingAmountCents: 0 } });
       expect(await save("void", reviewed.body)).toMatchObject({ httpStatus: 200, body: { status: "voided", invoicedAmountCents: 13000, paidAmountCents: 0 } });
       expect(await physical()).toEqual(stock);
       expect((await query("SELECT * FROM inventory.cost_reconciliation_postings")).rows).toEqual([]);
@@ -153,6 +158,16 @@ export function registerApInvoiceTransitionCases(fixture: {
     it.each(["approve", "dispute", "void"] as const)("preserves the existing invalid-state guard for %s", async action => {
       await prepare(); await query("UPDATE procurement.vendor_invoices SET status='voided' WHERE id=71");
       await expect(review(action)).rejects.toMatchObject({ statusCode: 409 });
+    });
+    it("rejects approval/dispute of a legacy draft invoice while allowing its existing unpaid void path", async () => {
+      await prepare(); await query("UPDATE procurement.vendor_invoices SET status='draft' WHERE id=71");
+      const before = await physical();
+      await expect(review("approve")).rejects.toMatchObject({ statusCode: 409 });
+      await expect(review("dispute")).rejects.toMatchObject({ statusCode: 409 });
+      const reviewed = await review("void");
+      expect(reviewed.preview).toMatchObject({ before: { status: "draft", amountCents: 13000 }, after: { status: "voided", amountCents: 13000 } });
+      expect(await save("void", reviewed.body)).toMatchObject({ httpStatus: 200 });
+      expect(await physical()).toEqual(before);
     });
     it("keeps paid invoice approval idempotent and blocks paid dispute/void without changing settlement", async () => {
       await prepare(); await approve();

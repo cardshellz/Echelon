@@ -28,7 +28,16 @@ export function InvoiceTransitionImpact({ preview }: { preview: ApInvoiceTransit
   return <div className="space-y-3 text-sm">
     <table className="w-full table-fixed"><thead><tr className="border-b"><th className="w-[45%] text-left py-2">What changes</th><th className="text-right p-2">Before</th><th className="text-right py-2">After</th></tr></thead>
       <tbody>{rows.map(([label, before, after], index) => <tr className="border-b" key={index}><th className="text-left py-2 pr-2 font-normal break-words">{label}</th><td className="text-right p-2 break-words">{before}</td><td className="text-right py-2 break-words font-medium">{after}</td></tr>)}</tbody></table>
-    <p>Stock counts, receipts, shipments, invoice line amounts and payments stay unchanged. Only the invoice's approval status and the costs selected from it can change.</p>
+    <p>Invoice line amounts, payments, stock counts, receipts and shipments stay unchanged. Review the approval, purchase balances and stock cost changes shown here.</p>
+    {preview.purchaseOrders.length > 0 && <details><summary className="cursor-pointer font-medium">Purchase order shares ({preview.purchaseOrders.length})</summary>
+      <table className="w-full table-fixed mt-2"><thead><tr className="border-b"><th className="w-[45%] text-left py-2">Purchase order</th><th className="text-right p-2">Before</th><th className="text-right py-2">After</th></tr></thead>
+        <tbody>{preview.purchaseOrders.flatMap(row => [
+          [`PO #${row.purchaseOrderId} · invoice share`, money(row.before.evidence.invoicedAmountCents, 2, row.before.evidence.currency), money(row.after.evidence.invoicedAmountCents, 2, row.after.evidence.currency)],
+          [`PO #${row.purchaseOrderId} · amount due`, money(row.before.evidence.outstandingAmountCents, 2, row.before.evidence.currency), money(row.after.evidence.outstandingAmountCents, 2, row.after.evidence.currency)],
+          [`PO #${row.purchaseOrderId} · financial status`, state(row.before.state), state(row.after.state)],
+        ]).map(([label, before, after], index) => <tr className="border-b" key={index}><th className="text-left font-normal break-words py-2 pr-2">{label}</th><td className="text-right p-2 break-words">{before}</td><td className="text-right py-2 break-words">{after}</td></tr>)}</tbody></table>
+      {preview.purchaseOrders.flatMap(row => row.after.evidence.reviewReasons.map(reason => <p key={`${row.purchaseOrderId}:${reason.code}:${reason.invoiceId}`}>PO #{row.purchaseOrderId}: {reason.message}</p>))}
+    </details>}
     {preview.before.approvedAt && <p>Original approval: {preview.before.approvedBy} · {new Date(preview.before.approvedAt).toLocaleString()}. This approval is retained.</p>}
     {preview.inventoryValues.filter(row => row.reviewReason).map(row => <p className="text-amber-700" key={row.lotId}>{row.lotNumber}: {row.reviewReason}</p>)}
     {preview.costReviews.filter(row => row.state === "review_required").map(row => <div className="rounded border p-2" key={row.purchaseOrderLineId}>
