@@ -335,6 +335,16 @@ test("expired options request worker recovery and refresh automatically without 
   expect(f.errors).toEqual([]);
 });
 
+test("a deferred order projection wakes when the customer opens an expired view",async({page})=>{
+  const f=await fixture(page,{openReturn:false,actionState:"refreshing",recoverOptions:true,heldOrder:true});
+  await expect.poll(()=>f.calls.filter(call=>call.path==="/account/order-actions/refresh").length).toBe(1);
+  await expect(page.getByRole("button",{name:"Edit order",exact:true})).toBeEnabled({timeout:10_000});
+  await expect(page.getByRole("button",{name:"Cancel order",exact:true})).toBeEnabled();
+  expect(f.calls.filter(call=>call.path==="/account/order-actions/refresh")).toHaveLength(1);
+  expect(f.calls.some(call=>call.commandKey)).toBe(false);
+  expect(f.errors).toEqual([]);
+});
+
 test("a failed cache refresh has one useful retry that restores held-order actions",async({page},info)=>{
   const f=await fixture(page,{openReturn:false,actionState:"failed",recoverOptions:true,heldOrder:true,failRefreshOnce:true});
   await expect(page.getByRole("alert")).toContainText("Some order options couldn’t be loaded");

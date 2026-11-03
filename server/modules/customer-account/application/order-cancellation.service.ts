@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   customerOrderCancellationInputSchema,
   customerOrderCancellationReviewSchema,
@@ -440,12 +441,16 @@ export class OrderCancellationService {
           );
           return;
         }
-        record = await this.update(
-          record,
-          { status: "refunding", lastSnapshot: snapshot, error: null },
-          null,
-          "cancellation_observed",
-        );
+        const alreadySettling = record.status === "synchronizing"
+          && record.cancellation.stage === "settling" && record.cancellation.rewards.settled
+          && record.lastSnapshot !== null && canonicalJson(record.lastSnapshot) === canonicalJson(snapshot);
+        if (!alreadySettling)
+          record = await this.update(
+            record,
+            { status: "refunding", lastSnapshot: snapshot, error: null },
+            null,
+            "cancellation_observed",
+          );
         if (!cancellationPaymentsSettled(snapshot)) return;
         if (
           !matchesOrderCancellationSettlement(
@@ -484,20 +489,21 @@ export class OrderCancellationService {
             "ORDER_CANCELLATION_REWARDS_CHANGED",
             "Your cancellation is saved. Contact us to verify its rewards.",
           );
-        record = await this.update(
-          record,
-          {
-            status: "synchronizing",
-            cancellation: {
-              ...record.cancellation,
-              stage: "settling",
-              rewards: settledRewards,
+        if (!alreadySettling)
+          record = await this.update(
+            record,
+            {
+              status: "synchronizing",
+              cancellation: {
+                ...record.cancellation,
+                stage: "settling",
+                rewards: settledRewards,
+              },
+              error: null,
             },
-            error: null,
-          },
-          null,
-          "cancellation_settled",
-        );
+            null,
+            "cancellation_settled",
+          );
         if (!warehouse.cancellationReleaseProof)
           throw new OrderEditError(
             "ORDER_CANCELLATION_RELEASE_UNAVAILABLE",

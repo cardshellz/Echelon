@@ -14,6 +14,11 @@ export const orderActionScopeSchema = z.object({
   attempts: z.number().int().nonnegative().safe(),
 }).strict();
 export type OrderActionScope = z.infer<typeof orderActionScopeSchema>;
+export const scheduledActionCandidateSchema = z.object({
+  omsOrderId: z.coerce.number().int().positive().safe(), generation: z.string().regex(/^[1-9][0-9]*$/),
+  verifiedAt: z.coerce.date(), nextRefreshAt: z.coerce.date(), snapshot: z.unknown(),
+}).strict();
+export type ScheduledActionCandidate = z.infer<typeof scheduledActionCandidateSchema>;
 export const orderActionMaintenanceIdsSchema = z.array(z.number().int().positive().safe()).min(1).max(20)
   .refine(ids => new Set(ids).size === ids.length, "Duplicate order IDs are not allowed.");
 
@@ -27,9 +32,11 @@ export interface OrderActionProjectionRefresher {
 export interface OrderActionProjectionStore extends OrderActionProjectionReader {
   drainInvalidations(limit: number): Promise<number>;
   seed(limit: number): Promise<number>;
+  scheduledCandidates(limit: number, now: Date): Promise<ScheduledActionCandidate[]>;
+  deferClosed(candidates: readonly ScheduledActionCandidate[], now: Date): Promise<number>;
   claim(limit: number, now: Date, leaseId: string): Promise<OrderActionScope[]>;
   complete(scope: OrderActionScope, snapshot: CustomerOrderActionSnapshot, now: Date, validUntil: Date,
-    failureClass?: "permanent" | "transient", refreshAt?: Date): Promise<boolean>;
+    failureClass?: "permanent" | "transient", refreshAt?: Date | null): Promise<boolean>;
   fail(scope: OrderActionScope, now: Date, retryAt: Date, code: string): Promise<void>;
 }
 export interface OrderActionProjectionInspector {

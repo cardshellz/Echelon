@@ -31,6 +31,10 @@ import {
   orderEditRefundIntentSchema,
 } from "../application/order-edit-provider.schema";
 
+// An unresolved warehouse/provider proof is still retried automatically.
+// Rechecking an unchanged cancellation every sweep cannot supply new evidence.
+export const CANCELLATION_SYNC_RECHECK_DELAY_MS = 5 * 60_000;
+
 const referenceSchema = z.object({
   omsOrderId: z.coerce.number().int().positive().safe(),
   channelId: z.number().int().positive(),
@@ -473,6 +477,7 @@ export class PostgresOrderEditStore implements OrderEditStore {
   async pending(limit: number, now: Date) {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100)
       throw new Error("Invalid order edit worker limit");
+    z.date().parse(now);
     // Unsubmitted, unexpired quotes need no work and must not starve payment or
     // refund reconciliation when a store has many simultaneous edit sessions.
     return (
@@ -494,8 +499,10 @@ export class PostgresOrderEditStore implements OrderEditStore {
             OR op.document->'error'->>'code'='ORDER_EDIT_HOLD_RELEASE_PENDING'
             OR EXISTS (SELECT 1 FROM wms.orders wo WHERE wo.order_edit_operation_id=op.id)
             OR EXISTS (SELECT 1 FROM oms.order_edit_provider_holds h WHERE h.operation_id=op.id AND h.released_at IS NULL))))
+      AND (COALESCE(op.document->>'kind','edit')<>'cancel_order' OR op.status<>'synchronizing'
+        OR op.document->'error'->>'code' IS NULL OR op.updated_at<=$4)
       ORDER BY op.updated_at,op.id LIMIT $1`,
-        [limit, now, [...ORDER_EDIT_REFUND_REVIEW_CODES]],
+        [limit, now, [...ORDER_EDIT_REFUND_REVIEW_CODES], new Date(now.getTime()-CANCELLATION_SYNC_RECHECK_DELAY_MS)],
       )
     ).rows.map((row) => row.id);
   }

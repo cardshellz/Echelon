@@ -4,11 +4,11 @@ import type { InventoryProductSyncRequest, InventoryProductSyncReceipt, Inventor
 
 const ROOT = "/api/inventory-planning/admin/product-sync";
 const SAVED_SHOPIFY_LINK_CHECK = "Last saved stock-link check: STOCK_LINK_NOT_ON_SALE (waiting); updated 2026-10-29T12:00:00.000Z. Shopify ACTIVE and DRAFT products can qualify for stock linking. Use Check again in Channel Inventory to recheck this saved result. Linking does not publish the product. No automatic retry is scheduled.";
-async function setup(page: Page, options: { surface?: "catalog" | "channel" | "preview"; canSync?: boolean } = {}) {
+async function setup(page: Page, options: { surface?: "catalog" | "channel" | "preview"; canSync?: boolean; conflicts?: boolean; conflictPages?: boolean } = {}) {
   const state = { checkingLinks: false, allMissing: false, requests: [] as InventoryProductSyncRequest[], receipt: null as InventoryProductSyncReceipt | null,
     loseResponse: false, progressUnavailable: false, verified: false, failed: false, wrongProgress: false, wrongActor: false,
     stale: false, paused: false, reviewUnavailable: false, stockLinkIssue: false, delayResponse: false, releaseResponse: null as (() => void) | null,
-    notCarried: false, hash: "a".repeat(64), errors: [] as string[] };
+    notCarried: false, hash: "a".repeat(64), errors: [] as string[], conflicts: options.conflicts ?? false, conflictReadFail: false };
   const mappingBlockers = () => state.notCarried ? ["PUBLICATION_TARGET_VARIANT_MAPPING_MISSING", "STOCK_LINK_NOT_CARRIED"] : ["INVENTORY_MAPPING_MISSING: BINDER-P1 has no active inventory link.",
     ...(state.stockLinkIssue ? [SAVED_SHOPIFY_LINK_CHECK] : [])];
   const variants = [{ id: 51, sku: "BINDER-P1" }, { id: 52, sku: "BINDER-C5" }];
@@ -39,6 +39,15 @@ async function setup(page: Page, options: { surface?: "catalog" | "channel" | "p
         catalogVariantId: String(901 + index), feedId: 11 + index, feedIsActive: true, feedProductId: "900", feedVariantId: String(901 + index),
         listingId: 21 + index, listingProductId: "900", listingVariantId: String(901 + index) })) } });
     if (path === "/api/channels") return route.fulfill({ json: [{ id: 7, name: "Test Shopify", provider: "shopify", status: "active", isDefault: 1 }] });
+    if (path === "/api/channels/7/listing-lifecycle/members/conflicts") {
+      if (state.conflictReadFail) return route.fulfill({status:503,json:{message:"Unavailable"}});
+      const offset = request.postDataJSON().offset as number;
+      const secondPage = offset > 0;
+      return route.fulfill({json:{items:state.conflicts ? [{productId:41,productVariantId:secondPage ? 52 : 51,
+        sku:secondPage ? "BINDER-OLDER" : "BINDER-OLD",operationId:secondPage
+          ? "00000000-0000-4000-8000-000000000002" : "00000000-0000-4000-8000-000000000001"}] : [],
+        hasMore:state.conflicts && !!options.conflictPages && !secondPage,offset}});
+    }
     if (path === "/api/products") return route.fulfill({ json: [{ id: 41, name: "Graded slab binder", sku: "BINDER", shopifyProductId: "900", isActive: true }] });
     if (path === "/api/channels/7/listings") return route.fulfill({ json: [] });
     if (path === "/api/inventory-planning/runtime-authority") return route.fulfill({ json: { contractVersion: "inventory_runtime_authority_readout_v1",
@@ -128,6 +137,31 @@ async function openReview(page: Page) {
 }
 const queued = "Inventory queued through ATP. Waiting for channel verification.";
 const verified = "Eligible inventory verified; some destinations need attention";
+test("keeps archived listing conflicts visible without claiming they can be repaired in the catalog", async ({page}) => {
+  const state=await setup(page,{surface:"channel",conflicts:true});
+  const notice=page.getByTestId("listing-member-conflicts");
+  await expect(notice).toContainText("1 archived variant link needs review");
+  await notice.locator("summary").click();
+  await expect(notice).toContainText("The current catalog editor does not repair archived variant links.");
+  await expect(notice.getByRole("link",{name:"BINDER-OLD"})).toHaveAttribute("href","/products/41?tab=channels");
+  state.conflictReadFail=true; await notice.getByRole("button",{name:"Refresh conflicts"}).click();
+  await expect(notice.getByRole("alert")).toContainText("last loaded conflicts");
+  await expect(notice.getByText("BINDER-OLD")).toBeVisible();
+  state.conflictReadFail=false; state.conflicts=false;
+  await notice.getByRole("button",{name:"Refresh conflicts"}).click();
+  await expect(notice).toHaveCount(0);
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]);
+});
+test("allows review of later pages of archived listing conflicts", async ({page}) => {
+  const state=await setup(page,{surface:"channel",conflicts:true,conflictPages:true});
+  const notice=page.getByTestId("listing-member-conflicts");
+  await notice.locator("summary").click();
+  await notice.getByRole("button",{name:"Next page"}).click();
+  await expect(notice.getByText("BINDER-OLDER",{exact:true})).toBeVisible();
+  await notice.getByRole("button",{name:"Previous page"}).click();
+  await expect(notice.getByText("BINDER-OLD",{exact:true})).toBeVisible();
+  expect(state.requests).toEqual([]); expect(state.errors).toEqual([]);
+});
 for (const surface of ["catalog", "channel", "preview"] as const) test(`records one product sync from the ${surface} surface and tracks every channel`, async ({ page }, info) => {
   const state=await setup(page,{surface}); await openReview(page);
   await expect(page.getByText("Test eBay",{exact:true})).toBeVisible();
