@@ -125,6 +125,8 @@ export function CustomerOrderEditor({
         (value.status === "ready" && !value.commandInProgress)
       )
         setCheckoutIntent(null);
+      if (observingCommand && value.status === "ready" && !value.commandInProgress)
+        setNotice("Your changes have not been applied. Review the total below and try again.");
     },
   });
   const rememberPaymentReturn = useCallback(() => {
