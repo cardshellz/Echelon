@@ -21,7 +21,7 @@ Baseline is `6a43c7b656004d93b6fb182b6f10ba93f394ce77`, independently verified i
 
 Invoice amount/lines, payments, receiving configuration, actual stock/received/shipped/invoiced counts and shipment charges are preserved. Approval release retains the original approval while using the existing exact `deriveInvoiceFinancialState` projection for settlement status. New actions do not add cash, recognize an unverified sale, guess a supplier split, infer receipt coverage or introduce an FX policy. Missing source/history support remains a visible cost review, not a hidden success or forced repair.
 
-`900000051000019900001_ap_invoice_transition_reviews.sql` adds only the retained approval ledger, its invoice/actor relationships, command identity uniqueness, and update/delete/truncate guards. There is no historical monetary backfill. Old clients attempting a **new** action without a preview receive a classified review-required response; old committed command results remain replayable.
+`900000051000019910001_ap_invoice_transition_reviews.sql` adds only the retained approval ledger, its invoice/actor relationships, command identity uniqueness, and update/delete/truncate guards. There is no historical monetary backfill. Old clients attempting a **new** action without a preview receive a classified review-required response; old committed command results remain replayable.
 
 ## Acceptance and remaining work
 

@@ -1,6 +1,6 @@
 # Remaining purchasing-costing delivery gates
 
-Snapshot: main `6a43c7b656004d93b6fb182b6f10ba93f394ce77` (#1989), including deployed #1987, plus the A2 invoice-transition candidate. This is the bounded delivery list for the existing [plan](procurement-costing-cleanup-plan.md), not another costing subsystem. Checkboxes in older stage notes are historical evidence and do not prove these exit gates.
+Snapshot: main `6a43c7b656004d93b6fb182b6f10ba93f394ce77` (#1989), including deployed #1987, plus the A2 invoice-transition candidate [#1991](https://github.com/cardshellz/Echelon/pull/1991). This is the bounded delivery list for the existing [plan](procurement-costing-cleanup-plan.md), not another costing subsystem. Checkboxes in older stage notes are historical evidence and do not prove these exit gates.
 
 ## Financial sources and commands — finish S2
 
