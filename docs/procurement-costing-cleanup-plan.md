@@ -5,18 +5,18 @@ This is the active tracker for consolidating purchase costing from PO through sh
 | Tracking field | Current value |
 | --- | --- |
 | Created | 2026-10-30 |
-| Overall state | #1964, #1967, #1971, #1979 and #1983 merged. #1983 independently verified in v3447, exact merge commit/process/migration and all 27 post-merge checks successful. Production has zero receipt assignments/enabled lines and zero freight approvals; live financial posting acceptance remains unproven. Receipt-specific prices and configured tax treatment remain confirmed policy |
+| Overall state | #1964, #1967, #1971, #1979, #1983 and #1987 merged. #1987 independently verified in v3453 on deployed commit `6a43c7b656004d93b6fb182b6f10ba93f394ce77`, with web/capture up and deployed-commit CI successful. Production has zero receipt assignments/enabled lines, freight approvals and standalone supplier approvals as of 2026-11-03; actual financial posting acceptance remains open |
 | Current stage | S2 — connect approved financial corrections to the existing costing pipeline and reviewed impact |
-| Next work item | Finish A1 standalone supplier-review approval acceptance, then A2 ordinary AP transitions and A3/A4 combined/header/credit adapters. [Finite remaining delivery gates](procurement-costing-remaining-delivery.md) define the remaining command, downstream, consumer and acceptance work |
-| Working branch | `codex/purchase-cost-review-approval` |
-| Plan branch base | `e5d69368639528cdf9c73d60799184591f8d8e88` |
-| Latest main incorporated | `3ffe92e6b5d772c9cc586c5d2505bca13af6e30f` (#1985/#1986), following `3b9395552` (#1963). The new returns/listing-sync and prior Catalog/publication/CI changes do not overlap procurement costing owners. The separately verified #1983 deployed merge is `56c547ae5f8e0ff60e7d0570999a58f3b973ef92` / v3447 |
+| Next work item | A2 ordinary invoice approve/dispute/void now in implementation and acceptance; then A3/A4 combined/header/credit adapters. [Finite remaining delivery gates](procurement-costing-remaining-delivery.md) retain the full remaining scope |
+| Working branch | `codex/purchase-invoice-transition-review` |
+| Plan branch base | `6a43c7b656004d93b6fb182b6f10ba93f394ce77` |
+| Latest main incorporated | `6a43c7b656004d93b6fb182b6f10ba93f394ce77` (#1989), including merged #1987. This is also the independently verified v3453 slug commit |
 | Audited main baseline | `e571bcac780852c3ac6b488354c10aaf7f1c417c`, the historical F1-F9 audit baseline. Later implementation and deployment evidence is recorded below; this baseline is not current production acceptance proof |
 | Audit | [Purchase costing authority review](procurement-costing-authority-audit-2026-10-30.md) |
 | Stage 1 contract and ownership map | [Contract, compatibility and recognition boundary](procurement-costing-stage-1-contract.md) |
 | Stage 2 compatibility trace | [Recorded authority and selected-input proof](procurement-costing-stage-2-compatibility.md) |
-| Current implementation PR | [#1987](https://github.com/cardshellz/Echelon/pull/1987), supplier-review approval binding; final-head acceptance recorded below. [#1983](https://github.com/cardshellz/Echelon/pull/1983) freight reconciliation and [#1979](https://github.com/cardshellz/Echelon/pull/1979) receipt assignment are merged and deployed |
-| Deployment and live acceptance | [#1983 verification](procurement-costing-deployment-1983.md): v3447 runs exact merge `56c547ae5`, migration succeeded, web/capture processes up on the same release, all 27 deployed-commit checks passed. Read-only counts at 2026-11-02 13:41 UTC: zero receipt assignments/enabled lines/freight approval events. Historical facts and original approvals were preserved. Actual production postings remain unproven; no live financial/stock writes were made |
+| Current implementation PR | A2 ordinary AP transition candidate; PR pending validation. [#1987](https://github.com/cardshellz/Echelon/pull/1987) supplier approval and [#1983](https://github.com/cardshellz/Echelon/pull/1983) freight reconciliation are deployed |
+| Deployment and live acceptance | [#1987 verification](procurement-costing-deployment-1987.md): v3453, exact slug/process identity, 63 final-PR checks and 27 deployed-commit checks without failures. Read-only counts remain zero; deployment is not actual financial posting acceptance |
 
 ## Resume here after a context reset
 

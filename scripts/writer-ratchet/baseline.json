@@ -1383,6 +1383,9 @@
   "procurement.receipt_cost_requests": [
     "modules/procurement"
   ],
+  "procurement.ap_invoice_transition_reviews": [
+    "modules/procurement"
+  ],
   "procurement.receipt_invoice_cost_allocations": [
     "modules/procurement"
   ],

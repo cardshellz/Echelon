@@ -1,4 +1,10 @@
 import { SupplierCreditEvidenceError } from "./supplier-credit-settlement.repository";
+import { z } from "zod";
+import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
+import { MoneyInputError } from "@shared/money-read";
+import { PoQuantityAmendmentError } from "./po-quantity-amendment.policy";
+import { reviewInvoiceTransitionInTransaction } from "./ap-invoice-transition.service";
+import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { financialCommandRepository } from "../../platform/commands/command-results.repository";
 import {
   runTransactionalFinancialCommand,
@@ -8,7 +14,6 @@ import {
 } from "../../platform/commands/transactional-command.service";
 import {
   ApLedgerError,
-  executeApInvoiceCommandInTransaction,
   runApInvoiceCommandPostCommit,
   type ApInvoiceFinancialCommand,
   type ApLedgerCommandInput,
@@ -18,6 +23,12 @@ import {
 export function classifyApInvoiceCommandFailure(
   error: unknown,
 ): FinancialCommandFailureDisposition {
+  if (error instanceof z.ZodError) return { kind: "rejected", httpStatus: 400,
+    body: { error: "Review the invoice action and add a reason.", details: { code: "AP_INVOICE_TRANSITION_INPUT_INVALID" } },
+    errorCode: "AP_INVOICE_TRANSITION_INPUT_INVALID", errorMessage: "Invalid invoice transition review" };
+  if (error instanceof CostEvidenceError || error instanceof MoneyInputError || error instanceof PoQuantityAmendmentError)
+    return { kind: "rejected", httpStatus: error instanceof PoQuantityAmendmentError ? error.statusCode : 409,
+      body: { error: error.message, details: { code: error.code } }, errorCode: error.code, errorMessage: error.message };
   if ((error instanceof ApLedgerError || error instanceof SupplierCreditEvidenceError) && error.statusCode >= 400 && error.statusCode <= 499) {
     return {
       kind: "rejected",
@@ -50,6 +61,7 @@ export function classifyApInvoiceCommandFailure(
 
 export function createApInvoiceCommands(
   repository: FinancialCommandRepository<ApLedgerDbClient> = financialCommandRepository,
+  clock: () => Date = () => new Date(),
 ) {
   async function execute(
     command: ApInvoiceFinancialCommand,
@@ -61,16 +73,23 @@ export function createApInvoiceCommands(
       repository,
       descriptor,
       classifyFailure: classifyApInvoiceCommandFailure,
-      work: async (tx) => ({
+      work: async (tx) => {
+        // A committed legacy receipt replays before new review requirements.
+        // New requests must have one authenticated, correctly scoped intent.
+        const action = command === "approve_invoice" ? "approve" : command === "dispute_invoice" ? "dispute" : "void";
+        if (!input.userId || descriptor.actorId !== input.userId || descriptor.actorType !== "user"
+          || descriptor.method !== "POST" || descriptor.routeTemplate !== `/api/vendor-invoices/:id/${action}`
+          || descriptor.commandName !== `ap.invoice.${action}` || descriptor.resourceKey !== `vendor_invoice:${invoiceId}`)
+          throw new ApLedgerError("Invoice transition command scope is invalid", 400, { code: "AP_INVOICE_TRANSITION_SCOPE_INVALID" });
+        const reviewed = await reviewInvoiceTransitionInTransaction(tx as AmendmentTransaction, invoiceId, action,
+          input.transitionReview, input.userId, clock(), descriptor.idempotencyKey);
+        return {
         httpStatus: 200,
-        body: await executeApInvoiceCommandInTransaction(
-          command,
-          { ...input, invoiceId },
-          tx,
-        ),
+        body: reviewed.result,
         resultType: "vendor_invoice",
         resultId: invoiceId,
-      }),
+        };
+      },
     });
 
     if (!result.replayed) {

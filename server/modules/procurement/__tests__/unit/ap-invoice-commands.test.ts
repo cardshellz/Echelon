@@ -24,6 +24,12 @@ vi.mock("../../ap-ledger.service", () => {
   };
 });
 
+vi.mock("../../ap-invoice-transition.service", () => ({
+  reviewInvoiceTransitionInTransaction: async (tx: unknown, invoiceId: number, action: string, input: unknown, actorId: string, at: Date, key: string) => ({
+    result: await mocks.executeInTransaction(`${action}_invoice`, { invoiceId, userId: actorId, transitionReview: input, now: at, key }, tx),
+  }),
+}));
+
 import { ApLedgerError } from "../../ap-ledger.service";
 import {
   classifyApInvoiceCommandFailure,
@@ -99,11 +105,13 @@ describe("AP invoice transactional commands", () => {
     });
 
     const commands = createApInvoiceCommands(repository as any);
-    const result = await commands[method](12, { ...input, userId: "ops-user" }, descriptor);
+    const action = command.replace("_invoice", "");
+    const result = await commands[method](12, { ...input, transitionReview: { reason: "checked", previewVersion: "a".repeat(64) }, userId: "ops-user" },
+      { ...descriptor, routeTemplate: `/api/vendor-invoices/:id/${action}`, commandName: `ap.invoice.${action}` });
 
     expect(mocks.executeInTransaction).toHaveBeenCalledWith(
       command,
-      { ...input, invoiceId: 12, userId: "ops-user" },
+      { invoiceId: 12, userId: "ops-user", transitionReview: { reason: "checked", previewVersion: "a".repeat(64) }, now: expect.any(Date), key: descriptor.idempotencyKey },
       tx,
     );
     expect(repository.executeClaim).toHaveBeenCalledOnce();
