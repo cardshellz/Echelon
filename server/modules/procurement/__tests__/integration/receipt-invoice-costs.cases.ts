@@ -228,6 +228,8 @@ export function registerReceiptInvoiceCostCases(fixture: {
         expect.objectContaining({ beforeMills: 1300000, afterMills: 1200000 }),
         expect.objectContaining({ beforeMills: 1700000, afterMills: 1700000 }),
       ]);
+      expect(measured.preview.receipts).toEqual([expect.objectContaining({ beforeMills: 1300000, afterMills: 1200000, pieces: 100 }),
+        expect.objectContaining({ beforeMills: 1700000, afterMills: 1700000, pieces: 100 })]);
       expect(await state()).toEqual(before);
       const key = randomUUID(), approved = await creditCommand("approve", measured.body, id, { key });
       expect(approved.httpStatus, JSON.stringify(approved.body)).toBe(200);
@@ -258,6 +260,23 @@ export function registerReceiptInvoiceCostCases(fixture: {
       expect(await creditCommand("approve", fresh.body, id)).toMatchObject({ httpStatus: 403 });
       expect(await totals()).toEqual(before);
       expect((await query("SELECT status FROM procurement.supplier_credits WHERE id=$1", [id])).rows[0].status).toBe("draft");
+    });
+    it("receipt credit follows a transferred receipt's stock and order cost basis without inventing an expense", async () => {
+      const { rows } = await setup(), { body } = await review(rows);
+      expect((await post("", body, randomUUID())).status).toBe(200);
+      await fixture.transferFirstAndSell();
+      const counts = (await query("SELECT id,qty_received,qty_on_hand,qty_picked,qty_packed FROM inventory.inventory_lots ORDER BY id")).rows;
+      const otherReceipt = (await totals())[1], bills = await physical();
+      const created = await draftCredit(rows[0]), id = (created.body as { credit: SupplierCreditDetail }).credit.id;
+      const measured = await creditReview(id);
+      expect(measured.preview.impact.orderCosts.some(row => row.totalMills.before !== row.totalMills.after)).toBe(true);
+      const approved = await creditCommand("approve", measured.body, id);
+      expect(approved.httpStatus, JSON.stringify(approved.body)).toBe(200);
+      expect((approved.body as { credit: SupplierCreditDetail }).credit.costStatus).toBe("posted");
+      expect((await query("SELECT id,qty_received,qty_on_hand,qty_picked,qty_packed FROM inventory.inventory_lots ORDER BY id")).rows).toEqual(counts);
+      expect((await totals())[1]).toEqual(otherReceipt);
+      expect(await physical()).toEqual(bills);
+      expect((await query("SELECT count(*)::int AS count FROM inventory.cost_reconciliation_postings")).rows[0].count).toBe(0);
     });
     it("receipt credit rejects a wrong receipt and cumulative credit over its exact assigned value", async () => {
       const { rows } = await setup(), { body } = await review(rows);

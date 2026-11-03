@@ -12,6 +12,10 @@ export const supplierCreditCostPreviewSchema = z.object({
     beforeMills: money, afterMills: money, reviewReason: z.string().nullable(),
   }).strict()),
   issues: z.array(z.string()),
+  // Optional only for already-retained version-1 approvals. New reviews show
+  // the billed receipt amounts as well as downstream stock/order values.
+  receipts: z.array(z.object({ receivingLineId: z.number().int().positive().safe(), receiptNumber: z.string(),
+    pieces: z.number().int().positive().safe(), beforeMills: money, afterMills: money }).strict()).optional(),
 }).strict();
 export type SupplierCreditCostPreview = z.infer<typeof supplierCreditCostPreviewSchema>;
 export const supplierCreditCostApprovalSchema = z.object({

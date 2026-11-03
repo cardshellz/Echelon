@@ -30,11 +30,12 @@ export const receiptCostSegmentSchema = z
         row.sourceBasePieces,
         row.sourceTotalMills,
       ].every(Number.isSafeInteger)
-      || (row.credits !== undefined && (row.evidence !== "confirmed"
-        || new Set(row.credits.map(credit => credit.supplierCreditLineId)).size !== row.credits.length
-        || row.credits.some(credit => credit.pieces !== row.pieces)))
     )
       return;
+    if (row.credits !== undefined && (row.evidence !== "confirmed"
+      || new Set(row.credits.map(credit => credit.supplierCreditLineId)).size !== row.credits.length
+      || row.credits.some(credit => credit.pieces !== row.pieces)))
+      context.addIssue({ code: "custom", message: "Receipt credits require unique lines covering this exact confirmed interval." });
     if (
       BigInt(row.sourceStartPiece) + BigInt(row.pieces) >
         BigInt(row.sourceBasePieces) ||

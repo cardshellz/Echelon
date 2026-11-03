@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { invoiceCostComponentEvidenceSchema, invoiceGoodsAmounts } from "@shared/procurement/invoice-cost-evidence";
-import { receiptSegmentCost } from "@shared/procurement/receipt-cost-segments";
+import { receiptCostSegmentSchema, receiptSegmentCost } from "@shared/procurement/receipt-cost-segments";
 import { supplierCreditCreateInputSchema, supplierCreditLineSourceKey } from "@shared/procurement/supplier-credit";
 import { resolvePurchaseCostSource } from "../../domain/purchase-cost-source";
 import { evaluateSupplierCreditSource, resolveSupplierCreditReductions } from "../../domain/supplier-credit-source";
@@ -83,6 +83,14 @@ describe("receipt-specific billed adjustments and credits", () => {
     expect([0, 1, 2].map(start => receiptSegmentCost(segments, start, 1).totalMills)).toEqual([1, 1, 1]);
     expect(receiptSegmentCost(segments, 0, 3).totalMills).toBe(3);
     expect(() => receiptSegmentCost([{ ...segments[0], credits: [{ supplierCreditLineId: 1, amountMills: 6, pieces: 3 }] }], 0, 3)).toThrow(/exceed/);
+  });
+  it.each(["duplicate", "different_quantity", "provisional"])("rejects %s credit segment evidence at the shared boundary", kind => {
+    const credit = { supplierCreditLineId: 1, amountMills: 1, pieces: 3 };
+    const segment = { startBasePiece: 0, pieces: 3, receivingLineId: 1, invoiceLineId: 1, sourceStartPiece: 0,
+      sourceBasePieces: 3, sourceTotalMills: 5, evidence: kind === "provisional" ? "estimated" : "confirmed",
+      credits: kind === "duplicate" ? [credit, credit] : [{ ...credit, pieces: kind === "different_quantity" ? 2 : 3 }] };
+    expect(receiptCostSegmentSchema.safeParse(segment).success).toBe(false);
+    expect(() => receiptSegmentCost([segment as any], 0, 3)).toThrow(/exact confirmed interval/);
   });
   it("preserves explicit excluded billed amounts rather than capitalizing them", () => {
     const input = source(), evidence = input.approvedInvoices[0].cost_component_evidence as any;

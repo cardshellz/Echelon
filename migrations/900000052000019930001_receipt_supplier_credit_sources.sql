@@ -5,6 +5,8 @@ CREATE FUNCTION procurement.supplier_credit_line_source_key(disposition jsonb) R
 LANGUAGE plpgsql IMMUTABLE STRICT AS $$
 DECLARE assignment jsonb; field text; amount numeric; result text;
 BEGIN
+ IF disposition ? 'receiptAllocation' AND disposition->>'kind' IS DISTINCT FROM 'price_reduction'
+ THEN RAISE EXCEPTION 'Receipt attribution requires a goods price credit' USING ERRCODE='23514'; END IF;
  IF disposition->>'kind'='price_reduction' THEN
   result:='price_reduction:'||(disposition->>'component');
   IF NOT (disposition ? 'receiptAllocation') THEN RETURN result; END IF;
@@ -46,13 +48,16 @@ BEGIN
  PERFORM allocation.id FROM procurement.receipt_invoice_cost_allocations allocation
  JOIN procurement.vendor_invoice_lines invoice_line ON invoice_line.id=allocation.invoice_line_id
  JOIN procurement.purchase_order_lines po_line ON po_line.id=allocation.purchase_order_line_id
+ JOIN procurement.receiving_lines receipt_line ON receipt_line.id=allocation.receiving_line_id
  WHERE allocation.invoice_line_id=source_invoice_line_id
   AND invoice_line.purchase_order_line_id=po_line.id AND po_line.receipt_costing_enabled=1
+  AND receipt_line.purchase_order_line_id=po_line.id
+  AND allocation.invoice_start_piece+allocation.pieces<=invoice_line.qty_invoiced::numeric
   AND allocation.receiving_line_id=(assignment->>'receivingLineId')::integer
   AND allocation.receipt_start_piece=(assignment->>'receiptStartPiece')::bigint
   AND allocation.invoice_start_piece=(assignment->>'invoiceStartPiece')::bigint
   AND allocation.pieces=(assignment->>'pieces')::bigint
- FOR SHARE OF allocation,invoice_line,po_line;
+ FOR SHARE OF allocation,invoice_line,po_line,receipt_line;
  IF NOT FOUND THEN RAISE EXCEPTION 'Receipt credit requires its exact saved invoice assignment' USING ERRCODE='23514'; END IF;
 END $$;
 

@@ -67,8 +67,9 @@ test("classified invoice adjustments and a receipt credit retain exact costs, or
   dialog = page.getByRole("dialog");
   await dialog.getByLabel("Reason for this credit action", { exact: true }).fill("Checked the exact billed receipt and supplier credit");
   await dialog.getByRole("button", { name: "Review receipt cost changes", exact: true }).click();
-  await expect(dialog.getByRole("table")).toContainText("$24.0000");
-  await expect(dialog.getByRole("table")).toContainText("$22.0000");
+  await expect(dialog.getByRole("table", { name: "Supplier cost by receipt", exact: true })).toContainText("$24.0000");
+  await expect(dialog.getByRole("table", { name: "Supplier cost by receipt", exact: true })).toContainText("$22.0000");
+  await expect(dialog.getByRole("table", { name: "Supplier cost by receipt", exact: true })).toContainText("$30.0000");
   expect((await state(backend)).lots).toEqual(classified.lots);
   await dialog.screenshot({ path: info.outputPath("receipt-credit-before-after.png") });
   await dialog.getByRole("button", { name: "Approve credit", exact: true }).click();
@@ -80,15 +81,15 @@ test("classified invoice adjustments and a receipt credit retain exact costs, or
   expect(approved.receivingLines).toEqual(original.receivingLines);
   expect(approved.receiptInvoiceApprovals).toEqual(original.receiptInvoiceApprovals);
   const history = page.getByRole("region", { name: "Receipt credit cost approvals", exact: true });
-  await expect(history.locator("summary")).toContainText(admin.username);
-  await history.locator("summary").click();
+  await expect(history.locator(":scope > details > summary")).toContainText(admin.username);
+  await history.locator(":scope > details > summary").click();
   await expect(history).toContainText("$22.0000");
 
   await page.getByRole("button", { name: "Void credit", exact: true }).click();
   dialog = page.getByRole("dialog");
   await dialog.getByLabel("Reason for this credit action", { exact: true }).fill("Supplier withdrew this credit; retain its original approval");
   await dialog.getByRole("button", { name: "Review receipt cost changes", exact: true }).click();
-  await expect(dialog.getByRole("table")).toContainText("$24.0000");
+  await expect(dialog.getByRole("table", { name: "Supplier cost by receipt", exact: true })).toContainText("$24.0000");
   await dialog.getByRole("button", { name: "Void credit", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   const restored = await state(backend);
@@ -96,5 +97,5 @@ test("classified invoice adjustments and a receipt credit retain exact costs, or
   expect(restored.invoices).toEqual(original.invoices);
   expect(restored.payments).toEqual(original.payments);
   expect(restored.receivingLines).toEqual(original.receivingLines);
-  await expect(history.locator("summary")).toHaveCount(2);
+  await expect(history.locator(":scope > details > summary")).toHaveCount(2);
 });

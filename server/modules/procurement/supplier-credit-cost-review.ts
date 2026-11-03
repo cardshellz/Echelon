@@ -9,8 +9,15 @@ import { readInvoiceCorrectionInventoryValues } from "./invoice-correction-cost-
 import { buildCostDestinationImpact } from "./cost-change-impact";
 import { costFingerprint, costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import { SupplierCreditError, type CreditTransaction } from "./supplier-credit.repository";
+import { readPurchaseCostSources } from "./purchase-cost-source.repository";
+import { receiptInvoiceCostRows } from "./domain/receipt-invoice-preview";
 
 type Input = { command: string; creditId?: number; raw: unknown; actorId: string; at: Date; costReviewExecution?: "preview"; commandKey?: string };
+async function readReceiptCosts(tx: CreditTransaction, lineIds: number[]) {
+  return [...(await readPurchaseCostSources(tx, lineIds)).values()].flatMap(source =>
+    source.receiptCosting ? receiptInvoiceCostRows(source, source.receiptCosting.receipts) : [])
+    .sort((a, b) => a.receivingLineId - b.receivingLineId);
+}
 /** Run after the shared graph lock, before IAM/document work. Old credits retain
  * their original command contract. New receipt attribution needs measured review. */
 export async function captureSupplierCreditCostReview(tx: CreditTransaction, input: Input) {
@@ -27,10 +34,11 @@ export async function captureSupplierCreditCostReview(tx: CreditTransaction, inp
   if (!lineIds.length) throw new SupplierCreditError("SUPPLIER_CREDIT_RECEIPT_SOURCE_MISSING", "Restore the credit's original purchase and receipt relationship before changing costs.");
   const dependencies = await readPoAmendmentDependencies(tx, lineIds);
   const values = await readInvoiceCorrectionInventoryValues(tx, dependencies);
+  const receipts = await readReceiptCosts(tx, lineIds);
   const authority = await readPurchaseApprovalActor(tx, input.actorId);
   if (!hasQuantityAmendmentAuthority(authority))
     throw new SupplierCreditError("SUPPLIER_CREDIT_COST_ADMIN_REQUIRED", "An Administrator with purchasing approval permission must approve receipt cost changes.", 403);
-  return { request, rows, lineIds, dependencies, values, authority };
+  return { request, rows, lineIds, dependencies, values, receipts, authority };
 }
 export async function finishSupplierCreditCostReview(tx: CreditTransaction, input: Input,
   before: NonNullable<Awaited<ReturnType<typeof captureSupplierCreditCostReview>>>, credit: SupplierCreditDetail) {
@@ -44,9 +52,16 @@ export async function finishSupplierCreditCostReview(tx: CreditTransaction, inpu
       beforeMills: row.onHandValueMills, afterMills: next.onHandValueMills, reviewReason: next.valueReviewReason };
   });
   const issues = credit.lines.flatMap(row => row.costIssues.map(issue => issue.message));
-  const preview = supplierCreditCostPreviewSchema.parse({ creditId: credit.id, action: input.command, impact, inventoryValues, issues,
+  const afterReceipts = new Map((await readReceiptCosts(tx, before.lineIds)).map(row => [row.receivingLineId, row]));
+  const receipts = before.receipts.map(row => {
+    const next = afterReceipts.get(row.receivingLineId);
+    if (!next || next.pieces !== row.pieces) throw new Error("Supplier credit changed received quantities");
+    return { receivingLineId: row.receivingLineId, receiptNumber: row.receiptNumber, pieces: row.pieces,
+      beforeMills: row.supplierMills, afterMills: next.supplierMills };
+  });
+  const preview = supplierCreditCostPreviewSchema.parse({ creditId: credit.id, action: input.command, impact, inventoryValues, issues, receipts,
     previewVersion: costFingerprint({ contract: 1, creditId: credit.id, command: input.command, expectedVersion: before.request.expectedVersion,
-      reason: before.request.reason, rows: before.rows, authority: before.authority, dependencies: before.dependencies, impact, inventoryValues, issues }) });
+      reason: before.request.reason, rows: before.rows, authority: before.authority, dependencies: before.dependencies, impact, inventoryValues, issues, receipts }) });
   if (before.request.previewVersion !== undefined && before.request.previewVersion !== preview.previewVersion)
     throw new SupplierCreditError("SUPPLIER_CREDIT_COST_PREVIEW_STALE", "Stock, invoice or credit costs changed. Review the current cost changes again.");
   if (input.costReviewExecution !== "preview") {
