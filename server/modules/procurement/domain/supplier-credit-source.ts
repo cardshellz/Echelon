@@ -78,7 +78,10 @@ export function evaluateSupplierCreditSource(input: {
     const field = line.disposition.component === "product" ? "productMills" : "packagingMills";
     reduction[field] = costInteger(amountMills.toString(), `credit.${field}`);
     const assignment = line.disposition.receiptAllocation;
-    const capacity = assignment ? allocateIntegerCostInterval(BigInt(goods![field]), BigInt(costInteger(invoice.qty_invoiced, "invoice pieces", 1)),
+    const invoicePieces = BigInt(costInteger(invoice.qty_invoiced, "invoice pieces", 1));
+    const invalidInterval = assignment && BigInt(assignment.invoiceStartPiece) + BigInt(assignment.pieces) > invoicePieces;
+    if (invalidInterval) issues.push(supplierCreditIssue("CREDIT_RECEIPT_SOURCE_CHANGED", "The credited receipt interval exceeds the original invoice's billed pieces."));
+    const capacity = assignment && !invalidInterval ? allocateIntegerCostInterval(BigInt(goods![field]), invoicePieces,
       BigInt(assignment.invoiceStartPiece), BigInt(assignment.pieces)) : BigInt(goods![field]);
     if (amountMills > capacity) issues.push(supplierCreditIssue("CREDIT_COMPONENT_EXCEEDED", "The credit exceeds the original invoice cost assigned to this destination."));
   } else if (!input.returnSource) {

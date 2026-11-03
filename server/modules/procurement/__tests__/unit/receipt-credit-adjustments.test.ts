@@ -62,6 +62,14 @@ describe("receipt-specific billed adjustments and credits", () => {
     expect(resolveSupplierCreditReductions(input.approvedInvoices, input.supplierCredits, 21).issues.some(row => row.code === "CREDIT_SOURCE_EXCEEDED")).toBe(true);
     expect(product(input).evidence).toBe("review_required");
   });
+  it("classifies an out-of-bounds credited interval instead of treating it as a retryable posting failure", () => {
+    const input = credited(), disposition = input.supplierCredits![0].disposition as any;
+    const result = evaluateSupplierCreditSource({ line: { invoiceLineId: 72, amountCents: 1,
+      disposition: { ...disposition, receiptAllocation: { ...disposition.receiptAllocation, invoiceStartPiece: 99 } } },
+      invoice: { ...input.approvedInvoices[0], purchase_order_line_id: 21 } });
+    expect(result.costState).toBe("review_required");
+    expect(result.costIssues).toContainEqual(expect.objectContaining({ code: "CREDIT_RECEIPT_SOURCE_CHANGED" }));
+  });
   it("keeps received returns on their separate outgoing cost owner", () => {
     const input = source();
     input.supplierCredits = [{ id: 1, supplier_credit_id: 1, invoice_line_id: 72, amount_cents: 1000, status: "approved", source_evidence: {},

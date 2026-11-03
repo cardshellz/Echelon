@@ -23,6 +23,7 @@ export async function installConnectedWorkflowFixture(pool: Pool): Promise<void>
     await pool.query(readFileSync(resolve(process.cwd(), "migrations", name), "utf8"));
   }
   await installSupplierReturnCompletionFixture(pool);
+  await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000052000019930001_receipt_supplier_credit_sources.sql"), "utf8"));
   await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000051000019910001_ap_invoice_transition_reviews.sql"), "utf8"));
   await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000049000019830001_freight_invoice_approval_history_lookup.sql"), "utf8"));
   // Legacy runtime DDL in server/db.ts, with bigint money from migration 0576;
