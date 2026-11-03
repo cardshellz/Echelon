@@ -45,6 +45,7 @@ import { registerReceiptConfigurationAuthorityCases } from "./receipt-configurat
 import { registerCostSourceCompatibilityCases } from "./cost-source-compatibility.cases";
 import { registerInvoiceCorrectionCostCases } from "./invoice-correction-costs.cases";
 import { registerPurchaseTaxCases } from "./purchase-tax.cases";
+import { registerApInvoiceTransitionCases } from "./ap-invoice-transition.cases";
 import type { ReceiveWarningEvaluator, ReceiveWarningReporter } from "../../receiving.service";
 
 // Real PostgreSQL regression coverage for the coordinated receipt/AP/freight owners.
@@ -133,6 +134,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/231_receipt_cost_recovery.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000004000017890001_receiving_quarantine.sql"), "utf8"));
     await installSupplierReturnCompletionFixture(pool);
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000051000019910001_ap_invoice_transition_reviews.sql"), "utf8"));
     // The log is runtime DDL in server/db.ts:997, with money types aligned by migration0576.
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) {
       await pool.query(fixtureTable(schema.auditEvents)); ownsAudit = true;
@@ -215,6 +217,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   beforeEach(async () => {
     if (ownedSchemas.length !== 7) throw new Error("Fixture schema ownership missing");
+    await pool.query("ALTER TABLE procurement.ap_invoice_transition_reviews DISABLE TRIGGER ap_invoice_transition_history_no_truncate");
     await pool.query(`ALTER TABLE inventory.lot_cost_origin_amendments DISABLE TRIGGER quantity_amendment_no_truncate;
       ALTER TABLE procurement.receipt_shipment_quantity_amendments DISABLE TRIGGER quantity_amendment_no_truncate;
       ALTER TABLE procurement.receipt_shipment_quantity_results DISABLE TRIGGER quantity_amendment_no_truncate`);
@@ -229,6 +232,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       ALTER TABLE inventory.cost_reconciliation_postings ENABLE TRIGGER cost_reconciliation_posting_no_truncate;
       ALTER TABLE inventory.cost_origin_repairs ENABLE TRIGGER cost_origin_repair_no_truncate`); }
     await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
+    await pool.query("ALTER TABLE procurement.ap_invoice_transition_reviews ENABLE TRIGGER ap_invoice_transition_history_no_truncate");
     await pool.query(`ALTER TABLE inventory.lot_cost_origin_amendments ENABLE TRIGGER quantity_amendment_no_truncate;
       ALTER TABLE procurement.receipt_shipment_quantity_amendments ENABLE TRIGGER quantity_amendment_no_truncate;
       ALTER TABLE procurement.receipt_shipment_quantity_results ENABLE TRIGGER quantity_amendment_no_truncate`);
@@ -1012,6 +1016,8 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
 
   function exceptionService() { return createShipmentCostExceptionService(database, () => NOW); }
   registerInvoiceCostTaskReviewCases({ pool: () => pool, database: () => database, at: NOW, actorId, receive, sell: seedConsumedCost });
+  registerApInvoiceTransitionCases({ pool: () => pool, database: () => database, at: NOW, actorId, receive, consume: seedConsumedCost,
+    finalizeFreight: async () => { await shipment.finalizeAllocations(1, actorId); return shipment.pushLandedCostsToLots(1, actorId); } });
   registerShipmentMeasurementCorrectionCases({ pool: () => pool, database: () => database, shipments: () => shipment,
     at: NOW, receive, approveSupplier: approveEvidence, sell: seedConsumedCost, historicalGaps: legacyQuantityGaps });
   registerPoAmendmentDependencyCases({ pool: () => pool, database: () => database, shipments: () => shipment, at: NOW, receive,

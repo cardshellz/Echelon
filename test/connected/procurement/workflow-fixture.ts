@@ -23,6 +23,7 @@ export async function installConnectedWorkflowFixture(pool: Pool): Promise<void>
     await pool.query(readFileSync(resolve(process.cwd(), "migrations", name), "utf8"));
   }
   await installSupplierReturnCompletionFixture(pool);
+  await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000051000019910001_ap_invoice_transition_reviews.sql"), "utf8"));
   await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000049000019830001_freight_invoice_approval_history_lookup.sql"), "utf8"));
   // Legacy runtime DDL in server/db.ts, with bigint money from migration 0576;
   // the AP owner still appends this audit alongside immutable cost evidence.
@@ -52,6 +53,7 @@ export async function installConnectedWorkflowFixture(pool: Pool): Promise<void>
 export async function readConnectedWorkflowState(pool: Pool) {
   return (await pool.query(`SELECT
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.vendor_invoice_lines t) AS "invoiceLines",
+    (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.ap_invoice_transition_reviews t) AS "invoiceTransitionReviews",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.po_events t WHERE event_type='invoice_cost_components_approved') AS "supplierCostApprovals",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM inventory.cost_reconciliation_postings t) AS "historicalCostPostings",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) || jsonb_build_object(
@@ -137,4 +139,27 @@ export async function seedFreightInvoiceWorkflow(pool: Pool): Promise<void> {
   } finally {
     client.release();
   }
+}
+
+/** Untouched synthetic bill used to exercise the actual AP review UI. No stock,
+ * posting, payment or historical approval may exist before this scenario starts. */
+export async function seedApTransitionWorkflow(pool: Pool): Promise<void> {
+  const row = (await pool.query(`SELECT
+    (SELECT count(*)::int FROM procurement.receiving_orders WHERE purchase_order_id IN (11,12)) AS receipts,
+    (SELECT count(*)::int FROM inventory.cost_applications) AS applications,
+    (SELECT count(*)::int FROM procurement.ap_payment_allocations WHERE vendor_invoice_id=71) AS payments,
+    (SELECT count(*)::int FROM procurement.ap_invoice_transition_reviews) AS approvals`)).rows[0];
+  if (Object.values(row).some(value => value !== 0)) throw new Error("AP transition scenario requires untouched synthetic documents");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(`UPDATE procurement.vendor_invoices SET status='received',approved_at=NULL,approved_by=NULL,
+      invoiced_amount_cents=8000,balance_cents=8000 WHERE id=71;
+      UPDATE procurement.vendor_invoice_lines SET line_total_cents=3000,unit_cost_cents=120,unit_cost_mills=12000,
+        cost_component_evidence='{"contractVersion":1,"source":"operator_review","packagingTreatment":"included_in_product","productMills":300000,"packagingMills":0,"adjustmentMills":0}'::jsonb
+        WHERE vendor_invoice_id=71 AND purchase_order_line_id=21;
+      UPDATE procurement.vendor_invoice_po_links SET allocated_amount_cents=3000 WHERE vendor_invoice_id=71 AND purchase_order_id=11`);
+    await client.query("COMMIT");
+  } catch (error) { await client.query("ROLLBACK"); throw error; }
+  finally { client.release(); }
 }
