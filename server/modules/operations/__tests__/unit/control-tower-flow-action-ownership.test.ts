@@ -50,6 +50,12 @@ describe("Control Tower flow action ownership", () => {
     expect(OMS_ROUTES_SOURCE).toContain('res.setHeader("Cache-Control", "private, no-store")');
   });
 
+  it("keeps last-scan issue categories clickable while live evidence is unavailable", () => {
+    expect(FLOW_MONITOR_SOURCE).toContain("const snapshotIssues = snapshot.issues");
+    expect(FLOW_MONITOR_SOURCE).toContain("issues: snapshotIssues");
+    expect(FLOW_MONITOR_SOURCE).toContain('Review ${snapshotIsCurrent ? "current" : "last scan"} ${stage.label} exceptions');
+    expect(FLOW_MONITOR_SOURCE).toContain('issue type{stage.issues.length === 1 ? "" : "s"} in last scan');
+  });
   it("requires the Control Tower triage permission at every replay endpoint", () => {
     expect(OMS_ROUTES_SOURCE).toMatch(
       /webhook-inbox\/:id\/replay"[\s\S]{0,160}requirePermission\("operations", "triage"\)/,
