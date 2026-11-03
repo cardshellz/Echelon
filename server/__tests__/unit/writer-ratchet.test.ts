@@ -177,6 +177,16 @@ describe("writer-ratchet (P2.1)", () => {
     expect(currentIncludingScripts["channels.channel_product_identities"]).toEqual(["modules/channels"]);
     expect(baseline["channels.channel_product_identities"]).toEqual(["modules/channels"]);
   });
+
+  it("staff Shopify OAuth authorizations have only the Channels owning writer, including scripts", () => {
+    const table = "channels.shopify_oauth_authorizations";
+    expect(current[table]).toEqual(["modules/channels"]);
+    expect(currentIncludingScripts[table]).toEqual(["modules/channels"]);
+    expect(baseline[table]).toEqual(["modules/channels"]);
+    expect(current["channels.channel_connections"]).not.toContain("server/routes/shopify.routes.ts");
+    expect(currentIncludingScripts["channels.channel_connections"]).not.toContain("server/routes/shopify.routes.ts");
+    expect(baseline["channels.channel_connections"]).not.toContain("server/routes/shopify.routes.ts");
+  });
   it.each(["marketplace.channel_listing_presence", "marketplace.channel_listing_presence_events"])(
     "%s has only the Marketplace Listings owning writer", table => {
       expect(current[table]).toEqual(["modules/marketplace-listings"]);

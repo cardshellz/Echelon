@@ -66,8 +66,7 @@
   "channels.channel_connections": [
     "modules/channels",
     "modules/dropship",
-    "server/routes/ebay-settings.routes.ts",
-    "server/routes/shopify.routes.ts"
+    "server/routes/ebay-settings.routes.ts"
   ],
   "channels.channel_feeds": [
     "modules/catalog",
@@ -145,6 +144,9 @@
     "modules/channels"
   ],
   "channels.partner_profiles": [
+    "modules/channels"
+  ],
+  "channels.shopify_oauth_authorizations": [
     "modules/channels"
   ],
   "channels.shopify_ownership_repair_commands": [
