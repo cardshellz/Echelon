@@ -13,8 +13,10 @@ const progressing = new Set<OrderEditStatus>([
   "synchronizing",
   "recovering",
 ]);
-export const orderEditWatchesStatus = (status: OrderEditStatus): boolean =>
-  progressing.has(status);
+export const orderEditWatchesStatus = (
+  status: OrderEditStatus,
+  commandInProgress = false,
+): boolean => commandInProgress || progressing.has(status);
 
 interface StatusOptions<
   T extends { operationId: string; status: string } = OrderEditOperation,
@@ -26,6 +28,7 @@ interface StatusOptions<
   busy(): boolean;
   revision(): number;
   clock?: () => number;
+  readImmediately?: boolean;
 }
 /** Display-only observer. Financial progress belongs to the canonical worker;
  * neither timers nor browser-return events may submit reconciliation commands.
@@ -189,6 +192,7 @@ export function useCustomerOperationStatus<
 export function useOrderEditStatus(options: StatusOptions) {
   return useCustomerOperationStatus({
     ...options,
-    isProgressing: (operation) => orderEditWatchesStatus(operation.status),
+    isProgressing: (operation) =>
+      orderEditWatchesStatus(operation.status, operation.commandInProgress),
   });
 }
