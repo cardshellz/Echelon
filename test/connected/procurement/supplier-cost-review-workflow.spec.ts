@@ -36,7 +36,7 @@ test("one reviewed supplier split updates stock components and retains the appro
   await page.getByRole("option", { name: "No, packaging is charged separately", exact: true }).click();
   await dialog.getByLabel(/^Product total/).fill("20.0000");
   await dialog.getByLabel(/^Packaging total/).fill("5.0000");
-  await dialog.getByLabel(/^Other adjustments/).fill("0");
+  await dialog.getByLabel(/^Billed adjustments total/).fill("0");
   await dialog.getByLabel("Notes / supplier invoice reference", { exact: true }).fill("Supplier confirms $20 goods and $5 packaging for this receipt.");
   await dialog.getByRole("button", { name: "Review cost changes", exact: true }).click();
   const review = dialog.getByRole("region", { name: "Supplier cost changes", exact: true });

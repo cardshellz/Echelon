@@ -58,7 +58,8 @@ export async function reviewInvoiceCostComponentsInTransaction(tx: AmendmentTran
     throw new ApLedgerError("An Administrator with purchasing approval permission must approve supplier cost changes.", 403, { code: "INVOICE_COST_REVIEW_ADMIN_REQUIRED" });
   const beforeValues = before ? await readInvoiceCorrectionInventoryValues(tx, before) : [];
   const after = invoiceCostComponentEvidenceSchema.parse({ contractVersion: 1, packagingTreatment: review.packagingTreatment, productMills: review.productMills,
-    packagingMills: review.packagingMills, adjustmentMills: review.adjustmentMills, source: "operator_review" });
+    packagingMills: review.packagingMills, adjustmentMills: review.adjustmentMills, source: "operator_review",
+    ...(review.adjustments === undefined ? {} : { adjustments: review.adjustments }) });
   await persistInvoiceCostComponents(tx, lineId, after, now);
   const application = execution.kind === "nested" || purchaseLineId === null ? null : await reconcilePurchaseCostEvidence(tx, purchaseLineId, new COGSService(tx), actorId, now);
   const afterDependencies = before && purchaseLineId !== null ? await readPoAmendmentDependencies(tx, [purchaseLineId]) : null;

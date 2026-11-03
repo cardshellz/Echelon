@@ -5,18 +5,18 @@ This is the active tracker for consolidating purchase costing from PO through sh
 | Tracking field | Current value |
 | --- | --- |
 | Created | 2026-10-30 |
-| Overall state | #1964, #1967, #1971, #1979, #1983 and #1987 merged. #1987 independently verified in v3453 on deployed commit `6a43c7b656004d93b6fb182b6f10ba93f394ce77`, with web/capture up and deployed-commit CI successful. Production has zero receipt assignments/enabled lines, freight approvals and standalone supplier approvals as of 2026-11-03; actual financial posting acceptance remains open |
+| Overall state | #1964, #1967, #1971, #1979, #1983, #1987 and #1991 merged. #1991 independently verified in v3454 at `209f40c11c669289be0e0cbc8bc8e2157da28cf9`, migration applied, web/capture up; actual live rollback-only invoice review completed. New financial approvals and receipt assignments remain zero; actual production posting acceptance remains open |
 | Current stage | S2 — connect approved financial corrections to the existing costing pipeline and reviewed impact |
-| Next work item | Finish hosted acceptance of the implemented A2 invoice transitions, then A3/A4 combined/header/credit adapters. [Finite remaining delivery gates](procurement-costing-remaining-delivery.md) retain the full remaining scope |
-| Working branch | `codex/purchase-invoice-transitions-reviewed` |
-| Plan branch base | `6a43c7b656004d93b6fb182b6f10ba93f394ce77` |
-| Latest main incorporated | `6a43c7b656004d93b6fb182b6f10ba93f394ce77` (#1989), including merged #1987. This is also the independently verified v3453 slug commit |
+| Next work item | Finish acceptance of classified billed-line adjustments and receipt-attributed credits. Combined amounts without a split, header allocation and tax/return-credit attribution remain explicit A3/A4 work. [Finite remaining delivery gates](procurement-costing-remaining-delivery.md) retain the full scope |
+| Working branch | `codex/supplier-cost-total-credit-attribution` |
+| Plan branch base | `209f40c11c669289be0e0cbc8bc8e2157da28cf9` |
+| Latest main incorporated | `209f40c11c669289be0e0cbc8bc8e2157da28cf9` (#1991), also the verified v3454 slug commit |
 | Audited main baseline | `e571bcac780852c3ac6b488354c10aaf7f1c417c`, the historical F1-F9 audit baseline. Later implementation and deployment evidence is recorded below; this baseline is not current production acceptance proof |
 | Audit | [Purchase costing authority review](procurement-costing-authority-audit-2026-10-30.md) |
 | Stage 1 contract and ownership map | [Contract, compatibility and recognition boundary](procurement-costing-stage-1-contract.md) |
 | Stage 2 compatibility trace | [Recorded authority and selected-input proof](procurement-costing-stage-2-compatibility.md) |
-| Current implementation PR | [#1991](https://github.com/cardshellz/Echelon/pull/1991), A2 ordinary AP transitions; local acceptance complete, hosted final-head checks tracked on the PR. The initial draft #1990 is superseded because its bootstrap migration placeholder was retained in commit history. [#1987](https://github.com/cardshellz/Echelon/pull/1987) supplier approval and [#1983](https://github.com/cardshellz/Echelon/pull/1983) freight reconciliation are deployed |
-| Deployment and live acceptance | [#1987 verification](procurement-costing-deployment-1987.md): v3453, exact slug/process identity, 63 final-PR checks and 27 deployed-commit checks without failures. Read-only counts remain zero; deployment is not actual financial posting acceptance |
+| Current implementation PR | A3/A4 billed-line adjustments and receipt-attributed credit candidate; publishing and hosted acceptance pending. [#1991](https://github.com/cardshellz/Echelon/pull/1991) is deployed; 63/63 final-head checks passed |
+| Deployment and live acceptance | [#1991 verification](procurement-costing-deployment-1991.md): v3454, exact slug/process/migration identity and actual live invoice impact preview. Closed without saving; original bill, payment, balance and approval independently read back unchanged. No new production approval was posted |
 
 ## Resume here after a context reset
 
@@ -355,3 +355,13 @@ Local acceptance: 396 cases in the complete PostgreSQL receipt/AP/tax/credit/fre
 Initial local runs exposed a duplicate Close locator and a test-cluster checkpoint/build sequencing failure. The footer has a distinct Close review label; clean connected acceptance ran against a fixed built artifact and a fresh, explicitly disposable PostgreSQL cluster with working checkpoints. Cleanup checks/timeouts and monetary assertions were not relaxed. The original stalled fixture cluster was stopped after verifying its directory and remaining task-owned clients.
 
 The initial draft's zero-PR placeholder migration was discovered in introduced Git history by hosted provenance checks. The implementation is republished as [#1991](https://github.com/cardshellz/Echelon/pull/1991) from a clean branch with correctly allocated migration `900000051000019910001_ap_invoice_transition_reviews.sql`; the original branch/history is preserved and the guard remains unchanged. Hosted final-head results belong to the linked replacement PR #1991. No production financial or physical records were changed. #1987 release verification is separately recorded above; A3/A4/B1/C1/D1/D2 remain open.
+
+## 2026-11-03 — #1991 deployed; billed-line adjustments and receipt credits
+
+Latest handoff supersedes the preceding candidate status. [#1991 live verification](procurement-costing-deployment-1991.md) proves the deployed release and the actual rollback-only UI review, with independent unchanged-bill readback. The next implementation is [billed-line adjustment and receipt-credit attribution](procurement-costing-stage-2-receipt-credits.md) on `codex/supplier-cost-total-credit-attribution`, based on #1991. It uses the existing source/application owners and immutable PO history; no new migration or financial storage subsystem is introduced.
+
+The candidate classifies signed amounts already belonging to an invoice line, preserves them through tax and invoice corrections, and attributes price credits to exact saved receipt intervals. Current admin approval binds the real before/after, exact inventory valuation, dependencies and current permission; approval/reversal/recheck preserve bills, physical counts, cash, source evidence and original approvals. Other receipts retain their own prices, and uninvoiced pieces remain provisional. Unsupported cases retain their owning review.
+
+Validation so far: 287 focused unit cases across ten files passed; the five new real PostgreSQL cases passed, including rollback/retry, cumulative caps and concurrent approvals. The composed SQL suite, final types/build, accessibility-corrected connected desktop/mobile and guards are being completed before publishing. An initial browser run found select labels that included their options; the editor now has explicit label/control IDs. No assertion, financial guard or timeout was weakened.
+
+Remaining A3/A4: combined supplier totals without a product/packaging split, unapportioned PO/invoice header adjustments, tax-credit allocation and additional receipt/quarantine-return combinations. They are not marked complete by this bounded slice. Then close downstream inheritance/recognition B1, shared monetary consumers C1 and composed/actual-record acceptance D1/D2. Do not infer a split, source allocation, sale or expense to close any gate.

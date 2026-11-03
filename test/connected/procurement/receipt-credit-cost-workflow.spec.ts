@@ -1,0 +1,100 @@
+import { randomUUID } from "node:crypto";
+import { test, expect, login, type Backend } from "./fixtures";
+import { receiveShipmentPurchase } from "./receiving-workflow";
+import { receiptInvoiceContextSchema, receiptInvoicePreviewSchema } from "../../../shared/procurement/receipt-invoice-costs";
+
+type Row = Record<string, unknown>;
+interface State { lots: Row[]; invoices: Row[]; payments: Row[]; receivingLines: Row[]; receiptInvoiceApprovals: Row[]; credits: Row[]; events: Row[] }
+const state = (backend: Backend) => backend.control<State>("workflow-state");
+
+test("classified invoice adjustments and a receipt credit retain exact costs, original bills and approval history", async ({ page, backend }, info) => {
+  await backend.control("receipt-invoice-workflow", {});
+  const admin = backend.actors.find(actor => actor.id === "connected-admin");
+  if (!admin) throw new Error("Connected admin missing");
+  await login(page, backend, admin);
+  await receiveShipmentPurchase(page, backend, 31);
+  await receiveShipmentPurchase(page, backend, 32);
+  const contextResponse = await page.request.get(`${backend.url}/api/purchasing/receipt-invoice-costs/21`);
+  expect(contextResponse.status()).toBe(200);
+  const context = receiptInvoiceContextSchema.parse(await contextResponse.json());
+  const allocations = context.receipts.map((receipt, index) => ({ receivingLineId: receipt.receivingLineId,
+    invoiceLineId: context.invoices[index].id, receiptStartPiece: 0, invoiceStartPiece: 0, pieces: receipt.pieces }));
+  const draft = { sourceVersion: context.sourceVersion, change: { purchaseOrderLineId: 21, allocations } };
+  const previewResponse = await page.request.post(`${backend.url}/api/purchasing/receipt-invoice-costs/preview`, { data: draft });
+  expect(previewResponse.status()).toBe(200);
+  const assignment = receiptInvoicePreviewSchema.parse(await previewResponse.json());
+  const assigned = await page.request.post(`${backend.url}/api/purchasing/receipt-invoice-costs`, { headers: { "Idempotency-Key": randomUUID() },
+    data: { ...draft, previewVersion: assignment.previewVersion, reason: "Checked the two real received batch invoice assignments", approvalConfirmed: true } });
+  expect(assigned.status()).toBe(200);
+  const original = await state(backend);
+  expect(original.lots.filter(row => row.po_line_id === 21).map(row => String(row.product_total_cost_mills))).toEqual(["250000", "300000"]);
+
+  await page.goto(`${backend.url}/ap-invoices/71?tab=lines`);
+  await page.getByRole("button", { name: /^Review costs for/ }).first().click();
+  let dialog = page.getByRole("dialog");
+  await dialog.getByLabel(/^Product total/).fill("26");
+  await dialog.getByLabel(/^Billed adjustments total/).fill("-1");
+  await dialog.getByRole("button", { name: "Classify a billed adjustment", exact: true }).click();
+  await dialog.getByLabel("Adjustment reference", { exact: true }).first().fill("Supplier discount");
+  await dialog.getByLabel("Amount (USD)", { exact: true }).first().fill("-2");
+  await dialog.getByRole("button", { name: "Classify a billed adjustment", exact: true }).click();
+  await dialog.getByLabel("Adjustment reference", { exact: true }).nth(1).fill("Billed service outside inventory");
+  await dialog.getByLabel("Amount (USD)", { exact: true }).nth(1).fill("1");
+  await dialog.getByLabel("Type", { exact: true }).nth(1).selectOption("other");
+  await dialog.getByLabel("Apply to", { exact: true }).nth(1).selectOption("excluded");
+  await dialog.getByLabel("Notes / supplier invoice reference", { exact: true }).fill("Supplier confirms the billed discount and separate service");
+  await dialog.getByRole("button", { name: "Review cost changes", exact: true }).click();
+  await expect(dialog.getByRole("table")).toContainText("24.0000 USD");
+  expect((await state(backend)).lots).toEqual(original.lots);
+  await dialog.getByRole("button", { name: "Approve and apply costs", exact: true }).click();
+  await expect(dialog.getByRole("status")).toContainText("Supplier amounts saved");
+  await dialog.getByRole("button", { name: "Close review", exact: true }).click();
+  const classified = await state(backend);
+  expect(classified.lots.filter(row => row.po_line_id === 21).map(row => String(row.product_total_cost_mills))).toEqual(["240000", "300000"]);
+  expect(classified.invoices).toEqual(original.invoices);
+  expect(classified.receivingLines).toEqual(original.receivingLines);
+
+  await page.goto(`${backend.url}/supplier-credits?new=1&sourceInvoiceId=71`);
+  await page.getByLabel("Supplier credit reference", { exact: true }).fill("CONNECTED-RECEIPT-CREDIT");
+  await page.getByLabel("Credit document date", { exact: true }).fill("2026-10-25");
+  await page.getByLabel(/^Credit amount for/).first().fill("2.00");
+  await page.getByLabel("Credit reason and cost treatment", { exact: true }).first().selectOption("price:product");
+  await page.getByLabel("Which receipt does this credit belong to?", { exact: true }).selectOption({ index: 1 });
+  await page.getByLabel("Credit reason / document evidence", { exact: true }).fill("Supplier credit specifically belongs to the first received batch");
+  await page.getByRole("button", { name: "Create credit draft", exact: true }).click();
+  await expect(page).toHaveURL(/supplier-credits\/\d+/);
+  await page.getByRole("button", { name: "Approve credit", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Reason for this credit action", { exact: true }).fill("Checked the exact billed receipt and supplier credit");
+  await dialog.getByRole("button", { name: "Review receipt cost changes", exact: true }).click();
+  await expect(dialog.getByRole("table")).toContainText("$24.0000");
+  await expect(dialog.getByRole("table")).toContainText("$22.0000");
+  expect((await state(backend)).lots).toEqual(classified.lots);
+  await dialog.screenshot({ path: info.outputPath("receipt-credit-before-after.png") });
+  await dialog.getByRole("button", { name: "Approve credit", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const approved = await state(backend);
+  expect(approved.lots.filter(row => row.po_line_id === 21).map(row => String(row.product_total_cost_mills))).toEqual(["220000", "300000"]);
+  expect(approved.invoices).toEqual(original.invoices);
+  expect(approved.payments).toEqual(original.payments);
+  expect(approved.receivingLines).toEqual(original.receivingLines);
+  expect(approved.receiptInvoiceApprovals).toEqual(original.receiptInvoiceApprovals);
+  const history = page.getByRole("region", { name: "Receipt credit cost approvals", exact: true });
+  await expect(history.locator("summary")).toContainText(admin.username);
+  await history.locator("summary").click();
+  await expect(history).toContainText("$22.0000");
+
+  await page.getByRole("button", { name: "Void credit", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Reason for this credit action", { exact: true }).fill("Supplier withdrew this credit; retain its original approval");
+  await dialog.getByRole("button", { name: "Review receipt cost changes", exact: true }).click();
+  await expect(dialog.getByRole("table")).toContainText("$24.0000");
+  await dialog.getByRole("button", { name: "Void credit", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const restored = await state(backend);
+  expect(restored.lots.filter(row => row.po_line_id === 21).map(row => String(row.product_total_cost_mills))).toEqual(["240000", "300000"]);
+  expect(restored.invoices).toEqual(original.invoices);
+  expect(restored.payments).toEqual(original.payments);
+  expect(restored.receivingLines).toEqual(original.receivingLines);
+  await expect(history.locator("summary")).toHaveCount(2);
+});

@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { invoiceAdjustmentAmounts } from "@shared/procurement/invoice-cost-adjustments";
 import { z } from "zod";
 import { purchaseTaxChangeSchema, purchaseTaxContextSchema, purchaseTaxApprovalHistorySchema, type PurchaseTaxTarget, type PurchaseTaxChange } from "@shared/procurement/purchase-tax";
 import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
@@ -167,10 +168,11 @@ export async function persistPurchaseTaxChange(tx: AmendmentTransaction, source:
     if (source.invoiceLine.invoice_currency !== "USD") throw new PurchaseTaxError("This invoice needs currency-specific costing before its tax can be applied. Its recorded currency and amounts were preserved.", "PURCHASE_TAX_CURRENCY_REVIEW");
     for (const tax of change.taxes) validType(tax.taxTypeId);
     const total = readIntegerMills(change.taxes.reduce((sum, tax) => sum + BigInt(tax.amountMills), BigInt(0)), "invoice taxes");
-    if (change.components.adjustmentMills !== total) throw new PurchaseTaxError("The invoice's other amount must equal its named tax amounts. Review unrelated adjustments separately.", "PURCHASE_TAX_AMOUNT_MISMATCH", 422);
+    if (BigInt(change.components.adjustmentMills) !== BigInt(total) + BigInt(invoiceAdjustmentAmounts(change.components.adjustments).totalMills)) throw new PurchaseTaxError("Billed adjustments must equal the named taxes plus the classified non-tax amounts.", "PURCHASE_TAX_AMOUNT_MISMATCH", 422);
     const row = source.invoiceLine;
     await reviewInvoiceCostComponentsInTransaction(tx, change.id, { packagingTreatment: change.components.packagingTreatment,
       productMills: change.components.productMills, packagingMills: change.components.packagingMills, adjustmentMills: change.components.adjustmentMills,
+      ...(change.components.adjustments === undefined ? {} : { adjustments: change.components.adjustments }),
       expectedVersion: invoiceCostReviewVersion({ id: change.id, qtyInvoiced: costInteger(row.qty_invoiced, "quantity"), unitCostCents: readIntegerCents(row.unit_cost_cents, "unit price"),
         unitCostMills: row.unit_cost_mills == null ? null : readIntegerMills(row.unit_cost_mills, "unit price"), lineTotalCents: readIntegerCents(row.line_total_cents, "invoice line"), costComponentEvidence: row.cost_component_evidence }), reason,
     }, actorId, at, { kind: "nested" });

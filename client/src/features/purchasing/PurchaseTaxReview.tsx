@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { invoiceAdjustmentAmounts } from "@shared/procurement/invoice-cost-adjustments";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 import { purchaseTaxChangeSchema, purchaseTaxContextSchema, purchaseTaxApprovalRequestSchema, purchaseTaxPreviewSchema, purchaseTaxResultSchema,
@@ -82,16 +83,18 @@ function TaxEditor({ loaded, storageKey, setBusy, close, reload }: { loaded: Pur
     if (target.kind === "purchase_order") return purchaseTaxChangeSchema.parse({ ...target, taxTypeId: typeId ? Number(typeId) : null, lineTypes });
     if (target.kind === "shipment_charge") return purchaseTaxChangeSchema.parse({ ...target, taxTypeId: typeId ? Number(typeId) : null });
     const entries = taxes.map(tax => ({ taxTypeId: Number(tax.typeId), amountMills: parseExactMoneyInput(tax.amount, 4) }));
-    const adjustmentMills = entries.reduce((sum, tax) => sum + BigInt(tax.amountMills), BigInt(0));
+    const adjustments = context.invoice?.components?.adjustments;
+    const adjustmentMills = entries.reduce((sum, tax) => sum + BigInt(tax.amountMills), BigInt(invoiceAdjustmentAmounts(adjustments).totalMills));
     return purchaseTaxChangeSchema.parse({ ...target, taxes: entries, components: { contractVersion: 1, source: "operator_review", packagingTreatment,
-      productMills: parseExactMoneyInput(product, 4), packagingMills: parseExactMoneyInput(packaging, 4), adjustmentMills: readIntegerMills(adjustmentMills, "invoice tax") } });
+      productMills: parseExactMoneyInput(product, 4), packagingMills: parseExactMoneyInput(packaging, 4), adjustmentMills: readIntegerMills(adjustmentMills, "billed adjustments", true),
+      ...(adjustments === undefined ? {} : { adjustments }) } });
   }
   function changeTaxes(next: typeof taxes) {
     setTaxes(next);
     if (productOverridden || context.invoice?.components == null) return;
     try {
       const total = next.reduce((sum, tax) => sum + BigInt(parseExactMoneyInput(tax.amount, 4)), BigInt(0));
-      const remainder = BigInt(context.invoice.totalCents) * BigInt(100) - BigInt(parseExactMoneyInput(packaging, 4)) - total;
+      const remainder = BigInt(context.invoice.totalCents) * BigInt(100) - BigInt(parseExactMoneyInput(packaging, 4)) - total - BigInt(invoiceAdjustmentAmounts(context.invoice.components.adjustments).totalMills);
       if (remainder >= BigInt(0)) setProduct(exactMoneyAsInput(remainder, 4));
     } catch { /* Incomplete form input is validated before preview. */ }
   }

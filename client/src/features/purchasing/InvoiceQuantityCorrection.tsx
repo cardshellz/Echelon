@@ -166,7 +166,8 @@ function QuantityEditor({ loaded, storageKey, onSaved, setBusy, onReload, onClos
     try {
       const components = review.costComponentsReviewed ? review.afterCostComponents : null;
       const body = invoiceQuantityApprovalRequestSchema.parse({ sourceVersion: context.sourceVersion, quantityPieces: review.afterQuantity, unitCostMills: review.afterUnitCostMills, lineTotalCents: review.afterLineAmountCents,
-        ...(components ? { costComponents: { packagingTreatment: components.packagingTreatment, productMills: components.productMills, packagingMills: components.packagingMills, adjustmentMills: components.adjustmentMills } } : {}),
+        ...(components ? { costComponents: { packagingTreatment: components.packagingTreatment, productMills: components.productMills, packagingMills: components.packagingMills, adjustmentMills: components.adjustmentMills,
+          ...(components.adjustments === undefined ? {} : { adjustments: components.adjustments }) } } : {}),
         previewVersion: review.previewVersion, ...(context.closedPurchaseOrder ? { closedPurchaseOrderConfirmed: true } : {}), reason, approvalConfirmed: true });
       const intent: Intent = { key: crypto.randomUUID(), body, preview: review };
       sessionStorage.setItem(storageKey, JSON.stringify(intent)); active.current = intent; setUnresolved(intent); setError(null); approve.mutate(intent);
