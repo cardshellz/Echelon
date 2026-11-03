@@ -18,7 +18,7 @@ export async function readPurchaseApproverName(tx: PurchaseApprovalIdentityTrans
 /** Identity owns these reads. Share locks hold current account, membership and
  * grant evidence through the purchase transaction; session role strings never
  * authorize a financial command. No password leaves this reader. */
-export async function readPurchaseApprovalActor(tx: PurchaseApprovalIdentityTransaction, userId: string): Promise<PurchaseApprovalActor> {
+async function readPurchasePermissionActor(tx: PurchaseApprovalIdentityTransaction, userId: string, action: "approve" | "edit"): Promise<PurchaseApprovalActor> {
   const actorId = purchaseApprovalActorSchema.shape.userId.parse(userId);
   const userResult = await tx.execute(sql`SELECT id,active FROM identity.users WHERE id=${actorId} FOR SHARE`);
   const user = z.object({ id: z.string(), active: z.number().int() }).optional().parse(userResult.rows[0]);
@@ -35,7 +35,7 @@ export async function readPurchaseApprovalActor(tx: PurchaseApprovalIdentityTran
     FROM identity.auth_user_roles assignment
     JOIN identity.auth_role_permissions grant_row ON grant_row.role_id=assignment.role_id
     JOIN identity.auth_permissions permission ON permission.id=grant_row.permission_id
-    WHERE assignment.user_id=${actorId} AND permission.resource='purchasing' AND permission.action='approve'
+    WHERE assignment.user_id=${actorId} AND permission.resource='purchasing' AND permission.action=${action}
     ORDER BY assignment.id,grant_row.id,permission.id
     FOR SHARE OF assignment,grant_row,permission
   `);
@@ -49,4 +49,16 @@ export async function readPurchaseApprovalActor(tx: PurchaseApprovalIdentityTran
     approvalGrantIds: grants.filter((grant) => grant.constraints === null).map((grant) => grant.id),
     hasScopedApprovalGrant: grants.some((grant) => grant.constraints !== null),
   });
+}
+
+export function readPurchaseApprovalActor(tx: PurchaseApprovalIdentityTransaction, userId: string): Promise<PurchaseApprovalActor> {
+  return readPurchasePermissionActor(tx, userId, "approve");
+}
+
+/** Ordinary AP actions retain their established action permissions. Unlike
+ * financial corrections, initial invoice approval does not require an admin role. */
+export async function readPurchaseInvoiceActionActor(tx: PurchaseApprovalIdentityTransaction, userId: string, action: "approve" | "edit") {
+  const actor = await readPurchasePermissionActor(tx, userId, action);
+  return { userId: actor.userId, active: actor.active, roles: actor.roles,
+    permissionAction: action, grantIds: actor.approvalGrantIds, hasScopedGrant: actor.hasScopedApprovalGrant };
 }

@@ -169,6 +169,10 @@ async function main(): Promise<void> {
       try { res.json(await workflow.readConnectedWorkflowState(context.pool)); }
       catch (error) { next(error); }
     });
+    app.post("/__test/seed-ap-transition-workflow", async (_req, res, next) => {
+      try { await workflow.seedApTransitionWorkflow(context.pool); res.json({ ready: true }); }
+      catch (error) { next(error); }
+    });
     app.post("/__test/expire-sessions", async (_req, res, next) => {
       try { await pool.query("DELETE FROM identity.session"); res.json({ expired: true }); }
       catch (error) { next(error); }

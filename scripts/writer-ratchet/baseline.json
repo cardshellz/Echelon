@@ -1245,6 +1245,9 @@
   "operations.control_tower_work_items": [
     "modules/operations"
   ],
+  "procurement.ap_invoice_transition_reviews": [
+    "modules/procurement"
+  ],
   "procurement.ap_payment_allocations": [
     "modules/procurement"
   ],
