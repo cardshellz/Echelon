@@ -14,7 +14,8 @@ const target: EbayReconciliationTarget = { outboxId: "1", publicationTargetId: 3
 function fixture() {
   const store = { claimDue: vi.fn().mockResolvedValueOnce([claim]).mockResolvedValue([]), renew: vi.fn().mockResolvedValue(undefined),
     plan: vi.fn().mockResolvedValue([target]), recordStock: vi.fn().mockResolvedValue({ current: true, repaired: false, checkedAt: NOW, outboxIds: ["1"] }),
-    finish: vi.fn().mockResolvedValue(undefined), fail: vi.fn().mockResolvedValue(undefined), readStatuses: vi.fn() };
+    readContentEffects: vi.fn().mockResolvedValue([]), finish: vi.fn().mockResolvedValue(undefined),
+    fail: vi.fn().mockResolvedValue(undefined), readStatuses: vi.fn() };
   const adapter = { supportedScopeTypes: ["account"], publishAbsolute: vi.fn(), readAbsolute: vi.fn().mockResolvedValue({ observedQuantity: 17, providerResponse: { quantity: 17 } }) };
   const content = vi.fn().mockResolvedValue({ jobId: JOB });
   const service = new EbayPublicationReconciliationService(store, { get: () => adapter as never }, content, () => NOW, () => TOKEN);
@@ -28,6 +29,24 @@ describe("durable eBay stock and content reconciliation", () => {
     expect(f.store.recordStock).toHaveBeenCalledWith(claim, [expect.objectContaining({ observedQuantity: 17, quantityConsistent: true })], NOW);
     expect(f.store.finish).toHaveBeenCalledWith(claim, expect.objectContaining({ current: true }), JOB, NOW);
     expect(f.content).toHaveBeenCalledWith(expect.objectContaining({ productId: 20, connectionId: 9, accountId: "seller" }));
+  });
+  it("records a fresh verified content observation without inventing a Sync job", async () => {
+    const f = fixture();
+    const verified = { kind: "provider_match", checkedAt: NOW, evidenceHash: "a".repeat(64), identityHash: "b".repeat(64), proof: null };
+    f.content.mockResolvedValueOnce({ verified } as never);
+    expect(await f.service.processDue()).toEqual({ checked: 1, repaired: 0, blocked: 0 });
+    expect(f.store.finish).toHaveBeenCalledWith(claim, expect.objectContaining({ current: true }), verified, NOW);
+  });
+  it("falls back to durable Sync when the effect evidence cannot be read", async () => {
+    const f = fixture();
+    f.store.readContentEffects.mockRejectedValue(new Error("synthetic database failure"));
+    const log = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await f.service.processDue()).toEqual({ checked: 1, repaired: 0, blocked: 0 });
+      expect(f.content).toHaveBeenCalledWith(expect.objectContaining({ forceSync: true, effects: [] }));
+      expect(f.store.finish).toHaveBeenCalledWith(claim, expect.objectContaining({ current: true }), JOB, NOW);
+      expect(log).toHaveBeenCalledWith(expect.stringContaining("PUBLICATION_RECOVERY_EFFECT_EVIDENCE_UNAVAILABLE"));
+    } finally { log.mockRestore(); }
   });
   it("enqueues current content even when a newer uncertain stock writer blocks its quantity check", async () => {
     const f = fixture();

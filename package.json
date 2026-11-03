@@ -7,7 +7,7 @@
     "dev:client": "vite dev --port 5000",
     "dev": "NODE_ENV=development tsx server/index.ts",
     "build": "tsx script/build.ts",
-    "start": "NODE_ENV=production node --max-old-space-size=384 dist/index.cjs",
+    "start": "bash scripts/start-web.sh",
     "check": "tsc",
     "check:tests": "tsc -p tsconfig.tests.server.json && tsc -p tsconfig.tests.client.json",
     "monitor:pick-replen-health": "tsx scripts/monitor-pick-replen-health.ts --notify --recoverInlineReplen --queueMissingReplen --json",

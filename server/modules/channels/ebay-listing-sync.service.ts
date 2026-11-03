@@ -27,7 +27,8 @@ import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { ebayListingFailureDiagnostic, type EbayListingFailureDiagnostic } from "./ebay-listing-failure-diagnostic";
 import type { EbayAutomaticPublicationRecoveryService, EbayRequestJournalContract } from "../inventory-planning/quantity-publication";
 import { withEbayQuantityRequestJournalContract } from "../inventory-planning/quantity-publication";
-import { recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
+import { ebayListingPublicationScopes, recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
+import type { QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
 import { logger as platformLogger } from "../../platform/observability/logger";
 import { runDueListingWork } from "../marketplace-listings/listing-work-runner";
 
@@ -79,7 +80,48 @@ export class EbayExistingListingSyncExecution
     private readonly recovery: EbayListingRequestRecovery,
     private readonly connector: EbayMarketplaceListingConnector,
     private readonly automaticRecovery?: Pick<EbayAutomaticPublicationRecoveryService, "recover">,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
+
+  /** Fresh provider readback uses the same preparation and comparator as Sync.
+   * It never clears request evidence or performs a provider write. */
+  async inspectForRecovery(identity: EbayListingSyncIdentity, watchScopes: readonly QuantityPublicationScope[],
+    hasOutstanding: (scopes: readonly QuantityPublicationScope[]) => Promise<boolean>):
+    Promise<{ kind: "provider_match"; checkedAt: Date; evidenceHash: string; identityHash: string; proof: null } | null> {
+    const uniqueScopes = (members: readonly QuantityPublicationScope[]) =>
+      [...new Map(members.map(scope => [JSON.stringify(scope), scope])).values()];
+    const initialScopes = uniqueScopes([...watchScopes, ...ebayListingPublicationScopes(identity)]);
+    if (await hasOutstanding(initialScopes)) return null;
+    const prepared = await this.prepare(identity);
+    this.assertPreparedIdentity(identity, prepared);
+    const resolvedIdentity = ebayListingSyncIdentitySchema.parse(prepared.identity);
+    const scopes = uniqueScopes([...initialScopes, ...ebayListingPublicationScopes(resolvedIdentity)]);
+    if (await hasOutstanding(scopes)) return null;
+    try {
+      await this.verify(prepared, resolvedIdentity);
+    } catch (error) {
+      if (error instanceof EbayListingSyncError && error.code === "EBAY_SYNC_READBACK_PENDING") return null;
+      throw error;
+    }
+    if (await hasOutstanding(scopes)) return null;
+    return { kind: "provider_match", checkedAt: z.date().parse(this.clock()), evidenceHash: syncContentIntentHash(prepared.draft), proof: null,
+      identityHash: syncIdentityHash(resolvedIdentity) };
+  }
+
+  private assertPreparedIdentity(identity: EbayListingSyncIdentity, prepared: PreparedEbayListingSync): void {
+    if (prepared.sourceIdentity) {
+      assertEbayListingSourceIdentityUnchanged(identity, prepared.sourceIdentity);
+    } else if (syncIdentityHash(identity) !== syncIdentityHash(prepared.identity)) {
+      throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The listing mapping changed. Start a new sync with the current mapping.");
+    }
+  }
+
+  private verify(prepared: PreparedEbayListingSync, identity: EbayListingSyncIdentity): Promise<void> {
+    const offerIds: Record<number, string> = {};
+    for (const member of identity.variants) if (member.offerId) offerIds[member.variantId] = member.offerId;
+    return this.connector.verifyExistingListing({ client: prepared.client, draft: prepared.draft, identity, offerIds });
+  }
+
   async execute(
     identity: EbayListingSyncIdentity,
     stage: Parameters<EbayListingSyncExecution["execute"]>[1],
@@ -91,13 +133,7 @@ export class EbayExistingListingSyncExecution
     await stage("prepare_listing", syncIdentityHash(identity), async () => {
       prepared = await this.prepare(identity);
     });
-    if (prepared.sourceIdentity) {
-      assertEbayListingSourceIdentityUnchanged(identity, prepared.sourceIdentity);
-    } else if (syncIdentityHash(identity) !== syncIdentityHash(prepared.identity)) {
-      // Legacy callers provide an already resolved identity. Its group is part
-      // of the provider identity and cannot be treated as a catalog hint.
-      throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The listing mapping changed. Start a new sync with the current mapping.");
-    }
+    this.assertPreparedIdentity(identity, prepared);
     const resolvedIdentity = ebayListingSyncIdentitySchema.parse(prepared.identity);
     // Persist the exact observed provider resources before any provider mutation.
     // A later retry cannot silently switch this job to another group or offer.
@@ -123,16 +159,7 @@ export class EbayExistingListingSyncExecution
     // retained inactive member's missing zero mapping cannot strand that check.
     // Ordinary read-only Sync still completes without opening paused inventory.
     if (hasRecurringRecovery) await prepareInventory();
-    const offerIds: Record<number, string> = {};
-    for (const member of resolvedIdentity.variants) {
-      if (member.offerId) offerIds[member.variantId] = member.offerId;
-    }
-    const verify = (): Promise<void> => this.connector.verifyExistingListing({
-      client: prepared.client,
-      draft: prepared.draft,
-      identity: resolvedIdentity,
-      offerIds,
-    });
+    const verify = (): Promise<void> => this.verify(prepared, resolvedIdentity);
     // A committed post-write checkpoint binds retries to accepted content. ATP
     // changes do not invalidate it; new content or a new command revision does.
     if (verificationIntentHash === contentHash) {

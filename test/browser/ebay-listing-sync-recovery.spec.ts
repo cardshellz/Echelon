@@ -725,6 +725,29 @@ test("completed content keeps observing stock through a checked match, delayed d
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test("a matching background recovery check keeps the completed listing visible without starting another sync", async ({ page }) => {
+  const state = await setupEbayChannelPage(page);
+  const completed = { ...job, state: "completed", inventoryReconciliation: {
+    state: "verified", checkedAt: "2026-10-15T14:00:00.000Z", nextCheckAt: "2026-10-15T14:15:00.000Z",
+    code: null, message: null,
+  } };
+  state.jobs = [completed];
+  await page.reload(); await page.clock.install();
+  const status = page.getByRole("status", { name: statusName });
+  await expect(status).toContainText("Listing sync completed.");
+  await page.getByRole("button", { name: "View update status", exact: true }).click();
+  const stock = page.getByRole("dialog").getByRole("region", { name: "Stock reconciliation", exact: true });
+  await expect(stock).toContainText("Monitoring continues");
+  state.jobs = [{ ...completed, inventoryReconciliation: { ...completed.inventoryReconciliation,
+    checkedAt: "2026-10-15T14:15:00.000Z", nextCheckAt: "2026-10-15T14:30:00.000Z" } }];
+  await page.clock.fastForward(10_100);
+  await expect(stock.locator("time").first()).toHaveAttribute("datetime", "2026-10-15T14:15:00.000Z");
+  await expect(stock).toContainText("Stock matched current inventory at the last check.");
+  await expect(page.getByRole("dialog").getByRole("status")).toContainText("Listing sync completed.");
+  expect(state.requests).toEqual([]); expect(state.commands).toEqual([]);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("stock monitoring failure appears in Errors while automatic correction remains progress", async ({ page }, info) => {
   const state = await setupEbayChannelPage(page);
   const completed = { ...job, state: "completed", inventoryReconciliation: {
