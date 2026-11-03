@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000051000019900001_ap_invoice_transition_reviews.sql",
+  "generation": 51,
+  "pr": 1990,
+  "ordinal": 1,
+  "after": [
+    "900000050000019890001_recovery_content_observations.sql"
+  ]
+}

@@ -40,7 +40,7 @@ test("invoice approval reviews the exact impact and retains a readable history",
   expect(state.requests).toEqual([]);
   await dialog.getByRole("button", { name: "Approve invoice", exact: true }).click();
   await expect(dialog.getByRole("status")).toContainText("Saved by Purchasing approver");
-  await dialog.getByRole("button", { name: "Close", exact: true }).click();
+  await dialog.getByRole("button", { name: "Close review", exact: true }).click();
   await expect(page.getByRole("region", { name: "Invoice approval history", exact: true })).toContainText("Purchasing approver");
   expect(state.history).toHaveLength(1); expect(state.failures).toEqual([]);
 });

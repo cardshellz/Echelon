@@ -53,7 +53,7 @@ test("AP approval, dispute, restored approval and void share the reviewed costin
     const invoice = saved.invoices.find(row => row.id === 71)!;
     if (originalApproval) expect(invoice).toMatchObject(originalApproval);
     else originalApproval = { approved_by: invoice.approved_by, approved_at: invoice.approved_at };
-    await dialog.getByRole("button", { name: "Close", exact: true }).click();
+    await dialog.getByRole("button", { name: "Close review", exact: true }).click();
     await expect(page.getByRole("region", { name: "Invoice approval history", exact: true }).locator("details")).toHaveCount(index + 1);
   }
   const history = await page.request.get(`${backend.url}/api/vendor-invoices/71/transition-history`);

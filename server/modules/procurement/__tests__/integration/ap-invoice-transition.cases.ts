@@ -11,6 +11,7 @@ import { createDrizzleFinancialCommandRepository } from "../../../../platform/co
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
+import { createReceiptInvoiceCostService, receiptInvoiceCommandScope } from "../../receipt-invoice-costs.service";
 
 export function registerApInvoiceTransitionCases(fixture: {
   pool: () => pg.Pool; database: () => AmendmentDatabase; actorId: string; at: Date;
@@ -157,6 +158,57 @@ export function registerApInvoiceTransitionCases(fixture: {
       expect(await physical()).toEqual(before);
       expect((await query("SELECT approved_by,approved_at FROM procurement.vendor_invoices WHERE id=71")).rows[0]).toEqual(original);
     });
+    it("restores a partially paid disputed invoice without erasing settlement status or original approval", async () => {
+      await prepare(); await approve();
+      const { recordPayment } = await import("../../ap-ledger.service");
+      await recordPayment({ vendorId: 5, currency: "USD", status: "completed", totalAmountCents: 1000, paymentDate: fixture.at,
+        paymentMethod: "wire", createdBy: fixture.actorId, allocations: [{ vendorInvoiceId: 71, appliedAmountCents: 1000 }] }, { now: fixture.at });
+      const original = (await query("SELECT approved_by,approved_at FROM procurement.vendor_invoices WHERE id=71")).rows[0];
+      const stock = await physical(), dispute = await review("dispute"); await save("dispute", dispute.body);
+      const restored = await review("approve", "lead-user");
+      expect(restored.preview.after).toMatchObject({ status: "partially_paid", amountCents: 13000, paidCents: 1000, balanceCents: 12000 });
+      expect(await save("approve", restored.body, { actor: "lead-user" })).toMatchObject({ httpStatus: 200, body: { status: "partially_paid", paidAmountCents: 1000 } });
+      expect((await query("SELECT approved_by,approved_at FROM procurement.vendor_invoices WHERE id=71")).rows[0]).toEqual(original);
+      expect(await physical()).toEqual(stock);
+    });
+    it("retains immutable review evidence for a manual invoice without PO relationships", async () => {
+      await prepare();
+      await query("UPDATE procurement.vendor_invoice_lines SET purchase_order_line_id=NULL WHERE id=72; DELETE FROM procurement.vendor_invoice_po_links WHERE vendor_invoice_id=71");
+      const reviewed = await review("approve"); expect(reviewed.preview.inventoryValues).toEqual([]);
+      expect(await save("approve", reviewed.body)).toMatchObject({ httpStatus: 200 });
+      expect(await createInvoiceTransitionHistory(fixture.database())(71)).toHaveLength(1);
+      expect((await query("SELECT * FROM procurement.po_events WHERE event_type='invoice_transition_reviewed'")).rows).toEqual([]);
+    });
+    it("retains receipt-specific assignments across dispute and approval, making withdrawn coverage provisional without guessing a new receipt cost", async () => {
+      await prepare(); await approve();
+      const owner = createReceiptInvoiceCostService(fixture.database(), () => fixture.at);
+      const context = await owner.context(21, fixture.actorId);
+      const draft = { sourceVersion: context.sourceVersion, change: { purchaseOrderLineId: 21, allocations: [{
+        receivingLineId: context.receipts[0].receivingLineId, invoiceLineId: 72, receiptStartPiece: 0, invoiceStartPiece: 0, pieces: 100 }] } };
+      const measured = await owner.preview(draft, fixture.actorId);
+      const body = { ...draft, previewVersion: measured.previewVersion, reason, approvalConfirmed: true };
+      const scope = receiptInvoiceCommandScope(21);
+      expect(await owner.approve(body, fixture.actorId, { ...scope, actorId: fixture.actorId, actorType: "user", contractVersion: 1,
+        idempotencyKey: randomUUID(), requestHash: hashHttpFinancialCommand({ ...scope, body }) })).toMatchObject({ httpStatus: 200 });
+      const assignments = (await query("SELECT * FROM procurement.receipt_invoice_cost_allocations ORDER BY id")).rows;
+      const approved = (await query("SELECT product_total_cost_mills::text,cost_provisional FROM inventory.inventory_lots ORDER BY id")).rows;
+      expect(approved).toEqual([{ product_total_cost_mills: "1200000", cost_provisional: 0 }]);
+      const dispute = await review("dispute");
+      expect(dispute.preview.costReviews[0]).toMatchObject({ state: "review_required", issues: expect.arrayContaining([expect.objectContaining({ code: "RECEIPT_INVOICE_ALLOCATION_REVIEW" })]) });
+      await save("dispute", dispute.body);
+      expect((await query("SELECT product_total_cost_mills::text,cost_provisional FROM inventory.inventory_lots ORDER BY id")).rows)
+        .toEqual([{ product_total_cost_mills: "1200000", cost_provisional: 1 }]);
+      await approve();
+      expect((await query("SELECT product_total_cost_mills::text,cost_provisional FROM inventory.inventory_lots ORDER BY id")).rows).toEqual(approved);
+      expect((await query("SELECT * FROM procurement.receipt_invoice_cost_allocations ORDER BY id")).rows).toEqual(assignments);
+      expect((await query("SELECT * FROM inventory.cost_reconciliation_postings")).rows).toEqual([]);
+    });
+    it.each([{ reason: null }, { reason: 10 }, { reason, previewVersion: "invalid" }, { reason, invoiceAmountCents: 1 }])(
+      "rejects malformed or extra public action fields without a financial mutation", async body => {
+        await prepare(); const before = await snapshot();
+        expect(await save("approve", body)).toMatchObject({ httpStatus: 400 });
+        expect(await snapshot()).toEqual(before);
+      });
 
     describe("actual AP HTTP routes", () => {
       let server: Server, endpoint: string;

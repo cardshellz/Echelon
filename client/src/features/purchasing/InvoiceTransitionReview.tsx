@@ -85,7 +85,7 @@ export function InvoiceTransitionReview({ invoiceId, action, onClose, onSaved }:
       {saved && <p role="status" className="rounded border border-green-600 p-3 text-sm">Saved by {saved.actorName} · {new Date(saved.approvedAt).toLocaleString()}. The reviewed changes and approval details are retained in history.</p>}
     </div>
     <div className="flex flex-wrap justify-end gap-2 border-t pt-3">
-      <Button variant="outline" disabled={locked} onClick={onClose}>Close</Button>
+      <Button variant="outline" disabled={locked} onClick={onClose}>Close review</Button>
       {!saved && !preview && <Button disabled={locked || !reason.trim()} onClick={() => review.mutate()}>{review.isPending ? "Loading changes…" : "Review changes"}</Button>}
       {!saved && preview && !unresolved && <><Button variant="outline" disabled={locked} onClick={() => { setPreview(null); save.reset(); }}>Review again</Button><Button disabled={locked || stale} onClick={approve}>{save.isPending ? "Saving…" : labels[action]}</Button></>}
       {unresolved && <Button disabled={save.isPending} onClick={() => save.mutate(unresolved)}>Retry saved request</Button>}
