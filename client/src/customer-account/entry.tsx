@@ -14,6 +14,7 @@ import {
 import { CustomerAccountOrderStatus } from "./CustomerAccountOrderStatus";
 import { CustomerAccountOrderHistory } from "./CustomerAccountOrderHistory";
 import { CustomerOrderPanelLoader } from "./CustomerOrderPanelLoader";
+import { retainedOrderActions } from "./order-action-display";
 import {
   loadOrderEditPaymentReturn,
   orderEditPaymentReturnStorage,
@@ -184,6 +185,7 @@ function CustomerAccount({
   const [error, setError] = useState<CustomerAccountAccessNotice | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [actions, setActions] = useState<ReadonlyMap<HTMLElement, CustomerOrderActions>>(new Map());
+  const [verifiedActions, setVerifiedActions] = useState<ReadonlyMap<HTMLElement, CustomerOrderActions>>(new Map());
   const [actionError, setActionError] = useState(false);
   const [totals, setTotals] = useState<
     ReadonlyMap<HTMLElement, CustomerOrderTotalsState>
@@ -209,6 +211,20 @@ function CustomerAccount({
   const requestedActionRefreshes = useRef(new Set<string>());
   const settlementReadBusy = useRef(false);
 
+  const retainActionDisplay = useCallback((incoming: CustomerOrderActions[]) => {
+    setVerifiedActions(previous => {
+      const next = new Map(previous);
+      for (const item of incoming) {
+        const row = rows.find(candidate => candidate.dataset.externalOrderId === item.externalOrderId);
+        if (!row) continue;
+        const retained = retainedOrderActions(item, previous.get(row));
+        if (retained) next.set(row, retained);
+        else next.delete(row);
+      }
+      return next;
+    });
+  }, [rows]);
+
   const loadActions = useCallback(async (signal?: AbortSignal, retry = false) => {
     if (!rows.length) return;
     const generation = ++actionGeneration.current;
@@ -216,6 +232,7 @@ function CustomerAccount({
       const result = await api.orderActions({ orders: rows.map(row => ({ externalOrderId: row.dataset.externalOrderId,
         orderReference: row.dataset.orderReference })) }, signal);
       if (signal?.aborted || generation !== actionGeneration.current) return;
+      retainActionDisplay(result.orders);
       setActions(new Map(rows.map(row => [row, result.orders.find(item => item.externalOrderId === row.dataset.externalOrderId)!])));
       setActionError(false);
       for (const item of result.orders) {
@@ -231,6 +248,7 @@ function CustomerAccount({
         // lookups; the durable worker owns every external inspection.
         const refreshed = await api.orderActions({ orders: requested.map(({ externalOrderId, orderReference }) => ({ externalOrderId, orderReference })) }, signal, true);
         if (signal?.aborted || generation !== actionGeneration.current) return;
+        retainActionDisplay(refreshed.orders);
         for (const item of refreshed.orders) {
           // A recent partial inspection may still be in its cooldown. Allow a
           // later ordinary lookup to request recovery once it becomes due.
@@ -243,7 +261,7 @@ function CustomerAccount({
     } catch {
       if (!signal?.aborted && generation === actionGeneration.current) setActionError(true);
     }
-  }, [api, rows]);
+  }, [api, rows, retainActionDisplay]);
 
   // This timer reads only the saved projection. All external work is in the worker.
   useEffect(() => {
@@ -565,6 +583,7 @@ function CustomerAccount({
           opener={managed.opener}
           summary={totals.get(managed.row)}
           actions={actions.get(managed.row)}
+          verifiedActions={verifiedActions.get(managed.row)}
           actionError={actionError}
           statusUnavailable={statusFailures.has(managed.row)}
           api={api}

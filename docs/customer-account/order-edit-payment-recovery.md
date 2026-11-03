@@ -36,6 +36,19 @@ time of the screenshot is unknown; no browser network trace was available.
 6. The existing account return flow loads the same operation and observes its
    completion. Completed/refunded/restored states cannot open stale payment URLs.
 
+Manage order's Pay button now uses `useOrderPanelPayment` to read that owned
+operation and open checkout directly. It does not mount the editor or ask for a
+second payment click. In-flight commands and already-processing payments remain
+under read-only observation; settled payments never open the old checkout.
+
+`retainedOrderActions` keeps the last verified, identity-bound display separately
+from the current lookup state. Background refreshes, failed reads and individual
+owner outages keep known controls visible, including when the panel is closed
+and reopened. A newly verified policy restriction replaces that display;
+`not_managed` or mismatched identities remove it. The signed API and existing
+command owners still decide whether an action is allowed when used. No stale
+snapshot is sent back as command authority or stored in a new shared cache.
+
 If a conflicting operation leaves the draft unsubmitted, observation returns to
 the saved editable plan without automatically sending another Apply. Confirmed
 expiry after Change items reloads the original order; a submitted/completed edit

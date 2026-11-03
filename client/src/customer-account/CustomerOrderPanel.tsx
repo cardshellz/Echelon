@@ -11,6 +11,7 @@ import { knownCustomerOrderFulfillment } from "@shared/customer-account/order-fu
 import type { CustomerAccountOrderSummary } from "@shared/customer-account/customer-account-orders";
 import { CustomerOrderDetails } from "./CustomerOrderDetails";
 import { orderDeliveryLabel } from "./customer-order-progress-presentation";
+import { useOrderPanelPayment } from "./use-order-panel-payment";
 
 export interface CustomerOrderPanelState {
   loading: boolean;
@@ -149,10 +150,17 @@ export function CustomerOrderPanel({
   const returnItemsAvailable = !cancelled && Boolean(state.returnOrder?.order.lines.some(line => line.eligibleQuantity > 0));
   const returnLookupAvailable = !cancelled && !state.returnOrder && state.returnLookupAvailable && state.omsOrderId !== null;
   const editing = Boolean(
-    order?.activeOperationId && order.activeOperationKind !== "cancel_order",
+    !cancelled && order?.activeOperationId && order.activeOperationKind !== "cancel_order",
   );
+  const payment = useOrderPanelPayment({ api, order, customerId, connectionId,
+    disabled: cancelled || Boolean(accessNotice), onChanged });
   const reviewNotice =
     editing && order?.activeOperationStatus === "review_required";
+  const updateLabel = reviewNotice || (editing && (order?.settlement?.outstandingCents ?? 0) > 0)
+    ? "View order update" : editing ? "Continue order update" : "Edit order";
+  const paymentLabel = payment.failed ? "Try payment again"
+    : payment.processing ? "Payment processing…"
+      : payment.busy ? "Opening payment…" : "Pay the difference";
   const canEdit =
     enabled &&
     !cancelled &&
@@ -330,18 +338,20 @@ export function CustomerOrderPanel({
                 </button>
               </div>
             )}
-            {editing && (order?.settlement?.outstandingCents ?? 0) > 0 && (
+            {editing && (order?.settlement?.outstandingCents ?? 0) > 0 && order?.activeOperationId !== payment.resolvedOperationId && (
               <div className="csz-panel-payment">
-                <p>Your order update is waiting for payment.</p>
+                <p role="status">{payment.message ?? "Your order update is waiting for payment."}</p>
                 <button
                   type="button"
                   className="csz-action"
-                  onClick={() => onEdit(order!.omsOrderId)}
+                  onClick={payment.pay}
+                  disabled={payment.busy}
                 >
-                  Pay the difference
+                  {paymentLabel}
                 </button>
               </div>
             )}
+            {payment.resolvedOperationId && (!order?.activeOperationId || order.activeOperationId === payment.resolvedOperationId) && payment.message && <p role="status" className="csz-panel-explanation">{payment.message}</p>}
             {reviewNotice && (
               <p
                 id="csz-order-review-notice"
@@ -366,11 +376,7 @@ export function CustomerOrderPanel({
             )}
             {canEdit &&
               option(
-                order?.activeOperationStatus === "review_required"
-                  ? "View order update"
-                  : editing
-                    ? "Continue order update"
-                    : "Edit order",
+                updateLabel,
                 () => onEdit(order!.omsOrderId),
               )}
             {state.loading && showChangeActions && (
