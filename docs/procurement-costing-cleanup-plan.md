@@ -8,9 +8,9 @@ This is the active tracker for consolidating purchase costing from PO through sh
 | Overall state | #1964, #1967, #1971, #1979, #1983, #1987 and #1991 merged. #1991 independently verified in v3454 at `209f40c11c669289be0e0cbc8bc8e2157da28cf9`, migration applied, web/capture up; actual live rollback-only invoice review completed. New financial approvals and receipt assignments remain zero; actual production posting acceptance remains open |
 | Current stage | S2 — connect approved financial corrections to the existing costing pipeline and reviewed impact |
 | Next work item | Review/deploy the classified billed-line adjustment and receipt-attributed credit candidate, then continue combined supplier amounts, header allocation and tax/return-credit attribution. [Finite remaining delivery gates](procurement-costing-remaining-delivery.md) retain the full scope |
-| Working branch | `codex/supplier-cost-total-credit-attribution` |
+| Working branch | `codex/supplier-combined-header-tax-return-costs` |
 | Plan branch base | `209f40c11c669289be0e0cbc8bc8e2157da28cf9` |
-| Latest main incorporated | `8cc65400dcd282240e56ea405ca0cfe9c63351ba` (#1992). The independently verified #1991 / v3454 slug remains `209f40c11c669289be0e0cbc8bc8e2157da28cf9` |
+| Latest main incorporated | `9cf76be54f121ecb611e3adf8c3f4856e09f08dd` (#1998), verified v3461 slug and running processes; includes merged #1993 |
 | Audited main baseline | `e571bcac780852c3ac6b488354c10aaf7f1c417c`, the historical F1-F9 audit baseline. Later implementation and deployment evidence is recorded below; this baseline is not current production acceptance proof |
 | Audit | [Purchase costing authority review](procurement-costing-authority-audit-2026-10-30.md) |
 | Stage 1 contract and ownership map | [Contract, compatibility and recognition boundary](procurement-costing-stage-1-contract.md) |
