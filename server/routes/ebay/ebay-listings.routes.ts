@@ -30,6 +30,7 @@ import { ebayPublicationStockService } from '../../modules/channels/ebay-publica
 import { readEbayPushRecoveryIdentity } from '../../modules/channels/ebay-listing-push';
 import { ebayListingSyncJobSchema } from '@shared/types/ebay-listing-sync';
 import { queueVariantAvailabilityRepair } from "../../modules/channels/variant-availability-sync.service";
+import { ChannelListingReconciliationService } from "../../modules/marketplace-listings/listing-member-lifecycle";
 import {
   createEbayRouteListingClient,
 } from "./ebay-listing-connector-client";
@@ -234,7 +235,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
                  cl.external_sku, cl.sync_status,
                  pv.sku AS variant_sku, pv.is_active AS variant_is_active,
                  pv.sales_eligibility AS variant_sales_eligibility,
-                 p.name AS product_name
+                 p.name AS product_name, p.is_active AS product_is_active, p.status AS product_status
           FROM channels.channel_listings cl
           LEFT JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
           LEFT JOIN catalog.products p ON p.id = pv.product_id
@@ -253,6 +254,22 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
         let quantityDrift = 0;
         let errors = 0;
         const changes: Array<{ id: number; sku: string; product: string; oldStatus: string; newStatus: string }> = [];
+        const reconciliation = new ChannelListingReconciliationService({
+          observe: async sku => {
+            const observation = await ebayListingConnector.inspectListingStatus({ client: ebayClient,sku,marketplaceId });
+            return { inventoryItemExists: observation.inventoryItemExists,hasActiveOffer: observation.hasActiveOffer,
+              availableQuantity: observation.availableQuantity };
+          },
+          markDeleted: async id => {
+            await client.query(`UPDATE channel_listings SET sync_status = 'deleted', sync_error = 'Inventory item not found on eBay', updated_at = NOW()
+              WHERE id = $1`, [id]);
+          },
+          markEnded: async id => {
+            await client.query(`UPDATE channel_listings SET sync_status = 'ended', sync_error = 'Offer no longer active on eBay', updated_at = NOW()
+              WHERE id = $1`, [id]);
+          },
+          queueStockRepair: async productVariantId => queueVariantAvailabilityRepair({ channelId: EBAY_CHANNEL_ID,productVariantId }),
+        });
 
         // Check each listing against eBay
         for (const listing of listings) {
@@ -263,50 +280,29 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
           }
 
           try {
-            const inspection = await ebayListingConnector.inspectListingStatus({
-              client: ebayClient,
-              sku,
-              marketplaceId,
+            const result = await reconciliation.reconcile({
+              listingId: listing.id,productVariantId: listing.product_variant_id,sku,
+              productActive: listing.product_is_active,variantActive: listing.variant_is_active,
+              productStatus: listing.product_status,salesEligibility: listing.variant_sales_eligibility,
             });
-
-            if (!inspection.inventoryItemExists) {
-              // Inventory item gone — mark as deleted
-              await client.query(
-                `UPDATE channel_listings SET sync_status = 'deleted', sync_error = 'Inventory item not found on eBay', updated_at = NOW()
-                 WHERE id = $1`,
-                [listing.id],
-              );
+            if (result.status === "deleted") {
               deleted++;
               changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "deleted" });
               continue;
             }
-
-            if (inspection.hasActiveOffer) {
-              if (
-                (listing.variant_is_active === false || listing.variant_sales_eligibility === "internal_only")
-                && (inspection.availableQuantity ?? 0) > 0
-              ) {
-                await queueVariantAvailabilityRepair({
-                  channelId: EBAY_CHANNEL_ID,
-                  productVariantId: listing.product_variant_id,
-                });
+            if (result.status === "active") {
+              if (result.quantityDrift) {
                 quantityDrift++;
                 changes.push({
                   id: listing.id,
                   sku,
                   product: listing.product_name || "Unknown",
-                  oldStatus: `inactive with eBay quantity ${inspection.availableQuantity}`,
+                  oldStatus: `internal-only with eBay quantity ${result.availableQuantity}`,
                   newStatus: "availability repair queued",
                 });
               }
               active++;
             } else {
-              // Offer ended/withdrawn
-              await client.query(
-                `UPDATE channel_listings SET sync_status = 'ended', sync_error = 'Offer no longer active on eBay', updated_at = NOW()
-                 WHERE id = $1`,
-                [listing.id],
-              );
               ended++;
               changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "ended" });
             }

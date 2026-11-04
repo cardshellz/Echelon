@@ -28,6 +28,8 @@ export interface ClaimedVariantAvailabilitySync {
   revision: number;
   attemptCount: number;
   leaseToken: string;
+  /** Null is a legacy request whose original purpose was not recorded. */
+  requestKind: "catalog_activation" | "stock_repair" | null;
 }
 
 export interface VariantAvailabilityContext {
@@ -66,6 +68,7 @@ interface ClaimRow {
   revision: string | number;
   attempt_count: number;
   lease_token: string;
+  request_kind: "catalog_activation" | "stock_repair" | null;
 }
 
 interface ContextRow {
@@ -101,6 +104,7 @@ export interface EnqueueVariantAvailabilitySyncInput {
   channelId: number;
   productVariantId: number;
   desiredActive: boolean;
+  requestKind: "catalog_activation" | "stock_repair";
 }
 
 function toPositiveInteger(value: string | number, field: string): number {
@@ -111,10 +115,18 @@ function toPositiveInteger(value: string | number, field: string): number {
   return parsed;
 }
 
-function requireAffectedRow(result: SqlQueryResult, action: string): void {
-  if (result.rowCount !== 1) {
-    throw new Error(`${action} lost its availability-sync lease or revision`);
-  }
+/** Catalog archive/reactivation locks product then variant before changing the
+ * queue. Take the same order before projecting a provider acknowledgement. */
+async function lockAvailabilityCatalog(client: SqlClient, variantId: number): Promise<{ archived: boolean }> {
+  const parent = (await client.query<{ id: number; is_active: boolean | null; status: string | null }>(`
+    SELECT p.id,p.is_active,p.status FROM catalog.products p
+    JOIN catalog.product_variants v ON v.product_id=p.id WHERE v.id=$1 FOR SHARE OF p NOWAIT
+  `, [toPositiveInteger(variantId, "productVariantId")])).rows[0];
+  const variant = (await client.query<{ product_id: number; is_active: boolean | null }>(
+    "SELECT product_id,is_active FROM catalog.product_variants WHERE id=$1 FOR SHARE NOWAIT", [variantId])).rows[0];
+  if (!parent || !variant || variant.product_id !== parent.id)
+    throw new Error("The catalog identity changed before the availability acknowledgement.");
+  return { archived: parent.is_active !== true || parent.status === "archived" || variant.is_active !== true };
 }
 
 export async function enqueueVariantAvailabilitySync(
@@ -126,42 +138,31 @@ export async function enqueueVariantAvailabilitySync(
   if (typeof input.desiredActive !== "boolean") {
     throw new Error("desiredActive must be a boolean");
   }
+  if ((input.requestKind !== "catalog_activation" || !input.desiredActive)
+    && (input.requestKind !== "stock_repair" || input.desiredActive)) {
+    throw new Error("requestKind must match the requested availability operation");
+  }
 
-  await dbPool.query(`
-    INSERT INTO channels.channel_variant_availability_sync (
-      channel_id,
-      product_variant_id,
-      desired_active,
-      revision,
-      status,
-      attempt_count,
-      next_attempt_at,
-      created_at,
-      updated_at
-    ) VALUES ($1, $2, $3, 1, 'pending', 0, transaction_timestamp(), transaction_timestamp(), transaction_timestamp())
-    ON CONFLICT (channel_id, product_variant_id)
-    DO UPDATE SET
-      desired_active = EXCLUDED.desired_active,
-      revision = channels.channel_variant_availability_sync.revision + 1,
-      status = 'pending',
-      attempt_count = 0,
-      next_attempt_at = transaction_timestamp(),
-      lease_token = NULL,
-      lease_expires_at = NULL,
-      completed_at = NULL,
-      last_error = NULL,
-      updated_at = transaction_timestamp()
-  `, [channelId, productVariantId, input.desiredActive]);
+  await dbPool.query(
+    "SELECT channels.request_variant_availability_refresh($1,$2,$3,$4)",
+    [channelId, productVariantId, input.desiredActive, input.requestKind],
+  );
 }
 
 export async function claimVariantAvailabilitySyncs(
   dbPool: SqlPool,
   input: { batchSize: number; leaseSeconds: number },
 ): Promise<ClaimedVariantAvailabilitySync[]> {
+  const batchSize = toPositiveInteger(input.batchSize, "batchSize");
+  const leaseSeconds = toPositiveInteger(input.leaseSeconds, "leaseSeconds");
   const leaseToken = randomUUID();
   const client = await dbPool.connect();
   try {
     await client.query("BEGIN");
+    // An older process can finish a lease during rolling deployment without
+    // knowing about the follow-up. Recover it before claiming this batch.
+    await client.query("SELECT channels.promote_completed_availability_followups($1,transaction_timestamp())",
+      [Math.min(batchSize, 1000)]);
     const result = await client.query<ClaimRow>(`
       WITH candidates AS (
         SELECT channel_id, product_variant_id
@@ -190,8 +191,10 @@ export async function claimVariantAvailabilitySyncs(
                 availability.desired_active,
                 availability.revision,
                 availability.attempt_count,
-                availability.lease_token
-    `, [input.batchSize, leaseToken, input.leaseSeconds]);
+                availability.lease_token,
+                CASE WHEN availability.enqueued_revision=availability.revision
+                  THEN availability.request_kind ELSE NULL END AS request_kind
+    `, [batchSize, leaseToken, leaseSeconds]);
     await client.query("COMMIT");
 
     return result.rows.map((row) => ({
@@ -201,6 +204,7 @@ export async function claimVariantAvailabilitySyncs(
       revision: toPositiveInteger(row.revision, "revision"),
       attemptCount: row.attempt_count,
       leaseToken: row.lease_token,
+      requestKind: row.request_kind,
     }));
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
@@ -306,25 +310,11 @@ export async function supersedeAvailabilityClaim(
   claim: ClaimedVariantAvailabilitySync,
   desiredActive: boolean,
 ): Promise<void> {
-  const result = await dbPool.query(`
-    UPDATE channels.channel_variant_availability_sync
-    SET desired_active = $5,
-        revision = revision + 1,
-        status = 'pending',
-        attempt_count = 0,
-        next_attempt_at = transaction_timestamp(),
-        lease_token = NULL,
-        lease_expires_at = NULL,
-        completed_at = NULL,
-        last_error = NULL,
-        updated_at = transaction_timestamp()
-    WHERE channel_id = $1
-      AND product_variant_id = $2
-      AND revision = $3
-      AND status = 'processing'
-      AND lease_token = $4::uuid
-  `, [claim.channelId, claim.productVariantId, claim.revision, claim.leaseToken, desiredActive]);
-  requireAffectedRow(result, "Superseding availability claim");
+  if (typeof desiredActive !== "boolean") throw new Error("desiredActive must be a boolean");
+  const result = await dbPool.query<{ rescheduled: boolean }>(
+    "SELECT channels.reschedule_variant_availability_claim($1,$2,$3,$4,$5,transaction_timestamp()) AS rescheduled",
+    [claim.channelId, claim.productVariantId, claim.revision, claim.leaseToken, desiredActive]);
+  if (result.rows[0]?.rescheduled !== true) throw new Error("Superseding availability claim lost its lease or revision");
 }
 
 export async function markVariantAvailabilitySynced(
@@ -342,6 +332,7 @@ export async function markVariantAvailabilitySynced(
   const client = await dbPool.connect();
   try {
     await client.query("BEGIN");
+    const catalog = await lockAvailabilityCatalog(client, claim.productVariantId);
     const lock = await client.query(`
       SELECT revision, status, lease_token
       FROM channels.channel_variant_availability_sync
@@ -359,6 +350,9 @@ export async function markVariantAvailabilitySynced(
       return false;
     }
 
+    // Mapping inserts written by this exact completion are projections of the
+    // current claim, not a new request. Other concurrent writers retain a follow-up.
+    await client.query("SELECT set_config('echelon.availability_completion_lease',$1,true)", [claim.leaseToken]);
     await client.query(`
       UPDATE channels.channel_feeds
       SET channel_variant_id = COALESCE($3, channel_variant_id),
@@ -375,7 +369,7 @@ export async function markVariantAvailabilitySynced(
       input.externalVariantId,
       input.externalInventoryItemId,
       input.externalSku,
-      input.feedActive ? 1 : 0,
+      input.feedActive && !catalog.archived ? 1 : 0,
       input.quantity,
     ]);
 
@@ -415,24 +409,10 @@ export async function markVariantAvailabilitySynced(
       ]);
     }
 
-    const completed = await client.query(`
-      UPDATE channels.channel_variant_availability_sync
-      SET status = 'synced',
-          lease_token = NULL,
-          lease_expires_at = NULL,
-          next_attempt_at = transaction_timestamp(),
-          last_synced_quantity = $5,
-          last_synced_at = transaction_timestamp(),
-          completed_at = transaction_timestamp(),
-          last_error = NULL,
-          updated_at = transaction_timestamp()
-      WHERE channel_id = $1
-        AND product_variant_id = $2
-        AND revision = $3
-        AND status = 'processing'
-        AND lease_token = $4::uuid
-    `, [claim.channelId, claim.productVariantId, claim.revision, claim.leaseToken, input.quantity]);
-    requireAffectedRow(completed, "Completing availability sync");
+    const completed = await client.query<{ completed: boolean }>(
+      "SELECT channels.complete_variant_availability_claim($1,$2,$3,$4,true,$5,transaction_timestamp()) AS completed",
+      [claim.channelId, claim.productVariantId, claim.revision, claim.leaseToken, input.quantity]);
+    if (completed.rows[0]?.completed !== true) throw new Error("Completing availability sync lost its lease or revision");
     await client.query("COMMIT");
     return true;
   } catch (error) {
@@ -452,22 +432,10 @@ export async function markVariantAvailabilityDelegated(
   dbPool: SqlPool,
   claim: ClaimedVariantAvailabilitySync,
 ): Promise<boolean> {
-  const completed = await dbPool.query(`
-    UPDATE channels.channel_variant_availability_sync
-    SET status = 'synced',
-        lease_token = NULL,
-        lease_expires_at = NULL,
-        next_attempt_at = transaction_timestamp(),
-        completed_at = transaction_timestamp(),
-        last_error = NULL,
-        updated_at = transaction_timestamp()
-    WHERE channel_id = $1
-      AND product_variant_id = $2
-      AND revision = $3
-      AND status = 'processing'
-      AND lease_token = $4::uuid
-  `, [claim.channelId, claim.productVariantId, claim.revision, claim.leaseToken]);
-  return completed.rowCount === 1;
+  const completed = await dbPool.query<{ completed: boolean }>(
+    "SELECT channels.complete_variant_availability_claim($1,$2,$3,$4,false,NULL,transaction_timestamp()) AS completed",
+    [claim.channelId, claim.productVariantId, claim.revision, claim.leaseToken]);
+  return completed.rows[0]?.completed === true;
 }
 
 /** Complete a claimed repair without publishing an external quantity. */
@@ -478,22 +446,13 @@ export async function markVariantAvailabilityNotApplicable(
   const client = await dbPool.connect();
   try {
     await client.query("BEGIN");
-    const completed = await client.query(`
-      UPDATE channels.channel_variant_availability_sync
-      SET status = 'synced',
-          lease_token = NULL,
-          lease_expires_at = NULL,
-          next_attempt_at = transaction_timestamp(),
-          completed_at = transaction_timestamp(),
-          last_error = NULL,
-          updated_at = transaction_timestamp()
-      WHERE channel_id = $1
-        AND product_variant_id = $2
-        AND revision = $3
-        AND status = 'processing'
-        AND lease_token = $4::uuid
+    await lockAvailabilityCatalog(client, claim.productVariantId);
+    const lock = await client.query(`
+      SELECT 1 FROM channels.channel_variant_availability_sync
+      WHERE channel_id=$1 AND product_variant_id=$2 AND revision=$3
+        AND status='processing' AND lease_token=$4::uuid FOR UPDATE
     `, [claim.channelId, claim.productVariantId, claim.revision, claim.leaseToken]);
-    if (completed.rowCount !== 1) {
+    if (lock.rowCount !== 1) {
       await client.query("ROLLBACK");
       return false;
     }
@@ -503,6 +462,10 @@ export async function markVariantAvailabilityNotApplicable(
           updated_at = transaction_timestamp()
       WHERE channel_id = $1 AND product_variant_id = $2
     `, [claim.channelId, claim.productVariantId]);
+    const completed = await client.query<{ completed: boolean }>(
+      "SELECT channels.complete_variant_availability_claim($1,$2,$3,$4,false,NULL,transaction_timestamp()) AS completed",
+      [claim.channelId, claim.productVariantId, claim.revision, claim.leaseToken]);
+    if (completed.rows[0]?.completed !== true) throw new Error("Completing availability sync lost its lease or revision");
     await client.query("COMMIT");
     return true;
   } catch (error) {

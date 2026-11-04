@@ -28,6 +28,7 @@ const CLAIM = {
   revision: 3,
   attemptCount: 1,
   leaseToken: "00000000-0000-4000-8000-000000000001",
+  requestKind: "stock_repair" as const,
 };
 
 const CONTEXT = {
@@ -110,6 +111,7 @@ describe("variant availability sync service", () => {
       channelId: 67,
       productVariantId: 438,
       desiredActive: false,
+      requestKind: "stock_repair",
     });
   });
 
@@ -147,7 +149,7 @@ describe("variant availability sync service", () => {
   });
 
   it("recalculates and restores current allocation on reactivation", async () => {
-    const activeClaim = { ...CLAIM, desiredActive: true, revision: 4 };
+    const activeClaim = { ...CLAIM, desiredActive: true, revision: 4, requestKind: "catalog_activation" as const };
     repository.claimVariantAvailabilitySyncs.mockResolvedValue([activeClaim]);
     repository.loadVariantAvailabilityContext.mockResolvedValue({
       ...CONTEXT,
@@ -178,6 +180,29 @@ describe("variant availability sync service", () => {
       activeClaim,
       expect.objectContaining({ quantity: 31, feedActive: true }),
     );
+  });
+
+  it("holds an archived legacy zero instead of treating it as an explicit stock repair", async () => {
+    const legacyClaim = { ...CLAIM, requestKind: null };
+    repository.claimVariantAvailabilitySyncs.mockResolvedValue([legacyClaim]);
+    const { service, inventoryPublication, pushInventory } = createHarness();
+
+    await expect(service.processDue()).resolves.toMatchObject({ claimed: 1, superseded: 1 });
+    expect(repository.supersedeAvailabilityClaim).toHaveBeenCalledWith(expect.anything(), legacyClaim, false);
+    expect(inventoryPublication.publishVariantAvailability).not.toHaveBeenCalled();
+    expect(pushInventory).not.toHaveBeenCalled();
+  });
+
+  it("holds an activation if its parent product was archived", async () => {
+    const activeClaim = { ...CLAIM, desiredActive: true, requestKind: "catalog_activation" as const };
+    repository.claimVariantAvailabilitySyncs.mockResolvedValue([activeClaim]);
+    repository.loadVariantAvailabilityContext.mockResolvedValue({ ...CONTEXT, catalogVariantActive: true,
+      catalogProductActive: false, catalogProductStatus: "archived" });
+    const { service, inventoryPublication } = createHarness();
+
+    await expect(service.processDue()).resolves.toMatchObject({ claimed: 1, superseded: 1 });
+    expect(repository.supersedeAvailabilityClaim).toHaveBeenCalledWith(expect.anything(), activeClaim, false);
+    expect(inventoryPublication.publishVariantAvailability).not.toHaveBeenCalled();
   });
 
   it("hands inactive variant zeroing to the canonical outbox without a direct provider write", async () => {
@@ -298,8 +323,11 @@ describe("variant availability sync service", () => {
   });
 
   it("completes internal-only availability work without publishing a quantity", async () => {
+    const activationClaim = { ...CLAIM, desiredActive: true, requestKind: "catalog_activation" as const };
+    repository.claimVariantAvailabilitySyncs.mockResolvedValue([activationClaim]);
     repository.loadVariantAvailabilityContext.mockResolvedValue({
       ...CONTEXT,
+      catalogVariantActive: true,
       catalogSalesEligibility: "internal_only",
     });
     const { service, pushInventory, allocationEngine } = createHarness();
@@ -312,11 +340,25 @@ describe("variant availability sync service", () => {
     });
     expect(repository.markVariantAvailabilityNotApplicable).toHaveBeenCalledWith(
       expect.anything(),
-      CLAIM,
+      activationClaim,
     );
     expect(allocationEngine.allocateProduct).not.toHaveBeenCalled();
     expect(pushInventory).not.toHaveBeenCalled();
     expect(repository.markVariantAvailabilitySynced).not.toHaveBeenCalled();
+  });
+
+  it("routes an explicit internal-only stock repair for an active variant through the inventory owner", async () => {
+    repository.loadVariantAvailabilityContext.mockResolvedValue({
+      ...CONTEXT,catalogVariantActive: true,catalogSalesEligibility: "internal_only",
+    });
+    const { service,pushInventory,allocationEngine,inventoryPublication } = createHarness();
+    await expect(service.processDue()).resolves.toEqual({ claimed: 1,synced: 1,retried: 0,superseded: 0 });
+    expect(repository.supersedeAvailabilityClaim).not.toHaveBeenCalled();
+    expect(repository.markVariantAvailabilityNotApplicable).not.toHaveBeenCalled();
+    expect(inventoryPublication.publishVariantAvailability).toHaveBeenCalledWith(
+      expect.objectContaining({ productId: 10,productVariantId: 67,channelId: 67,desiredActive: false }),expect.any(Function));
+    expect(pushInventory).toHaveBeenCalledWith(67,[expect.objectContaining({ variantId: 67,allocatedQty: 0 })]);
+    expect(allocationEngine.allocateProduct).not.toHaveBeenCalled();
   });
 
   it("supersedes a stale claim before calling eBay", async () => {

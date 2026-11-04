@@ -17,6 +17,7 @@ const CLAIM: ClaimedVariantAvailabilitySync = {
   revision: 9,
   attemptCount: 99,
   leaseToken: "00000000-0000-4000-8000-000000000001",
+  requestKind: "stock_repair",
 };
 
 describe("variant availability sync repository", () => {
@@ -28,13 +29,12 @@ describe("variant availability sync repository", () => {
       channelId: 67,
       productVariantId: 438,
       desiredActive: false,
+      requestKind: "stock_repair",
     })).resolves.toBeUndefined();
 
     expect(query).toHaveBeenCalledOnce();
-    expect(query.mock.calls[0][0]).toContain("INSERT INTO channels.channel_variant_availability_sync");
-    expect(query.mock.calls[0][0]).toContain("ON CONFLICT (channel_id, product_variant_id)");
-    expect(query.mock.calls[0][0]).toContain("revision = channels.channel_variant_availability_sync.revision + 1");
-    expect(query.mock.calls[0][1]).toEqual([67, 438, false]);
+    expect(query.mock.calls[0][0]).toBe("SELECT channels.request_variant_availability_refresh($1,$2,$3,$4)");
+    expect(query.mock.calls[0][1]).toEqual([67, 438, false, "stock_repair"]);
   });
 
   it("rejects invalid enqueue identifiers before writing", async () => {
@@ -45,6 +45,7 @@ describe("variant availability sync repository", () => {
       channelId: 0,
       productVariantId: 438,
       desiredActive: false,
+      requestKind: "stock_repair",
     })).rejects.toThrow("channelId must be a positive safe integer");
     expect(query).not.toHaveBeenCalled();
   });
@@ -52,6 +53,7 @@ describe("variant availability sync repository", () => {
   it("claims due work with a transaction, lease, and SKIP LOCKED", async () => {
     const query = vi.fn()
       .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({ rows: [{ promoted: 0 }], rowCount: 1 })
       .mockResolvedValueOnce({
         rows: [{
           channel_id: 67,
@@ -60,6 +62,7 @@ describe("variant availability sync repository", () => {
           revision: "9",
           attempt_count: 2,
           lease_token: "00000000-0000-4000-8000-000000000002",
+          request_kind: null,
         }],
         rowCount: 1,
       })
@@ -78,12 +81,15 @@ describe("variant availability sync repository", () => {
       revision: 9,
       attemptCount: 2,
       leaseToken: "00000000-0000-4000-8000-000000000002",
+      requestKind: null,
     }]);
 
     expect(query.mock.calls[0][0]).toBe("BEGIN");
-    expect(query.mock.calls[1][0]).toContain("FOR UPDATE SKIP LOCKED");
-    expect(query.mock.calls[1][0]).toContain("lease_expires_at");
-    expect(query.mock.calls[2][0]).toBe("COMMIT");
+    expect(query.mock.calls[1][0]).toContain("promote_completed_availability_followups");
+    expect(query.mock.calls[1][1]).toEqual([10]);
+    expect(query.mock.calls[2][0]).toContain("FOR UPDATE SKIP LOCKED");
+    expect(query.mock.calls[2][0]).toContain("lease_expires_at");
+    expect(query.mock.calls[3][0]).toBe("COMMIT");
     expect(release).toHaveBeenCalledOnce();
   });
 
@@ -112,8 +118,11 @@ describe("variant availability sync repository", () => {
   it("atomically completes unmanaged work and deactivates the local feed without writing a quantity", async () => {
     const query = vi.fn()
       .mockResolvedValueOnce({ rows: [], rowCount: null })
+      .mockResolvedValueOnce({ rows: [{ id: 30,is_active: true,status: "active" }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ product_id: 30,is_active: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ completed: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: null });
     const release = vi.fn();
     const client = { query, release } as unknown as SqlClient;
@@ -123,24 +132,26 @@ describe("variant availability sync repository", () => {
 
     expect(query.mock.calls.map(([statement]) => statement.trim())).toEqual([
       "BEGIN",
-      expect.stringContaining("UPDATE channels.channel_variant_availability_sync"),
+      expect.stringContaining("FROM catalog.products"),
+      expect.stringContaining("FROM catalog.product_variants"),
+      expect.stringContaining("SELECT 1 FROM channels.channel_variant_availability_sync"),
       expect.stringContaining("UPDATE channels.channel_feeds"),
+      expect.stringContaining("complete_variant_availability_claim"),
       "COMMIT",
     ]);
-    expect(query.mock.calls[1][0]).not.toContain("last_synced_quantity");
-    expect(query.mock.calls[2][0]).toContain("SET is_active = 0");
+    expect(query.mock.calls[3][0]).not.toContain("last_synced_quantity");
+    expect(query.mock.calls[4][0]).toContain("SET is_active = 0");
     expect(release).toHaveBeenCalledOnce();
   });
 
   it("completes a canonical handoff without claiming provider acknowledgement", async () => {
-    const query = vi.fn().mockResolvedValue({ rows: [], rowCount: 1 });
+    const query = vi.fn().mockResolvedValue({ rows: [{ completed: true }], rowCount: 1 });
     const pool = { query } as unknown as SqlPool;
 
     await expect(markVariantAvailabilityDelegated(pool, CLAIM)).resolves.toBe(true);
 
     expect(query).toHaveBeenCalledOnce();
-    expect(query.mock.calls[0][0]).toContain("UPDATE channels.channel_variant_availability_sync");
-    expect(query.mock.calls[0][0]).toContain("SET status = 'synced'");
+    expect(query.mock.calls[0][0]).toContain("complete_variant_availability_claim");
     expect(query.mock.calls[0][0]).not.toContain("channels.channel_feeds");
     expect(query.mock.calls[0][0]).not.toContain("channels.channel_listings");
     expect(query.mock.calls[0][0]).not.toContain("last_synced_qty");

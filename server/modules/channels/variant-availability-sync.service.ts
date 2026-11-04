@@ -79,6 +79,7 @@ export async function queueVariantAvailabilityRepair(
       channelId,
       productVariantId,
       desiredActive: false,
+      requestKind: "stock_repair",
     },
   );
 }
@@ -94,11 +95,19 @@ async function processClaim(
     const context = await loadVariantAvailabilityContext(dependencies.dbPool, claim);
     if (!context) return "superseded";
 
-    if (context.catalogVariantActive !== claim.desiredActive) {
+    const catalogActive = context.catalogProductActive === true
+      && context.catalogProductStatus !== "archived" && context.catalogVariantActive === true;
+    // A status scan can explicitly request a zero for an internal-only
+    // variant. The recorded request kind, not a matching boolean, distinguishes
+    // this existing obligation from an old archive-triggered zero.
+    const internalOnlyRepair = claim.requestKind === "stock_repair" && !claim.desiredActive
+      && (!catalogActive || !isCustomerSellableVariant({ salesEligibility: context.catalogSalesEligibility }));
+    if ((!catalogActive && !internalOnlyRepair)
+      || (context.catalogVariantActive !== claim.desiredActive && !internalOnlyRepair)) {
       await supersedeAvailabilityClaim(
         dependencies.dbPool,
         claim,
-        context.catalogVariantActive,
+        catalogActive,
       );
       return "superseded";
     }
@@ -122,7 +131,7 @@ async function processClaim(
       });
       return completed ? "synced" : "superseded";
     }
-    if (!isCustomerSellableVariant({ salesEligibility: context.catalogSalesEligibility })) {
+    if (!isCustomerSellableVariant({ salesEligibility: context.catalogSalesEligibility }) && !internalOnlyRepair) {
       const completed = await markVariantAvailabilityNotApplicable(dependencies.dbPool, claim);
       console.info(`${LOG_PREFIX} Skipped quantity publication for internal-only variant`, {
         channelId: context.channelId,

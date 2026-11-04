@@ -18,6 +18,17 @@ export function isArchivedCatalogMember(input: { productActive: boolean | null; 
   return input.productActive === false || input.variantActive === false || input.productStatus === "archived";
 }
 
+/** Archival is not an instruction to change a channel listing. Existing
+ * internal-only stock repairs remain distinct from that catalog decision. */
+export function shouldRepairInternalOnlyChannelStock(input: {
+  productActive: boolean | null; variantActive: boolean | null; productStatus: string | null;
+  salesEligibility: string | null; availableQuantity: number | null;
+}): boolean {
+  return input.productActive === true && input.variantActive === true && !isArchivedCatalogMember(input)
+    && input.salesEligibility === "internal_only"
+    && input.availableQuantity !== null && Number.isFinite(input.availableQuantity) && input.availableQuantity > 0;
+}
+
 /** Catalog owns archival. A separate channel action owns remote removal.
  * Stock must not recreate a mapping for an archived catalog member. */
 export function archivedListingMemberSelection(input: {
