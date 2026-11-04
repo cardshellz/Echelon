@@ -1,145 +1,234 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
+import type { Request, RequestHandler, Response } from "express";
+import { readCurrentStaffAccess } from "./modules/identity";
+import { logger } from "./platform/observability/logger";
+import { classify } from "./platform/observability/errors";
 
 let wss: WebSocketServer | null = null;
+type StaffSocket = WebSocket & { userId?: string; ip?: string; isAlive?: boolean };
+const userConnections = new Map<string, Set<StaffSocket>>();
 
-// Map of userId → Set of WebSocket connections (a user can have multiple tabs)
-const userConnections = new Map<string, Set<WebSocket>>();
+// A conservative memory bound, not a measured throughput claim. Notifications are
+// durable before this best-effort delivery; overflow requires reconnect and reload.
+const configuredPendingLimit = Number(process.env.WS_PENDING_NOTIFICATIONS_PER_USER);
+export const WS_PENDING_NOTIFICATIONS_PER_USER = Number.isSafeInteger(configuredPendingLimit)
+  && configuredPendingLimit > 0 ? configuredPendingLimit : 32;
+const pending = new Map<string, { ordersUpdated: boolean; notifications: string[] }>();
+let dispatch: Promise<void> | undefined;
 
-// Build version is set at server startup - changes after each publish/restart
+// Build version changes at restart. It contains no business data.
 export const BUILD_VERSION = Date.now().toString();
-console.log(`[Server] Build version: ${BUILD_VERSION}`);
 
-import type { RequestHandler } from "express";
+function closeUserConnections(userId: string, code: number, reason: string) {
+  pending.delete(userId);
+  for (const ws of userConnections.get(userId) ?? []) {
+    if (ws.readyState === WebSocket.OPEN) ws.close(code, reason);
+  }
+}
+
+function authorityUnavailable(userId: string, phase: "upgrade" | "broadcast", error: unknown) {
+  // Do not log SQL errors, session cookies, tokens, or notification payloads.
+  logger.error("identity.websocket.authority", {
+    outcome: "denied", error_code: "IDENTITY_WEBSOCKET_AUTHORITY_UNAVAILABLE",
+    error_class: classify(error), user_id: userId, phase,
+  });
+}
+
+async function drainBroadcasts(): Promise<void> {
+  // One outstanding broadcast authority read globally. One read covers all tabs
+  // and the pending batch for a user; new events during that read get a new check.
+  while (pending.size > 0) {
+    const [userId, batch] = pending.entries().next().value!;
+    pending.delete(userId);
+    if (![...(userConnections.get(userId) ?? [])].some(ws => ws.readyState === WebSocket.OPEN)) continue;
+    let access;
+    try {
+      access = await readCurrentStaffAccess(userId);
+    } catch (error) {
+      authorityUnavailable(userId, "broadcast", error);
+      closeUserConnections(userId, 1011, "Staff authority unavailable");
+      continue;
+    }
+    if (!access || access.roles.length === 0) {
+      closeUserConnections(userId, 1008, "Staff access revoked");
+      continue;
+    }
+    const messages = batch.ordersUpdated ? [JSON.stringify({ type: "orders:updated" })] : [];
+    messages.push(...batch.notifications);
+    // Re-read connections after awaiting authority. A disconnected socket must
+    // not receive a queued message. No authority is cached across batches.
+    for (const ws of userConnections.get(userId) ?? []) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      try {
+        for (const message of messages) {
+          if (ws.readyState !== WebSocket.OPEN) break;
+          ws.send(message);
+        }
+      } catch (error) {
+        logger.error("identity.websocket.delivery", {
+          outcome: "failed", error_code: "IDENTITY_WEBSOCKET_DELIVERY_FAILED",
+          error_class: classify(error), user_id: userId,
+        });
+        ws.close(1011, "Notification delivery unavailable");
+      }
+    }
+  }
+}
+
+function dispatchPending(): Promise<void> {
+  if (!dispatch) {
+    // Existing callers intentionally do not await this side-channel. Persisted
+    // notifications and order state remain authoritative; all failures are handled.
+    dispatch = drainBroadcasts().finally(() => {
+      dispatch = undefined;
+      if (pending.size > 0) void dispatchPending();
+    });
+  }
+  return dispatch;
+}
+
+function enqueue(userId: string, notification?: string) {
+  if (![...(userConnections.get(userId) ?? [])].some(ws => ws.readyState === WebSocket.OPEN)) return;
+  const batch = pending.get(userId) ?? { ordersUpdated: false, notifications: [] };
+  if (notification !== undefined) {
+    if (batch.notifications.length >= WS_PENDING_NOTIFICATIONS_PER_USER) {
+      logger.warn("identity.websocket.backpressure", {
+        outcome: "reconnect_required", error_code: "IDENTITY_WEBSOCKET_BACKLOG_LIMIT", user_id: userId,
+      });
+      closeUserConnections(userId, 1013, "Reconnect and reload notifications");
+      return;
+    }
+    batch.notifications.push(notification);
+  } else {
+    // Order-update messages are invalidation hints, so redundant pending hints coalesce.
+    batch.ordersUpdated = true;
+  }
+  pending.set(userId, batch);
+}
 
 export function setupWebSocket(server: Server, sessionMiddleware: RequestHandler) {
-  // Use noServer: true so we can catch the upgrade event manually and extract session
-  wss = new WebSocketServer({ noServer: true });
+  const serverWss = new WebSocketServer({ noServer: true });
+  wss = serverWss;
   const MAX_CONNECTIONS_PER_IP = 10;
   const ipConnections = new Map<string, number>();
+  const pendingUpgrades = new Map<string, number>();
 
   server.on("upgrade", (request, socket, head) => {
-    // Only handle upgrades to /ws
     if (request.url !== "/ws") {
       socket.destroy();
       return;
     }
-
-    // IP rate limiting
     const ip = request.socket.remoteAddress || "unknown";
-    const currentConns = ipConnections.get(ip) || 0;
-    if (currentConns >= MAX_CONNECTIONS_PER_IP) {
-      socket.write("HTTP/1.1 429 Too Many Requests\r\n\r\n");
+    const reject = (status: string) => {
+      socket.write(`HTTP/1.1 ${status}\r\n\r\n`);
       socket.destroy();
-      return;
+    };
+    if ((ipConnections.get(ip) ?? 0) + (pendingUpgrades.get(ip) ?? 0) >= MAX_CONNECTIONS_PER_IP) {
+      return reject("429 Too Many Requests");
     }
+    // Count pending authentication too; otherwise concurrent upgrades could each
+    // launch an authority read before any connection occupied the existing limit.
+    pendingUpgrades.set(ip, (pendingUpgrades.get(ip) ?? 0) + 1);
+    const releasePending = () => {
+      const count = pendingUpgrades.get(ip) ?? 0;
+      if (count > 1) pendingUpgrades.set(ip, count - 1);
+      else pendingUpgrades.delete(ip);
+    };
 
-    // Parse session cookie using express-session middleware
-    sessionMiddleware(request as any, {} as any, () => {
-      const session = (request as any).session;
-
-      // Reject unauthenticated connections immediately
-      if (!session || !session.user || !session.user.id) {
-        socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
-        socket.destroy();
-        return;
+    const authenticate = async (sessionError?: unknown) => {
+      const userId = (request as unknown as Request).session?.user?.id;
+      try {
+        if (sessionError) {
+          logger.error("identity.websocket.session", {
+            outcome: "denied", error_code: "IDENTITY_WEBSOCKET_SESSION_UNAVAILABLE", error_class: classify(sessionError),
+          });
+          return reject("503 Service Unavailable");
+        }
+        if (!userId) return reject("401 Unauthorized");
+        const access = await readCurrentStaffAccess(userId);
+        if (!access || access.roles.length === 0) return reject("403 Forbidden");
+        if (socket.destroyed) return;
+        // Other upgrades may have completed during the authority read.
+        const currentConns = ipConnections.get(ip) ?? 0;
+        if (currentConns >= MAX_CONNECTIONS_PER_IP) return reject("429 Too Many Requests");
+        serverWss.handleUpgrade(request, socket, head, (ws: StaffSocket) => {
+          ipConnections.set(ip, currentConns + 1);
+          ws.userId = userId;
+          ws.ip = ip;
+          serverWss.emit("connection", ws, request);
+        });
+      } catch (error) {
+        authorityUnavailable(userId ?? "unresolved", "upgrade", error);
+        reject("503 Service Unavailable");
+      } finally {
+        releasePending();
       }
+    };
+    try {
+      sessionMiddleware(request as unknown as Request, {} as Response, authenticate);
+    } catch (error) {
+      // Express-session normally reports via next, but a synchronous failure must
+      // also release the pending slot without allowing an upgrade.
+      void authenticate(error);
+    }
+  });
 
-      wss!.handleUpgrade(request, socket, head, (ws) => {
-        ipConnections.set(ip, currentConns + 1);
-        (ws as any).__userId = String(session.user.id);
-        (ws as any).__ip = ip;
-        wss!.emit("connection", ws, request);
+  serverWss.on("connection", (ws: StaffSocket) => {
+    const userId = ws.userId!;
+    const ip = ws.ip!;
+    ws.isAlive = true;
+    ws.on("pong", () => { ws.isAlive = true; });
+    if (!userConnections.has(userId)) userConnections.set(userId, new Set());
+    userConnections.get(userId)!.add(ws);
+    ws.send(JSON.stringify({ type: "version", version: BUILD_VERSION }));
+
+    ws.on("close", () => {
+      userConnections.get(userId)?.delete(ws);
+      if (userConnections.get(userId)?.size === 0) {
+        userConnections.delete(userId);
+        pending.delete(userId);
+      }
+      const currentConns = ipConnections.get(ip) ?? 0;
+      if (currentConns > 1) ipConnections.set(ip, currentConns - 1);
+      else ipConnections.delete(ip);
+    });
+    ws.on("error", () => {
+      logger.error("identity.websocket.connection", {
+        outcome: "failed", error_code: "IDENTITY_WEBSOCKET_CONNECTION_ERROR", user_id: userId,
       });
     });
   });
 
-  wss.on("connection", (ws) => {
-    const userId = (ws as any).__userId;
-    const ip = (ws as any).__ip;
-    
-    // Alive tracking for ping/pong
-    (ws as any).isAlive = true;
-    ws.on('pong', () => { (ws as any).isAlive = true; });
-
-    // Track user connection
-    if (!userConnections.has(userId)) {
-      userConnections.set(userId, new Set());
-    }
-    userConnections.get(userId)!.add(ws);
-
-    // Send current build version on connect
-    ws.send(JSON.stringify({ type: "version", version: BUILD_VERSION }));
-
-    ws.on("close", () => {
-      if (userConnections.has(userId)) {
-        userConnections.get(userId)!.delete(ws);
-        if (userConnections.get(userId)!.size === 0) {
-          userConnections.delete(userId);
-        }
-      }
-      const currentConns = ipConnections.get(ip) || 0;
-      if (currentConns > 1) {
-        ipConnections.set(ip, currentConns - 1);
-      } else {
-        ipConnections.delete(ip);
-      }
-    });
-
-    ws.on("error", (error) => {
-      console.error("WebSocket error:", error);
-    });
-  });
-
-  // Keep-alive ping (every 25s, Heroku timeout is 55s)
+  // Liveness only; authority is checked on upgrade and every business-message batch.
   const interval = setInterval(() => {
-    wss!.clients.forEach((ws: any) => {
+    serverWss.clients.forEach((ws: StaffSocket) => {
       if (ws.isAlive === false) return ws.terminate();
       ws.isAlive = false;
       ws.ping();
     });
   }, 25000);
 
-  // Clean up interval on wss close
-  wss.on('close', () => {
+  const shutdown = () => serverWss.clients.forEach(ws => ws.close(1001, "Server shutting down"));
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  serverWss.on("close", () => {
     clearInterval(interval);
+    process.off("SIGTERM", shutdown);
+    process.off("SIGINT", shutdown);
+    if (wss === serverWss) wss = null;
   });
-
-  // Handle graceful shutdown
-  const shutdown = () => {
-    if (wss) {
-      wss.clients.forEach(ws => ws.close(1001, "Server shutting down"));
-    }
-  };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
-
-  return wss;
+  return serverWss;
 }
 
-export function broadcastOrdersUpdated() {
-  if (!wss) return;
-
-  const message = JSON.stringify({ type: "orders:updated" });
-
-  wss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(message);
-    }
-  });
+export function broadcastOrdersUpdated(): Promise<void> {
+  if (!wss) return Promise.resolve();
+  for (const userId of userConnections.keys()) enqueue(userId);
+  return dispatchPending();
 }
 
-/**
- * Send a message to all WebSocket connections for a specific user.
- */
-export function broadcastToUser(userId: string, payload: Record<string, unknown>) {
-  const conns = userConnections.get(userId);
-  if (!conns) return;
-
-  const message = JSON.stringify(payload);
-  for (const ws of conns) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(message);
-    }
-  }
+/** Best-effort delivery of an already persisted notification to current staff. */
+export function broadcastToUser(userId: string, payload: Record<string, unknown>): Promise<void> {
+  enqueue(userId, JSON.stringify(payload));
+  return dispatchPending();
 }

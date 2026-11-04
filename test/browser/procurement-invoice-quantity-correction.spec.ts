@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { invoiceAmountPerPiece, type InvoiceQuantityApprovalRequest, type InvoiceQuantityContext, type InvoiceQuantityPreview, type InvoiceQuantityResult, type InvoiceCorrectionCostComponents } from "../../shared/procurement/invoice-quantity-correction";
 import type { InvoiceCostComponentEvidence } from "../../shared/procurement/invoice-cost-evidence";
@@ -126,7 +127,7 @@ async function setup(page: Page, options: { canApprove?: boolean; stale?: boolea
     }
     return route.fallback();
   });
-  await page.route("**/api/auth/me", (route) => route.fulfill({ json: { user: { id: "quantity-admin", username: "test", role: "admin" }, permissions: options.canApprove === false ? ["purchasing:view"] : ["purchasing:view", "purchasing:approve"], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", (route) => route.fulfill({ json: staffAuthorityFixture({ user: { id: "quantity-admin", username: "test", role: "admin" }, permissions: options.canApprove === false ? ["purchasing:view"] : ["purchasing:view", "purchasing:approve"], systemRoles: ["admin"] }) }));
   await page.route("**/api/vendor-invoices/71", (route) => route.fulfill({ json: invoice }));
   await page.route("**/api/vendor-invoice-lines/72/quantity-correction/preview", (route) => {
     const body = route.request().postDataJSON(); previews.push(body);

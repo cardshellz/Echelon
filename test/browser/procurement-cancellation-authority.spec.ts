@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { buildPoLifecycleSummary } from "../../server/modules/procurement/purchase-order-lifecycle.service";
 import { installFixtures, po } from "./procurement-fixtures";
@@ -10,9 +11,9 @@ async function cancellationFixture(
   let purchase = { ...po(17), ...state, financialStatus: "unbilled", lifecycle: buildPoLifecycleSummary({ id: 17, ...state }) };
   if (!withAction) purchase.lifecycle.nextActions = [];
   const calls: Array<{ path: string; body: unknown }> = [];
-  await page.route("**/api/auth/me", (route) => route.fulfill({ json: {
-    user: { id: "test-user", username: "test", role: "admin" }, permissions: ["purchasing:view", ...permissions], roles: ["admin"],
-  } }));
+  await page.route("**/api/auth/me", (route) => route.fulfill({ json: staffAuthorityFixture({
+    user: { id: "test-user", username: "test", role: "admin" }, permissions: ["purchasing:view", ...permissions], systemRoles: ["admin"],
+  }) }));
   await page.route("**/api/purchase-orders/17", (route) => route.fulfill({ json: purchase }));
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: {
     purchase: { ...purchase, currency: "USD", vendorName: "Test vendor", invoicedTotalCents: 0, paidTotalCents: 0,

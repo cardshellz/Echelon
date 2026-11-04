@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import type { InventoryProductSyncRequest, InventoryProductSyncReceipt, InventoryProductSyncProgress, InventoryProductSyncReview } from "../../shared/types/inventory-product-sync";
@@ -30,8 +31,7 @@ async function setup(page: Page, options: { surface?: "catalog" | "channel" | "p
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", username: "operator", role: "staff" }, roles: [],
-      permissions: ["channels:view", "inventory:view", "inventory:edit", "channels:edit", "inventory_planning:view", ...(options.canSync === false ? [] : ["inventory_planning:activate"])] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator", username: "operator", role: "staff" }, permissions: ["channels:view", "inventory:view", "inventory:edit", "channels:edit", "inventory_planning:view", ...(options.canSync === false ? [] : ["inventory_planning:activate"])], systemRoles: [], assignedRoles: [{ id: 101, name: "Inventory operator", isSystem: false }] }) });
     if (path === "/api/products/41/shopify-mapping") return route.fulfill({ json: { productId: 41, productName: "Graded slab binder",
       productSku: "BINDER", catalogProductId: "900", channel: { id: 7, name: "Test Shopify" }, status: "consistent", evidenceProductIds: ["900"],
       recommendedProductId: null, repairable: false, activeVariantCount: 2, archivedVariantCount: 0, activeVariantIssueIds: [],

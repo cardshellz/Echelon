@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { DEFAULT_SUPPLIER_SOURCING_POLICY, supplierSourcingUpdateSchema, type SupplierSourcingRecord } from "../../shared/procurement/supplier-sourcing";
 import { installFixtures } from "./procurement-fixtures";
@@ -7,7 +8,7 @@ async function setup(page: Page, canEdit = true) {
   const writes: unknown[] = [];
   let record: SupplierSourcingRecord = { vendorProductId: 1, revision: 0, policy: DEFAULT_SUPPLIER_SOURCING_POLICY, recordedBy: null, recordedAt: null, reason: null };
   const records: SupplierSourcingRecord[] = [];
-  await page.route("**/api/auth/me", (route) => route.fulfill({ json: { user: { id: "sourcing-operator", username: "test", role: "admin" }, permissions: canEdit ? ["purchasing:edit", "inventory:view"] : ["inventory:view"], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", (route) => route.fulfill({ json: staffAuthorityFixture({ user: { id: "sourcing-operator", username: "test", role: "admin" }, permissions: canEdit ? ["purchasing:view", "purchasing:edit", "inventory:view"] : ["purchasing:view", "inventory:view"], systemRoles: ["admin"] }) }));
   await page.route("**/api/vendors", (route) => route.fulfill({ json: [{ id: 1, code: "SYNTHETIC", name: "Synthetic sourcing vendor", active: 1, currency: "USD", defaultLeadTimeDays: 120, minimumOrderCents: 0 }] }));
   await page.route("**/api/products", (route) => route.fulfill({ json: [{ id: 10, sku: "SOURCE-TEST", baseSku: "SOURCE-TEST", name: "Fictional source product" }] }));
   await page.route("**/api/vendors/1/products", (route) => route.fulfill({ json: [{ id: 1, vendorId: 1, productId: 10, productVariantId: null, vendorSku: "SOURCE-TEST", vendorProductName: "Fictional source product", pricingBasis: "legacy_unknown", unitCostMills: null, unitCostCents: null, isPreferred: 1, isActive: 1, packSize: 50, moq: 50 }] }));

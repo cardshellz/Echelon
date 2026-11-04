@@ -8,8 +8,8 @@ import PickingSettings from "./PickingSettings";
 
 export default function PickingPage() {
   const [location, navigate] = useLocation();
-  const { user } = useAuth();
-  const isAdminLead = user?.role === "admin" || user?.role === "lead";
+  const { hasSystemRole } = useAuth();
+  const isAdminLead = hasSystemRole("admin") || hasSystemRole("lead");
 
   let activeTab = "queue";
   if (isAdminLead && location.startsWith("/picking/logs")) activeTab = "logs";

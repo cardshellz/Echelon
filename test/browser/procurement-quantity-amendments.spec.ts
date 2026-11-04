@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 import { expectFinancialRetryBoundaries, installFinancialRetryClock } from "./procurement-retry-clock";
@@ -77,7 +78,7 @@ async function setup(page: Page, options: { admin?: boolean; stale?: boolean; lo
     const request = route.request(); const path = new URL(request.url()).pathname;
     if (request.method() === "GET") {
       reads.push(path);
-      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" }, roles: ["Administrator"], permissions: ["purchasing:view", "purchasing:approve"] } });
+      if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "test-user", username: "test", role: "admin" }, systemRoles: ["admin"], permissions: ["purchasing:view", "purchasing:approve"] }) });
       if (path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), status: options.closeAfterLost && committed ? "closed" : "received", physicalStatus: "received", financialStatus: "paid" } });
       if (path === "/api/purchase-orders/17/quantity-amendment") return route.fulfill({ json: { ...context, sourceVersion: committed ? "b".repeat(64) : version } });
       if (path === "/api/purchase-orders/17/quantity-amendment/history") return route.fulfill({ json: {

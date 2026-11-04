@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { generatePurchasingRecommendations } from "../../server/modules/procurement/purchasing-recommendation.engine";
 import { installFixtures } from "./procurement-fixtures";
@@ -33,8 +34,8 @@ async function setup(page: Page, canEdit = true) {
       return route.fulfill({ status: 201, json: { id: 71, ...body } });
     }
     if (request.method() !== "GET") return route.fallback();
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" }, roles: ["admin"],
-      permissions: ["purchasing:view", "inventory:view", ...(canEdit ? ["purchasing:edit"] : [])] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "test-user", username: "test", role: "admin" }, systemRoles: ["admin"],
+      permissions: ["purchasing:view", "inventory:view", ...(canEdit ? ["purchasing:edit"] : [])] }) });
     if (path === "/api/settings/procurement") return route.fulfill({ json: { useNewReorderCockpit: true } });
     if (path === "/api/purchasing/reorder-analysis") return route.fulfill(state.analysisUnavailable
       ? { status: 503, json: { error: "Synthetic current analysis unavailable" } } : { json: analysis() });

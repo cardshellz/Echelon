@@ -6,6 +6,14 @@ import { registerAssemblyWorkRoutes } from "../../work/interfaces/assembly-work.
 import { WarehouseWorkError } from "../../work/domain/work-configuration";
 import { task, start, fence } from "../assembly-work.fixture";
 
+// The route still runs requireAuth. Identity facts are synthetic; command-level
+// warehouse permission decisions remain in the injected application services.
+vi.mock("../../../identity", () => ({ readCurrentStaffAccess: vi.fn(async (userId: string) => ({
+  user: { id: userId, username: "fixture", role: "picker", active: 1, displayName: null,
+    createdAt: new Date(0), lastLoginAt: null },
+  roles: [{ id: 101, name: "Fixture operator", isSystem: false }], permissions: [],
+})) }));
+
 describe("assembly work HTTP validation and identity", () => {
   let server: Server; let base: string; let authenticated: boolean;
   const service = { queue: vi.fn(), get: vi.fn(), command: vi.fn(), handoff: vi.fn(), complete: vi.fn() };

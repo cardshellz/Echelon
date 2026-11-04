@@ -197,6 +197,8 @@ const TRUNCATE_TABLES = [
   "catalog.product_variants",
   "catalog.products",
   "identity.users",
+  "identity.auth_user_roles",
+  "identity.auth_roles",
 ];
 
 export async function truncateTestData(): Promise<void> {

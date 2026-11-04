@@ -2524,6 +2524,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
        VALUES ($1, 'historical-attestation-lead', 'test-only-password-hash', 'lead', 1)`,
       [leadUserId],
     );
+    await pool.query(`WITH assigned_role AS (
+      INSERT INTO identity.auth_roles (name, is_system) VALUES ('Team Lead', 1) RETURNING id
+    ) INSERT INTO identity.auth_user_roles (user_id, role_id) SELECT $1, id FROM assigned_role`, [leadUserId]);
     const order = await pool.query<{ id: number }>(
       `INSERT INTO wms.orders (order_number)
        VALUES ('#ATTEST-1001')
@@ -2727,6 +2730,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
        VALUES ($1, 'historical-review-lead', 'test-only-password-hash', 'lead', 1)`,
       [leadUserId],
     );
+    await pool.query(`WITH assigned_role AS (
+      INSERT INTO identity.auth_roles (name, is_system) VALUES ('Team Lead', 1) RETURNING id
+    ) INSERT INTO identity.auth_user_roles (user_id, role_id) SELECT $1, id FROM assigned_role`, [leadUserId]);
     const order = await pool.query<{ id: number }>(
       `INSERT INTO wms.orders (order_number)
        VALUES ('#REVIEW-1001')
@@ -5599,6 +5605,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
        VALUES ($1, 'current-review-lead', 'test-only-password-hash', 'lead', 1)`,
       [leadUserId],
     );
+    await pool.query(`WITH assigned_role AS (
+      INSERT INTO identity.auth_roles (name, is_system) VALUES ('Team Lead', 1) RETURNING id
+    ) INSERT INTO identity.auth_user_roles (user_id, role_id) SELECT $1, id FROM assigned_role`, [leadUserId]);
     const providerObservationHash = "b".repeat(64);
     const client: HistoricalShipStationContentsClient = {
       async loadShipmentContents(providerShipmentId, expectedContents) {

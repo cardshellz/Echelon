@@ -42,9 +42,9 @@ export function registerInvoiceCostTaskReviewCases(fixture: {
     const tables = ["procurement.vendor_invoice_lines", "procurement.vendor_invoices", "procurement.purchase_order_lines", "procurement.receiving_lines", "inventory.inventory_lots", "oms.order_item_costs", "procurement.cost_source_revisions", "inventory.cost_applications", "inventory.cost_reconciliation_approvals", "inventory.cost_reconciliation_postings", "public.audit_events", "procurement.po_events"];
     return Promise.all(tables.map(async table => (await query(`SELECT * FROM ${table} ORDER BY id`)).rows));
   }
-  function save(body: InvoiceCostReview, key = randomUUID()) {
+  function save(body: InvoiceCostReview, key = randomUUID(), actorId = fixture.actorId) {
     const scope = { method: "POST", routeTemplate: "/api/vendor-invoice-lines/:lineId/cost-components", resourceKey: "vendor_invoice_line:72" };
-    return commands().review(72, body, fixture.actorId, { ...scope, commandName: "ap.invoice.cost_components", actorType: "user", actorId: fixture.actorId, idempotencyKey: key, contractVersion: 1, requestHash: hashHttpFinancialCommand({ ...scope, body }) });
+    return commands().review(72, body, actorId, { ...scope, commandName: "ap.invoice.cost_components", actorType: "user", actorId, idempotencyKey: key, contractVersion: 1, requestHash: hashHttpFinancialCommand({ ...scope, body }) });
   }
   async function current() { return fixture.database().transaction(tx => readPurchaseCostStatus(tx, [21])); }
 
@@ -124,10 +124,26 @@ export function registerInvoiceCostTaskReviewCases(fixture: {
     it.each(["0", "-1", "72x", "00072", "72.5", "2147483648"])("rejects noncanonical invoice line %s", async id => {
       expect(await post({}, { id })).toMatchObject({ status: 400 });
     });
-    it.each(["lead-user", "custom-user", "scoped-user"])("rejects the session admin label for persisted actor %s", async actor => {
+    it.each(["lead-user", "custom-user"])("rejects the session admin label for persisted actor %s", async actor => {
       await prepare(); const body = await input(), before = await snapshot();
       expect(await post(body, { operation: "/preview", actor })).toMatchObject({ status: 403, body: { details: { code: "INVOICE_COST_REVIEW_ADMIN_REQUIRED" } } });
       expect(await post({ ...body, previewVersion: "f".repeat(64) }, { actor })).toMatchObject({ status: 403 });
+      expect(await snapshot()).toEqual(before);
+    });
+    it("rejects scoped approval grants at HTTP and in direct cost preview and approval", async () => {
+      await prepare(); const body = await input(), before = await snapshot(), actor = "scoped-user";
+      const request = { ...body, previewVersion: "f".repeat(64) };
+      const denied = { status: 403, body: { error: "Permission denied: purchasing:approve" } };
+      expect(await post(body, { operation: "/preview", actor })).toMatchObject(denied);
+      expect(await post(request, { actor })).toMatchObject(denied);
+      expect(await snapshot()).toEqual(before);
+      await expect(preview()(72, body, actor)).rejects.toMatchObject({
+        statusCode: 403, details: { code: "INVOICE_COST_REVIEW_ADMIN_REQUIRED" },
+      });
+      expect(await snapshot()).toEqual(before);
+      expect(await save(request, randomUUID(), actor)).toMatchObject({
+        httpStatus: 403, body: { details: { code: "INVOICE_COST_REVIEW_ADMIN_REQUIRED" } }, terminalState: "rejected",
+      });
       expect(await snapshot()).toEqual(before);
     });
     it.each(["active", "role", "grant"])("rejects revoked %s authority between preview and approval", async revoked => {

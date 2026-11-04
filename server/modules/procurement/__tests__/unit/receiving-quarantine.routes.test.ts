@@ -12,7 +12,11 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("../../../../db", () => ({ db: { transaction: mocks.transaction } }));
 // Keep the real requireAuth middleware, but do not initialize identity storage.
-vi.mock("../../../identity", () => ({ hasPermission: vi.fn() }));
+vi.mock("../../../identity", () => ({ hasPermission: vi.fn(), readCurrentStaffAccess: vi.fn(async (userId: string) => ({
+  user: { id: userId, username: "fixture", role: "picker", active: 1, displayName: null,
+    createdAt: new Date(0), lastLoginAt: null },
+  roles: [{ id: 101, name: "Fixture operator", isSystem: false }], permissions: [],
+})) }));
 vi.mock("../../../../platform/observability", () => ({ logger: { error: mocks.log } }));
 vi.mock("../../receiving-quarantine-command-evidence.repository", () => ({ assertNoLegacyCustodyCommand: vi.fn() }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));

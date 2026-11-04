@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 async function setup(page: Page, lostResponse = false, frozenFirst = false) {
@@ -49,11 +50,9 @@ needed: 1, onHandAtSource: 1, availableAtSource: 0, reservedAtSource: 1, sourceC
     }
     if (url.pathname === "/api/auth/me")
       return route.fulfill({
-        json: {
-          user: {
+        json: staffAuthorityFixture({ user: {
             id: "operator", username: "operator", role: "admin"
-          }, roles: ["admin"], permissions: []
-        }
+          }, permissions: [], systemRoles: ["admin"] })
       });
     if (url.pathname === "/api/warehouse/locations")
       return route.fulfill({

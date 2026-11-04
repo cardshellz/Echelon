@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { channelIntentChange, createListingIntentChangesMock, handleListingIntentChangesRequest } from "./fixtures/listing-intent-changes.fixture";
 import { resolve } from "node:path";
 import { readFileSync } from "node:fs";
@@ -49,8 +50,7 @@ async function setup(page: Page, options: { readOnly?: boolean; connected?: bool
         error: state.stock.get(sku) === null ? "Could not read stock from Walmart. Refresh listings to try again." : null })) } });
     }
     if (req.method() === "GET") {
-      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", username: "operator", role: "lead" }, roles: ["lead"],
-        permissions: [...(options.readOnly ? ["channels:view"] : ["channels:view", "channels:edit"]), ...(options.inventoryAccess ? ["inventory_planning:view"] : []), ...(options.inventoryAccess === "activate" ? ["inventory_planning:activate"] : [])] } });
+      if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator", username: "operator", role: "lead" }, permissions: [...(options.readOnly ? ["channels:view"] : ["channels:view", "channels:edit"]), ...(options.inventoryAccess ? ["inventory_planning:view"] : []), ...(options.inventoryAccess === "activate" ? ["inventory_planning:activate"] : [])], systemRoles: ["lead"] }) });
       if (path === "/api/warehouses") return route.fulfill({ json: [{ id: 1, code: "LEON", name: "20 LEONBERG", isActive: 1, warehouseType: "operations" }] });
       if (path === `${BASE}/walmart`) return route.fulfill({ json: state.connected ? { ...status, orderSyncBlockedReason: options.blocked ? "Automatic order sync is disabled by server configuration." : null } : null });
       if (path === `${BASE}/walmart/exceptions`) return route.fulfill({ json: [] });

@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po, receipt } from "./procurement-fixtures";
 import type { ShipmentReceiptUnitSelection } from "../../shared/procurement/shipment-receipt-plan";
@@ -10,10 +11,10 @@ async function setup(page: Page, options: { empty?: boolean; drift?: boolean; co
   ], previews: [] as ShipmentReceiptUnitSelection[][], receipts: [] as Record<string, unknown>[], configurations: [] as Record<string, unknown>[], drifted: false, scopeChanged: false };
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: {
-      user: { id: "receiver", username: "receiver", role: "lead" }, roles: ["Receiver"],
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({
+      user: { id: "receiver", username: "receiver", role: "lead" }, systemRoles: [], assignedRoles: [{ id: 101, name: "Receiver", isSystem: false }],
       permissions: ["purchasing:view", "inventory:receive", ...(options.catalogPermission === false ? [] : ["inventory:create"])],
-    } });
+    }) });
     if (path === "/api/purchase-orders/17" && request.method() === "GET") return route.fulfill({ json: po(17) });
     if (path === "/api/purchase-orders/17/receive-options") return route.fulfill({ json: {
       shipmentOptions: [{ shipmentId: 42, shipmentNumber: "RECEIVE-SHIPMENT", purchaseOrderId: 17, status: "delivered", lineCount: 1,

@@ -341,9 +341,19 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events")).rows[0].count).toBe(1);
     expect((await pool.query("SELECT revision_number FROM procurement.purchase_orders")).rows[0].revision_number).toBe(1);
   });
-  it.each(["lead-user", "custom-user", "scoped-user"])("rejects forged legacy role or insufficient current authority for %s", async (actor) => {
+  it.each(["lead-user", "custom-user"])("rejects forged legacy role or insufficient current authority for %s", async (actor) => {
     const request = await body(20, actor); requestActor = actor; const before = await evidence();
     expect(await post(request)).toMatchObject({ status: 403, body: { code: "PO_AMENDMENT_ADMIN_REQUIRED" } }); expect(await evidence()).toEqual(before);
+  });
+  it("rejects scoped approval grants at both the HTTP boundary and direct command", async () => {
+    const actor = "scoped-user";
+    const request = await body(20, actor); requestActor = actor; const before = await evidence();
+    expect(await post(request)).toMatchObject({ status: 403, body: { error: "Permission denied: purchasing:approve" } });
+    expect(await evidence()).toEqual(before);
+    expect(await approve(1, request, actor, descriptor(request, randomUUID(), actor))).toMatchObject({
+      httpStatus: 403, body: { code: "PO_AMENDMENT_ADMIN_REQUIRED" }, terminalState: "rejected",
+    });
+    expect(await evidence()).toEqual(before);
   });
   it("checks live membership revocation after preview, including direct command execution", async () => {
     const request = await body(); await pool.query("DELETE FROM identity.auth_user_roles WHERE user_id='admin-user'"); const before = await evidence();

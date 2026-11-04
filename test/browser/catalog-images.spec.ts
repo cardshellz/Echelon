@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { test, expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -21,7 +22,7 @@ async function setup(page: Page, canEdit = true) {
   await page.route("https://cdn.example.com/**", route => route.fulfill({ contentType:"image/png",body:photoBytes }));
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", role: "staff", username: "operator" }, permissions: canEdit ? ["inventory:view", "inventory:edit"] : ["inventory:view"], roles: [] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator", role: "staff", username: "operator" }, permissions: canEdit ? ["inventory:view", "inventory:edit"] : ["inventory:view"], systemRoles: [], assignedRoles: [{ id: 101, name: "Catalog operator", isSystem: false }] }) });
     if (path === "/api/products/1") return route.fulfill({ json: {
       id: 1, productId: 1, sku: "ESS-TOP-55PT-SLV-CLR", name: "55PT 3x4 Toploader Essentials Clear+ Easy Glide Combo Pack",
       title: null, description: null, brand: "Shellz", status: "active", isActive: true, inventoryTrackingDefault: true,

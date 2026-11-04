@@ -1,5 +1,7 @@
 # Picking assignment and hold controls
 
+> FND-2C local correction (2026-11-04; not deployed): startup now registers missing permission/role definitions only. It does not grant permissions or assign legacy users. Any automatic-grant statement below describes prior behavior and is superseded for this candidate. Existing authority remains unchanged; explicit provisioning and mixed-version rollout gates are recorded in [the Foundation batch review](identity-explicit-access-rollout.md).
+
 Implementation branch: `codex/picking-release-permissions`, initially based on `ae4f64ba6` after merged PR #1651 and refreshed against `edd1812f9` before publication. This is a code change, not a production order recovery or inventory adjustment.
 
 ## Operator behavior

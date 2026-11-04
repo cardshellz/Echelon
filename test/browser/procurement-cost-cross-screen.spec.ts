@@ -1,5 +1,5 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { fullQuarantineCostStatus, fullQuarantineWorkspace } from "../fixtures/full-quarantine-cost";
-import { SYSTEM_ROLES } from "../../server/modules/identity/domain/identity.domain";
 import { installQuarantineFixtures } from "./procurement-quarantine-fixtures";
 import { shipmentListItem } from "../fixtures/shipment-work-list";
 import { landedCostHealthSchema } from "../../shared/procurement/landed-cost-health";
@@ -39,8 +39,8 @@ async function installCostScreens(page: Page) {
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (request.method() !== "GET") return route.fallback();
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" },
-      roles: [SYSTEM_ROLES.admin.name], permissions: ["purchasing:view", "purchasing:approve", "inventory:view"] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "test-user", username: "test", role: "admin" },
+      systemRoles: ["admin"], permissions: ["purchasing:view", "purchasing:approve", "inventory:view"] }) });
     if (path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), subtotalCents: 100000, totalCents: 100000 } });
     if (path === "/api/purchase-orders/17/shipment-costs") return route.fulfill(state.failCosts
       ? { status: 503, json: { error: "Synthetic cost summary unavailable" } } : { json: state.costs });

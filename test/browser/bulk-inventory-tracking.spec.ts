@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { test, expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import { BULK_INVENTORY_TRACKING_PATH, type BulkInventoryTrackingApply, type BulkInventoryTrackingRequest } from "../../shared/catalog/bulk-inventory-tracking";
@@ -13,7 +14,7 @@ async function setup(page: Page, edit = true) {
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/api/**", async route => {
     const req = route.request(); const path = new URL(req.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", username: "operator", role: "staff" }, permissions: edit ? ["inventory:view", "inventory:edit"] : ["inventory:view"], roles: [] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator", username: "operator", role: "staff" }, permissions: edit ? ["inventory:view", "inventory:edit"] : ["inventory:view"], systemRoles: [], assignedRoles: [{ id: 101, name: "Inventory operator", isSystem: false }] }) });
     if (path === "/api/products") return route.fulfill({ json: products });
     if (path === "/api/product-lines") return route.fulfill({ json: [{ id: 10, name: "Promotional group" }, { id: 11, name: "Other line" }] });
     if (path === "/api/product-categories") return route.fulfill({ json: [{ id: 20, name: "Stickers", isActive: true }, { id: 21, name: "Cards", isActive: true }] });
