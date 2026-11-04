@@ -1,11 +1,59 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { CustomerReturnPreviewService } from "../../server/modules/returns/application/customer-return-preview.service";
 import { validateCustomerReturnBoxPlan } from "../../server/modules/returns/application/customer-return-box-plan";
 import type { CustomerAccountRequest } from "../../shared/customer-account/customer-account.contract";
 import { customerReturnFlowReviewInputSchema } from "../../shared/returns/customer-return-flow.contract";
 import { customerReturnSavedRequestSchema } from "../../client/src/lib/customer-return-customer";
+
+test("saved overview paints before the large account bundle and reuses a signed-in shopping preload", async ({ page }, testInfo) => {
+  const calls: string[] = [];
+  const overview = { bootstrap: { session: { authenticated: true, privateTesting: true, sessionKey: "a".repeat(43) },
+    connection: { connectionId: 4, channelId: 2, shopDomain: "fixture.myshopify.com", name: "Synthetic", enabled: true, paymentWindowMinutes: 30 } },
+    summaries: { orders: [{ externalOrderId: "99", orderReference: "#HISTORY", omsOrderId: null, currency: "USD", totalCents: 741, cancelled: false, financialStatus: "Paid" }], unavailableExternalOrderIds: [], statusUnavailable: false },
+    actions: { orders: [{ externalOrderId: "99", orderReference: "#HISTORY", omsOrderId: null, state: "not_managed", snapshot: null, validUntil: null, verifiedAt: null }] } };
+  let holdFreshRead = false;
+  let releaseRead!: () => void;
+  const heldRead = new Promise<void>(resolve => { releaseRead = resolve; });
+  await page.route("https://shop.test/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/assets/csz-account-preload.js") return route.fulfill({ contentType: "text/javascript", body: await readFile("dist/customer-account/csz-account-preload.js") });
+    // Prove rows do not wait for either large editor asset. Never run a real API.
+    if (path.startsWith("/assets/")) return route.fulfill({ contentType: path.endsWith(".css") ? "text/css" : "text/javascript", body: "" });
+    if (path === "/apps/echelon-returns/account") {
+      const input = route.request().postDataJSON(); calls.push(input.path);
+      expect(input.commandKey).toBeUndefined(); expect(input.sessionKey).toBeUndefined();
+      if (holdFreshRead) await heldRead;
+      return route.fulfill({ json: overview });
+    }
+    const account = path.startsWith("/account");
+    const config = { config: { themeId: "174740308127", customerId: "100", proxyPath: "/apps/echelon-returns" }, orders: [{ externalOrderId: "99", orderReference: "#HISTORY" }],
+      bundleUrl: "https://shop.test/assets/csz-customer-account.js", cssUrl: "https://shop.test/assets/csz-customer-account.css" };
+    return route.fulfill({ contentType: "text/html", body: `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>
+      ${account ? '<main data-csz-customer-account><div data-csz-order-history-status></div><div data-csz-order-history-content hidden><table><tr data-csz-account-order data-external-order-id="99" data-order-reference="#HISTORY"><td>#HISTORY</td><td data-csz-order-total></td></tr></table></div></main>' : '<h1>Shop products</h1>'}
+      <script type="application/json" id="csz-customer-account-preload">${JSON.stringify(config)}</script><script src="/assets/csz-account-preload.js" defer></script></body></html>` });
+  });
+  // Warm from an ordinary signed-in shopping page, without loading account UI.
+  await page.goto("https://shop.test/products/fixture");
+  await expect.poll(() => calls.length).toBe(1);
+  await expect.poll(() => page.evaluate(() => Object.keys(sessionStorage).some(key => key.startsWith("csz-account-display-v1:")))).toBe(true);
+  holdFreshRead = true;
+  const times: number[] = [];
+  for (let iteration = 0; iteration < 10; iteration++) {
+    await page.goto(`https://shop.test/account?sample=${iteration}`);
+    await expect(page.locator("[data-csz-order-total]")).toHaveText("$7.41 USD");
+    await expect(page.locator("[data-csz-order-history-content]")).toBeVisible();
+    times.push(await page.evaluate(() => performance.now()));
+  }
+  releaseRead();
+  const sorted = [...times].sort((a, b) => a - b), p95 = sorted[Math.ceil(sorted.length * 0.95) - 1];
+  const timingPath = testInfo.outputPath("synthetic-display-latency.json");
+  await writeFile(timingPath, JSON.stringify({ samplesMs: times, p95Ms: p95, scope: "local browser fixtures, warmed display cache, held backend response and no editor bundle" }));
+  await testInfo.attach("synthetic-display-latency.json", { path: timingPath, contentType: "application/json" });
+  expect(p95).toBeLessThan(500);
+  expect(calls.every(path => path === "/account/overview")).toBe(true);
+});
 
 // Exercise the actual shipped IIFE and scoped stylesheet, not a component with
 // the staff app's global CSS. All transport is fictional and intercepted.
@@ -75,13 +123,34 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
     if (!["csz-customer-account.js", "csz-customer-account.css"].includes(name)) return route.abort();
     return route.fulfill({ contentType: name.endsWith(".css") ? "text/css" : "text/javascript", body: await readFile(resolve("dist/customer-account", name)) });
   });
+  const bootstrapReply = () => ({ session: { authenticated: true, privateTesting: true, sessionKey: "a".repeat(43) },
+    connection: { connectionId: 4, channelId: 36, shopDomain: "fixture.myshopify.com", name: "Synthetic", enabled: true, paymentWindowMinutes: 30 } });
+  const summaryReply = () => ({
+      orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10, currency: "USD", totalCents: cancellationPhase === "open" ? 741 : 0,
+        financialStatus:cancellationPhase === "completed" ? "Refunded" : "Paid", cancelled:cancellationPhase !== "open", fulfillment,
+        ...(options.cancellationFlow ? {progress:{unavailable:[],delivery:null,packages:[],returns:[],refunds:cancellationPhase === "open" || !refundProgressAvailable ? [] : [
+          {key:"cancellation:40000000-0000-4000-8000-000000000001",reference:"Order cancellation",status:{code:cancellationPhase === "completed" ? "completed" : "processing",label:cancellationPhase === "completed" ? "Refund issued" : "Refund processing"}}]}} : {})}],
+      unavailableExternalOrderIds: [], statusUnavailable: false,
+    });
+  const actionReply = (refreshing = false) => {
+    if (refreshing) refreshRequested = true; else actionReads++;
+    const ready = options.recoverOptions ? refreshRequested && !refreshing
+      : !options.actionState && (!options.invalidateAfterFirstLookup || actionReads === 1);
+    const returnFailed = Boolean(options.returnFailureAfterFirstLookup && actionReads > 1);
+    return { orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10,
+        state: ready ? "ready" : options.recoverOptions && refreshing ? "refreshing" : options.actionState ?? "refreshing", verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 300_000).toISOString(),
+        snapshot: ready ? { order: {...actionOrder,...(options.cancellationFlow && cancellationPhase !== "open" ? {
+          activeOperationId:"40000000-0000-4000-8000-000000000001",activeOperationKind:"cancel_order",activeOperationStatus:"refunding",
+          cancellation:{canReview:false,reasons:[],requestKey:cancellationRequest}} : {})}, returnOrder: returnFailed ? null : detail, orderFailed: false, returnFailed } : null }] };
+  };
   await page.route("**/apps/echelon-returns/account", async (route) => {
     const input = route.request().postDataJSON() as CustomerAccountRequest;
     calls.push(input);
-    if (input.path === "/account/bootstrap") return route.fulfill({ json: {
-      session: { authenticated: true, privateTesting: true, sessionKey: "a".repeat(43) },
-      connection: { connectionId: 4, channelId: 36, shopDomain: "fixture.myshopify.com", name: "Synthetic", enabled: true, paymentWindowMinutes: 30 },
-    } });
+    if (input.path === "/account/bootstrap") return route.fulfill({ json: bootstrapReply() });
+    if (input.path === "/account/overview") {
+      summaryReads++;
+      return route.fulfill({ json: { bootstrap: bootstrapReply(), summaries: summaryReply(), actions: actionReply() } });
+    }
     if (input.path === "/account/orders/10/cancellation/review") return route.fulfill({json:{connectionId:4,omsOrderId:10,orderNumber:"#TEST-1001",currency:"USD",
       revision:"c".repeat(64),orderRevision:"a".repeat(64),refundCents:741,eligibility:{allowed:true,reasons:[]},
       rewards:{fingerprint:"d".repeat(64),returnedPoints:"100.00",deductedEarnedPoints:"0.00",settled:false}}});
@@ -92,30 +161,17 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
       return route.fulfill({json:cancellationResult()});
     }
     if (input.path === "/account/orders/10/cancellation/status") return route.fulfill({json:cancellationResult()});
-    if (input.path === "/account/order-summaries") { summaryReads++;
+    if (input.path === "/account/saved-summaries") { summaryReads++;
       if (failSummary) return route.fulfill({status:503,json:{error:{code:"CUSTOMER_ACCOUNT_REQUEST_FAILED"}}});
-      return route.fulfill({ json: {
-      orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10, currency: "USD", totalCents: cancellationPhase === "open" ? 741 : 0,
-        financialStatus:cancellationPhase === "completed" ? "Refunded" : "Paid", cancelled:cancellationPhase !== "open", fulfillment,
-        ...(options.cancellationFlow ? {progress:{unavailable:[],delivery:null,packages:[],returns:[],refunds:cancellationPhase === "open" || !refundProgressAvailable ? [] : [
-          {key:"cancellation:40000000-0000-4000-8000-000000000001",reference:"Order cancellation",status:{code:cancellationPhase === "completed" ? "completed" : "processing",label:cancellationPhase === "completed" ? "Refund issued" : "Refund processing"}}]}} : {})}],
-      unavailableExternalOrderIds: [], statusUnavailable: false,
-    } }); }
+      return route.fulfill({ json: summaryReply() });
+    }
     if (input.path === "/account/order-actions" || input.path === "/account/order-actions/refresh") {
       const refreshing = input.path.endsWith("/refresh");
       if (refreshing && options.failRefreshOnce && !refreshFailed) {
         refreshFailed = true;
-        return route.fulfill({status:503,json:{error:{code:"FIXTURE_REFRESH_UNAVAILABLE",message:"Refresh unavailable"}}});
+        return route.fulfill({ status: 503, json: { error: { code: "FIXTURE_REFRESH_UNAVAILABLE", message: "Refresh unavailable" } } });
       }
-      if (refreshing) refreshRequested = true; else actionReads++;
-      const ready = options.recoverOptions ? refreshRequested && !refreshing
-        : !options.actionState && (!options.invalidateAfterFirstLookup || actionReads===1);
-      const returnFailed = Boolean(options.returnFailureAfterFirstLookup && actionReads > 1);
-      return route.fulfill({ json: { orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10,
-        state: ready ? "ready" : options.recoverOptions && refreshing ? "refreshing" : options.actionState ?? "refreshing", verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 300_000).toISOString(),
-        snapshot: ready ? { order: {...actionOrder,...(options.cancellationFlow && cancellationPhase !== "open" ? {
-          activeOperationId:"40000000-0000-4000-8000-000000000001",activeOperationKind:"cancel_order",activeOperationStatus:"refunding",
-          cancellation:{canReview:false,reasons:[],requestKey:cancellationRequest}} : {})}, returnOrder: returnFailed ? null : detail, orderFailed: false, returnFailed } : null }] } });
+      return route.fulfill({ json: actionReply(refreshing) });
     }
     if (input.path === "/order-edits/orders/10") return route.fulfill({ json: {
       connectionId: 4, omsOrderId: 10, orderNumber: "#TEST-1001", customerName: "Synthetic customer", customerEmail: null, activeOperationId: null, revision: "fixture", currency: "USD",

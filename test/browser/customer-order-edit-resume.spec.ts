@@ -126,6 +126,7 @@ async function setup(
     retryFails?: boolean;
     loseResume?: boolean;
     failResumeObservationOnce?: boolean;
+    historicalRemovedLines?: boolean;
   } = {},
 ) {
   const requests: Array<{ path: string; method: string; commandKey?: string }> =
@@ -167,7 +168,11 @@ async function setup(
       });
     expect(input.sessionKey).toBe("a".repeat(43));
     if (input.path === "/order-edits/orders/1")
-      return route.fulfill({ json: order });
+      return route.fulfill({ json: options.historicalRemovedLines ? {
+        ...order,
+        lines: [...order.lines, { ...order.lines[0],
+          lineItemId: "gid://shopify/LineItem/2", quantity: 0, totalCents: 0 }],
+      } : order });
     if (input.path === `/order-edits/operations/${operationId}`) {
       if (
         options.failResumeObservationOnce &&
@@ -332,6 +337,15 @@ test("a failed recovery read retries only the original edit observation", async 
   expect(observations).toHaveLength(3);
   expect(observations.every(request => request.method === "GET" && !request.commandKey)).toBe(true);
   expect(f.requests.some(request => /\/(quotes|commit|abandon|reconcile)$/.test(request.path))).toBe(false);
+  expect(f.errors).toEqual([]);
+});
+
+test("a cached removed line never becomes an editable item or a saved-plan change", async ({ page }) => {
+  const f = await setup(page, { initial: "ready", historicalRemovedLines: true });
+  await expect(page.getByRole("spinbutton")).toHaveCount(1);
+  await expect(page.getByRole("spinbutton")).toHaveValue("2");
+  await expect(page.getByRole("button", { name: "Apply changes · $2.47 due", exact: true })).toBeEnabled();
+  expect(f.requests.some(request => /\/(resume|quotes|commit|abandon|reconcile)$/.test(request.path))).toBe(false);
   expect(f.errors).toEqual([]);
 });
 

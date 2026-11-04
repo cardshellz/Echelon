@@ -42,6 +42,22 @@ describe("customer account signed storefront HTTP boundary", () => {
     return fetch(`${base}?${signed}`, { method: "POST", headers: { Origin: "https://shop.test", "Content-Type": "application/json", [CUSTOMER_ACCOUNT_COMMAND_HEADER]: "1", ...headers },
       body: JSON.stringify({ themeId: staging.themeId, expectedCustomerId: "100", method: "GET", path: "/account/bootstrap", query: {}, ...body }) });
   }
+  it("initializes one signed overview read without a bootstrap round trip, preserving the command session gate", async () => {
+    const identity = { externalOrderId: "99", orderReference: "#HISTORY" };
+    const summaries = vi.fn(async () => ({ orders: [{ ...identity, omsOrderId: null, currency: "USD", totalCents: 741, cancelled: false, financialStatus: "Paid" }], unavailableExternalOrderIds: [], statusUnavailable: false }));
+    const actions = vi.fn(async () => ({ orders: [{ ...identity, omsOrderId: null, state: "refreshing", snapshot: null, verifiedAt: null, validUntil: null }] }));
+    services.mockImplementation(() => ({ edits: { connection }, orders: { summaries, actions }, returns: vi.fn() }) as never);
+    const input = { method: "POST", path: "/account/overview", body: { orders: [identity] } };
+    const response = await request(input); expect(response.status).toBe(200);
+    const overview = await response.json(); expect(overview.summaries.orders[0].totalCents).toBe(741);
+    expect(summaries).toHaveBeenCalledWith(input.body, { saved: true, progress: true });
+    expect((await request({ ...input, expectedCustomerId: "101" })).status).toBe(401);
+    expect((await request(input, proof({ logged_in_customer_id: "" }))).status).toBe(401);
+    expect((await request({ ...input, sessionKey: "b".repeat(43) })).status).toBe(401);
+    expect((await request({ method: "POST", path: "/account/saved-summaries", body: input.body })).status).toBe(401);
+    expect((await request({ method: "POST", path: "/account/saved-summaries", body: input.body, sessionKey: overview.bootstrap.session.sessionKey })).status).toBe(200);
+    expect(summaries).toHaveBeenCalledTimes(2);
+  });
   it("serves the native returns chooser through the existing signed customer scope and cached reader", async () => {
     const page = { orders: [{ omsOrderId: 10, orderReference: "#TEST-1001", purchasedAt: null, eligibleItemCount: 1 }], nextBeforeOmsOrderId: null, unavailableOrderCount: 0 };
     const choices = vi.fn(async () => page);

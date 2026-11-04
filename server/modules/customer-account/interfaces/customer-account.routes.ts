@@ -1,3 +1,4 @@
+import { customerAccountOverviewSchema } from "@shared/customer-account/account-overview";
 import { dispatchCustomerReturn } from "../../returns/interfaces/http/customer-return-dispatch";
 import type { Express, Response } from "express";
 import { rateLimit } from "express-rate-limit";
@@ -169,7 +170,7 @@ export function registerCustomerAccountRoutes(
           sessionKey: input.sessionKey,
         });
         if (
-          input.path !== "/account/bootstrap" &&
+          input.path !== "/account/bootstrap" && input.path !== "/account/overview" &&
           input.sessionKey !== principal.sessionKey
         ) {
           throw new CustomerReturnCustomerAccessError(
@@ -238,6 +239,20 @@ async function dispatch(
       },
       connection: await services.edits.connection(),
     });
+  }
+  if (path === "/account/overview" && !read) {
+    empty.parse(query);
+    const [connection, summaries, actions] = await Promise.all([
+      services.edits.connection(), services.orders.summaries(body, { progress: true, saved: true }), services.orders.actions(body, { allowUnavailable: true }),
+    ]);
+    return customerAccountOverviewSchema.parse({
+      bootstrap: { session: { authenticated: true, privateTesting: true, sessionKey: principal.sessionKey }, connection },
+      summaries, actions,
+    });
+  }
+  if (path === "/account/saved-summaries" && !read) {
+    empty.parse(query);
+    return customerAccountOrderSummariesSchema.parse(await services.orders.summaries(body, { progress: true, saved: true }));
   }
   if (path === "/account/resolve" && !read) {
     empty.parse(query);

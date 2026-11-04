@@ -172,10 +172,42 @@ async function setup(
       body: '<h1>Synthetic payment fixture</h1><a href="http://127.0.0.1:5192/account?preview_theme_id=174740308127">Return to your order</a>',
     }),
   );
+  const bootstrapReply = () => ({
+          session: {
+            authenticated: true,
+            privateTesting: true,
+            sessionKey: "a".repeat(43),
+          },
+          connection: {
+            connectionId: 4,
+            channelId: 36,
+            shopDomain: "fixture.myshopify.com",
+            name: "Synthetic",
+            enabled: true,
+            paymentWindowMinutes: 30,
+          },
+        });
+  const actionReply = async () => {
+      const currentOrder = options.orderRead ? await options.orderRead() : order;
+    return { orders: identities.map(identity => ({ ...identity,
+        omsOrderId: identity.externalOrderId === "99" ? 1 : null,
+        state: identity.externalOrderId !== "99" ? "not_managed" : currentOrder ? "ready" : "failed",
+        verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 60_000).toISOString(),
+        snapshot: identity.externalOrderId === "99" && currentOrder ? { order: { ...currentOrder, activeOperationId: activeOperation },
+          returnOrder: null, orderFailed: false, returnFailed: false } : null })) };
+  };
   await page.route("**/apps/echelon-returns/account", async (route) => {
     const input = route.request().postDataJSON() as CustomerAccountRequest;
     requests.push(input);
     expect(input.expectedCustomerId).toBe("100");
+    if (input.path === "/account/overview") {
+      expect(input.method).toBe("POST");
+      expect(input.commandKey).toBeUndefined();
+      expect(input.body).toEqual({orders:identities});
+      const result = options.summaryRead ? await options.summaryRead() : summaries();
+      return result ? route.fulfill({json:{bootstrap:bootstrapReply(),summaries:result,actions:await actionReply()}})
+        : route.fulfill({status:503,json:{error:{code:"ORDER_READ_UNAVAILABLE",message:"Synthetic summary read failure"}}});
+    }
     if (input.path === "/account/bootstrap")
       return route.fulfill({
         json: {
@@ -194,15 +226,15 @@ async function setup(
           },
         },
       });
-    if (input.path === "/account/order-summaries") {
+    if (input.path === "/account/order-summaries" || input.path === "/account/saved-summaries") {
       expect(input.method).toBe("POST");
       expect(input.commandKey).toBeUndefined();
-      expect(input.body).toEqual({ orders: identities });
+      expect((input.body as {orders:typeof identities}).orders.every(identity => identities.some(expected => expected.externalOrderId === identity.externalOrderId && expected.orderReference === identity.orderReference))).toBe(true);
       const result = options.summaryRead
         ? await options.summaryRead()
         : summaries();
       return result
-        ? route.fulfill({ json: result })
+        ? route.fulfill({ json: {...result, orders:result.orders.filter(order => (input.body as {orders:typeof identities}).orders.some(identity => identity.externalOrderId === order.externalOrderId)), unavailableExternalOrderIds:result.unavailableExternalOrderIds.filter(id => (input.body as {orders:typeof identities}).orders.some(identity => identity.externalOrderId === id))} })
         : route.fulfill({
             status: 503,
             json: {
@@ -213,15 +245,7 @@ async function setup(
             },
           });
     }
-    if (input.path === "/account/order-actions") {
-      const currentOrder = options.orderRead ? await options.orderRead() : order;
-      return route.fulfill({ json: { orders: identities.map(identity => ({ ...identity,
-        omsOrderId: identity.externalOrderId === "99" ? 1 : null,
-        state: identity.externalOrderId !== "99" ? "not_managed" : currentOrder ? "ready" : "failed",
-        verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 60_000).toISOString(),
-        snapshot: identity.externalOrderId === "99" && currentOrder ? { order: { ...currentOrder, activeOperationId: activeOperation },
-          returnOrder: null, orderFailed: false, returnFailed: false } : null })) } });
-    }
+    if (input.path === "/account/order-actions") return route.fulfill({json:await actionReply()});
     if (input.path === "/returns/returns")
       return route.fulfill({
         json: { returns: [], nextBeforeAuthorizationId: null },
@@ -341,6 +365,8 @@ async function setup(
           (request) =>
             ![
               "/account/bootstrap",
+              "/account/overview",
+              "/account/saved-summaries",
               "/account/order-summaries",
               "/account/order-actions",
               "/returns/returns",
@@ -377,7 +403,7 @@ test("account totals wait for the owned current financial facts without submitti
   await expect(
     page.getByRole("status").filter({ hasText: "Loading your orders…" }),
   ).toBeVisible();
-  await expect(page.locator("[data-csz-order-history-content]")).toBeHidden();
+  await expect(page.locator("[data-csz-order-history-content]")).toBeVisible();
   release();
   await expect(total).toHaveText("$10.76 USD");
   expect(
@@ -400,14 +426,14 @@ test("account totals recover from a failed current read through an explicit read
   await expect(page.getByRole("alert")).toContainText(
     "We couldn’t load your orders.",
   );
-  await expect(page.locator("[data-csz-order-history-content]")).toBeHidden();
+  await expect(page.locator("[data-csz-order-history-content]")).toBeVisible();
   await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(total).toHaveText("$8.29 USD");
   expect(reads).toBe(2);
   fixture.assertNoFinancialCommands();
 });
 
-test("a slow history lookup reveals every verified total together without per-row calculation states", async ({
+test("a slow history lookup keeps native order rows visible without per-row calculation states", async ({
   page,
 }) => {
   let release!: () => void;
@@ -438,7 +464,7 @@ test("a slow history lookup reveals every verified total together without per-ro
     },
   });
   const history = page.locator("[data-csz-order-history-content]");
-  await expect(history).toBeHidden();
+  await expect(history).toBeVisible();
   await expect(
     page.getByText("Loading your orders…", { exact: true }),
   ).toBeVisible();
@@ -446,10 +472,10 @@ test("a slow history lookup reveals every verified total together without per-ro
     0,
   );
   await page.clock.fastForward(10_000);
-  await expect(history).toBeHidden();
+  await expect(history).toBeVisible();
   expect(
     fixture.requests.filter(
-      (request) => request.path === "/account/order-summaries",
+      (request) => ["/account/overview", "/account/saved-summaries"].includes(request.path),
     ),
   ).toHaveLength(1);
   release();
@@ -469,7 +495,7 @@ test("a slow history lookup reveals every verified total together without per-ro
   fixture.assertNoFinancialCommands();
 });
 
-test("an incomplete history response stays behind one retry instead of revealing a partially priced page", async ({
+test("one missing historical fact preserves verified totals and recovers automatically", async ({
   page,
 }) => {
   let attempts = 0;
@@ -498,11 +524,11 @@ test("an incomplete history response stays behind one retry instead of revealing
     },
   });
   const history = page.locator("[data-csz-order-history-content]");
-  await expect(page.getByRole("alert")).toContainText(
-    "We couldn’t load your orders.",
-  );
-  await expect(history).toBeHidden();
-  await page.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect(history.locator("[data-csz-order-total]").first()).toHaveText("$8.29 USD");
+  await expect(history).toBeVisible();
+  await expect(page.getByText("Total unavailable", {exact:true})).toHaveCount(0);
+  await page.clock.runFor(2_500);
+  await expect(history).toBeVisible();
   await expect(history).toBeVisible();
   await expect(history.locator("[data-csz-order-total]")).toHaveText([
     "$8.29 USD",
@@ -537,7 +563,7 @@ test("account totals leave the loading state when startup configuration is inval
   page,
 }) => {
   const fixture = await setup(page, { openEditor: false, customerId: "" });
-  await expect(page.locator("[data-csz-order-history-content]")).toBeHidden();
+  await expect(page.locator("[data-csz-order-history-content]")).toBeVisible();
   await expect(page.getByRole("alert")).toHaveText(
     "Your orders could not be loaded. Please refresh this page.",
   );
@@ -567,7 +593,7 @@ for (const mismatch of [
     await expect(page.getByRole("alert")).toContainText(
       "We couldn’t load your orders.",
     );
-    await expect(page.locator("[data-csz-order-history-content]")).toBeHidden();
+    await expect(page.locator("[data-csz-order-history-content]")).toBeVisible();
     expect(
       fixture.requests.filter((request) =>
         request.path.startsWith("/order-edits/"),
@@ -680,11 +706,11 @@ test("closing order options preserves the account session and totals without new
   await page.clock.fastForward(5000);
   expect(fixture.requests).toHaveLength(reads);
   expect(
-    fixture.requests.filter((request) => request.path === "/account/bootstrap"),
+    fixture.requests.filter((request) => request.path === "/account/overview"),
   ).toHaveLength(1);
   expect(
     fixture.requests.filter(
-      (request) => request.path === "/account/order-summaries",
+      (request) => ["/account/overview", "/account/saved-summaries"].includes(request.path),
     ),
   ).toHaveLength(1);
   fixture.assertNoFinancialCommands();
