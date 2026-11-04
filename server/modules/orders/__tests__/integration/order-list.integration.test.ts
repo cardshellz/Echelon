@@ -66,13 +66,24 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     }));
     history = (await import("../../order-history.storage")).orderHistoryMethods;
     vi.doMock("../../../../db", () => ({ db: orm, pool: database.pool }));
+    // This suite proves WMS listing SQL/DTO behavior. Keep the real HTTP gate,
+    // supplying its current Identity authority through an explicit test port;
+    // the deliberately small listing schema is not an Identity fixture.
+    vi.doMock("../../../identity", async importOriginal => ({
+      ...await importOriginal<typeof import("../../../identity")>(),
+      readCurrentStaffAccess: async (userId: string) => userId === "fixture-operator" ? {
+        user: { id: userId, username: "Fixture operator", active: 1, role: "picker", displayName: null,
+          createdAt: new Date("2026-10-05T00:00:00Z"), lastLoginAt: null },
+        roles: [{ id: 1, name: "Picker", isSystem: true }], permissions: ["picking:view"],
+      } : undefined,
+    }));
     orderStorage = (await import("../../orders.storage")).orderMethods;
   });
   beforeEach(async () => {
     await database.pool.query("TRUNCATE wms.order_items, wms.orders, wms.picking_logs, oms.oms_orders, oms.oms_order_lines, channels.channels RESTART IDENTITY");
     queries.length = 0;
   });
-  afterAll(async () => { vi.doUnmock("../../../../storage/base"); vi.doUnmock("../../../../db"); await database?.close(); });
+  afterAll(async () => { vi.doUnmock("../../../../storage/base"); vi.doUnmock("../../../../db"); vi.doUnmock("../../../identity"); await database?.close(); });
 
   async function seed(status: string, overrides: Partial<typeof schema.wmsOrders.$inferInsert> = {}) {
     const [order] = await orm.insert(schema.wmsOrders).values({

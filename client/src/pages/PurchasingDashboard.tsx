@@ -643,10 +643,10 @@ export default function PurchasingDashboard() {
   const [, navigate] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { user, hasPermission } = useAuth();
+  const { hasPermission, hasSystemRole } = useAuth();
   // Match the auto-draft POST boundary: adjustment permission alone does not
-  // authorize starting the job; the server also requires the admin role.
-  const canRunAutoDraft = user?.role === "admin" && hasPermission("inventory", "adjust");
+  // authorize starting the job; the server also requires the assigned system role.
+  const canRunAutoDraft = hasSystemRole("admin") && hasPermission("inventory", "adjust");
   const canManagePlanningPolicy = hasPermission("inventory", "adjust") || hasPermission("purchasing", "edit");
   const [exclusionModalOpen, setExclusionModalOpen] = useState(false);
   const [runHistorySearch, setRunHistorySearch] = useState("");

@@ -278,6 +278,17 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/returns/__tests__/integration/customer-return-guest.repository.test.ts",
       // Staff Shopify OAuth: atomic challenge claims, current authority, stale completion and durable audit.
       "server/modules/channels/__tests__/integration/shopify-staff-oauth.integration.test.ts",
+      // Identity: constrained grants remain scoped across HTTP and command readers.
+      "server/modules/identity/__tests__/integration/scoped-grants.integration.test.ts",
+      // Generic role edits: restriction preservation, validation, rollback and races.
+      "server/modules/identity/__tests__/integration/role-permissions.integration.test.ts",
+      // Employee assignment requires an explicit valid selection and serialized replacement.
+      "server/modules/identity/__tests__/integration/role-assignments.integration.test.ts",
+      "server/modules/identity/__tests__/integration/identity-administration.integration.test.ts",
+      "server/modules/identity/__tests__/integration/staff-access.integration.test.ts",
+      "server/modules/identity/__tests__/integration/identity-access-audit-migration.integration.test.ts",
+      // Startup registers definitions only; it must not resurrect employee authority.
+      "server/modules/identity/__tests__/integration/startup-authority.integration.test.ts",
     );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);

@@ -5,8 +5,8 @@ export async function readWarehouseWorkActor(client: PoolClient, userId: string)
   const user = await client.query<{ id: string; active: number }>(
     "SELECT id, active FROM identity.users WHERE id = $1 FOR SHARE", [userId],
   );
-  const grants = await client.query<{ action: string; constraints: unknown }>(`
-    SELECT p.action, rp.constraints
+  const grants = await client.query<{ action: string; unscoped: boolean }>(`
+    SELECT p.action, (rp.constraints IS NULL) AS unscoped
     FROM identity.auth_user_roles ur
     JOIN identity.auth_role_permissions rp ON rp.role_id = ur.role_id
     JOIN identity.auth_permissions p ON p.id = rp.permission_id
@@ -19,7 +19,8 @@ export async function readWarehouseWorkActor(client: PoolClient, userId: string)
     active: user.rows[0]?.active === 1,
     // Existing generic constraints have no implemented contract. Never discard them
     // to accidentally turn a restricted role into a warehouse-wide grant.
-    permissions: [...new Set(grants.rows.filter((row) => row.constraints === null)
+    // Compare in SQL so a JSONB null cannot become an unscoped grant after decoding.
+    permissions: [...new Set(grants.rows.filter((row) => row.unscoped === true)
       .map((row) => `warehouse_work:${row.action}`))],
   };
 }

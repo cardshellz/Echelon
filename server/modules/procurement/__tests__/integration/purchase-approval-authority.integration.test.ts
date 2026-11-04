@@ -775,10 +775,11 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     expect(await evidence()).toEqual(before);
   });
 
-  it("rejects unsupported scoped authority in the real approval owner even when generic permission middleware passes", async () => {
+  it("rejects unsupported scoped authority at both HTTP permission and direct approval-owner boundaries", async () => {
     requestActor = "scoped-user";
     const before = await evidence();
-    expect(await postApproval()).toMatchObject({ status: 403, body: { details: { code: "PO_APPROVAL_SCOPE_UNSUPPORTED" } } });
+    expect(await postApproval()).toMatchObject({ status: 403, body: { error: "Permission denied: purchasing:approve" } });
+    await expect(approveCurrent("scoped-user")).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_APPROVAL_SCOPE_UNSUPPORTED" } });
     expect(await evidence()).toEqual(before);
   });
 

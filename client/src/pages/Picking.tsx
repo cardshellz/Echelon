@@ -697,10 +697,11 @@ export default function Picking() {
 }
 
 function PickingWorkspace() {
-  // Get current user for role-based UI
-  const { user, permissions, hasPermission } = useAuth();
-  const isAdminOrLead = user && (user.role === "admin" || user.role === "lead");
-  const canViewReplenTasks = isAdminOrLead || hasPermission("inventory", "view");
+  // Supervisor affordances use verified assignments, never the legacy label.
+  const { user, permissions, hasPermission, hasSystemRole } = useAuth();
+  const isAdminOrLead = hasSystemRole("admin") || hasSystemRole("lead");
+  const canViewReplenTasks = hasPermission("inventory", "view");
+  const canChangePriority = isAdminOrLead;
   const canManageHolds = hasPermission("orders", "hold");
   const { toast } = useToast();
   
@@ -1136,7 +1137,7 @@ function PickingWorkspace() {
     },
   });
   
-  // Mutation for setting order priority (admin/lead only)
+  // Mutation for setting order priority (the server rechecks assigned system roles).
   const priorityMutation = useMutation({
     mutationFn: ({ orderId, priority }: { orderId: number; priority: number | "reset" }) => 
       setOrderPriority(orderId, priority),
@@ -3681,9 +3682,9 @@ function PickingWorkspace() {
                               </div>
                             )}
                             {/* Admin action buttons (Bump / Normal / Hold / Release) — kept inline */}
-                            {(isAdminOrLead || canManageHolds) && (
+                            {(canChangePriority || canManageHolds) && (
                               <div className="text-[10px] text-muted-foreground/70 flex items-center gap-2 mt-0.5">
-                                {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority < 9999 && (
+                                {canChangePriority && order.status === "ready" && !order.onHold && order.priority < 9999 && (
                                   <button
                                     className="text-red-500 hover:text-red-600 flex items-center gap-0.5 font-medium"
                                     onClick={(e) => {
@@ -3698,7 +3699,7 @@ function PickingWorkspace() {
                                     Bump
                                   </button>
                                 )}
-                                {isAdminOrLead && order.status === "ready" && !order.onHold && order.priority >= 9999 && (
+                                {canChangePriority && order.status === "ready" && !order.onHold && order.priority >= 9999 && (
                                   <button
                                     className="text-slate-500 hover:text-slate-600 flex items-center gap-0.5 font-medium"
                                     onClick={(e) => {

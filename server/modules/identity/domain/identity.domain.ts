@@ -86,6 +86,9 @@ export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
   { resource: "warehouse", action: "manage", description: "Manage warehouse settings and replenishment rules", category: "warehouse" },
 ];
 
+// Historical default policy lists remain for compatibility/reference. Ordinary
+// startup registers only name/description definitions; these lists never prove
+// an employee's effective grants and must not restore revoked authority.
 export const SYSTEM_ROLES = {
   admin: {
     name: "Administrator",

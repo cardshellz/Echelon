@@ -421,21 +421,12 @@ function CombineOrderItems({ orderId }: { orderId: number }) {
   );
 }
 
-// --- Priority Control Card (Lead/Admin only) ---
+// --- Priority Control Card (explicitly assigned Administrator/Team Lead) ---
 
 function PriorityControlCard({ order, onUpdated }: { order: OrderDetail; onUpdated: () => void }) {
   const { toast } = useToast();
-  const { data: authData } = useQuery<{ user: { id: string; role: string; username: string } }>({
-    queryKey: ["/api/auth/me"],
-    queryFn: async () => {
-      const res = await fetch("/api/auth/me", { credentials: "include" });
-      if (!res.ok) return null;
-      return res.json();
-    },
-  });
-
-  const permissions = (authData as any)?.permissions || (authData as any)?.user?.permissions || {};
-  const isAuthorized = authData?.user?.role === "admin" || permissions?.orders?.includes("override_priority");
+  const { hasSystemRole } = useAuth();
+  const isAuthorized = hasSystemRole("admin") || hasSystemRole("lead");
   if (!isAuthorized || isWmsOrderTerminal(order)) return null;
 
   const isBumped = order.priority >= 9999;
@@ -675,7 +666,7 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
         </CardContent>
       </Card>
 
-      {/* Priority Management — Lead/Admin only */}
+      {/* Priority management matches the assigned-system-role command boundary. */}
       <PriorityControlCard order={order} onUpdated={() => refetch()} />
 
       {/* Customer & Shipping */}

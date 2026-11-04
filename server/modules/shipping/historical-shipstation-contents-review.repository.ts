@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { readStaffSystemRoleAuthorityPg } from "../identity/staff-authority";
 
 import {
   loadCurrentShipStationContentsConflictCandidate,
@@ -375,12 +376,12 @@ function snapshotFromRow(row: Record<string, unknown>): HistoricalShipStationCon
 }
 
 async function authorizedActor(client: PoolClient, actorUserId: string): Promise<"admin" | "lead"> {
-  const result = await client.query(
-    "SELECT role, active FROM identity.users WHERE id = $1 FOR UPDATE",
-    [actorUserId],
-  );
-  const role = result.rows[0]?.role;
-  if (result.rows.length !== 1 || Number(result.rows[0]?.active) !== 1 || !["admin", "lead"].includes(role)) {
+  const authority = await readStaffSystemRoleAuthorityPg(client, actorUserId);
+  // Existing immutable evidence uses admin/lead labels; the authorization
+  // behind a new decision now comes only from explicit system assignments.
+  const role = authority.roles.includes("admin") ? "admin"
+    : authority.roles.includes("lead") ? "lead" : null;
+  if (!authority.active || !role) {
     throw new HistoricalShipStationContentsReviewRepositoryError(
       "LEAD_AUTHORIZATION_REQUIRED",
       "Historical contents decisions require an active lead or administrator",

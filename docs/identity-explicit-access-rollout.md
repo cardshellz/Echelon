@@ -1,9 +1,9 @@
 # Explicit employee access: Foundation rollout contract
 
-This draft records the approved employee access model and the release gates for its
-implementation. The initial documentation commit reserves a real draft PR identity;
-the implementation and migration will be attached to the same draft after allocation.
-It is not a deployment or permission-change authorization.
+This document records the approved employee access model and the release gates for
+[draft PR #1998](https://github.com/cardshellz/Echelon/pull/1998). The implementation
+carries the earlier scoped-grant, role-editor and startup-revocation corrections into
+one explicit-role cutover. It is not a deployment or permission-change authorization.
 
 ## Accepted authority
 
@@ -13,7 +13,7 @@ Ordinary startup registers missing definitions only; it must not restore revoked
 or infer memberships from legacy labels. Account creation and granting access are separate.
 Existing named business approver-role requirements remain explicit assigned-role policies.
 
-## Intended correction and preserved behavior
+## Implementation and preserved behavior
 
 - Reject malformed role selections before deleting anything. An explicit empty list is a
   valid revocation. Serialize full replacements without promising optimistic versioning.
@@ -27,8 +27,10 @@ Existing named business approver-role requirements remain explicit assigned-role
 
 ## Gates before any rollout
 
-1. Allocate the audit migration using this actual draft PR number and current migration
-   dependencies. Verify discovery, immutability, upgrade and final-head hosted checks.
+1. Verify discovery, immutability, upgrade and final-head hosted checks for
+   `900000053000019980001_identity_access_audit_guard.sql`. Its allocation belongs to
+   PR #1998 and depends on `0107_audit_events.sql` and the current Shopify OAuth
+   migration. Install the additive guard before enabling the access-command cutover.
 2. Run the read-only access preflight only in an explicitly approved environment. Review
    actual zero-role accounts and named-role effects; a legacy label is not migration input.
 3. If there is no usable access manager, stop. Review an explicit bootstrap for the exact
@@ -52,3 +54,27 @@ provide correlation, not an exactly-once receipt or stale-form conflict detectio
 This bounded family does not certify every business command, the whole session lifecycle,
 production throughput, effective GitHub protections, or the complete Foundation phase.
 No merge, automatic merge, deployment or production permission/data mutation is authorized.
+
+## Evidence and maintenance
+
+The pre-publication local review passed 684 focused tests, 664 disposable PostgreSQL
+tests across 15 suites, all three TypeScript checks, and seven full current-source schema
+upgrade groups covering 512 tables. After allocation, the six Identity database suites
+(229 cases) and full-source upgrade were rerun successfully using the allocated SQL.
+The 684 focused tests and all three TypeScript checks also passed after allocation.
+The new and prior audit guards coexist; a real lock timeout and injected ledger-write
+failure preserve prior metadata/history and roll back incomplete DDL. These tests use
+an existing disposable owner/superuser and do not establish actual runtime least privilege.
+Current hosted results belong to the exact PR head, not these historical local counts.
+
+The access-administration use cases own account/role changes, membership replacement and
+permission replacement. `runIdentityAdministration` enforces current actor authority,
+management coverage and transactional audit. `readIdentityAccessPreflight` reports the
+existing management condition without granting access. Tests are registered in the
+existing PostgreSQL manifest; the private-writer AST guard runs in the unit lane.
+The guard detects literal imports/re-exports, not all computed imports or direct SQL.
+
+Preserve the accepted custom/multiple/empty-role model when changing these controls.
+Guard, exclusion, fixture or manifest changes require review of prohibited and permitted
+behavior; a larger baseline is not proof of compliance. Password-reset session invalidation,
+optimistic editor versioning and whole-system command/telemetry coverage remain separate work.

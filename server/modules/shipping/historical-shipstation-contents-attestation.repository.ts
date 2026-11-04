@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { readStaffSystemRoleAuthorityPg } from "../identity/staff-authority";
 
 import {
   loadHistoricalShipStationExpectedContents,
@@ -227,26 +228,15 @@ implements HistoricalShipStationContentsAttestationTransaction {
   async lockAuthorizedActor(
     userId: string,
   ): Promise<AuthorizedHistoricalContentsAttestationActor | null> {
-    const result = await this.query(
-      `SELECT id, role, active
-       FROM identity.users
-       WHERE id = $1
-       FOR UPDATE`,
-      [userId],
-    );
-    if (result.rows.length === 0) return null;
-    if (result.rows.length !== 1) {
-      throw new HistoricalShipStationContentsAttestationRepositoryError(
-        "INVALID_DATABASE_EVIDENCE",
-        "Historical contents attestation received duplicate actor identity",
-      );
-    }
-    const row = result.rows[0];
-    const id = exactText(row.id, "actor_user_id");
-    const role = exactText(row.role, "actor_role");
-    const active = Number(row.active);
-    if (id !== userId || active !== 1 || (role !== "admin" && role !== "lead")) return null;
-    return Object.freeze({ userId: id, role });
+    const authority = await readStaffSystemRoleAuthorityPg({
+      query: (text, values) => this.query(text, values),
+    }, userId);
+    // Keep the historical evidence contract, deriving its label solely from
+    // current explicit system-role assignments. Multiple assignments are valid.
+    const role = authority.roles.includes("admin") ? "admin"
+      : authority.roles.includes("lead") ? "lead" : null;
+    if (!authority.active || !role) return null;
+    return Object.freeze({ userId, role });
   }
 
   async loadCandidateForUpdate(

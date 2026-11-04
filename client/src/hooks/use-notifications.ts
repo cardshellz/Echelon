@@ -2,6 +2,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
 import { useEffect, useRef } from "react";
 
+const NOTIFICATION_RECONNECT_INITIAL_MS = 1_000;
+const NOTIFICATION_RECONNECT_MAX_MS = 30_000;
+const NOTIFICATION_CONNECTION_STABLE_MS = 30_000;
+
 // Types matching the backend response
 export interface NotificationItem {
   id: number;
@@ -30,74 +34,134 @@ export interface NotificationPreference {
  * Polls every 30s and also refreshes on WebSocket messages.
  */
 export function useUnreadCount() {
-  const { user } = useAuth();
+  const { user, assignedRoles, accessStatus, refetch } = useAuth();
+  const hasStaffAccess = !!user && accessStatus === "authenticated" && assignedRoles.length > 0;
   const queryClient = useQueryClient();
   const wsRef = useRef<WebSocket | null>(null);
 
   const query = useQuery<{ count: number }>({
     queryKey: ["/api/notifications/unread-count"],
-    queryFn: async () => {
-      const res = await fetch("/api/notifications/unread-count");
+    queryFn: async ({ signal }) => {
+      const res = await fetch("/api/notifications/unread-count", { signal });
       if (!res.ok) throw new Error("Failed to fetch unread count");
       return res.json();
     },
     refetchInterval: 30_000,
-    enabled: !!user,
+    enabled: hasStaffAccess,
   });
 
   // WebSocket connection for real-time pushes
   useEffect(() => {
-    if (!user) return;
+    if (!hasStaffAccess) return;
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const wsUrl = `${protocol}//${window.location.host}/ws`;
-    const ws = new WebSocket(wsUrl);
+    let disposed = false;
+    let revoked = false;
+    let retryDelay = NOTIFICATION_RECONNECT_INITIAL_MS;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 
-    ws.onopen = () => {
-      console.log("[WebSocket] Connected for notifications");
+    const reloadNotifications = () => {
+      // Pushes are hints. The persisted list/count recover events missed during
+      // a disconnect, an authority outage, or the server's bounded queue overflow.
+      void queryClient.invalidateQueries({ queryKey: ["/api/notifications/unread-count"] });
+      void queryClient.invalidateQueries({ queryKey: ["/api/notifications"] });
+    };
+    const scheduleReconnect = () => {
+      if (disposed || revoked || reconnectTimer !== undefined) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = undefined;
+        connect();
+      }, retryDelay);
+      retryDelay = Math.min(retryDelay * 2, NOTIFICATION_RECONNECT_MAX_MS);
     };
 
-    ws.onmessage = (event) => {
+    const connect = () => {
+      if (disposed || revoked) return;
+      let ws: WebSocket;
       try {
-        const msg = JSON.parse(event.data);
-        if (msg.type === "notification") {
-          // Invalidate both count and list
-          queryClient.invalidateQueries({ queryKey: ["/api/notifications/unread-count"] });
-          queryClient.invalidateQueries({ queryKey: ["/api/notifications"] });
+        ws = new WebSocket(wsUrl);
+      } catch {
+        // Construction can fail before the browser provides close/error events.
+        reloadNotifications();
+        scheduleReconnect();
+        return;
+      }
+      wsRef.current = ws;
+      let openedAt: number | undefined;
+      const isCurrent = () => !disposed && wsRef.current === ws;
+      ws.onopen = () => {
+        if (!isCurrent()) return;
+        openedAt = Date.now();
+        reloadNotifications();
+      };
+      ws.onmessage = (event) => {
+        if (!isCurrent()) return;
+        try {
+          const msg: unknown = JSON.parse(event.data);
+          if (msg && typeof msg === "object" && "type" in msg && msg.type === "notification") {
+            reloadNotifications();
+          }
+        } catch {
+          // A malformed hint cannot replace authoritative notification data.
+          reloadNotifications();
         }
-      } catch {}
+      };
+      ws.onerror = () => {
+        if (isCurrent()) reloadNotifications();
+        // Browsers follow a transport error with close; only close schedules retry.
+      };
+      ws.onclose = async (event) => {
+        if (!isCurrent()) return;
+        wsRef.current = null;
+        reloadNotifications();
+        if (event.code === 1008) {
+          revoked = true;
+          await refetch();
+          return;
+        }
+        // A rejected HTTP upgrade is exposed as 1006, not its 401/403 status.
+        // Refresh authority before retrying so a revoked session cannot loop.
+        if (event.code === 1006) await refetch();
+        if (openedAt !== undefined && Date.now() - openedAt >= NOTIFICATION_CONNECTION_STABLE_MS) {
+          retryDelay = NOTIFICATION_RECONNECT_INITIAL_MS;
+        }
+        scheduleReconnect();
+      };
     };
 
-    ws.onerror = () => {};
-    ws.onclose = () => {};
-
-    wsRef.current = ws;
+    connect();
 
     return () => {
-      ws.close();
+      disposed = true;
+      if (reconnectTimer !== undefined) clearTimeout(reconnectTimer);
+      const ws = wsRef.current;
+      wsRef.current = null;
+      ws?.close();
     };
-  }, [user?.id, queryClient]);
+  }, [user?.id, hasStaffAccess, queryClient, refetch]);
 
-  return query.data?.count ?? 0;
+  return hasStaffAccess ? query.data?.count ?? 0 : 0;
 }
 
 /**
  * Hook for the notification list.
  */
 export function useNotifications(opts?: { unreadOnly?: boolean; limit?: number }) {
-  const { user } = useAuth();
+  const { user, assignedRoles, accessStatus } = useAuth();
+  const hasStaffAccess = !!user && accessStatus === "authenticated" && assignedRoles.length > 0;
   const params = new URLSearchParams();
   if (opts?.unreadOnly) params.set("unreadOnly", "true");
   if (opts?.limit) params.set("limit", String(opts.limit));
 
   return useQuery<NotificationItem[]>({
     queryKey: ["/api/notifications", opts?.unreadOnly, opts?.limit],
-    queryFn: async () => {
-      const res = await fetch(`/api/notifications?${params}`);
+    queryFn: async ({ signal }) => {
+      const res = await fetch(`/api/notifications?${params}`, { signal });
       if (!res.ok) throw new Error("Failed to fetch notifications");
       return res.json();
     },
-    enabled: !!user,
+    enabled: hasStaffAccess,
   });
 }
 
@@ -139,15 +203,16 @@ export function useMarkAllRead() {
  * Hook for notification preferences.
  */
 export function useNotificationPreferences() {
-  const { user } = useAuth();
+  const { user, assignedRoles, accessStatus } = useAuth();
+  const hasStaffAccess = !!user && accessStatus === "authenticated" && assignedRoles.length > 0;
   return useQuery<NotificationPreference[]>({
     queryKey: ["/api/notification-preferences"],
-    queryFn: async () => {
-      const res = await fetch("/api/notification-preferences");
+    queryFn: async ({ signal }) => {
+      const res = await fetch("/api/notification-preferences", { signal });
       if (!res.ok) throw new Error("Failed to fetch preferences");
       return res.json();
     },
-    enabled: !!user,
+    enabled: hasStaffAccess,
   });
 }
 
