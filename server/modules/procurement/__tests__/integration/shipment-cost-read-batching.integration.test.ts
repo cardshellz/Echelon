@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { sql } from "drizzle-orm";
+import { sql, type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_AT, FLOW_ACTOR, type FlowCostHarness } from "./procurement-flow-cost.fixture";
 import { prepareShipmentCostRevisions, prepareShipmentCostRevisionBatch } from "../../shipment-cost-application.service";
 import { readCurrentShipmentSourceFingerprintBatch } from "../../shipment-cost-exception.repository";
@@ -57,15 +58,26 @@ const snapshot = { isolationLevel: "repeatable read", accessMode: "read only" } 
       expect(reviews.get(32)).toEqual(await readShipmentCostReviewInTransaction(tx, 32));
     }, snapshot);
   });
-  it("uses bounded six-query economic batches over more than two header pages", async () => {
+  it("keeps economic pages bounded and adds tax/header reads only for pages containing invoices", async () => {
     await seedShipments(201);
     await harness.database.transaction(async tx => {
-      let reads = 0;
-      const reader = { execute: async (query: unknown) => { reads++; return tx.execute(query as Parameters<typeof tx.execute>[0]); } };
+      const executed: Array<{ sql: string; params: unknown[] }> = [];
+      const reader = { execute: async (query: SQL) => {
+        executed.push(new PgDialect().sqlToQuery(query)); return tx.execute(query);
+      } };
       const ids = Array.from({ length: 201 }, (_, i) => 31 + i);
       const result = await readCurrentShipmentSourceFingerprintBatch(reader, ids);
       expect(result.size).toBe(201); expect([...result.values()].every(value => value.size === 1)).toBe(true);
-      expect(reads).toBe(18);
+      // Three six-query source pages, plus one document-wide header probe,
+      // one invoice-tax read and one configured charge-tax read. Only the
+      // first page contains billed sources; later pages do not repeat them.
+      const headers = executed.filter(query => query.sql.includes("procurement.supplier_header_cost_reviews"));
+      const invoiceTaxes = executed.filter(query => query.sql.includes("FROM procurement.vendor_invoice_line_taxes"));
+      const chargeTaxes = executed.filter(query => query.sql.includes("WHERE cost.id=ANY"));
+      expect(headers).toHaveLength(1); expect(headers[0].params).toEqual([[301]]);
+      expect(invoiceTaxes).toHaveLength(1); expect(invoiceTaxes[0].params).toEqual([[401, 402]]);
+      expect(chargeTaxes).toHaveLength(1); expect(chargeTaxes[0].params).toEqual([[41, 42]]);
+      expect(executed).toHaveLength(21);
     }, snapshot);
   });
   it("retains one reader snapshot during a concurrent source change and refreshes on the next request", async () => {
