@@ -18,6 +18,7 @@ import { createOrderActionProjectionWorker, startOrderActionProjectionScheduler 
 import { createPackageHistoryWorker, startPackageHistoryScheduler } from "./modules/shipping/package-history.composition";
 import type { OrderActionProjectionReport } from "./modules/customer-account/infrastructure/order-action-projection.composition";
 import { logger } from "./platform/observability/logger";
+import { reportBackgroundWork } from "./platform/observability/background-work-report";
 import { hasPermission } from "./modules/identity";
 import { startListingPublicationWorker } from "./modules/marketplace-listings/application/listing-publication-worker";
 import { startArchonOrderDelivery } from "./modules/oms/archon-order-delivery.worker";
@@ -757,8 +758,8 @@ function startEchelonSyncScheduler(
   if (!schedulersDisabled()) {
     try {
       const packages = createPackageHistoryWorker(dbPool, db, event => {
-        const { action, code, ...fields } = event;
-        logger.info(action, { ...fields, ...(code ? { error_code: code } : {}) });
+        const { action, ...fields } = event;
+        reportBackgroundWork(action, fields);
       });
       if (packages) httpServer.once("close", startPackageHistoryScheduler(packages, () => {
         logger.error("shipping_package_history_sweep", { outcome: "failed", error_code: "PACKAGE_HISTORY_SWEEP_FAILED" });
@@ -775,9 +776,8 @@ function startEchelonSyncScheduler(
     } catch {
       logger.error("customer_return_workflow_start", { outcome: "failed", error_code: "RETURN_WORKFLOW_CONFIGURATION_INVALID" });
     }
-    const reportActions: OrderActionProjectionReport = ({ action, code, ...event }) => {
-      const write = event.outcome === "failed" ? logger.error : logger.info;
-      write(action, { ...event, ...(code ? { error_code: code } : {}) });
+    const reportActions: OrderActionProjectionReport = ({ action, ...event }) => {
+      reportBackgroundWork(action, event);
     };
     try {
       httpServer.once("close", startOrderActionProjectionScheduler(createOrderActionProjectionWorker(dbPool, orderEdits, reportActions), reportActions));

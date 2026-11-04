@@ -57,6 +57,8 @@ export interface OrderEditReleaseProof {
   allocationRequired?: boolean;
   fulfilledCancellation?: boolean;
   cancelledOrder?: boolean;
+  /** Exact shipments and provider identities observed cancelled by the shipping owner. */
+  verifiedCancellationShipments?: Array<{ shipmentId: number; providerOrderId: number }>;
   /** No Shopify financial command was sent; only this operation's hold is removed. */
   unsubmitted?: boolean;
 }

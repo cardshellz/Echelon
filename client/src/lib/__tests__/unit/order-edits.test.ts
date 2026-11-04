@@ -56,6 +56,20 @@ const operation: OrderEditOperation = {
 };
 const jsonResponse = (value: unknown) => new Response(JSON.stringify(value));
 
+it("keeps busy observation opt-in and uses only a GET without a command key", async () => {
+  const request = vi.fn<typeof fetch>().mockImplementation(async () => jsonResponse({ ...operation, commandInProgress: true }));
+  const api = createOrderEditTransport(request, { observationVersion: "v1" });
+  const result = await api.operation(key);
+  expect(result.commandInProgress).toBe(true);
+  const [path, options] = request.mock.calls[0];
+  expect(path).toBe(`/api/order-edits/admin/operations/${key}?codeEntryVersion=v1&observationVersion=v1`);
+  expect(options?.method).toBe("GET");
+  expect(new Headers(options?.headers).has("Idempotency-Key")).toBe(false);
+  expect(orderEditCanCommit(result, Date.parse("2026-10-05T12:00:00Z"))).toBe(false);
+  await createOrderEditTransport(request).operation(key);
+  expect(request.mock.calls[1][0]).toBe(`/api/order-edits/admin/operations/${key}?codeEntryVersion=v1`);
+});
+
 describe("order edit product catalog transport", () => {
   const productId = "gid://shopify/Product/10";
   const product = {

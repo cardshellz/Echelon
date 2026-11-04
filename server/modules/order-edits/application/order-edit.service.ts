@@ -618,10 +618,25 @@ export class OrderEditService {
     }
     return this.present(record, codeEntryVersion);
   }
-  async get(id: string, codeEntryVersion?: "v1") {
+  async get(id: string, codeEntryVersion?: "v1", observationVersion?: "v1") {
     const record = await this.store.get(id);
     this.requireEdit(record);
-    return this.present(record, codeEntryVersion);
+    if (!observationVersion) return this.present(record, codeEntryVersion);
+    try {
+      // Observe the same nonblocking order lock as submission. Reading a stale
+      // ready document while its command owns that lock must not re-enable Apply.
+      return await this.store.withOrderLock(record.omsOrderId, async () => ({
+        ...this.present(await this.store.get(id), codeEntryVersion),
+        commandInProgress: false,
+      }));
+    } catch (error) {
+      if (!(error instanceof OrderEditError) || error.code !== "ORDER_EDIT_BUSY")
+        throw error;
+      return {
+        ...this.present(await this.store.get(id), codeEntryVersion),
+        commandInProgress: true,
+      };
+    }
   }
   async commit(id: string, key: string, actorId: string) {
     return this.locked(id, async (initial) => {

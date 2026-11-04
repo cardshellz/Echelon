@@ -10,9 +10,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import type { SupplierCreditCommands } from "./use-supplier-credit-commands";
+import { receiptCreditAttributionKey } from "@shared/procurement/receipt-credit-attribution";
 
-type LineDraft = { amount: string; disposition: string; quantity: string; reference: string };
-const emptyLine = (): LineDraft => ({ amount: "", disposition: "", quantity: "", reference: "" });
+type LineDraft = { amount: string; disposition: string; quantity: string; reference: string; receipt: string };
+const emptyLine = (): LineDraft => ({ amount: "", disposition: "", quantity: "", reference: "", receipt: "" });
 type CreditSourceLine = SupplierCreditOptions["lines"][number];
 function acceptedReturnChoices(line: CreditSourceLine) {
   return (line.acceptedReturns ?? []).flatMap(source => source.components.flatMap(component => [
@@ -89,7 +90,11 @@ export function SupplierCreditCreate({ commands, initialInvoiceId, returnDisposi
         }
         const component = line.components.find(value => `price:${value}` === draft.disposition);
         if (!component) throw new Error(`${line.label}: choose a supported credit reason and cost component.`);
-        return { invoiceLineId: line.invoiceLineId, amountCents, disposition: { kind: "price_reduction" as const, component } };
+        const selectedReceipt = line.receiptAllocations?.find(row => receiptCreditAttributionKey(row) === draft.receipt);
+        if (line.receiptCosting && !selectedReceipt) throw new Error(`${line.label}: choose the original billed receipt for this credit.`);
+        const receiptAllocation = selectedReceipt ? (({ receiptNumber: _reference, ...row }) => row)(selectedReceipt) : undefined;
+        return { invoiceLineId: line.invoiceLineId, amountCents, disposition: { kind: "price_reduction" as const, component,
+          ...(receiptAllocation ? { receiptAllocation } : {}) } };
       });
       if (supplierReturnLineId !== null && !lines.some(line => line.disposition.kind === "accepted_stock_return" && line.disposition.supplierReturnLineId === supplierReturnLineId)) throw new Error("Select the verified accepted-stock return that opened this credit workflow.");
       const newReturnQuantities = new Map<number, number>();
@@ -180,6 +185,11 @@ export function SupplierCreditCreate({ commands, initialInvoiceId, returnDisposi
                   </select>
                 </div>
               </div>
+              {line.receiptCosting && draft.disposition.startsWith("price:") && <div><Label htmlFor={`credit-receipt-${key}`}>Which receipt does this credit belong to?</Label>
+                <select id={`credit-receipt-${key}`} className={selectClass} value={draft.receipt} onChange={event => update(key, { receipt: event.target.value })}>
+                  <option value="">Choose the billed receipt</option>{line.receiptAllocations?.map(row => <option key={receiptCreditAttributionKey(row)} value={receiptCreditAttributionKey(row)}>{row.receiptNumber} · {row.pieces.toLocaleString()} pieces · receipt line #{row.receivingLineId}{row.receiptStartPiece > 0 ? ` · from piece ${row.receiptStartPiece + 1}` : ""}</option>)}
+                </select><p className="text-xs text-muted-foreground">Only this receipt's assigned cost changes. Other receipts, quantities and the original invoice remain unchanged.</p>
+              </div>}
               {accepted && <div className="space-y-2 text-sm">
                 <p>{accepted.entitlement ? "This additional credit uses an existing matched physical quantity; the stock return is not repeated." : "Match part or all of the recorded physical return. Components on this document share the same selected returned quantity. This does not change retained inventory or record cash."}</p>
                 <div className="grid gap-2 sm:grid-cols-2"><div><Label htmlFor={`credit-accepted-qty-${key}`}>Accepted-stock returned quantity ({accepted.source.unitsPerVariant} pieces per recorded unit; available {accepted.entitlement?.quantity ?? accepted.source.quantityAvailable})</Label><Input id={`credit-accepted-qty-${key}`} inputMode="numeric" value={draft.quantity} disabled={accepted.entitlement !== null} onChange={event => update(key, { quantity: event.target.value })} /></div>

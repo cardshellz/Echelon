@@ -106,9 +106,9 @@ export function createRuntimeMemoryObserver(dependencies: {
         throw error;
       }
     },
-    /** At most one process record and MAX_RUNTIME_MEMORY_GROUPS small work
-     * records per interval. No per-request/per-tick log stream or history buffer. */
-    report(details: Readonly<Record<string, unknown>>): void {
+    /** Failure groups are always emitted. Successful work can accumulate over
+     * several process samples without retaining individual requests or jobs. */
+    report(details: Readonly<Record<string, unknown>>, includeSuccessfulWork = true): void {
       reportSequence++;
       const telemetryFailures = failures;
       failures = 0;
@@ -116,13 +116,14 @@ export function createRuntimeMemoryObserver(dependencies: {
         ...details, reportSequence, activeWork: active, telemetryFailures,
       }));
       for (const [name, group] of groups) {
-        if (group.active || group.started || group.completed || group.failed) {
+        const populated = group.active || group.started || group.completed || group.failed;
+        if (populated && (includeSuccessfulWork || group.failed > 0)) {
           attempt(() => dependencies.emit("runtime.work_memory", {
             reportSequence, name, ...group, deltaScope: "whole_process_not_exclusive",
           }));
+          // Keep in-flight gauges across reporting windows, not completed history.
+          Object.assign(group, newGroup(), { active: group.active, peakActive: group.active });
         }
-        // Keep in-flight gauges across reporting windows, not completed history.
-        Object.assign(group, newGroup(), { active: group.active, peakActive: group.active });
       }
     },
   };

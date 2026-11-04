@@ -16,6 +16,7 @@ export function CustomerOrderPanelLoader(props: {
   enabled: boolean;
   summary?: CustomerOrderTotalsState;
   actions?: CustomerOrderActions;
+  verifiedActions?: CustomerOrderActions;
   actionError: boolean;
   statusUnavailable: boolean;
   accessNotice: CustomerAccountAccessNotice | null;
@@ -33,25 +34,37 @@ export function CustomerOrderPanelLoader(props: {
 }) {
   const summary = props.summary?.status === "verified" ? props.summary.order : null;
   const actions = props.actions;
-  const unverified = actions?.state === "ready" ? actions.snapshot : null;
+  // A refresh invalidates command evidence, not the customer's menu. Commands
+  // always recheck their owners; keep the same owned display until replaced.
+  const retained = props.verifiedActions;
+  const sameOwnedOrder = actions && retained && actions.state !== "not_managed" &&
+    actions.externalOrderId === retained.externalOrderId && actions.orderReference === retained.orderReference &&
+    actions.omsOrderId === retained.omsOrderId;
+  const unverified = props.accessNotice ? null : sameOwnedOrder ? retained.snapshot
+    : actions?.state === "ready" ? actions.snapshot : null;
   const mismatch = Boolean((unverified?.order && unverified.order.connectionId !== props.connectionId)
     || (summary?.omsOrderId != null && actions?.omsOrderId != null && summary.omsOrderId !== actions.omsOrderId));
   const snapshot = mismatch ? null : unverified;
+  // Retained snapshots keep navigation visible, but must not initialize a new
+  // return with invalidated item facts. Resolve those through the owned reader
+  // only when the customer actually selects Return items.
+  const returnLookupRequired = props.actionError || actions?.state !== "ready" || actions.snapshot?.returnFailed === true;
   const state: CustomerOrderPanelState = {
-    loading: !props.actionError && (!actions || actions.state === "refreshing"),
+    loading: !props.actionError && !snapshot && (!actions || actions.state === "refreshing"),
     error: props.actionError || mismatch || actions?.state === "failed" || (snapshot?.orderFailed && snapshot.returnFailed)
       ? "Some order options couldn’t be loaded. Try again to refresh them."
-      : snapshot?.orderFailed ? "Editing, address and cancellation options couldn’t be loaded."
+      : snapshot?.orderFailed ? snapshot.order ? "Order options couldn’t be refreshed. Your saved options are still available."
+        : "Editing, address and cancellation options couldn’t be loaded."
         : snapshot?.returnFailed ? "Return options couldn’t be loaded. You can still open Return items."
           : props.historyError,
     order: snapshot?.order ?? null,
     omsOrderId: actions?.omsOrderId ?? summary?.omsOrderId ?? null,
-    returnOrder: snapshot?.returnOrder ?? null,
+    returnOrder: returnLookupRequired ? null : snapshot?.returnOrder ?? null,
     // This only opens the existing owned-order return lookup. A cache rebuild is
     // not a policy decision, and never authorizes intake or a label purchase.
     returnLookupAvailable: Boolean(props.enabled && props.connectionId && !props.accessNotice && !mismatch
       && (actions?.omsOrderId ?? summary?.omsOrderId) != null && props.row.dataset.cancelled !== "true"
-      && (!snapshot || snapshot.returnFailed)),
+      && (!snapshot || returnLookupRequired)),
   };
   return <CustomerOrderPanel {...props} state={state} summary={summary} onChanged={props.onRefresh}
     onRetry={() => {

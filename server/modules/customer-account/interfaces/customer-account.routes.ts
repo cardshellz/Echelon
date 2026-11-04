@@ -343,12 +343,12 @@ async function dispatch(
     const operationId = z.string().uuid().parse(operation[1]);
     if (!operation[2] && read) {
       const params = z
-        .object({ codeEntryVersion: z.literal("v1").optional() })
+        .object({ codeEntryVersion: z.literal("v1").optional(), observationVersion: z.literal("v1").optional() })
         .strict()
         .parse(query);
       return orderEditResponsePresentation(
         orderEditOperationSchema.parse(
-          await services.edits.operation(operationId, params.codeEntryVersion),
+          await services.edits.operation(operationId, params.codeEntryVersion, params.observationVersion),
         ),
         pricingDisplay,
       );

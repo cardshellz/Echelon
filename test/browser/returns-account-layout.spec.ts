@@ -13,6 +13,7 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
   actionState?: "refreshing" | "failed"; failReturnLookup?: boolean; holdReturnLookup?: Promise<void>; queuedWorkflow?: boolean; returnLookupOrderId?: number; noReturnQuantity?: boolean;
   savedRequestOutcome?: "rejected" | "unknown";
   blockRecoveryClear?: boolean;
+  returnFailureAfterFirstLookup?: boolean;
   recoverOptions?: boolean;
   heldOrder?: boolean;
   failRefreshOnce?: boolean;
@@ -109,11 +110,12 @@ async function fixture(page: Page, options: { failReview?: boolean; lostSubmit?:
       if (refreshing) refreshRequested = true; else actionReads++;
       const ready = options.recoverOptions ? refreshRequested && !refreshing
         : !options.actionState && (!options.invalidateAfterFirstLookup || actionReads===1);
+      const returnFailed = Boolean(options.returnFailureAfterFirstLookup && actionReads > 1);
       return route.fulfill({ json: { orders: [{ externalOrderId: "1001", orderReference: "#TEST-1001", omsOrderId: 10,
         state: ready ? "ready" : options.recoverOptions && refreshing ? "refreshing" : options.actionState ?? "refreshing", verifiedAt: new Date().toISOString(), validUntil: new Date(Date.now() + 300_000).toISOString(),
         snapshot: ready ? { order: {...actionOrder,...(options.cancellationFlow && cancellationPhase !== "open" ? {
           activeOperationId:"40000000-0000-4000-8000-000000000001",activeOperationKind:"cancel_order",activeOperationStatus:"refunding",
-          cancellation:{canReview:false,reasons:[],requestKey:cancellationRequest}} : {})}, returnOrder: detail, orderFailed: false, returnFailed: false } : null }] } });
+          cancellation:{canReview:false,reasons:[],requestKey:cancellationRequest}} : {})}, returnOrder: returnFailed ? null : detail, orderFailed: false, returnFailed } : null }] } });
     }
     if (input.path === "/order-edits/orders/10") return route.fulfill({ json: {
       connectionId: 4, omsOrderId: 10, orderNumber: "#TEST-1001", customerName: "Synthetic customer", customerEmail: null, activeOperationId: null, revision: "fixture", currency: "USD",
@@ -335,6 +337,16 @@ test("expired options request worker recovery and refresh automatically without 
   expect(f.errors).toEqual([]);
 });
 
+test("a deferred order projection wakes when the customer opens an expired view",async({page})=>{
+  const f=await fixture(page,{openReturn:false,actionState:"refreshing",recoverOptions:true,heldOrder:true});
+  await expect.poll(()=>f.calls.filter(call=>call.path==="/account/order-actions/refresh").length).toBe(1);
+  await expect(page.getByRole("button",{name:"Edit order",exact:true})).toBeEnabled({timeout:10_000});
+  await expect(page.getByRole("button",{name:"Cancel order",exact:true})).toBeEnabled();
+  expect(f.calls.filter(call=>call.path==="/account/order-actions/refresh")).toHaveLength(1);
+  expect(f.calls.some(call=>call.commandKey)).toBe(false);
+  expect(f.errors).toEqual([]);
+});
+
 test("a failed cache refresh has one useful retry that restores held-order actions",async({page},info)=>{
   const f=await fixture(page,{openReturn:false,actionState:"failed",recoverOptions:true,heldOrder:true,failRefreshOnce:true});
   await expect(page.getByRole("alert")).toContainText("Some order options couldn’t be loaded");
@@ -360,6 +372,22 @@ test("local invalidation keeps return navigation available without inspecting pr
   await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
   await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeEnabled({ timeout: 250 });
   await expect(page.getByText("Order options are being refreshed. Your order has not changed.", { exact: true })).toHaveCount(0);
+  expect(f.calls.filter(call => call.path.startsWith("/order-edits/") || /^\/returns\/orders\//.test(call.path))).toEqual([]);
+  await page.getByRole("button", { name: "Return items", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();
+  expect(f.calls.filter(call => call.path === "/returns/orders/10")).toHaveLength(1);
+  expect(f.submitCount()).toBe(0);
+  expect(f.errors).toEqual([]);
+});
+
+test("a failed return-owner refresh retains navigation but reloads item facts when starting the return", async ({ page }) => {
+  await page.clock.install({ time: new Date() });
+  const f = await fixture(page, { openReturn: false, returnFailureAfterFirstLookup: true });
+  await page.getByRole("button", { name: "Close order options" }).click();
+  await page.clock.fastForward(30_000);
+  await expect.poll(f.actionReads).toBe(2);
+  await page.getByRole("button", { name: "Manage order #TEST-1001" }).click();
+  await expect(page.getByRole("button", { name: "Return items", exact: true })).toBeEnabled();
   expect(f.calls.filter(call => call.path.startsWith("/order-edits/") || /^\/returns\/orders\//.test(call.path))).toEqual([]);
   await page.getByRole("button", { name: "Return items", exact: true }).click();
   await expect(page.getByRole("heading", { name: "What would you like to return?" })).toBeVisible();

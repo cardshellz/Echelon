@@ -9,6 +9,7 @@ import { PostgresListingLifecycleRepository } from "../../infrastructure/pg-list
 import { listingAccountKey } from "../../domain/listing-publication";
 import { processListingMemberRetirement } from "../../application/process-listing-member-retirement";
 import { archivedListingMemberSelection } from "../../domain/listing-member-lifecycle";
+import { resolveListingIntentLifecycle } from "../../domain/listing-intent-lifecycle";
 import { EbayListingMemberAdapter } from "../../infrastructure/providers/ebay/ebay-listing-member.adapter";
 import { ShopifyListingMemberAdapter } from "../../infrastructure/providers/shopify-listing-member.adapter";
 import { WalmartListingMemberAdapter } from "../../../channels/adapters/walmart/walmart-listing-member.adapter";
@@ -252,6 +253,73 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     await run();
     expect((await receipts())[0]).toMatchObject({ state: "failed", code: "LISTING_MEMBER_IDENTITY_CONFLICT", identity: { identityConflict: true } });
     expect(getOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled();
+  });
+  it("defers a conflicting identity once and discovers its corrected source without losing the removal duty", async () => {
+    await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='offer-archived' WHERE product_variant_id=301");
+    remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
+    remote.set("offer-active", { offerId: "offer-active", sku: "ACTIVE-PACK", marketplaceId: "EBAY_US", status: "PUBLISHED" });
+    await run();
+    const [conflict] = await receipts();
+    expect(conflict).toMatchObject({ state: "failed", code: "LISTING_MEMBER_IDENTITY_CONFLICT" });
+    expect(await store.listConflictsForChannel(10,0)).toEqual({items:[{productId:30,productVariantId:302,
+      sku:"RENAMED-ARCHIVED-PACK",operationId:conflict.operationId}],hasMore:false,offset:0});
+    expect(await store.listConflictsForChannel(999,0)).toEqual({items:[],hasMore:false,offset:0});
+    const selected = await selection();
+    const lifecycle = resolveListingIntentLifecycle({ selection: { ...selected, variants: selected.variants.filter(row=>row.productVariantId===302) },
+      accountId:"seller-one", retainedVariantIds:[302], retirements:[conflict], stock:[], contentWork:[], now });
+    expect(lifecycle?.state).toBe("waiting_lifecycle");
+    if (!lifecycle || lifecycle.state !== "waiting_lifecycle") throw new Error("Expected unresolved listing work");
+    expect(lifecycle.lifecycle.members[0]).toMatchObject({state:"attention",nextActions:[{owner:"listing_mapping"}]});
+    expect(lifecycle.message).toContain("after the links change");
+    const before = (await database.pool.query("SELECT version,next_attempt_at='infinity'::timestamptz AS deferred FROM marketplace.listing_member_retirements WHERE id=$1", [conflict.operationId])).rows[0];
+    const eventsBefore = (await database.pool.query("SELECT count(*)::int AS n FROM marketplace.listing_member_retirement_events WHERE operation_id=$1", [conflict.operationId])).rows[0].n;
+    expect(before.deferred).toBe(true);
+    expect(await store.due(new Date(now.getTime()+3_600_000),25)).toEqual([]);
+    // A worker that selected this ID before another worker parked it must not
+    // append a second identical failure after the first transaction commits.
+    await store.withMember(conflict.operationId, session => processListingMemberRetirement(session,{store,adapter:async()=>adapter},()=>new Date(now.getTime()+3_600_000)));
+    await run(new Date(now.getTime()+3_600_000));
+    expect((await database.pool.query("SELECT version FROM marketplace.listing_member_retirements WHERE id=$1",[conflict.operationId])).rows[0].version).toBe(before.version);
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM marketplace.listing_member_retirement_events WHERE operation_id=$1",[conflict.operationId])).rows[0].n).toBe(eventsBefore);
+    expect(deleteOffer).not.toHaveBeenCalled();
+    await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='offer-active' WHERE product_variant_id=301");
+    await run(new Date(now.getTime()+3_660_000));
+    const [corrected] = await receipts();
+    expect(corrected).toMatchObject({state:"retired",identity:{identityConflict:false}});
+    expect(await store.listConflictsForChannel(10,0)).toEqual({items:[],hasMore:false,offset:0});
+    expect(corrected.operationId).not.toBe(conflict.operationId);
+    expect(deleteOffer).toHaveBeenCalledExactlyOnceWith("offer-archived");
+    expect(remote.has("offer-active")).toBe(true);
+    expect((await database.pool.query("SELECT state,code FROM marketplace.listing_member_retirements WHERE id=$1",[conflict.operationId])).rows[0])
+      .toEqual({state:"failed",code:"LISTING_MEMBER_IDENTITY_CONFLICT"});
+  });
+  it("paginates current identity conflicts without exposing another channel", async () => {
+    await database.pool.query(`UPDATE channels.channel_listings SET external_variant_id='offer-archived' WHERE product_variant_id=301;
+      INSERT INTO catalog.product_variants(id,product_id,sku,uom_type,is_active,requires_shipping,track_inventory,sales_eligibility)
+        VALUES(303,30,'ANOTHER-ARCHIVED','case',false,true,true,'sellable');
+      INSERT INTO channels.channel_listings(channel_id,product_variant_id,external_sku,external_variant_id,sync_status)
+        VALUES(10,303,'ANOTHER-OLD-SKU','offer-archived','synced');`);
+    await run();
+    expect((await store.listConflictsForChannel(10,0)).items.map(item=>item.productVariantId)).toEqual([302,303]);
+    expect((await store.listConflictsForChannel(10,1)).items.map(item=>item.productVariantId)).toEqual([303]);
+    expect(await store.listConflictsForChannel(999,0)).toEqual({items:[],hasMore:false,offset:0});
+    expect(getOffer).not.toHaveBeenCalled();
+  });
+  it("keeps conflicts beyond the first hundred available to the channel workspace", async () => {
+    await database.pool.query(`INSERT INTO catalog.product_variants(id,product_id,sku,uom_type,is_active,requires_shipping,track_inventory,sales_eligibility)
+      SELECT n,30,'ARCHIVED-'||n,'case',false,true,true,'sellable' FROM generate_series(400,500) n;
+      INSERT INTO channels.channel_listings(channel_id,product_variant_id,external_sku,external_variant_id,sync_status)
+      SELECT 10,n,'OLD-'||n,'offer-archived','synced' FROM generate_series(400,500) n`);
+    await store.discover(now,250);
+    // Populate the read fixture as already reported conflicts; production
+    // state changes still go through the worker and its immutable audit.
+    await database.pool.query(`UPDATE marketplace.listing_member_retirements SET state='failed',
+      code='LISTING_MEMBER_IDENTITY_CONFLICT',next_attempt_at='infinity'::timestamptz`);
+    const first = await store.listConflictsForChannel(10,0);
+    const second = await store.listConflictsForChannel(10,100);
+    expect(first.items).toHaveLength(100); expect(first.hasMore).toBe(true);
+    expect(second.items).toHaveLength(2); expect(second.hasMore).toBe(false);
+    expect(new Set([...first.items,...second.items].map(item=>item.operationId)).size).toBe(102);
   });
   it("retains completion across new active sync jobs, process restarts and repeated discovery", async () => {
     await run(); const first = await receipts();

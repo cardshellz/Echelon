@@ -1,4 +1,7 @@
 import { noInventoryEffectLabel } from "./cost-inventory-effect-presentation";
+import { SupplierCreditCostImpact } from "./SupplierCreditCostImpact";
+import { supplierCreditCostPreviewSchema, type SupplierCreditCostPreview } from "@shared/procurement/supplier-credit-cost-review";
+import { financialCommandFetchJson } from "@/lib/financial-command";
 import { supplierCreditCostLabel, supplierCreditCostSummary } from "@/features/purchasing/supplier-credit-presentation";
 import { SupplierCreditLink } from "./SupplierCreditLink";
 import React, { useCallback, useEffect, useState } from "react";
@@ -43,16 +46,31 @@ export function SupplierCreditDetail({ creditId, commands }: { creditId: number;
   const blocked = commands.blocked || creditQuery.isFetching || creditQuery.isError;
   const actionCapability = !credit || !action ? null : action.command === "reverse" ? credit.applications.find(row => row.id === action.applicationId)?.canReverse : credit.capabilities[action.command === "reconcile_costs" ? "reconcileCosts" : action.command];
   const staleAction = action !== null && action.expectedVersion !== credit?.version;
+  const [costPreview, setCostPreview] = useState<SupplierCreditCostPreview | null>(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const receiptCostReview = credit?.lines.some(line => line.disposition.kind === "price_reduction" && line.disposition.receiptAllocation) === true
+    && action !== null && action.command !== "reverse";
   async function submitReview() {
     if (!credit || !action || blocked || !commands.canApprove || !actionCapability?.allowed || staleAction) return;
     try {
       setError(null);
-      const payload = { expectedVersion: action.expectedVersion, reason: actionReason };
+      if (receiptCostReview && !costPreview) {
+        setLoadingPreview(true);
+        try {
+          const result = supplierCreditCostPreviewSchema.parse(await financialCommandFetchJson(`/api/supplier-credits/${creditId}/${action.command}/preview`, {
+            method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedVersion: action.expectedVersion, reason: actionReason }),
+          }));
+          if (result.creditId !== creditId || result.action !== action.command) throw new Error("The cost preview belongs to another credit action.");
+          setCostPreview(result);
+        } finally { setLoadingPreview(false); }
+        return;
+      }
+      const payload = { expectedVersion: action.expectedVersion, reason: actionReason, ...(receiptCostReview && costPreview ? { previewVersion: costPreview.previewVersion } : {}) };
       if (action.command === "reverse") await commands.execute({ command: "reverse", creditId, applicationId: action.applicationId, payload });
       else await commands.execute({ command: action.command, creditId, payload });
-    } catch (failure) { setError(failure instanceof Error ? failure.message : "Credit review failed."); }
+    } catch (failure) { setCostPreview(null); setError(failure instanceof Error ? failure.message : "Credit review failed."); }
   }
-  function review(next: ReviewAction) { setAction(next); setActionReason(""); setError(null); }
+  function review(next: ReviewAction) { setAction(next); setActionReason(""); setError(null); setCostPreview(null); }
   if (creditQuery.isPending) return <p role="status">Loading supplier credit…</p>;
   if (creditQuery.isError || !credit) return <section role="alert" className="space-y-2">
     <p>Supplier credit and its financial history are unavailable.</p>
@@ -115,12 +133,14 @@ export function SupplierCreditDetail({ creditId, commands }: { creditId: number;
         <p className="font-medium">{line.label}: {formatPaymentAmount(line.amountCents)}
         </p>
         <p>{line.disposition.kind === "price_reduction" ? `Price reduction · ${line.disposition.component}` : line.disposition.kind === "accepted_stock_return" ? `Accepted-stock return line #${line.disposition.supplierReturnLineId} · ${line.disposition.quantity} recorded units · ${line.disposition.component} · ${line.disposition.evidenceReference}${line.disposition.entitlementId ? ` · Existing matched quantity #${line.disposition.entitlementId}` : ""}` : `Physical return #${line.disposition.returnDispositionId} · ${line.disposition.quantity} source units · ${line.disposition.evidenceReference}`}
+          {line.disposition.kind === "price_reduction" && line.disposition.receiptAllocation && ` · Receipt line #${line.disposition.receiptAllocation.receivingLineId} · ${line.disposition.receiptAllocation.pieces.toLocaleString()} billed pieces`}
         </p>
         <p>Cost result: {line.inventoryEffect ? noInventoryEffectLabel : supplierCreditCostLabel(line.costState)}
         </p>{line.costIssues.map(issue => <p key={`${issue.code}:${issue.message}`} role="alert">{issue.message}
         </p>)}
       </div>)}
     </section>
+    {credit.costApprovals?.length ? <section aria-label="Receipt credit cost approvals" className="rounded border p-3 space-y-2"><h2 className="font-semibold">Approved cost changes</h2>{credit.costApprovals.map(row => <details key={row.eventId}><summary>{row.actorName} · {new Date(row.approvedAt).toLocaleString()} · {row.preview.action}</summary><p>{row.reason}</p><SupplierCreditCostImpact preview={row.preview} /></details>)}</section> : null}
     {commands.canApprove && <div className="flex flex-wrap gap-3">{credit.status === "draft" && <div>
       <Button disabled={blocked || !credit.capabilities.approve.allowed} onClick={() => review({ command: "approve", expectedVersion: credit.version })}>Approve credit</Button>{!credit.capabilities.approve.allowed && <p className="text-sm">{credit.capabilities.approve.reason}
       </p>}
@@ -163,12 +183,14 @@ export function SupplierCreditDetail({ creditId, commands }: { creditId: number;
           </DialogDescription>
         </DialogHeader>
         <SupplierCreditRecovery commands={commands} />{staleAction && <p role="alert">The credit changed after this review opened. Close and reopen the action after refreshing.</p>}<Label htmlFor="credit-action-reason">Reason for this credit action</Label>
-        <Textarea id="credit-action-reason" value={actionReason} maxLength={2000} disabled={commands.blocked} onChange={event => setActionReason(event.target.value)} />{error && <p role="alert" className="text-destructive">{error}
+        <Textarea id="credit-action-reason" value={actionReason} maxLength={2000} disabled={commands.blocked || loadingPreview} onChange={event => { setActionReason(event.target.value); setCostPreview(null); }} />
+        {costPreview && <SupplierCreditCostImpact preview={costPreview} />}{error && <p role="alert" className="text-destructive">{error}
         </p>}<div className="flex flex-wrap gap-2">
-          <Button disabled={blocked || !commands.canApprove || !actionCapability?.allowed || staleAction || actionReason.trim().length < 3} onClick={() => void submitReview()}>{action ? actionLabel[action.command] : "Confirm"}
+          <Button disabled={blocked || loadingPreview || !commands.canApprove || (receiptCostReview && !commands.canApproveReceiptCosts) || !actionCapability?.allowed || staleAction || actionReason.trim().length < 3} onClick={() => void submitReview()}>{loadingPreview ? "Loading cost changes…" : receiptCostReview && !costPreview ? "Review receipt cost changes" : action ? actionLabel[action.command] : "Confirm"}
           </Button>
           <Button variant="outline" onClick={() => setAction(null)}>Cancel review</Button>
         </div>
+        {receiptCostReview && !commands.canApproveReceiptCosts && <p className="text-sm">An Administrator with purchasing approval permission must approve receipt cost changes.</p>}
       </DialogContent>
     </Dialog>
   </div>;

@@ -128,6 +128,9 @@ export function registerListingLifecycleRoutes(app: Express): void {
   route("/members", false, (service, id, request) =>
     service.memberHistory(id, request.body),
   );
+  route("/members/conflicts", false, (service, id, request) =>
+    service.memberConflicts(id, request.body),
+  );
   route("/presence", false, (service, id, request) =>
     service.refreshPresence(id, lookupSchema.parse(request.body).skus),
   );
