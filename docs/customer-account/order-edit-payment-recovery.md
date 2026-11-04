@@ -48,6 +48,9 @@ and reopened. A newly verified policy restriction replaces that display;
 `not_managed` or mismatched identities remove it. The signed API and existing
 command owners still decide whether an action is allowed when used. No stale
 snapshot is sent back as command authority or stored in a new shared cache.
+Retained return details are never used to initialize a new return after
+invalidation or a return-owner failure. Return items stays visible, then invokes
+the existing owned-order lookup on click. Opening the panel starts no inspection.
 
 If a conflicting operation leaves the draft unsubmitted, observation returns to
 the saved editable plan without automatically sending another Apply. Confirmed
