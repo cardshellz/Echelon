@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import React, { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { supplierHeaderContextSchema, supplierHeaderPreviewSchema, supplierHeaderApprovalInputSchema, supplierHeaderResultSchema,
   MAX_SUPPLIER_HEADER_ENTRIES, supplierHeaderEligibleLines, type SupplierHeaderTarget, type SupplierHeaderContext, type SupplierHeaderPreview } from "@shared/procurement/supplier-header-costs";
