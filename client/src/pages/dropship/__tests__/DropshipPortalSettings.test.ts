@@ -43,8 +43,8 @@ describe("DropshipPortalSettings store lifecycle actions", () => {
 
     expect(canRefreshStoreConnection(connection)).toBe(true);
     expect(canChangeStoreConnection(connection)).toBe(true);
-    expect(storeOAuthActionTitle("refresh_connection", "ebay", connection.status)).toBe("Reconnect Ebay store");
-    expect(storeOAuthActionTitle("change_store", "ebay", connection.status)).toBe("Connect a different Ebay store");
+    expect(storeOAuthActionTitle("refresh_connection", "ebay", connection.status)).toBe("Reconnect eBay store");
+    expect(storeOAuthActionTitle("change_store", "ebay", connection.status)).toBe("Connect a different eBay store");
   });
 
   it("allows a launch-ready eBay connection to refresh newly requested OAuth permissions", async () => {
@@ -79,8 +79,8 @@ describe("DropshipPortalSettings store lifecycle actions", () => {
       emailChallengeAction: "connect_store",
       intent: "change_store",
     })).toEqual({
-      actionLabel: "Connect a different Ebay store: marz_cards",
-      confirmLabel: "Verify and connect a different Ebay store",
+      actionLabel: "Connect a different eBay store: marz_cards",
+      confirmLabel: "Verify and connect a different eBay store",
     });
 
     const markup = renderToStaticMarkup(React.createElement(SensitiveActionVerificationPanel, {
@@ -96,8 +96,8 @@ describe("DropshipPortalSettings store lifecycle actions", () => {
 
     expect(markup).toContain("verification code sent to your email");
     expect(markup).toContain("Selected action:");
-    expect(markup).toContain("Connect a different Ebay store: marz_cards");
-    expect(markup).toContain("Verify and connect a different Ebay store");
+    expect(markup).toContain("Connect a different eBay store: marz_cards");
+    expect(markup).toContain("Verify and connect a different eBay store");
     expect(markup).not.toContain("Verify and reconnect");
   });
 
@@ -121,8 +121,8 @@ describe("DropshipPortalSettings store lifecycle actions", () => {
       emailChallengeAction: "connect_store",
       intent: "refresh_connection",
     })).toEqual({
-      actionLabel: "Reconnect Ebay store: marz_cards",
-      confirmLabel: "Verify and reconnect the Ebay store",
+      actionLabel: "Reconnect eBay store: marz_cards",
+      confirmLabel: "Verify and reconnect the eBay store",
     });
     expect(storeVerificationActionContent({
       connection,

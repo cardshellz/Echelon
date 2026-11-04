@@ -1316,8 +1316,8 @@ export class DropshipReturnService {
         eventType: DROPSHIP_NOTIFICATION_EVENTS.RMA_OPENED,
         critical: true,
         channels: ["email", "in_app"],
-        title: "Dropship RMA opened",
-        message: `RMA ${rma.rmaNumber} was opened for review.`,
+        title: "Return opened",
+        message: `Return ${rma.rmaNumber} was opened. We'll let you know once it's checked.`,
         payload: {
           rmaId: rma.rmaId,
           rmaNumber: rma.rmaNumber,
@@ -1360,8 +1360,8 @@ export class DropshipReturnService {
         eventType: DROPSHIP_NOTIFICATION_EVENTS.RETURN_CREDIT_POSTED,
         critical: true,
         channels: ["email", "in_app"],
-        title: "Dropship return credit posted",
-        message: `RMA ${result.rma.rmaNumber} credit posted for ${formatNotificationCurrency(result.inspection.creditCents, creditCurrency)}.`,
+        title: "Return credited",
+        message: `Return ${result.rma.rmaNumber}: ${formatNotificationCurrency(result.inspection.creditCents, creditCurrency)} was credited to your wallet.`,
         payload: {
           rmaId: result.rma.rmaId,
           rmaNumber: result.rma.rmaNumber,

@@ -503,13 +503,13 @@ describe("catalog store choice", () => {
 
   it("names a store by its display name, then its domain, then its platform", () => {
     expect(catalogStoreName(secondEbay)).toBe("second-store");
-    expect(catalogStoreName({ externalDisplayName: null, shopDomain: null, platform: "ebay" })).toBe("Ebay store name pending");
+    expect(catalogStoreName({ externalDisplayName: null, shopDomain: null, platform: "ebay" })).toBe("eBay store");
   });
 
   it("gives the push outcome words the store's own name, or none rather than the placeholder", () => {
     expect(catalogStoreOwnName(secondEbay)).toBe("second-store");
     expect(catalogStoreOwnName({ externalDisplayName: "Marz Cards", shopDomain: "marz.example", platform: "ebay" })).toBe("Marz Cards");
-    // Settings labels the button "Reconnect Ebay store name pending"; the words then name the store's Reconnect button instead.
+    // Settings labels the button "Reconnect eBay store"; the words then name the store's Reconnect button instead.
     expect(catalogStoreOwnName({ externalDisplayName: null, shopDomain: null, platform: "ebay" })).toBeNull();
     expect(catalogStoreOwnName({ externalDisplayName: "", shopDomain: "", platform: "ebay" })).toBeNull();
     expect(catalogStoreOwnName(null)).toBeNull();

@@ -44,6 +44,7 @@ import type {
   DropshipAutoReloadResult,
   DropshipWalletService,
 } from "./dropship-wallet-service";
+import { vendorPlatformName } from "../domain/vendor-platform-name";
 
 const positiveIdSchema = z.number().int().positive();
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
@@ -638,8 +639,8 @@ export class DropshipOrderProcessingService {
       eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_PAYMENT_HOLD_EXPIRED,
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship order payment hold expired",
-      message: `Order intake ${claim.intake.intakeId} was cancelled because the wallet payment hold expired.`,
+      title: "Order cancelled: not paid in time",
+      message: `${vendorPlatformName(claim.intake.platform)} order ${claim.intake.externalOrderId} was cancelled because it wasn't paid in time.`,
       payload: {
         intakeId: claim.intake.intakeId,
         vendorId: claim.intake.vendorId,
@@ -714,10 +715,10 @@ export class DropshipOrderProcessingService {
         : DROPSHIP_NOTIFICATION_EVENTS.ORDER_PROCESSING_FAILED,
       critical: !classified.retryable,
       channels: ["email", "in_app"],
-      title: classified.retryable ? "Dropship order processing retrying" : "Dropship order processing failed",
+      title: classified.retryable ? "Order delayed" : "Order couldn't be processed",
       message: classified.retryable
-        ? `Order intake ${claim.intake.intakeId} processing hit a retryable issue: ${vendorFailureMessage}.`
-        : `Order intake ${claim.intake.intakeId} could not be processed: ${vendorFailureMessage}.`,
+        ? `${vendorPlatformName(claim.intake.platform)} order ${claim.intake.externalOrderId} is delayed: ${vendorFailureMessage}. We'll keep trying.`
+        : `${vendorPlatformName(claim.intake.platform)} order ${claim.intake.externalOrderId} couldn't be processed: ${vendorFailureMessage}.`,
       payload: {
         intakeId: claim.intake.intakeId,
         vendorId: claim.intake.vendorId,

@@ -8,7 +8,7 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { dropshipPortalPath } from "@/lib/dropship-auth";
 import { ebayListingSetupQueryKey } from "@/lib/dropship-ebay-listing-query-sync";
-import { formatCents, formatStatus, type DropshipEbayListingSetupResponse,
+import { formatCents, type DropshipEbayListingSetupResponse,
   type DropshipListingPreviewResult, type DropshipListingPreviewRow } from "@/lib/dropship-ops-surface";
 import { LISTING_PREVIEW_WORDS, formatListingPreviewIssue, listingPreviewDescriptionLinkName, listingPreviewModeWords, listingPreviewPolicyLines,
   listingPreviewSettingsLink, listingPreviewSettingsLinkName, listingPreviewStatusTone, pageListingPreviews, safeListingImageUrl } from "@/lib/dropship-listing-preview";
@@ -17,6 +17,7 @@ import type { PolicySetupFacts } from "@/lib/dropship-listing-settings-words";
 import { scopeWithoutPrefix } from "@/lib/dropship-unsaved-changes";
 import { ebayCategorySourceLabel } from "@/lib/dropship-ebay-category-rules";
 import { PUBLISH_WORDS } from "@/lib/dropship-catalog-publish-words";
+import { vendorListingPreviewStatusLabel } from "@/lib/dropship-vendor-labels";
 import { GuardedLink, useUnsavedDrafts } from "./catalog/UnsavedChangesGuard";
 import { DropshipListingShippingEstimate } from "./DropshipListingShippingEstimate";
 
@@ -285,7 +286,7 @@ function ListingImageGallery({ images, title }: { images: NonNullable<DropshipLi
       <PreviewImage key={image?.url ?? index} url={image?.url} alt={image?.altText ?? title} className="h-56 w-full rounded object-contain sm:h-64" />
     </div>
     {image && <p className={`mt-2 text-xs ${image.publicationStatus === "included" ? "text-zinc-500" : "text-amber-800"}`}>
-      {image.publicationStatus === "included" ? "Included in the listing payload." : "Catalog image only — not included in the listing payload."}
+      {image.publicationStatus === "included" ? "Included in your listing." : "Catalog image only — not included in your listing."}
       {image.reason && ` ${formatListingPreviewIssue(image.reason)}`}
     </p>}
     {images.length > 1 && <div className="mt-3 flex max-h-28 gap-2 overflow-auto pb-2">
@@ -311,7 +312,7 @@ function PreviewStatus({ row }: { row: DropshipListingPreviewRow }) {
   const issues = [...new Set([...row.blockers, ...row.warnings])];
   const hidden = issues.length - MAX_INLINE_ROW_ISSUES;
   return <div className="space-y-1">
-    <Badge variant="outline" className={listingPreviewStatusTone(row.previewStatus)}>{formatStatus(row.previewStatus)}</Badge>
+    <Badge variant="outline" className={listingPreviewStatusTone(row.previewStatus)}>{vendorListingPreviewStatusLabel(row.previewStatus)}</Badge>
     {issues.length > 0 && <ul className="max-w-72 space-y-0.5 text-xs text-zinc-600" data-testid={`listing-row-issues-${row.productVariantId}`}>
       {issues.slice(0, MAX_INLINE_ROW_ISSUES).map((issue) => <li key={issue}>{formatListingPreviewIssue(issue)}</li>)}
       {hidden > 0 && <li>{hidden} more in the preview.</li>}

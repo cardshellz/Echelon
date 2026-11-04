@@ -27,7 +27,6 @@ import {
   fetchJson,
   formatCents,
   formatDateTime,
-  formatStatus,
   parseDollarInputToCents,
   postJson,
   putJson,
@@ -161,6 +160,7 @@ import {
   type WalletTerms,
 } from "@/lib/dropship-wallet-flow";
 import { describeWalletError, type WalletErrorSurface } from "@/lib/dropship-wallet-errors";
+import { vendorLedgerStatusLabel, vendorPaymentFailureLine } from "@/lib/dropship-vendor-labels";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 /**
@@ -2643,9 +2643,9 @@ function ActivitySection({ wallet }: { wallet: DropshipWalletView }) {
                         {labelFor(entry.fundingMethodId) ? `from ${labelFor(entry.fundingMethodId)} · ` : ""}charged {formatCents(entry.cardFee.chargedCents)}{entry.cardFee.feeCents > 0 ? ` incl. ${formatCents(entry.cardFee.feeCents)} fee (${formatFeeRate(entry.cardFee.feeBps)})` : " (no fee)"}
                       </span>
                     )}
-                    {entry.failure && <span className="block text-xs text-red-700">Failed: {entry.failure.code ?? entry.failure.message ?? "unknown"}</span>}
+                    {entry.failure && <span className="block text-xs text-red-700">{vendorPaymentFailureLine(entry.failure)}</span>}
                   </TableCell>
-                  <TableCell><Badge variant="outline">{formatStatus(entry.status)}</Badge></TableCell>
+                  <TableCell><Badge variant="outline">{vendorLedgerStatusLabel(entry.status)}</Badge></TableCell>
                   <TableCell className="text-right font-mono">{describeLedgerAmount(entry)}</TableCell>
                   <TableCell className="text-right font-mono">{describeBalanceAfterCell(entry)}</TableCell>
                   <TableCell className="whitespace-nowrap text-sm text-zinc-500">{formatDateTime(entry.createdAt)}</TableCell>
