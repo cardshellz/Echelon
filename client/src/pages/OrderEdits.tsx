@@ -1263,6 +1263,7 @@ export function OrderEditOperationView({
   onCodesChange,
   onPaymentOpen,
   statusReadBusy = false,
+  recoveringCommand = false,
 }: {
   operation: OrderEditOperation;
   now: number;
@@ -1277,6 +1278,7 @@ export function OrderEditOperationView({
   onCodesChange?: (codes: string[]) => Promise<void>;
   onPaymentOpen?: () => void;
   statusReadBusy?: boolean;
+  recoveringCommand?: boolean;
 }) {
   const [codeEditing, setCodeEditing] = useState(false);
   const copy = orderEditStatusCopy[operation.status];
@@ -1289,21 +1291,29 @@ export function OrderEditOperationView({
       ? null
       : operation.error;
   const description =
-    audience === "customer" && operation.status === "review_required"
-      ? "We need to check these changes. Contact us with the edit reference below."
-      : audience === "customer" && operation.status === "synchronizing"
-        ? "We’re finishing your order update. This page will update automatically."
-        : audience === "customer" && operation.status === "awaiting_payment"
-          ? operation.error?.code === "ORDER_EDIT_PAYMENT_PENDING"
-            ? "Your payment is processing. This page will update automatically."
-            : "Complete your payment below to finish updating your order."
-          : audience === "customer" && operation.status === "completed"
-            ? "Your order has been updated."
-            : copy.description;
+    recoveringCommand
+      ? "Finishing your order update. This page will update automatically."
+      : audience === "customer" && operation.status === "committing"
+        ? "Applying your changes. This page will update automatically."
+        : audience === "customer" && operation.status === "review_required"
+        ? "We need to check these changes. Contact us with the edit reference below."
+        : audience === "customer" && operation.status === "synchronizing"
+          ? "We’re finishing your order update. This page will update automatically."
+          : audience === "customer" && operation.status === "awaiting_payment"
+            ? operation.error?.code === "ORDER_EDIT_PAYMENT_PENDING"
+              ? "Your payment is processing. This page will update automatically."
+              : "Complete your payment below to finish updating your order."
+            : audience === "customer" && operation.status === "completed"
+              ? "Your order has been updated."
+              : copy.description;
   const payable = operation.balanceDueCents > 0;
   const refundable = operation.refundDueCents > 0;
   const paymentUrl =
-    operation.status === "awaiting_payment"
+    operation.status === "awaiting_payment" &&
+    payable &&
+    !recoveringCommand &&
+    operation.commandInProgress !== true &&
+    operation.error?.code !== "ORDER_EDIT_PAYMENT_PENDING"
       ? safeOrderEditPaymentUrl(operation.paymentUrl)
       : null;
   const money = (value: number) =>
@@ -1312,12 +1322,13 @@ export function OrderEditOperationView({
     operation.expiresAt !== null && Date.parse(operation.expiresAt) <= now;
   // Normal submitted progress is observed through read-only requests. Retain
   // explicit reconciliation only for a failed or uncertain customer command.
-  const showStatusCheck =
-    audience !== "customer" ||
-    isUncertain ||
-    error !== null ||
-    (operation.status === "ready" && expired) ||
-    operationError !== null;
+  const showStatusCheck = recoveringCommand
+    ? error !== null
+    : audience !== "customer" ||
+      isUncertain ||
+      error !== null ||
+      (operation.status === "ready" && expired) ||
+      operationError !== null;
   const financials = operation.financials;
   const showCurrent = ["completed", "recovered", "failed", "expired"].includes(
     operation.status,
@@ -1492,7 +1503,7 @@ export function OrderEditOperationView({
         )}
         {operationError && <ErrorMessage text={operationError.message} />}
         <ErrorMessage text={error} />
-        {isUncertain && (
+        {isUncertain && !recoveringCommand && (
           <p role="status" className="text-sm">
             {audience === "customer"
               ? "We couldn’t confirm the last request. Try again to check its result."
@@ -1507,7 +1518,7 @@ export function OrderEditOperationView({
           </p>
         )}
         <div className="oe-editor-footer">
-          {operation.status === "ready" && (
+          {operation.status === "ready" && !recoveringCommand && (
             <>
               <Button
                 type="button"
@@ -1527,7 +1538,7 @@ export function OrderEditOperationView({
               </Button>
             </>
           )}
-          {operation.canAbandon && (
+          {operation.canAbandon && !recoveringCommand && (
             <Button
               type="button"
               variant="outline"

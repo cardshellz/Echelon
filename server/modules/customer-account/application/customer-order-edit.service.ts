@@ -212,9 +212,9 @@ export class CustomerOrderEditService {
     await this.ownedScope(input.connectionId, input.omsOrderId);
     return this.dependencies.edits.quote(input, this.actorId);
   }
-  async operation(raw: string, codeEntryVersion?: "v1") {
+  async operation(raw: string, codeEntryVersion?: "v1", observationVersion?: "v1") {
     await this.ownedOperation(raw);
-    return this.dependencies.edits.get(raw, codeEntryVersion);
+    return this.dependencies.edits.get(raw, codeEntryVersion, observationVersion);
   }
   async progress(
     raw: string,

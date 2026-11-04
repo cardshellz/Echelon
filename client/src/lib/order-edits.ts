@@ -224,6 +224,7 @@ export function orderEditCanCommit(
 ): boolean {
   return (
     operation.status === "ready" &&
+    operation.commandInProgress !== true &&
     operation.error === null &&
     Number.isFinite(now) &&
     (operation.expiresAt === null || Date.parse(operation.expiresAt) > now)
@@ -295,7 +296,7 @@ export const orderEditStatusCopy: Record<
   },
 };
 
-export function createOrderEditTransport(request: typeof fetch = fetch) {
+export function createOrderEditTransport(request: typeof fetch = fetch, options: { observationVersion?: "v1" } = {}) {
   const read = <T>(
     path: string,
     schema: z.ZodType<T, z.ZodTypeDef, unknown>,
@@ -309,7 +310,7 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
     operationId.parse(id);
     // The operation UUID is also its stable command key across reloads. Actions are separately scoped server-side.
     const result = await orderEditRequest(
-      `/operations/${encodeURIComponent(id)}${action ? `/${action}` : "?codeEntryVersion=v1"}`,
+      `/operations/${encodeURIComponent(id)}${action ? `/${action}` : `?codeEntryVersion=v1${options.observationVersion ? "&observationVersion=v1" : ""}`}`,
       orderEditOperationSchema,
       action ? { method: "POST", key: id, body: {} } : { signal },
       request,

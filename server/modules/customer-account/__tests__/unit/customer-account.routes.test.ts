@@ -221,6 +221,28 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect((await request(body)).status).toBe(200);
     expect(progress).toHaveBeenCalledWith(operationId, "resume", operationId);
   });
+  it("negotiates busy observation only on a signed read and never dispatches a command", async () => {
+    const operationId = "22222222-2222-4222-8222-222222222222";
+    const operation = vi.fn(async (_id: string, _code?: "v1", version?: "v1") => ({
+      operationId, orderNumber: "#TEST", currency: "USD", status: "ready", canAbandon: true,
+      previousTotalCents: 1005, updatedTotalCents: 1481, balanceDueCents: 476, refundDueCents: 0,
+      lines: [], warnings: [], expiresAt: null, paymentDeadline: null, paymentUrl: null, error: null,
+      ...(version ? { commandInProgress: true } : {}),
+    }));
+    const progress = vi.fn();
+    services.mockImplementation(() => ({ edits: { connection, operation, progress }, returns: vi.fn() }) as never);
+    const sessionKey = (await (await request()).json()).session.sessionKey;
+    const scope = { path: `/order-edits/operations/${operationId}`, sessionKey };
+    const observed = await request({ ...scope, query: { codeEntryVersion: "v1", observationVersion: "v1" } });
+    expect(observed.status).toBe(200);
+    expect(await observed.json()).toMatchObject({ commandInProgress: true, status: "ready" });
+    expect(operation).toHaveBeenLastCalledWith(operationId, "v1", "v1");
+    const legacy = await request({ ...scope, query: { codeEntryVersion: "v1" } });
+    expect(await legacy.json()).not.toHaveProperty("commandInProgress");
+    expect((await request({ ...scope, query: { observationVersion: "v2" } })).status).toBe(400);
+    expect((await request({ ...scope, sessionKey: undefined, query: { observationVersion: "v1" } })).status).toBe(401);
+    expect(progress).not.toHaveBeenCalled();
+  });
   it("keeps cancellation review/status inside signed ownership and requires approval identity for submission", async () => {
     const bootstrap = await (await request()).json(), requestKey = "22222222-2222-4222-8222-222222222222";
     const rewards = { fingerprint: "a".repeat(64), returnedPoints: "100.00", deductedEarnedPoints: "5.00", settled: false };

@@ -125,12 +125,14 @@ async function setup(
     expired?: boolean;
     retryFails?: boolean;
     loseResume?: boolean;
+    failResumeObservationOnce?: boolean;
   } = {},
 ) {
   const requests: Array<{ path: string; method: string; commandKey?: string }> =
     [];
   const errors: string[] = [];
   let resumes = 0;
+  let resumeObservationFailed = false;
   let current = operation(
     options.initial ?? "review_required",
     options.expired,
@@ -166,8 +168,25 @@ async function setup(
     expect(input.sessionKey).toBe("a".repeat(43));
     if (input.path === "/order-edits/orders/1")
       return route.fulfill({ json: order });
-    if (input.path === `/order-edits/operations/${operationId}`)
+    if (input.path === `/order-edits/operations/${operationId}`) {
+      if (
+        options.failResumeObservationOnce &&
+        resumes > 0 &&
+        !resumeObservationFailed
+      ) {
+        resumeObservationFailed = true;
+        return route.fulfill({
+          status: 503,
+          json: {
+            error: {
+              code: "ORDER_STATUS_UNAVAILABLE",
+              message: "Synthetic observation failure",
+            },
+          },
+        });
+      }
       return route.fulfill({ json: current });
+    }
     if (input.path === `/order-edits/operations/${operationId}/resume`) {
       expect(input.commandKey).toBe(operationId);
       resumes += 1;
@@ -265,11 +284,10 @@ test("a second preparation failure retains selections and offers a direct retry"
   ).toBe(false);
 });
 
-test("an uncertain resume is reconciled without repeating or applying the edit", async ({
+test("an uncertain resume recovers automatically through a read without repeating or applying the edit", async ({
   page,
 }) => {
   const f = await setup(page, { loseResume: true });
-  await page.getByRole("button", { name: "Try again", exact: true }).click();
   await expect(
     page.getByRole("button", {
       name: "Apply changes · $2.47 due",
@@ -279,11 +297,42 @@ test("an uncertain resume is reconciled without repeating or applying the edit",
   expect(
     f.requests.filter((request) => request.path.endsWith("/resume")),
   ).toHaveLength(1);
+  const observations = f.requests.filter(
+    request => request.path === `/order-edits/operations/${operationId}`,
+  );
+  expect(observations).toHaveLength(2);
+  expect(observations.every(request => request.method === "GET" && !request.commandKey)).toBe(true);
   expect(
     f.requests.some((request) =>
-      /\/(quotes|commit|abandon)$/.test(request.path),
+      /\/(quotes|commit|abandon|reconcile)$/.test(request.path),
     ),
   ).toBe(false);
+  await expect(
+    page.getByRole("button", { name: "Try again", exact: true }),
+  ).toHaveCount(0);
+  expect(f.errors).toEqual([]);
+});
+
+test("a failed recovery read retries only the original edit observation", async ({ page }) => {
+  const f = await setup(page, { loseResume: true, failResumeObservationOnce: true });
+  await expect(
+    page.getByText("We couldn’t check your order’s status. Please try again.", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Apply changes · $2.47 due", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Try again", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Apply changes · $2.47 due", exact: true }),
+  ).toBeEnabled();
+  expect(f.requests.filter(request => request.path.endsWith("/resume"))).toHaveLength(1);
+  const observations = f.requests.filter(
+    request => request.path === `/order-edits/operations/${operationId}`,
+  );
+  expect(observations).toHaveLength(3);
+  expect(observations.every(request => request.method === "GET" && !request.commandKey)).toBe(true);
+  expect(f.requests.some(request => /\/(quotes|commit|abandon|reconcile)$/.test(request.path))).toBe(false);
+  expect(f.errors).toEqual([]);
 });
 
 test("an already submitted operation is never prepared again on reopen", async ({

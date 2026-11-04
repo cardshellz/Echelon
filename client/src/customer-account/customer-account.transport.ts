@@ -128,7 +128,7 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
         throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_ORDER_MISMATCH", "Order details could not be verified. Please try again.");
       return result;
     },
-    edits: createOrderEditTransport(bridge),
+    edits: createOrderEditTransport(bridge, { observationVersion: "v1" }),
     cancellation: {
       review: async (connectionId: number, omsOrderId: number, signal?: AbortSignal) => json(await call({
         method: "GET", path: `/account/orders/${omsOrderId}/cancellation/review`, query: { connectionId: String(connectionId) },

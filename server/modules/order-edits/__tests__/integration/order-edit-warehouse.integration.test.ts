@@ -347,6 +347,22 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       INSERT INTO inventory.availability_claim_lines VALUES(1,1,40,100,1,1,0,0,0,0);`);
     });
 
+    it("observes a real PostgreSQL command lock without replaying a command or writing an audit event", async () => {
+      const store = new PostgresOrderEditStore(database.pool);
+      const h = serviceHarness();
+      const service = new OrderEditService(store, h.provider, h.warehouse,
+        () => new Date("2026-10-05T00:01:00Z"), () => OP, h.report);
+      const before = await database.pool.query("SELECT count(*) AS count FROM oms.order_edit_events WHERE operation_id=$1", [OP]);
+      await store.withOrderLock(20, async () => {
+        expect(await service.get(OP, "v1", "v1")).toMatchObject({ status: "committing", commandInProgress: true });
+        expect(await service.get(OP, "v1")).not.toHaveProperty("commandInProgress");
+      });
+      expect(await service.get(OP, "v1", "v1")).toMatchObject({ status: "committing", commandInProgress: false });
+      expect(await database.pool.query("SELECT count(*) AS count FROM oms.order_edit_events WHERE operation_id=$1", [OP])).toMatchObject({ rows: before.rows });
+      expect(h.provider.commit).not.toHaveBeenCalled();
+      expect(h.warehouse.acquire).not.toHaveBeenCalled();
+    });
+
     it("admits only submitted refund reviews for read-only scheduler recovery", async () => {
       const store = new PostgresOrderEditStore(database.pool);
       const h = serviceHarness(1);
