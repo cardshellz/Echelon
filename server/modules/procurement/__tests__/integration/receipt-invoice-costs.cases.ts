@@ -19,6 +19,15 @@ import { readPurchaseCostStatus } from "../../purchase-cost-status.repository";
 import type { AmendmentDatabase } from "../../po-quantity-amendment.repository";
 import type { ReceivingService } from "../../receiving.service";
 import type { createPurchasingService } from "../../purchasing.service";
+import { createSupplierCreditCommands } from "../../supplier-credit.commands";
+import { createSupplierCreditCostPreview } from "../../supplier-credit.service";
+import { loadSupplierCreditSource, readSupplierCreditDetail } from "../../supplier-credit.repository";
+import { createDrizzleFinancialCommandRepository } from "../../../../platform/commands/command-results.repository";
+import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
+import type { SupplierCreditCommand, SupplierCreditDetail } from "@shared/procurement/supplier-credit";
+import { createInvoiceCostReviewPreviewService } from "../../invoice-cost-review-preview.service";
+import { createInvoiceCostReviewCommands } from "../../invoice-cost-review.service";
+import { invoiceCostReviewVersion } from "../../ap-ledger.service";
 
 export function registerReceiptInvoiceCostCases(fixture: {
   shipments: () => ShipmentTrackingService;
@@ -162,6 +171,29 @@ export function registerReceiptInvoiceCostCases(fixture: {
       )
     ).rows;
   }
+  function creditCommand(command: SupplierCreditCommand, body: unknown, creditId?: number, options: { actor?: string; key?: string } = {}) {
+    const routeTemplate = command === "create" ? "/api/supplier-credits" : `/api/supplier-credits/:id/${command}`;
+    const scope = { method: "POST", routeTemplate, resourceKey: `supplier-credit:${creditId ?? "new"}:document` };
+    return createSupplierCreditCommands(createDrizzleFinancialCommandRepository(fixture.database()), () => fixture.at).execute(command, body, {
+      ...scope, actorType: "user", actorId: options.actor ?? fixture.actorId, commandName: `supplier_credit.${command}`,
+      idempotencyKey: options.key ?? randomUUID(), contractVersion: 1,
+      requestHash: hashHttpFinancialCommand({ ...scope, params: creditId === undefined ? {} : { id: String(creditId) }, query: {}, body }),
+    }, creditId);
+  }
+  async function draftCredit(row: ReceiptInvoiceAllocation, amountCents = 1000) {
+    await query("INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(3,'purchasing','edit','purchasing') ON CONFLICT DO NOTHING; INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,3) ON CONFLICT DO NOTHING");
+    const source = await fixture.database().transaction(tx => loadSupplierCreditSource(tx, row.invoiceLineId === 72 ? 71 : 81));
+    const { invoiceLineId, ...receiptAllocation } = row;
+    return creditCommand("create", { sourceInvoiceId: source.invoice.id, expectedSourceVersion: source.version,
+      supplierReference: randomUUID(), creditCalendarDate: "2026-09-06", reason: "Supplier credit for the first receipt only",
+      lines: [{ invoiceLineId, amountCents, disposition: { kind: "price_reduction", component: "product", receiptAllocation } }] });
+  }
+  async function creditReview(id: number, action: "approve" | "void" | "reconcile_costs" = "approve", actor = fixture.actorId) {
+    const credit = await fixture.database().transaction(tx => readSupplierCreditDetail(tx, id, true));
+    const request = { expectedVersion: credit.version, reason: "Checked the exact supplier credit and billed receipt" };
+    const preview = await createSupplierCreditCostPreview(fixture.database(), () => fixture.at)(id, action, request, actor);
+    return { preview, body: { ...request, previewVersion: preview.previewVersion } };
+  }
   describe("receipt-specific invoice costs through public approval and real receiving", () => {
     beforeAll(async () => {
       const app = express();
@@ -185,6 +217,118 @@ export function registerReceiptInvoiceCostCases(fixture: {
         await new Promise<void>((done, reject) =>
           server.close((error) => (error ? reject(error) : done())),
         );
+    });
+    it("receipt credit previews actual costs, applies only to its billed receipt, retains approval and safely reverses", async () => {
+      const { rows } = await setup(), { body } = await review(rows);
+      expect((await post("", body, randomUUID())).status).toBe(200);
+      const created = await draftCredit(rows[0]); expect(created.httpStatus, JSON.stringify(created.body)).toBe(201);
+      const id = (created.body as { credit: SupplierCreditDetail }).credit.id, before = await state(), counts = await physical();
+      const measured = await creditReview(id);
+      expect(measured.preview.inventoryValues).toEqual([
+        expect.objectContaining({ beforeMills: 1300000, afterMills: 1200000 }),
+        expect.objectContaining({ beforeMills: 1700000, afterMills: 1700000 }),
+      ]);
+      expect(measured.preview.receipts).toEqual([expect.objectContaining({ beforeMills: 1300000, afterMills: 1200000, pieces: 100 }),
+        expect.objectContaining({ beforeMills: 1700000, afterMills: 1700000, pieces: 100 })]);
+      expect(await state()).toEqual(before);
+      const key = randomUUID(), approved = await creditCommand("approve", measured.body, id, { key });
+      expect(approved.httpStatus, JSON.stringify(approved.body)).toBe(200);
+      expect((approved.body as { credit: SupplierCreditDetail }).credit).toMatchObject({ costStatus: "posted", costApprovals: [expect.objectContaining({ actorId: fixture.actorId, reason: measured.body.reason })] });
+      expect(await totals()).toEqual([expect.objectContaining({ product: "1100000", packaging: "100000" }), expect.objectContaining({ product: "1500000", packaging: "200000" })]);
+      expect(await physical()).toEqual(counts);
+      const after = await state();
+      expect(await creditCommand("approve", measured.body, id, { key })).toMatchObject({ httpStatus: 200, replayed: true, body: approved.body });
+      expect(await state()).toEqual(after);
+      const reversed = await creditReview(id, "void");
+      const voided = await creditCommand("void", reversed.body, id);
+      expect(voided.httpStatus, JSON.stringify(voided.body)).toBe(200);
+      expect((voided.body as { credit: SupplierCreditDetail }).credit.costApprovals).toHaveLength(2);
+      expect(await totals()).toEqual([expect.objectContaining({ product: "1200000", packaging: "100000" }), expect.objectContaining({ product: "1500000", packaging: "200000" })]);
+      expect(await physical()).toEqual(counts);
+    });
+    it("receipt credit requires a current admin preview and does not post after permission revocation or a stale source", async () => {
+      const { rows } = await setup(), { body } = await review(rows);
+      expect((await post("", body, randomUUID())).status).toBe(200);
+      const created = await draftCredit(rows[0]), id = (created.body as { credit: SupplierCreditDetail }).credit.id;
+      const measured = await creditReview(id), before = await totals();
+      expect(await creditCommand("approve", { expectedVersion: measured.body.expectedVersion, reason: measured.body.reason }, id)).toMatchObject({ httpStatus: 409 });
+      await expect(creditReview(id, "approve", "lead-user")).rejects.toMatchObject({ code: "SUPPLIER_CREDIT_COST_ADMIN_REQUIRED" });
+      await query("UPDATE procurement.purchase_order_lines SET packaging_cost_cents=packaging_cost_cents+1 WHERE id=21");
+      expect(await creditCommand("approve", measured.body, id)).toMatchObject({ httpStatus: 409 });
+      const fresh = await creditReview(id);
+      await query("DELETE FROM identity.auth_role_permissions WHERE role_id=1 AND permission_id=1");
+      expect(await creditCommand("approve", fresh.body, id)).toMatchObject({ httpStatus: 403 });
+      expect(await totals()).toEqual(before);
+      expect((await query("SELECT status FROM procurement.supplier_credits WHERE id=$1", [id])).rows[0].status).toBe("draft");
+    });
+    it("receipt credit follows a transferred receipt's stock and order cost basis without inventing an expense", async () => {
+      const { rows } = await setup(), { body } = await review(rows);
+      expect((await post("", body, randomUUID())).status).toBe(200);
+      await fixture.transferFirstAndSell();
+      const counts = (await query("SELECT id,qty_received,qty_on_hand,qty_picked,qty_packed FROM inventory.inventory_lots ORDER BY id")).rows;
+      const otherReceipt = (await totals())[1], bills = await physical();
+      const created = await draftCredit(rows[0]), id = (created.body as { credit: SupplierCreditDetail }).credit.id;
+      const measured = await creditReview(id);
+      expect(measured.preview.impact.orderCosts.some(row => row.totalMills.before !== row.totalMills.after)).toBe(true);
+      const approved = await creditCommand("approve", measured.body, id);
+      expect(approved.httpStatus, JSON.stringify(approved.body)).toBe(200);
+      expect((approved.body as { credit: SupplierCreditDetail }).credit.costStatus).toBe("posted");
+      expect((await query("SELECT id,qty_received,qty_on_hand,qty_picked,qty_packed FROM inventory.inventory_lots ORDER BY id")).rows).toEqual(counts);
+      expect((await totals())[1]).toEqual(otherReceipt);
+      expect(await physical()).toEqual(bills);
+      expect((await query("SELECT count(*)::int AS count FROM inventory.cost_reconciliation_postings")).rows[0].count).toBe(0);
+    });
+    it("receipt credit rejects a wrong receipt and cumulative credit over its exact assigned value", async () => {
+      const { rows } = await setup(), { body } = await review(rows);
+      expect((await post("", body, randomUUID())).status).toBe(200);
+      const wrong = await draftCredit({ ...rows[0], receivingLineId: rows[1].receivingLineId });
+      expect(wrong).toMatchObject({ httpStatus: 409 });
+      const created = await draftCredit(rows[0], 7000), id = (created.body as { credit: SupplierCreditDetail }).credit.id;
+      const measured = await creditReview(id); expect((await creditCommand("approve", measured.body, id)).httpStatus).toBe(200);
+      const second = await draftCredit(rows[0], 5500);
+      expect(second).toMatchObject({ httpStatus: 409 });
+    });
+    it("receipt credit concurrent approvals post once; a failed immutable approval rolls back every cost", async () => {
+      const { rows } = await setup(), { body } = await review(rows);
+      expect((await post("", body, randomUUID())).status).toBe(200);
+      const created = await draftCredit(rows[0]), id = (created.body as { credit: SupplierCreditDetail }).credit.id;
+      const measured = await creditReview(id), before = await state(), key = randomUUID();
+      await query(`CREATE FUNCTION procurement.receipt_credit_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.event_type='supplier_credit_costs_approved' THEN RAISE EXCEPTION 'Synthetic receipt credit approval failure'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER receipt_credit_fail BEFORE INSERT ON procurement.po_events FOR EACH ROW EXECUTE FUNCTION procurement.receipt_credit_fail()`);
+      try { await expect(creditCommand("approve", measured.body, id, { key })).rejects.toThrow(); }
+      finally { await query("DROP TRIGGER receipt_credit_fail ON procurement.po_events; DROP FUNCTION procurement.receipt_credit_fail()"); }
+      expect(await state()).toEqual(before);
+      await query("SELECT pg_sleep(GREATEST(0, EXTRACT(EPOCH FROM next_attempt_at-clock_timestamp())) + 0.01) FROM public.financial_command_results WHERE idempotency_key=$1", [key]);
+      const results = await Promise.all([creditCommand("approve", measured.body, id, { key }), creditCommand("approve", measured.body, id)]);
+      expect(results.map(result => result.httpStatus).sort()).toEqual([200, 409]);
+      expect((await query("SELECT count(*)::int AS count FROM procurement.po_events WHERE event_type='supplier_credit_costs_approved'")).rows[0].count).toBe(1);
+      expect((await query("SELECT approved_by FROM procurement.supplier_credits WHERE id=$1", [id])).rows[0].approved_by).toBe(fixture.actorId);
+    });
+    it("billed adjustments use the reviewed invoice owner, conserve the gross bill and leave other receipts unchanged", async () => {
+      const { rows } = await setup(), { body } = await review(rows);
+      expect((await post("", body, randomUUID())).status).toBe(200);
+      const invoice = (await query("SELECT * FROM procurement.vendor_invoice_lines WHERE id=72")).rows[0];
+      const request = { expectedVersion: invoiceCostReviewVersion({ id: 72, qtyInvoiced: Number(invoice.qty_invoiced), unitCostCents: Number(invoice.unit_cost_cents),
+        unitCostMills: invoice.unit_cost_mills === null ? null : Number(invoice.unit_cost_mills), lineTotalCents: Number(invoice.line_total_cents), costComponentEvidence: invoice.cost_component_evidence }),
+        packagingTreatment: "separate" as const, productMills: 1300000, packagingMills: 100000, adjustmentMills: -100000,
+        adjustments: [{ key: "discount", label: "Supplier goods discount", category: "discount" as const, amountMills: -200000, destination: "product" as const },
+          { key: "outside", label: "Billed service outside inventory", category: "other" as const, amountMills: 100000, destination: "excluded" as const }], reason: "Checked supplier billed discount and excluded service" };
+      const before = await state(), counts = await physical();
+      const measured = await createInvoiceCostReviewPreviewService(fixture.database(), () => fixture.at)(72, request, fixture.actorId);
+      expect(await state()).toEqual(before);
+      expect(measured.preview.inventoryValues).toEqual([expect.objectContaining({ beforeMills: 1300000, afterMills: 1200000 }), expect.objectContaining({ beforeMills: 1700000, afterMills: 1700000 })]);
+      const raw = { ...request, previewVersion: measured.preview.previewVersion }, scope = { method: "POST", routeTemplate: "/api/vendor-invoice-lines/:lineId/cost-components", resourceKey: "vendor_invoice_line:72" };
+      const saved = await createInvoiceCostReviewCommands(createDrizzleFinancialCommandRepository(fixture.database()), () => fixture.at).review(72, raw, fixture.actorId,
+        { ...scope, actorType: "user", actorId: fixture.actorId, idempotencyKey: randomUUID(), commandName: "ap.invoice.cost_components", contractVersion: 1, requestHash: hashHttpFinancialCommand({ ...scope, body: raw }) });
+      expect(saved.httpStatus).toBe(200);
+      expect(await totals()).toEqual([expect.objectContaining({ product: "1100000", packaging: "100000" }), expect.objectContaining({ product: "1500000", packaging: "200000" })]);
+      const after = await physical();
+      // Only the explicitly reviewed line composition changes; gross bills,
+      // invoice quantities, cash, receipts and physical inventory are preserved.
+      expect(after.slice(0, 3)).toEqual(counts.slice(0, 3));
+      expect((await query("SELECT qty_invoiced,line_total_cents FROM procurement.vendor_invoice_lines WHERE id=72")).rows).toEqual([{ qty_invoiced: invoice.qty_invoiced, line_total_cents: invoice.line_total_cents }]);
+      expect((await query("SELECT payload_json->'preview'->'after'->'adjustments' AS adjustments FROM procurement.po_events WHERE event_type='invoice_cost_components_approved'")).rows[0].adjustments).toEqual(request.adjustments);
     });
     it("previews without mutation, then posts each receipt's own invoice once", async () => {
       const { rows } = await setup(),

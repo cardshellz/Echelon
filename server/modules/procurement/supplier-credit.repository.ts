@@ -6,6 +6,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import type { db } from "../../db";
 import { readSupplierCreditSourceOptions, readSupplierCreditCostStatus, type SupplierCreditCostReadCache } from "./supplier-credit-source.service";
+import { supplierCreditCostApprovalSchema } from "@shared/procurement/supplier-credit-cost-review";
 export type CreditTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export class SupplierCreditError extends Error {
   constructor(readonly code: string, message: string, readonly statusCode = 409) {
@@ -132,6 +133,15 @@ export async function readSupplierCreditDetail(tx: CreditTransaction, id: number
     cost
   });
   const eligible = canApprove && issues.length === 0;
+  const costApprovalRows = lineRows.some(row => { const disposition = supplierCreditDispositionSchema.safeParse(row.line.disposition).data;
+    return disposition?.kind === "price_reduction" && disposition.receiptAllocation; })
+    ? (await tx.execute(sql`SELECT DISTINCT ON (payload_json->>'commandKey') id,actor_id,payload_json
+      FROM procurement.po_events WHERE event_type='supplier_credit_costs_approved' AND payload_json->>'creditId'=${String(id)}
+      ORDER BY payload_json->>'commandKey',id`)).rows : null;
+  const costApprovals = costApprovalRows?.sort((a, b) => Number(a.id) - Number(b.id)).map(row => {
+    const { actorName, approvedAt, reason, preview } = supplierCreditCostApprovalSchema.omit({ eventId: true, actorId: true }).passthrough().parse(row.payload_json);
+    return { eventId: costInteger(row.id, "creditCostApprovalId", 1), actorId: String(row.actor_id), actorName, approvedAt, reason, preview };
+  });
   const lines = lineRows.map(({
     line,
     source: invoiceLine
@@ -242,7 +252,8 @@ export async function readSupplierCreditDetail(tx: CreditTransaction, id: number
       supplierCreditId: _credit,
       ...row
     }) => row),
-    capabilities: result.capabilities
+    capabilities: result.capabilities,
+    ...(costApprovals === undefined ? {} : { costApprovals }),
   })));
 }
 export async function readSupplierCreditOptions(tx: CreditTransaction, invoiceId: number, actorId: string, canCreate: boolean, at: Date): Promise<SupplierCreditOptions> {
@@ -275,6 +286,7 @@ export async function readSupplierCreditOptions(tx: CreditTransaction, invoiceId
         creditedAmountCents: credited,
         availableAmountCents: line.lineTotalCents - credited,
         components: option?.components ?? [],
+        ...(option?.receiptCosting ? { receiptCosting: true, receiptAllocations: option.receiptAllocations } : {}),
         returnDispositions: option?.returnDispositions ?? [],
         acceptedReturns: option?.acceptedReturns ?? [],
         issues: option?.issues ?? []
