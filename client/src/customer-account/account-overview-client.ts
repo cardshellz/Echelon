@@ -15,6 +15,7 @@ import {
 } from "./account-page-config";
 import { CUSTOMER_ACCOUNT_COMMAND_HEADER } from "@shared/customer-account/customer-account.contract";
 import { CustomerAccountRequestError } from "./account-request-error";
+import { retainedOrderActions } from "./order-action-display";
 import { customerAccountBootstrapSchema } from "@shared/customer-account/customer-account.contract";
 
 // Optional action evidence has a separate failure boundary from verified money.
@@ -130,6 +131,10 @@ export function accountOverviewClient(
   }
   function writeCache(result: AccountDisplay): void {
     verifyOverviewIdentities(result, input);
+    const previous = readCache();
+    const actions = { orders: result.actions.orders.map(current =>
+      retainedOrderActions(current, previous?.actions.orders.find(prior => prior.externalOrderId === current.externalOrderId)) ?? current,
+    ) };
     try {
       // Drop another customer's session-display cache on account changes.
       const keys = Array.from(
@@ -148,7 +153,7 @@ export function accountOverviewClient(
           displaySchema.parse({
             savedAt: dependencies.now(),
             summaries: result.summaries,
-            actions: result.actions,
+            actions,
           }),
         ),
       );

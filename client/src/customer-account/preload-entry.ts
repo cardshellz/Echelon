@@ -169,7 +169,7 @@ if (element) {
             // Updating the handoff remains safe; do not overwrite its portal DOM.
             if (element.dataset.adopted !== "true") paint(result);
             if (element.accountOverview)
-              element.accountOverview.display = result;
+              element.accountOverview.display = client.readCache() ?? result;
             return result;
           })
           .finally(() => clearTimeout(timer));

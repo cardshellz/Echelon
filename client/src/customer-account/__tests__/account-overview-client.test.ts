@@ -17,6 +17,17 @@ function fixture() {
   return { client, dependencies, data, state, request };
 }
 describe("short lived, customer-bound display preload", () => {
+  it("keeps prior bound action display separate from a newer failed owner response", async () => {
+    const h=fixture();
+    const ready={...display.actions.orders[0],omsOrderId:1,state:"ready",verifiedAt:"2026-11-04T12:00:00Z",validUntil:"2026-11-04T12:05:00Z",
+      snapshot:{order:null,returnOrder:null,orderFailed:true,returnFailed:false}};
+    h.request.mockResolvedValueOnce(Response.json({...overview,actions:{orders:[ready]}}));
+    await h.client.read();
+    h.request.mockResolvedValueOnce(Response.json({...overview,actions:{orders:[{...ready,state:"failed",snapshot:null,verifiedAt:null,validUntil:null}]}}));
+    const latest=await h.client.read();
+    expect(latest.actions.orders[0].state).toBe("failed");
+    expect(h.client.readCache()?.actions.orders[0]).toEqual(ready);
+  });
   it.each([null, {orders:[]}, {orders:[{...display.actions.orders[0],externalOrderId:"101"}]}])(
     "isolates malformed optional actions while retaining strictly verified purchase facts", async actions => {
       const h=fixture();h.request.mockResolvedValueOnce(Response.json({...overview,actions}));
