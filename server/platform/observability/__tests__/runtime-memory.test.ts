@@ -70,12 +70,14 @@ describe("runtime memory telemetry lifecycle", () => {
     stopDuplicate();
     await observeRuntimeWork("job.one", async () => "result");
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(emit).toHaveBeenCalledTimes(3);
-    expect(emit.mock.calls[2][1]).toMatchObject({ name: "job.one", completed: 1 });
+    expect(emit).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(180_000);
+    expect(emit).toHaveBeenCalledTimes(6);
+    expect(emit.mock.calls[5][1]).toMatchObject({ name: "job.one", completed: 1 });
     expect(vi.getTimerCount()).toBe(1);
     stop(); stop();
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(emit).toHaveBeenCalledTimes(3);
+    expect(emit).toHaveBeenCalledTimes(6);
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -86,7 +88,7 @@ describe("runtime memory telemetry lifecycle", () => {
     stop = startRuntimeMemoryTelemetry({ environment: enabled, emit });
     oldStop();
     await observeRuntimeWork("job.one", async () => undefined);
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(240_000);
     expect(emit.mock.calls.at(-1)?.[1]).toMatchObject({ name: "job.one", completed: 1 });
   });
 
@@ -113,7 +115,8 @@ describe("runtime memory telemetry lifecycle", () => {
     length.mockReturnValue(0);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(emit.mock.calls[0][1]).toMatchObject({ skippedReports: 2, peakStdoutQueuedBytes: 100_000 });
-    expect(emit.mock.calls[1][1]).toMatchObject({ name: "job.one", completed: 1 });
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(emit.mock.calls.at(-1)?.[1]).toMatchObject({ name: "job.one", completed: 1 });
   });
 
   it("also skips a backed-up stderr stream and tolerates an unavailable context reader", async () => {
@@ -167,8 +170,8 @@ describe("request instrumentation", () => {
     response.emit("finish"); response.emit("close");
     expect(response.listenerCount("finish")).toBe(0);
     expect(response.listenerCount("close")).toBe(0);
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(emit.mock.calls.at(-1)?.[1]).toMatchObject({ name: "http.api_read", active: 0,
+    await vi.advanceTimersByTimeAsync(240_000);
+    expect(emit.mock.calls.find(call => call[1].name === "http.api_read")?.[1]).toMatchObject({ name: "http.api_read", active: 0,
       started: 1, [outcome]: 1, maxRssDelta: null });
     expect(JSON.stringify(emit.mock.calls)).not.toContain("private");
   });

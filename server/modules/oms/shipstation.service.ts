@@ -4819,8 +4819,16 @@ export function createShipStationService(
       await db.transaction(async (tx: any) => {
         const row = await lock(tx);
         if (!isConfigured()) throw new OrderEditError("ORDER_EDIT_SHIPPING_UNAVAILABLE", "ShipStation is unavailable.");
-        const proof = await tx.execute(sql`SELECT provider_order_id,was_held FROM oms.order_edit_provider_holds
-          WHERE operation_id=${input.operationId}::uuid AND shipment_id=${input.shipmentId} AND released_at IS NULL FOR UPDATE`);
+        const proof = await tx.execute(sql`SELECT provider_order_id,was_held,released_at FROM oms.order_edit_provider_holds
+          WHERE operation_id=${input.operationId}::uuid AND shipment_id=${input.shipmentId} FOR UPDATE`);
+        if (input.mode === "verify_cancelled" && proof.rows?.length === 0) {
+          // Historical shipments can lack a hold receipt. Verify the exact
+          // terminal provider state; never fabricate an earlier hold or send a write.
+          await readProvider(row.provider_order_id, "cancelled");
+          return;
+        }
+        if (proof.rows?.[0]?.released_at != null)
+          throw new OrderEditError("ORDER_EDIT_PROVIDER_HOLD_RELEASED", "The saved provider hold was already released and needs review.");
         const baseline = z.object({ provider_order_id: z.coerce.number().int().positive().safe(), was_held: z.boolean() }).parse(proof.rows?.[0]);
         if (baseline.provider_order_id !== row.provider_order_id) throw new OrderEditError("ORDER_EDIT_PROVIDER_IDENTITY_CHANGED", "The provider shipment identity changed.");
         if (input.mode === "release_unsubmitted") {

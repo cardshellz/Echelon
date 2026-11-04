@@ -89,6 +89,26 @@ export interface OrderEditWarehouseInspection {
   wmsOrderIds: number[];
   fulfillment: CustomerOrderFulfillment;
 }
+
+function cancellationProviderId(shipment: { shipping_engine: string | null; shipstation_order_id: unknown; engine_order_ref: string | null }): number | null {
+  // Match the provider adapter's legacy numeric reference handling, including
+  // leading zeroes, before comparing it with the separately saved ID.
+  const rawReference = shipment.engine_order_ref;
+  if (rawReference !== null && rawReference !== "" && !/^\d+$/.test(rawReference))
+    throw new OrderEditError("ORDER_CANCELLATION_PROVIDER_UNVERIFIED", "A cancelled shipment has an invalid provider reference.");
+  const reference = rawReference ? z.coerce.number().int().positive().safe().safeParse(rawReference) : null;
+  if (reference && !reference.success)
+    throw new OrderEditError("ORDER_CANCELLATION_PROVIDER_UNVERIFIED", "A cancelled shipment has an invalid provider identity.");
+  const referenceId = reference?.success ? reference.data : null;
+  if (shipment.shipstation_order_id != null && referenceId !== null && Number(shipment.shipstation_order_id) !== referenceId)
+    throw new OrderEditError("ORDER_CANCELLATION_PROVIDER_UNVERIFIED", "The cancelled shipment has conflicting provider identities.");
+  const raw = shipment.shipstation_order_id ?? (shipment.shipping_engine === "shipstation" ? referenceId : null);
+  if (raw === null) return null;
+  const parsed = z.coerce.number().int().positive().safe().safeParse(raw);
+  if (!parsed.success) throw new OrderEditError("ORDER_CANCELLATION_PROVIDER_UNVERIFIED", "A cancelled shipment has an invalid provider identity.");
+  return parsed.data;
+}
+
 async function readReleaseProof(
   client: PoolClient,
   omsOrderId: number,
@@ -211,11 +231,13 @@ async function readReleaseProof(
     // cancelOrderCascade preserves purchased-line history. Its disposition is
     // the cancelled order/partitions and released canonical claims, not a zero
     // purchased quantity. The native snapshot above proves full cancellation.
+    if (providerHolds.some(hold => !shipmentIds.includes(hold.shipment_id)))
+      throw new OrderEditError("ORDER_CANCELLATION_PROVIDER_UNVERIFIED", "A provider receipt does not belong to this cancellation's warehouse shipments.");
     for (const shipment of shipments.rows) {
-      const providerId = shipment.shipstation_order_id ?? (shipment.shipping_engine === "shipstation" && /^[1-9]\d*$/.test(shipment.engine_order_ref ?? "") ? String(shipment.engine_order_ref) : null);
+      const providerId = cancellationProviderId(shipment);
       const receipt = providerHolds.find(hold => hold.shipment_id === shipment.id);
       if ((shipment.shipping_engine !== null && shipment.shipping_engine !== "shipstation")
-        || (providerId !== null && (!receipt || receipt.released_at !== null || String(receipt.provider_order_id) !== String(providerId))))
+        || (receipt && (providerId === null || receipt.released_at !== null || String(receipt.provider_order_id) !== String(providerId))))
         throw new OrderEditError("ORDER_CANCELLATION_PROVIDER_UNVERIFIED", "The cancelled warehouse shipment still needs provider verification.");
     }
   }
@@ -396,6 +418,22 @@ async function readReleaseProof(
       )
       .digest("hex"),
   };
+}
+
+/** A missing historical hold is not proof of cancellation. Every currently
+ * linked shipment must instead be observed cancelled by the provider owner. */
+async function cancellationProviderShipments(client: PoolClient, wmsOrderIds: number[]): Promise<Array<{ id: number; provider_order_id: number | null }>> {
+  const rows = (await client.query(`SELECT id,shipping_engine,shipstation_order_id,engine_order_ref
+    FROM wms.outbound_shipments WHERE order_id=ANY($1::int[]) ORDER BY id FOR UPDATE`, [wmsOrderIds])).rows;
+  const shipments: Array<{ id: number; provider_order_id: number | null }> = [];
+  for (const row of rows) {
+    const providerId = cancellationProviderId(row);
+    // No local ID (or even no engine) does not prove an earlier push was not
+    // accepted. Every shipment crosses the provider lock; an unresolved ID is
+    // rejected there instead of silently authorizing completion.
+    shipments.push({ id: positiveId.parse(row.id), provider_order_id: providerId });
+  }
+  return shipments;
 }
 
 async function readAllocationProof(
@@ -604,6 +642,7 @@ export async function finalizeOrderEditWarehouseRelease(
     allocationRequired: z.boolean().optional(),
     fulfilledCancellation: z.boolean().optional(),
     cancelledOrder: z.boolean().optional(),
+    verifiedCancellationShipments: z.array(z.object({ shipmentId: positiveId, providerOrderId: positiveId }).strict()).optional(),
     unsubmitted: z.boolean().optional(),
   })
     .strict()
@@ -636,6 +675,17 @@ export async function finalizeOrderEditWarehouseRelease(
       "ORDER_EDIT_RELEASE_CHANGED",
       "Warehouse state changed after provider verification; verify the edit again.",
     );
+  if (proof.cancelledOrder) {
+    const shipments = await cancellationProviderShipments(client, current.wmsOrderIds);
+    const required = shipments.map(shipment => ({ shipmentId: shipment.id, providerOrderId: shipment.provider_order_id }));
+    if (shipments.some(shipment => shipment.provider_order_id === null)
+      || !proof.verifiedCancellationShipments || proof.verifiedCancellationShipments.length !== required.length
+      || required.some((shipment, index) => proof.verifiedCancellationShipments?.[index]?.shipmentId !== shipment.shipmentId
+        || proof.verifiedCancellationShipments?.[index]?.providerOrderId !== shipment.providerOrderId))
+      throw new OrderEditError("ORDER_CANCELLATION_PROVIDER_UNVERIFIED", "Every linked cancelled shipment requires fresh provider verification.");
+  } else if (proof.verifiedCancellationShipments !== undefined) {
+    throw new OrderEditError("ORDER_EDIT_RELEASE_STATE_INVALID", "Cancellation verification cannot authorize another release.");
+  }
   // Provider cleanup was verified before this proof was issued. Retire its
   // receipt with completion and audit, including when an independent manual
   // hold must remain physically in place. A failed transaction retains both.
@@ -1384,18 +1434,7 @@ export class OrderEditWarehouseGateway {
         false,
         true,
       );
-      const receipts = await client.query(
-        "SELECT shipment_id AS id,provider_order_id FROM oms.order_edit_provider_holds WHERE operation_id=$1 AND released_at IS NULL ORDER BY shipment_id",
-        [operationId],
-      );
-      const shipments = z
-        .array(
-          z.object({
-            id: positiveId,
-            provider_order_id: z.coerce.number().int().positive().safe(),
-          }),
-        )
-        .parse(receipts.rows);
+      const shipments = await cancellationProviderShipments(client, before.wmsOrderIds);
       return { before, shipments };
     });
     await this.providerPhase(shipments, operationId, "verify_cancelled");
@@ -1415,7 +1454,11 @@ export class OrderEditWarehouseGateway {
         "ORDER_CANCELLATION_RELEASE_CHANGED",
         "The warehouse cancellation changed during verification.",
       );
-    return after;
+    if (shipments.some(shipment => shipment.provider_order_id === null))
+      throw new OrderEditError("ORDER_CANCELLATION_PROVIDER_UNVERIFIED", "A cancelled shipment has no verified provider identity.");
+    return { ...after, verifiedCancellationShipments: shipments.map(shipment => ({
+      shipmentId: shipment.id, providerOrderId: positiveId.parse(shipment.provider_order_id),
+    })) };
   }
 
   private async releaseOwned(

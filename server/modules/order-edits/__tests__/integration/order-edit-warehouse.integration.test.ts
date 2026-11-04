@@ -480,6 +480,55 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       expect((await database.pool.query("SELECT paid_quantity,authority_fulfillable_quantity FROM oms.oms_order_lines WHERE id=30")).rows[0]).toEqual({ paid_quantity: 1, authority_fulfillable_quantity: 1 });
       expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.order_edit_events WHERE operation_id=$1 AND action='cancellation_completed'", [OP])).rows[0].count).toBe(1);
     });
+    it("recovers a missing hold only after exact provider cancellation verification and retains that proof", async () => {
+      const value = await cancelledOperation(), store = new PostgresOrderEditStore(database.pool);
+      await database.pool.query("INSERT INTO wms.outbound_shipments(id,order_id,status,shipping_engine,shipstation_order_id) VALUES(51,10,'cancelled','shipstation',55)");
+      const verify = vi.fn().mockRejectedValueOnce(new OrderEditError("ORDER_CANCELLATION_PROVIDER_PENDING","Provider is still active."));
+      const current = new OrderEditWarehouseGateway(database.pool, { isConfigured:()=>true, synchronizeOrderEditShipment:verify }, vi.fn());
+      await expect(current.cancellationReleaseProof(20,OP)).rejects.toMatchObject({code:"ORDER_CANCELLATION_PROVIDER_PENDING"});
+      expect((await store.get(OP)).status).toBe("synchronizing");
+      expect((await database.pool.query("SELECT count(*)::int n FROM oms.order_edit_provider_holds WHERE operation_id=$1",[OP])).rows[0].n).toBe(0);
+      const proof = await current.cancellationReleaseProof(20,OP);
+      expect(proof).toMatchObject({cancelledOrder:true,verifiedCancellationShipments:[{shipmentId:51,providerOrderId:55}]});
+      expect(verify).toHaveBeenLastCalledWith({shipmentId:51,operationId:OP,mode:"verify_cancelled"});
+      await database.pool.query("UPDATE wms.outbound_shipments SET shipstation_order_id=56 WHERE id=51");
+      await expect(store.save({...value,version:2,status:"completed"},1,null,"cancellation_completed",proof)).rejects.toMatchObject({code:"ORDER_EDIT_RELEASE_CHANGED"});
+      expect((await store.get(OP)).status).toBe("synchronizing");
+      await database.pool.query("UPDATE wms.outbound_shipments SET shipstation_order_id=55 WHERE id=51");
+      const verified = await current.cancellationReleaseProof(20,OP);
+      await store.save({...value,version:2,status:"completed"},1,null,"cancellation_completed",verified);
+      expect((await store.get(OP)).status).toBe("completed");
+      expect((await database.pool.query("SELECT after_state->'warehouseRelease'->'verifiedCancellationShipments' AS identities FROM oms.order_edit_events WHERE operation_id=$1 AND action='cancellation_completed'",[OP])).rows[0].identities)
+        .toEqual([{shipmentId:51,providerOrderId:55}]);
+      expect((await database.pool.query("SELECT count(*)::int n FROM oms.order_edit_provider_holds WHERE operation_id=$1",[OP])).rows[0].n).toBe(0);
+    });
+    it.each(["changed_provider_id","released_receipt","conflicting_identifiers","zero_padded_conflict","invalid_reference"])("never replaces unsafe existing provider evidence: %s", async failure => {
+      await cancelledOperation();
+      await database.pool.query("INSERT INTO wms.outbound_shipments(id,order_id,status,shipping_engine,shipstation_order_id) VALUES(51,10,'cancelled','shipstation',55)");
+      await database.pool.query("INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held,released_at) VALUES($1,51,$2,false,$3)",
+        [OP,failure === "changed_provider_id" ? 56 : 55,failure === "released_receipt" ? new Date("2026-10-06T00:00:00Z") : null]);
+      if(failure === "conflicting_identifiers") await database.pool.query("UPDATE wms.outbound_shipments SET engine_order_ref='56' WHERE id=51");
+      if(failure === "zero_padded_conflict") await database.pool.query("UPDATE wms.outbound_shipments SET engine_order_ref='00056' WHERE id=51");
+      if(failure === "invalid_reference") await database.pool.query("UPDATE wms.outbound_shipments SET engine_order_ref='other-order' WHERE id=51");
+      const verify=vi.fn();
+      const current=new OrderEditWarehouseGateway(database.pool,{isConfigured:()=>true,synchronizeOrderEditShipment:verify},vi.fn());
+      await expect(current.cancellationReleaseProof(20,OP)).rejects.toMatchObject({code:"ORDER_CANCELLATION_PROVIDER_UNVERIFIED"});
+      expect(verify).not.toHaveBeenCalled();
+      expect((await new PostgresOrderEditStore(database.pool).get(OP)).status).toBe("synchronizing");
+    });
+    it.each([null, "shipstation"])("does not skip the provider lock for an unlinked shipment (engine=%s)", async engine => {
+      await cancelledOperation();
+      await database.pool.query("INSERT INTO wms.outbound_shipments(id,order_id,status,shipping_engine) VALUES(51,10,'cancelled',$1)", [engine]);
+      const verify = vi.fn().mockRejectedValueOnce(new OrderEditError("ORDER_EDIT_PROVIDER_IDENTITY_UNVERIFIED", "Provider identity is not established."));
+      const current = new OrderEditWarehouseGateway(database.pool,{isConfigured:()=>true,synchronizeOrderEditShipment:verify},vi.fn());
+      await expect(current.cancellationReleaseProof(20,OP)).rejects.toMatchObject({code:"ORDER_EDIT_PROVIDER_IDENTITY_UNVERIFIED"});
+      expect(verify).toHaveBeenCalledWith({shipmentId:51,operationId:OP,mode:"verify_cancelled"});
+      expect((await new PostgresOrderEditStore(database.pool).get(OP)).status).toBe("synchronizing");
+      // Even a broken provider implementation cannot certify a null identity.
+      await expect(current.cancellationReleaseProof(20,OP)).rejects.toMatchObject({code:"ORDER_CANCELLATION_PROVIDER_UNVERIFIED"});
+      await database.pool.query("UPDATE wms.outbound_shipments SET shipping_engine='shipstation',shipstation_order_id=55 WHERE id=51");
+      expect(await current.cancellationReleaseProof(20,OP)).toMatchObject({verifiedCancellationShipments:[{shipmentId:51,providerOrderId:55}]});
+    });
     it.each([false,true])("runs cancellation through split refunds, retries and owned hold cleanup (lost reply=%s)",async lostReply=>{
       await database.pool.query(`INSERT INTO oms.order_edit_settings VALUES(4,30,true,'staff','2026-10-05T00:00:00Z')
         ON CONFLICT(connection_id) DO UPDATE SET enabled=true;
@@ -521,8 +570,17 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       rewards.settleCancellation.mockRejectedValueOnce(new OrderEditProviderError("REWARD_ORDER_PROCESSING","Synthetic retry","unknown"));
       await service.reconcile(OP);expect((await read()).get(20)?.[0].status.code).toBe("completed");
       const release=vi.spyOn(gateway,"cancellationReleaseProof");
-      release.mockRejectedValueOnce(new OrderEditError("ORDER_CANCELLATION_WAREHOUSE_PENDING","Synthetic release retry"));
+      release.mockRejectedValueOnce(new OrderEditError("ORDER_CANCELLATION_WAREHOUSE_PENDING","Synthetic release retry"))
+        .mockRejectedValueOnce(new OrderEditError("ORDER_CANCELLATION_WAREHOUSE_PENDING","Synthetic release retry"));
       await service.reconcile(OP);expect((await store.get(OP)).status).toBe("synchronizing");
+      const failureTime = new Date("2026-10-06T00:00:00Z");
+      expect(await store.pending(25,new Date(failureTime.getTime()+299_999))).not.toContain(OP);
+      expect(await store.pending(25,new Date(failureTime.getTime()+300_000))).toContain(OP);
+      const beforeRetry=(await database.pool.query("SELECT count(*)::int n FROM oms.order_edit_events WHERE operation_id=$1",[OP])).rows[0].n;
+      await service.reconcile(OP);
+      const afterRetry=(await database.pool.query("SELECT count(*)::int n FROM oms.order_edit_events WHERE operation_id=$1",[OP])).rows[0].n;
+      expect(afterRetry-beforeRetry).toBe(1);
+      expect((await store.get(OP)).error?.code).toBe("ORDER_CANCELLATION_WAREHOUSE_PENDING");
       await service.reconcile(OP);await service.reconcile(OP);
       const final=(await database.pool.query("SELECT id,warehouse_status,on_hold,order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0];
       expect(final).toMatchObject({warehouse_status:"cancelled",on_hold:1,order_edit_operation_id:null});

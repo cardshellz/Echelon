@@ -1,11 +1,14 @@
 import { readFileSync } from "node:fs";
 import { Pool } from "pg";
-import { beforeAll, beforeEach, afterAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, afterAll, describe, expect, it, vi } from "vitest";
 import { PostgresOrderActionProjectionStore } from "../../infrastructure/order-action-projection.repository";
+import { OrderActionProjectionWorker } from "../../application/order-action-projection.worker";
 import { PostgresCustomerReturnBoxMeasurements } from "../../../returns/infrastructure/customer-return-box-measurements.repository";
 import { resolveReturnsTestDatabase } from "../../../returns/__tests__/support/disposable-database";
 import { createInspectionTestSchema, seedInspectionTestSchema } from "../../../returns/__tests__/support/customer-return-inspection-database";
 import type { OrderActionScope } from "../../application/order-action-projection.ports";
+import { CustomerReturnPreviewService } from "../../../returns/application/customer-return-preview.service";
+import type { CustomerOrderActionSnapshot } from "@shared/customer-account/order-actions";
 
 const url = resolveReturnsTestDatabase(process.env, "inspection");
 const integration = url ? describe.sequential : describe.skip;
@@ -14,6 +17,16 @@ const LEASE = "00000000-0000-4000-8000-000000000001";
 const OTHER_LEASE = "00000000-0000-4000-8000-000000000002";
 const SNAPSHOT = { order: null, returnOrder: null, orderFailed: false, returnFailed: false };
 const identity = { externalOrderId: "1000", orderReference: "#TEST-1" };
+function closedSnapshot(): CustomerOrderActionSnapshot {
+  const preview = new CustomerReturnPreviewService().lookup({scenarioId:"split_delivered",orderReference:"TEST-1001"});
+  const {mode:_mode,scenarioId:_scenario,...order}=preview;
+  return {order:{connectionId:4,omsOrderId:100,orderNumber:"#TEST-1",customerName:"Synthetic",customerEmail:null,
+    activeOperationId:null,revision:"fixture",currency:"USD",eligibility:{editable:false,reasons:["Shipped"]},
+    addressEligibility:{editable:false,reasons:["Shipped"]},cancellation:{canReview:false,requestKey:null,reasons:["Shipped"]},
+    codeEntryAvailable:true,lines:[],totalCents:0,financialStatus:"Paid",warehouseStatus:"Shipped"},
+    returnOrder:{omsOrderId:100,settingsVersion:null,order:{...order,orderReference:"TEST-1",sourceRevision:"a".repeat(64),
+      lines:order.lines.map(line=>({...line,eligibleQuantity:0}))}},orderFailed:false,returnFailed:false};
+}
 function table(file: string, marker: string): string {
   const sql = readFileSync(file, "utf8").replace(/\r\n/g, "\n");
   const start = sql.indexOf(marker); const end = sql.indexOf("\n);", start);
@@ -124,6 +137,68 @@ integration("durable customer action lookup and transactional source invalidatio
     expect((await read("100", new Date(NOW.getTime() + 120_000))).orders[0].state).toBe("ready");
     expect((await store.claim(1, new Date(NOW.getTime() + 120_000), OTHER_LEASE))[0].omsOrderId).toBe(100);
     expect((await read("100", new Date(NOW.getTime() + 3_600_000))).orders[0].state).toBe("refreshing");
+  });
+  it("parks a closed refresh but wakes on customer demand and on transactional source changes", async () => {
+    const scope = await claim();
+    expect(await store.complete(scope, closedSnapshot(), NOW, new Date(NOW.getTime()+60_000), undefined, null)).toBe(true);
+    expect((await pool.query("SELECT next_refresh_at='infinity'::timestamptz AS deferred FROM oms.customer_order_actions WHERE oms_order_id=100")).rows[0].deferred).toBe(true);
+    const later = new Date(NOW.getTime()+120_000);
+    expect((await store.claim(2,later,OTHER_LEASE)).some(value=>value.omsOrderId===100)).toBe(false);
+    expect((await read("100",later)).orders[0]).toMatchObject({state:"refreshing",snapshot:null});
+    await store.requestRefresh({channelId:36,externalCustomerId:"100",orders:[identity]},later);
+    const requested=(await store.claim(2,later,OTHER_LEASE)).find(value=>value.omsOrderId===100)!;
+    expect(requested).toBeDefined();
+    expect(await store.complete(requested,closedSnapshot(),later,new Date(later.getTime()+60_000),undefined,null)).toBe(true);
+    await pool.query("UPDATE oms.oms_order_lines SET quantity=2 WHERE id=101");
+    expect((await read("100",later)).orders[0].state).toBe("refreshing");
+    await store.drainInvalidations(1_000);
+    expect((await store.claim(2,later,LEASE)).some(value=>value.omsOrderId===100)).toBe(true);
+  });
+  it("converts an existing closed backlog to on-demand work without a provider call", async () => {
+    const scoped=new PostgresOrderActionProjectionStore(pool,["test-shop.myshopify.com"],[100]);
+    const scope=(await scoped.claim(1,NOW,LEASE))[0];
+    const snapshot=closedSnapshot();
+    expect(await scoped.complete(scope,snapshot,NOW,new Date(NOW.getTime()+60_000),undefined,new Date(NOW.getTime()+60_000))).toBe(true);
+    const later=new Date(NOW.getTime()+120_000), candidates=await scoped.scheduledCandidates(50,later);
+    expect(candidates).toHaveLength(1);
+    const inspector={inspect:vi.fn()};
+    const worker=new OrderActionProjectionWorker({store:scoped,inspector,now:()=>later,newId:()=>OTHER_LEASE,report:vi.fn()});
+    await worker.run();
+    expect(inspector.inspect).not.toHaveBeenCalled();
+    expect(await scoped.claim(1,later,OTHER_LEASE)).toEqual([]);
+    expect((await read("100",later)).orders[0]).toMatchObject({state:"refreshing",snapshot:null});
+    await scoped.requestRefresh({channelId:36,externalCustomerId:"100",orders:[identity]},later);
+    expect((await scoped.claim(1,later,OTHER_LEASE)).map(row=>row.omsOrderId)).toEqual([100]);
+  });
+  it.each(["customer", "source", "lease"])("does not defer closed evidence after a concurrent %s wake-up",async race=>{
+    const scoped=new PostgresOrderActionProjectionStore(pool,["test-shop.myshopify.com"],[100]);
+    const scope=(await scoped.claim(1,NOW,LEASE))[0];
+    await scoped.complete(scope,closedSnapshot(),NOW,new Date(NOW.getTime()+60_000),undefined,new Date(NOW.getTime()+60_000));
+    const later=new Date(NOW.getTime()+120_000), candidates=await scoped.scheduledCandidates(50,later);
+    expect(candidates).toHaveLength(1);
+    if(race==="customer") await scoped.requestRefresh({channelId:36,externalCustomerId:"100",orders:[identity]},later);
+    if(race==="source") await pool.query("UPDATE oms.oms_order_lines SET quantity=2 WHERE id=101");
+    if(race==="lease") expect((await scoped.claim(1,later,OTHER_LEASE))).toHaveLength(1);
+    expect(await scoped.deferClosed(candidates,later)).toBe(0);
+    if(race==="source") await scoped.drainInvalidations(1_000);
+    if(race!=="lease") expect((await scoped.claim(1,later,OTHER_LEASE)).map(row=>row.omsOrderId)).toEqual([100]);
+  });
+  it("never parks a transient inspection failure or treats it as a closed backlog candidate",async()=>{
+    const scoped=new PostgresOrderActionProjectionStore(pool,["test-shop.myshopify.com"],[100]);
+    const scope=(await scoped.claim(1,NOW,LEASE))[0];
+    const failure={...closedSnapshot(),returnOrder:null,returnFailed:true};
+    await expect(scoped.complete(scope,failure,NOW,new Date(NOW.getTime()+60_000),"transient",null)).rejects.toThrow("requires a retry deadline");
+    expect(await scoped.complete(scope,failure,NOW,new Date(NOW.getTime()+60_000),"transient",new Date(NOW.getTime()+60_000))).toBe(true);
+    const later=new Date(NOW.getTime()+120_000);
+    expect(await scoped.scheduledCandidates(50,later)).toEqual([]);
+    expect((await scoped.claim(1,later,OTHER_LEASE)).map(row=>row.omsOrderId)).toEqual([100]);
+  });
+  it("rejects deferral when the saved evidence is incomplete", async () => {
+    const scoped = new PostgresOrderActionProjectionStore(pool,["test-shop.myshopify.com"],[100]);
+    const scope = (await scoped.claim(1,NOW,LEASE))[0];
+    await expect(scoped.complete(scope,SNAPSHOT,NOW,new Date(NOW.getTime()+60_000),undefined,null))
+      .rejects.toThrow("Only complete closed action evidence may be deferred.");
+    expect(await scoped.complete(scope,SNAPSHOT,NOW,new Date(NOW.getTime()+60_000))).toBe(true);
   });
   it("does not starve a due failed inspection behind unbuilt history", async () => {
     const scope = await claim();

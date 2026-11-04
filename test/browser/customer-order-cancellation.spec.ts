@@ -36,6 +36,7 @@ async function fixture(
     reviewChanged?: boolean;
     mismatch?: boolean;
     heldStatus?: Promise<void>;
+    pendingProviderProof?: boolean;
   } = {},
 ) {
   const requests: CustomerAccountRequest[] = [];
@@ -57,9 +58,11 @@ async function fixture(
     currency: "USD",
     status,
     refundCents: 829,
-    refundStatus: status === "completed" ? "completed" : "pending",
-    rewards: { ...review.rewards, settled: status === "completed" },
-    error: null,
+    refundStatus: status === "completed" || status === "synchronizing" ? "completed" : "pending",
+    rewards: { ...review.rewards, settled: status === "completed" || status === "synchronizing" },
+    error: options.pendingProviderProof && status === "synchronizing"
+      ? {code:"ORDER_CANCELLATION_PROVIDER_UNVERIFIED",message:"The cancelled warehouse shipment still needs provider verification.",retryable:true}
+      : null,
   });
   await page.route("**/*", (route) =>
     new URL(route.request().url()).hostname === "127.0.0.1"
@@ -224,6 +227,22 @@ test("a lost accepted response is recovered automatically by its saved key witho
   await page.clock.fastForward(60_000);
   expect(f.counts().statusReads).toBe(reads);
   expect(f.counts().submissions).toBe(1);
+  f.assertSafe();
+});
+
+test("pending provider verification stays visible and resolves without another cancellation", async ({page}) => {
+  const f=await fixture(page,{pendingProviderProof:true});
+  await f.submit();
+  f.setStatus("synchronizing");
+  await page.clock.fastForward(5_000);
+  await expect(page.getByRole("alert")).toContainText("The cancelled warehouse shipment still needs provider verification.");
+  await expect(page.getByText("Refund processed",{exact:true})).toBeVisible();
+  f.setStatus("completed");
+  await page.clock.fastForward(5_000);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText(/Your order is cancelled\. The refund has been processed/)).toBeVisible();
+  expect(f.counts().submissions).toBe(1);
+  expect(f.counts().providerAcceptances).toBe(1);
   f.assertSafe();
 });
 

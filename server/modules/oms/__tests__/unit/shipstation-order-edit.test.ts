@@ -34,7 +34,7 @@ function setup() {
   const header = {
     id: 9,
     order_id: 10,
-    provider_order_id: 55,
+    provider_order_id: 55 as number | null,
     order_edit_operation_id: OPERATION,
     status: "queued",
     warehouse_status: "ready",
@@ -255,6 +255,30 @@ describe("ShipStation order-edit ownership and readback", () => {
     await f.run("verify_cancelled"); await f.run("verify_cancelled");
     expect(f.calls.slice(before).every(call => call.body === null)).toBe(true);
     expect(f.live.orderStatus).toBe("cancelled");
+  });
+  it("verifies a cancelled shipment without inventing a missing historical hold", async () => {
+    const f = setup();
+    f.header.warehouse_status = "cancelled"; f.header.status = "cancelled"; f.live.orderStatus = "cancelled";
+    await f.run("verify_cancelled");
+    expect(f.baseline).toBeUndefined();
+    expect(f.calls.every(call => call.body === null)).toBe(true);
+    expect(f.calls.map(call => call.path)).toEqual(["/orders/55", "/shipments", "/orders"]);
+  });
+  it("does not treat a missing provider identity as proof of cancellation", async () => {
+    const f = setup();
+    f.header.warehouse_status = "cancelled"; f.header.status = "cancelled"; f.header.provider_order_id = null;
+    await expect(f.run("verify_cancelled")).rejects.toMatchObject({code:"ORDER_EDIT_PROVIDER_IDENTITY_UNVERIFIED"});
+    expect(f.calls).toEqual([]);
+  });
+  it.each(["active_sibling", "active_label", "uncancelled_provider"])("still blocks missing-hold cancellation verification for %s", async failure => {
+    const f = setup();
+    f.header.warehouse_status = "cancelled"; f.header.status = "cancelled"; f.live.orderStatus = "cancelled";
+    if (failure === "active_sibling") f.split("awaiting_shipment");
+    if (failure === "active_label") f.setLabels([{ orderId: 55, orderNumber: "#100", voided: false }]);
+    if (failure === "uncancelled_provider") f.live.orderStatus = "on_hold";
+    await expect(f.run("verify_cancelled")).rejects.toThrow();
+    expect(f.baseline).toBeUndefined();
+    expect(f.calls.every(call => call.body === null)).toBe(true);
   });
   it.each(["active_sibling", "active_label", "uncancelled_provider"])("keeps cancellation ownership for %s", async failure => {
     const f = setup(); await f.run("hold"); f.header.warehouse_status = "cancelled"; f.header.status = "cancelled"; f.live.orderStatus = "cancelled";
