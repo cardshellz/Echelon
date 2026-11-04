@@ -305,6 +305,9 @@ export function OrderDraft({
   };
 }) {
   const queryClient = useQueryClient();
+  // Older action snapshots may still include removed Shopify lines. Keep them
+  // out of both the editable controls and the submitted change plan.
+  const currentLines = order.lines.filter((line) => line.quantity > 0);
   const [localCodes, setLocalCodes] = useState<string[]>([]);
   const [codeEditing, setCodeEditing] = useState(false);
   const [rewardBusy, setRewardBusy] = useState(false);
@@ -312,7 +315,7 @@ export function OrderDraft({
   const changeCodes = onDiscountCodesChange ?? setLocalCodes;
   const [quantities, setQuantities] = useState<Record<string, string>>(() =>
     Object.fromEntries(
-      order.lines.map((line) => [
+      currentLines.map((line) => [
         line.lineItemId,
         String(
           initialOperation?.requestedPlan?.changes.find(
@@ -382,7 +385,7 @@ export function OrderDraft({
     setError(null);
     setQuantities((current) => ({ ...current, [id]: value }));
   }
-  const changes = order.lines
+  const changes = currentLines
     .filter((line) => quantities[line.lineItemId] !== String(line.quantity))
     .map((line) => ({
       lineItemId: line.lineItemId,
@@ -725,7 +728,7 @@ export function OrderDraft({
                   enabled={mutable && active}
                   includedVariantIds={
                     new Set([
-                      ...order.lines
+                      ...currentLines
                         .map((line) => line.variantId)
                         .filter((id): id is string => id !== null),
                       ...additions.map((item) => item.variant.variantId),
@@ -739,7 +742,7 @@ export function OrderDraft({
                     if (
                       !mutable ||
                       !variant.available ||
-                      order.lines.some(
+                      currentLines.some(
                         (line) => line.variantId === variant.variantId,
                       )
                     )
@@ -759,10 +762,10 @@ export function OrderDraft({
               )}
             </div>
             <div className="oe-edit-items" aria-label="Editable order items">
-              {order.lines.map((line) => {
+              {currentLines.map((line) => {
                 const previewGroup =
                   line.variantId &&
-                  order.lines.filter(
+                  currentLines.filter(
                     (item) => item.variantId === line.variantId,
                   ).length === 1
                     ? previewLineGroups.get(`variant:${line.variantId}`)

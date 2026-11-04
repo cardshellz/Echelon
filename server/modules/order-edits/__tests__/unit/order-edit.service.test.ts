@@ -31,6 +31,32 @@ import {
 } from "../fixtures/order-edit-service.fixture";
 
 describe("private order edit orchestration", () => {
+  it("excludes removed source lines from editable items without deleting audit evidence", async () => {
+    const h = serviceHarness();
+    const active = h.snapshot().lines[0];
+    const removed = { ...active, id: "gid://shopify/LineItem/removed", quantity: 0,
+      unfulfilledQuantity: 0, totalCents: 0, unsupported: true };
+    h.setCurrent({ lines: [active, removed] });
+    const before = structuredClone(h.snapshot());
+    const result = await h.service.order(4, 1);
+    expect(result.lines.map(line => line.lineItemId)).toEqual([active.id]);
+    expect(result.eligibility.editable).toBe(true);
+    expect(h.snapshot()).toEqual(before);
+    expect(h.snapshot().lines).toContainEqual(removed);
+    expect(h.provider.quote).not.toHaveBeenCalled();
+    expect(h.provider.commit).not.toHaveBeenCalled();
+  });
+  it("rejects a stale request targeting a removed line before saving or preparing an edit", async () => {
+    const h = serviceHarness();
+    const removed = { ...h.snapshot().lines[0], id: "gid://shopify/LineItem/2",
+      quantity: 0, unfulfilledQuantity: 0, totalCents: 0, unsupported: true };
+    h.setCurrent({ lines: [...h.snapshot().lines, removed] });
+    await expect(h.service.quote({...h.input, changes:[{lineItemId:removed.id,quantity:2}]},"staff"))
+      .rejects.toMatchObject({code:"EDIT_PLAN_INVALID"});
+    expect(h.provider.quote).not.toHaveBeenCalled();
+    expect(h.provider.commit).not.toHaveBeenCalled();
+    expect(h.events).toEqual([]);
+  });
   it("presents verified variant identities and marks only a new product added, keeping Shopify source lines intact", async () => {
     const h = serviceHarness();
     const originalQuote = await h.provider.quote.getMockImplementation()!();

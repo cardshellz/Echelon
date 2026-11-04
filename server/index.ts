@@ -1,3 +1,4 @@
+import { createAccountNativeSummariesWorker } from "./modules/customer-account/infrastructure/account-native-summaries.composition";
 import { createCustomerReturnWorkflowWorker, startCustomerReturnWorkflowScheduler } from "./modules/returns/infrastructure/customer-return-workflow.composition";
 import type { ReturnWorkflowReport } from "./modules/returns/application/customer-return-workflow.worker";
 import { createChannelSyncBatchService } from "./channel-sync-batch.composition";
@@ -777,7 +778,12 @@ function startEchelonSyncScheduler(
       reportBackgroundWork(action, event);
     };
     try {
-      httpServer.once("close", startOrderActionProjectionScheduler(createOrderActionProjectionWorker(dbPool, orderEdits, reportActions), reportActions));
+      const actionWorker = createOrderActionProjectionWorker(dbPool, orderEdits, reportActions);
+      const nativeWorker = createAccountNativeSummariesWorker(dbPool, reportActions);
+      httpServer.once("close", startOrderActionProjectionScheduler({ run: async () => {
+        const outcomes = await Promise.allSettled([actionWorker.run(), nativeWorker.run()]);
+        if (outcomes.some(outcome => outcome.status === "rejected")) throw new Error("ACCOUNT_PROJECTION_SWEEP_FAILED");
+      } }, reportActions));
     } catch {
       // A read-model configuration problem must not prevent the shared service
       // from starting. The account's existing authorization gate still applies.

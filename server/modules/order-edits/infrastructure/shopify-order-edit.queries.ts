@@ -6,9 +6,15 @@ const DISCOUNT_VALUE = `value { __typename ... on PricingPercentageValue { perce
 const CALCULATED_ALLOCATION = `calculatedDiscountAllocations { allocatedAmountSet { ${MONEY} } discountApplication { __typename id allocationMethod appliedTo targetType targetSelection description ${DISCOUNT_VALUE} ... on CalculatedDiscountCodeApplication { code } } }`;
 // Current totals only: no calculated order, catalog, discount validation or payment history.
 export const ACCOUNT_SUMMARIES_QUERY = `query EchelonAccountOrderSummaries($ids: [ID!]!) {
-  nodes(ids: $ids) { ... on Order { id name customer { id } cancelledAt displayFinancialStatus
+  nodes(ids: $ids) { ... on Order { id name updatedAt customer { id } cancelledAt displayFinancialStatus
     currentTotalPriceSet { ${MONEY} }
   } }
+}`;
+export const ACCOUNT_NATIVE_PAGE_QUERY = `query EchelonAccountNativePage($after: String, $search: String, $sort: OrderSortKeys!) {
+  orders(first: 100, after: $after, query: $search, sortKey: $sort, reverse: false) {
+    nodes { id name updatedAt customer { id } cancelledAt displayFinancialStatus currentTotalPriceSet { ${MONEY} } }
+    pageInfo { hasNextPage }
+  }
 }`;
 // Replacing a line cannot preserve customization or subscriptions through
 // orderEditAddVariant. Read these explicitly; never assume an empty value.
@@ -22,7 +28,7 @@ export const REFUND_FIELDS = `id note totalRefundedSet { ${MONEY} } transactions
 export const ORDER_QUERY = `query EchelonEditOrder($id: ID!) {
   shop { currencyCode primaryDomain { host } transformEnabled: metafield(namespace: "cardshellz", key: "transform_global_enabled") { value } }
   order(id: $id) {
-    id name updatedAt merchantEditable merchantEditableErrors cancelledAt closed fullyPaid
+    id name updatedAt displayFinancialStatus merchantEditable merchantEditableErrors cancelledAt closed fullyPaid
     currencyCode presentmentCurrencyCode capturable taxesIncluded
     currentTotalPriceSet { ${MONEY} } totalOutstandingSet { ${MONEY} }
     currentSubtotalPriceSet { ${MONEY} } currentTotalTaxSet { ${MONEY} }
