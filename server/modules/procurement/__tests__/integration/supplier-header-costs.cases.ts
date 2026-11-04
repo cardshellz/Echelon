@@ -107,7 +107,10 @@ export function registerSupplierHeaderCostCases(fixture: { pool: () => pg.Pool; 
       expect((await query("SELECT actual_cents::text AS amount FROM procurement.inbound_freight_costs WHERE id=31")).rows).toEqual([{ amount: "5200" }]);
       expect((await query("SELECT allocated_cents::text AS amount FROM procurement.inbound_freight_allocations WHERE shipment_cost_id=31")).rows).toEqual([{ amount: "5200" }]);
       expect((await query("SELECT freight_allocated_cents::text AS freight,recoverable_tax_allocated_cents::text AS recoverable FROM procurement.landed_cost_snapshots WHERE inbound_shipment_line_id=11")).rows).toEqual([{ freight: "5200", recoverable: "200" }]);
-      const displayed = await readPoShipmentCosts(fixture.database(), 10);
+      const displayed = await readPoShipmentCosts({
+        execute: statement => fixture.database().transaction(tx => tx.execute(statement)),
+        transaction: (work, options) => fixture.database().transaction(work, options),
+      }, 10);
       expect(displayed?.taxCosts).toMatchObject({ supplierInventoryCents: 13000, shipmentInventoryCents: 5000, recoverableShipmentTaxCents: 200, inventoryLandedCents: 18000 });
       // Repeating the same approved rule records no second charge increase.
       const next = await review(entries);

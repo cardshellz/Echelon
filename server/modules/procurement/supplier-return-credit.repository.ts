@@ -102,7 +102,7 @@ export async function loadReturnCreditEvidence(tx: CostEvidenceTransaction, rawI
     ORDER BY returned.id,invoice.id,line.id LIMIT 10001`)).rows;
     if (rawChoices.length > 10000)
         throw new CostEvidenceError("SUPPLIER_RETURN_INVOICE_LIMIT", "Return source invoice choices exceed their bounded complete read.");
-    const scopedInvoiceIds = [...new Set(rawChoices.filter(row => Number(row.receipt_costing_enabled ?? 0) === 1).map(row => costInteger(row.invoice_line_id, "returned invoice line", 1)))];
+    const scopedInvoiceIds = [...new Set(rawChoices.filter(row => costInteger(row.receipt_costing_enabled ?? 0, "receipt costing policy") === 1).map(row => costInteger(row.invoice_line_id, "returned invoice line", 1)))];
     const assignments = scopedInvoiceIds.length ? (await tx.execute(sql`SELECT allocation.*,receipt.id AS receipt_id,receipt.receipt_number,
       (SELECT min(origin.purchase_start_base_piece) FROM inventory.effective_lot_cost_origins origin WHERE origin.receiving_line_id=allocation.receiving_line_id) AS receipt_start
       FROM procurement.receipt_invoice_cost_allocations allocation JOIN procurement.receiving_lines receiving_line ON receiving_line.id=allocation.receiving_line_id
@@ -111,7 +111,7 @@ export async function loadReturnCreditEvidence(tx: CostEvidenceTransaction, rawI
     if (assignments.length > 10000) throw new CostEvidenceError("SUPPLIER_RETURN_INVOICE_LIMIT", "Return invoice assignments exceed their complete bounded read.");
     const invoiceAttributions = new Map<string, InvoiceAttribution>();
     const choices = rawChoices.filter(choice => {
-      if (Number(choice.receipt_costing_enabled ?? 0) !== 1) return true;
+      if (costInteger(choice.receipt_costing_enabled ?? 0, "receipt costing policy") !== 1) return true;
       const source = supplierReturnStockPreviewLineSchema.parse(rows.find(row => Number(row.id) === Number(choice.return_line_id))!.source_snapshot);
       const owned = assignments.filter(row => Number(row.invoice_line_id) === Number(choice.invoice_line_id) && Number(row.receiving_line_id) === source.sourceProof.origin.receivingLineId);
       if (!owned.length) return false;
