@@ -13,7 +13,9 @@ import {
   costInteger,
 } from "../../inventory/infrastructure/cost-evidence-values";
 import type { CostRevisionInput } from "../../inventory/infrastructure/cost-evidence.repository";
-import type { SupplierCreditCostRow } from "./supplier-credit-source";
+import { resolveSupplierCreditReductions, supplierCreditSourceEvidenceSchema, type SupplierCreditCostRow } from "./supplier-credit-source";
+import { supplierCreditDispositionSchema } from "@shared/procurement/supplier-credit";
+import { receiptCreditAttributionKey } from "@shared/procurement/receipt-credit-attribution";
 
 export interface ReceiptCostingEvidence {
   receipts: ReceiptCostingReceipt[];
@@ -121,14 +123,28 @@ export function resolveReceiptInvoiceSources(
     purchaseOrderLine: { ...source.purchaseOrderLine, status: "open" },
     approvedInvoices: [],
   });
-  if (source.supplierCredits?.length)
-    reject(
-      "Receipt-specific supplier credits require their original receipt attribution before costs can change.",
-    );
   const allocations = validateReceiptInvoiceAllocations(
     source,
     source.receiptCosting?.allocations ?? [],
   );
+  const credits = (source.supplierCredits ?? []).filter(row => supplierCreditDispositionSchema.safeParse(row.disposition).data?.kind !== "accepted_stock_return");
+  const reductions = resolveSupplierCreditReductions(source.approvedInvoices, credits, costInteger(source.purchaseOrderLine.id, "purchaseOrderLineId", 1));
+  if (reductions.issues.length) reject(reductions.issues[0].message);
+  const allocationKey = (invoiceLineId: number, row: Parameters<typeof receiptCreditAttributionKey>[0]) => `${invoiceLineId}:${receiptCreditAttributionKey(row)}`;
+  const assignmentKeys = new Set(allocations.map(row => allocationKey(row.invoiceLineId, row)));
+  const activeCredits = credits.filter(row => row.status === "approved").map(credit => ({
+    id: costInteger(credit.id, "creditLineId", 1), evidence: supplierCreditSourceEvidenceSchema.parse(credit.source_evidence),
+  })).sort((a, b) => a.id - b.id);
+  const creditsByAssignment = new Map<string, typeof activeCredits>();
+  for (const credit of activeCredits) {
+    const evidence = credit.evidence;
+    if (!evidence.receiptAllocation || evidence.returnSource || evidence.reduction.basePieces !== 0
+      || !assignmentKeys.has(allocationKey(evidence.invoiceLineId, evidence.receiptAllocation)))
+      reject("This credit needs its original invoice-to-receipt assignment reviewed. Received quantities and other receipts' costs are preserved.");
+    const key = allocationKey(evidence.invoiceLineId, evidence.receiptAllocation);
+    const assigned = creditsByAssignment.get(key) ?? [];
+    assigned.push(credit); creditsByAssignment.set(key, assigned);
+  }
   const receipts = source.receiptCosting!.receipts;
   const actual = new Map<number, CostRevisionInput[]>();
   for (const id of new Set(allocations.map((row) => row.invoiceLineId))) {
@@ -190,6 +206,10 @@ export function resolveReceiptInvoiceSources(
       const selected = actual
         .get(row.invoiceLineId)!
         .find((item) => item.component === quoted.component)!;
+      const receiptCredits = (creditsByAssignment.get(allocationKey(row.invoiceLineId, row)) ?? []).flatMap(credit => {
+        const amountMills = quoted.component === "product" ? credit.evidence.reduction.productMills : credit.evidence.reduction.packagingMills;
+        return amountMills === 0 ? [] : [{ supplierCreditLineId: credit.id, amountMills, pieces: row.pieces }];
+      });
       segments.push({
         startBasePiece: start,
         pieces: row.pieces,
@@ -199,6 +219,7 @@ export function resolveReceiptInvoiceSources(
         sourceBasePieces: selected.basePieces!,
         sourceTotalMills: selected.totalMills!,
         evidence: "confirmed",
+        ...(receiptCredits.length ? { credits: receiptCredits } : {}),
       });
       cursor = start + row.pieces;
     }
@@ -214,6 +235,7 @@ export function resolveReceiptInvoiceSources(
         inputs.find((item) => item.component === quoted.component)!.sources,
     );
     if (projected.provisionalPieces > 0) references.push(...quoted.sources);
+    references.push(...reductions.sources);
     return {
       ...quoted,
       currency: "USD",

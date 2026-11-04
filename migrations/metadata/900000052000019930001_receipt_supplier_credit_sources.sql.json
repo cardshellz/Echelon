@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000052000019930001_receipt_supplier_credit_sources.sql",
+  "generation": 52,
+  "pr": 1993,
+  "ordinal": 1,
+  "after": [
+    "900000051000019910001_ap_invoice_transition_reviews.sql"
+  ]
+}

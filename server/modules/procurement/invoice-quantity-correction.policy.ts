@@ -8,6 +8,7 @@ import type { PurchaseApprovalActor } from "../identity/domain/purchase-approval
 import { hasQuantityAmendmentAuthority, type AmendmentFacts } from "./po-quantity-amendment.policy";
 import { evaluatePurchaseOrderInvoiceMatches } from "./purchase-order-invoice-match";
 import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
+import { canonicalJson } from "@shared/utils/canonical-json";
 
 export class InvoiceQuantityCorrectionError extends Error {
   constructor(message: string, readonly code: string, readonly statusCode = 409) { super(message); this.name = "InvoiceQuantityCorrectionError"; }
@@ -173,7 +174,7 @@ export function planInvoiceQuantityCorrection(facts: InvoiceCorrectionFacts, lin
   const supplied = request.costComponents, previous = preview.beforeCostComponents;
   const breakdownChanged = supplied !== undefined && (!previous || supplied.productMills !== previous.productMills
     || supplied.packagingMills !== previous.packagingMills || supplied.adjustmentMills !== previous.adjustmentMills
-    || supplied.packagingTreatment !== previous.packagingTreatment);
+    || supplied.packagingTreatment !== previous.packagingTreatment || canonicalJson(supplied.adjustments ?? null) !== canonicalJson(previous.adjustments ?? null));
   if (preview.beforeQuantity === preview.afterQuantity && preview.invoiceLineAmountCents === preview.afterLineAmountCents && preview.recordedUnitCostMills === preview.afterUnitCostMills && !breakdownChanged) throw new InvoiceQuantityCorrectionError("Enter a quantity, unit price, line amount or supplier cost amount different from the current invoice.", "INVOICE_QUANTITY_NO_CHANGE", 400);
   return preview;
 }

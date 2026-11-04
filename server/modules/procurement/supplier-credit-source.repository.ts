@@ -69,7 +69,8 @@ export async function readShipmentSupplierCreditCostRows(tx: CostEvidenceTransac
 export async function readSupplierCreditInvoiceLines(tx: CostEvidenceTransaction, invoiceId: number, lock: boolean) {
   const rows = (await tx.execute(sql`
     SELECT line.*,invoice.vendor_id,invoice.currency,invoice.status AS invoice_status,
-      po.vendor_id AS po_vendor_id,po_line.product_id AS po_product_id,po_line.line_type AS po_line_type
+      po.vendor_id AS po_vendor_id,po_line.product_id AS po_product_id,po_line.line_type AS po_line_type,
+      po_line.receipt_costing_enabled AS receipt_costing_enabled
     FROM procurement.vendor_invoice_lines line
     JOIN procurement.vendor_invoices invoice ON invoice.id=line.vendor_invoice_id
     LEFT JOIN procurement.purchase_order_lines po_line ON po_line.id=line.purchase_order_line_id

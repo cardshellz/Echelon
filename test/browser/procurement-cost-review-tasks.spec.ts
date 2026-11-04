@@ -88,7 +88,7 @@ test("reviews real before/after values and applies once without leaving the PO l
   await dialog.getByLabel("Is packaging included in the product price?", { exact: true }).click();
   await page.getByRole("option", { name: "No, packaging is charged separately", exact: true }).click();
   await dialog.getByLabel(/^Product total/).fill("120"); await dialog.getByLabel(/^Packaging total/).fill("10");
-  await dialog.getByLabel(/^Other adjustments/).fill("0"); await dialog.getByLabel("Notes / supplier invoice reference").fill("Supplier's final document confirmed");
+  await dialog.getByLabel(/^Billed adjustments total/).fill("0"); await dialog.getByLabel("Notes / supplier invoice reference").fill("Supplier's final document confirmed");
   await dialog.getByRole("button", { name: "Review cost changes", exact: true }).click();
   const changes = dialog.getByRole("region", { name: "Supplier cost changes" });
   await expect(changes).toContainText("TEST-LOT-901"); await expect(changes).toContainText("55.0000 USD"); await expect(changes).toContainText("65.0000 USD");

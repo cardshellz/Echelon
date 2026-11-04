@@ -9,6 +9,9 @@ const MIN_INTERVAL_MS = 10_000;
 const MAX_INTERVAL_MS = 300_000;
 // Diagnostics must not amplify a blocked log drain; retain counters, not log objects.
 const MAX_LOG_BACKLOG_BYTES = 64 * 1024;
+// Preserve one-minute process readings, but aggregate routine work groups over
+// five readings. Failed groups are still emitted at the next process sample.
+const PROCESS_SAMPLES_PER_SUCCESSFUL_WORK_REPORT = 5;
 let observer: RuntimeMemoryObserver | null = null;
 
 export function resolveRuntimeMemoryConfiguration(environment: NodeJS.ProcessEnv): {
@@ -69,6 +72,7 @@ export function startRuntimeMemoryTelemetry(options: {
   let samplingFailures = 0;
   let peakStdoutQueuedBytes = 0;
   let peakStderrQueuedBytes = 0;
+  let successfulWorkSampleCount = 0;
   const sample = () => {
     try {
       peakStdoutQueuedBytes = Math.max(peakStdoutQueuedBytes, process.stdout.writableLength);
@@ -77,9 +81,13 @@ export function startRuntimeMemoryTelemetry(options: {
         skippedReports++;
         return;
       }
-      current.report({ ...options.readContext?.(), ...(options.readMemory ?? readRuntimeMemory)(),
+      const details = { ...options.readContext?.(), ...(options.readMemory ?? readRuntimeMemory)(),
         intervalMs: config.intervalMs, skippedReports, samplingFailures,
-        peakStdoutQueuedBytes, peakStderrQueuedBytes });
+        peakStdoutQueuedBytes, peakStderrQueuedBytes };
+      successfulWorkSampleCount++;
+      const includeSuccessfulWork = successfulWorkSampleCount >= PROCESS_SAMPLES_PER_SUCCESSFUL_WORK_REPORT;
+      current.report(details, includeSuccessfulWork);
+      if (includeSuccessfulWork) successfulWorkSampleCount = 0;
       skippedReports = 0;
       samplingFailures = 0;
       peakStdoutQueuedBytes = 0;

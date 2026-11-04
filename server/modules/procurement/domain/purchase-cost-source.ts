@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
 import { resolveReceiptInvoiceSources, type ReceiptInvoiceSource } from "./receipt-invoice-costs";
-import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
+import { invoiceCostComponentEvidenceSchema, invoiceGoodsAmounts } from "@shared/procurement/invoice-cost-evidence";
 import {
   costFingerprint,
   costInteger,
@@ -101,6 +101,13 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
       const components = evidence.data;
       const taxes = purchaseTaxEvidence(approvedInvoices[index].tax_cost_evidence);
       const tax = purchaseTaxAmounts(taxes);
+      let goods: ReturnType<typeof invoiceGoodsAmounts>;
+      try { goods = invoiceGoodsAmounts(components); }
+      catch (error) {
+        if (!(error instanceof RangeError)) throw error;
+        issue = { code: "INVOICE_ADJUSTMENT_REVIEW_REQUIRED", message: error.message };
+        goods = { productMills: components.productMills, packagingMills: components.packagingMills, adjustmentMills: 0 };
+      }
       const total =
         BigInt(components.productMills) +
         BigInt(components.packagingMills) +
@@ -114,7 +121,7 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
             ),
           ) *
             BigInt(100) ||
-        components.adjustmentMills !== tax.taxMills ||
+        BigInt(components.adjustmentMills) !== BigInt(tax.taxMills) + BigInt(goods.adjustmentMills) ||
         (components.packagingTreatment === "included_in_product" &&
           components.packagingMills !== 0)
       ) {
@@ -125,8 +132,8 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
         };
       }
       issue ??= taxTreatmentIssue(taxes);
-      product += BigInt(components.productMills) + BigInt(tax.inventoryMills);
-      packaging += BigInt(components.packagingMills);
+      product += BigInt(goods.productMills) + BigInt(tax.inventoryMills);
+      packaging += BigInt(goods.packagingMills);
       if (components.packagingTreatment === "included_in_product")
         packagingTreatment = "included_in_product";
     }
@@ -159,6 +166,10 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
     code: "PURCHASE_TAX_CREDIT_REVIEW", message: "This supplier credit needs its tax amounts checked against the original taxed invoice before inventory costs can be replaced.",
   };
   issue ??= credits.issues[0] ?? null;
+  if (source.supplierCredits?.some(row => row.status === "approved" && typeof row.disposition === "object" && row.disposition !== null
+    && "receiptAllocation" in row.disposition)) issue ??= {
+    code: "CREDIT_RECEIPT_ATTRIBUTION_REQUIRED", message: "This credit belongs to a particular receipt. Restore its saved receipt costing assignment before changing costs.",
+  };
   const currency = actual
     ? approvedInvoices.every((row) => row.currency === "USD")
       ? "USD"

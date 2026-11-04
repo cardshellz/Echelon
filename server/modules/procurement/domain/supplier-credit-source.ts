@@ -1,7 +1,9 @@
 import { z } from "zod";
 import { acceptedReturnCreditSourceSchema } from "@shared/procurement/supplier-return-credit";
 import { costIssueSchema, type CostIssue, type CostSourceReference, type CostInventoryEffect } from "@shared/procurement/cost-source-contracts";
-import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
+import { invoiceCostComponentEvidenceSchema, invoiceGoodsAmounts } from "@shared/procurement/invoice-cost-evidence";
+import { receiptCreditAttributionSchema, receiptCreditAttributionKey } from "@shared/procurement/receipt-credit-attribution";
+import { allocateIntegerCostInterval } from "@shared/utils/integer-cost-interval";
 import { supplierCreditDispositionSchema, type SourceLineInput } from "@shared/procurement/supplier-credit";
 import { costFingerprint, costInteger, CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
 
@@ -23,6 +25,7 @@ export const supplierCreditSourceEvidenceSchema = z.object({
   }).strict().nullable(),
   acceptedReturnSource: acceptedReturnCreditSourceSchema.optional(),
   issues: z.array(costIssueSchema),
+  receiptAllocation: receiptCreditAttributionSchema.optional(),
 }).strict();
 export type SupplierCreditSourceEvidence = z.infer<typeof supplierCreditSourceEvidenceSchema>;
 
@@ -55,9 +58,14 @@ export function evaluateSupplierCreditSource(input: {
   const purchaseOrderLineId = invoice.purchase_order_line_id == null ? null : costInteger(invoice.purchase_order_line_id, "purchaseOrderLineId", 1);
   const freightCostId = invoice.freight_cost_id == null ? null : costInteger(invoice.freight_cost_id, "freightCostId", 1);
   const components = invoiceCostComponentEvidenceSchema.safeParse(invoice.cost_component_evidence);
+  let goods: ReturnType<typeof invoiceGoodsAmounts> | null = null;
+  if (components.success) {
+    try { goods = invoiceGoodsAmounts(components.data); }
+    catch (error) { if (!(error instanceof RangeError)) throw error; }
+  }
   const exactComponents = components.success
-    && components.data.adjustmentMills === 0
-    && BigInt(components.data.productMills) + BigInt(components.data.packagingMills) === BigInt(costInteger(invoice.line_total_cents, "lineTotalCents")) * BigInt(100);
+    && goods !== null && components.data.adjustmentMills === goods.adjustmentMills
+    && BigInt(components.data.productMills) + BigInt(components.data.packagingMills) + BigInt(components.data.adjustmentMills) === BigInt(costInteger(invoice.line_total_cents, "lineTotalCents")) * BigInt(100);
   let returnSource: SupplierCreditSourceEvidence["returnSource"] = null;
   if (line.disposition.kind === "accepted_stock_return") {
     throw new CostEvidenceError("CREDIT_ACCEPTED_RETURN_OWNER_REQUIRED", "Accepted-stock credits require the independent immutable return-value owner.");
@@ -69,15 +77,21 @@ export function evaluateSupplierCreditSource(input: {
   } else if (line.disposition.kind === "price_reduction") {
     const field = line.disposition.component === "product" ? "productMills" : "packagingMills";
     reduction[field] = costInteger(amountMills.toString(), `credit.${field}`);
-    if (amountMills > BigInt(components.data[field])) issues.push(supplierCreditIssue("CREDIT_COMPONENT_EXCEEDED", "The credit exceeds the original invoice cost component."));
+    const assignment = line.disposition.receiptAllocation;
+    const invoicePieces = BigInt(costInteger(invoice.qty_invoiced, "invoice pieces", 1));
+    const invalidInterval = assignment && BigInt(assignment.invoiceStartPiece) + BigInt(assignment.pieces) > invoicePieces;
+    if (invalidInterval) issues.push(supplierCreditIssue("CREDIT_RECEIPT_SOURCE_CHANGED", "The credited receipt interval exceeds the original invoice's billed pieces."));
+    const capacity = assignment && !invalidInterval ? allocateIntegerCostInterval(BigInt(goods![field]), invoicePieces,
+      BigInt(assignment.invoiceStartPiece), BigInt(assignment.pieces)) : BigInt(goods![field]);
+    if (amountMills > capacity) issues.push(supplierCreditIssue("CREDIT_COMPONENT_EXCEEDED", "The credit exceeds the original invoice cost assigned to this destination."));
   } else if (!input.returnSource) {
     issues.push(supplierCreditIssue("CREDIT_RETURN_SOURCE_REVIEW", "The physical return lacks an exact immutable invoice product source and unit conversion. Review its financial disposition explicitly."));
   } else {
     returnSource = input.returnSource;
     const pieces = BigInt(returnSource.observationQuantity) * BigInt(returnSource.unitsPerVariant);
     const invoicedPieces = BigInt(costInteger(invoice.qty_invoiced, "qtyInvoiced", 1));
-    const product = BigInt(components.data.productMills) * pieces;
-    const packaging = BigInt(components.data.packagingMills) * pieces;
+    const product = BigInt(goods!.productMills) * pieces;
+    const packaging = BigInt(goods!.packagingMills) * pieces;
     if (pieces > invoicedPieces || product % invoicedPieces !== BigInt(0) || packaging % invoicedPieces !== BigInt(0)
       || (product + packaging) / invoicedPieces !== amountMills) {
       issues.push(supplierCreditIssue("CREDIT_RETURN_VALUE_REVIEW", "The supplier credit does not exactly equal the returned quantity's original invoice components. An explicit difference disposition is required; no inventory loss or residual price is inferred."));
@@ -90,7 +104,8 @@ export function evaluateSupplierCreditSource(input: {
   const sourceEvidence = supplierCreditSourceEvidenceSchema.parse({ contractVersion: 1,
     invoiceLineId: line.invoiceLineId, invoiceId: costInteger(invoice.vendor_invoice_id, "invoiceId", 1),
     invoiceSourceFingerprint: supplierCreditInvoiceSourceFingerprint(invoice), purchaseOrderLineId, freightCostId,
-    reduction, returnSource, issues });
+    reduction, returnSource, issues,
+    ...(line.disposition.kind === "price_reduction" && line.disposition.receiptAllocation ? { receiptAllocation: line.disposition.receiptAllocation } : {}) });
   return { sourceEvidence, costState: issues.length ? "review_required" : "pending", costIssues: issues };
 }
 
@@ -119,6 +134,9 @@ export function supplierCreditDispositionMatches(credit: SupplierCreditCostRow, 
       && (evidence.issues.length > 0 || BigInt(reduction.basePieces) === BigInt(source.observationQuantity) * BigInt(source.unitsPerVariant));
   }
   if (evidence.returnSource !== null || reduction.basePieces !== 0) return false;
+  if (disposition.kind === "price_reduction"
+    && (disposition.receiptAllocation ? receiptCreditAttributionKey(disposition.receiptAllocation) : null)
+      !== (evidence.receiptAllocation ? receiptCreditAttributionKey(evidence.receiptAllocation) : null)) return false;
   if (evidence.issues.length) return true;
   const amount = BigInt(costInteger(credit.amount_cents, "creditAmountCents", 1)) * BigInt(100);
   return (disposition.component === "product" ? BigInt(reduction.productMills) === amount && reduction.packagingMills === 0 && reduction.landedMills === 0
@@ -133,6 +151,7 @@ export function resolveSupplierCreditReductions(invoices: Record<string, unknown
   const sources: CostSourceReference[] = [];
   const returns: CostInventoryEffect["returns"] = [];
   const byInvoice = new Map<number, { product: bigint; packaging: bigint; pieces: bigint }>();
+  const byReceipt = new Map<string, { invoiceLineId: number; allocation: NonNullable<SupplierCreditSourceEvidence["receiptAllocation"]>; product: bigint; packaging: bigint }>();
   const identities = new Set<number>();
   for (const credit of credits) {
     // A return of accepted stock already has its own outgoing cost allocation.
@@ -181,6 +200,12 @@ export function resolveSupplierCreditReductions(invoices: Record<string, unknown
     const totals = byInvoice.get(invoiceLineId) ?? { product: BigInt(0), packaging: BigInt(0), pieces: BigInt(0) };
     totals.product += BigInt(reduction.productMills); totals.packaging += BigInt(reduction.packagingMills); totals.pieces += BigInt(reduction.basePieces);
     byInvoice.set(invoiceLineId, totals);
+    if (evidence.receiptAllocation) {
+      const key = `${invoiceLineId}:${receiptCreditAttributionKey(evidence.receiptAllocation)}`;
+      const receipt = byReceipt.get(key) ?? { invoiceLineId, allocation: evidence.receiptAllocation, product: BigInt(0), packaging: BigInt(0) };
+      receipt.product += BigInt(reduction.productMills); receipt.packaging += BigInt(reduction.packagingMills);
+      byReceipt.set(key, receipt);
+    }
     productMills += BigInt(reduction.productMills); packagingMills += BigInt(reduction.packagingMills); basePieces += BigInt(reduction.basePieces);
     if (evidence.returnSource) returns.push({
       supplierCreditLineId: lineId, returnDispositionId: evidence.returnSource.dispositionId,
@@ -191,10 +216,19 @@ export function resolveSupplierCreditReductions(invoices: Record<string, unknown
   for (const [invoiceLineId, totals] of byInvoice) {
     const invoice = invoices.find(row => Number(row.id) === invoiceLineId)!;
     const parsed = invoiceCostComponentEvidenceSchema.safeParse(invoice.cost_component_evidence);
-    if (!parsed.success || totals.product > BigInt(parsed.data.productMills) || totals.packaging > BigInt(parsed.data.packagingMills)
+    const goods = parsed.success ? invoiceGoodsAmounts(parsed.data) : null;
+    if (!goods || totals.product > BigInt(goods.productMills) || totals.packaging > BigInt(goods.packagingMills)
       || totals.pieces > BigInt(costInteger(invoice.qty_invoiced, "qtyInvoiced"))) {
       issues.push(supplierCreditIssue("CREDIT_SOURCE_EXCEEDED", "Cumulative supplier credits exceed the original invoice component or quantity. Review the credit source before changing inventory costs."));
     }
+  }
+  for (const receipt of byReceipt.values()) {
+    const invoice = invoices.find(row => Number(row.id) === receipt.invoiceLineId)!;
+    const goods = invoiceGoodsAmounts(invoiceCostComponentEvidenceSchema.parse(invoice.cost_component_evidence));
+    const capacity = (amount: number) => allocateIntegerCostInterval(BigInt(amount), BigInt(costInteger(invoice.qty_invoiced, "invoice pieces", 1)),
+      BigInt(receipt.allocation.invoiceStartPiece), BigInt(receipt.allocation.pieces));
+    if (receipt.product > capacity(goods.productMills) || receipt.packaging > capacity(goods.packagingMills))
+      issues.push(supplierCreditIssue("CREDIT_SOURCE_EXCEEDED", "Cumulative credits exceed the original amount assigned to this receipt."));
   }
   return { productMills, packagingMills, basePieces, issues, sources, returns };
 }

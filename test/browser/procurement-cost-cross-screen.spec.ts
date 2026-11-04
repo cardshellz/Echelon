@@ -165,7 +165,7 @@ test("resolves supplier evidence from health and refreshes both shipments, PO re
   await page.getByRole("option",{name:"No, packaging is charged separately"}).click();
   await page.getByLabel(/^Product total/).fill("100");
   await page.getByLabel(/^Packaging total/).fill("18");
-  await page.getByLabel(/^Other adjustments/).fill("0");
+  await page.getByLabel(/^Billed adjustments total/).fill("0");
   await page.getByLabel("Notes / supplier invoice reference").fill("Supplier invoice amounts reviewed");
   await approveSupplierCostReview(page);
   await expect(page.getByRole("dialog")).toContainText("Supplier amounts saved");
