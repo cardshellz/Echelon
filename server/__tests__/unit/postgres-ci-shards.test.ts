@@ -276,6 +276,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/procurement/__tests__/integration/purchase-tax-migration.integration.test.ts",
       "server/modules/procurement/__tests__/integration/receipt-invoice-migration.integration.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-guest.repository.test.ts",
+      // Staff Shopify OAuth: atomic challenge claims, current authority, stale completion and durable audit.
+      "server/modules/channels/__tests__/integration/shopify-staff-oauth.integration.test.ts",
     );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);
