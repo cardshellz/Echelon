@@ -22,11 +22,14 @@ const app = readSource("client/src/App.tsx");
 const routes = readSource("server/modules/procurement/purchasing-recommendation.routes.ts");
 
 describe("procurement automation UI contract", () => {
-  it("is registered at /procurement/automation for admin/lead", () => {
-    expect(app).toContain('path="/procurement/automation"');
-    expect(app).toMatch(
-      /procurement\/automation"[\s\S]{0,300}component=\{ProcurementAutomation\}[\s\S]{0,100}allowedRoles=\{\["admin", "lead"\]\}/,
+  it("protects /procurement/automation with the server's inventory read permission", () => {
+    const route = app.match(/<Route path="\/procurement\/automation">([\s\S]*?)<\/Route>/)?.[1];
+    expect(route).toBeDefined();
+    expect(route).toMatch(
+      /<ProtectedRoute\s+component=\{ProcurementAutomation\}\s+requiredPermission=\{\{\s*resource: "inventory",\s*action: "view"\s*\}\}\s*\/>/,
     );
+    expect(route).not.toContain("allowedRoles");
+    expect(routes).toContain('app.get("/api/purchasing/auto-draft/status", requirePermission("inventory", "view")');
   });
 
   it("honors the five frozen review-queue deep-link params", () => {

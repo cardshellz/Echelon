@@ -3,7 +3,13 @@ import type { AddressInfo } from "node:net";
 import { afterEach,beforeEach,describe,expect,it,vi } from "vitest";
 import { registerEbayPublicationStockRoutes } from "../../ebay-publication-stock.routes";
 const {hasPermission}=vi.hoisted(()=>({hasPermission:vi.fn(async()=>true)}));
-vi.mock("../../../../modules/identity",()=>({hasPermission}));
+// Resolve a current assigned identity through the real requireAuth middleware;
+// capability outcomes remain controlled by this suite's separate permission mock.
+vi.mock("../../../../modules/identity", () => ({ hasPermission, readCurrentStaffAccess: vi.fn(async (userId: string) => ({
+    user: { id: userId, username: "fixture", role: "picker", active: 1, displayName: null,
+      createdAt: new Date(0), lastLoginAt: null },
+    roles: [{ id: 101, name: "Fixture operator", isSystem: false }], permissions: [],
+  })) }));
 describe("retired manual eBay stock setup HTTP",()=>{
   let server:ReturnType<ReturnType<typeof express>["listen"]>,url:string;
   const getReceipt=vi.fn(async(_productId:number,_commandKey:string)=>null);

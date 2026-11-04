@@ -28,6 +28,34 @@ function repositoryWith(input: Readonly<{
 }
 
 describe("historical ShipStation contents attestation repository transaction", () => {
+  it.each([
+    { label: "legacy admin without assignments", legacy: "admin", active: 1, roles: [], expected: null },
+    { label: "same-name custom administrator", legacy: "admin", active: 1,
+      roles: [{ id: 5, name: "Administrator", isSystem: false }], expected: null },
+    { label: "assigned admin with legacy picker", legacy: "picker", active: 1,
+      roles: [{ id: 5, name: "Administrator", isSystem: true }], expected: "admin" },
+    { label: "assigned lead with legacy picker", legacy: "picker", active: 1,
+      roles: [{ id: 6, name: "Team Lead", isSystem: true }], expected: "lead" },
+    { label: "multiple assigned system roles", legacy: "picker", active: 1,
+      roles: [{ id: 6, name: "Team Lead", isSystem: true }, { id: 5, name: "Administrator", isSystem: true }], expected: "admin" },
+    { label: "inactive assigned administrator", legacy: "admin", active: 0,
+      roles: [{ id: 5, name: "Administrator", isSystem: true }], expected: null },
+  ])("authorizes $label from transaction-held assignments", async ({ legacy, active, roles, expected }) => {
+    const harness = repositoryWith({ query: async text => {
+      if (text.includes("FROM identity.users")) return { rows: [{ active, role: legacy }] };
+      if (text.includes("identity.auth_user_roles")) return { rows: roles };
+      return { rows: [] };
+    } });
+    await expect(harness.repository.withSerializableTransaction(tx => tx.lockAuthorizedActor("operator")))
+      .resolves.toEqual(expected ? { userId: "operator", role: expected } : null);
+    const statements = harness.query.mock.calls.map(([text]) => text);
+    expect(statements[0]).toBe("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+    expect(statements[1]).toContain("FOR SHARE");
+    expect(statements.at(-1)).toBe("COMMIT");
+    if (active === 1) expect(statements[2]).toContain("FOR SHARE OF role, assignment");
+    else expect(statements.some(text => text.includes("identity.auth_user_roles"))).toBe(false);
+  });
+
   it("loads recognizable order, shipment, tracking, and item context in one read snapshot", async () => {
     const harness = repositoryWith({
       query: async (text) => {

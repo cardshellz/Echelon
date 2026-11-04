@@ -102,6 +102,85 @@ function postgresFixture() {
   return snapshot(sources);
 }
 describe("PostgreSQL coverage selection", () => {
+  it.each([
+    { source: "infrastructure/access-administration.repository.ts", required: [
+      "server/modules/identity/__tests__/integration/identity-administration.integration.test.ts",
+    ] },
+    { source: "infrastructure/access-preflight.repository.ts", required: [
+      "server/modules/identity/__tests__/integration/identity-administration.integration.test.ts",
+    ] },
+    { source: "infrastructure/staff-access.repository.ts", required: [
+      "server/modules/identity/__tests__/integration/staff-access.integration.test.ts",
+    ] },
+    { source: "infrastructure/staff-system-role-authority.repository.ts", required: [
+      "server/modules/identity/__tests__/integration/staff-access.integration.test.ts",
+      "server/modules/oms/__tests__/integration/package-reconciliation.integration.test.ts",
+      "server/modules/shipping/__tests__/integration/package-allocation-ledger.repository.integration.test.ts",
+    ] },
+    { source: "infrastructure/identity.repository.ts", required: [
+      "server/modules/identity/__tests__/integration/role-assignments.integration.test.ts",
+      "server/modules/identity/__tests__/integration/scoped-grants.integration.test.ts",
+      "server/modules/identity/__tests__/integration/role-permissions.integration.test.ts",
+      "server/modules/channels/__tests__/integration/shopify-staff-oauth.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/purchase-approval-authority.integration.test.ts",
+      "server/modules/warehouse/__tests__/integration/work-configuration.integration.test.ts",
+      "server/modules/orders/__tests__/integration/picking-assignment-release.integration.test.ts",
+    ] },
+    { source: "infrastructure/command-authority.repository.ts", required: [
+      "server/modules/identity/__tests__/integration/scoped-grants.integration.test.ts",
+      "server/modules/channels/__tests__/integration/shopify-staff-oauth.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/purchase-approval-authority.integration.test.ts",
+    ] },
+    { source: "infrastructure/purchase-approval-access.repository.ts", required: [
+      "server/modules/identity/__tests__/integration/scoped-grants.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/purchase-approval-authority.integration.test.ts",
+    ] },
+    { source: "infrastructure/work-access.repository.ts", required: [
+      "server/modules/identity/__tests__/integration/scoped-grants.integration.test.ts",
+      "server/modules/warehouse/__tests__/integration/work-configuration.integration.test.ts",
+    ] },
+    { source: "domain/role-permission-edit.ts", required: [
+      "server/modules/identity/__tests__/integration/role-permissions.integration.test.ts",
+    ] },
+    { source: "application/identity.use-cases.ts", required: [
+      "server/modules/identity/__tests__/integration/role-assignments.integration.test.ts",
+      "server/modules/identity/__tests__/integration/role-permissions.integration.test.ts",
+    ] },
+    { source: "identity.routes.ts", required: [
+      "server/modules/identity/__tests__/integration/role-assignments.integration.test.ts",
+      "server/modules/identity/__tests__/integration/role-permissions.integration.test.ts",
+    ] },
+    { source: "domain/role-assignment.ts", required: [
+      "server/modules/identity/__tests__/integration/role-assignments.integration.test.ts",
+    ] },
+  ])("retains actual repository consumers when Identity $source changes", ({ source, required }) => {
+    // Exercise real source imports, not only the synthetic graph below. Include
+    // uncommitted source additions in the application/test roots, while keeping
+    // the complete tracked graph and excluding unrelated untracked artifacts.
+    const files = new Set(execFileSync("git", ["ls-files", "-z"], {
+      cwd: root, encoding: "utf8", maxBuffer: 10 * 1024 * 1024,
+    }).split("\0").filter(Boolean));
+    const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "-z", "--",
+      "server", "shared", "client", "scripts", "test"], {
+      cwd: root, encoding: "utf8", maxBuffer: 10 * 1024 * 1024,
+    }).split("\0").filter(file => /\.[cm]?[jt]sx?$/.test(file));
+    for (const file of untracked) files.add(file);
+    expect(files.has("server/modules/identity/" + source)).toBe(true);
+    const result = selectPostgresTests({ files,
+      readSource: file => readFileSync(resolve(root, file), "utf8"),
+      changes: [change("server/modules/identity/" + source)],
+    });
+    expect(result.run).toBe(true);
+    for (const file of required) {
+      expect(POSTGRES_TEST_FILES).toContain(file);
+      const owner = file.split("/__tests__/")[0];
+      expect(result.files).toEqual(expect.arrayContaining(
+        POSTGRES_TEST_FILES.filter(candidate => candidate.startsWith(owner + "/")),
+      ));
+    }
+    // A conservative full-manifest fallback is also safe. This invariant does
+    // not claim the dependency analyzer can narrow every current source graph.
+  });
   it("selects the complete changed owner and cross-owner imported dependencies", () => {
     const current = postgresFixture();
     const first = POSTGRES_TEST_FILES[0].split("/__tests__/")[0];

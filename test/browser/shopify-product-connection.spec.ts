@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { test, expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import type { ShopifyConnectionContext, ShopifyConnectionPreview, ShopifyProductConnectionCommand, ShopifyProductConnectionExecute, ShopifyProductConnectionRequest } from "../../shared/catalog/shopify-product-connection";
@@ -25,8 +26,7 @@ async function setup(page: Page, options: { productOnly?: boolean; canEdit?: boo
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", username: "operator", role: "staff" }, roles: [],
-      permissions: ["inventory:view", "channels:view", "inventory_planning:view", ...(options.canEdit === false ? [] : ["inventory:edit", "channels:edit", ...(options.canActivate === false ? [] : ["inventory_planning:activate"])])] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator", username: "operator", role: "staff" }, permissions: ["inventory:view", "channels:view", "inventory_planning:view", ...(options.canEdit === false ? [] : ["inventory:edit", "channels:edit", ...(options.canActivate === false ? [] : ["inventory_planning:activate"])])], systemRoles: [], assignedRoles: [{ id: 101, name: "Catalog operator", isSystem: false }] }) });
     if (path === base) {
       if (state.reject) await new Promise(resolve => setTimeout(resolve,250));
       const channelId = Number(new URL(request.url()).searchParams.get("channelId") || 7);

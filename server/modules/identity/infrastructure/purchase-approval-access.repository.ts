@@ -31,7 +31,7 @@ async function readPurchasePermissionActor(tx: PurchaseApprovalIdentityTransacti
     FOR SHARE OF role,assignment
   `);
   const grantsResult = await tx.execute(sql`
-    SELECT grant_row.id,grant_row.constraints
+    SELECT grant_row.id,(grant_row.constraints IS NULL) AS unscoped
     FROM identity.auth_user_roles assignment
     JOIN identity.auth_role_permissions grant_row ON grant_row.role_id=assignment.role_id
     JOIN identity.auth_permissions permission ON permission.id=grant_row.permission_id
@@ -40,14 +40,15 @@ async function readPurchasePermissionActor(tx: PurchaseApprovalIdentityTransacti
     FOR SHARE OF assignment,grant_row,permission
   `);
   const roleRows = z.array(z.object({ id: resourceId, name: z.string(), isSystem: z.number().int().min(0).max(1) })).parse(rolesResult.rows);
-  const grants = z.array(z.object({ id: resourceId, constraints: z.unknown() })).parse(grantsResult.rows);
+  const grants = z.array(z.object({ id: resourceId, unscoped: z.boolean() })).parse(grantsResult.rows);
   return purchaseApprovalActorSchema.parse({
     userId: user.id, active: true,
     roles: roleRows.map((role) => ({ ...role, isSystem: role.isSystem === 1 })),
     // Identity's generic constraints have no implemented scope contract. Follow
     // readWarehouseWorkActor: a restricted grant cannot become a global grant.
-    approvalGrantIds: grants.filter((grant) => grant.constraints === null).map((grant) => grant.id),
-    hasScopedApprovalGrant: grants.some((grant) => grant.constraints !== null),
+    // SQL NULL is distinct from a JSONB null constraint, even after pg decoding.
+    approvalGrantIds: grants.filter((grant) => grant.unscoped).map((grant) => grant.id),
+    hasScopedApprovalGrant: grants.some((grant) => !grant.unscoped),
   });
 }
 

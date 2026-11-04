@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import type { Page } from "@playwright/test";
 import {
   CustomerReturnPreviewError,
@@ -15,6 +16,8 @@ export const PREVIEW_API = CUSTOMER_RETURN_PREVIEW_API_PATH;
 interface ReturnPreviewFixtureOptions {
   role?: string | null;
   loginRole?: string | null;
+  /** Explicit capabilities for this fixture; the admin assignment adds no grants. */
+  permissions?: readonly string[];
   shops?: { channelId: number; name: string }[];
   packingLimits?: CustomerReturnPackingLimit[];
   unitWeightGrams?: number;
@@ -86,16 +89,12 @@ export async function installReturnPreviewFixtures(
     }
   });
   function authBody(currentRole: string) {
-    return {
-      user: {
+    return staffAuthorityFixture({ user: {
         id: `preview-test-${currentRole}`,
         username: "preview-test",
         role: currentRole,
         active: 1,
-      },
-      permissions: [],
-      roles: currentRole === "admin" ? ["Administrator"] : [],
-    };
+      }, permissions: configured.permissions ?? [], systemRoles: currentRole === "admin" ? ["admin"] : [] });
   }
 
   page.on("pageerror", (error) => failures.push(error.message));

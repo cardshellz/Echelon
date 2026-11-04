@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { view, policyHead, policyValue, previewRow, stockLinkStatus, target, HASH_A, HASH_B } from "../../client/src/features/channel-inventory/__tests__/fixtures";
@@ -68,11 +69,8 @@ async function setup(page: Page, options: {
         if (state.stockLinkReadFailure === 503) return route.fulfill({ status: 503, json: { error: { code: "SERVICE_UNAVAILABLE", message: "Try again." } } });
         return route.fulfill({ json: id === state.stockLink.publicationTargetId ? state.stockLink : { supported: false, publicationTargetId: id } });
       }
-      if (path === "/api/auth/me") return route.fulfill({ json: {
-        user: { id: "operator-1", username: "operator", role: "operator" }, roles: ["operator"],
-        permissions: options.permission === "none" ? [] : options.permission === "view" ? ["inventory_planning:view"]
-          : ["inventory_planning:view", "inventory_planning:edit", "inventory_planning:activate"],
-      } });
+      if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator-1", username: "operator", role: "operator" }, permissions: options.permission === "none" ? [] : options.permission === "view" ? ["inventory_planning:view"]
+          : ["inventory_planning:view", "inventory_planning:edit", "inventory_planning:activate"], systemRoles: [], assignedRoles: [{ id: 101, name: "operator", isSystem: false }] }) });
       if (path === BASE) return route.fulfill({ json: state.data });
       if (path === "/api/inventory-planning/admin/channel-definitions/3/progress") return route.fulfill({ json: state.progress });
       if ([4,104].some(id => path === `/api/inventory-planning/admin/channel-definitions/${id}/progress`)) return route.fulfill({ json: null });

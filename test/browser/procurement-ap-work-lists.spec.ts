@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { recordedPaymentReply } from "./procurement-payment-fixtures";
 import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
 import { resolve } from "node:path";
@@ -7,7 +8,7 @@ import { apSummaryFixture, invoiceListItem, paymentListItem, workListPage } from
 
 async function setup(page: Page) {
   const failures = await installFixtures(page);
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "ap-reader", username: "ap-reader", role: "admin" }, permissions: ["purchasing:view", "purchasing:create", "purchasing:edit", "purchasing:approve"], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: "ap-reader", username: "ap-reader", role: "admin" }, permissions: ["purchasing:view", "purchasing:create", "purchasing:edit", "purchasing:approve"], systemRoles: ["admin"] }) }));
   await page.route("**/api/vendors", route => route.fulfill({ json: [{ id: 2, name: "Older supplier" }, { id: 3, name: "Large supplier" }] }));
   return failures;
 }

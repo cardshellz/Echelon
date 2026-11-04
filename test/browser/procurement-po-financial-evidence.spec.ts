@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
 import { expect, test, type Page } from "@playwright/test";
 import type { PoFinancialEvidence } from "../../shared/procurement/po-financial-evidence";
@@ -25,10 +26,10 @@ async function installFinancialFixtures(page: Page, evidence: unknown, options: 
   primaryAction?: { id: string; label: string; detail: string; severity: string; tab?: string };
 } = {}) {
   const failures = await installFixtures(page);
-  await page.route("**/api/auth/me", route => route.fulfill({ json: {
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({
     user: { id: "test-financial-reviewer", username: "test", role: "admin" },
-    permissions: ["purchasing:view", "purchasing:create", "purchasing:approve"], roles: ["admin"],
-  } }));
+    permissions: ["purchasing:view", "purchasing:create", "purchasing:approve"], systemRoles: ["admin"],
+  }) }));
   await page.route("**/api/purchase-orders/17", route => route.fulfill({ json: {
     ...po(17), status: options.cancelled ? "cancelled" : "received", physicalStatus: options.cancelled ? "cancelled" : "received", financialStatus: options.paidStatus ? "paid" : "partially_paid",
     // Deliberately contradictory cached whole-document figures must never become PO amounts.
@@ -458,9 +459,9 @@ test("missing invoice-link evidence still opens the identified invoice for revie
 
 test("read-only PO review reaches the invoice without exposing its payment or creation controls", async ({ page }) => {
   const failures = await installFinancialFixtures(page, sharedPartial());
-  await page.route("**/api/auth/me", route => route.fulfill({ json: {
-    user: { id: "test-reader", username: "reader", role: "lead" }, permissions: ["purchasing:view"], roles: ["lead"],
-  } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({
+    user: { id: "test-reader", username: "reader", role: "lead" }, permissions: ["purchasing:view"], systemRoles: ["lead"],
+  }) }));
   await page.goto("/purchase-orders/17?tab=invoices");
   await expect(page.getByRole("button", { name: "Add invoice", exact: true })).toHaveCount(0);
   await openLinkedInvoice(page);

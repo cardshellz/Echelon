@@ -17,10 +17,10 @@ function reader(rows: unknown[][]) {
 describe("Identity command authority projection", () => {
   it("deduplicates current unconstrained grants and preserves scoped evidence separately", async () => {
     const tx = reader([[{ id: "buyer", active: 1 }], [{ id: 1 }], [
-      { resource: "settings", action: "edit", constraints: null },
-      { resource: "purchasing", action: "cancel", constraints: null },
-      { resource: "settings", action: "edit", constraints: null },
-      { resource: "purchasing", action: "approve", constraints: { warehouseId: 1 } },
+      { resource: "settings", action: "edit", unscoped: true },
+      { resource: "purchasing", action: "cancel", unscoped: true },
+      { resource: "settings", action: "edit", unscoped: true },
+      { resource: "purchasing", action: "approve", unscoped: false },
     ]]);
     expect(await readCommandAuthorityActor(tx, "buyer")).toEqual({
       userId: "buyer", active: true, permissions: ["purchasing:cancel", "settings:edit"], scopedPermissions: ["purchasing:approve"],
@@ -43,5 +43,12 @@ describe("Identity command authority projection", () => {
     const tx = reader([]);
     await expect(readCommandAuthorityActor(tx, "  ")).rejects.toThrow();
     expect(tx.execute).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, null, "true", 1])("rejects malformed unscoped evidence (%s) instead of authorizing", async (unscoped) => {
+    const tx = reader([[{ id: "buyer", active: 1 }], [{ id: 1 }], [
+      { resource: "purchasing", action: "approve", unscoped },
+    ]]);
+    await expect(readCommandAuthorityActor(tx, "buyer")).rejects.toThrow();
   });
 });

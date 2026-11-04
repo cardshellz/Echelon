@@ -9,6 +9,17 @@ import { WarehouseWorkError } from "../../work/domain/work-configuration";
 import type { Pool } from "pg";
 import { emptyWorkConfiguration } from "@shared/warehouse-work";
 
+// The route still runs requireAuth. Identity facts are synthetic; command-level
+// warehouse permission decisions remain in the injected application service.
+vi.mock("../../../identity", () => ({
+  readWarehouseWorkActor: vi.fn(async () => { throw new Error("HTTP fixture must not execute warehouse identity queries"); }),
+  readWarehouseWorkEmployees: vi.fn(async () => { throw new Error("HTTP fixture must not execute warehouse identity queries"); }),
+  readCurrentStaffAccess: vi.fn(async (userId: string) => ({
+  user: { id: userId, username: "fixture", role: "picker", active: 1, displayName: null,
+    createdAt: new Date(0), lastLoginAt: null },
+  roles: [{ id: 101, name: "Fixture operator", isSystem: false }], permissions: [],
+})) }));
+
 describe("warehouse work HTTP boundary", () => {
   let server: Server;
   let base: string;

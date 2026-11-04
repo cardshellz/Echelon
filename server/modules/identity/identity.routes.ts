@@ -1,10 +1,12 @@
 import type { Express } from "express";
 import * as repo from "./infrastructure/identity.repository";
 import * as useCases from "./application/identity.use-cases";
-import { requirePermission, requireAuth } from "../../routes/middleware";
-import type { SafeUser } from "@shared/schema";
-import bcrypt from "bcrypt"; // Keep for update password if not fully extracted yet, or extract it too.
+import { requirePermission, requireAuth, requireActiveSessionIdentity, getRequestStaffAccess } from "../../routes/middleware";
 import rateLimit from "express-rate-limit";
+import { RolePermissionEditError } from "./domain/role-permission-edit";
+import { RoleAssignmentError } from "./domain/role-assignment";
+import { IdentityAdministrationError } from "./domain/access-administration";
+import { assignedSystemRoleKeys } from "./domain/staff-access";
 
 const loginRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -44,21 +46,20 @@ export function registerAuthRoutes(app: Express) {
     });
   });
   
-  app.get("/api/auth/me", requireAuth, async (req, res) => {
-    if (req.session.user) {
-      try {
-        const permissions = await repo.getUserPermissions(req.session.user.id);
-        const roles = await repo.getUserRoles(req.session.user.id);
-        res.json({ 
-          user: req.session.user,
-          permissions,
-          roles: roles.map(r => r.name),
-        });
-      } catch (error) {
-        res.json({ user: req.session.user, permissions: [], roles: [] });
-      }
-    } else {
-      res.status(401).json({ error: "Not authenticated" });
+  app.get("/api/auth/me", requireActiveSessionIdentity, async (req, res, next) => {
+    try {
+      const access = await getRequestStaffAccess(req);
+      if (!access) return res.status(401).json({ error: "Not authenticated" });
+      res.json({
+        user: access.user,
+        permissions: access.permissions,
+        roles: access.roles.map(role => role.name),
+        assignedRoles: access.roles,
+        systemRoles: assignedSystemRoleKeys(access.roles),
+      });
+    } catch (error) {
+      // An unavailable authority is not evidence of either zero access or permission.
+      next(error);
     }
   });
   
@@ -83,38 +84,22 @@ export function registerAuthRoutes(app: Express) {
         password,
         role: role || "picker",
         displayName: displayName || username,
-      });
+      }, { actorId: req.session.user!.id });
       
       res.status(201).json(safeUser);
     } catch (error: any) {
-      console.error("Error creating user:", error);
-      res.status(400).json({ error: error.message || "Failed to create user" });
+      if (error instanceof IdentityAdministrationError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
+      // Do not serialize/log a database error carrying password/hash parameters.
+      res.status(500).json({ error: "Failed to create user" });
     }
   });
   
   app.patch("/api/users/:id", requirePermission("users", "edit"), async (req, res) => {
     try {
       const userId = req.params.id;
-      const { displayName, role, password, active } = req.body;
-      
-      const updateData: { displayName?: string; role?: string; password?: string; active?: number } = {};
-      if (displayName !== undefined) updateData.displayName = displayName;
-      if (role !== undefined) updateData.role = role;
-      if (active !== undefined) updateData.active = active;
-      if (password && password.trim()) updateData.password = await bcrypt.hash(password, 10);
-      
-      const user = await repo.updateUser(userId, updateData);
-      if (!user) return res.status(404).json({ error: "User not found" });
-      
-      const safeUser: SafeUser = {
-        id: user.id, username: user.username, role: user.role,
-        displayName: user.displayName, active: user.active,
-        createdAt: user.createdAt, lastLoginAt: user.lastLoginAt,
-      };
-      
-      res.json(safeUser);
+      res.json(await useCases.updateUserUseCase(userId, req.body, { actorId: req.session.user!.id }));
     } catch (error) {
-      console.error("Error updating user:", error);
+      if (error instanceof IdentityAdministrationError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
       res.status(500).json({ error: "Failed to update user" });
     }
   });
@@ -152,28 +137,35 @@ export function registerAuthRoutes(app: Express) {
       const { name, description, permissionIds } = req.body;
       if (!name) return res.status(400).json({ error: "Role name is required" });
       
-      const role = await useCases.createRoleUseCase(name, description || null, permissionIds || []);
+      const role = await useCases.createRoleUseCase(name, description ?? null, permissionIds === undefined ? [] : permissionIds, { actorId: req.session.user!.id });
       res.status(201).json(role);
     } catch (error) {
+      if (error instanceof IdentityAdministrationError || error instanceof RolePermissionEditError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
       res.status(500).json({ error: "Failed to create role" });
     }
   });
   
   app.put("/api/roles/:id/permissions", requirePermission("roles", "edit"), async (req, res) => {
     try {
-      await useCases.updateRolePermissionsUseCase(parseInt(req.params.id), req.body.permissionIds || []);
+      const roleId = /^[1-9]\d*$/.test(req.params.id) ? Number(req.params.id) : NaN;
+      await useCases.updateRolePermissionsUseCase(roleId, req.body?.permissionIds, { actorId: req.session.user!.id });
       res.json({ success: true });
     } catch (error) {
+      if (error instanceof RolePermissionEditError || error instanceof IdentityAdministrationError) {
+        return res.status(error.statusCode).json({ code: error.code, error: error.message });
+      }
       res.status(500).json({ error: "Failed to update role permissions" });
     }
   });
   
   app.delete("/api/roles/:id", requirePermission("roles", "delete"), async (req, res) => {
     try {
-      const success = await repo.deleteRole(parseInt(req.params.id));
+      const roleId = /^[1-9]\d*$/.test(req.params.id) ? Number(req.params.id) : NaN;
+      const success = await useCases.deleteRoleUseCase(roleId, { actorId: req.session.user!.id });
       if (!success) return res.status(400).json({ error: "Cannot delete system roles" });
       res.json({ success: true });
     } catch (error) {
+      if (error instanceof IdentityAdministrationError || error instanceof RolePermissionEditError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
       res.status(500).json({ error: "Failed to delete role" });
     }
   });
@@ -189,9 +181,12 @@ export function registerAuthRoutes(app: Express) {
   
   app.put("/api/users/:id/roles", requirePermission("users", "manage_roles"), async (req, res) => {
     try {
-      await useCases.assignUserRolesUseCase(req.params.id, req.body.roleIds || []);
+      await useCases.assignUserRolesUseCase(req.params.id, req.body?.roleIds, { actorId: req.session.user!.id });
       res.json({ success: true });
     } catch (error) {
+      if (error instanceof RoleAssignmentError || error instanceof IdentityAdministrationError) {
+        return res.status(error.statusCode).json({ code: error.code, error: error.message });
+      }
       res.status(500).json({ error: "Failed to assign user roles" });
     }
   });

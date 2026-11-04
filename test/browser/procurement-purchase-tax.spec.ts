@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 import { purchaseTaxContextSchema, purchaseTaxPreviewSchema, type PurchaseTaxTarget, type PurchaseTaxPreview } from "../../shared/procurement/purchase-tax";
@@ -19,7 +20,7 @@ async function setup(page: Page, options: { target?: PurchaseTaxTarget; canAppro
     documents: target.kind === "tax_type" && target.id === null ? [] : [document], lines: [{ id: 18, label: "Test goods", taxMills: 0, taxTypeId: null }],
     invoice: target.kind === "invoice_line" ? { totalCents: 12000, currency: "USD", taxes: [], components } : null, approvals: [] });
   let measured: PurchaseTaxPreview | undefined, lost = options.loseResponse ?? false, denial = options.denial;
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "tax-admin", username: "tax-admin", role: "admin" }, permissions: ["purchasing:view", "purchasing:approve", "settings:edit"], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: "tax-admin", username: "tax-admin", role: "admin" }, permissions: ["purchasing:view", "purchasing:approve", "settings:edit"], systemRoles: ["admin"] }) }));
   await page.route("**/api/settings/procurement", route => route.fulfill({ json: { requireApproval: false, autoSendOnApprove: false, requireAcknowledgeBeforeReceive: false, hideIncotermsDomestic: false, enableShipmentTracking: true, autoPutawayLocation: false, autoCloseOnReconcile: false, oneClickReceiveStart: false, useNewPoEditor: true, useNewReorderCockpit: false, revision: 1 } }));
   await page.route("**/api/purchasing/tax-types", route => route.fulfill({ json: options.create ? [] : [type] }));
   await page.route("**/api/purchasing/tax-review/**", route => route.fulfill({ json: context }));

@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import type {
   OriginRepairContext,
@@ -162,7 +163,7 @@ async function install(page: Page, admin = true, loseResponse = false) {
     }
     if (path === "/api/auth/me")
       return route.fulfill({
-        json: {
+        json: staffAuthorityFixture({
           user: {
             id: "test-user",
             username: "test",
@@ -171,8 +172,8 @@ async function install(page: Page, admin = true, loseResponse = false) {
           permissions: admin
             ? ["purchasing:view", "purchasing:approve", "inventory:view"]
             : ["purchasing:view", "inventory:view"],
-          roles: admin ? ["admin"] : ["lead"],
-        },
+          systemRoles: admin ? ["admin"] : ["lead"],
+        }),
       });
     if (path === "/api/purchase-orders/17")
       return route.fulfill({ json: po(17) });

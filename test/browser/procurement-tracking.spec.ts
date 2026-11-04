@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import type { InboundTrackingConfig, InboundTrackingReference, InboundTrackingSnapshot, InboundTrackingView } from "../../shared/procurement/inbound-tracking";
 import { installFixtures, po } from "./procurement-fixtures";
@@ -10,7 +11,7 @@ function view(ready = true): InboundTrackingView { return { pollingEnabled: read
 async function setup(page: Page, options: { ready?: boolean; canEdit?: boolean } = {}) {
   const failures = await installFixtures(page);
   const data = view(options.ready ?? true);
-  await page.route("**/api/auth/me", (route) => route.fulfill({ json: { user: { id: "tracking-operator", username: "test", role: "admin" }, permissions: options.canEdit === false ? ["purchasing:view"] : ["purchasing:view", "purchasing:edit"], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", (route) => route.fulfill({ json: staffAuthorityFixture({ user: { id: "tracking-operator", username: "test", role: "admin" }, permissions: options.canEdit === false ? ["purchasing:view"] : ["purchasing:view", "purchasing:edit"], systemRoles: ["admin"] }) }));
   await page.route("**/api/inbound-shipments/42/tracking", (route) => route.request().method() === "GET" ? route.fulfill({ json: data }) : route.fallback());
   await page.route("**/api/inbound-shipments/42/tracking/7/history**", (route) => route.fulfill({ json: { observations: [{ id: "1", observedAt: "2026-09-07T11:00:00.000Z", snapshot: snapshot() }], attempts: [{ startedAt: "2026-09-07T12:00:00.000Z", completedAt: "2026-09-07T12:00:20.000Z", outcome: "retry", errorCode: "SEARATES_TIMEOUT", message: "SeaRates tracking request timed out." }], changes: [{ revision: 1, actorId: "tracking-operator", recordedAt: "2026-09-07T08:00:00.000Z", before: null, after: config }], nextObservationCursor: null } }));
   return { failures, data };

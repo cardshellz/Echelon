@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { voidedOwnershipFixture } from "../fixtures/invoice-source";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
@@ -17,7 +18,7 @@ async function setup(page: Page, options: { permissions?: string[]; conflict?: b
   const commands: { key: string; body: ReplacementInvoiceInput }[] = [];
   const result = { invoiceId: 72, replacesInvoiceId: 71, invoiceNumber: "TEST-FREIGHT-71", status: "received", freightCostIds: [9] };
   let conflict = options.conflict ?? false, loseResponses = options.loseResponses ?? false;
-  await page.route("**/api/auth/me", (route) => route.fulfill({ json: { user: { id: "replacement-user", username: "test", role: "admin" }, permissions: options.permissions ?? ["purchasing:view", "purchasing:create", "purchasing:edit"], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", (route) => route.fulfill({ json: staffAuthorityFixture({ user: { id: "replacement-user", username: "test", role: "admin" }, permissions: options.permissions ?? ["purchasing:view", "purchasing:create", "purchasing:edit"], systemRoles: ["admin"] }) }));
   await page.route("**/api/vendor-invoices/71", (route) => route.fulfill({ json: options.malformed ? { ...invoice, replacementCapability: {} } : invoice }));
   await page.route("**/api/vendor-invoices/72", (route) => route.fulfill({ json: {
     ...invoice, id: 72, status: "received", replacesInvoiceId: 71,

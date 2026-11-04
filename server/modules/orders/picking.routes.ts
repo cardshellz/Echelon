@@ -5,7 +5,7 @@ import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
 import { identityStorage } from "../identity";
 const storage = { ...ordersStorage, ...channelsStorage, ...identityStorage };
-import { requirePermission, requireAuth } from "../../routes/middleware";
+import { requirePermission, requireAuth, requireAssignedSystemRole } from "../../routes/middleware";
 import { orders, orderItems, pickingLogs, outboundShipments } from "@shared/schema";
 import { broadcastOrdersUpdated } from "../../websocket";
 import { db } from "../../db";
@@ -639,9 +639,9 @@ export function registerPickingRoutes(app: Express) {
 
   // Set order priority (admin/lead only)
   // Accepts a numeric priority value: 9999 = Bump to Top, -1 = Hold, 100 = Normal (SLA reset)
-  app.post("/api/orders/:id/priority", requireAuth, async (req, res) => {
+  app.post("/api/orders/:id/priority", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
 
@@ -704,9 +704,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/settings/order-combining", requireAuth, async (req, res) => {
+  app.post("/api/settings/order-combining", requireAuth, requireAssignedSystemRole("admin"), async (req, res) => {
     try {
-      if (!req.session.user || req.session.user.role !== "admin") {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin access required" });
       }
       // Body: { warehouseId: number | null, enabled: boolean }
@@ -740,9 +740,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/orders/combine", requireAuth, async (req, res) => {
+  app.post("/api/orders/combine", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       res.json(await orderCombining.combineOrders(req.body.orderIds, req.session.user.id));
@@ -755,9 +755,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/orders/combine-all", requireAuth, async (req, res) => {
+  app.post("/api/orders/combine-all", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       // Optional body.warehouseId — scopes the sweep to a single warehouse
@@ -773,9 +773,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/orders/:id/uncombine", requireAuth, async (req, res) => {
+  app.post("/api/orders/:id/uncombine", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       const result = await orderCombining.uncombineOrder(parseInt(req.params.id));
@@ -801,9 +801,9 @@ export function registerPickingRoutes(app: Express) {
   // ===== EXCEPTION HANDLING =====
   
   // Get all orders in exception status (admin/lead only)
-  app.get("/api/orders/exceptions", requireAuth, async (req, res) => {
+  app.get("/api/orders/exceptions", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       
@@ -837,9 +837,9 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Resolve an exception (admin/lead only)
-  app.post("/api/orders/:id/resolve-exception", requireAuth, async (req, res) => {
+  app.post("/api/orders/:id/resolve-exception", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       const { picking } = req.app.locals.services;
@@ -896,9 +896,9 @@ export function registerPickingRoutes(app: Express) {
   // ===== PICKING LOGS API =====
 
   // Get picking logs with filters (admin/lead only)
-  app.get("/api/picking/logs", requireAuth, async (req, res) => {
+  app.get("/api/picking/logs", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       
@@ -947,9 +947,9 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Get order timeline (logs for a specific order)
-  app.get("/api/picking/orders/:id/timeline", requireAuth, async (req, res) => {
+  app.get("/api/picking/orders/:id/timeline", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       
@@ -1003,10 +1003,10 @@ export function registerPickingRoutes(app: Express) {
     ]);
   });
 
-  app.post("/api/picking/logs/backfill", requireAuth, async (req, res) => {
+  app.post("/api/picking/logs/backfill", requireAuth, requireAssignedSystemRole("admin"), async (req, res) => {
     try {
       const user = req.session?.user;
-      if (!user || user.role !== "admin") {
+      if (!user) {
         return res.status(403).json({ error: "Admin access required" });
       }
 
@@ -1123,10 +1123,10 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/picking/metrics", requireAuth, async (req, res) => {
+  app.get("/api/picking/metrics", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
     try {
       const user = req.session?.user;
-      if (!user || !["admin", "lead"].includes(user.role)) {
+      if (!user) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -1196,9 +1196,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/orders/history", requireAuth, limitPageRead(async (req, res) => {
+  app.get("/api/orders/history", requireAuth, requireAssignedSystemRole("admin", "lead"), limitPageRead(async (req, res) => {
     try {
-      if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       
@@ -1232,9 +1232,9 @@ export function registerPickingRoutes(app: Express) {
     }
   }));
   
-  app.get("/api/orders/:id/detail", requireAuth, async (req, res) => {
+  app.get("/api/orders/:id/detail", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
     try {
-      if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       
@@ -1255,9 +1255,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
   
-  app.get("/api/orders/history/export", requireAuth, async (req, res) => {
+  app.get("/api/orders/history/export", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
     try {
-      if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       

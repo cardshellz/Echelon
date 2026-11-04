@@ -4,7 +4,6 @@ const userIdSchema = z.string().min(1).max(255).refine(value => value.trim() ===
 const identitySchema = z.object({
   id: userIdSchema,
   active: z.number().int(),
-  role: z.string().min(1).max(20),
   roles: z.array(z.object({ name: z.string().min(1).max(100), isSystem: z.number().int().min(0).max(1) }).strict()).max(200),
 }).strict();
 
@@ -34,9 +33,9 @@ export async function requireCustomerReturnPreviewAccess(
   } catch {
     throw new CustomerReturnPreviewAccessError("RETURN_PREVIEW_UNAVAILABLE", 503, "The admin preview is temporarily unavailable.");
   }
-  // The existing account role and RBAC membership are independently editable.
-  // For this private preview, either demotion denies access; neither is an OR fallback.
-  if (!identity || identity.id !== userId.data || identity.active !== 1 || identity.role !== "admin"
+  // This private preview requires a current assigned system Administrator role.
+  // The historical account label is neither authority nor a second veto.
+  if (!identity || identity.id !== userId.data || identity.active !== 1
     || !identity.roles.some(role => role.name === "Administrator" && role.isSystem === 1)) {
     throw new CustomerReturnPreviewAccessError("RETURN_PREVIEW_FORBIDDEN", 403, "Active administrator access is required.");
   }

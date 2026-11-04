@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { sqlIntegerArray } from "../../infrastructure/postgres-array";
+import { readStaffSystemRoleAuthority } from "../identity/staff-authority";
 import { readLabelEvidence, readPreviousItems, readSources,
   type AuthorizedLabelReplacement, type PreviousItem, type SourceItem } from "./ebay-label-replacement.repository";
 import { planPackageReconciliation, packageReconciliationInputSchema, type PackageReconciliationInput, type PackageReconciliationPlan } from "./package-reconciliation.domain";
@@ -158,8 +159,8 @@ export async function applyPackageReconciliation(tx: Transaction, rawCommand: Pa
   const command = packageReconciliationCommandSchema.parse(rawCommand);
   if (!Number.isFinite(now.getTime())) throw new PackageReconciliationError("INVALID_CLOCK", "Package reconciliation requires a valid injected clock");
   if (command.mode === "adopt_existing" || command.correction) {
-    const principal = rows(await tx.execute(sql`SELECT id FROM identity.users WHERE id::text = ${command.actor} AND role = 'admin' AND active = 1`));
-    if (principal.length !== 1) throw new PackageReconciliationError("OPERATOR_NOT_AUTHORIZED", "Package correction requires an active authenticated administrator");
+    const principal = await readStaffSystemRoleAuthority(tx, command.actor);
+    if (!principal.active || !principal.roles.includes("admin")) throw new PackageReconciliationError("OPERATOR_NOT_AUTHORIZED", "Package correction requires an active authenticated administrator");
     if (command.correction && command.correction.actorId !== command.actor) throw new PackageReconciliationError("OPERATOR_NOT_AUTHORIZED", "Correction actor differs from the authenticated command actor");
   }
   const requestHash = digest({ ...command, providerProof: command.providerProof ? { ...command.providerProof, observedAt: null } : null });

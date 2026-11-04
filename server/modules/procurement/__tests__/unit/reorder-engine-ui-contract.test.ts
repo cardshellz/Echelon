@@ -189,15 +189,16 @@ describe("reorder engine UI contract", () => {
     expect(appShell).toContain("useNewReorderCockpit");
     // Fail-safe is STRICT: only an explicit `true` from the settings payload
     // flips the label — undefined data (fetch pending, 401/403, 500, or the
-    // query disabled for roles that cannot see Reorder Analysis) stays legacy.
-    // Grant-based access to other procurement links does not enable this query.
+    // query disabled without assigned access and purchasing:view) stays legacy.
+    // The inventory:view link grant alone does not enable this settings query.
     expect(appShell).toContain("procurementSettings?.useNewReorderCockpit === true");
     expect(appShell).toContain("enabled: canSeeReorderLink");
+    expect(appShell).toContain('const canSeeReorderLink = hasAssignedAccess && hasPermission("purchasing", "view")');
     expect(appShell).toContain("retry: false");
     // Flag OFF (or settings load error) → the base structure's legacy label,
-    // byte-identical to the pre-flag nav.
+    // retaining its explicit inventory read permission.
     expect(appShell).toContain(
-      '{ label: "Reorder Analysis", icon: BarChart3, href: REORDER_ANALYSIS_HREF }',
+      '{ label: "Reorder Analysis", icon: BarChart3, href: REORDER_ANALYSIS_HREF, requiredPermission: { resource: "inventory", action: "view" } }',
     );
     // Flag ON → same href, same icon, relabeled "Reorder Engine".
     expect(appShell).toContain('REORDER_ANALYSIS_HREF = "/reorder-analysis"');

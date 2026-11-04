@@ -4,7 +4,7 @@ const permission = z.string().min(3).max(201);
 
 /** Current Identity evidence for a command; session roles are not authority. */
 export const commandAuthorityActorSchema = z.object({
-  userId: z.string().trim().min(1).max(255),
+  userId: z.string().min(1).max(255).refine(value => value.trim().length > 0),
   active: z.boolean(),
   permissions: z.array(permission),
   scopedPermissions: z.array(permission),
