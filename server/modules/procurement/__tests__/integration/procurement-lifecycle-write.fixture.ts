@@ -34,6 +34,9 @@ export async function installFlowLifecycleWrites(harness: FlowCostHarness): Prom
     "900000017000018610001_supplier_credit_completion.sql",
   ]) await harness.pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
   await installSupplierReturnCompletionFixture(harness.pool);
+  for (const migration of ["900000052000019930001_receipt_supplier_credit_sources.sql",
+    "900000055000020000001_supplier_header_tax_return_sources.sql"])
+    await harness.pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
   // The existing RFQ actor already has purchasing:edit. Settlement/collection
   // deliberately exercises real, separate current approval/read grants.
   await harness.pool.query(`INSERT INTO identity.auth_permissions(id,resource,action,category)

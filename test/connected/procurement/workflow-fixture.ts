@@ -24,6 +24,7 @@ export async function installConnectedWorkflowFixture(pool: Pool): Promise<void>
   }
   await installSupplierReturnCompletionFixture(pool);
   await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000052000019930001_receipt_supplier_credit_sources.sql"), "utf8"));
+  await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000055000020000001_supplier_header_tax_return_sources.sql"), "utf8"));
   await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000051000019910001_ap_invoice_transition_reviews.sql"), "utf8"));
   await pool.query(readFileSync(resolve(process.cwd(), "migrations/900000049000019830001_freight_invoice_approval_history_lookup.sql"), "utf8"));
   // Legacy runtime DDL in server/db.ts, with bigint money from migration 0576;
@@ -53,6 +54,7 @@ export async function installConnectedWorkflowFixture(pool: Pool): Promise<void>
 /** Persisted physical/financial/command evidence for connected assertions, never API substitutes. */
 export async function readConnectedWorkflowState(pool: Pool) {
   return (await pool.query(`SELECT
+    (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.supplier_header_cost_reviews t) AS "headerReviews",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.vendor_invoice_lines t) AS "invoiceLines",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.ap_invoice_transition_reviews t) AS "invoiceTransitionReviews",
     (SELECT coalesce(jsonb_agg(to_jsonb(t) ORDER BY id),'[]'::jsonb) FROM procurement.po_events t WHERE event_type='invoice_cost_components_approved') AS "supplierCostApprovals",
@@ -163,4 +165,11 @@ export async function seedApTransitionWorkflow(pool: Pool): Promise<void> {
     await client.query("COMMIT");
   } catch (error) { await client.query("ROLLBACK"); throw error; }
   finally { client.release(); }
+}
+
+/** Deliberately billed header difference on untouched synthetic documents. The
+ * actual preview, allocation, approval and cost writes remain production owners. */
+export async function seedSupplierHeaderWorkflow(pool: Pool): Promise<void> {
+  await seedReceiptInvoiceWorkflow(pool);
+  await pool.query(`UPDATE procurement.vendor_invoices SET invoiced_amount_cents=7700,balance_cents=7700 WHERE id=71`);
 }

@@ -5,18 +5,18 @@ This is the active tracker for consolidating purchase costing from PO through sh
 | Tracking field | Current value |
 | --- | --- |
 | Created | 2026-10-30 |
-| Overall state | #1964, #1967, #1971, #1979, #1983, #1987 and #1991 merged. #1991 independently verified in v3454 at `209f40c11c669289be0e0cbc8bc8e2157da28cf9`, migration applied, web/capture up; actual live rollback-only invoice review completed. New financial approvals and receipt assignments remain zero; actual production posting acceptance remains open |
+| Overall state | #1993 independently verified deployed in v3461 at `9cf76be54f121ecb611e3adf8c3f4856e09f08dd` (includes #1998); exact release/process/migration and live rollback-only invoice review verified. Original bill, cash, approval and evidence unchanged. Production receipt assignments and credit documents remain zero, so actual posting acceptance remains open |
 | Current stage | S2 — connect approved financial corrections to the existing costing pipeline and reviewed impact |
-| Next work item | Review/deploy the classified billed-line adjustment and receipt-attributed credit candidate, then continue combined supplier amounts, header allocation and tax/return-credit attribution. [Finite remaining delivery gates](procurement-costing-remaining-delivery.md) retain the full scope |
+| Next work item | Complete review/CI for #2000: combined goods, PO/invoice header allocation, original-tax refunds and returned-receipt attribution; then continue B1/C1 downstream integrity and remaining monetary consumer acceptance. [Finite remaining delivery gates](procurement-costing-remaining-delivery.md) retain the full scope |
 | Working branch | `codex/supplier-combined-header-tax-return-costs` |
-| Plan branch base | `209f40c11c669289be0e0cbc8bc8e2157da28cf9` |
+| Plan branch base | `9cf76be54f121ecb611e3adf8c3f4856e09f08dd` |
 | Latest main incorporated | `9cf76be54f121ecb611e3adf8c3f4856e09f08dd` (#1998), verified v3461 slug and running processes; includes merged #1993 |
 | Audited main baseline | `e571bcac780852c3ac6b488354c10aaf7f1c417c`, the historical F1-F9 audit baseline. Later implementation and deployment evidence is recorded below; this baseline is not current production acceptance proof |
 | Audit | [Purchase costing authority review](procurement-costing-authority-audit-2026-10-30.md) |
 | Stage 1 contract and ownership map | [Contract, compatibility and recognition boundary](procurement-costing-stage-1-contract.md) |
 | Stage 2 compatibility trace | [Recorded authority and selected-input proof](procurement-costing-stage-2-compatibility.md) |
-| Current implementation PR | [#1993](https://github.com/cardshellz/Echelon/pull/1993): billed-line adjustments and receipt-attributed credits. Local acceptance is recorded below; final-head hosted results belong to that PR. [#1991](https://github.com/cardshellz/Echelon/pull/1991) is deployed; 63/63 final-head checks passed |
-| Deployment and live acceptance | [#1991 verification](procurement-costing-deployment-1991.md): v3454, exact slug/process/migration identity and actual live invoice impact preview. Closed without saving; original bill, payment, balance and approval independently read back unchanged. No new production approval was posted |
+| Current implementation PR | [#2000](https://github.com/cardshellz/Echelon/pull/2000): combined supplier totals, header allocations and tax/return credits. [Current trace and acceptance](procurement-costing-stage-2-combined-header-credits.md). Candidate, deployment and live posting remain separate gates |
+| Deployment and live acceptance | [#1993 verification](procurement-costing-deployment-1993.md): 63/63 final-head CI; v3461 exact slug/process/migration identity and actual rollback-only invoice review. Closed without approving; original financial facts and component evidence independently read back unchanged |
 
 ## Resume here after a context reset
 
@@ -371,3 +371,11 @@ The real credit flow shows each receipt number and its supplier cost before/afte
 Browser acceptance found missing select/control IDs and an old database source-key restriction; explicit labels and the forward guard migration correct those causes. Final review also found that malformed internal credit segments returned from schema refinement without an error; explicit rejection and three boundary cases now cover duplicate credit IDs, different piece coverage and provisional segments. The dependency-selection test reuses its supported cache for one unchanged repository snapshot, retaining all coverage assertions and its timeout. No financial guard, assertion or timeout was weakened.
 
 Remaining A3/A4: combined supplier totals without a product/packaging split, unapportioned PO/invoice header adjustments, tax-credit allocation and additional receipt/quarantine-return combinations. They are not marked complete by this bounded slice. Then close downstream inheritance/recognition B1, shared monetary consumers C1 and composed/actual-record acceptance D1/D2. Do not infer a split, source allocation, sale or expense to close any gate.
+
+## 2026-11-04 continuation: #1993 deployed; #2000 candidate
+
+The [#1993 deployment record](procurement-costing-deployment-1993.md) replaces older not-deployed notes for that release. The [combined/header/credit trace](procurement-costing-stage-2-combined-header-credits.md) is the active A3/A4 implementation record. It reuses the existing financial command, source revision, receipt assignment, inventory/order-cost application and outgoing return-value owners. No production financial mutation was made for verification.
+
+Local acceptance currently includes 5,347 procurement unit tests, 1,631 client-library tests, the 410-case real PostgreSQL owner suite and two additional mixed-header/immutable-guard cases. The separate original supplier-credit SQL suite passed 36 cases. Server/client test typechecks and build passed. Connected acceptance and final-head hosted CI must be recorded in the current trace before declaring this candidate ready. These overlapping test suites are not added into one total.
+
+Remaining after this candidate: B1 verified-sale/accounting recipient and inheritance acceptance; C1 complete monetary consumer matrix; D1 final hosted candidate; D2 evidence-backed live posting acceptance. No whole-plan completion is claimed. Unsupported or missing original invoice/receipt/return links remain named source reviews; a shared PO alone is not evidence of an invoice-to-return relationship.

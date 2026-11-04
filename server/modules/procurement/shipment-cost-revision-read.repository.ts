@@ -1,3 +1,5 @@
+import { attachSupplierHeaderInvoiceEvidence } from "./supplier-header-invoice-evidence";
+import { attachSupplierInvoiceTaxEvidence } from "./supplier-invoice-tax-evidence";
 import { sql } from "drizzle-orm";
 import { costInteger, CostEvidenceError, type CostEvidenceTransaction } from "../inventory/infrastructure/cost-evidence.repository";
 import type { ShipmentCostRevisionReadEvidence } from "./shipment-cost-revision-proposals";
@@ -61,7 +63,7 @@ export async function readShipmentCostRevisionEvidence(tx: CostEvidenceTransacti
       shipment.allocation_method_default,
       snapshot.id AS snapshot_id,snapshot.product_value_evidence AS snapshot_product_value_evidence,
       snapshot.freight_allocated_cents,snapshot.duty_allocated_cents,snapshot.insurance_allocated_cents,snapshot.other_allocated_cents,
-      snapshot.recoverable_tax_allocated_cents AS __recoverable_tax_cents
+      snapshot.recoverable_tax_allocated_cents AS __recoverable_tax_cents,snapshot.excluded_supplier_allocated_cents AS __excluded_supplier_cents
     FROM procurement.inbound_shipment_lines line
     JOIN procurement.inbound_shipments shipment ON shipment.id=line.inbound_shipment_id
     LEFT JOIN procurement.purchase_order_lines po_line ON po_line.id=line.purchase_order_line_id
@@ -75,14 +77,16 @@ export async function readShipmentCostRevisionEvidence(tx: CostEvidenceTransacti
     lines.set(shipmentId, shipmentLines.map(row => {
       // Keep the existing immutable economic evidence byte-for-byte. Physical
       // inputs are current validation evidence, not new fingerprint fields.
-      const { __recoverable_tax_cents: recoverableTax, __physical_cartons: cartons, __physical_basis: basis, __physical_weight: weight,
+      const { __excluded_supplier_cents: excludedSupplier, __recoverable_tax_cents: recoverableTax, __physical_cartons: cartons, __physical_basis: basis, __physical_weight: weight,
         __physical_length: length, __physical_width: width, __physical_height: height, ...economicRow } = row;
       const text = (value: unknown) => value == null ? null : String(value);
       sources.set(costInteger(row.id, "shipmentLineId", 1), { qtyShipped: costInteger(row.qty_shipped, "qtyShipped", 1),
         cartonCount: cartons == null ? null : costInteger(cartons, "cartonCount", 0), dimensionBasis: text(basis),
         weightKg: text(weight), lengthCm: text(length), widthCm: text(width), heightCm: text(height) });
-      return recoverableTax != null && costInteger(recoverableTax, "recoverable tax") !== 0
-        ? { ...economicRow, recoverable_tax_allocated_cents: recoverableTax } : economicRow;
+      return { ...economicRow,
+        ...(recoverableTax != null && costInteger(recoverableTax, "recoverable tax") !== 0 ? { recoverable_tax_allocated_cents: recoverableTax } : {}),
+        ...(excludedSupplier != null && costInteger(excludedSupplier, "excluded supplier share", -Number.MAX_SAFE_INTEGER) !== 0 ? { excluded_supplier_allocated_cents: excludedSupplier } : {}),
+      };
     }));
     physicalSources.set(shipmentId, sources);
   }
@@ -118,6 +122,9 @@ export async function readShipmentCostRevisionEvidence(tx: CostEvidenceTransacti
     LEFT JOIN procurement.vendor_invoice_lines invoice_line ON invoice_line.vendor_invoice_id=invoice.id
     ORDER BY invoice.id,invoice_line.id
   `)).rows, ids);
+  const reviewedInvoices = await attachSupplierHeaderInvoiceEvidence(tx, [...new Map([...invoiceRows.values()].flat().map(row => [row.id, row])).values()]);
+  const reviewedById = new Map((await attachSupplierInvoiceTaxEvidence(tx, reviewedInvoices)).map(row => [row.id, row]));
+  for (const [id, rows] of invoiceRows) invoiceRows.set(id, rows.map(row => reviewedById.get(row.id)!));
   const allocationRows = partition((await tx.execute(sql`
     SELECT charge.inbound_shipment_id AS __shipment_id,allocation.* FROM procurement.inbound_freight_allocations allocation
     JOIN procurement.inbound_freight_costs charge ON charge.id=allocation.shipment_cost_id

@@ -12,6 +12,9 @@ import { resolveShipmentSupplierCredits } from "./domain/shipment-supplier-credi
 import { isUnresolvedPhysicalAllocation } from "@shared/procurement/shipment-allocation";
 import { readPurchaseTaxCosts } from "./purchase-tax-costs.repository";
 import { readIntegerCents } from "@shared/money-read";
+import { attachSupplierHeaderInvoiceEvidence } from "./supplier-header-invoice-evidence";
+import { attachSupplierInvoiceTaxEvidence } from "./supplier-invoice-tax-evidence";
+import { shipmentHeaderExclusions } from "./domain/shipment-header-exclusions";
 
 type SummaryReader = {
   execute(query: SQL): Promise<{ rows: Record<string, unknown>[] }>;
@@ -32,7 +35,13 @@ export async function readPoShipmentCosts(
     async (tx) => {
       const header = await tx.execute(
         sql`SELECT currency,total_cents,shipping_cost_cents,tax_cents,
-          (tax_type_id IS NOT NULL OR COALESCE(tax_cents,0)<>0
+          (tax_type_id IS NOT NULL OR COALESCE(tax_cents,0)<>0 OR COALESCE(po.discount_cents,0)<>0 OR COALESCE(po.shipping_cost_cents,0)<>0
+            OR EXISTS(SELECT 1 FROM procurement.supplier_header_cost_reviews review WHERE review.purchase_order_id=po.id)
+            OR EXISTS(SELECT 1 FROM procurement.supplier_header_cost_reviews review JOIN procurement.vendor_invoice_lines invoice_line ON invoice_line.vendor_invoice_id=review.vendor_invoice_id
+              JOIN procurement.inbound_freight_costs charge ON charge.id=invoice_line.freight_cost_id
+              JOIN procurement.inbound_shipment_lines shipment_line ON shipment_line.inbound_shipment_id=charge.inbound_shipment_id WHERE shipment_line.purchase_order_id=po.id)
+            OR EXISTS(SELECT 1 FROM procurement.vendor_invoice_lines line JOIN procurement.vendor_invoices invoice ON invoice.id=line.vendor_invoice_id
+              JOIN procurement.purchase_order_lines product ON product.id=line.purchase_order_line_id WHERE product.purchase_order_id=po.id AND invoice.status IN ('approved','partially_paid','paid'))
             OR EXISTS(SELECT 1 FROM procurement.purchase_order_lines line WHERE line.purchase_order_id=po.id
               AND line.status<>'cancelled' AND (line.tax_type_id IS NOT NULL OR COALESCE(line.tax_cents,0)<>0 OR line.line_type='tax'))
             OR EXISTS(SELECT 1 FROM procurement.vendor_invoice_line_taxes tax JOIN procurement.vendor_invoice_lines line ON line.id=tax.vendor_invoice_line_id
@@ -107,6 +116,7 @@ export async function readPoShipmentCosts(
       SUM(line.line_total_cents) OVER (PARTITION BY invoice.id)::text AS document_total
       FROM selected JOIN procurement.vendor_invoices invoice ON invoice.id=selected.id
       LEFT JOIN procurement.vendor_invoice_lines line ON line.vendor_invoice_id=invoice.id ORDER BY invoice.id,line.id`);
+      invoices.rows = await attachSupplierHeaderInvoiceEvidence(tx, await attachSupplierInvoiceTaxEvidence(tx, invoices.rows.map(row => ({ ...row, vendor_invoice_id: row.invoice_id }))));
       const invoiceEvidence = invoices.rows.map((row) => ({
         id: row.id,
         invoiceId: row.invoice_id,
@@ -124,6 +134,7 @@ export async function readPoShipmentCosts(
         unitCostMills: row.unit_cost_mills,
         unitCostCents: row.unit_cost_cents,
         lineTotalCents: row.line_total_cents,
+        ...(row.header_authority ? { headerAuthority: row.header_authority, headerShares: row.header_cost_evidence } : {}),
       }));
       const allocations =
         await tx.execute(sql`SELECT allocation.shipment_cost_id,allocation.inbound_shipment_line_id,allocation.allocated_cents,allocation.basis_evidence,line.purchase_order_id
@@ -152,20 +163,22 @@ export async function readPoShipmentCosts(
         return { lineId, shipmentId: costInteger(linkedLine.inbound_shipment_id, "shipmentId", 1), contract: row.contract };
       }));
       const supplierCredits = await readSupplierCreditCostRows(tx, { freightCostIds: charges.rows.map(row => Number(row.id)) });
-      const creditAdjustment = resolveShipmentSupplierCredits({ charges: charges.rows, allocations: allocations.rows,
+      const creditAdjustment = resolveShipmentSupplierCredits({ purpose: "supplier_balance", charges: charges.rows, allocations: allocations.rows,
         invoices: invoices.rows.map(row => ({ ...row, vendor_invoice_id: row.invoice_id })), credits: supplierCredits });
-      const recoverableIds = new Set(charges.rows.filter(row => row.tax_treatment === "recoverable").map(row => Number(row.id)));
-      const recoverableCredits = resolveShipmentSupplierCredits({ charges: charges.rows.filter(row => recoverableIds.has(Number(row.id))),
-        allocations: allocations.rows.filter(row => recoverableIds.has(Number(row.shipment_cost_id))),
+      const chargeTaxes = new Map(charges.rows.filter(row => row.tax_treatment != null).map(row => [Number(row.id), { treatment: String(row.tax_treatment) }]));
+      const headerExclusions = shipmentHeaderExclusions(invoices.rows, allocations.rows, chargeTaxes);
+      const recoverableIds = new Set(charges.rows.filter(row => row.tax_treatment === "recoverable" && !headerExclusions.replacedTaxChargeIds.has(Number(row.id))).map(row => Number(row.id)));
+      const inventoryCredits = resolveShipmentSupplierCredits({ charges: charges.rows.filter(row => !recoverableIds.has(Number(row.id))),
+        allocations: allocations.rows.filter(row => !recoverableIds.has(Number(row.shipment_cost_id))),
         invoices: invoices.rows.map(row => ({ ...row, vendor_invoice_id: row.invoice_id })),
-        credits: supplierCredits.filter(row => recoverableIds.has(Number(row.freight_cost_id))) });
-      const recoverableByShipmentLine = new Map<number, number>();
+        credits: supplierCredits.filter(row => !recoverableIds.has(Number(row.freight_cost_id))) });
+      const recoverableByShipmentLine = new Map(headerExclusions.taxByLine);
       for (const row of allocations.rows.filter(row => recoverableIds.has(Number(row.shipment_cost_id)) && Number(row.purchase_order_id) === poId)) {
         const lineId = Number(row.inbound_shipment_line_id);
         recoverableByShipmentLine.set(lineId, readIntegerCents(BigInt(recoverableByShipmentLine.get(lineId) ?? 0) + BigInt(readIntegerCents(row.allocated_cents, "recoverable tax share", true)), "recoverable tax share", true));
       }
       for (const [id, amount] of recoverableByShipmentLine) recoverableByShipmentLine.set(id,
-        readIntegerCents(BigInt(amount) - BigInt(recoverableCredits.creditedCentsByLine.get(id) ?? 0), "net recoverable tax share", true));
+        readIntegerCents(BigInt(amount) - BigInt(creditAdjustment.creditedCentsByLine.get(id) ?? 0) + BigInt(inventoryCredits.creditedCentsByLine.get(id) ?? 0), "net recoverable tax share", true));
       const costs = buildPoShipmentCosts(
         {
           poId,
@@ -276,7 +289,8 @@ export async function readPoShipmentCosts(
         supplierCosts: await readPurchaseCostStatus(tx, linked.rows.flatMap(line => line.purchase_order_line_id == null
           ? [] : [costInteger(line.purchase_order_line_id, "purchaseOrderLineId", 1)])),
         ...(header.rows[0].tax_active === true ? { taxCosts: await readPurchaseTaxCosts(tx, poId, {
-          lines: costs.lines, recoverableByShipmentLine, complete: costs.summary.combinedCostCents !== null && recoverableCredits.issues.length === 0,
+          lines: costs.lines, recoverableByShipmentLine, excludedByShipmentLine: headerExclusions.otherByLine,
+          complete: costs.summary.combinedCostCents !== null && inventoryCredits.issues.length === 0,
         }) } : {}),
       };
     },

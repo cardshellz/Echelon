@@ -1,4 +1,5 @@
 import { SupplierReturnCreditReview } from "./SupplierReturnCreditReview";
+import { ReceiptInvoiceCosts } from "./ReceiptInvoiceCosts";
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
@@ -47,7 +48,7 @@ export function SupplierReturnDetail({ returnId, commands }: { returnId: number;
         {line.source.costProvisional && <p className="text-sm">The original returned value included provisional costs. Later changes remain below.</p>}
         <section aria-label={`Return line ${line.id} credit matching`} className="rounded bg-muted/30 p-3 space-y-2"><h3 className="font-medium">{returnCreditLabels[line.creditState]}</h3>{line.creditIssues.map(issue => <p role="alert" key={issue.code} className="text-sm">{issue.message}</p>)}
           {(line.sourceInvoices ?? []).map(invoice => <p key={`${invoice.sourceInvoiceId}:${invoice.invoiceLineId}`}><SupplierCreditLink create sourceInvoiceId={invoice.sourceInvoiceId} supplierReturnLineId={line.id}>Record supplier credit from {invoice.invoiceNumber} / line #{invoice.invoiceLineId}</SupplierCreditLink></p>)}
-          {(!line.sourceInvoices || line.sourceInvoices.length === 0) && <p className="text-sm">An approved invoice line that owns this return has not been verified. Review the original supplier invoice before recording its credit.</p>}
+          {line.creditState !== "matched" && (!line.sourceInvoices || line.sourceInvoices.length === 0) && <div className="space-y-2 text-sm"><p>The invoice for these returned goods is not verified. Review the original receipt's supplier invoice and cost assignment, then match its credit.</p><ReceiptInvoiceCosts purchaseOrderLineId={origin.purchaseOrderLineId} label="Review original receipt invoice" /></div>}
           {[...new Set((line.creditLinks ?? []).map(credit => credit.entitlementId))].map(id => <p key={id}><Link className="text-primary underline" href={reviewHref(id)}>Review credit difference #{id}</Link></p>)}
           {(line.creditLinks ?? []).map(credit => <p key={credit.creditLineId} className="text-sm"><Link className="text-primary underline" href={href(`/supplier-credits/${credit.creditId}`)}>{credit.supplierReference}</Link> · {credit.status} · {formatPaymentAmount(credit.amountCents)} · {credit.component} · {credit.quantity} recorded units</p>)}
         </section>

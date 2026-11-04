@@ -31,7 +31,7 @@ function assertSourceCapacity(source: Awaited<ReturnType<typeof loadSupplierCred
   for (const line of lines) requested.set(line.invoiceLineId, (requested.get(line.invoiceLineId) ?? BigInt(0)) + BigInt(line.amountCents));
   for (const [id, amount] of requested) {
     const line = source.lines.find(row => row.id === id);
-    if (!line || !Number.isSafeInteger(line.lineTotalCents) || line.lineTotalCents < 0 || amount + BigInt(source.credited.get(id) ?? 0) > BigInt(line.lineTotalCents)) throw new SupplierCreditError("SUPPLIER_CREDIT_SOURCE_EXCEEDED", "Credit exceeds the remaining documented amount on an original invoice line.");
+    if (!line || !Number.isSafeInteger(line.lineTotalCents) || line.lineTotalCents < 0 || amount + BigInt(source.credited.get(id) ?? 0) > BigInt(source.capacities.get(id)!)) throw new SupplierCreditError("SUPPLIER_CREDIT_SOURCE_EXCEEDED", "Credit exceeds the remaining documented amount on an original invoice line and its approved header share.");
   }
 }
 async function refreshInvoices(tx: CreditTransaction, ids: readonly number[], actorId: string, reason: string, at: Date) {

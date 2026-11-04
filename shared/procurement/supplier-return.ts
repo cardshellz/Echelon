@@ -231,6 +231,7 @@ export const supplierReturnCreditLinkSchema = z.object({
     creditId: id, creditLineId: id, sourceInvoiceId: id, supplierReference: z.string(),
     status: z.enum(["approved", "voided"]), entitlementId: id, quantity,
     component: z.enum(["product", "packaging", "landed", "unassigned"]), amountCents: nonnegative.positive(),
+    taxTypeId: id.optional(), taxSourceKey: z.string().optional(), taxTreatment: z.enum(["inventory", "recoverable"]).optional(),
 }).strict();
 export const supplierReturnInvoiceChoiceSchema = z.object({
     sourceInvoiceId: id, invoiceLineId: id, invoiceNumber: z.string(),

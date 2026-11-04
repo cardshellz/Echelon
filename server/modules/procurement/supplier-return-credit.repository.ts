@@ -1,3 +1,4 @@
+import { acceptedReturnInvoiceAttribution, intersectReturnedIntervals, type ReturnInvoiceAssignment } from "./domain/accepted-return-invoice-attribution";
 import { sql } from "drizzle-orm";
 import { supplierCreditSourceEvidenceSchema, supplierCreditDispositionMatches } from "./domain/supplier-credit-source";
 import { projectReturnCreditReview } from "./domain/supplier-return-credit-review";
@@ -11,7 +12,9 @@ import { readSupplierReturnInventoryEvidenceBatch } from "../inventory/applicati
 import { lotCostsForIntervals } from "../inventory/domain/lot-cost";
 import { subtractCostQuantityIntervals, sliceCostQuantityIntervals } from "../inventory/domain/cost-quantity-intervals";
 import { costInteger, costFingerprint, CostEvidenceError, type CostEvidenceTransaction } from "../inventory/infrastructure/cost-evidence.repository";
+import { readPurchaseTaxTypes } from "./purchase-tax-evidence.repository";
 const idsSchema = z.array(z.number().int().positive().safe()).max(1000);
+type InvoiceAttribution = { receiptId: number; receiptNumber: string; receiptStartBasePiece: number; assignments: ReturnInvoiceAssignment[]; eligibleIntervals: Array<{ start: number; quantity: number }> };
 const fields = { product: "productMills", packaging: "packagingMills", landed: "landedMills" } as const;
 const intervalSchema = z.array(supplierReturnIntervalSchema).min(1).max(10000);
 const issue = (code: string, message: string) => ({ code, message });
@@ -29,7 +32,7 @@ function costsFor(row: Record<string, unknown>, intervals: Array<{
 export async function loadReturnCreditEvidence(tx: CostEvidenceTransaction, rawIds: readonly number[]) {
     const ids = idsSchema.parse([...new Set(rawIds)]);
     if (!ids.length)
-        return { rows: [], entitlements: [], links: [], choices: [], reviews: [], values: new Map<number, {
+        return { rows: [], entitlements: [], links: [], choices: [], reviews: [], invoiceAttributions: new Map<string, InvoiceAttribution>(), values: new Map<number, {
                 currentCosts: SupplierReturnCostTotals;
                 costEntries: Array<{
                     id: number;
@@ -63,7 +66,7 @@ export async function loadReturnCreditEvidence(tx: CostEvidenceTransaction, rawI
     }
     const entitlements = (await tx.execute(sql `SELECT * FROM procurement.supplier_return_credit_entitlements
     WHERE supplier_return_line_id=ANY(${sql.param(ids)}::int[]) ORDER BY id`)).rows;
-    const links = (await tx.execute(sql `SELECT link.*,entitlement.supplier_return_line_id,entitlement.quantity,
+    let links = (await tx.execute(sql `SELECT link.*,entitlement.supplier_return_line_id,entitlement.quantity,
       credit.id AS credit_id,credit.source_invoice_id,credit.supplier_reference,credit.status,credit.vendor_id,
       line.disposition,line.invoice_line_id,line.amount_cents AS line_amount_cents,line.source_evidence
     FROM procurement.supplier_return_credit_links link
@@ -73,11 +76,23 @@ export async function loadReturnCreditEvidence(tx: CostEvidenceTransaction, rawI
     WHERE entitlement.supplier_return_line_id=ANY(${sql.param(ids)}::int[]) ORDER BY link.id LIMIT 10001`)).rows;
     if (links.length > 10000)
         throw new CostEvidenceError("SUPPLIER_RETURN_CREDIT_LIMIT", "Return credit history exceeds its bounded complete read.");
-    const choices = (await tx.execute(sql `SELECT returned.id AS return_line_id,invoice.id AS source_invoice_id,
-      invoice.invoice_number,line.id AS invoice_line_id,line.purchase_order_line_id,line.freight_cost_id
+    if (links.some(row => { const parsed = supplierCreditSourceLineInputSchema.shape.disposition.safeParse(row.disposition);
+      return parsed.success && parsed.data.kind === "accepted_stock_return" && parsed.data.taxRefund !== undefined; })) {
+      const types = new Map((await readPurchaseTaxTypes(tx)).map(type => [type.id, type.treatment]));
+      links = links.map(row => {
+        const source = supplierCreditSourceEvidenceSchema.parse(row.source_evidence);
+        if (!source.taxCredit) return row;
+        const treatment = types.get(source.taxCredit.taxTypeId);
+        if (!treatment) throw new CostEvidenceError("RETURN_CREDIT_TAX_TYPE_MISSING", "Restore the return refund's original configured tax type.");
+        return { ...row, current_tax_treatment: treatment };
+      });
+    }
+    const rawChoices = (await tx.execute(sql `SELECT returned.id AS return_line_id,invoice.id AS source_invoice_id,
+      invoice.invoice_number,line.id AS invoice_line_id,line.purchase_order_line_id,line.freight_cost_id,po_line.receipt_costing_enabled
     FROM procurement.supplier_return_lines returned JOIN procurement.supplier_returns header ON header.id=returned.supplier_return_id
     JOIN procurement.vendor_invoices invoice ON invoice.vendor_id=header.vendor_id AND invoice.currency='USD' AND invoice.status IN ('approved','partially_paid','paid')
     JOIN procurement.vendor_invoice_lines line ON line.vendor_invoice_id=invoice.id
+    LEFT JOIN procurement.purchase_order_lines po_line ON po_line.id=line.purchase_order_line_id
     WHERE returned.id=ANY(${sql.param(ids)}::int[]) AND (
       line.purchase_order_line_id=returned.purchase_order_line_id AND line.freight_cost_id IS NULL
       OR line.purchase_order_line_id IS NULL AND line.freight_cost_id IS NOT NULL AND EXISTS (
@@ -85,8 +100,30 @@ export async function loadReturnCreditEvidence(tx: CostEvidenceTransaction, rawI
         WHERE allocation.shipment_cost_id=line.freight_cost_id
         AND allocation.inbound_shipment_line_id=(returned.source_snapshot->'sourceProof'->'origin'->>'inboundShipmentLineId')::int))
     ORDER BY returned.id,invoice.id,line.id LIMIT 10001`)).rows;
-    if (choices.length > 10000)
+    if (rawChoices.length > 10000)
         throw new CostEvidenceError("SUPPLIER_RETURN_INVOICE_LIMIT", "Return source invoice choices exceed their bounded complete read.");
+    const scopedInvoiceIds = [...new Set(rawChoices.filter(row => Number(row.receipt_costing_enabled ?? 0) === 1).map(row => costInteger(row.invoice_line_id, "returned invoice line", 1)))];
+    const assignments = scopedInvoiceIds.length ? (await tx.execute(sql`SELECT allocation.*,receipt.id AS receipt_id,receipt.receipt_number,
+      (SELECT min(origin.purchase_start_base_piece) FROM inventory.effective_lot_cost_origins origin WHERE origin.receiving_line_id=allocation.receiving_line_id) AS receipt_start
+      FROM procurement.receipt_invoice_cost_allocations allocation JOIN procurement.receiving_lines receiving_line ON receiving_line.id=allocation.receiving_line_id
+      JOIN procurement.receiving_orders receipt ON receipt.id=receiving_line.receiving_order_id WHERE invoice_line_id=ANY(${sql.param(scopedInvoiceIds)}::int[])
+      ORDER BY invoice_line_id,receiving_line_id,receipt_start_piece LIMIT 10001`)).rows : [];
+    if (assignments.length > 10000) throw new CostEvidenceError("SUPPLIER_RETURN_INVOICE_LIMIT", "Return invoice assignments exceed their complete bounded read.");
+    const invoiceAttributions = new Map<string, InvoiceAttribution>();
+    const choices = rawChoices.filter(choice => {
+      if (Number(choice.receipt_costing_enabled ?? 0) !== 1) return true;
+      const source = supplierReturnStockPreviewLineSchema.parse(rows.find(row => Number(row.id) === Number(choice.return_line_id))!.source_snapshot);
+      const owned = assignments.filter(row => Number(row.invoice_line_id) === Number(choice.invoice_line_id) && Number(row.receiving_line_id) === source.sourceProof.origin.receivingLineId);
+      if (!owned.length) return false;
+      const receiptStartBasePiece = costInteger(owned[0].receipt_start, "original returned receipt start");
+      const selected = owned.map(row => ({ receivingLineId: costInteger(row.receiving_line_id, "returned receipt line", 1), invoiceLineId: costInteger(row.invoice_line_id, "returned invoice line", 1),
+        receiptStartPiece: costInteger(row.receipt_start_piece, "receipt piece start"), invoiceStartPiece: costInteger(row.invoice_start_piece, "invoice piece start"), pieces: costInteger(row.pieces, "billed receipt pieces", 1) }));
+      const trace = acceptedReturnInvoiceAttribution(source, source.intervals, receiptStartBasePiece, selected);
+      if (!trace.eligibleIntervals.length) return false;
+      invoiceAttributions.set(`${choice.return_line_id}:${choice.invoice_line_id}`, { receiptStartBasePiece,
+        receiptId: costInteger(owned[0].receipt_id, "original return receipt", 1), receiptNumber: z.string().min(1).parse(owned[0].receipt_number), assignments: selected, eligibleIntervals: trace.eligibleIntervals });
+      return true;
+    });
     const reviews = (await tx.execute(sql `SELECT review.* FROM procurement.supplier_return_credit_reviews review
     JOIN procurement.supplier_return_credit_entitlements entitlement ON entitlement.id=review.entitlement_id
     WHERE entitlement.supplier_return_line_id=ANY(${sql.param(ids)}::int[]) ORDER BY review.id LIMIT 10001`)).rows;
@@ -128,13 +165,15 @@ export async function loadReturnCreditEvidence(tx: CostEvidenceTransaction, rawI
             throw new CostEvidenceError("RETURN_CREDIT_LINK_REVIEW", "Retained supplier credit evidence does not match its immutable return entitlement.");
         }
     }
-    return { rows, entitlements, links, choices, reviews, values };
+    return { rows, entitlements, links, choices, reviews, values, invoiceAttributions };
 }
 export function retainedReturnCreditLink(raw: Record<string, unknown>) {
+    const tax = raw.current_tax_treatment == null ? null : supplierCreditSourceEvidenceSchema.parse(raw.source_evidence).taxCredit;
     return supplierReturnCreditLinkSchema.parse({ creditId: costInteger(raw.credit_id, "creditId", 1),
         creditLineId: costInteger(raw.supplier_credit_line_id, "creditLineId", 1), sourceInvoiceId: costInteger(raw.source_invoice_id, "invoiceId", 1),
         supplierReference: raw.supplier_reference, status: raw.status, entitlementId: costInteger(raw.entitlement_id, "entitlementId", 1),
-        quantity: costInteger(raw.quantity, "quantity", 1), component: raw.component, amountCents: costInteger(raw.amount_cents, "amountCents", 1) });
+        quantity: costInteger(raw.quantity, "quantity", 1), component: raw.component, amountCents: costInteger(raw.amount_cents, "amountCents", 1),
+        ...(tax ? { taxTypeId: tax.taxTypeId, taxSourceKey: tax.key, taxTreatment: raw.current_tax_treatment } : {}) });
 }
 function invoiceChoice(raw: Record<string, unknown>) {
     return supplierReturnInvoiceChoiceSchema.parse({ sourceInvoiceId: costInteger(raw.source_invoice_id, "invoiceId", 1),
@@ -169,7 +208,7 @@ export async function readSupplierReturnCreditStates(tx: CostEvidenceTransaction
             }
             settledQuantity += costInteger(entitlement.quantity, "quantity", 1);
             const difference = projection.review.differences;
-            if (projection.review.latestReview && !projection.review.reviewCurrent) {
+            if (projection.review.latestReview && !projection.review.reviewCurrent && Object.values(difference).some(value => value !== 0)) {
                 creditIssues.push(issue("RETURN_CREDIT_REVIEW_STALE", "Returned value or active supplier credits changed after the last review. Review current evidence again."));
             }
             if (difference.unassignedCreditCents > 0)
@@ -218,15 +257,20 @@ export async function readAcceptedReturnCreditOptions(tx: CostEvidenceTransactio
             return [];
         const source = supplierReturnStockPreviewLineSchema.parse(row.source_snapshot);
         const entitlements = evidence.entitlements.filter(item => Number(item.supplier_return_line_id) === Number(row.id));
-        const quantityUsed = entitlements.reduce((sum, item) => sum + costInteger(item.quantity, "entitlementQuantity", 1), 0);
+        const free = subtractCostQuantityIntervals(source.intervals, entitlements.flatMap(item => intervalSchema.parse(item.intervals)), costInteger(row.lot.cost_basis_qty, "costBasis", 1));
+        const attribution = evidence.invoiceAttributions.get(`${row.id}:${invoice.id}`);
+        const eligible = attribution ? intersectReturnedIntervals(free, attribution.eligibleIntervals) : free;
+        const available = eligible.reduce((sum, item) => sum + BigInt(item.quantity), BigInt(0));
         // Goods invoice quantities are base pieces; return quantities are frozen
         // lot units. Options must not advertise a selection the command rejects.
-        const invoiceQuantityLimit = invoice.purchase_order_line_id == null ? source.quantity
+        const invoiceQuantityLimit = invoice.purchase_order_line_id == null || attribution ? source.quantity
             : Number(BigInt(costInteger(invoice.qty_invoiced, "invoiceQuantity", 1)) / BigInt(source.unitsPerVariant));
         return [{ supplierReturnId: Number(row.supplier_return_id), supplierReturnLineId: Number(row.id),
-                quantityAvailable: Math.min(source.quantity - quantityUsed, invoiceQuantityLimit), unitsPerVariant: source.unitsPerVariant,
+                ...(attribution ? { receiptAttributed: true } : {}),
+                quantityAvailable: Math.min(costInteger(available.toString(), "available returned units"), invoiceQuantityLimit), unitsPerVariant: source.unitsPerVariant,
                 evidenceReference: String(row.evidence_reference), label: `${source.lotNumber} · ${row.return_calendar_date}`,
-                components: invoiceChoice(choice).components, entitlements: entitlements.filter(item => Number(item.quantity) <= invoiceQuantityLimit).map(item => ({ id: Number(item.id), quantity: Number(item.quantity) })) }];
+                components: invoiceChoice(choice).components, entitlements: entitlements.filter(item => Number(item.quantity) <= invoiceQuantityLimit
+                  && (!attribution || acceptedReturnInvoiceAttribution(source, intervalSchema.parse(item.intervals), attribution.receiptStartBasePiece, attribution.assignments).parts.length > 0)).map(item => ({ id: Number(item.id), quantity: Number(item.quantity) })) }];
     });
 }
 export async function reviewAcceptedReturnCreditSource(tx: CostEvidenceTransaction, input: {
@@ -240,11 +284,12 @@ export async function reviewAcceptedReturnCreditSource(tx: CostEvidenceTransacti
     const evidence = await loadReturnCreditEvidence(tx, [disposition.supplierReturnLineId]);
     const row = evidence.rows[0], source = supplierReturnStockPreviewLineSchema.parse(row.source_snapshot);
     const choice = evidence.choices.find(item => Number(item.invoice_line_id) === Number(input.invoice.id));
+    const attribution = evidence.invoiceAttributions.get(`${row.id}:${input.invoice.id}`);
     if (!choice || Number(row.vendor_id) !== Number(input.invoice.vendor_id) || row.evidence_reference !== disposition.evidenceReference
         || !invoiceChoice(choice).components.includes(disposition.component)) {
         throw new CostEvidenceError("RETURN_CREDIT_SOURCE_MISMATCH", "Choose the original approved invoice, recorded collection evidence and supported component for this return.");
     }
-    if (input.invoice.purchase_order_line_id != null
+    if (input.invoice.purchase_order_line_id != null && !attribution
         && BigInt(disposition.quantity) * BigInt(source.unitsPerVariant) > BigInt(costInteger(input.invoice.qty_invoiced, "invoiceQuantity", 1))) {
         throw new CostEvidenceError("RETURN_CREDIT_INVOICE_QUANTITY", "The selected returned quantity exceeds the original goods invoice quantity. Choose its documented source.");
     }
@@ -259,17 +304,22 @@ export async function reviewAcceptedReturnCreditSource(tx: CostEvidenceTransacti
         throw new CostEvidenceError("RETURN_CREDIT_ENTITLEMENT_MISMATCH", "An additional credit must name its original complete returned-quantity entitlement.");
     }
     const basis = costInteger(row.lot.cost_basis_qty, "costBasis", 1);
-    const free = subtractCostQuantityIntervals(source.intervals, entitlements.flatMap(item => intervalSchema.parse(item.intervals)), basis);
+    const remaining = subtractCostQuantityIntervals(source.intervals, entitlements.flatMap(item => intervalSchema.parse(item.intervals)), basis);
+    const free = attribution ? intersectReturnedIntervals(remaining, attribution.eligibleIntervals) : remaining;
     const available = free.reduce((sum, item) => sum + item.quantity, 0);
     if (!existing && disposition.quantity > available)
         throw new CostEvidenceError("RETURN_CREDIT_QUANTITY_EXCEEDED", "The reviewed free returned quantity changed; choose an existing entitlement for a top-up or reload.");
     const intervals = existing ? intervalSchema.parse(existing.intervals) : sliceCostQuantityIntervals(free, 0, disposition.quantity);
+    const invoiceParts = attribution ? acceptedReturnInvoiceAttribution(source, intervals, attribution.receiptStartBasePiece, attribution.assignments).parts : null;
+    if (invoiceParts && !invoiceParts.length) throw new CostEvidenceError("RETURN_CREDIT_RECEIPT_SOURCE_MISMATCH", "This returned quantity was billed to a different receipt invoice. Choose its saved invoice source.");
     const current = evidence.values.get(Number(row.id))!;
     return acceptedReturnCreditSourceSchema.parse({ contractVersion: 1, returnId: Number(row.supplier_return_id), returnLineId: Number(row.id),
         returnAllocationId: existing ? Number(existing.return_allocation_id) : costInteger((await tx.execute(sql `SELECT id FROM inventory.supplier_return_allocations WHERE supplier_return_line_id=${Number(row.id)}`)).rows[0]?.id, "returnAllocationId", 1),
         sourceFingerprint: row.source_fingerprint, entitlementId: disposition.entitlementId ?? null,
         quantity: disposition.quantity, unitsPerVariant: source.unitsPerVariant, intervals,
-        evidenceReference: row.evidence_reference, reviewedCosts: costsFor(row, intervals), reviewedEntryIds: current.costEntries.map(entry => entry.id) });
+        evidenceReference: row.evidence_reference, reviewedCosts: costsFor(row, intervals), reviewedEntryIds: current.costEntries.map(entry => entry.id),
+        ...(invoiceParts ? { invoiceAttribution: { invoiceLineId: costInteger(input.invoice.id, "returned invoice", 1), receivingLineId: source.sourceProof.origin.receivingLineId,
+          receiptId: attribution!.receiptId, receiptNumber: attribution!.receiptNumber, parts: invoiceParts } } : {}) });
 }
 /** Called only after the approved document has been locked in the shared graph.
  * A second component on this document reuses its explicitly reviewed same slice;
@@ -316,9 +366,11 @@ export async function readAcceptedReturnCreditCostStatus(tx: CostEvidenceTransac
     const projection = projectReturnCreditEntitlement(evidence, Number(raw.entitlement_id));
     if (raw.status === "voided")
         return { costState: "posted" as const, costIssues: [] };
+    if (projection.review.creditLinks.find(link => link.creditLineId === creditLineId)?.taxTreatment === "recoverable")
+        return { costState: "posted" as const, costIssues: [] };
     const component = raw.disposition.component as keyof typeof fields | "unassigned";
     const issues = [];
-    if (projection.review.latestReview && !projection.review.reviewCurrent) {
+    if (projection.review.latestReview && !projection.review.reviewCurrent && Object.values(projection.review.differences).some(value => value !== 0)) {
         issues.push(issue("RETURN_CREDIT_REVIEW_STALE", "Returned value or supplier credits changed after the difference review."));
     }
     const difference = projection.review.differences;

@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { supplierCreditCostPreviewSchema } from "@shared/procurement/supplier-credit-cost-review";
-import { supplierCreditReviewInputSchema, supplierCreditDispositionSchema, supplierCreditIdSchema, type SupplierCreditDetail } from "@shared/procurement/supplier-credit";
+import { supplierCreditReviewInputSchema, supplierCreditLineRequiresCostReview, supplierCreditIdSchema, type SupplierCreditDetail } from "@shared/procurement/supplier-credit";
 import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
 import { hasQuantityAmendmentAuthority } from "./po-quantity-amendment.policy";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
@@ -23,26 +23,30 @@ async function readReceiptCosts(tx: CreditTransaction, lineIds: number[]) {
 export async function captureSupplierCreditCostReview(tx: CreditTransaction, input: Input) {
   if (!["approve", "void", "reconcile_costs"].includes(input.command) || input.creditId === undefined) return null;
   supplierCreditIdSchema.parse(input.creditId);
-  const rows = (await tx.execute(sql`SELECT line.*,invoice.purchase_order_line_id FROM procurement.supplier_credit_lines line
-    JOIN procurement.vendor_invoice_lines invoice ON invoice.id=line.invoice_line_id WHERE line.supplier_credit_id=${input.creditId} ORDER BY line.id`)).rows;
-  if (!rows.some(row => { const disposition = supplierCreditDispositionSchema.safeParse(row.disposition).data;
-    return disposition?.kind === "price_reduction" && disposition.receiptAllocation; })) return null;
+  const rows = (await tx.execute(sql`SELECT line.*,invoice.purchase_order_line_id,charge.inbound_shipment_id FROM procurement.supplier_credit_lines line
+    JOIN procurement.vendor_invoice_lines invoice ON invoice.id=line.invoice_line_id
+    LEFT JOIN procurement.inbound_freight_costs charge ON charge.id=invoice.freight_cost_id WHERE line.supplier_credit_id=${input.creditId} ORDER BY line.id`)).rows;
+  if (!rows.some(row => supplierCreditLineRequiresCostReview({ disposition: row.disposition, sourceEvidence: row.source_evidence }))) return null;
   const request = supplierCreditReviewInputSchema.parse(input.raw);
   if (input.costReviewExecution !== "preview" && (!request.previewVersion || !input.commandKey))
     throw new SupplierCreditError("SUPPLIER_CREDIT_COST_PREVIEW_REQUIRED", "Review this receipt's cost changes before approving them.");
-  const lineIds = [...new Set(rows.filter(row => row.purchase_order_line_id != null).map(row => costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1)))];
+  const shipmentIds = [...new Set(rows.filter(row => row.inbound_shipment_id != null).map(row => costInteger(row.inbound_shipment_id, "shipment", 1)))];
+  const shipmentLines = shipmentIds.length ? (await tx.execute(sql`SELECT DISTINCT purchase_order_line_id FROM procurement.inbound_shipment_lines
+    WHERE inbound_shipment_id=ANY(${sql.param(shipmentIds)}::int[]) AND purchase_order_line_id IS NOT NULL ORDER BY purchase_order_line_id LIMIT 501`)).rows : [];
+  if (shipmentLines.length > 500) throw new SupplierCreditError("SUPPLIER_CREDIT_SCOPE_LIMIT", "The complete credit cost review exceeds 500 purchase lines.");
+  const lineIds = [...new Set([...rows.filter(row => row.purchase_order_line_id != null), ...shipmentLines].map(row => costInteger(row.purchase_order_line_id, "purchaseOrderLineId", 1)))];
   if (!lineIds.length) throw new SupplierCreditError("SUPPLIER_CREDIT_RECEIPT_SOURCE_MISSING", "Restore the credit's original purchase and receipt relationship before changing costs.");
-  const dependencies = await readPoAmendmentDependencies(tx, lineIds);
+  const dependencies = await readPoAmendmentDependencies(tx, lineIds, { shipmentIds });
   const values = await readInvoiceCorrectionInventoryValues(tx, dependencies);
   const receipts = await readReceiptCosts(tx, lineIds);
   const authority = await readPurchaseApprovalActor(tx, input.actorId);
   if (!hasQuantityAmendmentAuthority(authority))
     throw new SupplierCreditError("SUPPLIER_CREDIT_COST_ADMIN_REQUIRED", "An Administrator with purchasing approval permission must approve receipt cost changes.", 403);
-  return { request, rows, lineIds, dependencies, values, receipts, authority };
+  return { request, rows, lineIds, shipmentIds, dependencies, values, receipts, authority };
 }
 export async function finishSupplierCreditCostReview(tx: CreditTransaction, input: Input,
   before: NonNullable<Awaited<ReturnType<typeof captureSupplierCreditCostReview>>>, credit: SupplierCreditDetail) {
-  const after = await readPoAmendmentDependencies(tx, before.lineIds);
+  const after = await readPoAmendmentDependencies(tx, before.lineIds, { shipmentIds: before.shipmentIds });
   const impact = buildCostDestinationImpact(before.dependencies, after);
   const afterValues = new Map((await readInvoiceCorrectionInventoryValues(tx, after)).map(row => [row.lotId, row]));
   const inventoryValues = before.values.map(row => {

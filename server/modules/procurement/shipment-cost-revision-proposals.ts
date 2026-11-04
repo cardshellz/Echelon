@@ -1,3 +1,4 @@
+import { shipmentHeaderExclusions } from "./domain/shipment-header-exclusions";
 import { buildShipmentAllocationBasis, resolveShipmentAllocationMethod, shipmentAllocationBasisMatches,
   allocateShipmentCents, shipmentAllocationEvidenceMatches, type ShipmentAllocationBasis } from "./domain/shipment-allocation-basis";
 import type { CostIssue, CostSourceReference } from "@shared/procurement/cost-source-contracts";
@@ -30,7 +31,10 @@ export function buildShipmentCostRevisionProposals(shipmentId: number, evidence:
   const lines = { rows: evidence.lines }, charges = { rows: evidence.charges }, invoiceRows = { rows: evidence.invoiceRows };
   const allocationRows = { rows: evidence.allocationRows }, previous = { rows: evidence.previous };
   const supplierCredits = evidence.supplierCredits;
+  const chargeTaxes = new Map(charges.rows.filter(row => row.tax_cost_evidence !== undefined).map(row => [Number(row.id), purchaseTaxEvidence([row.tax_cost_evidence])[0]]));
+  const headerExclusions = shipmentHeaderExclusions(invoiceRows.rows, allocationRows.rows, chargeTaxes);
   const recoverableChargeIds = new Set(charges.rows.filter(charge => charge.tax_cost_evidence !== undefined
+    && !headerExclusions.replacedTaxChargeIds.has(Number(charge.id))
     && purchaseTaxEvidence([charge.tax_cost_evidence])[0]?.treatment === "recoverable").map(charge => Number(charge.id)));
   const invoiceEvidence = invoiceRows.rows.map((line) => ({
     id: line.id, invoiceId: line.vendor_invoice_id, freightCostId: line.freight_cost_id,
@@ -40,6 +44,7 @@ export function buildShipmentCostRevisionProposals(shipmentId: number, evidence:
     invoiceTotalCents: line.invoiced_amount_cents, documentLinesTotalCents: line.document_lines_total_cents,
     quantity: line.qty_invoiced, unitCostMills: line.unit_cost_mills, unitCostCents: line.unit_cost_cents,
     lineTotalCents: line.line_total_cents,
+    ...(line.header_authority ? { headerAuthority: line.header_authority, headerShares: line.header_cost_evidence } : {}),
   }));
   const chargeEvidence = (charge: Record<string, unknown>) => ({
     id: charge.id, shipmentId, vendorId: charge.vendor_id ?? null, invoiceId: charge.vendor_invoice_id ?? null,
@@ -123,14 +128,16 @@ export function buildShipmentCostRevisionProposals(shipmentId: number, evidence:
         version: costFingerprint(invoiceLine) });
     }
     sources.push(...creditAdjustment.sources);
+    const savedOther = BigInt(costInteger(line.excluded_supplier_allocated_cents ?? 0, "saved excluded supplier share", -Number.MAX_SAFE_INTEGER)) * BigInt(100);
+    const currentOther = BigInt(headerExclusions.otherByLine.get(Number(line.id)) ?? 0) * BigInt(100);
     const savedRecoverable = BigInt(costInteger(line.recoverable_tax_allocated_cents ?? 0, "saved recoverable tax")) * BigInt(100);
     const currentRecoverable = allocationRows.rows.filter(row => Number(row.inbound_shipment_line_id) === Number(line.id)
-      && recoverableChargeIds.has(Number(row.shipment_cost_id))).reduce<bigint>((sum, row) => sum + BigInt(costInteger(row.allocated_cents, "recoverable tax allocation")) * BigInt(100), BigInt(0));
+      && recoverableChargeIds.has(Number(row.shipment_cost_id))).reduce<bigint>((sum, row) => sum + BigInt(costInteger(row.allocated_cents, "recoverable tax allocation")) * BigInt(100), BigInt(0)) + BigInt(headerExclusions.taxByLine.get(Number(line.id)) ?? 0) * BigInt(100);
     const amount = line.qty == null ? null : costInteger((["freight_allocated_cents","duty_allocated_cents","insurance_allocated_cents","other_allocated_cents"]
-      .reduce((sum, field) => sum + BigInt(costInteger(line[field], field, -Number.MAX_SAFE_INTEGER)), BigInt(0)) * BigInt(100) - savedRecoverable).toString(), "allocatedMills", -Number.MAX_SAFE_INTEGER);
+      .reduce((sum, field) => sum + BigInt(costInteger(line[field], field, -Number.MAX_SAFE_INTEGER)), BigInt(0)) * BigInt(100) - savedRecoverable - savedOther).toString(), "allocatedMills", -Number.MAX_SAFE_INTEGER);
     const actual = chargeAuthorities.length > 0 && chargeAuthorities.every((authority) => authority.evidence === "confirmed");
     const lineAllocatedMills = allocationRows.rows.filter((allocation) => Number(allocation.inbound_shipment_line_id) === Number(line.id))
-      .reduce<bigint>((sum, allocation) => sum + BigInt(costInteger(allocation.allocated_cents, "allocationCents", -Number.MAX_SAFE_INTEGER)) * BigInt(100), BigInt(0)) - currentRecoverable;
+      .reduce<bigint>((sum, allocation) => sum + BigInt(costInteger(allocation.allocated_cents, "allocationCents", -Number.MAX_SAFE_INTEGER)) * BigInt(100), BigInt(0)) - currentRecoverable - currentOther;
     const sameSnapshot = prior?.shipmentLineSnapshot?.snapshot_id != null && Number(prior.shipmentLineSnapshot.snapshot_id) === Number(line.snapshot_id);
     const allocationPolicyChanged = sameSnapshot && Array.isArray(prior.charges) && charges.rows.some((charge) => {
       const oldCharge = prior.charges.find((old: any) => Number(old.id) === Number(charge.id));
@@ -140,7 +147,7 @@ export function buildShipmentCostRevisionProposals(shipmentId: number, evidence:
       const old = prior.allocationBasis.find((entry: any) => Number(entry.costId) === basis.costId);
       return !old || old.method !== basis.method || old.source !== basis.source;
     }));
-    const allocationStale = basisStale || !allocationsComplete || savedRecoverable !== currentRecoverable || (amount !== null && lineAllocatedMills !== BigInt(amount))
+    const allocationStale = savedOther !== currentOther || basisStale || !allocationsComplete || savedRecoverable !== currentRecoverable || (amount !== null && lineAllocatedMills !== BigInt(amount))
       || (line.qty != null && Number(line.qty) !== Number(line.qty_shipped)) || ((allocationPolicyChanged || effectiveMethodChanged) && !options.allocationJustFinalized);
     const netAmount = amount === null ? null : costInteger((BigInt(amount) - BigInt(creditAdjustment.creditedCentsByLine.get(Number(line.id)) ?? 0) * BigInt(100)).toString(), "netAllocatedMills", -Number.MAX_SAFE_INTEGER);
     const issue = amount === null ? { code: "LANDED_ALLOCATION_MISSING", message: `Shipment line ${line.id} has no saved allocation.` }

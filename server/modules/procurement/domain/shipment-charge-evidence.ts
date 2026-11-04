@@ -1,6 +1,7 @@
 import { resolveShipmentBillingOwnership } from "./shipment-billing-ownership";
 import { z } from "zod";
 import type { CostIssue } from "@shared/procurement/cost-source-contracts";
+import { supplierHeaderEconomicShareSchema } from "@shared/procurement/supplier-header-costs";
 
 const integer = z.number().int().safe();
 const id = integer.positive();
@@ -19,6 +20,8 @@ const invoiceLineSchema = z.object({
   invoiceTotalCents: money, documentLinesTotalCents: money.nullable(),
   quantity: integer.positive().nullable(), unitCostMills: money.nullable(), unitCostCents: money.nullable(),
   lineTotalCents: money.nullable(),
+  headerAuthority: z.object({ sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/), expectedMills: integer }).strict().optional(),
+  headerShares: z.array(supplierHeaderEconomicShareSchema).optional(),
 });
 const inputSchema = z.object({ charge: chargeSchema, invoices: z.array(invoiceLineSchema), priorConfirmedCharge: z.unknown() });
 type Charge = z.infer<typeof chargeSchema>;
@@ -32,6 +35,15 @@ export interface ShipmentChargeEvidence {
 
 function review(code: string, message: string): ShipmentChargeEvidence {
   return { evidence: "review_required", issue: { code, message }, confirmedCharge: null, approvedInvoiceLineIds: [] };
+}
+
+function reviewedHeader(invoice: InvoiceLine, all: readonly InvoiceLine[]): boolean {
+  const rows = all.filter(row => row.invoiceId === invoice.invoiceId), authority = invoice.headerAuthority;
+  if (!authority || invoice.documentLinesTotalCents === null) return false;
+  return rows.every(row => row.headerAuthority?.sourceFingerprint === authority.sourceFingerprint
+      && row.headerAuthority.expectedMills === authority.expectedMills && row.headerShares !== undefined)
+    && BigInt(authority.expectedMills) === (BigInt(invoice.invoiceTotalCents) - BigInt(invoice.documentLinesTotalCents)) * BigInt(100)
+    && rows.flatMap(row => row.headerShares!).reduce((sum, share) => sum + BigInt(share.amountMills), BigInt(0)) === BigInt(authority.expectedMills);
 }
 
 function sameConfirmedCharge(current: Charge, previous: Charge): boolean {
@@ -118,7 +130,7 @@ export function resolveShipmentChargeEvidence(value: unknown): ShipmentChargeEvi
     const ownershipHeaders = new Map(invoices.map(line => [line.invoiceId, {
       id: line.invoiceId, vendorId: line.vendorId, shipmentId: line.shipmentId, currency: line.currency,
       status: line.status, invoiceNumber: line.invoiceNumber ?? "", replacesInvoiceId: line.replacesInvoiceId,
-      hasProductSources: invoices.some(source => source.invoiceId === line.invoiceId && (source.purchaseOrderLineId !== null || source.productVariantId !== null)),
+      hasProductSources: !reviewedHeader(line, invoices) && invoices.some(source => source.invoiceId === line.invoiceId && (source.purchaseOrderLineId !== null || source.productVariantId !== null)),
     }]));
     const ownership = resolveShipmentBillingOwnership({ cost: charge, invoices: [...ownershipHeaders.values()],
       lines: invoices.filter(line => line.freightCostId !== null && line.id !== null).map(line => ({
@@ -127,7 +139,7 @@ export function resolveShipmentChargeEvidence(value: unknown): ShipmentChargeEvi
       })) });
     if (ownership.state === "review_required") return review("LANDED_INVOICE_SOURCE_MISMATCH", ownership.message);
     if (sourcedLines.some((line) => line.id === null || line.quantity === null || line.lineTotalCents === null
-      || line.lineTotalCents < 0 || line.invoiceTotalCents < 0 || line.documentLinesTotalCents !== line.invoiceTotalCents
+      || line.lineTotalCents < 0 || line.invoiceTotalCents < 0 || line.documentLinesTotalCents !== line.invoiceTotalCents && !reviewedHeader(line, invoices)
       || (line.unitCostMills === null && line.unitCostCents === null))) {
       return review("LANDED_INVOICE_TOTAL_REVIEW", `Shipment charge ${charge.id} needs complete invoice lines that reconcile to the document total.`);
     }
@@ -138,6 +150,7 @@ export function resolveShipmentChargeEvidence(value: unknown): ShipmentChargeEvi
         return review("LANDED_INVOICE_TOTAL_REVIEW", `Shipment charge ${charge.id} has inconsistent invoice quantity, unit price, or extended amount.`);
       }
       invoicedCents += BigInt(line.lineTotalCents!);
+      if (reviewedHeader(line, invoices)) invoicedCents += line.headerShares!.reduce((sum, share) => sum + BigInt(share.amountMills), BigInt(0)) / BigInt(100);
     }
     if (effectiveCents === null || invoicedCents !== BigInt(effectiveCents)) {
       return review("LANDED_INVOICE_AMOUNT_REVIEW", `Shipment charge ${charge.id} differs from its invoice allocation. Reconcile the charge and invoice before applying costs.`);

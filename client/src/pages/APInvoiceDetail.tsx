@@ -1,3 +1,4 @@
+import { SupplierHeaderCosts } from "@/features/purchasing/SupplierHeaderCosts";
 import { ReceiptInvoiceCosts } from "@/features/purchasing/ReceiptInvoiceCosts";
 import { FreightInvoiceCosts } from "@/features/purchasing/FreightInvoiceCosts";
 import { InvoiceTransitionHistory, InvoiceTransitionReview } from "@/features/purchasing/InvoiceTransitionReview";
@@ -532,6 +533,7 @@ export default function APInvoiceDetail() {
 
         {!isVoided && (
           <div className="flex gap-2 flex-wrap justify-end">
+            {invoiceId !== null && <SupplierHeaderCosts target={{ kind: "invoice", id: invoiceId }} />}
             {invoiceId !== null && recordedSourceCapabilities.success && recordedSourceCapabilities.data.freightSourceLineIds.length > 0 && (
               <FreightInvoiceCosts invoiceId={invoiceId} label={canApprove ? "Review & approve" : "Shipment costs"} />
             )}

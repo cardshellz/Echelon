@@ -6,6 +6,7 @@ import { products, productVariants, forecastProductIdentities } from "./catalog.
 import { warehouses, warehouseLocations } from "./warehouse.schema";
 import { users } from "./identity.schema";
 import type { ShipmentAllocationEvidence } from "../procurement/shipment-allocation";
+import type { SupplierHeaderEntry, SupplierHeaderShare } from "../procurement/supplier-header-costs";
 
 // ============================================================================
 // PROCUREMENT + FINANCE/AP TABLES
@@ -1766,6 +1767,7 @@ export const landedCostSnapshots = procurementSchema.table("landed_cost_snapshot
   insuranceAllocatedCents: bigint("insurance_allocated_cents", { mode: "number" }),
   otherAllocatedCents: bigint("other_allocated_cents", { mode: "number" }),
   recoverableTaxAllocatedCents: bigint("recoverable_tax_allocated_cents", { mode: "number" }).notNull().default(0),
+  excludedSupplierAllocatedCents: bigint("excluded_supplier_allocated_cents", { mode: "number" }).notNull().default(0),
   totalLandedCostCents: bigint("total_landed_cost_cents", { mode: "number" }),
   landedUnitCostCents: bigint("landed_unit_cost_cents", { mode: "number" }),
   qty: integer("qty"),
@@ -1888,6 +1890,31 @@ export const insertVendorInvoiceLineSchema = createInsertSchema(vendorInvoiceLin
 
 export type InsertVendorInvoiceLine = z.infer<typeof insertVendorInvoiceLineSchema>;
 export type VendorInvoiceLine = typeof vendorInvoiceLines.$inferSelect;
+
+/** Append-only approved classifications of amounts on the original document.
+ * These are allocation evidence, never a second supplier bill or cost ledger. */
+export const supplierHeaderCostReviews = procurementSchema.table("supplier_header_cost_reviews", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  purchaseOrderId: integer("purchase_order_id").references(() => purchaseOrders.id, { onDelete: "restrict" }),
+  vendorInvoiceId: integer("vendor_invoice_id").references(() => vendorInvoices.id, { onDelete: "restrict" }),
+  sourceFingerprint: varchar("source_fingerprint", { length: 64 }).notNull(),
+  sourceVersion: varchar("source_version", { length: 64 }).notNull(),
+  entries: jsonb("entries_json").$type<SupplierHeaderEntry[]>().notNull(),
+  before: jsonb("before_json").$type<SupplierHeaderShare[]>().notNull(),
+  after: jsonb("after_json").$type<SupplierHeaderShare[]>().notNull(),
+  purchaseOrderIds: integer("purchase_order_ids").array().notNull(),
+  actorId: varchar("actor_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  actorName: text("actor_name").notNull(), reason: text("reason").notNull(),
+  approvedAt: timestamp("approved_at", { withTimezone: true }).notNull(),
+  commandKey: varchar("command_key", { length: 200 }).notNull(),
+  previewVersion: varchar("preview_version", { length: 64 }).notNull(),
+}, table => [
+  uniqueIndex("supplier_header_cost_reviews_po_command_uq").on(table.actorId, table.purchaseOrderId, table.commandKey).where(sql`${table.purchaseOrderId} IS NOT NULL`),
+  uniqueIndex("supplier_header_cost_reviews_invoice_command_uq").on(table.actorId, table.vendorInvoiceId, table.commandKey).where(sql`${table.vendorInvoiceId} IS NOT NULL`),
+  index("supplier_header_cost_reviews_po_idx").on(table.purchaseOrderId, table.id),
+  index("supplier_header_cost_reviews_invoice_idx").on(table.vendorInvoiceId, table.id),
+  check("supplier_header_cost_reviews_target_ck", sql`num_nonnulls(${table.purchaseOrderId},${table.vendorInvoiceId})=1`),
+]);
 
 /** These are parts of the existing billed line amount, never added to AP again. */
 export const vendorInvoiceLineTaxes = procurementSchema.table("vendor_invoice_line_taxes", {

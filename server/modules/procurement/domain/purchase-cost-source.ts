@@ -11,6 +11,8 @@ import { resolveSupplierCreditReductions, type SupplierCreditCostRow } from "./s
 import { supplierCostReviewFactsSchema } from "@shared/procurement/cost-review-facts";
 import { purchaseTaxEvidence, purchaseTaxAmounts, taxTreatmentIssue } from "./purchase-tax";
 import { readIntegerMills } from "@shared/money-read";
+import { supplierHeaderAmounts } from "./supplier-header-costs";
+import { costIssueSchema } from "@shared/procurement/cost-source-contracts";
 
 /** The single product/packaging source decision, shared by posting and reads. */
 function purchaseInvoiceEvidence(source: {
@@ -61,7 +63,8 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
   const { line, approvedInvoices, purchaseOrderLineId, qty, coverageQty, credits, approvedQty, parsed, fullQuarantineReturn } = purchaseInvoiceEvidence(source);
   // This is a source disposition, not proof of inventory completion. The
   // application owner must independently verify live custody and cost history.
-  let issue: { code: string; message: string } | null = null;
+  const headerIssue = (approvedInvoices.length ? approvedInvoices.find(row => row.header_cost_issue !== undefined)?.header_cost_issue : line.header_cost_issue);
+  let issue: { code: string; message: string } | null = headerIssue === undefined ? null : costIssueSchema.parse(headerIssue);
   if (
     !fullQuarantineReturn &&
     approvedInvoices.length > 0 &&
@@ -90,7 +93,7 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
     ).toString(),
     "packagingMills",
   );
-  let packagingTreatment: "separate" | "included_in_product" = "separate";
+  let packagingTreatment: "separate" | "included_in_product" | "combined" = "separate";
   if (actual) {
     let product = BigInt(0),
       packaging = BigInt(0);
@@ -99,8 +102,11 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
       if (!evidence.success)
         throw new Error("Validated invoice evidence changed in memory");
       const components = evidence.data;
-      const taxes = purchaseTaxEvidence(approvedInvoices[index].tax_cost_evidence);
+      const lineTaxes = purchaseTaxEvidence(approvedInvoices[index].tax_cost_evidence);
+      const taxes = [...lineTaxes, ...purchaseTaxEvidence(approvedInvoices[index].header_tax_cost_evidence)];
       const tax = purchaseTaxAmounts(taxes);
+      const header = supplierHeaderAmounts(approvedInvoices[index].header_cost_evidence);
+      if (header.landedMills !== 0) issue ??= { code: "SUPPLIER_HEADER_SCOPE_REVIEW", message: "A shipment header charge cannot replace this product's supplier amount." };
       let goods: ReturnType<typeof invoiceGoodsAmounts>;
       try { goods = invoiceGoodsAmounts(components); }
       catch (error) {
@@ -121,8 +127,8 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
             ),
           ) *
             BigInt(100) ||
-        BigInt(components.adjustmentMills) !== BigInt(tax.taxMills) + BigInt(goods.adjustmentMills) ||
-        (components.packagingTreatment === "included_in_product" &&
+        BigInt(components.adjustmentMills) !== BigInt(purchaseTaxAmounts(lineTaxes).taxMills) + BigInt(goods.adjustmentMills) ||
+        (components.packagingTreatment !== "separate" &&
           components.packagingMills !== 0)
       ) {
         issue = {
@@ -132,12 +138,13 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
         };
       }
       issue ??= taxTreatmentIssue(taxes);
-      product += BigInt(goods.productMills) + BigInt(tax.inventoryMills);
-      packaging += BigInt(goods.packagingMills);
-      if (components.packagingTreatment === "included_in_product")
+      product += BigInt(goods.productMills) + BigInt(header.productMills) + BigInt(tax.inventoryMills);
+      packaging += BigInt(goods.packagingMills) + BigInt(header.packagingMills);
+      if (components.packagingTreatment === "combined") packagingTreatment = "combined";
+      else if (components.packagingTreatment === "included_in_product" && packagingTreatment !== "combined")
         packagingTreatment = "included_in_product";
     }
-    const netProduct = product - credits.productMills;
+    const netProduct = product - credits.productMills - credits.taxInventoryMills;
     const netPackaging = packaging - credits.packagingMills;
     if (netProduct < BigInt(0) || netPackaging < BigInt(0)) issue = {
       code: "CREDIT_SOURCE_EXCEEDED", message: "Supplier credits exceed the original invoice component. Review the source; negative inventory cost is not supported.",
@@ -149,7 +156,7 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
       (netPackaging < BigInt(0) ? packaging : netPackaging).toString(),
       "invoice.packagingMills",
     );
-  } else if (costInteger(line.discount_cents ?? 0, "discountCents") !== 0
+  } else if ((costInteger(line.discount_cents ?? 0, "discountCents") !== 0 && line.header_cost_evidence === undefined)
     || (costInteger(line.tax_cents ?? 0, "taxCents") !== 0 && line.tax_cost_evidence === undefined)) {
     issue ??= {
       code: "PURCHASE_ADJUSTMENT_REVIEW",
@@ -157,14 +164,19 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
         "The purchase has a discount or tax requiring an explicit cost component disposition.",
     };
   }
+  if (!actual && line.header_cost_evidence !== undefined) {
+    const header = supplierHeaderAmounts(line.header_cost_evidence);
+    const product = BigInt(productMills) + BigInt(header.productMills), packaging = BigInt(packagingMills) + BigInt(header.packagingMills);
+    if (product < BigInt(0) || packaging < BigInt(0) || header.landedMills !== 0) issue ??= {
+      code: "SUPPLIER_HEADER_COMPONENT_REVIEW", message: "Review the header allocation: it cannot make a goods component negative or replace shipment costs.",
+    };
+    else { productMills = readIntegerMills(product, "PO product and header"); packagingMills = readIntegerMills(packaging, "PO packaging and header"); }
+  }
   if (!actual && line.tax_cost_evidence !== undefined) {
     const taxes = purchaseTaxEvidence(line.tax_cost_evidence), amounts = purchaseTaxAmounts(taxes);
     issue ??= taxTreatmentIssue(taxes);
     productMills = readIntegerMills(BigInt(productMills) + BigInt(amounts.inventoryMills), "product and capitalized tax");
   }
-  if (credits.sources.length && (approvedInvoices.some(row => purchaseTaxEvidence(row.tax_cost_evidence).some(tax => tax.amountMills !== 0)))) issue ??= {
-    code: "PURCHASE_TAX_CREDIT_REVIEW", message: "This supplier credit needs its tax amounts checked against the original taxed invoice before inventory costs can be replaced.",
-  };
   issue ??= credits.issues[0] ?? null;
   if (source.supplierCredits?.some(row => row.status === "approved" && typeof row.disposition === "object" && row.disposition !== null
     && "receiptAllocation" in row.disposition)) issue ??= {
@@ -177,7 +189,7 @@ function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoi
     : line.currency === "USD"
       ? "USD"
       : null;
-  const sources: CostRevisionInput["sources"] = actual
+  const sources: CostRevisionInput["sources"] = actual || approvedInvoices.some(row => row.header_cost_issue !== undefined)
     ? approvedInvoices.map((row) => ({
         kind: "vendor_invoice_line" as const,
         documentId: costInteger(row.vendor_invoice_id, "invoiceId", 1),
