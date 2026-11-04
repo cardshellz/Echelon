@@ -114,10 +114,9 @@ export function ListingMemberRecoveryDialog({
     >
       <DialogContent className="max-h-[85vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Archived member removal recovery</DialogTitle>
+          <DialogTitle>Review listing removal</DialogTitle>
           <DialogDescription>
-            Review the exact saved channel member before authorizing another
-            removal attempt.
+            Check the saved channel member and the outcome of the earlier removal.
           </DialogDescription>
         </DialogHeader>
         {review.isPending && <p role="status">Checking the saved member...</p>}
@@ -139,8 +138,7 @@ export function ListingMemberRecoveryDialog({
             </p>
             <p>{review.data.message}</p>
             <p className="text-xs text-muted-foreground">
-              Earlier dispatches and this recovery decision remain in the
-              operation history.
+              Earlier requests remain in the operation history.
             </p>
           </div>
         )}
@@ -153,7 +151,7 @@ export function ListingMemberRecoveryDialog({
           >
             Refresh review
           </Button>
-          {canEdit && (
+          {canEdit && (command || review.data?.canResume) && (
             <Button
               disabled={busy || (!command && !review.data?.canResume)}
               onClick={() => void resume()}

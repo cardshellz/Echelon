@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ListingMemberRecoveryService, type ListingMemberRecoveryScope } from "./listing-member-recovery.service";
 import type { ListingMemberLifecycleDependencies } from "./listing-member-lifecycle.port";
-import { processListingMemberRetirement } from "./process-listing-member-retirement";
+import { reconcileArchivedMemberRetirement } from "./reconcile-archived-member-retirement";
 import {
   listingLifecycleCommandSchema,
   listingLifecycleListSchema,
@@ -196,10 +196,9 @@ export class ListingLifecycleService {
       failed = 0;
     const members = this.dependencies.members;
     if (members) {
-      await members.store.discover(this.now(), limit);
       for (const id of await members.store.due(this.now(), limit)) {
         try {
-          const result = await members.store.withMember(id, session => processListingMemberRetirement(session, members, () => this.now()));
+          const result = await members.store.withMember(id, session => reconcileArchivedMemberRetirement(session, members, () => this.now()));
           if (result?.state === "failed") failed++;
           else if (result) processed++;
         } catch (error) {

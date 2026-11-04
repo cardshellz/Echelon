@@ -2,6 +2,7 @@ import type { ListingMemberRetirement } from "@shared/types/listing-member-lifec
 import {
   validateListingMemberObservation,
   ListingMemberLifecycleError,
+  hasUnconfirmedMemberDispatch,
 } from "../domain/listing-member-lifecycle";
 import type {
   ListingMemberLifecycleAdapter,
@@ -25,7 +26,8 @@ export async function processListingMemberRetirement(
     record.code === "LISTING_MEMBER_IDENTITY_INVALID"
   )
     return record;
-  if (!(await session.isCurrent()))
+  const currentSource = await session.isCurrent();
+  if (!currentSource && !hasUnconfirmedMemberDispatch(record))
     return session.save(
       "superseded",
       "LISTING_MEMBER_SOURCE_CHANGED",
@@ -114,6 +116,20 @@ export async function processListingMemberRetirement(
     retired = (await observe()).retired;
   } catch (error) {
     return failure(error, record.state === "retiring");
+  }
+  if (!currentSource) {
+    // A changed owner cannot authorize another removal, but neither may it
+    // erase a request that might already have reached the channel. Reconcile
+    // only the exact previously submitted identity; never dispatch from here.
+    return session.save(
+      retired ? "retired" : "failed",
+      retired ? null : "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+      retired
+        ? "The sales channel confirmed that the member from the earlier removal is no longer published."
+        : "An earlier removal may still reach the sales channel after this listing link changed. Check that listing before transferring or publishing it. No new removal was sent.",
+      now(),
+      retired ? undefined : { recoveryRequired: true, verificationAttempts: (record.verificationAttempts ?? 0) + 1 },
+    );
   }
   if (!retired && (record.state === "retiring" || record.recoveryRequired)) {
     const checks = (record.verificationAttempts ?? 0) + 1;

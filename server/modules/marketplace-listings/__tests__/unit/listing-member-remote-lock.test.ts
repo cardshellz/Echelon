@@ -51,7 +51,10 @@ describe("tryLockListingMemberRemote", () => {
       source_revision: "r1", state: "pending", code: null, message: null, verified_at: null, version: 1, dispatch_status: "none",
       dispatch_key: null, verification_attempts: 0, recovery_required: false };
     const pooled = { ...client, query: async (text: string, values: unknown[] = []) => {
-      if (text.startsWith("SELECT * FROM marketplace.listing_member_retirements")) return { rows: [row], rowCount: 1 };
+      if (text.includes("FROM marketplace.listing_member_retirements r WHERE r.id=$1")) {
+        expect(values).toEqual([row.id]);
+        return { rows: [row], rowCount: 1 };
+      }
       return client.query(text, values);
     }, release: () => undefined };
     const repository = new PostgresListingMemberLifecycleRepository({ connect: async () => pooled as never });

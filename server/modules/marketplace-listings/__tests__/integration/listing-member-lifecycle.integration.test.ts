@@ -8,12 +8,14 @@ import { PostgresListingMemberLifecycleRepository, readListingMemberRetirements,
 import { PostgresListingLifecycleRepository } from "../../infrastructure/pg-listing-lifecycle.repository";
 import { listingAccountKey } from "../../domain/listing-publication";
 import { processListingMemberRetirement } from "../../application/process-listing-member-retirement";
+import { reconcileArchivedMemberRetirement } from "../../application/reconcile-archived-member-retirement";
+import { ListingLifecycleService } from "../../application/listing-lifecycle.service";
 import { archivedListingMemberSelection } from "../../domain/listing-member-lifecycle";
 import { resolveListingIntentLifecycle } from "../../domain/listing-intent-lifecycle";
 import { EbayListingMemberAdapter } from "../../infrastructure/providers/ebay/ebay-listing-member.adapter";
 import { ShopifyListingMemberAdapter } from "../../infrastructure/providers/shopify-listing-member.adapter";
 import { WalmartListingMemberAdapter } from "../../../channels/adapters/walmart/walmart-listing-member.adapter";
-import { installListingMemberLifecycleFixture, listingMemberBaseSql } from "../fixtures/listing-member-lifecycle.fixture";
+import { installListingMemberLifecycleFixture, listingMemberBaseSql, seedLegacyRetirements } from "../fixtures/listing-member-lifecycle.fixture";
 import { createListingMemberLifecycle } from "../../../../listing-member-lifecycle.composition";
 
 // The composition must use its injected disposable pool. Unrelated imported
@@ -32,12 +34,17 @@ const now = new Date("2026-10-19T12:00:00.000Z");
   const deleteOffer = vi.fn(async (id: string) => { remote.delete(id); });
   const adapter = new EbayListingMemberAdapter(async () => ({ getOffer, clearOffer, deleteOffer }));
   const run = async (date = now) => {
-    await store.discover(date, 25);
+    await seedLegacyRetirements(database.pool, date, 25);
     for (const id of await store.due(date, 25)) await store.withMember(id, session => processListingMemberRetirement(session,
       { store, adapter: async () => adapter }, () => date));
   };
   const receipts = () => readListingMemberRetirements(database.pool, { destinationKind: "channel_connection", connectionId: 11, productVariantIds: [302] });
   const selection = () => readChannelStockSelection(database.pool, { channelId: 10, channelConnectionId: 11, productId: 30, productVariantIds: [301,302] });
+  const worker = (date = now) => new ListingLifecycleService({
+    store: new PostgresListingLifecycleRepository(database.pool),
+    provider: {} as ConstructorParameters<typeof ListingLifecycleService>[0]["provider"],
+    members: { store, adapter: async () => adapter }, now: () => date, uuid: randomUUID,
+  });
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(url, disposable, listingMemberBaseSql);
     await installListingMemberLifecycleFixture(database.pool);
@@ -62,11 +69,151 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     deleteOffer.mockImplementation(async id => { remote.delete(id); });
     remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "UNPUBLISHED" });
   });
+  it("does not create or send a removal just because a variant is archived", async () => {
+    remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
+    expect(await worker().processDue()).toEqual({ processed: 0, failed: 0 });
+    expect((await database.pool.query("SELECT count(*)::integer n FROM marketplace.listing_member_retirements")).rows[0].n).toBe(0);
+    expect(getOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled();
+    expect(remote.has("offer-archived")).toBe(true);
+  });
+  it.each(["unknown", "legacy"] as const)("keeps a superseded %s dispatch visible and read-only", async dispatch => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [initial] = await receipts();
+    await store.withMember(initial.operationId, session => session.save("retiring", null, "Previous request", now,
+      dispatch === "unknown" ? { dispatchStatus: "unknown", dispatchKey: initial.operationId } : {}));
+    await database.pool.query("UPDATE catalog.product_variants SET updated_at=updated_at+interval '1 second' WHERE id=302");
+    await store.withMember(initial.operationId, session => session.save("superseded", "LISTING_MEMBER_SOURCE_CHANGED",
+      "The old worker considered this finished.", now));
+    const [original] = await receipts();
+    expect(original).toMatchObject({ operationId: initial.operationId, state: "superseded", dispatchStatus: "unknown" });
+
+    const selected = await selection();
+    const lifecycle = resolveListingIntentLifecycle({
+      selection: { ...selected, variants: selected.variants.filter(row => row.productVariantId === 302) },
+      accountId: "seller-one", retainedVariantIds: [302], retirements: [original], stock: [], contentWork: [], now,
+    });
+    expect(lifecycle?.state).toBe("waiting_lifecycle");
+    if (!lifecycle || lifecycle.state !== "waiting_lifecycle") throw new Error("Expected unresolved work");
+    expect(lifecycle.lifecycle.members[0]).toMatchObject({
+      state: "attention", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+      nextActions: [{ owner: "listing_member_retirement", operationId: initial.operationId }],
+    });
+
+    remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
+    const recovery = new ListingMemberRecoveryService({ store, adapter: async () => adapter }, () => now);
+    const review = await recovery.preview(10, initial.operationId);
+    expect(review).toMatchObject({ record: { operationId: initial.operationId, state: "superseded" },
+      observation: { retired: false }, canResume: false });
+    expect(review.message).toContain("without sending another removal");
+    await expect(recovery.resume(10, { operationId: initial.operationId, commandKey: randomUUID(), reviewHash: review.reviewHash }, "user:test"))
+      .rejects.toMatchObject({ code: "LISTING_MEMBER_RECOVERY_SCOPE_CHANGED" });
+    expect(await worker().processDue()).toEqual({ processed: 0, failed: 0 });
+    expect(clearOffer).not.toHaveBeenCalled();
+    expect(deleteOffer).not.toHaveBeenCalled();
+    expect((await database.pool.query("SELECT state,version FROM marketplace.listing_member_retirements WHERE id=$1",
+      [initial.operationId])).rows[0]).toEqual({ state: "superseded", version: 3 });
+    expect((await database.pool.query("SELECT count(*)::int n FROM marketplace.listing_member_retirement_events WHERE operation_id=$1",
+      [initial.operationId])).rows[0].n).toBe(3);
+  });
+  it("does not assume an incomplete superseded history proves a request was never sent", async () => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [initial] = await receipts();
+    await database.pool.query("UPDATE marketplace.listing_member_retirements SET version=version+1 WHERE id=$1", [initial.operationId]);
+    await database.pool.query("UPDATE catalog.product_variants SET updated_at=updated_at+interval '1 second' WHERE id=302");
+    await store.withMember(initial.operationId, session => session.save("superseded", "LISTING_MEMBER_SOURCE_CHANGED", "Old status", now));
+    expect(await receipts()).toEqual([expect.objectContaining({
+      operationId: initial.operationId, state: "superseded", dispatchStatus: "unknown",
+    })]);
+    expect(getOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled();
+  });
+  it("supersedes a legacy automatic removal only when its complete audit proves it was not sent", async () => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [before] = await receipts();
+    expect(await worker().processDue()).toEqual({ processed: 1, failed: 0 });
+    const [after] = await store.listForChannel(10, 30, 25);
+    expect(after).toMatchObject({ operationId: before.operationId, state: "superseded", code: "LISTING_MEMBER_ARCHIVE_NO_REMOVAL" });
+    expect(getOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled();
+    expect((await database.pool.query("SELECT count(*)::integer n FROM marketplace.listing_member_retirement_events WHERE operation_id=$1", [before.operationId])).rows[0].n).toBe(2);
+    expect(await worker(new Date(now.getTime() + 120_000)).processDue()).toEqual({ processed: 0, failed: 0 });
+  });
+  it("serializes concurrent cancellation of the same unsent archive removal", async () => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [before] = await receipts();
+    await Promise.all([worker().processDue(), worker().processDue()]);
+    expect((await store.listForChannel(10, 30, 25))[0]).toMatchObject({ operationId: before.operationId, state: "superseded" });
+    expect((await database.pool.query("SELECT count(*)::integer n FROM marketplace.listing_member_retirement_events WHERE operation_id=$1", [before.operationId])).rows[0].n).toBe(2);
+    expect(await store.due(new Date(now.getTime() + 120_000), 25)).toEqual([]);
+    expect(getOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled();
+  });
+  it("cancels a deferred archived alias without touching the active owner's offer", async () => {
+    await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='offer-archived' WHERE product_variant_id=301");
+    await run();
+    const [conflict] = await receipts();
+    expect(conflict).toMatchObject({ state: "failed", code: "LISTING_MEMBER_IDENTITY_CONFLICT" });
+    expect(await worker().processDue()).toEqual({ processed: 1, failed: 0 });
+    expect((await store.listForChannel(10, 30, 25))[0]).toMatchObject({ state: "superseded", code: "LISTING_MEMBER_ARCHIVE_NO_REMOVAL" });
+    expect(getOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled();
+  });
+  it("keeps a legacy send marker for a failed pre-marker-format request and only reads the provider", async () => {
+    remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await store.withMember(id, async session => {
+      await session.save("retiring", null, "Legacy send marker", now);
+      await session.save("failed", "LEGACY_ERROR", "Legacy failure", now);
+    });
+    await worker(new Date(now.getTime() + 120_000)).processDue();
+    expect((await receipts())[0]).toMatchObject({ operationId: id, state: "failed", dispatchStatus: "none",
+      code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED", recoveryRequired: true });
+    expect(getOffer).toHaveBeenCalledTimes(1); expect(deleteOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled();
+    expect(await store.due(new Date(now.getTime() + 180_000), 25)).toEqual([]);
+    expect(await store.due(new Date(now.getTime() + 1_020_000), 25)).toEqual([id]);
+  });
+  it("does not assume an incomplete audit proves an automatic removal was unsent", async () => {
+    remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await database.pool.query("UPDATE marketplace.listing_member_retirements SET version=version+1 WHERE id=$1", [id]);
+    await worker().processDue();
+    expect((await receipts())[0]).toMatchObject({ operationId: id, state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED", recoveryRequired: true });
+    expect(getOffer).toHaveBeenCalledTimes(1); expect(deleteOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled();
+  });
+  it("does not treat malformed audit entries as proof that nothing was sent", async () => {
+    remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await database.pool.query("UPDATE marketplace.listing_member_retirements SET version=version+1 WHERE id=$1", [id]);
+    await database.pool.query(`INSERT INTO marketplace.listing_member_retirement_events(operation_id,version,actor,before_state,after_state,occurred_at)
+      VALUES($1,2,'fixture',NULL,jsonb_build_object('state','pending'),$2)`, [id, now]);
+    await worker().processDue();
+    expect((await receipts())[0]).toMatchObject({ operationId: id, state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED" });
+    expect(getOffer).toHaveBeenCalledTimes(1); expect(deleteOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled();
+  });
+  it("retains uncertain work and backs off when the publication fence cannot be acquired", async () => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await store.withMember(id, session => session.save("retiring", null, "Unknown dispatch", now,
+      { dispatchStatus: "unknown", dispatchKey: id }));
+    await store.withMember(id, session => reconcileArchivedMemberRetirement(session, {
+      store, adapter: async () => adapter, withPublicationFence: async () => { throw new Error("fence unavailable"); },
+    }, () => now));
+    expect((await receipts())[0]).toMatchObject({ operationId: id, state: "failed", code: "LISTING_MEMBER_PROVIDER_FAILED", recoveryRequired: true });
+    expect(await store.due(new Date(now.getTime() + 60_000), 25)).toEqual([]);
+    expect(getOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled();
+  });
+  it("retains an explicitly authorized recovery command for a prior removal", async () => {
+    const { record, service } = await unresolvedRecovery();
+    const review = await service.preview(10, record.operationId);
+    await service.resume(10, { operationId: record.operationId, reviewHash: review.reviewHash, commandKey: randomUUID() }, "operator");
+    await worker(new Date(now.getTime() + 240_000)).processDue();
+    expect((await receipts())[0]).toMatchObject({ operationId: record.operationId, state: "retired" });
+    expect(deleteOffer).toHaveBeenCalledTimes(2);
+  });
   // Audit acceptance test: a durable marker alone cannot establish that a
   // provider request was dispatched. Restart needs a safe, actionable resolution.
   it("AUDIT: recovers a crash after the retirement marker commits but before dispatch", async () => {
     remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
-    await store.discover(now, 25);
+    await seedLegacyRetirements(database.pool, now, 25);
     const [id] = await store.due(now, 25);
     await expect(store.withMember(id, session => processListingMemberRetirement({
       ...session,
@@ -144,7 +291,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
       "INSERT INTO dropship.dropship_listing_push_job_items VALUES(91,90,80,302,'push','completed','{\"listingIntent\":{\"sku\":\"DROPSHIP-OLD-SKU\",\"marketplaceConfig\":{\"marketplaceId\":\"EBAY_US\"}}}');",
     );
     remote.set("dropship-offer", { offerId: "dropship-offer", sku: "DROPSHIP-OLD-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
-    await store.discover(now, 25);
+    await seedLegacyRetirements(database.pool, now, 25);
     const [record] = await readListingMemberRetirements(database.pool, { destinationKind: "dropship_store_connection", connectionId: 70, productVariantIds: [302] });
     await store.withMember(record.operationId, session => session.save("retiring", null, "Unconfirmed dispatch", now, { dispatchStatus: "unknown" }));
     const dependencies = { store, adapter: async () => adapter };
@@ -209,7 +356,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     await database.pool.query("UPDATE channels.channels SET provider=$1",[provider]);
     if(provider==="shopify") await database.pool.query("UPDATE channels.channel_connections SET shop_domain='shared-store.myshopify.com'");
     if(provider==="walmart") await database.pool.query("INSERT INTO channels.walmart_connections VALUES(11,'partner','production','us')");
-    await store.discover(now,25);
+    await seedLegacyRetirements(database.pool, now, 25);
     const [id]=await store.due(now,25);
     await store.withMember(id,session=>session.save("retiring",null,"Unconfirmed dispatch",now,{dispatchStatus:"unknown"}));
     let removed=false;
@@ -254,7 +401,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect((await receipts())[0]).toMatchObject({ state: "failed", code: "LISTING_MEMBER_IDENTITY_CONFLICT", identity: { identityConflict: true } });
     expect(getOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled();
   });
-  it("defers a conflicting identity once and discovers its corrected source without losing the removal duty", async () => {
+  it("defers a conflicting identity without retries, then cancels its proven unsent automatic removal", async () => {
     await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='offer-archived' WHERE product_variant_id=301");
     remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
     remote.set("offer-active", { offerId: "offer-active", sku: "ACTIVE-PACK", marketplaceId: "EBAY_US", status: "PUBLISHED" });
@@ -274,7 +421,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     const before = (await database.pool.query("SELECT version,next_attempt_at='infinity'::timestamptz AS deferred FROM marketplace.listing_member_retirements WHERE id=$1", [conflict.operationId])).rows[0];
     const eventsBefore = (await database.pool.query("SELECT count(*)::int AS n FROM marketplace.listing_member_retirement_events WHERE operation_id=$1", [conflict.operationId])).rows[0].n;
     expect(before.deferred).toBe(true);
-    expect(await store.due(new Date(now.getTime()+3_600_000),25)).toEqual([]);
+    expect(await store.due(new Date(now.getTime()+3_600_000),25)).toEqual([conflict.operationId]);
     // A worker that selected this ID before another worker parked it must not
     // append a second identical failure after the first transaction commits.
     await store.withMember(conflict.operationId, session => processListingMemberRetirement(session,{store,adapter:async()=>adapter},()=>new Date(now.getTime()+3_600_000)));
@@ -282,16 +429,12 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect((await database.pool.query("SELECT version FROM marketplace.listing_member_retirements WHERE id=$1",[conflict.operationId])).rows[0].version).toBe(before.version);
     expect((await database.pool.query("SELECT count(*)::int AS n FROM marketplace.listing_member_retirement_events WHERE operation_id=$1",[conflict.operationId])).rows[0].n).toBe(eventsBefore);
     expect(deleteOffer).not.toHaveBeenCalled();
-    await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='offer-active' WHERE product_variant_id=301");
-    await run(new Date(now.getTime()+3_660_000));
-    const [corrected] = await receipts();
-    expect(corrected).toMatchObject({state:"retired",identity:{identityConflict:false}});
+    await worker(new Date(now.getTime()+3_660_000)).processDue();
     expect(await store.listConflictsForChannel(10,0)).toEqual({items:[],hasMore:false,offset:0});
-    expect(corrected.operationId).not.toBe(conflict.operationId);
-    expect(deleteOffer).toHaveBeenCalledExactlyOnceWith("offer-archived");
+    expect(deleteOffer).not.toHaveBeenCalled();
     expect(remote.has("offer-active")).toBe(true);
     expect((await database.pool.query("SELECT state,code FROM marketplace.listing_member_retirements WHERE id=$1",[conflict.operationId])).rows[0])
-      .toEqual({state:"failed",code:"LISTING_MEMBER_IDENTITY_CONFLICT"});
+      .toEqual({state:"superseded",code:"LISTING_MEMBER_ARCHIVE_NO_REMOVAL"});
   });
   it("paginates current identity conflicts without exposing another channel", async () => {
     await database.pool.query(`UPDATE channels.channel_listings SET external_variant_id='offer-archived' WHERE product_variant_id=301;
@@ -310,7 +453,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
       SELECT n,30,'ARCHIVED-'||n,'case',false,true,true,'sellable' FROM generate_series(400,500) n;
       INSERT INTO channels.channel_listings(channel_id,product_variant_id,external_sku,external_variant_id,sync_status)
       SELECT 10,n,'OLD-'||n,'offer-archived','synced' FROM generate_series(400,500) n`);
-    await store.discover(now,250);
+    await seedLegacyRetirements(database.pool, now, 250);
     // Populate the read fixture as already reported conflicts; production
     // state changes still go through the worker and its immutable audit.
     await database.pool.query(`UPDATE marketplace.listing_member_retirements SET state='failed',
@@ -359,7 +502,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect(deleteOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled();
   });
   it("serializes competing workers and preserves an immutable event history", async () => {
-    await store.discover(now,25); const [id] = await store.due(now,25);
+    await seedLegacyRetirements(database.pool, now, 25); const [id] = await store.due(now,25);
     await store.withMember(id, async session => {
       expect(await store.withMember(id, async () => "duplicate")).toBeNull();
       await processListingMemberRetirement(session,{ store, adapter: async () => adapter },()=>now);
@@ -371,7 +514,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect(events).toHaveLength(2); expect(events[1].after_state.state).toBe("retired");
   });
   it("supersedes an old request after a saved identity changes and never applies its receipt to the replacement", async () => {
-    await store.discover(now,25);
+    await seedLegacyRetirements(database.pool, now, 25);
     await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='replacement' WHERE product_variant_id=302");
     const [id] = await store.due(now,25);
     await store.withMember(id, session => processListingMemberRetirement(session,{ store, adapter: async () => adapter },()=>now));
@@ -379,11 +522,129 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect((await database.pool.query("SELECT state FROM marketplace.listing_member_retirements")).rows[0].state).toBe("superseded");
   });
   it("stops an unstarted removal when Catalog reactivates the member", async () => {
-    await store.discover(now,25);
+    await seedLegacyRetirements(database.pool, now, 25);
     await database.pool.query("UPDATE catalog.product_variants SET is_active=true,updated_at=now() WHERE id=302");
     const [id] = await store.due(now,25);
     await store.withMember(id, session => processListingMemberRetirement(session,{ store, adapter: async () => adapter },()=>now));
     expect(getOffer).not.toHaveBeenCalled(); expect(await receipts()).toEqual([]);
+  });
+  it.each(["unknown", "accepted"] as const)("retains a %s removal after its catalog owner changes and only observes the original identity", async dispatchStatus => {
+    remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await store.withMember(id, session => session.save("retiring", null, "Earlier removal", now,
+      { dispatchStatus, dispatchKey: id }));
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=true,updated_at=updated_at+interval '1 second' WHERE id=302");
+
+    const retained = await receipts();
+    expect(retained).toHaveLength(1);
+    expect(retained[0]).toMatchObject({ operationId: id, dispatchStatus });
+    await store.withMember(id, session => processListingMemberRetirement(session, { store, adapter: async () => adapter }, () => now));
+    const [pending] = await receipts();
+    expect(pending).toMatchObject({ state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED", recoveryRequired: true });
+    expect(getOffer).toHaveBeenCalledWith("offer-archived");
+    expect(clearOffer).not.toHaveBeenCalled();
+    expect(deleteOffer).not.toHaveBeenCalled();
+
+    const recovery = new ListingMemberRecoveryService({ store, adapter: async () => adapter }, () => now);
+    const review = await recovery.preview(10, id);
+    expect(review).toMatchObject({ canResume: false, observation: { retired: false } });
+    await expect(recovery.resume(10, { operationId: id, reviewHash: review.reviewHash, commandKey: randomUUID() }, "operator"))
+      .rejects.toMatchObject({ code: "LISTING_MEMBER_RECOVERY_SCOPE_CHANGED" });
+    expect(clearOffer).not.toHaveBeenCalled();
+    expect(deleteOffer).not.toHaveBeenCalled();
+
+    remote.delete("offer-archived");
+    await store.withMember(id, session => processListingMemberRetirement(session, { store, adapter: async () => adapter }, () => now));
+    const [completed] = await store.listForChannel(10, 30, 25);
+    expect(completed).toMatchObject({ operationId: id, state: "retired", dispatchStatus });
+    expect(clearOffer).not.toHaveBeenCalled();
+    expect(deleteOffer).not.toHaveBeenCalled();
+    expect(await receipts()).toEqual([]);
+    await expect(recovery.preview(10, id)).rejects.toMatchObject({ code: "LISTING_MEMBER_RECOVERY_SCOPE_CHANGED" });
+    const events = (await database.pool.query("SELECT after_state FROM marketplace.listing_member_retirement_events WHERE operation_id=$1 ORDER BY version", [id])).rows;
+    expect(events.map(row => row.after_state.state)).toEqual(["pending", "retiring", "failed", "retired"]);
+  });
+  it("keeps an uncertain stale removal when provider readback fails", async () => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await store.withMember(id, session => session.save("retiring", null, "Unconfirmed dispatch", now,
+      { dispatchStatus: "unknown", dispatchKey: id }));
+    await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='new-owner' WHERE product_variant_id=302");
+    getOffer.mockRejectedValueOnce(new Error("provider unavailable"));
+    await store.withMember(id, session => processListingMemberRetirement(session, { store, adapter: async () => adapter }, () => now));
+    expect((await receipts())[0]).toMatchObject({ operationId: id, state: "retiring", dispatchStatus: "unknown" });
+    expect(deleteOffer).not.toHaveBeenCalled();
+    expect(clearOffer).not.toHaveBeenCalled();
+  });
+  it("keeps an older unconfirmed removal actionable when a newer mapping generation exists", async () => {
+    remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [oldId] = await store.due(now, 25);
+    await store.withMember(oldId, session => session.save("retiring", null, "Unconfirmed dispatch", now,
+      { dispatchStatus: "unknown", dispatchKey: oldId }));
+    await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='new-offer' WHERE product_variant_id=302");
+    await seedLegacyRetirements(database.pool, now, 25);
+    await store.withMember(oldId, session => processListingMemberRetirement(session, { store, adapter: async () => adapter }, () => now));
+    const retirements = await receipts();
+    expect(retirements).toHaveLength(2);
+    const selected = await readChannelStockSelection(database.pool, { channelId: 10, channelConnectionId: 11, productId: 30, productVariantIds: [302] });
+    const result = resolveListingIntentLifecycle({ selection: selected, accountId: "seller-one", retainedVariantIds: [302],
+      retirements, stock: [], contentWork: [], now });
+    if (!result || result.state !== "waiting_lifecycle") throw new Error("Expected unresolved listing lifecycle work");
+    expect(result.lifecycle.members[0]).toMatchObject({ state: "attention", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED" });
+    expect(result.lifecycle.members[0].nextActions).toContainEqual({ owner: "listing_member_retirement", operationId: oldId });
+    expect(deleteOffer).not.toHaveBeenCalled();
+  });
+  it("does not send an authorized retry if the owner changed after the recovery was saved", async () => {
+    const { record, service } = await unresolvedRecovery();
+    const review = await service.preview(10, record.operationId);
+    await service.resume(10, { operationId: record.operationId, reviewHash: review.reviewHash, commandKey: randomUUID() }, "operator");
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=true,updated_at=updated_at+interval '1 second' WHERE id=302");
+    const originalWrites = deleteOffer.mock.calls.length;
+    await store.withMember(record.operationId, session => processListingMemberRetirement(session, { store, adapter: async () => adapter }, () => now));
+    expect((await receipts())[0]).toMatchObject({ state: "failed", dispatchStatus: "authorized", recoveryRequired: true,
+      code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED" });
+    expect(deleteOffer).toHaveBeenCalledTimes(originalWrites);
+  });
+  it("serializes concurrent observations of a stale uncertain removal without another provider write", async () => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await store.withMember(id, session => session.save("retiring", null, "Unconfirmed dispatch", now,
+      { dispatchStatus: "unknown", dispatchKey: id }));
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=true,updated_at=updated_at+interval '1 second' WHERE id=302");
+    let entered!: () => void;
+    let release!: () => void;
+    const observing = new Promise<void>(resolve => { entered = resolve; });
+    const resume = new Promise<void>(resolve => { release = resolve; });
+    const observe = vi.fn(async (identity: ListingMemberIdentity) => { entered(); await resume; return { identity, retired: false }; });
+    const retire = vi.fn();
+    const dependencies = { store, adapter: async () => ({ observe, retire }) };
+    const first = store.withMember(id, session => processListingMemberRetirement(session, dependencies, () => now));
+    await observing;
+    expect(await store.withMember(id, session => processListingMemberRetirement(session, dependencies, () => now))).toBeNull();
+    release();
+    await first;
+    expect(observe).toHaveBeenCalledTimes(1);
+    expect(retire).not.toHaveBeenCalled();
+    expect((await receipts())[0]).toMatchObject({ state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED" });
+  });
+  it.each(["ebay", "shopify", "walmart"])("uses the same stale-dispatch guard for %s", async provider => {
+    await database.pool.query("UPDATE channels.channels SET provider=$1 WHERE id=10", [provider]);
+    if (provider === "shopify") await database.pool.query("UPDATE channels.channel_connections SET shop_domain='test.myshopify.com' WHERE id=11");
+    if (provider === "walmart") await database.pool.query("INSERT INTO channels.walmart_connections VALUES(11,'seller-one','production','us')");
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await store.withMember(id, session => session.save("retiring", null, "Unconfirmed dispatch", now,
+      { dispatchStatus: "unknown", dispatchKey: id }));
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=true,updated_at=updated_at+interval '1 second' WHERE id=302");
+    const observe = vi.fn(async (identity: ListingMemberIdentity) => ({ identity, retired: false }));
+    const retire = vi.fn();
+    await store.withMember(id, session => processListingMemberRetirement(session,
+      { store, adapter: async () => ({ observe, retire }) }, () => now));
+    expect((await receipts())[0]).toMatchObject({ identity: { provider }, state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED" });
+    expect(observe).toHaveBeenCalledTimes(1);
+    expect(retire).not.toHaveBeenCalled();
   });
   it("runs the same persisted lifecycle for Shopify and never deletes an active sibling", async () => {
     await database.pool.query(`UPDATE channels.channels SET provider='shopify'; UPDATE channels.channel_connections SET shop_domain='test.myshopify.com';
@@ -395,7 +656,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
       present = false; return { data: { productVariantsBulkDelete: { userErrors: [] } } };
     });
     const shopify = new ShopifyListingMemberAdapter(async () => ({ graphql }));
-    await store.discover(now,25);
+    await seedLegacyRetirements(database.pool, now, 25);
     for (const id of await store.due(now,25)) await store.withMember(id, session => processListingMemberRetirement(session,{ store, adapter: async () => shopify },()=>now));
     expect((await receipts())[0]).toMatchObject({ state: "retired", identity: { provider: "shopify" } });
     expect(graphql.mock.calls.filter(call => call[0].startsWith("mutation"))).toHaveLength(1);
@@ -409,7 +670,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     const retire = vi.fn(async () => { retired = true; });
     const walmart = new WalmartListingMemberAdapter({ account: async () => account,
       observe: async (_account, sku) => ({ sku, title: "Archived member", retired }), retire });
-    await store.discover(now,25);
+    await seedLegacyRetirements(database.pool, now, 25);
     const [id] = await store.due(now,25);
     await store.withMember(id, session => processListingMemberRetirement(session,{ store, adapter: async () => walmart },()=>now));
     expect(retire).toHaveBeenCalledExactlyOnceWith(account,"OLD-REMOTE-SKU",id);
@@ -440,7 +701,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     });
     const walmart = new WalmartListingMemberAdapter({ account: async () => account, observe, retire });
     const process = async (date: Date) => {
-      await store.discover(date,25);
+      await seedLegacyRetirements(database.pool, date, 25);
       for (const id of await store.due(date,25)) await store.withMember(id, session => processListingMemberRetirement(session, {
         store, adapter: async () => walmart,
         withPublicationFence: (identity, work) => publication.withListing(account,identity.externalSku!,
@@ -497,7 +758,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     const observe = vi.fn(async (identity: ListingMemberIdentity) => ({ identity, retired: false }));
     const retire = vi.fn(async () => {});
     const process = async (time: Date) => {
-      await store.discover(time,25);
+      await seedLegacyRetirements(database.pool, time, 25);
       for (const id of await store.due(time,25)) await store.withMember(id, session => processListingMemberRetirement(session,
         { store, adapter: async () => ({ observe, retire }) }, () => time));
     };
@@ -514,7 +775,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
   });
   it("rolls back a failed audit write before any external removal and resumes the same request", async () => {
     remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
-    await store.discover(now,25);
+    await seedLegacyRetirements(database.pool, now, 25);
     const [before] = await receipts();
     await database.pool.query(`CREATE FUNCTION marketplace.reject_member_event_test() RETURNS trigger LANGUAGE plpgsql AS $$
       BEGIN RAISE EXCEPTION 'injected member audit failure'; END; $$;
@@ -532,7 +793,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect((await receipts())[0]).toMatchObject({ operationId: before.operationId, state: "retired" });
   });
   it("fences reactivation and saved identity reassignment while the provider request is in flight", async () => {
-    await store.discover(now,25);
+    await seedLegacyRetirements(database.pool, now, 25);
     const [id] = await store.due(now,25);
     const competing = await database.pool.connect();
     try {
@@ -562,7 +823,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect(deleteOffer).not.toHaveBeenCalled();
   });
   it("records a malformed first identity once without starving a bounded discovery batch or already queued work", async () => {
-    await store.discover(now, 1); // Existing valid work must survive a later malformed source.
+    await seedLegacyRetirements(database.pool, now, 1); // Existing valid work must survive a later malformed source.
     const [queued] = await receipts();
     expect(queued.state).toBe("pending");
     await expect(database.pool.query(`UPDATE marketplace.listing_member_retirements
@@ -576,9 +837,9 @@ const now = new Date("2026-10-19T12:00:00.000Z");
         VALUES(10,303,'LATER-REMOTE-SKU','offer-later','synced')`);
     remote.set("offer-later", { offerId: "offer-later", sku: "LATER-REMOTE-SKU", marketplaceId: "EBAY_US", status: "UNPUBLISHED" });
 
-    await store.discover(now, 1);
-    await store.discover(now, 1);
-    await store.discover(now, 1);
+    await seedLegacyRetirements(database.pool, now, 1);
+    await seedLegacyRetirements(database.pool, now, 1);
+    await seedLegacyRetirements(database.pool, now, 1);
     const all = await readListingMemberRetirements(database.pool, {
       destinationKind: "channel_connection", connectionId: 11, productVariantIds: [301, 302, 303],
     });
@@ -695,7 +956,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
       const members = createListingMemberLifecycle(database.pool, unusedWalmart, authDatabase,
         new PostgresListingLifecycleRepository(database.pool, assertArchivedMemberPublicationAllowed));
       const process = async (date: Date) => {
-        await members.store.discover(date, 25);
+        await seedLegacyRetirements(database.pool, date, 25);
         for (const id of await members.store.due(date, 25)) await members.store.withMember(id,
           session => processListingMemberRetirement(session, members, () => date));
       };

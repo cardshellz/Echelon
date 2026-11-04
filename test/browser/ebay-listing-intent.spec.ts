@@ -40,6 +40,22 @@ type Command = { excluded: boolean; commandKey: string };
 const receipt = (command: Command, job: unknown = withdrawal) => ({ success: true, productId: 1, excluded: command.excluded, commandKey: command.commandKey, replayed: false, job,
   remoteAction: command.excluded ? job ? "queued_withdrawal" : "local_exclusion" : "included" });
 
+test("archive status explains the channel listing can remain live without offering a removal retry", async ({page}) => {
+  const state = await setupEbayChannelPage(page);
+  state.excluded = true; state.feedStatus = "excluded";
+  state.intentChanges.items = [channelIntentChange(67, { state:"not_applicable",
+    last_error_message:"Archived variants are excluded from updates. Their channel listings may remain live until explicitly unpublished.",
+    lifecycle:{ assessedAt:"2026-10-20T20:00:00.000Z", selectionFingerprint:"a".repeat(64),
+      members:[{productVariantId:11,duty:"none",state:"settled",code:"LISTING_LIFECYCLE_ARCHIVED_LOCALLY",
+        message:"This variant is archived and excluded from updates. A channel listing may still be live until explicitly unpublished.",references:[]}] } })];
+  await page.reload();
+  const panel = page.getByTestId("listing-intent-changes");
+  await panel.locator("summary").first().click();
+  await expect(panel).toContainText("Their channel listings may remain live until explicitly unpublished.");
+  await expect(panel.getByRole("button",{name:"Review listing",exact:true})).toHaveCount(0);
+  expect(state.commands).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("excluding saves removal and shows Ended only after the provider state is verified", async ({ page }, info) => {
   const state = await setupEbayChannelPage(page); const commands: Command[] = [];
   await page.route("**/api/ebay/product-exclusion/1", route => {
@@ -367,7 +383,7 @@ for (const readOnly of [false,true]) test(`archived recovery uses the shared own
   await panel.getByRole("button",{name:"Review listing",exact:true}).click();
   await page.getByRole("button",{name:"Review removal: ARCHIVED-PACK",exact:true}).click();
   let dialog=page.getByRole("dialog");
-  await expect(dialog.getByRole("heading",{name:"Archived member removal recovery",exact:true})).toBeVisible();
+  await expect(dialog.getByRole("heading",{name:"Review listing removal",exact:true})).toBeVisible();
   if (readOnly) {
     await expect(dialog.getByRole("button",{name:"Authorize removal recovery",exact:true})).toHaveCount(0);
     expect(commands).toEqual([]); return;
@@ -382,6 +398,67 @@ for (const readOnly of [false,true]) test(`archived recovery uses the shared own
   expect(commands).toHaveLength(2); expect(commands[1]).toEqual(commands[0]);
   expect(commands[0]).toMatchObject({operationId:archivedMember.operationId,reviewHash:"d".repeat(64)});
   expect(state.requests.some(path=>path.includes("/listings/push"))).toBe(false);
+});
+
+test("a changed listing link permits read-only review of an earlier unconfirmed removal", async ({page}) => {
+  const state=await setupEbayChannelPage(page); state.excluded=true; state.feedStatus="excluded";
+  state.intentChanges.items=[memberChange()];
+  const record={...archivedMember,code:"LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED"};
+  let reviews=0, authorizations=0;
+  await page.route("**/api/channels/67/listing-lifecycle/members**", route => {
+    const path=new URL(route.request().url()).pathname;
+    if (path.endsWith("/resume")) { authorizations++; return route.fulfill({status:409}); }
+    if (path.endsWith("/recovery")) {
+      reviews++;
+      return route.fulfill({json:{record,observation:{identity:record.identity,retired:false},
+        reviewHash:"d".repeat(64),canResume:false,
+        message:"The listing link changed after an earlier removal may have been sent. Check the exact channel listing before transferring or publishing it. This review cannot authorize another removal."}});
+    }
+    return route.fulfill({json:{items:[record]}});
+  });
+  await page.reload();
+  const panel=page.getByTestId("listing-intent-changes");
+  await panel.locator("summary").first().click();
+  await panel.getByRole("button",{name:"Review listing",exact:true}).click();
+  await page.getByRole("button",{name:"Review removal: ARCHIVED-PACK",exact:true}).click();
+  const dialog=page.getByRole("dialog");
+  await expect(dialog).toContainText("The listing link changed after an earlier removal may have been sent.");
+  await expect(dialog.getByRole("button",{name:"Authorize removal recovery",exact:true})).toHaveCount(0);
+  await dialog.getByRole("button",{name:"Refresh review",exact:true}).click();
+  await expect.poll(()=>reviews).toBeGreaterThanOrEqual(2);
+  expect(authorizations).toBe(0);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("an old superseded dispatch can be reviewed without authorizing another removal", async ({page}) => {
+  const state=await setupEbayChannelPage(page); state.excluded=true; state.feedStatus="excluded";
+  state.intentChanges.items=[memberChange()];
+  const record={...archivedMember,state:"superseded",dispatchStatus:"unknown",
+    code:"LISTING_MEMBER_SOURCE_CHANGED"};
+  let reviews=0, authorizations=0;
+  await page.route("**/api/channels/67/listing-lifecycle/members**", route => {
+    const path=new URL(route.request().url()).pathname;
+    if (path.endsWith("/resume")) { authorizations++; return route.fulfill({status:409}); }
+    if (path.endsWith("/recovery")) {
+      reviews++;
+      return route.fulfill({json:{record,observation:{identity:record.identity,retired:false},
+        reviewHash:"d".repeat(64),canResume:false,
+        message:"An earlier removal may have reached the channel before this request was superseded. This review checks the saved listing without sending another removal; its historical outcome remains unconfirmed."}});
+    }
+    return route.fulfill({json:{items:[record]}});
+  });
+  await page.reload();
+  const panel=page.getByTestId("listing-intent-changes");
+  await panel.locator("summary").first().click();
+  await panel.getByRole("button",{name:"Review listing",exact:true}).click();
+  await page.getByRole("button",{name:"Review removal: ARCHIVED-PACK",exact:true}).click();
+  const dialog=page.getByRole("dialog");
+  await expect(dialog).toContainText("without sending another removal");
+  await expect(dialog.getByRole("button",{name:"Authorize removal recovery",exact:true})).toHaveCount(0);
+  await dialog.getByRole("button",{name:"Refresh review",exact:true}).click();
+  await expect.poll(()=>reviews).toBeGreaterThanOrEqual(2);
+  expect(authorizations).toBe(0);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
 test("disabled-category work still opens the saved removal operation",async({page})=>{

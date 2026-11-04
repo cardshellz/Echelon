@@ -1,6 +1,10 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 import type { Pool } from "pg";
+import { z } from "zod";
+import { listingMemberIdentitySchema } from "@shared/types/listing-member-lifecycle";
+import { canonicalJson } from "@shared/utils/canonical-json";
 import { installStockSelectionFixture } from "../../../inventory-planning/__tests__/fixtures/stock-selection.fixture";
 
 export const listingMemberBaseSql = `CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA dropship;
@@ -27,4 +31,53 @@ export async function installListingMemberLifecycleFixture(pool: Pool) {
     "259_channel_listing_lifecycle.sql", "0748_walmart_listing_presence.sql",
     "900000013000018480001_shared_listing_member_lifecycle.sql", "900000022000018880002_listing_member_recovery.sql"])
     await pool.query(readFileSync(resolve("migrations", file), "utf8"));
+}
+
+/** Construct persisted pre-cutover archive requests, including the historical
+ * malformed-identity diagnostic shape. The application no longer creates them. */
+export async function seedLegacyRetirements(pool: Pool, now: Date, limit: number) {
+  const client = await pool.connect();
+  try {
+    const sources = (await client.query<{ identity: unknown; source_revision: string }>(`SELECT s.identity,s.source_revision
+      FROM marketplace.listing_member_retirement_sources s WHERE NOT EXISTS(SELECT 1 FROM marketplace.listing_member_retirements r
+        WHERE md5(r.source_identity::text)=md5(s.identity::text) AND r.source_identity=s.identity AND r.source_revision=s.source_revision)
+      ORDER BY s.product_variant_id,s.identity::text LIMIT $1`, [limit])).rows;
+    for (const source of sources) {
+      const parsed = listingMemberIdentitySchema.safeParse(source.identity);
+      let identity = parsed.success ? parsed.data : null;
+      let invalidMessage: string | null = null;
+      if (!parsed.success) {
+        const local = listingMemberIdentitySchema.pick({ destinationKind: true, connectionId: true, channelId: true,
+          vendorId: true, productId: true, productVariantId: true }).passthrough().parse(source.identity);
+        const field = <T>(schema: z.ZodType<T>, value: unknown, fallback: T): T => {
+          const result = schema.safeParse(value); return result.success ? result.data : fallback;
+        };
+        const shape = listingMemberIdentitySchema.shape;
+        identity = listingMemberIdentitySchema.parse({ destinationKind: local.destinationKind, connectionId: local.connectionId,
+          channelId: local.channelId, vendorId: local.vendorId, productId: local.productId, productVariantId: local.productVariantId,
+          provider: field(shape.provider, local.provider, "invalid"), accountId: field(shape.accountId, local.accountId, null),
+          environment: field(shape.environment, local.environment, "production"), market: field(shape.market, local.market, "invalid"),
+          externalSku: field(shape.externalSku, local.externalSku, null), externalProductId: field(shape.externalProductId, local.externalProductId, null),
+          externalVariantId: field(shape.externalVariantId, local.externalVariantId, null),
+          externalInventoryItemId: field(shape.externalInventoryItemId, local.externalInventoryItemId, null), identityConflict: true });
+        const fields = [...new Set(parsed.error.issues.map(issue => String(issue.path[0] ?? "identity")))].slice(0, 16);
+        invalidMessage = `The saved listing identity has invalid fields: ${fields.join(", ")}. `
+          + "Correct the saved listing connection or mapping before removal. This archived variant remains excluded; no provider request was sent.";
+      }
+      if (!identity) throw new Error("Legacy retirement fixture could not construct an identity");
+      const key = createHash("sha256").update(canonicalJson(source.identity)).digest("hex");
+      await client.query("BEGIN");
+      try {
+        const inserted = (await client.query<{ id: string }>(`INSERT INTO marketplace.listing_member_retirements
+          (id,identity_key,identity,source_identity,source_revision,product_id,product_variant_id,state,code,message,next_attempt_at,created_at,updated_at)
+          VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12) ON CONFLICT(identity_key,source_revision) DO NOTHING RETURNING id`,
+        [randomUUID(), key, identity, source.identity, source.source_revision, identity.productId, identity.productVariantId,
+          invalidMessage ? "failed" : "pending", invalidMessage ? "LISTING_MEMBER_IDENTITY_INVALID" : null, invalidMessage,
+          invalidMessage ? null : now, now])).rows[0];
+        if (inserted) await client.query(`INSERT INTO marketplace.listing_member_retirement_events(operation_id,version,actor,before_state,after_state,occurred_at)
+          SELECT id,version,'system:listing-lifecycle',NULL,to_jsonb(r),$2 FROM marketplace.listing_member_retirements r WHERE id=$1`, [inserted.id, now]);
+        await client.query("COMMIT");
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+    }
+  } finally { client.release(); }
 }

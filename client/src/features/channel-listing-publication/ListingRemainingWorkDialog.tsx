@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { ListingIntentChangeStatus } from "@shared/listing-intent-propagation";
 import type { ListingWorkAction } from "@shared/listing-work-action";
 import { listingMemberRetirementSchema } from "@shared/types/listing-member-lifecycle";
+import { hasUnconfirmedMemberDispatch } from "@shared/listing-member-dispatch";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -141,7 +142,8 @@ export function ListingRemainingWorkDialog({
           </p>
         )}
         {members.data?.items
-          .filter((member) => !["retired", "superseded"].includes(member.state))
+          .filter((member) => member.state !== "retired"
+            && (member.state !== "superseded" || hasUnconfirmedMemberDispatch(member)))
           .map((member) => (
             <Button
               key={member.operationId}
