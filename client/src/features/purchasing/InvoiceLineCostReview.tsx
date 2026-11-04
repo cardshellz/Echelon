@@ -1,4 +1,5 @@
 import { SupplierCreditLink } from "./SupplierCreditLink";
+import { InvoiceCostAdjustmentEditor } from "./InvoiceCostAdjustmentEditor";
 import React, { useEffect, useRef, useState, type FormEvent } from "react";
 import { useSearch } from "wouter";
 import { INVOICE_COST_QUERY_PARAM } from "@/lib/procurement-navigation";
@@ -22,6 +23,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { reconciliationDestinations } from "@shared/procurement/cost-reconciliation";
 import { z } from "zod";
+import { canonicalJson } from "@shared/utils/canonical-json";
 
 type ReviewLine = {
   id: number;
@@ -84,7 +86,8 @@ function ReviewEditor({ line, currency, blockedReason, onSaved, onDiscard, onClo
         await financialCommandFetchJson(`/api/vendor-invoice-lines/${line.id}/cost-components/preview`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }));
       if (result.preview.lineId !== line.id || result.preview.lineTotalCents !== line.lineTotalCents
         || result.preview.after.productMills !== body.productMills || result.preview.after.packagingMills !== body.packagingMills
-        || result.preview.after.adjustmentMills !== body.adjustmentMills || result.preview.after.packagingTreatment !== body.packagingTreatment)
+        || result.preview.after.adjustmentMills !== body.adjustmentMills || result.preview.after.packagingTreatment !== body.packagingTreatment
+        || canonicalJson(result.preview.after.adjustments ?? null) !== canonicalJson(body.adjustments ?? null))
         throw new Error("The cost preview does not match this invoice. Reload before saving.");
       return result;
     },
@@ -134,7 +137,7 @@ function ReviewEditor({ line, currency, blockedReason, onSaved, onDiscard, onClo
     componentTotal = BigInt(amounts.productMills) + BigInt(amounts.packagingMills) + BigInt(amounts.adjustmentMills);
   } catch { /* Incomplete fields are represented as unknown, never zero. */ }
   const balanced = componentTotal !== null && validTotal && componentTotal === BigInt(line.lineTotalCents) * BigInt(100);
-  function field(name: keyof InvoiceCostReviewForm, value: string) {
+  function field(name: Exclude<keyof InvoiceCostReviewForm, "adjustments">, value: string) {
     setForm((current) => ({ ...current, [name]: value })); setValidationError(null);
   }
   function submit(event: FormEvent) {
@@ -162,12 +165,14 @@ function ReviewEditor({ line, currency, blockedReason, onSaved, onDiscard, onClo
       <div className="sm:col-span-2"><Label htmlFor={`${prefix}-treatment`}>Is packaging included in the product price?</Label><Select value={form.packagingTreatment} onValueChange={(value) => field("packagingTreatment", value)} disabled={locked || stale}><SelectTrigger id={`${prefix}-treatment`}><SelectValue placeholder="Check how the supplier billed packaging" /></SelectTrigger><SelectContent><SelectItem value="separate">No, packaging is charged separately</SelectItem><SelectItem value="included_in_product">Yes, packaging is included</SelectItem></SelectContent></Select></div>
       <div><Label htmlFor={`${prefix}-product`}>Product total ({currency})</Label><Input id={`${prefix}-product`} inputMode="decimal" value={form.product} onChange={(event) => field("product", event.target.value)} /></div>
       <div><Label htmlFor={`${prefix}-packaging`}>Packaging total ({currency})</Label><Input id={`${prefix}-packaging`} inputMode="decimal" value={form.packaging} onChange={(event) => field("packaging", event.target.value)} /></div>
-      <div className="sm:col-span-2"><Label htmlFor={`${prefix}-adjustment`}>Other adjustments / credits ({currency})</Label><Input id={`${prefix}-adjustment`} inputMode="decimal" value={form.adjustment} onChange={(event) => field("adjustment", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Enter credits as negative amounts. Adjustments are preserved and may require further cost review.</p></div>
+      <div className="sm:col-span-2"><Label htmlFor={`${prefix}-adjustment`}>Billed adjustments total, including tax ({currency})</Label><Input id={`${prefix}-adjustment`} inputMode="decimal" value={form.adjustment} onChange={(event) => field("adjustment", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Amounts already on this invoice. Enter discounts as negative amounts. Classify non-tax amounts below; use Tax review for tax. Supplier credit notes are recorded separately.</p></div>
+      <div className="sm:col-span-2"><InvoiceCostAdjustmentEditor rows={form.adjustments} currency={currency} onChange={adjustments => setForm(current => ({ ...current, adjustments }))} /></div>
       {!blockedReason && <div className="sm:col-span-2"><Label htmlFor={`${prefix}-reason`}>Notes / supplier invoice reference</Label><Textarea id={`${prefix}-reason`} maxLength={2000} value={form.reason} onChange={(event) => field("reason", event.target.value)} /></div>}
     </fieldset>
     {componentTotal !== null && !balanced && <p className="text-sm text-amber-700 dark:text-amber-300">The amounts must add up to this line's invoice amount exactly.</p>}
     </>}
     {reviewed && !saved && <><InvoiceCostImpactReview preview={reviewed.preview} currency={currency} />
+      {reviewed.body.adjustments?.map(row => <p key={row.key} className="text-sm">{row.label}: {exactMoneyAsInput(row.amountMills, 4)} {currency} · {row.destination === "excluded" ? "outside inventory cost" : `${row.destination} cost`}</p>)}
       <p className="text-sm">Packaging: {reviewed.body.packagingTreatment === "included_in_product" ? "included in the product amount" : "billed separately"}.<br />Supplier reference: {reviewed.body.reason}</p>
       {reviewed.application?.costApplications.some(item => item.status === "review_required") && <p className="text-sm text-amber-700">These supplier amounts can be saved, but some cost records still need attention. Their saved reasons will remain in Cost review.</p>}</>}
     {(validationError || failure) && <p role="alert" className="text-sm text-destructive">{validationError ?? failure?.message}</p>}

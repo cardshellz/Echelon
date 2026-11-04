@@ -13,6 +13,12 @@ describe("exact invoice cost review form", () => {
   it("prefills only validated recorded component amounts", () => {
     expect(invoiceCostReviewForm(evidence)).toEqual({ packagingTreatment: "separate", product: "100.0000", packaging: "18.0000", adjustment: "0.0000", reason: "" });
   });
+  it("retains classified billed adjustments through form review without rounding or dropping their destination", () => {
+    const adjustments = [{ key: "discount", label: "Supplier discount", category: "discount" as const, amountMills: -10000, destination: "product" as const }];
+    const form = { ...invoiceCostReviewForm({ ...evidence, adjustmentMills: -10000, adjustments }), reason: "Checked supplier discount" };
+    expect(form.adjustments).toEqual([{ key: "discount", label: "Supplier discount", category: "discount", amount: "-1.0000", destination: "product" }]);
+    expect(invoiceCostReviewFromForm(form, version, 11700)).toMatchObject({ adjustmentMills: -10000, adjustments });
+  });
   it.each([
     [".0375", 375], ["0.0001", 1], ["-0.0001", -1], ["-55", -550_000],
     ["900719925474.0991", Number.MAX_SAFE_INTEGER], ["-900719925474.0991", -Number.MAX_SAFE_INTEGER],

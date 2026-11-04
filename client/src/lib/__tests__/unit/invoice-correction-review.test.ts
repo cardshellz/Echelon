@@ -25,6 +25,12 @@ function fixture() {
 }
 
 describe("invoice correction reviewed intent", () => {
+  it("rejects an adjustment destination that differs from the reviewed correction", () => {
+    const { request, preview } = fixture();
+    request.costComponents = { ...components, adjustments: [{ key: "discount", label: "Supplier discount", category: "discount", amountMills: 0, destination: "product" }] };
+    preview.afterCostComponents = { ...preview.afterCostComponents!, adjustments: [{ ...request.costComponents.adjustments![0], destination: "excluded" }] };
+    expect(invoiceCorrectionMatchesRequest(preview, request)).toBe(false);
+  });
   it("accepts the exact measured invoice and supplier amounts", () => {
     const { request, preview } = fixture(); expect(invoiceCorrectionMatchesRequest(preview, request)).toBe(true);
   });

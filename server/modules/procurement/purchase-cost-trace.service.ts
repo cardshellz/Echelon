@@ -1,5 +1,5 @@
 import { projectReceiptCostQueue, receiptCostQueueReadSchema } from "./receipt-cost-queue-read.service";
-import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
+import { invoiceCostComponentEvidenceSchema, invoiceGoodsAmounts } from "@shared/procurement/invoice-cost-evidence";
 import { projectPurchaseCostApplications, purchaseCostApplicationReadSchema } from "./purchase-cost-application-read.service";
 import { PurchaseWorkspaceError } from "./purchase-workspace.service";
 import { z } from "zod";
@@ -164,7 +164,10 @@ function projectInvoiceLine(line: PurchaseCostEvidence["invoiceLines"][number]):
     issues.push("Invoice component amounts do not reconcile to the recorded document total.");
   }
   if (components.packagingTreatment === "included_in_product" && components.packagingMills !== 0) issues.push("Included packaging must not also carry a separate packaging amount.");
-  if (components.adjustmentMills !== 0) issues.push("The explicit invoice adjustment requires review by the cost application owner.");
+  try {
+    if (components.adjustmentMills !== invoiceGoodsAmounts(components).adjustmentMills)
+      issues.push("Tax or unclassified billed adjustments still need their owning cost review.");
+  } catch { issues.push("Billed adjustments exceed their supported product or packaging amount."); }
   return { ...record, componentEvidence: issues.length ? "review_required" : "explicit_recorded", components, componentIssues: issues };
 }
 export function projectPurchaseCostTrace(input: PurchaseCostEvidence, purchase: PurchaseWorkspace["purchase"]): PurchaseCostTrace {

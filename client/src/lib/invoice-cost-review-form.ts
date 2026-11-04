@@ -2,6 +2,7 @@ import {
   invoiceCostComponentEvidenceSchema, invoiceCostReviewSchema, type InvoiceCostReview,
 } from "@shared/procurement/invoice-cost-review";
 import { exactMoneyAsInput, parseExactMoneyInput } from "./exact-money-input";
+import type { InvoiceCostAdjustment } from "@shared/procurement/invoice-cost-adjustments";
 
 export type InvoiceCostReviewForm = {
   packagingTreatment: "" | "separate" | "included_in_product";
@@ -9,6 +10,7 @@ export type InvoiceCostReviewForm = {
   packaging: string;
   adjustment: string;
   reason: string;
+  adjustments?: Array<Omit<InvoiceCostAdjustment, "amountMills"> & { amount: string }>;
 };
 
 export function invoiceCostReviewForm(evidence: unknown): InvoiceCostReviewForm {
@@ -20,6 +22,7 @@ export function invoiceCostReviewForm(evidence: unknown): InvoiceCostReviewForm 
     packaging: exactMoneyAsInput(parsed.data.packagingMills, 4),
     adjustment: exactMoneyAsInput(parsed.data.adjustmentMills, 4),
     reason: "",
+    ...(parsed.data.adjustments === undefined ? {} : { adjustments: parsed.data.adjustments.map(({ amountMills, ...row }) => ({ ...row, amount: exactMoneyAsInput(amountMills, 4) })) }),
   };
 }
 
@@ -32,10 +35,11 @@ export function invoiceCostReviewAmounts(form: InvoiceCostReviewForm) {
     productMills: amount(form.product, "Product"),
     packagingMills: amount(form.packaging, "Packaging"),
     adjustmentMills: amount(form.adjustment, "Adjustments", true),
+    ...(form.adjustments === undefined ? {} : { adjustments: form.adjustments.map(({ amount: input, ...row }) => ({ ...row, amountMills: amount(input, row.label || "Billed adjustment", true) })) }),
   };
 }
 
-export function invoiceCostComponentsFromForm(form: InvoiceCostReviewForm, lineTotalCents: number): Pick<InvoiceCostReview, "packagingTreatment" | "productMills" | "packagingMills" | "adjustmentMills"> {
+export function invoiceCostComponentsFromForm(form: InvoiceCostReviewForm, lineTotalCents: number): Pick<InvoiceCostReview, "packagingTreatment" | "productMills" | "packagingMills" | "adjustmentMills" | "adjustments"> {
   if (!Number.isSafeInteger(lineTotalCents)) throw new Error("The recorded invoice total cannot be reviewed safely.");
   if (!form.packagingTreatment) throw new Error("Select the packaging treatment from the supplier evidence.");
   const amounts = invoiceCostReviewAmounts(form);

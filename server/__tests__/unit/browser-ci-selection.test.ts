@@ -296,7 +296,9 @@ describe("browser CI impact selection", () => {
   });
 
   it("selects catalog coverage and startup, without procurement, returns or order journeys for the actual Shopify UI change", () => {
-    const evidence = { ...repositorySources(), changes: [{ status: "M", paths: ["client/src/components/catalog/ShopifyProductConnection.tsx"] }] };
+    // These decisions share one immutable repository snapshot. Reuse the
+    // supported dependency cache instead of reparsing the same files per suite.
+    const evidence = { ...repositorySources(), dependencyCache: new Map(), changes: [{ status: "M", paths: ["client/src/components/catalog/ShopifyProductConnection.tsx"] }] };
     for (const suite of ["procurement", "procurementConnected", "orderEdits"])
       expect(selectBrowserSuite({ suite, ...evidence }), suite).toEqual({ run: false, reason: "Only known paths outside this suite's dependency graph changed" });
     expect(selectBrowserSuite({ suite: "appBootstrap", ...evidence }).run).toBe(true);

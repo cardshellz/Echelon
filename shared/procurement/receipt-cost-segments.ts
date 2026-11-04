@@ -16,6 +16,9 @@ export const receiptCostSegmentSchema = z
     sourceBasePieces: quantity.positive(),
     sourceTotalMills: money,
     evidence: z.enum(["estimated", "confirmed"]),
+    credits: z.array(z.object({
+      supplierCreditLineId: id, amountMills: money, pieces: quantity.positive(),
+    }).strict()).max(1000).optional(),
   })
   .strict()
   .superRefine((row, context) => {
@@ -29,6 +32,10 @@ export const receiptCostSegmentSchema = z
       ].every(Number.isSafeInteger)
     )
       return;
+    if (row.credits !== undefined && (row.evidence !== "confirmed"
+      || new Set(row.credits.map(credit => credit.supplierCreditLineId)).size !== row.credits.length
+      || row.credits.some(credit => credit.pieces !== row.pieces)))
+      context.addIssue({ code: "custom", message: "Receipt credits require unique lines covering this exact confirmed interval." });
     if (
       BigInt(row.sourceStartPiece) + BigInt(row.pieces) >
         BigInt(row.sourceBasePieces) ||
@@ -82,19 +89,25 @@ export function receiptSegmentCost(
       throw new RangeError("Receipt cost intervals overlap or leave a gap.");
     expected = right;
     const count = right - left;
-    mills += allocateIntegerCostInterval(
-      BigInt(row.sourceTotalMills),
-      BigInt(row.sourceBasePieces),
-      BigInt(row.sourceStartPiece) + left - BigInt(row.startBasePiece),
-      count,
-    );
+    if (row.credits?.length) {
+      const gross = allocateIntegerCostInterval(BigInt(row.sourceTotalMills), BigInt(row.sourceBasePieces),
+        BigInt(row.sourceStartPiece), BigInt(row.pieces));
+      const net = gross - row.credits.reduce((total, credit) => total + BigInt(credit.amountMills), BigInt(0));
+      if (net < BigInt(0)) throw new RangeError("Receipt credits exceed the original assigned cost.");
+      // Allocate the net receipt amount once. Subtracting separately rounded
+      // credits per stock unit can create negative penny/mill remainders.
+      mills += allocateIntegerCostInterval(net, BigInt(row.pieces), left - BigInt(row.startBasePiece), count);
+    } else {
+      mills += allocateIntegerCostInterval(BigInt(row.sourceTotalMills), BigInt(row.sourceBasePieces),
+        BigInt(row.sourceStartPiece) + left - BigInt(row.startBasePiece), count);
+    }
     covered += count;
     if (row.evidence === "confirmed") confirmed += count;
   }
   if (
     expected !== end ||
     covered !== BigInt(pieces) ||
-    mills > BigInt(Number.MAX_SAFE_INTEGER)
+    mills > BigInt(Number.MAX_SAFE_INTEGER) || mills < BigInt(0)
   )
     throw new RangeError(
       "The complete receipt interval has no exact supported source coverage.",

@@ -43,7 +43,7 @@ async function fill(page: Page, options: { product?: string; packaging?: string;
   await page.getByRole("option", { name: "No, packaging is charged separately" }).click();
   await page.getByLabel(/^Product total/).fill(options.product ?? "100.0000");
   await page.getByLabel(/^Packaging total/).fill(options.packaging ?? "18.0000");
-  await page.getByLabel(/^Other adjustments/).fill(options.adjustment ?? "0");
+  await page.getByLabel(/^Billed adjustments total/).fill(options.adjustment ?? "0");
   await page.getByLabel("Notes / supplier invoice reference").fill("Final supplier breakdown reviewed");
 }
 
@@ -51,7 +51,7 @@ test("reviews unknown amounts, retries a lost acknowledgement and preserves the 
   const { commands, invoice, failures } = await setup(page, { lostResponse: true });
   await expect(page.getByLabel(/^Product total/)).toHaveValue("");
   await expect(page.getByLabel(/^Packaging total/)).toHaveValue("");
-  await expect(page.getByLabel(/^Other adjustments/)).toHaveValue("");
+  await expect(page.getByLabel(/^Billed adjustments total/)).toHaveValue("");
   await expect(page.getByText("The product and packaging amounts are missing.", { exact: false })).toBeVisible();
   await fill(page);
   await approveSupplierCostReview(page);
@@ -72,7 +72,7 @@ test("requires exact reconciliation and explicit packaging treatment before savi
   await page.getByRole("button", { name: "Review cost changes", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("exactly");
   expect(commands).toEqual([]);
-  await page.getByLabel(/^Other adjustments/).fill("0");
+  await page.getByLabel(/^Billed adjustments total/).fill("0");
   await page.getByLabel("Is packaging included in the product price?", { exact: true }).click();
   await page.getByRole("option", { name: "Yes, packaging is included" }).click();
   await page.getByRole("button", { name: "Review cost changes", exact: true }).click();
