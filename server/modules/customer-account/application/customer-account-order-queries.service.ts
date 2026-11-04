@@ -1,3 +1,4 @@
+import type { AccountNativeReader } from "./account-native-summaries.ports";
 import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
 import type { OrderEditService } from "../../order-edits/application/order-edit.service";
 import type { OrderEditConnection } from "@shared/order-edits/order-edit.contract";
@@ -20,7 +21,10 @@ import type {
 } from "@shared/customer-account/customer-account-orders";
 import { customerOrderProgressSchema } from "@shared/customer-account/order-progress";
 import type { CustomerAccountProgressReader } from "./customer-account-progress.ports";
-import type { OrderActionProjectionReader, OrderActionProjectionRefresher } from "./order-action-projection.ports";
+import type {
+  OrderActionProjectionReader,
+  OrderActionProjectionRefresher,
+} from "./order-action-projection.ports";
 
 export interface CustomerAccountOrderContext {
   externalOrderId: string;
@@ -36,6 +40,8 @@ export interface CustomerAccountOrderContextReader {
   }): Promise<CustomerAccountOrderContext[]>;
 }
 
+const ACCOUNT_NATIVE_MAX_REFRESH_LAG_MS = 2 * 60_000;
+
 /** Query-only account surface. Shopify owns current money; OMS/WMS enrich the
  * status when present. Historical purchases need no OMS record or edit draft. */
 export class CustomerAccountOrderQueriesService {
@@ -45,6 +51,7 @@ export class CustomerAccountOrderQueriesService {
       connection(): Promise<OrderEditConnection>;
       edits: Pick<OrderEditService, "orderSummaries" | "customerOrderDetails">;
       context: CustomerAccountOrderContextReader;
+      native?: AccountNativeReader;
       actions?: OrderActionProjectionReader;
       actionRefresh?: OrderActionProjectionRefresher;
       progress?: CustomerAccountProgressReader;
@@ -68,44 +75,139 @@ export class CustomerAccountOrderQueriesService {
     return connection;
   }
 
-  async actions(raw: unknown) {
+  async actions(raw: unknown, options: { allowUnavailable?: boolean } = {}) {
     const input = customerAccountOrderSummariesInputSchema.parse(raw);
-    if (!this.dependencies.actions || !this.dependencies.now)
-      throw new OrderEditError(
-        "CUSTOMER_ACCOUNT_ACTIONS_UNAVAILABLE",
-        "Order options are temporarily unavailable. Please try again.",
-        503,
+    try {
+      if (!this.dependencies.actions || !this.dependencies.now)
+        throw new OrderEditError(
+          "CUSTOMER_ACCOUNT_ACTIONS_UNAVAILABLE",
+          "Order options are temporarily unavailable. Please try again.",
+          503,
+        );
+      const principal = this.dependencies.principal;
+      return await this.dependencies.actions.read(
+        {
+          ...input,
+          channelId: principal.channelId,
+          externalCustomerId: principal.externalCustomerId,
+        },
+        this.dependencies.now(),
       );
-    const principal = this.dependencies.principal;
-    return this.dependencies.actions.read(
-      {
-        ...input,
-        channelId: principal.channelId,
-        externalCustomerId: principal.externalCustomerId,
-      },
-      this.dependencies.now(),
-    );
+    } catch (cause) {
+      if (!options.allowUnavailable) throw cause;
+      this.dependencies.report({
+        code: "CUSTOMER_ACCOUNT_ACTIONS_UNAVAILABLE",
+      });
+      return {
+        orders: input.orders.map((identity) => ({
+          ...identity,
+          omsOrderId: null,
+          state: "failed" as const,
+          snapshot: null,
+          verifiedAt: null,
+          validUntil: null,
+        })),
+      };
+    }
   }
 
   async refreshActions(raw: unknown) {
     const input = customerAccountOrderSummariesInputSchema.parse(raw);
     if (!this.dependencies.actionRefresh || !this.dependencies.now)
-      throw new OrderEditError("CUSTOMER_ACCOUNT_ACTIONS_UNAVAILABLE", "Order options are temporarily unavailable. Please try again.", 503);
+      throw new OrderEditError(
+        "CUSTOMER_ACCOUNT_ACTIONS_UNAVAILABLE",
+        "Order options are temporarily unavailable. Please try again.",
+        503,
+      );
     const { channelId, externalCustomerId } = this.dependencies.principal;
-    await this.dependencies.actionRefresh.requestRefresh({ ...input, channelId, externalCustomerId }, this.dependencies.now());
+    await this.dependencies.actionRefresh.requestRefresh(
+      { ...input, channelId, externalCustomerId },
+      this.dependencies.now(),
+    );
     return this.actions(input);
+  }
+
+  private async savedNative(
+    input: import("@shared/customer-account/customer-account-orders").CustomerAccountOrderSummariesInput,
+    connection: OrderEditConnection,
+  ) {
+    if (!this.dependencies.native || !this.dependencies.now)
+      throw new Error("ACCOUNT_NATIVE_READER_UNAVAILABLE");
+    const principal = this.dependencies.principal;
+    const facts = await this.dependencies.native.read({
+      ...input,
+      channelId: principal.channelId,
+      connectionId: connection.connectionId,
+      shopDomain: principal.shopDomain,
+      externalCustomerId: principal.externalCustomerId,
+    });
+    const missing = input.orders.filter(
+      (order) =>
+        !facts.some((fact) => fact.externalOrderId === order.externalOrderId),
+    );
+    const now = this.dependencies.now();
+    const stale = facts.filter(
+      (fact) =>
+        fact.freshThrough.getTime() <
+        now.getTime() - ACCOUNT_NATIVE_MAX_REFRESH_LAG_MS,
+    );
+    const refresh = [
+      ...new Set([
+        ...missing.map((order) => order.externalOrderId),
+        ...stale.map((fact) => fact.externalOrderId),
+      ]),
+    ];
+    if (refresh.length) {
+      // Queue only; never put a Shopify read on the page's critical path.
+      try {
+        await this.dependencies.native.request(
+          {
+            channelId: principal.channelId,
+            externalCustomerId: principal.externalCustomerId,
+            externalOrderIds: refresh,
+          },
+          this.dependencies.now(),
+        );
+      } catch {
+        // Queue availability must not discard already verified display facts.
+        this.dependencies.report({
+          code: "CUSTOMER_ACCOUNT_NATIVE_REFRESH_QUEUE_FAILED",
+        });
+      }
+    }
+    return {
+      stale: stale.length > 0,
+      orders: facts.map(
+        ({
+          externalCustomerId,
+          connectionId: _connection,
+          sourceUpdatedAt: _version,
+          freshThrough: _freshThrough,
+          ...fact
+        }) => ({
+          ...fact,
+          customerId: externalCustomerId
+            ? `gid://shopify/Customer/${externalCustomerId}`
+            : null,
+        }),
+      ),
+    };
   }
 
   async summaries(
     raw: unknown,
-    options: { progress?: boolean } = {},
+    options: { progress?: boolean; saved?: boolean } = {},
   ): Promise<CustomerAccountOrderSummaries> {
     const input = customerAccountOrderSummariesInputSchema.parse(raw);
     const connection = await this.connection();
     const principal = this.dependencies.principal;
     const ids = input.orders.map((order) => order.externalOrderId);
-    const [native, contexts] = await Promise.all([
-      this.dependencies.edits.orderSummaries(connection.connectionId, ids),
+    const [nativeResult, contexts] = await Promise.all([
+      options.saved
+        ? this.savedNative(input, connection)
+        : this.dependencies.edits
+            .orderSummaries(connection.connectionId, ids)
+            .then((orders) => ({ orders, stale: false })),
       this.dependencies.context
         .read({
           channelId: principal.channelId,
@@ -125,9 +227,9 @@ export class CustomerAccountOrderQueriesService {
     const expectedCustomerId = `gid://shopify/Customer/${principal.externalCustomerId}`;
     const orders: CustomerAccountOrderSummary[] = [];
     const unavailableExternalOrderIds: string[] = [];
-    let statusUnavailable = contexts === null;
+    let statusUnavailable = contexts === null || nativeResult.stale;
     for (const requested of input.orders) {
-      const matches = native.filter(
+      const matches = nativeResult.orders.filter(
         (order) => order.externalOrderId === requested.externalOrderId,
       );
       const order = matches.length === 1 ? matches[0] : null;

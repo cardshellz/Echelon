@@ -1,8 +1,17 @@
+import {
+  accountOverviewClient,
+  type AccountDisplay,
+  type AccountOverviewHandoff,
+} from "./account-overview-client";
+import type { CustomerAccountOverview } from "@shared/customer-account/account-overview";
 import { useEffect, useRef, useState, useCallback } from "react";
-import { ACCOUNT_SETTLEMENT_REFRESH_MS, needsCancellationSettlementRefresh } from "./account-settlement-refresh";
+import {
+  ACCOUNT_SETTLEMENT_REFRESH_MS,
+  needsCancellationSettlementRefresh,
+} from "./account-settlement-refresh";
 import type { CustomerOrderActions } from "@shared/customer-account/order-actions";
 import { createRoot } from "react-dom/client";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { DialogPortalContainerContext } from "@/components/ui/dialog";
 import { CustomerWorkspace } from "@/pages/CustomerReturnCustomerPortal";
@@ -81,7 +90,9 @@ function AccountModal({
     <dialog
       ref={dialog}
       className={`csz-account-dialog${choice.kind === "edit" ? "" : " csz-return-dialog"}`}
-      aria-labelledby={choice.kind === "edit" ? "csz-account-dialog-title" : undefined}
+      aria-labelledby={
+        choice.kind === "edit" ? "csz-account-dialog-title" : undefined
+      }
       aria-label={choice.kind === "edit" ? undefined : "Return items"}
       onCancel={(event) => {
         event.preventDefault();
@@ -92,12 +103,8 @@ function AccountModal({
         {choice.kind === "edit" && (
           <header className="csz-dialog-heading">
             <div>
-              <h2 id="csz-account-dialog-title">
-                Edit your order
-              </h2>
-              <p>
-                Update your items, then apply your changes.
-              </p>
+              <h2 id="csz-account-dialog-title">Edit your order</h2>
+              <p>Update your items, then apply your changes.</p>
             </div>
             <button
               type="button"
@@ -110,7 +117,13 @@ function AccountModal({
             </button>
           </header>
         )}
-        <div className={choice.kind === "edit" ? "csz-dialog-body" : "csz-return-dialog-body"}>
+        <div
+          className={
+            choice.kind === "edit"
+              ? "csz-dialog-body"
+              : "csz-return-dialog-body"
+          }
+        >
           {error && (
             <p
               role="alert"
@@ -138,18 +151,20 @@ function AccountModal({
                 }}
               />
             ) : (
-                <CustomerWorkspace
-                  embedded
-                  onBusy={setBusy}
-                  initialOrder={choice.returnOrder}
-                  initialOrderId={choice.kind === "return" ? choice.omsOrderId : undefined}
-                  initialStatus={choice.returnStatus}
-                  sessionKey={session.session.sessionKey!}
-                  transport={returnApi.current}
-                  downloadRequest={api.request}
-                  onDenied={setError}
-                  onSignedOut={onClose}
-                />
+              <CustomerWorkspace
+                embedded
+                onBusy={setBusy}
+                initialOrder={choice.returnOrder}
+                initialOrderId={
+                  choice.kind === "return" ? choice.omsOrderId : undefined
+                }
+                initialStatus={choice.returnStatus}
+                sessionKey={session.session.sessionKey!}
+                transport={returnApi.current}
+                downloadRequest={api.request}
+                onDenied={setError}
+                onSignedOut={onClose}
+              />
             )}
           </DialogPortalContainerContext.Provider>
         </div>
@@ -163,7 +178,13 @@ function CustomerAccount({
   statusTarget,
   signInUrl,
   customerId,
+  initialDisplay,
+  initialOverview,
+  saveDisplay,
 }: {
+  saveDisplay(display: AccountDisplay): void;
+  initialDisplay: AccountDisplay | null;
+  initialOverview: Promise<CustomerAccountOverview> | null;
   root: HTMLElement;
   api: CustomerAccountTransport;
   statusTarget: HTMLElement | null;
@@ -184,12 +205,39 @@ function CustomerAccount({
   } | null>(null);
   const [error, setError] = useState<CustomerAccountAccessNotice | null>(null);
   const [attempt, setAttempt] = useState(0);
-  const [actions, setActions] = useState<ReadonlyMap<HTMLElement, CustomerOrderActions>>(new Map());
+  const [actions, setActions] = useState<
+    ReadonlyMap<HTMLElement, CustomerOrderActions>
+  >(
+    () =>
+      new Map(
+        rows.flatMap((row) => {
+          const action = initialDisplay?.actions.orders.find(
+            (item) => item.externalOrderId === row.dataset.externalOrderId,
+          );
+          return action ? [[row, action] as const] : [];
+        }),
+      ),
+  );
   const [verifiedActions, setVerifiedActions] = useState<ReadonlyMap<HTMLElement, CustomerOrderActions>>(new Map());
   const [actionError, setActionError] = useState(false);
   const [totals, setTotals] = useState<
     ReadonlyMap<HTMLElement, CustomerOrderTotalsState>
-  >(() => new Map(rows.map((row) => [row, { status: "loading" as const }])));
+  >(
+    () =>
+      new Map(
+        rows.map((row) => {
+          const order = initialDisplay?.summaries.orders.find(
+            (item) => item.externalOrderId === row.dataset.externalOrderId,
+          );
+          return [
+            row,
+            order
+              ? { status: "verified" as const, order }
+              : { status: "loading" as const },
+          ];
+        }),
+      ),
+  );
   const [statusFailures, setStatusFailures] = useState<
     ReadonlySet<HTMLElement>
   >(new Set());
@@ -210,6 +258,7 @@ function CustomerAccount({
   const actionGeneration = useRef(0);
   const requestedActionRefreshes = useRef(new Set<string>());
   const settlementReadBusy = useRef(false);
+  const missingAttempts = useRef(0);
 
   const retainActionDisplay = useCallback((incoming: CustomerOrderActions[]) => {
     setVerifiedActions(previous => {
@@ -267,16 +316,31 @@ function CustomerAccount({
   useEffect(() => {
     if (!session) return;
     const controller = new AbortController();
-    const refresh = () => { if (document.visibilityState === "visible") void loadActions(controller.signal); };
-    const expires = [...actions.values()].map(row => row.validUntil ? Date.parse(row.validUntil) : 0).filter(value => value > Date.now());
-    const pending = !actions.size || [...actions.values()].some(row => row.state === "refreshing");
+    const refresh = () => {
+      if (document.visibilityState === "visible")
+        void loadActions(controller.signal);
+    };
+    const expires = [...actions.values()]
+      .map((row) => (row.validUntil ? Date.parse(row.validUntil) : 0))
+      .filter((value) => value > Date.now());
+    const pending =
+      !actions.size ||
+      [...actions.values()].some((row) => row.state === "refreshing");
     // This cheap local lookup observes source invalidations while the page stays
     // visible. Provider refresh scheduling never controls whether a known panel
     // can render, and opening the panel itself still starts no request.
-    const delay = pending ? 5_000 : expires.length ? Math.max(1_000, Math.min(30_000, Math.min(...expires) - Date.now())) : null;
+    const delay = pending
+      ? 5_000
+      : expires.length
+        ? Math.max(1_000, Math.min(30_000, Math.min(...expires) - Date.now()))
+        : null;
     const timer = delay === null ? null : setTimeout(refresh, delay);
     document.addEventListener("visibilitychange", refresh);
-    return () => { controller.abort(); if (timer !== null) clearTimeout(timer); document.removeEventListener("visibilitychange", refresh); };
+    return () => {
+      controller.abort();
+      if (timer !== null) clearTimeout(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
   }, [session, actions, loadActions]);
 
   const loadSummaries = useCallback(
@@ -287,7 +351,8 @@ function CustomerAccount({
       if (!selected.length) return;
       setError(null);
       setTotals((previous) => {
-        if (selected.every(row => previous.get(row)?.status === "verified")) return previous;
+        if (selected.every((row) => previous.get(row)?.status === "verified"))
+          return previous;
         const next = new Map(previous);
         for (const row of selected)
           if (previous.get(row)?.status !== "verified")
@@ -312,11 +377,6 @@ function CustomerAccount({
           signal,
         );
         if (signal?.aborted) return;
-        if (result.unavailableExternalOrderIds.length) {
-          // Do not reveal a partially verified page or blank a previously
-          // verified amount when a refresh cannot account for every row.
-          throw new Error("The current order history could not be verified.");
-        }
         const currentRows = selected.filter(
           (row) => requestGeneration.current.get(row) === generations.get(row),
         );
@@ -329,7 +389,11 @@ function CustomerAccount({
             );
             next.set(
               row,
-              order ? { status: "verified", order } : { status: "failed" },
+              order
+                ? { status: "verified", order }
+                : previous.get(row)?.status === "verified"
+                  ? previous.get(row)!
+                  : { status: "failed" },
             );
           }
           return next;
@@ -370,12 +434,15 @@ function CustomerAccount({
     if (!session) return;
     const controller = new AbortController();
     const refreshVisibleSummaries = () => {
-      if (document.visibilityState !== "visible" || settlementReadBusy.current) return;
+      if (document.visibilityState !== "visible" || settlementReadBusy.current)
+        return;
       settlementReadBusy.current = true;
       // A tab can outlive a backend release or a refund made elsewhere. Refresh
       // its read model on return even if its old summary had no refund activity
       // from which to start settlement polling. This submits no command.
-      void loadSummaries(rows, controller.signal).finally(() => { settlementReadBusy.current = false; });
+      void loadSummaries(rows, controller.signal).finally(() => {
+        settlementReadBusy.current = false;
+      });
     };
     window.addEventListener("focus", refreshVisibleSummaries);
     document.addEventListener("visibilitychange", refreshVisibleSummaries);
@@ -388,25 +455,104 @@ function CustomerAccount({
 
   useEffect(() => {
     if (!session) return;
-    const selected = rows.filter(row => {
+    const selected = rows.filter((row) => {
       const summary = totals.get(row);
-      return needsCancellationSettlementRefresh(summary?.status === "verified" ? summary.order : null, actions.get(row));
+      return needsCancellationSettlementRefresh(
+        summary?.status === "verified" ? summary.order : null,
+        actions.get(row),
+      );
     });
     if (!selected.length) return;
     const controller = new AbortController();
     let stopped = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const observe = async () => {
-      if (document.visibilityState === "visible" && !settlementReadBusy.current) {
+      if (
+        document.visibilityState === "visible" &&
+        !settlementReadBusy.current
+      ) {
         settlementReadBusy.current = true;
-        try { await loadSummaries(selected, controller.signal); }
-        finally { settlementReadBusy.current = false; }
+        try {
+          await loadSummaries(selected, controller.signal);
+        } finally {
+          settlementReadBusy.current = false;
+        }
       }
-      if (!stopped) timer = setTimeout(() => { void observe(); }, ACCOUNT_SETTLEMENT_REFRESH_MS);
+      if (!stopped)
+        timer = setTimeout(() => {
+          void observe();
+        }, ACCOUNT_SETTLEMENT_REFRESH_MS);
     };
-    timer = setTimeout(() => { void observe(); }, ACCOUNT_SETTLEMENT_REFRESH_MS);
-    return () => { stopped = true; controller.abort(); if (timer) clearTimeout(timer); };
+    timer = setTimeout(() => {
+      void observe();
+    }, ACCOUNT_SETTLEMENT_REFRESH_MS);
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
   }, [session, rows, totals, actions, loadSummaries]);
+
+  const missingIdentity = rows.filter(row => totals.get(row)?.status !== "verified")
+    .map(row => row.dataset.externalOrderId).join(",");
+  useEffect(() => {
+    if (!session || !rows.length) return;
+    const missing = rows.filter(
+      (row) => totals.get(row)?.status !== "verified",
+    );
+    if (!missing.length || missingAttempts.current >= 10) return;
+    const controller = new AbortController();
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const schedule = () => {
+      timer = setTimeout(async () => {
+        if (stopped || missingAttempts.current >= 10) return;
+        if (document.visibilityState === "visible") {
+          missingAttempts.current++;
+          await loadSummaries(missing, controller.signal);
+        }
+        if (!stopped && missingAttempts.current < 10) schedule();
+      }, 2_000);
+    };
+    schedule();
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      controller.abort();
+    };
+    // Loading/failed transitions for the same missing identities must not abort
+    // their own in-flight read. Only a changed identity set restarts recovery.
+  }, [session, rows, missingIdentity, loadSummaries]);
+
+  useEffect(() => {
+    if (
+      !session ||
+      !rows.length ||
+      rows.some(
+        (row) => totals.get(row)?.status !== "verified" || !actions.has(row),
+      )
+    )
+      return;
+    const orders = rows.flatMap((row) => {
+      const state = totals.get(row);
+      return state?.status === "verified" ? [state.order] : [];
+    });
+    // Validate the display-only DTO before persisting; editable order responses
+    // are not substituted for a native current-total summary.
+    const display = {
+      summaries: {
+        orders,
+        unavailableExternalOrderIds: [],
+        statusUnavailable: statusFailures.size > 0,
+      },
+      actions: { orders: [...actions.values()] },
+    };
+    try {
+      saveDisplay(display as AccountDisplay);
+    } catch {
+      /* Optional cache; preserve the verified screen. */
+    }
+  }, [session, rows, totals, actions, statusFailures, saveDisplay]);
 
   const closePanel = useCallback(() => setManaged(null), []);
   const closeModal = () => {
@@ -421,10 +567,20 @@ function CustomerAccount({
     if (row) void loadSummaries([row]);
     void loadActions(accountRequests.current?.signal);
     if (session?.session.sessionKey) {
-      const signal = accountRequests.current?.signal ?? new AbortController().signal;
-      void api.returns(session.session.sessionKey).history(null, signal).then(value => {
-        if (!signal.aborted) { setHistory(value); setHistoryError(null); }
-      }).catch(cause => { if (!signal.aborted) setHistoryError(message(cause)); });
+      const signal =
+        accountRequests.current?.signal ?? new AbortController().signal;
+      void api
+        .returns(session.session.sessionKey)
+        .history(null, signal)
+        .then((value) => {
+          if (!signal.aborted) {
+            setHistory(value);
+            setHistoryError(null);
+          }
+        })
+        .catch((cause) => {
+          if (!signal.aborted) setHistoryError(message(cause));
+        });
     }
   };
 
@@ -434,15 +590,74 @@ function CustomerAccount({
     setError(null);
     setSession(null);
     setHistoryError(null);
-    void api
-      .bootstrap(controller.signal)
-      .then((result) => {
+    const input = {
+      orders: rows.map((row) => ({
+        externalOrderId: row.dataset.externalOrderId,
+        orderReference: row.dataset.orderReference,
+      })),
+    };
+    const read = rows.length
+      ? attempt === 0 && initialOverview
+        ? initialOverview.then((value) => api.adoptOverview(value, input))
+        : api.overview(input, controller.signal)
+      : api
+          .bootstrap(controller.signal)
+          .then((bootstrap) => ({
+            bootstrap,
+            summaries: {
+              orders: [],
+              unavailableExternalOrderIds: [],
+              statusUnavailable: false,
+            },
+            actions: { orders: [] },
+          }));
+    void read
+      .then((overview) => {
         if (controller.signal.aborted) return;
+        const result = overview.bootstrap;
         setSession(result);
-        // One small native query covers this page, including purchases predating
-        // OMS. Edit eligibility and return policy checks are demand-loaded.
-        void loadSummaries(rows, controller.signal);
-        void loadActions(controller.signal);
+        setTotals(
+          (previous) =>
+            new Map(
+              rows.map((row) => {
+                const order = overview.summaries.orders.find(
+                  (item) =>
+                    item.externalOrderId === row.dataset.externalOrderId,
+                );
+                return [
+                  row,
+                  order
+                    ? { status: "verified" as const, order }
+                    : previous.get(row)?.status === "verified"
+                      ? previous.get(row)!
+                      : { status: "loading" as const },
+                ];
+              }),
+            ),
+        );
+        retainActionDisplay(overview.actions.orders);
+        setActions(
+          new Map(
+            rows.flatMap((row) => {
+              const action = overview.actions.orders.find(
+                (item) => item.externalOrderId === row.dataset.externalOrderId,
+              );
+              return action ? [[row, action] as const] : [];
+            }),
+          ),
+        );
+        setStatusFailures(
+          new Set(overview.summaries.statusUnavailable ? rows : []),
+        );
+        if (
+          overview.actions.orders.some(
+            (item) =>
+              item.state !== "ready" ||
+              item.snapshot?.orderFailed ||
+              item.snapshot?.returnFailed,
+          )
+        )
+          void loadActions(controller.signal);
         const paymentStorage = orderEditPaymentReturnStorage();
         const paymentReturn =
           paymentStorage &&
@@ -500,7 +715,16 @@ function CustomerAccount({
       controller.abort();
       client.clear();
     };
-  }, [api, rows, attempt, client, customerId, loadSummaries, loadActions, accessSurface]);
+  }, [
+    api,
+    rows,
+    attempt,
+    client,
+    customerId,
+    accessSurface,
+    initialOverview,
+    loadActions,
+  ]);
 
   async function showReturn(
     authorizationId: number,
@@ -539,12 +763,23 @@ function CustomerAccount({
   );
   return (
     <QueryClientProvider client={client}>
-      <CustomerAccountOrderTotals root={root} states={totals} api={api} />
+      <CustomerAccountOrderTotals
+        root={root}
+        states={totals}
+        api={api}
+        onRetry={(row) => {
+          missingAttempts.current = 0;
+          void loadSummaries([row]);
+        }}
+      />
       <CustomerAccountOrderHistory
         root={root}
         states={totals}
         hasAccessError={error !== null}
-        onRetry={() => void loadSummaries(rows)}
+        onRetry={() => {
+          missingAttempts.current = 0;
+          void loadSummaries(rows);
+        }}
       />
       <CustomerAccountOrderStatus states={totals} />
       {rows.flatMap((row) => {
@@ -599,7 +834,9 @@ function CustomerAccount({
             void loadSummaries([managed.row]);
             void loadActions(accountRequests.current?.signal);
           }}
-          onActionRetry={() => { void loadActions(accountRequests.current?.signal, true); }}
+          onActionRetry={() => {
+            void loadActions(accountRequests.current?.signal, true);
+          }}
           onAccessRetry={() => setAttempt((value) => value + 1)}
           onEdit={(omsOrderId) => {
             setManaged(null);
@@ -708,14 +945,60 @@ if (root && mount && configElement) {
     root
       .querySelector<HTMLElement>("[data-csz-order-history-status]")
       ?.replaceChildren();
-    createRoot(mount).render(
-      <CustomerAccount
-        root={root}
-        api={api}
-        statusTarget={statusTarget}
-        signInUrl={signInUrl}
-        customerId={config.customerId}
-      />,
+    const rowElements = Array.from(
+      root.querySelectorAll<HTMLElement>("[data-csz-account-order]"),
+    );
+    const input = {
+      orders: rowElements.map((row) => ({
+        externalOrderId: row.dataset.externalOrderId,
+        orderReference: row.dataset.orderReference,
+      })),
+    };
+    let saveDisplay = (_display: AccountDisplay) => {};
+    let initialDisplay: AccountDisplay | null = null;
+    let initialOverview: Promise<CustomerAccountOverview> | null = null;
+    if (rowElements.length) {
+      let storage: Storage | undefined;
+      try {
+        storage = sessionStorage;
+      } catch {
+        /* Optional display cache. */
+      }
+      const overviewClient = accountOverviewClient(config, input, {
+        storage,
+        now: Date.now,
+        request: fetch,
+        origin: location.origin,
+      });
+      saveDisplay = overviewClient.writeCache;
+      const handoff = document.getElementById(
+        "csz-customer-account-preload",
+      ) as AccountOverviewHandoff | null;
+      if (handoff?.accountOverview?.key === overviewClient.key) {
+        initialDisplay = handoff.accountOverview.display;
+        initialOverview = handoff.accountOverview.request;
+        handoff.dataset.adopted = "true";
+      } else initialDisplay = overviewClient.readCache();
+    }
+    // Transfer painted targets to React in one commit without duplicate labels.
+    root
+      .querySelectorAll(
+        "[data-csz-order-total], [data-csz-order-financial-status], [data-csz-order-fulfillment], [data-csz-order-return-status]",
+      )
+      .forEach((target) => target.replaceChildren());
+    flushSync(() =>
+      createRoot(mount).render(
+        <CustomerAccount
+          root={root}
+          api={api}
+          statusTarget={statusTarget}
+          signInUrl={signInUrl}
+          customerId={config.customerId}
+          initialDisplay={initialDisplay}
+          saveDisplay={saveDisplay}
+          initialOverview={initialOverview}
+        />,
+      ),
     );
   } catch {
     // React has not mounted when page configuration fails validation.
@@ -725,7 +1008,7 @@ if (root && mount && configElement) {
     const history = root.querySelector<HTMLElement>(
       "[data-csz-order-history-content]",
     );
-    if (history) history.hidden = true;
+    if (history) history.hidden = false;
     root
       .querySelectorAll<HTMLElement>(
         "[data-csz-order-total], [data-csz-order-financials]",

@@ -46,6 +46,7 @@ import type {
 } from "./order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
 import { sameOrderEditPlan } from "../domain/order-edit-plan-identity";
+import { resolveOrderEditLinePlan } from "../domain/order-edit-line-plan";
 import { orderEditHasSubmissionEvidence } from "./order-edit-submission";
 import type { OrderEditCodeRedemptions } from "./order-edit-code-redemptions";
 import { requiresOrderEditCodeReceipt } from "../domain/order-edit-coupon-boundary";
@@ -313,7 +314,9 @@ export class OrderEditService {
         editable: warehouse.editable && reasons.length === 0,
         reasons,
       },
-      lines: snapshot.lines.map((line) => ({
+      // Removed Shopify lines remain in the source snapshot and audit evidence,
+      // but cannot be edited as current purchased units.
+      lines: snapshot.lines.filter((line) => line.quantity > 0).map((line) => ({
         lineItemId: line.id,
         variantId: line.variantId,
         title: line.title,
@@ -405,6 +408,15 @@ export class OrderEditService {
       const reasons = orderEditEligibilityReasons(baseline);
       if (reasons.length)
         throw new OrderEditError("ORDER_EDIT_INELIGIBLE", reasons.join(" "));
+      // Reject stale clients targeting historical removed lines before creating
+      // a saved attempt or asking Shopify to prepare a calculated order.
+      resolveOrderEditLinePlan({
+        originals: baseline.lines.filter(line => line.quantity > 0)
+          .map(({id, variantId, quantity}) => ({id, variantId, quantity})),
+        changes: input.changes,
+        additions: input.additions,
+        protectedLineIds: [],
+      });
       const now = this.clock();
       let record: OrderEditRecord = {
         id: this.uuid(),

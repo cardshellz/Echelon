@@ -1,3 +1,5 @@
+import { accountNativeFact, accountNativeNodeSchema, accountNativeObservationNode } from "../../customer-account/infrastructure/shopify-account-native.reader";
+import type { AccountNativeRetainer, AccountNativeObservation } from "../../customer-account/application/account-native-summaries.ports";
 import { matchingRefund, proveRefund } from "./shopify-order-edit-refund-evidence";
 import {
   matchesOrderEditQuote as matchesQuote,
@@ -44,7 +46,7 @@ import {
 import { priceOrderEditPreviewItems } from "../domain/order-edit-preview-pricing";
 import { supportedVariant, stockAvailable } from "../domain/order-edit-variant";
 import { shopifyOrderEditVariantSchema as VARIANT } from "./shopify-order-edit-variant";
-import { cents } from "./shopify-order-edit-money";
+import { cents, shopifyMoneyBagCents as money } from "./shopify-order-edit-money";
 import { CUSTOMER_ACCOUNT_ORDER_PAGE_SIZE } from "@shared/customer-account/customer-account-orders";
 import {
   shopifyOrderEditTaxLineSchema,
@@ -178,6 +180,7 @@ const ORDER = z.object({
   id: TEXT,
   name: TEXT,
   updatedAt: z.string().datetime(),
+  displayFinancialStatus: accountNativeNodeSchema.shape.displayFinancialStatus.optional(),
   merchantEditable: z.boolean(),
   merchantEditableErrors: z.array(z.string()),
   cancelledAt: z.string().nullable(),
@@ -328,6 +331,8 @@ export class ShopifyOrderEditProvider
       memberPresentation?: MemberPlanPresentationReader;
       codeHistory?: OrderEditCodeHistory;
       rewards?: OrderEditRewards;
+      accountSummaries?: AccountNativeRetainer;
+      reportAccountSummaryFailure?: (error: import("../application/order-edit-diagnostics").OrderEditDiagnosticError) => void;
     },
   ) {
     this.fetchImpl = options.fetch ?? fetch;
@@ -384,6 +389,154 @@ export class ShopifyOrderEditProvider
     return { done: job.done, failed: job.status === "FAILED", orderId: job.order?.id ?? null };
   }
 
+  /** Background-only purchase facts. This performs no mutation or eligibility calculation. */
+  async accountNativeByIds(connectionId: number, externalOrderIds: string[]) {
+    const ids = z
+      .array(
+        z
+          .string()
+          .regex(/^[1-9][0-9]*$/)
+          .max(30),
+      )
+      .min(1)
+      .max(20)
+      .parse(externalOrderIds);
+    if (new Set(ids).size !== ids.length)
+      fail("ACCOUNT_ORDER_IDENTITIES_INVALID", "Duplicate order identities.");
+    const credentials = await this.credentials(connectionId);
+    const startedAt = this.options.clock();
+    const result = z
+      .object({ nodes: z.array(z.unknown().nullable()).length(ids.length) })
+      .parse(
+        await this.request(credentials, gql.ACCOUNT_SUMMARIES_QUERY, {
+          ids: ids.map((id) => gid("Order", id)),
+        }),
+      );
+    const facts: AccountNativeObservation["facts"][number][] = [];
+    const failures: NonNullable<
+      AccountNativeObservation["failures"]
+    >[number][] = [];
+    for (const [index, node] of result.nodes.entries()) {
+      if (node === null) continue;
+      const observed = accountNativeObservationNode(credentials, node);
+      if (observed.externalOrderId !== ids[index])
+        fail("ORDER_IDENTITY_MISMATCH", "Shopify returned a different order.");
+      if (observed.fact) facts.push(observed.fact);
+      if (observed.failure) failures.push(observed.failure);
+    }
+    return { facts, failures, startedAt, finishedAt: this.options.clock() };
+  }
+
+  async accountNativePage(
+    connectionId: number,
+    after: string | null,
+    since: Date | null,
+  ) {
+    z.string()
+      .regex(/^[1-9][0-9]*$/)
+      .max(30)
+      .nullable()
+      .parse(after);
+    if (since) z.date().parse(since);
+    const credentials = await this.credentials(connectionId);
+    const startedAt = this.options.clock();
+    if (after === null && since === null) {
+      const access = z
+        .object({
+          currentAppInstallation: z.object({
+            accessScopes: z.array(z.object({ handle: z.string() })).max(250),
+          }),
+        })
+        .parse(
+          await this.request(
+            credentials,
+            `query EchelonAccountHistoryAccess { currentAppInstallation { accessScopes { handle } } }`,
+            {},
+          ),
+        );
+      const scopes = access.currentAppInstallation.accessScopes.map(
+        (scope) => scope.handle,
+      );
+      if (
+        !scopes.includes("read_all_orders") ||
+        !scopes.some(
+          (scope) => scope === "read_orders" || scope === "write_orders",
+        )
+      )
+        fail(
+          "ACCOUNT_HISTORY_SCOPE_MISSING",
+          "Historical account warming requires read_all_orders and order read access.",
+        );
+    }
+    const result = z
+      .object({
+        orders: z.object({
+          nodes: z.array(z.unknown()).max(100),
+          pageInfo: z.object({ hasNextPage: z.boolean() }),
+        }),
+      })
+      .parse(
+        await this.request(credentials, gql.ACCOUNT_NATIVE_PAGE_QUERY, {
+          after: null,
+          search:
+            [
+              since ? `updated_at:>=\"${since.toISOString()}\"` : null,
+              after ? `id:>${after}` : null,
+            ]
+              .filter(Boolean)
+              .join(" AND ") || null,
+          sort: "ID",
+        }),
+      );
+    const observed = result.orders.nodes.map((node) =>
+      accountNativeObservationNode(credentials, node),
+    );
+    // Seek by native ID, not a deep opaque cursor: large histories must not
+    // hit Shopify's pagination ceiling. Changes behind this seek are revisited.
+    let previous = after === null ? BigInt(0) : BigInt(after);
+    for (const item of observed) {
+      if (BigInt(item.externalOrderId) <= previous)
+        fail(
+          "ACCOUNT_CURSOR_INVALID",
+          "The purchase history ID did not advance.",
+        );
+      previous = BigInt(item.externalOrderId);
+    }
+    if (result.orders.pageInfo.hasNextPage && !observed.length)
+      fail(
+        "ACCOUNT_CURSOR_INVALID",
+        "The purchase history page did not advance.",
+      );
+    return {
+      observation: {
+        facts: observed.flatMap((item) => (item.fact ? [item.fact] : [])),
+        failures: observed.flatMap((item) =>
+          item.failure ? [item.failure] : [],
+        ),
+        startedAt,
+        finishedAt: this.options.clock(),
+      },
+      after: result.orders.pageInfo.hasNextPage
+        ? observed.at(-1)!.externalOrderId
+        : null,
+    };
+  }
+
+  private async retainAccountObservation(
+    observation: () => AccountNativeObservation,
+  ): Promise<void> {
+    if (!this.options.accountSummaries) return;
+    try {
+      await this.options.accountSummaries.retain(observation());
+    } catch (cause) {
+      // Presentation storage must not turn an already verified order command
+      // into a financial failure. The durable delta scan repairs missed facts.
+      this.options.reportAccountSummaryFailure?.(
+        orderEditDiagnosticError(cause),
+      );
+    }
+  }
+
   async readOrderSummaries(connectionId: number, externalOrderIds: readonly string[]) {
     const ids = z.array(z.string().max(30).regex(/^[1-9]\d*$/)).min(1).max(CUSTOMER_ACCOUNT_ORDER_PAGE_SIZE).parse(externalOrderIds);
     if (new Set(ids).size !== ids.length) fail("ACCOUNT_ORDER_IDENTITIES_INVALID", "Duplicate order identities are not allowed.");
@@ -412,6 +565,7 @@ export class ShopifyOrderEditProvider
     expectedCustomerId?: string,
     expectedShopDomain?: string,
   ): Promise<OrderEditSnapshot> {
+    const startedAt = this.options.clock();
     const credentials = await this.credentials(connectionId);
     if (expectedShopDomain !== undefined && credentials.shopDomain !== expectedShopDomain)
       fail("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.");
@@ -431,6 +585,9 @@ export class ShopifyOrderEditProvider
     // Customer reads must prove ownership before reward/code-history enrichment.
     if (expectedCustomerId !== undefined && order.customer?.id !== expectedCustomerId)
       fail("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.");
+    if (order.displayFinancialStatus) await this.retainAccountObservation(() => ({
+      facts: [accountNativeFact(credentials, order)], startedAt, finishedAt: this.options.clock(),
+    }));
     complete(order.lineItems);
     complete(order.discountApplications);
     complete(order.shippingLines);
@@ -3309,16 +3466,6 @@ function decimal(value: number): string {
     fail("MONEY_INVALID", "A nonnegative integer-cents amount is required.");
   const exact = BigInt(value);
   return `${exact / BigInt(100)}.${String(exact % BigInt(100)).padStart(2, "0")}`;
-}
-function money(value: z.infer<typeof BAG>, signed = false): number {
-  const presentment = cents(value.presentmentMoney.amount, signed);
-  const shop = cents(value.shopMoney.amount, signed);
-  if (presentment !== shop)
-    fail(
-      "CURRENCY_CONVERSION_UNSUPPORTED",
-      "Shop and presentment amounts must match for this pilot.",
-    );
-  return presentment;
 }
 function subtract(left: number, right: number) {
   const result = left - right;

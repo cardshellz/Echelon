@@ -1146,6 +1146,8 @@
   "oms.customer_order_action_invalidations": [
     "modules/customer-account"
   ],
+  "oms.customer_account_native_summaries": ["modules/customer-account"],
+  "oms.customer_account_native_cursors": ["modules/customer-account"],
   "oms.customer_order_actions": [
     "modules/customer-account"
   ],

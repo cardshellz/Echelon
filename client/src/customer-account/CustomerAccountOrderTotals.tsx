@@ -69,10 +69,12 @@ export function CustomerAccountOrderTotals({
   root,
   states,
   api,
+  onRetry,
 }: {
   root: HTMLElement;
   states: ReadonlyMap<HTMLElement, CustomerOrderTotalsState>;
   api: CustomerAccountTransport;
+  onRetry?(row: HTMLElement): void;
 }) {
   return (
     <>
@@ -87,9 +89,21 @@ export function CustomerAccountOrderTotals({
         const portals = targets.map((target, index) =>
           createPortal(
             <span>
-              {order
-                ? `${formatOrderEditMoney(order.totalCents, order.currency)} ${order.currency}`
-                : null}
+              {order ? (
+                `${formatOrderEditMoney(order.totalCents, order.currency)} ${order.currency}`
+              ) : pending ? (
+                <span role="status" aria-label="Loading order total">
+                  —
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="csz-account-link"
+                  onClick={() => onRetry?.(row)}
+                >
+                  Retry total
+                </button>
+              )}
             </span>,
             target,
             `${row.dataset.externalOrderId}:total:${index}`,

@@ -1,3 +1,4 @@
+import { PostgresAccountNativeSummaries } from "./account-native-summaries.repository";
 import type { Pool } from "pg";
 import { CustomerAccountProgressService } from "../application/customer-account-progress.service";
 import { PostgresCustomerOrderDeliveryReader } from "../../shipping/customer-order-delivery.reader";
@@ -46,6 +47,7 @@ export function customerAccountServices(pool: Pool, edits: OrderEditService) {
         edits,
         connection: () => customerEdits.connection(),
         context: new PostgresCustomerAccountOrderContextReader(pool),
+        native: new PostgresAccountNativeSummaries(pool),
         actions: new PostgresOrderActionProjectionStore(pool),
         actionRefresh: new PostgresOrderActionProjectionStore(pool),
         progress: new CustomerAccountProgressService({
