@@ -46,6 +46,7 @@ export async function runReturnWorkflowAcceptance(env: NodeJS.ProcessEnv): Promi
   delete isolatedEnv.DATABASE_URL; delete isolatedEnv.EXTERNAL_DATABASE_URL; delete isolatedEnv.BROWSER_FEATURE;
   run(["node_modules/vitest/vitest.mjs", "run", ...UNIT_FILES, "--no-file-parallelism", "--allowOnly=false"], isolatedEnv);
   run(["node_modules/vite/bin/vite.js", "build", "--config", "vite.customer-account.config.ts"], isolatedEnv);
+  run(["node_modules/vite/bin/vite.js", "build", "--config", "vite.customer-account-preload.config.ts"], isolatedEnv);
   run(["node_modules/@playwright/test/cli.js", "test", "--config", "playwright.returns-preview.config.ts",
     "returns-customer.spec.ts", "returns-account-layout.spec.ts", "--forbid-only"], isolatedEnv);
 }

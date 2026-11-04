@@ -63,6 +63,48 @@ function fixture() {
   return { service, edits, context, report };
 }
 describe("owned, query-only account history", () => {
+  it("preserves known native amounts when queuing a different cold order fails", async () => {
+    const h = fixture(); const now = new Date("2026-11-03T12:00:00Z");
+    const native = { read: vi.fn(async () => [{ ...identity, channelId: 2, connectionId: 4, shopDomain: principal.shopDomain,
+      externalCustomerId: "100", sourceUpdatedAt: now.toISOString(), freshThrough: now, currency: "USD" as const, totalCents: 0, financialStatus: "Refunded", cancelled: true }]),
+      request: vi.fn(async () => { throw new Error("Synthetic queue outage"); }) };
+    const service = new CustomerAccountOrderQueriesService({ principal, connection: async () => connection, edits: h.edits, context: h.context, native, now: () => now, report: h.report });
+    const result = await service.summaries({ orders: [identity, { externalOrderId: "100", orderReference: "#OTHER" }] }, { saved: true });
+    expect(result.orders[0].totalCents).toBe(0); expect(result.unavailableExternalOrderIds).toEqual(["100"]);
+    expect(h.report).toHaveBeenCalledWith({ code: "CUSTOMER_ACCOUNT_NATIVE_REFRESH_QUEUE_FAILED" });
+    expect(h.edits.orderSummaries).not.toHaveBeenCalled();
+  });
+
+  it("keeps saved totals usable when only the options lookup fails", async () => {
+    const h = fixture();
+    const service = new CustomerAccountOrderQueriesService({ principal, connection: async () => connection, edits: h.edits, context: h.context,
+      actions: { read: async () => { throw new Error("Synthetic options outage"); } }, now: () => new Date("2026-11-03T12:00:00Z"), report: h.report });
+    expect(await service.actions({ orders: [identity] }, { allowUnavailable: true })).toEqual({ orders: [{ ...identity, omsOrderId: null, state: "failed", snapshot: null, verifiedAt: null, validUntil: null }] });
+    await expect(service.actions({ orders: [identity] })).rejects.toThrow("Synthetic options outage");
+    expect(h.report).toHaveBeenCalledWith({ code: "CUSTOMER_ACCOUNT_ACTIONS_UNAVAILABLE" });
+  });
+
+  it("uses saved native money for the new overview without a Shopify read, including no-OMS history", async () => {
+    const h = fixture();
+    const native = { read: vi.fn(async () => [{ ...summary, connectionId: 4, externalCustomerId: "100", freshThrough: new Date("2026-11-03T12:00:00Z"), sourceUpdatedAt: "2026-11-03T12:00:00Z" }]), request: vi.fn(async () => {}) };
+    // The cache port returns persisted native facts, not customerId/GID fields.
+    native.read.mockResolvedValue([{ externalOrderId: identity.externalOrderId, orderReference: identity.orderReference, channelId: 2, connectionId: 4,
+      shopDomain: principal.shopDomain, externalCustomerId: "100", freshThrough: new Date("2026-11-03T12:00:00Z"), sourceUpdatedAt: "2026-11-03T12:00:00Z", currency: "USD", totalCents: 0, financialStatus: "Refunded", cancelled: true }] as never);
+    const service = new CustomerAccountOrderQueriesService({ principal, connection: async () => connection, edits: h.edits, context: h.context,
+      native: native as never, now: () => new Date("2026-11-03T12:00:00Z"), report: h.report });
+    const result = await service.summaries({ orders: [identity] }, { saved: true });
+    expect(result.orders).toEqual([{ ...identity, totalCents: 0, currency: "USD", cancelled: true, financialStatus: "Refunded", omsOrderId: null }]);
+    expect(h.edits.orderSummaries).not.toHaveBeenCalled(); expect(h.edits.customerOrderDetails).not.toHaveBeenCalled();
+    expect(native.request).not.toHaveBeenCalled();
+  });
+  it("queues a cold miss without a synchronous provider fallback or guessed total", async () => {
+    const h = fixture(); const now = new Date("2026-11-03T12:00:00Z");
+    const native = { read: vi.fn(async () => []), request: vi.fn(async () => {}) };
+    const service = new CustomerAccountOrderQueriesService({ principal, connection: async () => connection, edits: h.edits, context: h.context, native, now: () => now, report: h.report });
+    expect(await service.summaries({ orders: [identity] }, { saved: true })).toEqual({ orders: [], unavailableExternalOrderIds: [identity.externalOrderId], statusUnavailable: false });
+    expect(native.request).toHaveBeenCalledWith({ channelId: 2, externalCustomerId: "100", externalOrderIds: [identity.externalOrderId] }, now);
+    expect(h.edits.orderSummaries).not.toHaveBeenCalled();
+  });
   it("explicit recovery queues only presentation work for the signed principal and rereads locally",async()=>{
     const h=fixture();const actions={read:vi.fn(async()=>({orders:[]}))};
     const actionRefresh={requestRefresh:vi.fn(async()=>{})};const connect=vi.fn(async()=>connection);
