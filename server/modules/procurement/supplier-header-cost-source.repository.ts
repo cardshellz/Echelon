@@ -100,4 +100,3 @@ export async function readSupplierHeaderSources(tx: CostEvidenceTransaction, tar
   }
   return result;
 }
-
