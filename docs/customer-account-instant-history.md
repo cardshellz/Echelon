@@ -101,12 +101,9 @@ main are preserved.
 
 ## Release sequence
 
-1. Create the draft backend PR, then allocate the real migration identity with
-   `scripts/migrations/create-migration.mjs`. Move
-   `server/modules/customer-account/infrastructure/account-native-summaries.sql`
-   into that allocated migration and update the integration test's DDL path.
-   Do not invent a PR number or deploy the unallocated template. There must be
-   one deployed DDL owner, not duplicate SQL copies.
+1. Apply `migrations/900000054000020010001_customer_account_native_summaries.sql` through the normal migration release. Its metadata was allocated to backend PR #2001.
+   The integration tests execute this exact forward-only DDL; there is no separate
+   SQL template or second schema owner.
 2. Run the required checks on the final PR head and deploy the backend/migration
    before changing the theme. Deployment starts read-model maintenance for the
    configured enabled stores; no live scan was run during this implementation.

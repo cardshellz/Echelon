@@ -27,7 +27,7 @@ integration("native account facts without an OMS dependency", () => {
       CREATE TABLE channels.channels(id int PRIMARY KEY,provider text,status text);
       CREATE TABLE channels.channel_connections(id int PRIMARY KEY,channel_id int,shop_domain text,expires_at timestamptz);
       CREATE TABLE oms.oms_orders(id int PRIMARY KEY,channel_id int,external_order_id text,external_customer_id text);`);
-    await pool.query(readFileSync("server/modules/customer-account/infrastructure/account-native-summaries.sql", "utf8"));
+    await pool.query(readFileSync("migrations/900000054000020010001_customer_account_native_summaries.sql", "utf8"));
     store = new PostgresAccountNativeSummaries(pool, [fact.shopDomain]);
   });
   beforeEach(async () => {
