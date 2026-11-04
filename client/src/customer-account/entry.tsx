@@ -218,7 +218,13 @@ function CustomerAccount({
         }),
       ),
   );
-  const [verifiedActions, setVerifiedActions] = useState<ReadonlyMap<HTMLElement, CustomerOrderActions>>(new Map());
+  const [verifiedActions, setVerifiedActions] = useState<ReadonlyMap<HTMLElement, CustomerOrderActions>>(() =>
+    new Map(rows.flatMap(row => {
+      const cached = initialDisplay?.actions.orders.find(item => item.externalOrderId === row.dataset.externalOrderId);
+      const retained = cached ? retainedOrderActions(cached) : null;
+      return retained ? [[row, retained] as const] : [];
+    })),
+  );
   const [actionError, setActionError] = useState(false);
   const [totals, setTotals] = useState<
     ReadonlyMap<HTMLElement, CustomerOrderTotalsState>
