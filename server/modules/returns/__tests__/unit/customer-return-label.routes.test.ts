@@ -30,7 +30,6 @@ const PDF = Buffer.from("%PDF-1.7\nsynthetic private label\n%%EOF");
 const admin = () => ({
   id: "admin-1",
   active: 1,
-  role: "admin",
   roles: [{ name: "Administrator", isSystem: 1 }],
 });
 type IdentityReader = NonNullable<
@@ -240,6 +239,7 @@ describe("private customer return label HTTP boundaries", () => {
     "customer",
     "inactive",
     "demoted",
+    "unassigned",
     "non-system-admin",
     "wrong-identity",
   ])(
@@ -248,7 +248,8 @@ describe("private customer return label HTTP boundaries", () => {
       if (kind === "anonymous") session = {};
       else if (kind === "customer") session = { customer: { id: "admin-1" } };
       else if (kind === "inactive") identity = { ...admin(), active: 0 };
-      else if (kind === "demoted") identity = { ...admin(), role: "picker" };
+      else if (kind === "demoted") identity = { ...admin(), roles: [{ name: "Picker", isSystem: 1 }] };
+      else if (kind === "unassigned") identity = { ...admin(), roles: [] };
       else if (kind === "non-system-admin")
         identity = {
           ...admin(),
@@ -271,6 +272,16 @@ describe("private customer return label HTTP boundaries", () => {
       expectNoOperations();
     },
   );
+
+  it("rejects obsolete legacy-role identity metadata without constructing a label service", async () => {
+    identity = { ...admin(), role: "admin" };
+    const response = await request(DOWNLOAD);
+    expect(response.status).toBe(503);
+    expect(response.body.error.code).toBe("RETURN_PREVIEW_UNAVAILABLE");
+    expectPrivate(response);
+    expect(resolveServices).not.toHaveBeenCalled();
+    expectNoOperations();
+  });
 
   it("rereads current administrator identity on status, progress, and private downloads", async () => {
     // Cached roles cannot grant or remove authority; only the session ID is trusted.

@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import type { Page } from "@playwright/test";
 import { generatePurchasingRecommendations } from "../../server/modules/procurement/purchasing-recommendation.engine";
 import { defaultPurchasePlanningPolicy } from "../../shared/procurement/purchase-planning-policy";
@@ -58,7 +59,9 @@ const emptyPipelineHealth = purchaseRecommendationPipelineHealthSchema.parse({
 
 export async function setupPlanning(page: Page, bundleReview = false) {
   const failures = await installFixtures(page);
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" }, permissions: ["purchasing:view", "purchasing:edit"], roles: ["admin"] } }));
+  // The real reorder-analysis endpoint requires inventory:view; the legacy
+  // admin-only route gate previously hid this missing positive-fixture grant.
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: "test-user", username: "test", role: "admin" }, permissions: ["inventory:view", "purchasing:view", "purchasing:edit"], systemRoles: ["admin"] }) }));
   await page.route("**/api/purchasing/forecast-backtests?*", (route) => route.fulfill({ json: emptyAccuracyReport }));
   await page.route("**/api/procurement/health/recommendation-pipeline", (route) => route.fulfill({ json: emptyPipelineHealth }));
   const policy = { ...defaultPurchasePlanningPolicy(), growthPercent: 25, products: [{ productId: 10, essential: true, minimumStockPieces: 100, targetCoverDays: 180, leadTimeStages: null }] };

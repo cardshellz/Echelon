@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 // UI contract for the Run report page (design surface 04, /procurement/runs).
 // Pattern follows procurement-automation-ui-contract.test.ts: pin the
 // load-bearing strings so a refactor cannot silently drop a frozen server
-// contract — the route + roles, the endpoints the page consumes, the
+// contract - the route + read permission, the endpoints the page consumes, the
 // READ-ONLY invariant (this page performs no mutations at all), the
 // summary_json-derived fields it renders from normalizeAutoDraftRun, and the
 // engine tab-strip state across all three shipped pages.
@@ -29,11 +29,14 @@ const automationPage = readFileSync(
 );
 
 describe("procurement runs UI contract", () => {
-  it("is registered at /procurement/runs for admin/lead", () => {
-    expect(app).toContain('path="/procurement/runs"');
-    expect(app).toMatch(
-      /procurement\/runs"[\s\S]{0,300}component=\{ProcurementRuns\}[\s\S]{0,100}allowedRoles=\{\["admin", "lead"\]\}/,
+  it("protects /procurement/runs with the server's inventory read permission", () => {
+    const route = app.match(/<Route path="\/procurement\/runs">([\s\S]*?)<\/Route>/)?.[1];
+    expect(route).toBeDefined();
+    expect(route).toMatch(
+      /<ProtectedRoute\s+component=\{ProcurementRuns\}\s+requiredPermission=\{\{\s*resource: "inventory",\s*action: "view"\s*\}\}\s*\/>/,
     );
+    expect(route).not.toContain("allowedRoles");
+    expect(routes).toContain('app.get("/api/purchasing/auto-draft/runs", requirePermission("inventory", "view")');
   });
 
   it("consumes the real run-report read endpoints", () => {

@@ -143,7 +143,33 @@ describe("page size boundaries", () => {
   });
 });
 
+function hasProtectedPageReadWiring(handlers: readonly ts.Expression[]): boolean {
+  const namedCall = (node: ts.Expression | undefined, name: string) => node !== undefined
+    && ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === name;
+  const isAuthentication = (node: ts.Expression | undefined) => node !== undefined
+    && ((ts.isIdentifier(node) && node.text === "requireAuth") || namedCall(node, "requirePermission"));
+  if (handlers.length < 2 || !isAuthentication(handlers[0])
+    || !namedCall(handlers[handlers.length - 1], "limitPageRead")) return false;
+  // Additional authorization belongs before the limited handler, never outside it
+  // or in place of the initial current-identity/capability check.
+  return handlers.slice(1, -1).every(node => isAuthentication(node) || namedCall(node, "requireAssignedSystemRole"));
+}
+
 describe("page protection wiring", () => {
+  it.each([
+    ["requireAuth, limitPageRead(handler)", true],
+    ['requirePermission("orders", "view"), limitPageRead(handler)', true],
+    ['requireAuth, requireAssignedSystemRole("admin", "lead"), limitPageRead(handler)', true],
+    ["limitPageRead(handler), requireAuth", false],
+    ["handler, limitPageRead(handler)", false],
+    ["requireAuth, unboundedHandler, limitPageRead(handler)", false],
+    ["requireAuth, limitPageRead(handler), unboundedHandler", false],
+  ])("validates the complete authentication-to-limiter sequence: %s", (chain, expected) => {
+    const source = ts.createSourceFile("fixture.ts", `route(${chain});`, ts.ScriptTarget.Latest, true);
+    const statement = source.statements[0];
+    if (!ts.isExpressionStatement(statement) || !ts.isCallExpression(statement.expression)) throw new Error("Invalid guard fixture");
+    expect(hasProtectedPageReadWiring(statement.expression.arguments)).toBe(expected);
+  });
   it.each([
     ["server/modules/channels/channels.routes.ts", ["/api/wms/orders", "/api/channel-allocation/grid"]],
     ["server/modules/orders/picking.routes.ts", ["/api/picking/queue", "/api/orders", "/api/orders/history"]],
@@ -156,10 +182,9 @@ describe("page protection wiring", () => {
     const protectedRoutes: string[] = [];
     const visit = (node: ts.Node) => {
       if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === "get") {
-        const [url, auth, handler] = node.arguments;
+        const [url, ...handlers] = node.arguments;
         if (url && ts.isStringLiteral(url) && (routes as readonly string[]).includes(url.text)) {
-          expect(auth.getText(source)).toMatch(/^require(Auth|Permission)/);
-          expect(ts.isCallExpression(handler) && handler.expression.getText(source) === "limitPageRead").toBe(true);
+          expect(hasProtectedPageReadWiring(handlers)).toBe(true);
           protectedRoutes.push(url.text);
         }
       }

@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -25,15 +26,11 @@ async function setup(page: Page) {
       return route.fulfill({ json: null });
     }
     if (request.method() === "GET" && path === "/api/auth/me") {
-      return route.fulfill({ json: {
-        user: { id: "operator-1", username: "operator", role: "admin" },
-        permissions: [
+      return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator-1", username: "operator", role: "admin" }, permissions: [
           "inventory_planning:view",
           "inventory_planning:edit",
           "inventory_planning:activate",
-        ],
-        roles: ["admin"],
-      } });
+        ], systemRoles: ["admin"] }) });
     }
     if (request.method() === "GET" && path === "/api/inventory-planning/runtime-authority") {
       return route.fulfill({ json: {

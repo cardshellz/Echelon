@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -35,11 +36,7 @@ async function setup(
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (request.method() === "GET" && path === "/api/auth/me") {
-      return route.fulfill({ json: {
-        user: { id: "operator-1", username: "operator", role: "admin" },
-        permissions: ["channels:view", "channels:edit", "channels:create", "inventory:view", "inventory:edit", "inventory_planning:view"],
-        roles: ["admin"],
-      } });
+      return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator-1", username: "operator", role: "admin" }, permissions: ["channels:view", "channels:edit", "channels:create", "inventory:view", "inventory:edit", "inventory_planning:view"], systemRoles: ["admin"] }) });
     }
     if (request.method() === "GET" && path === "/api/inventory-planning/runtime-authority") {
       if (authority === "unavailable") {

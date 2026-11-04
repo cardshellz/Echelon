@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 import { returnResult, returnCreditReview, returnCreditReviewResult } from "../fixtures/supplier-return";
@@ -6,7 +7,7 @@ async function setup(page: Page) {
   const failures = await installFixtures(page);
   const state = { actor: "ap-reader", approve: true, failed: false, mode: "ok", review: returnCreditReview(), requests: [] as Array<{ key: string; body: SupplierReturnCreditReviewInput }>, records: new Map<string, SupplierReturnCreditReviewCommandResult>() };
   const detail = returnResult().return; detail.lines[0].creditLinks = [{ creditId: 19, creditLineId: 191, sourceInvoiceId: 71, supplierReference: "CN-COMBINED", status: "approved", entitlementId: 111, quantity: 2, component: "unassigned", amountCents: 200 }];
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: state.actor, username: state.actor, role: "admin" }, permissions: ["purchasing:view", ...(state.approve ? ["purchasing:approve"] : [])], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: state.actor, username: state.actor, role: "admin" }, permissions: ["purchasing:view", ...(state.approve ? ["purchasing:approve"] : [])], systemRoles: ["admin"] }) }));
   await page.route("**/api/supplier-returns/9", route => route.fulfill({ json: detail }));
   await page.route("**/api/supplier-return-entitlements/111/review", route => {
     if (route.request().method() === "GET") return state.failed ? route.fulfill({ status: 503, json: { error: "Unavailable" } }) : route.fulfill({ json: state.review });

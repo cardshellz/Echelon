@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import type { Page } from "@playwright/test";
 import {
   CustomerReturnPreviewError,
@@ -86,16 +87,12 @@ export async function installReturnPreviewFixtures(
     }
   });
   function authBody(currentRole: string) {
-    return {
-      user: {
+    return staffAuthorityFixture({ user: {
         id: `preview-test-${currentRole}`,
         username: "preview-test",
         role: currentRole,
         active: 1,
-      },
-      permissions: [],
-      roles: currentRole === "admin" ? ["Administrator"] : [],
-    };
+      }, permissions: [], systemRoles: currentRole === "admin" ? ["admin"] : [] });
   }
 
   page.on("pageerror", (error) => failures.push(error.message));

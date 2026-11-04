@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page, type Route } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 import { invoiceSourceFixture } from "../fixtures/invoice-source";
@@ -9,7 +10,7 @@ type Mode = "ok" | "lost" | "auth" | "mismatch" | "reject";
 async function setup(page: Page) {
   const failures = await installFixtures(page);
   const state = { actor: "ap-reader", canApprove: true, mode: "ok" as Mode, detailFailed: false, invoicesFailed: false, payment: paymentFixture() as any, requests: [] as Array<{ operation: string; key: string; body: any }>, records: new Map<string,any>(), queries: [] as URLSearchParams[] };
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: state.actor, username: state.actor, role: "admin" }, permissions: ["purchasing:view",...(state.canApprove ? ["purchasing:approve"] : [])],roles:["admin"] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: state.actor, username: state.actor, role: "admin" }, permissions: ["purchasing:view",...(state.canApprove ? ["purchasing:approve"] : [])],systemRoles: ["admin"] }) }));
   await page.route("**/api/vendors",route=>route.fulfill({json:[{id:2,name:"Test supplier"}]}));
   await page.route("**/api/ap/command-events?*",route=>route.fulfill({json:{events:[]}}));
   await page.route("**/api/ap-payments/work-list?*",route=>route.fulfill({json:workListPage([paymentListItem(state.payment)],route.request().url())}));

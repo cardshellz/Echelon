@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 import type { PoShipmentCosts } from "../../shared/procurement/po-shipment-costs";
@@ -83,7 +84,7 @@ async function installCostFixtures(page: Page, approver = true) {
   const failures = await installFixtures(page);
   await page.route("**/api/auth/me", (route) =>
     route.fulfill({
-      json: {
+      json: staffAuthorityFixture({
         user: {
           id: "test-user",
           username: "test",
@@ -92,8 +93,8 @@ async function installCostFixtures(page: Page, approver = true) {
         permissions: approver
           ? ["purchasing:view", "purchasing:approve"]
           : ["purchasing:view"],
-        roles: approver ? ["admin"] : ["lead"],
-      },
+        systemRoles: approver ? ["admin"] : ["lead"],
+      }),
     }),
   );
   await page.route("**/api/purchase-orders/17", (route) =>

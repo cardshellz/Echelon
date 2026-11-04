@@ -67,6 +67,19 @@ failure preserve prior metadata/history and roll back incomplete DDL. These test
 an existing disposable owner/superuser and do not establish actual runtime least privilege.
 Current hosted results belong to the exact PR head, not these historical local counts.
 
+The first hosted run exposed tests still relying on legacy role labels or incomplete
+identity responses. The follow-up changes test fixtures and assertions only: explicit
+assigned-role metadata, in-place access-denied UI, and separate HTTP/direct-command
+denial proofs. Permission restrictions and unchanged-business-record assertions remain.
+The shared browser fixture validates the public authority schema and never derives
+assignments or grants from the legacy label. Independent review found no weakened checks.
+This follow-up passed 397 unit/guard cases, 498 PostgreSQL cases in the two affected
+suites, 162 focused mocked-browser cases, 36 connected desktop/mobile cases and all
+four application/test typechecks. Counts overlap earlier coverage and are not additive.
+Connected tests use synthetic sessions/data, not deployed accounts or production evidence.
+One unrelated isolated Dropship finance dialog timeout did not reproduce in six local
+attempts; its hosted outcome still requires observation on the final head.
+
 The access-administration use cases own account/role changes, membership replacement and
 permission replacement. `runIdentityAdministration` enforces current actor authority,
 management coverage and transactional audit. `readIdentityAccessPreflight` reports the

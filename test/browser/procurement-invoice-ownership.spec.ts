@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
@@ -9,7 +10,7 @@ const emptyInvoices = { invoices: [], summary: { totalInvoicedCents: 0, totalPai
 async function shipmentSetup(page: Page, options: { lose?: boolean; malformed?: boolean; reject?: boolean; vendorsFail?: boolean; costsFail?: boolean; invoicesFail?: boolean } = {}) {
   const failures = await installFixtures(page);
   const state = { committed: false, lose: options.lose ?? false, malformed: options.malformed ?? false, reject: options.reject ?? false, actor: "freight-operator", canEdit: true, vendorsFail: options.vendorsFail ?? false, costsFail: options.costsFail ?? false, invoicesFail: options.invoicesFail ?? false, commands: [] as Array<{ key: string; body: any }> };
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: state.actor, username: state.actor, role: "admin" }, permissions: ["purchasing:view", ...(state.canEdit ? ["purchasing:edit", "purchasing:create", "purchasing:approve"] : [])], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: state.actor, username: state.actor, role: "admin" }, permissions: ["purchasing:view", ...(state.canEdit ? ["purchasing:edit", "purchasing:create", "purchasing:approve"] : [])], systemRoles: ["admin"] }) }));
   await page.route("**/api/inbound-shipments/42", route => route.fulfill({ json: {
     id: 42, shipmentNumber: "TEST-SHIP-42", status: "booked", mode: "sea_fcl", lines: [], statusHistory: [],
     costs: [{ id: 9, costType: "freight", vendorId: 2, vendorName: "Carrier", description: "Shipment freight", estimatedCents: 10000, actualCents: null,
@@ -110,7 +111,7 @@ test("another operator cannot see or retry the prior operator's invoice request"
 
 for (const kind of ["ordinary", "shipment", "review", "malformed"] as const) test(`invoice ${kind} ownership controls PO links and financial actions`, async ({ page }) => {
   const failures = await installFixtures(page);
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "source-reviewer", username: "source-reviewer", role: "admin" }, roles: ["admin"], permissions: ["purchasing:view", "purchasing:edit", "purchasing:approve"] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: "source-reviewer", username: "source-reviewer", role: "admin" }, systemRoles: ["admin"], permissions: ["purchasing:view", "purchasing:edit", "purchasing:approve"] }) }));
   await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: {
     id: 71, invoiceNumber: "SOURCE-71", vendorId: 2, vendorName: "Carrier", status: "received", currency: "USD", invoicedAmountCents: 10000, hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 0, balanceCents: 10000, lines: [], attachments: [], payments: [], poLinks: [{ id: 1, purchaseOrderId: 17, poNumber: "PO-17" }],
     capabilities: { edit: { allowed: true, requiredPermission: "purchasing:edit", code: "AP_INVOICE_EDITABLE", reason: "This invoice is editable." } }, sourceCapabilities: kind === "malformed" ? {} : invoiceSourceFixture(kind),
@@ -159,7 +160,7 @@ test("PO list malformed workflow and read failures do not display cached settlem
 
 for (const source of ["freight-id", "capability-id", "unverified"] as const) test(`invoice source line deletion is blocked by ${source} evidence`, async ({ page }) => {
   const failures = await installFixtures(page);
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "source-reviewer", username: "source-reviewer", role: "admin" }, roles: ["admin"], permissions: ["purchasing:view", "purchasing:edit", "purchasing:approve"] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: "source-reviewer", username: "source-reviewer", role: "admin" }, systemRoles: ["admin"], permissions: ["purchasing:view", "purchasing:edit", "purchasing:approve"] }) }));
   const commands: string[] = [];
   const line = { id: 51, lineNumber: 1, qtyInvoiced: 1, unitCostCents: 10000, unitCostMills: 1000000, lineTotalCents: 10000, productName: "Freight source", matchStatus: "pending", freightCostId: source === "freight-id" ? 9 : null };
   await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: {
@@ -261,7 +262,7 @@ test("a pending invoice remains recoverable when the main shipment refresh fails
 
 test("revoked approval permission disables an already open payment dialog", async ({ page }) => {
   const failures = await installFixtures(page); let allowed = true; const payments: unknown[] = [];
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "source-reviewer", username: "source-reviewer", role: "admin" }, roles: ["admin"], permissions: ["purchasing:view", "purchasing:edit", ...(allowed ? ["purchasing:approve"] : [])] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: "source-reviewer", username: "source-reviewer", role: "admin" }, systemRoles: ["admin"], permissions: ["purchasing:view", "purchasing:edit", ...(allowed ? ["purchasing:approve"] : [])] }) }));
   await page.route("**/api/vendor-invoices/71", route => route.fulfill({ json: {
     id: 71, invoiceNumber: "SOURCE-71", vendorId: 2, vendorName: "Carrier", status: "approved", currency: "USD", invoicedAmountCents: 10000, hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 0, balanceCents: 10000, lines: [], poLinks: [], attachments: [], payments: [], sourceCapabilities: invoiceSourceFixture("shipment"),
   } }));

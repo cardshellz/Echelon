@@ -4,7 +4,13 @@ import express, { type Request } from "express";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ execute: vi.fn(), permission: vi.fn(), log: vi.fn() }));
-vi.mock("../../../identity", () => ({ hasPermission: mocks.permission }));
+// Keep real admission middleware; current assignments and capability outcomes are
+// separate fixtures, so the session's legacy role never grants authority.
+vi.mock("../../../identity", () => ({ hasPermission: mocks.permission, readCurrentStaffAccess: vi.fn(async (userId: string) => ({
+  user: { id: userId, username: "fixture", role: "picker", active: 1, displayName: null,
+    createdAt: new Date(0), lastLoginAt: null },
+  roles: [{ id: 101, name: "Fixture operator", isSystem: false }], permissions: [],
+})) }));
 vi.mock("../../../../platform/observability", () => ({ logger: { error: mocks.log } }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
 vi.mock("../../receipt-reversal.commands", async (original) => ({

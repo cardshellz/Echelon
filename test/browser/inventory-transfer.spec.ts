@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -17,9 +18,7 @@ async function setup(page: Page, options: { fixed?: boolean; warehouseFailure?: 
       state.unexpected.push(`${request.method()} ${path}`);
       return route.fulfill({ status: 500, json: { error: "Unexpected write" } });
     }
-    if (path === "/api/auth/me") return route.fulfill({ json: {
-      user: { id: "operator", username: "operator", role: "admin" }, permissions: ["inventory:view", "inventory:adjust"], roles: ["admin"],
-    } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator", username: "operator", role: "admin" }, permissions: ["inventory:view", "inventory:adjust"], systemRoles: ["admin"] }) });
     if (path === "/api/warehouses") return state.warehouseFailure
       ? route.fulfill({ status: 503, json: { error: "Unavailable" } })
       : route.fulfill({ json: [

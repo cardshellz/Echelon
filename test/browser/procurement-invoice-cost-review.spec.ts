@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import type { InvoiceCostReview, InvoiceCostReviewResult } from "../../shared/procurement/invoice-cost-review";
 import { installFixtures } from "./procurement-fixtures";
@@ -15,7 +16,7 @@ async function setup(page: Page, options: { canApprove?: boolean; isAdmin?: bool
   const commands: Array<{ key: string; body: InvoiceCostReview }> = [];
   const replays = new Map<string, InvoiceCostReviewResult>();
   let lost = false, stale = options.stale ?? false;
-  await page.route("**/api/auth/me", (route) => route.fulfill({ json: { user: { id: "cost-reviewer", username: "test", role: "admin" }, permissions: options.canApprove === false ? ["purchasing:view"] : ["purchasing:view", "purchasing:approve"], roles: [options.isAdmin === false ? "Team Lead" : "Administrator"] } }));
+  await page.route("**/api/auth/me", (route) => route.fulfill({ json: staffAuthorityFixture({ user: { id: "cost-reviewer", username: "test", role: "admin" }, permissions: options.canApprove === false ? ["purchasing:view"] : ["purchasing:view", "purchasing:approve"], systemRoles: [options.isAdmin === false ? "lead" : "admin"] }) }));
   await page.route("**/api/vendor-invoices/71", (route) => route.fulfill({ json: invoice }));
   await page.route("**/api/vendor-invoice-lines/72/cost-components", async (route) => {
     const request = route.request(), key = request.headers()["idempotency-key"], body = request.postDataJSON() as InvoiceCostReview;

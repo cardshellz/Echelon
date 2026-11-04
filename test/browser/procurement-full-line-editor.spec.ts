@@ -1,10 +1,11 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 import type { ShipmentEditorContext, ShipmentEditorPreview, ShipmentEditorRequest } from "@shared/procurement/shipment-editor";
 import type { PoQuantityAmendmentContext, PoQuantityAmendmentPreview, PoQuantityPreviewRequest } from "@shared/procurement/po-quantity-amendment";
 
 const version = "a".repeat(64), reviewed = "b".repeat(64);
-const admin = { user: { id: "editor-admin", username: "Reviewer", role: "admin" }, roles: ["Administrator"], permissions: ["purchasing:view", "purchasing:approve", "inventory:view"] };
+const admin = staffAuthorityFixture({ user: { id: "editor-admin", username: "Reviewer", role: "admin" }, systemRoles: ["admin"], permissions: ["purchasing:view", "purchasing:approve", "inventory:view"] });
 const product = { id: 2, sku: "NEW-PRODUCT", name: "Added product", isActive: true,
   variants: [{ id: 20, sku: "NEW-PIECE", name: "Piece", unitsPerVariant: 1, isActive: true }] };
 

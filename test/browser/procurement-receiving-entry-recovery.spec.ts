@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, receipt } from "./procurement-fixtures";
 
@@ -30,7 +31,7 @@ async function setup(page: Page, options: Options = {}) {
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (request.method() === "GET") {
-      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: state.actorId, username: "test", role: "admin" }, roles: ["admin"], permissions: ["inventory:view", "purchasing:view", ...(state.permitted ? ["inventory:adjust", "purchasing:approve"] : [])] } });
+      if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: state.actorId, username: "test", role: "admin" }, systemRoles: ["admin"], permissions: ["inventory:view", "purchasing:view", ...(state.permitted ? ["inventory:adjust", "purchasing:approve"] : [])] }) });
       if (path === "/api/receiving") return route.fulfill({ json: [...state.lines.keys()].map(order) });
       if (/^\/api\/receiving\/\d+$/.test(path)) {
         state.reads++;

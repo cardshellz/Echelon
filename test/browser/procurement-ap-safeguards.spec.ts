@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
 import { apSummaryFixture, invoiceListItem, paymentListItem, workListPage } from "./procurement-ap-work-list-fixtures";
 import { expect, test, type Page } from "@playwright/test";
@@ -7,7 +8,7 @@ const locked = { allowed: false, requiredPermission: "purchasing:edit", code: "A
 const editable = { allowed: true, requiredPermission: "purchasing:edit", code: "AP_INVOICE_EDITABLE", reason: "This invoice can be edited." };
 async function setup(page: Page, canEdit = true) {
   const failures = await installFixtures(page);
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "ap-reviewer", role: "admin", username: "test" }, permissions: canEdit ? ["purchasing:view", "purchasing:edit", "purchasing:approve"] : ["purchasing:view"], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: "ap-reviewer", role: "admin", username: "test" }, permissions: canEdit ? ["purchasing:view", "purchasing:edit", "purchasing:approve"] : ["purchasing:view"], systemRoles: ["admin"] }) }));
   return failures;
 }
 const invoice = (edit = locked) => ({ sourceCapabilities: invoiceSourceFixture(), id: 71, invoiceNumber: "AP-SAFE-71", vendorId: 2, vendorName: "Test vendor", status: "disputed", currency: "USD", invoicedAmountCents: 10000, hasSupplierCreditHistory: false, creditedAmountCents: 0, paidAmountCents: 8000, balanceCents: 2000,

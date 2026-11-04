@@ -2,9 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Express, NextFunction, Request, RequestHandler, Response } from "express";
 
 // Keep the real requireAuth middleware. Its Identity import would otherwise load
-// the unrelated application database barrel; no permission behavior is mocked
-// here because command authority is independently tested in the owner suites.
-vi.mock("../../../identity", () => ({ hasPermission: vi.fn() }));
+// the unrelated application database barrel. Current identity is synthetic here;
+// command authority is independently tested in the owner suites.
+// Resolve a current assigned identity through the real requireAuth middleware;
+// capability outcomes remain controlled by this suite's separate permission mock.
+vi.mock("../../../identity", () => ({ hasPermission: vi.fn(), readCurrentStaffAccess: vi.fn(async (userId: string) => ({
+    user: { id: userId, username: "fixture", role: "picker", active: 1, displayName: null,
+      createdAt: new Date(0), lastLoginAt: null },
+    roles: [{ id: 101, name: "Fixture operator", isSystem: false }], permissions: [],
+  })) }));
 vi.mock("../../../../db", () => { throw new Error("Route-chain tests must not initialize the application database"); });
 
 import { registerShopifyOAuthRoutes } from "../../../../routes/shopify-oauth.routes";

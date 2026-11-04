@@ -4,7 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerEbayListingRecoveryRoutes } from "../../ebay-listing-recovery.routes";
 import type { EbayListingRecoveryService } from "../../../../modules/channels/ebay-listing-recovery.service";
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async (_user: string, _resource: string, _action: string) => true) }));
-vi.mock("../../../../modules/identity", () => ({ hasPermission }));
+// Resolve a current assigned identity through the real requireAuth middleware;
+// capability outcomes remain controlled by this suite's separate permission mock.
+vi.mock("../../../../modules/identity", () => ({ hasPermission, readCurrentStaffAccess: vi.fn(async (userId: string) => ({
+    user: { id: userId, username: "fixture", role: "picker", active: 1, displayName: null,
+      createdAt: new Date(0), lastLoginAt: null },
+    roles: [{ id: 101, name: "Fixture operator", isSystem: false }], permissions: [],
+  })) }));
 const id = "655ca747-20b9-4940-9c61-019baf1c11c1";
 describe("eBay operator recovery HTTP permission boundary", () => {
   let server: ReturnType<ReturnType<typeof express>["listen"]>;
