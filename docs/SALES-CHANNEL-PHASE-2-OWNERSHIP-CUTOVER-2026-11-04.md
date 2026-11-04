@@ -129,6 +129,6 @@ The affected lifecycle, mapping, queue, and Catalog policy suites passed 231
 tests against a disposable PostgreSQL instance and unit fixtures. The archive
 and recovery browser selection passed 12 desktop/mobile tests with mocked APIs.
 Those browser tests do not exercise an ownership transfer. The queue tests load
-`.verification/archive-separation.sql` directly; that prototype must be
-replaced with an allocated production migration and the new integration suite
-added to the PostgreSQL CI manifest before a release candidate is valid.
+`.verification/archive-separation.sql` directly; the suite is in the
+PostgreSQL CI manifest, but that prototype must be replaced with an allocated
+production migration before a release candidate is valid.

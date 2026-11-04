@@ -192,6 +192,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/procurement/__tests__/integration/ap-financial-safeguards.integration.test.ts",
       "server/modules/dropship/__tests__/integration/dropship-listing-config-revision.integration.test.ts",
       "server/modules/channels/__tests__/integration/ebay-listing-mapping-repair.integration.test.ts",
+      "server/modules/channels/__tests__/integration/variant-availability-archive-cutover.integration.test.ts",
       "server/modules/channels/__tests__/integration/ebay-publication-stock.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-publication-readiness.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/ebay-listing-preparation-scope.integration.test.ts",
