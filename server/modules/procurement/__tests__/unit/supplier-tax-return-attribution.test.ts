@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { evaluateSupplierCreditSource, resolveSupplierCreditReductions, supplierCreditDispositionMatches } from "../../domain/supplier-credit-source";
+import { evaluateSupplierCreditSource, resolveSupplierCreditReductions, supplierCreditDispositionMatches, supplierCreditInvoiceSourceFingerprint } from "../../domain/supplier-credit-source";
 import { resolvePurchaseCostSource } from "../../domain/purchase-cost-source";
 import { supplierInvoiceAmounts } from "../../domain/supplier-invoice-amounts";
 import { validateQuarantineInvoiceCreditIntervals } from "../../domain/quarantine-invoice-credit";
@@ -20,6 +20,12 @@ function credit(disposition: SourceLineInput["disposition"], amountCents: number
 }
 const refund = { kind: "tax_reduction", taxSourceKey: "invoice_line:72:1", taxTypeId: 1 } as const;
 describe("supplier tax and returned invoice ownership", () => {
+  it("preserves an existing refund when an empty header review adds no economic share", () => {
+    const original = invoice(), saved = credit(refund, 100);
+    const reviewed = { ...original, header_cost_evidence: [] };
+    expect(supplierCreditInvoiceSourceFingerprint(reviewed)).toBe(supplierCreditInvoiceSourceFingerprint(original));
+    expect(resolveSupplierCreditReductions([reviewed], [saved], 21)).toMatchObject({ issues: [], taxInventoryMills: BigInt(10000) });
+  });
   it("selects combined goods and known tax separately without manufacturing packaging", () => {
     expect(supplierInvoiceAmounts(invoice())).toMatchObject({ productMills: 1000000, packagingMills: 0, packagingTreatment: "combined", inventoryTaxMills: 100000 });
     expect(evaluateSupplierCreditSource({ invoice: invoice(), line: { invoiceLineId: 72, amountCents: 100, disposition: { kind: "price_reduction", component: "product" } } }).costIssues).toEqual([]);

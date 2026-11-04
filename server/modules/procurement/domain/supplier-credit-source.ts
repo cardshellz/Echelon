@@ -7,6 +7,7 @@ import { allocateIntegerCostInterval } from "@shared/utils/integer-cost-interval
 import { supplierCreditDispositionSchema, type SourceLineInput } from "@shared/procurement/supplier-credit";
 import { costFingerprint, costInteger, CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
 import { supplierInvoiceAmounts, supplierInvoiceTaxSource } from "./supplier-invoice-amounts";
+import { supplierHeaderEconomicShareSchema } from "@shared/procurement/supplier-header-costs";
 
 export type SupplierCreditSourceInput = SourceLineInput;
 const integer = z.number().int().nonnegative().safe();
@@ -35,6 +36,7 @@ export type SupplierCreditSourceEvidence = z.infer<typeof supplierCreditSourceEv
 
 /** Deliberately excludes invoice payment status and mutable display metadata. */
 export function supplierCreditInvoiceSourceFingerprint(row: Record<string, unknown>): string {
+  const header = z.array(supplierHeaderEconomicShareSchema).max(30).parse(row.header_cost_evidence ?? []);
   return costFingerprint({
     id: costInteger(row.id, "invoiceLineId", 1),
     vendor_invoice_id: costInteger(row.vendor_invoice_id, "invoiceId", 1),
@@ -43,7 +45,9 @@ export function supplierCreditInvoiceSourceFingerprint(row: Record<string, unkno
     // Freight uses its exact charge relationship, not product/packaging metadata.
     cost_component_evidence: row.freight_cost_id == null ? row.cost_component_evidence ?? null : null,
     currency: row.currency,
-    ...(row.header_cost_evidence == null ? {} : { header: (row.header_cost_evidence as Array<Record<string, unknown>>).map(({ taxTreatment: _treatment, ...share }) => share) }),
+    // Recording an empty header review cannot invalidate an already approved
+    // credit. Only actual economic shares extend the legacy source identity.
+    ...(header.length ? { header: header.map(({ taxTreatment: _treatment, ...share }) => share) } : {}),
   });
 }
 
