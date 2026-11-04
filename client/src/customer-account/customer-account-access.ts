@@ -1,5 +1,5 @@
 import { CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED } from "@shared/customer-account/customer-account.contract";
-import { CustomerAccountRequestError } from "./customer-account.transport";
+import { z } from "zod";
 
 export interface CustomerAccountAccessNotice {
   message: string;
@@ -13,8 +13,9 @@ export function customerAccountAccessNotice(
   surface: "order" | "history" = "order",
 ): CustomerAccountAccessNotice {
   if (
-    cause instanceof CustomerAccountRequestError &&
-    cause.code === CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED
+    z
+      .object({ code: z.literal(CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED) })
+      .safeParse(cause).success
   ) {
     return {
       message:

@@ -1535,7 +1535,7 @@ function harness(
   },
   codeOptions: Pick<
     ConstructorParameters<typeof ShopifyOrderEditProvider>[0],
-    "codeHistory" | "rewards"
+    "codeHistory" | "rewards" | "accountSummaries" | "reportAccountSummaryFailure"
   > = {},
 ) {
   const requests: Array<{ query: string; variables: Record<string, unknown> }> =
@@ -1594,6 +1594,18 @@ async function reduction() {
 }
 
 describe("native tax rate display evidence", () => {
+  it("never changes an owned order read when optional cache validation or storage fails", async () => {
+    for (const invalidPresentation of [false,true]) {
+      const retain = vi.fn(async () => { if (!invalidPresentation) throw new Error("Synthetic cache outage"); });
+      const cacheReport = vi.fn();
+      const h = harness([rawOrder({ displayFinancialStatus: "PAID", ...(invalidPresentation ? {name:"X".repeat(60)} : {}) })],{},undefined,
+        {accountSummaries:{retain},reportAccountSummaryFailure:cacheReport});
+      expect((await h.provider.readOrder(4,"100","gid://shopify/Customer/1")).totalCents).toBe(2000);
+      expect(cacheReport).toHaveBeenCalledOnce(); expect(retain).toHaveBeenCalledTimes(invalidPresentation ? 0 : 1);
+      expect(h.requests).toHaveLength(1); expect(h.requests[0].query).not.toContain("mutation");
+    }
+  });
+
   it("rejects a foreign signed-in customer before reading any saved reward/code history", async () => {
     const history = { enrich: vi.fn() };
     const h = harness([rawOrder()], {}, undefined, { codeHistory: history });

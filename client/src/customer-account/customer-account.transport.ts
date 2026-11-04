@@ -1,5 +1,5 @@
+import { accountOverviewReadSchema, parseAccountOverview } from "./account-overview-client";
 import { z } from "zod";
-import { CUSTOMER_ORDER_PROGRESS_VERSION } from "@shared/customer-account/order-progress";
 import { CUSTOMER_ACCOUNT_COMMAND_HEADER, customerAccountRequestSchema, customerAccountBootstrapSchema, customerAccountOrderIdentitySchema, customerAccountOrderIdentityInputSchema } from "@shared/customer-account/customer-account.contract";
 import { ORDER_EDIT_API } from "@shared/order-edits/order-edit.contract";
 import { CUSTOMER_RETURNS_API, RETURN_CUSTOMER_SESSION_HEADER } from "@shared/returns/customer-return-access.contract";
@@ -12,23 +12,18 @@ import { customerOrderCancellationInputSchema, customerOrderCancellationReviewSc
 import { customerAccountOrderSummariesInputSchema, customerAccountOrderSummariesSchema, customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";
 import { customerOrderActionPageSchema } from "@shared/customer-account/order-actions";
 
-export const customerAccountPageConfigSchema = z.object({
-  themeId: z.string().max(30).regex(/^[1-9][0-9]*$/),
-  customerId: z.string().max(30).regex(/^[1-9][0-9]*$/),
-  loginPath: z.string().max(100).regex(/^\/(?:[a-z]{2}(?:-[a-z0-9]{2,8})?\/)?account\/login$/i).default("/account/login"),
-  proxyPath: z.string().regex(/^\/(apps|a|community|tools)\/[a-z0-9][a-z0-9-]*$/).refine(path => !path.endsWith("/member-portal")),
-}).strict();
-export type CustomerAccountPageConfig = z.input<typeof customerAccountPageConfigSchema>;
+export { customerAccountPageConfigSchema } from "./account-page-config";
+import { customerAccountPageConfigSchema, type CustomerAccountPageConfig } from "./account-page-config";
+export type { CustomerAccountPageConfig } from "./account-page-config";
 // Bound storefront waits; a timed-out mutation must still be reconciled.
 export const CUSTOMER_ACCOUNT_REQUEST_TIMEOUT_MS = 25_000;
-export class CustomerAccountRequestError extends Error {
-  constructor(public readonly code: string | undefined, message: string) { super(message); }
-}
+import { CustomerAccountRequestError } from "./account-request-error";
+export { CustomerAccountRequestError } from "./account-request-error";
 export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, request: typeof fetch = fetch) {
   const config = customerAccountPageConfigSchema.parse(raw);
   let sessionKey: string | undefined;
   async function call(input: { method: "GET" | "POST"; path: string; query?: Record<string, string>; body?: unknown; commandKey?: string }, signal?: AbortSignal | null): Promise<Response> {
-    const body = customerAccountRequestSchema.parse({ ...input, themeId: config.themeId, expectedCustomerId: config.customerId, ...(sessionKey ? { sessionKey } : {}) });
+    const body = customerAccountRequestSchema.parse({ ...input, themeId: config.themeId, expectedCustomerId: config.customerId, ...(sessionKey && !["/account/bootstrap", "/account/overview"].includes(input.path) ? { sessionKey } : {}) });
     const controller = new AbortController();
     const cancel = () => controller.abort(signal?.reason);
     if (signal?.aborted) cancel();
@@ -86,6 +81,21 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
       ...(key ? { commandKey: key } : {}) }, options?.signal);
   };
   return {
+    async overview(raw: unknown, signal?: AbortSignal) {
+      const input = customerAccountOrderSummariesInputSchema.parse(raw);
+      const result = parseAccountOverview(await json(await call({ method: "POST", path: "/account/overview", body: input }, signal), accountOverviewReadSchema), input);
+      if (!result.bootstrap.session.authenticated || !result.bootstrap.session.sessionKey)
+        throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_SESSION_INVALID", "The account response could not be verified.");
+      sessionKey = result.bootstrap.session.sessionKey;
+      return result;
+    },
+    adoptOverview(raw: unknown, orders: unknown) {
+      const result = parseAccountOverview(raw, customerAccountOrderSummariesInputSchema.parse(orders));
+      if (!result.bootstrap.session.authenticated || !result.bootstrap.session.sessionKey)
+        throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_SESSION_INVALID", "The account response could not be verified.");
+      sessionKey = result.bootstrap.session.sessionKey;
+      return result;
+    },
     async bootstrap(signal?: AbortSignal) {
       const result = await json(await call({ method: "GET", path: "/account/bootstrap" }, signal), customerAccountBootstrapSchema);
       if (!result.session.authenticated || !result.session.sessionKey) throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_SESSION_INVALID", "The account response could not be verified.");
@@ -103,17 +113,7 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
     },
     orderSummaries: async (raw: unknown, signal?: AbortSignal) => {
       const input = customerAccountOrderSummariesInputSchema.parse(raw);
-      let response = await call({ method: "POST", path: "/account/order-summaries", query: { statusDisplayVersion: CUSTOMER_ORDER_PROGRESS_VERSION }, body: input }, signal);
-      if (response.status === 400 && !signal?.aborted) {
-        const rejected: unknown = await response.clone().json().catch(() => null);
-        const invalid = z.object({error:z.object({code:z.literal("RETURN_CUSTOMER_INPUT_INVALID")})}).safeParse(rejected);
-        if (invalid.success) {
-          // A theme may reach a still-running older backend during deployment.
-          // Only this read is retried without the additive version; signed
-          // ownership and strict money/identity validation stay in force.
-          response = await call({ method: "POST", path: "/account/order-summaries", body: input }, signal);
-        }
-      }
+      const response = await call({ method: "POST", path: "/account/saved-summaries", body: input }, signal);
       const result = await json(response, customerAccountOrderSummariesSchema);
       const expected = input.orders.map(order => order.externalOrderId);
       const received = [...result.orders.map(order => order.externalOrderId), ...result.unavailableExternalOrderIds];
