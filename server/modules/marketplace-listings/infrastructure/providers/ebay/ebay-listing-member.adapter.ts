@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
-import type { ListingMemberLifecycleAdapter } from "../../../application/listing-member-lifecycle.port";
+import type { ListingMemberDispatchReceipt, ListingMemberLifecycleAdapter } from "../../../application/listing-member-lifecycle.port";
 import { ListingMemberLifecycleError } from "../../../domain/listing-member-lifecycle";
 import { EbayApiRequestError } from "../../../../channels/adapters/ebay/ebay-api-error";
 
@@ -28,10 +28,10 @@ export class EbayListingMemberAdapter implements ListingMemberLifecycleAdapter {
       throw new ListingMemberLifecycleError("LISTING_MEMBER_IDENTITY_CHANGED", "The saved eBay offer now belongs to a different SKU, marketplace, or listing. Repair its link before removal.");
     return { identity, retired: offer.status === "UNPUBLISHED" };
   }
-  async retire(identity: ListingMemberIdentity): Promise<void> {
+  async retire(identity: ListingMemberIdentity): Promise<ListingMemberDispatchReceipt> {
     // Revalidate at the provider boundary. A missing/already unpublished offer is
     // a successful replay, never permission to delete another SKU or the group.
-    if ((await this.observe(identity)).retired) return;
+    if ((await this.observe(identity)).retired) return { finality: "terminal" };
     const client = await this.client(identity);
     await client.clearOffer(identity.externalVariantId!, identity.externalSku!);
     try {
@@ -44,5 +44,6 @@ export class EbayListingMemberAdapter implements ListingMemberLifecycleAdapter {
           : "The eBay removal response was not confirmed. Echelon will check this exact offer before any further action.",
         rejected ? "not_submitted" : "unknown");
     }
+    return { finality: "terminal" };
   }
 }

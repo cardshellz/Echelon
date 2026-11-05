@@ -14,6 +14,7 @@ const snapshotSchema = z.object({
   code: z.string().nullable(),
   dispatch_status: z.enum(["none", "unknown", "accepted", "authorized"]).nullable().optional(),
   dispatch_key: z.string().uuid().nullable().optional(),
+  dispatch_finality: z.enum(["pending", "terminal"]).nullable().optional(),
   verification_attempts: z.number().int().nonnegative().nullable().optional(),
   recovery_required: z.boolean().nullable().optional(),
 }).passthrough();
@@ -32,13 +33,15 @@ export interface ListingMemberDispatchHead {
   code: string | null;
   dispatchStatus: string;
   dispatchKey: string | null;
+  dispatchFinality: string | null;
 }
 
 /** Current readback and request finality are different facts. Each unknown
- * dispatch is closed only by a later acceptance of that same dispatch key.
- * Historical markers without a key and incomplete audit streams are unknown. */
+ * dispatch is closed only by an explicitly terminal receipt for that same key.
+ * Historical acceptances without finality evidence remain unconfirmed. */
 export class ListingMemberDispatchHistoryAssessment {
   private readonly pendingKeys = new Set<string>();
+  private readonly observedKeys = new Set<string>();
   private readonly expectedIdentity: string;
   private readonly expectedSourceIdentity: string;
   private invalid = false;
@@ -76,20 +79,28 @@ export class ListingMemberDispatchHistoryAssessment {
     this.latest = snapshot;
     const status = snapshot.dispatch_status ?? "none";
     const key = snapshot.dispatch_key ?? null;
+    const finality = snapshot.dispatch_finality ?? null;
+    if (finality !== null && status !== "accepted") { this.invalid = true; return; }
     if (snapshot.state === "retiring") this.hadRetiringEvent = true;
     if (status === "none" && (snapshot.state === "retiring" || snapshot.recovery_required === true
       || (snapshot.verification_attempts ?? 0) > 0)) this.unkeyedMarker = true;
     if (status === "unknown") {
-      if (key) this.pendingKeys.add(key);
+      if (key) { this.observedKeys.add(key); this.pendingKeys.add(key); }
       else this.unkeyedMarker = true;
-    } else if (status === "accepted" && key) this.pendingKeys.delete(key);
+    } else if (status === "accepted") {
+      if (!key) this.unkeyedMarker = true;
+      else if (finality === "terminal" && this.observedKeys.has(key)) this.pendingKeys.delete(key);
+      else if (finality === "terminal") this.unkeyedMarker = true;
+      else this.pendingKeys.add(key);
+    }
   }
 
   result(): { unconfirmed: boolean; hadRetiringEvent: boolean } {
     const latest = this.latest;
     if (this.invalid || this.count !== this.head.version || !latest || latest.state !== this.head.state
       || latest.code !== this.head.code || (latest.dispatch_status ?? "none") !== this.head.dispatchStatus
-      || (latest.dispatch_key ?? null) !== this.head.dispatchKey)
+      || (latest.dispatch_key ?? null) !== this.head.dispatchKey
+      || (latest.dispatch_finality ?? null) !== this.head.dispatchFinality)
       return { unconfirmed: true, hadRetiringEvent: true };
     return { unconfirmed: this.unkeyedMarker || this.pendingKeys.size > 0, hadRetiringEvent: this.hadRetiringEvent };
   }

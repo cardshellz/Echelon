@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type { ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 import {
   validateListingMemberObservation,
@@ -12,6 +13,7 @@ import type {
 } from "./listing-member-lifecycle.port";
 
 export const RETIREMENT_VERIFICATION_LIMIT = 5;
+const dispatchReceiptSchema = z.object({ finality: z.enum(["pending", "terminal"]) }).strict();
 
 /** Keep the observed listing state separate from the final outcome of each
  * previously dispatched request. A later observation cannot exclude a late
@@ -42,7 +44,7 @@ export async function processListingMemberRetirement(
   dependencies: ListingMemberLifecycleDependencies,
   now: () => Date,
 ): Promise<ListingMemberRetirement> {
-  const record = session.current;
+  let record = session.current;
   if (
     record.state === "retired" ||
     record.state === "superseded" ||
@@ -197,8 +199,9 @@ export async function processListingMemberRetirement(
       now(),
       { dispatchStatus: "unknown", dispatchKey, verificationAttempts: 0 },
     );
+    let receipt: z.infer<typeof dispatchReceiptSchema>;
     try {
-      await adapter.retire(record.identity, dispatchKey);
+      receipt = dispatchReceiptSchema.parse(await adapter.retire(record.identity, dispatchKey));
     } catch (error) {
       const unknown =
         !(error instanceof ListingMemberLifecycleError) ||
@@ -207,12 +210,12 @@ export async function processListingMemberRetirement(
     }
     // Keep persistence outside provider catches: a failed commit must retain
     // the previous unknown marker rather than classify a write as not sent.
-    await session.save(
+    record = await session.save(
       "retiring",
       null,
       "The channel accepted removal. Verifying the exact member.",
       now(),
-      { dispatchStatus: "accepted" },
+      { dispatchStatus: "accepted", dispatchFinality: receipt.finality },
     );
     try {
       retired = (await observe()).retired;

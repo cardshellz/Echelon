@@ -37,7 +37,8 @@ const provenNoDispatchSql = `r.dispatch_status='none' AND r.dispatch_key IS NULL
     FROM marketplace.listing_member_retirement_events e WHERE e.operation_id=r.id),false)`;
 interface Row { id: string; identity_key: string; identity: unknown; source_identity: unknown; source_revision: string;
   product_id: number; product_variant_id: number; state: string; code: string | null; message: string | null; verified_at: Date | null;
-  version: number; dispatch_status: string; dispatch_key: string | null; verification_attempts: number; recovery_required: boolean;
+  version: number; dispatch_status: string; dispatch_key: string | null; dispatch_finality: string | null;
+  verification_attempts: number; recovery_required: boolean;
   source_current?: boolean; next_attempt_at?: Date | number | null }
 
 type DispatchEvidence = ReturnType<ListingMemberDispatchHistoryAssessment["result"]>;
@@ -47,7 +48,7 @@ function assessment(row: Row): ListingMemberDispatchHistoryAssessment {
   return new ListingMemberDispatchHistoryAssessment({ id: row.id, version: row.version, identityKey: row.identity_key,
     identity: row.identity, sourceIdentity: row.source_identity, sourceRevision: row.source_revision,
     productId: row.product_id, productVariantId: row.product_variant_id, state: row.state, code: row.code,
-    dispatchStatus: row.dispatch_status, dispatchKey: row.dispatch_key });
+    dispatchStatus: row.dispatch_status, dispatchKey: row.dispatch_key, dispatchFinality: row.dispatch_finality ?? null });
 }
 
 async function readDispatchEvidence(client: StockSelectionQueryClient, rows: readonly Row[]): Promise<Map<string, DispatchEvidence>> {
@@ -64,6 +65,7 @@ async function readDispatchEvidence(client: StockSelectionQueryClient, rows: rea
         'source_revision',e.after_state->'source_revision','product_id',e.after_state->'product_id',
         'product_variant_id',e.after_state->'product_variant_id','state',e.after_state->'state','code',e.after_state->'code',
         'dispatch_status',e.after_state->'dispatch_status','dispatch_key',e.after_state->'dispatch_key',
+        'dispatch_finality',e.after_state->'dispatch_finality',
         'verification_attempts',e.after_state->'verification_attempts','recovery_required',e.after_state->'recovery_required'
       ) AS after_state FROM marketplace.listing_member_retirement_events e
       WHERE e.operation_id=ANY($1::uuid[]) AND ($2::uuid IS NULL OR (e.operation_id,e.version)>($2::uuid,$3::integer))
@@ -287,12 +289,14 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
       await client.query(`UPDATE marketplace.listing_member_retirements SET state=$2,code=$3,message=$4,
         verified_at=$5,next_attempt_at=$6,updated_at=$7,version=version+1,
         dispatch_status=COALESCE($8,dispatch_status),dispatch_key=COALESCE($9,dispatch_key),
+        dispatch_finality=CASE WHEN $8 IN ('none','unknown','authorized') THEN NULL
+          WHEN $8='accepted' THEN $12 ELSE dispatch_finality END,
         verification_attempts=COALESCE($10,verification_attempts),recovery_required=CASE WHEN $2 IN ('retired','superseded') THEN false ELSE COALESCE($11,recovery_required) END WHERE id=$1 RETURNING *`,
       [id, state, code, message, state === "retired" ? now : null,
         state === "retired" || state === "superseded" ? null
           : state === "failed" && code === "LISTING_MEMBER_IDENTITY_CONFLICT" ? "infinity"
           : new Date(now.getTime() + retryAfterMs), now, progress.dispatchStatus ?? null, progress.dispatchKey ?? null,
-        progress.verificationAttempts ?? null, progress.recoveryRequired ?? null]);
+        progress.verificationAttempts ?? null, progress.recoveryRequired ?? null, progress.dispatchFinality ?? null]);
       await audit(client, id, record(before), now);
       const saved = await readRecordedMember(client, id);
       await client.query("COMMIT");
@@ -311,7 +315,7 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
         VALUES($1,$2,$3,$4,$5,$6,$7)`, [input.commandKey,id,input.actor,input.reviewHash,JSON.stringify(before.snapshot),JSON.stringify(input.observation),now]);
       await client.query(`UPDATE marketplace.listing_member_retirements SET state='pending',code=NULL,
         message='Removal recovery authorized. The exact saved member will be checked before dispatch.',
-        dispatch_status='authorized',dispatch_key=$2,verification_attempts=0,recovery_required=false,
+        dispatch_status='authorized',dispatch_key=$2,dispatch_finality=NULL,verification_attempts=0,recovery_required=false,
         next_attempt_at=$3,updated_at=$3,version=version+1 WHERE id=$1 RETURNING *`, [id,input.commandKey,now]);
       await audit(client,id,record(before),now,input.actor);
       const saved = await readRecordedMember(client, id);

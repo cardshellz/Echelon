@@ -419,7 +419,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     const [id]=await store.due(now,25);
     await store.withMember(id,session=>session.save("retiring",null,"Unconfirmed dispatch",now,{dispatchStatus:"unknown"}));
     let removed=false;
-    const retire=vi.fn(async()=>{removed=true;});
+    const retire=vi.fn(async()=>{removed=true; return { finality: "terminal" as const };});
     const normalized={observe:async(identity:ListingMemberIdentity)=>({identity,retired:removed}),retire};
     const dependencies={store,adapter:async()=>normalized};
     await store.withMember(id,session=>processListingMemberRetirement(session,dependencies,()=>now));
@@ -707,19 +707,14 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     remote.delete("offer-archived");
     await store.withMember(id, session => processListingMemberRetirement(session, { store, adapter: async () => adapter }, () => now));
     const [completed] = await store.listForChannel(10, 30, 25);
-    expect(completed).toMatchObject({ operationId: id, state: dispatchStatus === "unknown" ? "failed" : "retired", dispatchStatus });
+    expect(completed).toMatchObject({ operationId: id, state: "failed", dispatchStatus });
     expect(clearOffer).not.toHaveBeenCalled();
     expect(deleteOffer).not.toHaveBeenCalled();
-    if (dispatchStatus === "unknown") {
-      expect(await receipts()).toEqual([expect.objectContaining({ state: "failed", unconfirmedPriorDispatch: true,
-        code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED" })]);
-      expect(await recovery.preview(10, id)).toMatchObject({ canResume: false, observation: { retired: true } });
-    } else {
-      expect(await receipts()).toEqual([]);
-      await expect(recovery.preview(10, id)).rejects.toMatchObject({ code: "LISTING_MEMBER_RECOVERY_SCOPE_CHANGED" });
-    }
+    expect(await receipts()).toEqual([expect.objectContaining({ state: "failed", unconfirmedPriorDispatch: true,
+      code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED" })]);
+    expect(await recovery.preview(10, id)).toMatchObject({ canResume: false, observation: { retired: true } });
     const events = (await database.pool.query("SELECT after_state FROM marketplace.listing_member_retirement_events WHERE operation_id=$1 ORDER BY version", [id])).rows;
-    expect(events.map(row => row.after_state.state)).toEqual(["pending", "retiring", "failed", dispatchStatus === "unknown" ? "failed" : "retired"]);
+    expect(events.map(row => row.after_state.state)).toEqual(["pending", "retiring", "failed", "failed"]);
   });
   it("does not let a successful retry erase an earlier unconfirmed dispatch", async () => {
     const { record, service } = await unresolvedRecovery();
@@ -963,7 +958,8 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     const [id] = await store.due(now,25);
     await store.withMember(id, session => processListingMemberRetirement(session,{ store, adapter: async () => walmart },()=>now));
     expect(retire).toHaveBeenCalledExactlyOnceWith(account,"OLD-REMOTE-SKU",id);
-    expect((await receipts())[0]).toMatchObject({ state: "retired", identity: { provider: "walmart", accountId: "walmart-seller" } });
+    expect((await receipts())[0]).toMatchObject({ state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+      unconfirmedPriorDispatch: true, identity: { provider: "walmart", accountId: "walmart-seller" } });
     expect((await selection()).variants.map(row => row.action)).toEqual(["read_only","none"]);
   });
   it("reuses Walmart publication admission and waits for earlier feeds before retirement", async () => {
@@ -1002,7 +998,9 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect(observe).not.toHaveBeenCalled(); expect(retire).not.toHaveBeenCalled();
     await database.pool.query("UPDATE marketplace.channel_listing_updates SET state='accepted'");
     await process(new Date(now.getTime()+120_000));
-    expect((await receipts())[0].state).toBe("retired"); expect(retire).toHaveBeenCalledTimes(1);
+    expect((await receipts())[0]).toMatchObject({ state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+      unconfirmedPriorDispatch: true });
+    expect(retire).toHaveBeenCalledTimes(1);
     await expect(publication.withAllowed(account,["OLD-REMOTE-SKU"],write)).rejects.toMatchObject({ code: "LISTING_MEMBER_ARCHIVED" });
   });
   it("keeps an unknown removal in readback recovery while the provider still shows stale live state", async () => {
@@ -1046,7 +1044,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
   });
   it("keeps an accepted asynchronous retirement in readback recovery through failures and restarts", async () => {
     const observe = vi.fn(async (identity: ListingMemberIdentity) => ({ identity, retired: false }));
-    const retire = vi.fn(async () => {});
+    const retire = vi.fn(async () => ({ finality: "pending" as const }));
     const process = async (time: Date) => {
       await seedLegacyRetirements(database.pool, time, 25);
       for (const id of await store.due(time,25)) await store.withMember(id, session => processListingMemberRetirement(session,
@@ -1060,8 +1058,55 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     store = new PostgresListingMemberLifecycleRepository(database.pool);
     observe.mockImplementation(async identity => ({ identity, retired: true }));
     await process(new Date(now.getTime()+240_000));
-    expect((await receipts())[0].state).toBe("retired");
+    expect((await receipts())[0]).toMatchObject({ state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+      unconfirmedPriorDispatch: true });
     expect(retire).toHaveBeenCalledTimes(1);
+  });
+  it("retains an old accepted response as unconfirmed after a restart and current retired observation", async () => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await store.withMember(id, session => session.save("retiring", null, "Earlier send", now,
+      { dispatchStatus: "unknown", dispatchKey: id }));
+    // Old binaries saved acceptance without saying whether the request finished.
+    await store.withMember(id, session => session.save("retired", null, "Old completion", now,
+      { dispatchStatus: "accepted" }));
+    store = new PostgresListingMemberLifecycleRepository(database.pool);
+    const [saved] = await receipts();
+    expect(saved).toMatchObject({ state: "retired", unconfirmedPriorDispatch: true, dispatchStatus: "accepted" });
+    expect(archivedListingMemberSelection({ productVariantId: 302, archived: true, retirement: saved }))
+      .not.toHaveProperty("retirementEvidence");
+    const review = await new ListingMemberRecoveryService({ store, adapter: async () => adapter }, () => now).preview(10, id);
+    expect(review).toMatchObject({ canResume: false, observation: { retired: true } });
+    expect(clearOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled();
+  });
+  it("clears a terminal receipt when an older worker starts a new dispatch key", async () => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await store.withMember(id, session => session.save("retiring", null, "First send", now,
+      { dispatchStatus: "unknown", dispatchKey: id }));
+    await store.withMember(id, session => session.save("retiring", null, "First final receipt", now,
+      { dispatchStatus: "accepted", dispatchFinality: "terminal" }));
+    expect((await receipts())[0].unconfirmedPriorDispatch).toBeUndefined();
+    const nextKey = randomUUID();
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      // This models the previous worker, which does not know dispatch_finality.
+      const next = (await client.query(`UPDATE marketplace.listing_member_retirements
+        SET dispatch_status='unknown',dispatch_key=$2,version=version+1 WHERE id=$1 RETURNING dispatch_finality`, [id, nextKey])).rows[0];
+      expect(next.dispatch_finality).toBeNull();
+      await client.query(`INSERT INTO marketplace.listing_member_retirement_events(operation_id,version,actor,before_state,after_state,occurred_at)
+        SELECT id,version,'old-worker',NULL,to_jsonb(r),$2 FROM marketplace.listing_member_retirements r WHERE id=$1`, [id, now]);
+      const accepted = (await client.query(`UPDATE marketplace.listing_member_retirements
+        SET dispatch_status='accepted',version=version+1 WHERE id=$1 RETURNING dispatch_finality`, [id])).rows[0];
+      expect(accepted.dispatch_finality).toBeNull();
+      await client.query(`INSERT INTO marketplace.listing_member_retirement_events(operation_id,version,actor,before_state,after_state,occurred_at)
+        SELECT id,version,'old-worker',NULL,to_jsonb(r),$2 FROM marketplace.listing_member_retirements r WHERE id=$1`, [id, now]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+    const [saved] = await receipts();
+    expect(saved).toMatchObject({ dispatchStatus: "accepted", dispatchKey: nextKey, unconfirmedPriorDispatch: true });
   });
   it("rolls back a failed audit write before any external removal and resumes the same request", async () => {
     remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });

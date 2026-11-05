@@ -85,7 +85,7 @@ describe("Walmart retirement adapter", () => {
       productId: 2, productVariantId: 3, externalSku: "SKU", externalProductId: null, externalVariantId: null,
       externalInventoryItemId: "SKU", identityConflict: false };
     const adapter = new WalmartListingMemberAdapter(f.provider);
-    await adapter.retire(identity, correlationId);
+    await expect(adapter.retire(identity, correlationId)).resolves.toEqual({ finality: "pending" });
     expect(f.api.retire).toHaveBeenCalledExactlyOnceWith("SKU",correlationId);
     expect(f.stock.holdVariants).not.toHaveBeenCalled();
     f.api.observe.mockResolvedValue({ sku: "SKU",productName: "Sleeves",lifecycleStatus: "RETIRED",publishedStatus: "UNPUBLISHED" });

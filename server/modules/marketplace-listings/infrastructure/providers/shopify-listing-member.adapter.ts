@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
-import type { ListingMemberLifecycleAdapter } from "../../application/listing-member-lifecycle.port";
+import type { ListingMemberDispatchReceipt, ListingMemberLifecycleAdapter } from "../../application/listing-member-lifecycle.port";
 import { ListingMemberLifecycleError } from "../../domain/listing-member-lifecycle";
 import { shopifyListingIdentityAliases } from "./shopify-listing-member-identity";
 
@@ -26,8 +26,8 @@ export class ShopifyListingMemberAdapter implements ListingMemberLifecycleAdapte
       throw new ListingMemberLifecycleError("LISTING_MEMBER_IDENTITY_CHANGED", "The Shopify variant does not match the retained product and SKU. Repair its link before removal.");
     return { identity, retired: member === null };
   }
-  async retire(identity: ListingMemberIdentity): Promise<void> {
-    if ((await this.observe(identity)).retired) return;
+  async retire(identity: ListingMemberIdentity): Promise<ListingMemberDispatchReceipt> {
+    if ((await this.observe(identity)).retired) return { finality: "terminal" };
     const client = await this.client(identity);
     const variables = { productId: gid("Product", identity.externalProductId), variantsIds: [gid("ProductVariant", identity.externalVariantId)] };
     let result: z.infer<typeof deletionSchema>;
@@ -42,5 +42,6 @@ export class ShopifyListingMemberAdapter implements ListingMemberLifecycleAdapte
     }
     if (result.data.productVariantsBulkDelete.userErrors.length)
       throw new ListingMemberLifecycleError("LISTING_MEMBER_REMOVAL_REJECTED", "Shopify rejected removal of this exact variant. Review its listing before retrying.");
+    return { finality: "terminal" };
   }
 }

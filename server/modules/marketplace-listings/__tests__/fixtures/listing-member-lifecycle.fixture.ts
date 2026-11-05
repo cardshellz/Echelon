@@ -30,7 +30,8 @@ export async function installListingMemberLifecycleFixture(pool: Pool, options: 
   for (const file of ["0707_channel_listing_publication.sql", "0724_channel_listing_updates.sql",
     "259_channel_listing_lifecycle.sql", "0748_walmart_listing_presence.sql",
     "900000013000018480001_shared_listing_member_lifecycle.sql", "900000022000018880002_listing_member_recovery.sql",
-    ...(options.includeAliasMigration === false ? [] : ["900000057000020020002_listing_member_identity_aliases.sql"])])
+    ...(options.includeAliasMigration === false ? [] : ["900000057000020020002_listing_member_identity_aliases.sql"]),
+    "900000058000020020003_listing_member_dispatch_finality.sql"])
     await pool.query(readFileSync(resolve("migrations", file), "utf8"));
 }
 

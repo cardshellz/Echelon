@@ -100,9 +100,10 @@ operation ID, so it cannot by itself establish which deletion belongs to that
 receipt. The local reader exposes superseded and retired records with uncertain
 dispatch history and permits a read-only provider observation without changing
 the immutable history or authorizing another deletion. The shared domain checks
-the complete event sequence: an accepted receipt closes only the matching
-dispatch key; a successful later retry cannot close a different earlier unknown
-request. An incomplete or malformed event stream is treated as unconfirmed.
+the complete event sequence: only a receipt explicitly recorded as terminal
+closes its matching dispatch key; acceptance alone and a successful later retry
+cannot close a different earlier unknown request. An incomplete or malformed
+event stream is treated as unconfirmed.
 Audit events are read in bounded pages; a PostgreSQL test covers a history that
 crosses multiple pages and verifies that dispatch keys are reconciled across them.
 Older client bundles keep the original strict response format; current clients
@@ -252,3 +253,41 @@ partial-lock cleanup, and an uncertain dispatch retained across the migration.
 These protections cover the member-lifecycle and Dropship removal callers of
 the lock. They do not fence the other mapping or stock writers listed above and
 therefore do not by themselves make ownership transfer safe.
+
+## Member dispatch finality checkpoint
+
+The shared member owner now records whether the adapter's response is terminal
+or merely accepted. An accepted Walmart single-item retirement remains pending
+because [Walmart says](https://developer.walmart.com/us-marketplace/docs/retire-an-item) this response acknowledges a queued request; observing an
+unpublished item does not identify which request caused that state. The event
+reader retains every unresolved dispatch key independently. Historical accepted
+responses without the new finality evidence remain unconfirmed. The migration
+also clears an old receipt when an older worker changes the dispatch key or
+status, so a rolling worker cannot apply the previous request's finality to a
+new request. These changes do not establish a safe ownership transfer or a
+complete recovery action.
+
+Walmart documents a [US-only `RETIRE_ITEM` bulk feed](https://developer.walmart.com/us-marketplace/docs/bulk-item-setup-1)
+that returns a feed ID. Its [published US examples](https://developer.walmart.com/file/mp/us/feed-type-samples.zip)
+include `RetireItemHeader` and `RetireItem` SKU records, and its [feed status endpoint](https://developer.walmart.com/us-marketplace/reference/getfeeditemstatus)
+provides item-level results. Its [general feed guide](https://developer.walmart.com/global-marketplace/docs/list-all-feed-statuses)
+says even a processed feed can need additional item processing or review. The
+available evidence does not yet prove which exact feed/item result makes a
+retirement unable to perform a later write, nor does a feed ID reconstruct an
+older DELETE's missing receipt. The bulk API and the historical requests must
+not be declared final or interchangeable on that basis.
+
+Walmart's [item FAQ](https://developer.walmart.com/us-marketplace/lang-es/docs/item-inventory)
+also describes changing an end date to unretire an item, while the current
+[single-item DELETE guide](https://developer.walmart.com/us-marketplace/docs/retire-an-item)
+describes permanent retirement and does not show an end-date input. These pages
+do not establish the exact reversible API operation for the existing US
+integration. Neither behavior should be guessed from the other.
+
+The separate whole-listing path in `ListingLifecycleService.process` still calls
+`ListingLifecycleProvider.retire` outside the shared member dispatch protocol.
+It saves `retiring` after that call and saves `failed` for caught errors; on a
+later run a failed state can dispatch again. Its legacy events do not establish
+whether an earlier failure happened before or after transport. It must be moved
+under the same durable dispatch and recovery owner, including unlinked Walmart
+SKUs, before this draft is safe to deploy.
