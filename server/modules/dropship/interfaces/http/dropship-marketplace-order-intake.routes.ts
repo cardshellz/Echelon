@@ -244,8 +244,8 @@ async function notifyShopifyStoreUninstalled(input: {
     eventType: DROPSHIP_NOTIFICATION_EVENTS.STORE_DISCONNECTED,
     critical: true,
     channels: ["email", "in_app"],
-    title: "Dropship store disconnected",
-    message: `Your Shopify dropship store ${input.shopDomain} was disconnected because the Shopify app was uninstalled. Order intake and listing pushes are paused.`,
+    title: "Store disconnected",
+    message: `Your Shopify store ${input.shopDomain} was disconnected because the Card Shellz app was uninstalled from it. New orders and listing updates are paused.`,
     payload: {
       vendorId: input.vendorId,
       storeConnectionId: input.storeConnectionId,

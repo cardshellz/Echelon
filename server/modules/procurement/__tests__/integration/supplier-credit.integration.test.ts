@@ -25,6 +25,9 @@ databaseTests.sequential("supplier credit financial ownership and recovery", () 
     if (start < 0) throw new Error("Receipt allocation migration boundary changed");
     await fixture.pool.query(receiptMigration.slice(start));
     await fixture.pool.query(readFileSync("migrations/900000052000019930001_receipt_supplier_credit_sources.sql", "utf8"));
+    expect((await fixture.pool.query("SELECT count(*)::int AS count FROM procurement.supplier_header_cost_reviews")).rows).toEqual([{ count: 0 }]);
+    await fixture.pool.query("DROP TABLE procurement.supplier_header_cost_reviews");
+    await fixture.pool.query(readFileSync("migrations/900000055000020000001_supplier_header_tax_return_sources.sql", "utf8"));
   });
   beforeEach(async () => {
     await fixture.reset();

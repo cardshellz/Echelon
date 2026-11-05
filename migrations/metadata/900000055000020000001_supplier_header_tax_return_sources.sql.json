@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000055000020000001_supplier_header_tax_return_sources.sql",
+  "generation": 55,
+  "pr": 2000,
+  "ordinal": 1,
+  "after": [
+    "900000054000020010001_customer_account_native_summaries.sql"
+  ]
+}

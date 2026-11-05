@@ -5,10 +5,12 @@ import Decimal from "decimal.js";
 import { purchaseTaxCostsSchema } from "@shared/procurement/purchase-tax-costs";
 import { resolvePurchaseCostSource } from "./purchase-cost-source";
 import { purchaseTaxAmounts, purchaseTaxEvidence, PurchaseTaxError } from "./purchase-tax";
+import { resolveSupplierCreditReductions } from "./supplier-credit-source";
 
 export interface PurchaseTaxShippingCosts {
   lines: readonly { purchaseOrderLineId?: number | null; allocatedCents: number; lineId: number }[];
   recoverableByShipmentLine: ReadonlyMap<number, number>;
+  excludedByShipmentLine?: ReadonlyMap<number, number>;
   complete: boolean;
 }
 type SupplierSource = Parameters<typeof resolvePurchaseCostSource>[0];
@@ -18,9 +20,10 @@ type SupplierSource = Parameters<typeof resolvePurchaseCostSource>[0];
 export function projectPurchaseTaxCosts(records: readonly Record<string, unknown>[], sources: readonly SupplierSource[], shipping: PurchaseTaxShippingCosts) {
   const selected = sources.map(source => ({ source, proposals: resolvePurchaseCostSource(source) }));
   const receiptScoped = sources.some(source => source.receiptCosting);
-  const taxed = receiptScoped || records.some(row => row.tax_type_id != null || row.header_tax_type_id != null)
-    || selected.some(row => row.source.purchaseOrderLine.tax_cost_evidence !== undefined || row.source.approvedInvoices.some(invoice => invoice.tax_cost_evidence !== undefined))
-    || shipping.recoverableByShipmentLine.size > 0;
+  const taxed = receiptScoped || sources.some(source => source.approvedInvoices.length > 0) || records.some(row => row.tax_type_id != null || row.header_tax_type_id != null)
+    || selected.some(row => row.source.purchaseOrderLine.tax_cost_evidence !== undefined || row.source.purchaseOrderLine.header_cost_evidence !== undefined || row.source.purchaseOrderLine.header_cost_issue !== undefined
+      || row.source.approvedInvoices.some(invoice => invoice.tax_cost_evidence !== undefined || invoice.header_cost_evidence !== undefined || invoice.header_cost_issue !== undefined))
+    || shipping.recoverableByShipmentLine.size > 0 || (shipping.excludedByShipmentLine?.size ?? 0) > 0;
   if (!taxed) return undefined;
   const productIds = records.filter(row => row.line_type === "product").map(row => readIntegerCents(row.id, "product line"));
   if (!productIds.length) throw new PurchaseTaxError("Tax needs a product line and a verified allocation basis before it can be included in inventory.", "PURCHASE_TAX_ALLOCATION_REQUIRED");
@@ -32,7 +35,8 @@ export function projectPurchaseTaxCosts(records: readonly Record<string, unknown
     throw new PurchaseTaxError("A shipment charge is missing its unique purchase line link.", "PURCHASE_TAX_SOURCE_INVALID");
   const exactCents = (mills: bigint) => mills % BigInt(100) !== BigInt(0) ? null : readIntegerCents(mills / BigInt(100), "tax-adjusted cost", true);
   let recoverableSupplier = BigInt(0), recoverableShipment = BigInt(0), reason: string | null = null;
-  const hasUnallocatedOtherCharges = records.some(row => (row.line_type !== "product" && row.line_type !== "tax" && readIntegerCents(row.line_total_cents ?? 0, "PO charge", true) !== 0)
+  const hasUnallocatedOtherCharges = selected.some(row => (!row.source.approvedInvoices.length || row.source.receiptCosting)
+    && row.source.purchaseOrderLine.header_cost_evidence === undefined) && records.some(row => (row.line_type !== "product" && row.line_type !== "tax" && readIntegerCents(row.line_total_cents ?? 0, "PO charge", true) !== 0)
     || readIntegerCents(row.header_discount_cents ?? 0, "header discount", true) !== 0 || readIntegerCents(row.header_shipping_cents ?? 0, "header freight", true) !== 0);
   const lines = selected.map(({ source, proposals }) => {
     const lineId = readIntegerCents(source.purchaseOrderLine.id, "lineId"), basis = proposals[0]?.basePieces;
@@ -43,23 +47,29 @@ export function projectPurchaseTaxCosts(records: readonly Record<string, unknown
     // the DTO and the receipt/cost contracts; they are never posted from a rate.
     const supplierInventoryCents = supplierMills === null ? null : source.receiptCosting
       ? readIntegerCents((supplierMills+BigInt(50))/BigInt(100),"display supplier cost") : exactCents(supplierMills);
-    if (supplierInventoryCents === null) reason ??= proposals.some(row => row.issue?.code === "PURCHASE_TAX_TYPE_REQUIRED")
+    if (supplierInventoryCents === null) reason ??= proposals.some(row => row.issue?.code.startsWith("SUPPLIER_HEADER_"))
+      ? "Review the supplier's discounts and header charges before using their inventory cost."
+      : proposals.some(row => row.issue?.code === "PURCHASE_TAX_TYPE_REQUIRED")
       ? "Choose the supplier tax type before using its inventory cost."
       : "Confirm the supplier quantities, tax type and billed amounts to calculate inventory cost.";
     if (basis !== readIntegerCents(source.purchaseOrderLine.order_qty, "ordered pieces")) reason ??= "The selected invoice costs cover a different quantity from the PO. Receipt-specific cost allocation is needed before showing the complete PO inventory total.";
-    const taxEvidence = source.approvedInvoices.length ? source.approvedInvoices.flatMap(invoice => purchaseTaxEvidence(invoice.tax_cost_evidence))
+    const taxEvidence = source.approvedInvoices.length ? source.approvedInvoices.flatMap(invoice => [...purchaseTaxEvidence(invoice.tax_cost_evidence), ...purchaseTaxEvidence(invoice.header_tax_cost_evidence)])
       : purchaseTaxEvidence(source.purchaseOrderLine.tax_cost_evidence);
     recoverableSupplier += BigInt(purchaseTaxAmounts(taxEvidence).recoverableMills);
+    if (source.supplierCredits?.length) {
+      const refunds = resolveSupplierCreditReductions(source.approvedInvoices, source.supplierCredits, lineId);
+      if (!refunds.issues.length) recoverableSupplier -= refunds.taxRecoverableMills;
+    }
     let shipment = BigInt(0);
     for (const share of shipping.lines.filter(row => row.purchaseOrderLineId === lineId)) {
       const excluded = shipping.recoverableByShipmentLine.get(share.lineId) ?? 0;
-      shipment += BigInt(share.allocatedCents) - BigInt(excluded); recoverableShipment += BigInt(excluded);
+      shipment += BigInt(share.allocatedCents) - BigInt(excluded) - BigInt(shipping.excludedByShipmentLine?.get(share.lineId) ?? 0); recoverableShipment += BigInt(excluded);
     }
     const shipmentInventoryCents = readIntegerCents(shipment, "inventory shipment share", true);
     return { purchaseOrderLineId: lineId, pieces: basis ?? readIntegerCents(source.purchaseOrderLine.order_qty, "ordered pieces"), supplierInventoryCents,
       shipmentInventoryCents, inventoryLandedCents: supplierInventoryCents === null || !shipping.complete ? null : readIntegerCents(BigInt(supplierInventoryCents) + shipment, "inventory line total", true) };
   });
-  if (hasUnallocatedOtherCharges) reason = [reason, "Other PO charges still need their inventory cost allocation."].filter(Boolean).join(" ");
+  if (hasUnallocatedOtherCharges && !selected.some(row => row.proposals.some(item => item.issue?.code.startsWith("SUPPLIER_HEADER_")))) reason = [reason, "Other PO charges still need their inventory cost allocation."].filter(Boolean).join(" ");
   const exactSupplierMills = selected.every(row=>row.proposals.every(item=>item.totalMills!==null))
     ? selected.reduce((sum,row)=>sum+row.proposals.reduce((value,item)=>value+BigInt(item.totalMills!),BigInt(0)),BigInt(0)) : null;
   const supplierInventoryCents = reason !== null ? null : receiptScoped && exactSupplierMills !== null
@@ -96,7 +106,8 @@ export function projectTaxedShipmentSupplierCost(source: SupplierSource, pieces:
     }
     return {unitCostMills:readIntegerMills(amount.div(pieces).toDecimalPlaces(0,Decimal.ROUND_HALF_UP).toFixed(0),"shipment receipt display rate"),reason:null};
   }
-  const selectedTax = source.purchaseOrderLine.tax_cost_evidence !== undefined || source.approvedInvoices.some(row => row.tax_cost_evidence !== undefined);
+  const selectedTax = source.purchaseOrderLine.tax_cost_evidence !== undefined || source.purchaseOrderLine.header_cost_evidence !== undefined || source.purchaseOrderLine.header_cost_issue !== undefined
+    || source.approvedInvoices.some(row => row.tax_cost_evidence !== undefined || row.header_cost_evidence !== undefined || row.header_cost_issue !== undefined);
   if (!selectedTax && !shipmentHasTax) return undefined;
   const proposals = resolvePurchaseCostSource(source), base = proposals[0]?.basePieces;
   if (source.approvedInvoices.length > 1 || !Number.isSafeInteger(pieces) || pieces <= 0 || base == null || base < pieces

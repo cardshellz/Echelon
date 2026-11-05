@@ -48,7 +48,7 @@ const CREDIT_TABLES = [schema.inboundShipments, schema.inboundShipmentLines, sch
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
   schema.purchasingRecommendationPoHandoffs, schema.poApprovalTiers, schema.warehouseSettings,
 ] as const;
-const CREDIT_HISTORY_TABLES = ["procurement.supplier_credits", "procurement.supplier_credit_lines",
+const CREDIT_HISTORY_TABLES = ["procurement.supplier_header_cost_reviews","procurement.supplier_credits", "procurement.supplier_credit_lines",
   "procurement.supplier_credit_applications", "procurement.supplier_credit_application_reversals",
   "procurement.receiving_quarantine_observations", "procurement.receiving_quarantine_acceptances",
   "procurement.receiving_quarantine_dispositions", "inventory.cost_reconciliation_approvals",

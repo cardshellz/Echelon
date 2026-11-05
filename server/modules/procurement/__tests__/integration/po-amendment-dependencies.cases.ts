@@ -278,7 +278,7 @@ export function registerPoAmendmentDependencyCases(fixture: {
 
   it("approved supplier amounts remain authoritative when the PO order quantity changes", async () => {
     await prepare();
-    await query(`UPDATE procurement.vendor_invoices SET status='paid',paid_amount_cents=invoiced_amount_cents,balance_cents=0 WHERE id=71;
+    await query(`UPDATE procurement.vendor_invoices SET status='paid',invoiced_amount_cents=13000,paid_amount_cents=13000,balance_cents=0 WHERE id=71;
       UPDATE procurement.vendor_invoice_lines SET qty_invoiced=100,line_total_cents=13000,
         cost_component_evidence='{"contractVersion":1,"packagingTreatment":"separate","productMills":1200000,"packagingMills":100000,"adjustmentMills":0,"source":"operator_review"}' WHERE id=72;
       UPDATE procurement.purchase_orders SET status='received',physical_status='received' WHERE id=10;

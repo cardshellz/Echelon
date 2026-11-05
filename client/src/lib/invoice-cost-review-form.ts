@@ -5,7 +5,7 @@ import { exactMoneyAsInput, parseExactMoneyInput } from "./exact-money-input";
 import type { InvoiceCostAdjustment } from "@shared/procurement/invoice-cost-adjustments";
 
 export type InvoiceCostReviewForm = {
-  packagingTreatment: "" | "separate" | "included_in_product";
+  packagingTreatment: "" | "separate" | "included_in_product" | "combined";
   product: string;
   packaging: string;
   adjustment: string;
@@ -43,7 +43,7 @@ export function invoiceCostComponentsFromForm(form: InvoiceCostReviewForm, lineT
   if (!Number.isSafeInteger(lineTotalCents)) throw new Error("The recorded invoice total cannot be reviewed safely.");
   if (!form.packagingTreatment) throw new Error("Select the packaging treatment from the supplier evidence.");
   const amounts = invoiceCostReviewAmounts(form);
-  if (form.packagingTreatment === "included_in_product" && amounts.packagingMills !== 0) {
+  if (form.packagingTreatment !== "separate" && amounts.packagingMills !== 0) {
     throw new Error("Packaging included in product must have a separate packaging amount of zero.");
   }
   if (BigInt(amounts.productMills) + BigInt(amounts.packagingMills) + BigInt(amounts.adjustmentMills) !== BigInt(lineTotalCents) * BigInt(100)) {

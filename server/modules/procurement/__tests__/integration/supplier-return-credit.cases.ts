@@ -11,11 +11,12 @@ import { createDrizzleFinancialCommandRepository } from "../../../../platform/co
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import type { SupplierReturnStockFixture } from "./supplier-return-stock.cases";
-import type { SourceLineInput } from "@shared/procurement/supplier-credit";
+import { supplierCreditLineRequiresCostReview, type SourceLineInput } from "@shared/procurement/supplier-credit";
 import { previewSupplierReturnStock } from "../../../inventory/application/supplier-return-stock";
 import { createSupplierReturnReader, recordSupplierReturn } from "../../supplier-return.service";
 import { loadSupplierCreditSource, readSupplierCreditDetail, readSupplierCreditOptions } from "../../supplier-credit.repository";
-import { executeSupplierCreditCommand } from "../../supplier-credit.service";
+import { executeSupplierCreditCommand, createSupplierCreditCostPreview } from "../../supplier-credit.service";
+import { createReceiptInvoiceCostService, receiptInvoiceCommandScope } from "../../receipt-invoice-costs.service";
 import { readSupplierReturnEntitlementReview } from "../../supplier-return-credit-review.service";
 import { recordSupplierReturnDifferenceReview } from "../../supplier-return-difference.service";
 export function registerSupplierReturnCreditCases(fixture: SupplierReturnStockFixture) {
@@ -41,16 +42,50 @@ export function registerSupplierReturnCreditCases(fixture: SupplierReturnStockFi
         });
     }
     async function change(creditId: number, command: "approve" | "void") {
-        return fixture.database().transaction(async (tx) => {
-            const current = await readSupplierCreditDetail(tx, creditId, true);
+        const current = await fixture.database().transaction(tx => readSupplierCreditDetail(tx, creditId, true));
+        const request = { expectedVersion: current.version, reason: "Reviewed original supplier document and physical collection" };
+        const measured = current.lines.some(supplierCreditLineRequiresCostReview)
+          ? await createSupplierCreditCostPreview(fixture.database(), () => fixture.at)(creditId, command, request, fixture.actorId) : null;
+        return fixture.database().transaction(async tx => {
             return executeSupplierCreditCommand(tx, { ...context, command, creditId,
-                raw: { expectedVersion: current.version, reason: "Reviewed original supplier document and physical collection" } });
+                ...(measured ? { commandKey: randomUUID() } : {}), raw: { ...request, ...(measured ? { previewVersion: measured.previewVersion } : {}) } });
         });
     }
     function creditLine(returnLineId: number, amountCents: number, component: "product" | "packaging" | "landed" | "unassigned", entitlementId?: number, invoiceLineId = 72): SourceLineInput {
         return { invoiceLineId, amountCents, disposition: { kind: "accepted_stock_return", supplierReturnLineId: returnLineId, quantity: 1,
                 evidenceReference: "RETURN-COLLECTION-1", component, ...(entitlementId ? { entitlementId } : {}) } };
     }
+    it.each(["inventory", "recoverable"] as const)("matches returned receipt goods and %s tax to the original invoice without reducing retained stock or inventing an expense", async treatment => {
+        await query("UPDATE procurement.purchase_order_lines SET receipt_costing_enabled=1 WHERE id=21");
+        const { document, line } = await prepare(false);
+        await query("INSERT INTO procurement.purchase_tax_types(id,code,name,treatment,revision,created_at,updated_at,updated_by) VALUES(1,'VAT','Supplier VAT',$1,1,$2,$2,$3)", [treatment, fixture.at, fixture.actorId]);
+        await query(`UPDATE procurement.vendor_invoices SET invoiced_amount_cents=27000,balance_cents=27000 WHERE id=71;
+          UPDATE procurement.vendor_invoice_lines SET line_total_cents=27000,cost_component_evidence=jsonb_set(cost_component_evidence,'{adjustmentMills}','100000') WHERE id=72;
+          INSERT INTO procurement.vendor_invoice_line_taxes(vendor_invoice_line_id,tax_type_id,amount_mills) VALUES(72,1,100000)`);
+        await fixture.approveInvoice();
+        const service = createReceiptInvoiceCostService(fixture.database(), () => fixture.at), loaded = await service.context(21, fixture.actorId);
+        const assignment = { sourceVersion: loaded.sourceVersion, change: { purchaseOrderLineId: 21, allocations: [{ receivingLineId: line.source.sourceProof.origin.receivingLineId,
+          invoiceLineId: 72, receiptStartPiece: 0, invoiceStartPiece: 0, pieces: 100 }] } };
+        const preview = await service.preview(assignment, fixture.actorId), body = { ...assignment, previewVersion: preview.previewVersion,
+          reason: "Matched returned and retained goods to the original received invoice", approvalConfirmed: true };
+        const scope = { method: "POST", ...receiptInvoiceCommandScope(21) };
+        expect((await service.approve(body, fixture.actorId, { ...scope, actorType: "user", actorId: fixture.actorId, contractVersion: 1,
+          idempotencyKey: randomUUID(), requestHash: hashHttpFinancialCommand({ ...scope, body }) })).httpStatus).toBe(200);
+        const currentReturn = await createSupplierReturnReader(fixture.database()).detail(document.id, fixture.actorId);
+        if (!currentReturn) throw new Error("The recorded return is missing.");
+        const baseline = await physical(), returned = currentReturn.lines[0];
+        const product = creditLine(returned.id, 6000, "product"), packaging = creditLine(returned.id, 500, "packaging");
+        const tax: SourceLineInput = { ...creditLine(returned.id, 250, "product"), disposition: { kind: "accepted_stock_return", supplierReturnLineId: returned.id, quantity: 1,
+          evidenceReference: "RETURN-COLLECTION-1", component: "product", taxRefund: { taxSourceKey: "invoice_line:72:1", taxTypeId: 1 } } };
+        const created = (await draft([product, packaging, tax])).credit;
+        expect(created.lines[2].sourceEvidence.acceptedReturnSource).toMatchObject({ invoiceAttribution: { invoiceLineId: 72, receivingLineId: line.source.sourceProof.origin.receivingLineId,
+          parts: [{ pieces: 50, invoiceStartPiece: 0, receiptStartPiece: 0 }] } });
+        const approved = await change(created.id, "approve");
+        expect(approved.credit.costStatus).toBe("posted"); expect(await physical()).toEqual(baseline);
+        expect((await createSupplierReturnReader(fixture.database()).detail(document.id, fixture.actorId))?.lines[0].creditState).toBe("matched");
+        expect((await query("SELECT count(*)::int AS count FROM inventory.cost_reconciliation_postings")).rows[0].count).toBe(0);
+        await change(created.id, "void"); expect(await physical()).toEqual(baseline);
+    });
     async function physical() {
         return (await query(`SELECT
       (SELECT jsonb_agg(to_jsonb(row) ORDER BY id) FROM inventory.inventory_lots row) AS lots,

@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import { asc, eq, sql } from "drizzle-orm";
 import { supplierCredits, supplierCreditLines, supplierCreditApplications, supplierCreditApplicationReversals, vendorInvoices, vendorInvoiceLines, vendors } from "@shared/schema";
-import { supplierCreditDetailSchema, supplierCreditDispositionSchema, supplierCreditOptionsSchema, type SupplierCreditDetail, type SupplierCreditOptions } from "@shared/procurement/supplier-credit";
+import { supplierCreditDetailSchema, supplierCreditDispositionSchema, supplierCreditOptionsSchema, supplierCreditLineRequiresCostReview, type SupplierCreditDetail, type SupplierCreditOptions } from "@shared/procurement/supplier-credit";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import type { db } from "../../db";
 import { readSupplierCreditSourceOptions, readSupplierCreditCostStatus, type SupplierCreditCostReadCache } from "./supplier-credit-source.service";
 import { supplierCreditCostApprovalSchema } from "@shared/procurement/supplier-credit-cost-review";
+import { readSupplierCreditInvoiceLines } from "./supplier-credit-source.repository";
+import { supplierHeaderAmounts } from "./domain/supplier-header-costs";
+import { readIntegerCents } from "@shared/money-read";
 export type CreditTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 export class SupplierCreditError extends Error {
   constructor(readonly code: string, message: string, readonly statusCode = 409) {
@@ -32,6 +35,9 @@ export async function loadSupplierCreditSource(tx: CreditTransaction, invoiceId:
   if (!invoice) throw new SupplierCreditError("SUPPLIER_CREDIT_SOURCE_NOT_FOUND", "Original supplier invoice not found.", 404);
   const linesQuery = tx.select().from(vendorInvoiceLines).where(eq(vendorInvoiceLines.vendorInvoiceId, invoiceId)).orderBy(asc(vendorInvoiceLines.id));
   const lines = await (lock ? linesQuery.for("update") : linesQuery);
+  const selected = await readSupplierCreditInvoiceLines(tx, invoiceId, false);
+  const capacities = new Map(selected.map(row => [costInteger(row.id, "credit invoice line", 1), readIntegerCents(BigInt(costInteger(row.line_total_cents, "original bill line"))
+    + BigInt(supplierHeaderAmounts(row.header_cost_evidence).totalMills) / BigInt(100), "allocated bill capacity")]));
   const totals = await tx.execute(sql`SELECT l.invoice_line_id,coalesce(sum(l.amount_cents),0) AS amount
     FROM procurement.supplier_credit_lines l JOIN procurement.supplier_credits c ON c.id=l.supplier_credit_id
     WHERE c.source_invoice_id=${invoiceId} AND c.status='approved' GROUP BY l.invoice_line_id`);
@@ -59,11 +65,14 @@ export async function loadSupplierCreditSource(tx: CreditTransaction, invoiceId:
   const version = creditHash({
     sourceSnapshot,
     status: invoice.status,
+    ...(selected.some(row => row.header_cost_evidence !== undefined || row.tax_cost_evidence !== undefined) ? { selected: selected.map(row => ({ id: row.id,
+      header: row.header_cost_evidence ?? null, headerIssue: row.header_cost_issue ?? null, taxes: row.tax_cost_evidence ?? null })) } : {}),
     credits: [...credited].sort((a, b) => a[0] - b[0])
   });
   return {
     invoice,
     lines,
+    capacities,
     credited,
     version,
     sourceSnapshot
@@ -133,8 +142,7 @@ export async function readSupplierCreditDetail(tx: CreditTransaction, id: number
     cost
   });
   const eligible = canApprove && issues.length === 0;
-  const costApprovalRows = lineRows.some(row => { const disposition = supplierCreditDispositionSchema.safeParse(row.line.disposition).data;
-    return disposition?.kind === "price_reduction" && disposition.receiptAllocation; })
+  const costApprovalRows = lineRows.some(row => supplierCreditLineRequiresCostReview({ disposition: row.line.disposition, sourceEvidence: row.line.sourceEvidence }))
     ? (await tx.execute(sql`SELECT DISTINCT ON (payload_json->>'commandKey') id,actor_id,payload_json
       FROM procurement.po_events WHERE event_type='supplier_credit_costs_approved' AND payload_json->>'creditId'=${String(id)}
       ORDER BY payload_json->>'commandKey',id`)).rows : null;
@@ -278,14 +286,16 @@ export async function readSupplierCreditOptions(tx: CreditTransaction, invoiceId
     lines: source.lines.map(line => {
       const option = choices.find(row => row.invoiceLineId === line.id);
       const credited = source.credited.get(line.id) ?? 0;
-      if (!Number.isSafeInteger(line.lineTotalCents) || line.lineTotalCents < 0 || credited > line.lineTotalCents) throw new SupplierCreditError("SUPPLIER_CREDIT_SOURCE_REVIEW", "Original invoice line totals need review.");
+      const capacity = source.capacities.get(line.id)!;
+      if (!Number.isSafeInteger(line.lineTotalCents) || line.lineTotalCents < 0 || credited > capacity) throw new SupplierCreditError("SUPPLIER_CREDIT_SOURCE_REVIEW", "Original invoice line totals need review.");
       return {
         invoiceLineId: line.id,
         label: line.description || line.productName || line.sku || `Invoice line ${line.id}`,
         lineAmountCents: line.lineTotalCents,
         creditedAmountCents: credited,
-        availableAmountCents: line.lineTotalCents - credited,
+        availableAmountCents: capacity - credited,
         components: option?.components ?? [],
+        ...(option?.taxSources ? { taxSources: option.taxSources, combinedGoods: option.combinedGoods } : {}),
         ...(option?.receiptCosting ? { receiptCosting: true, receiptAllocations: option.receiptAllocations } : {}),
         returnDispositions: option?.returnDispositions ?? [],
         acceptedReturns: option?.acceptedReturns ?? [],

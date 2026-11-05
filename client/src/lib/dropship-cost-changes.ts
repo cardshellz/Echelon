@@ -198,7 +198,7 @@ export function describeVendorListingActionDetail(action: DropshipVendorListingA
   const place = vendorListingActionPriceLink(action) === null ? "on the Catalog page" : "in Listing settings";
   switch (action.action) {
     case "reprice_queued":
-      return action.pushJobId !== null ? `Queued as push job ${action.pushJobId}; the result shows on the Catalog page.` : null;
+      return action.pushJobId !== null ? "Your new price is being sent to eBay." : null;
     case "reprice_refused":
       return "Your store could not take a push at the time. Fix what the Onboarding page shows, then queue the listing again.";
     case "awaiting_review":

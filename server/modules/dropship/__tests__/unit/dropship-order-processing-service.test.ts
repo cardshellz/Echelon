@@ -428,7 +428,7 @@ describe("DropshipOrderProcessingService", () => {
     expect(notice).toMatchObject({
       eventType: "dropship_order_processing_failed",
       critical: true,
-      message: "Order intake 1 could not be processed: an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it.",
+      message: "Shopify order EXT-1 couldn't be processed: an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it.",
       payload: { failureCode: DATABASE_CONSTRAINT_VIOLATION_CODE },
     });
     expect(JSON.stringify(notice)).not.toContain("dropship_shipping_quote_snapshots");
@@ -467,7 +467,7 @@ describe("DropshipOrderProcessingService", () => {
     });
     expect(notificationSender.sent[0]).toMatchObject({
       eventType: "dropship_order_processing_failed",
-      message: "Order intake 1 could not be processed: an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it.",
+      message: "Shopify order EXT-1 couldn't be processed: an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it.",
     });
     expect(JSON.stringify(notificationSender.sent[0])).not.toContain("p.tier");
   });
@@ -502,7 +502,7 @@ describe("DropshipOrderProcessingService", () => {
     expect(repository.failure).toMatchObject({ status: "failed", retryable: false });
     expect(notificationSender.sent[0]).toMatchObject({
       eventType: "dropship_order_processing_failed",
-      message: "Order intake 1 could not be processed: an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it.",
+      message: "Shopify order EXT-1 couldn't be processed: an internal Card Shellz error stopped it; the order is saved and Card Shellz staff can retry it.",
     });
     expect(JSON.stringify(notificationSender.sent[0])).not.toContain("OMS refused");
   });

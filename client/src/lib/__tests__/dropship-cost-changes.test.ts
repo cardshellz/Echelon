@@ -120,7 +120,7 @@ describe("vendor listing action words", () => {
       .toBe("Each sale loses money until you raise the price on the Catalog page.");
     expect(describeVendorListingActionDetail(action({ holdReleasedAt: "2026-10-14T00:05:00.000Z", holdReleaseReason: "price_covers_cost" }), formatDate))
       .toBe("Selling again since on 2026-10-14.");
-    expect(describeVendorListingActionDetail(action({ action: "reprice_queued", pushJobId: 100 }), formatDate)).toContain("push job 100");
+    expect(describeVendorListingActionDetail(action({ action: "reprice_queued", pushJobId: 100 }), formatDate)).toBe("Your new price is being sent to eBay.");
     expect(describeVendorListingActionDetail(action({ action: "price_covers_cost" }), formatDate)).toBeNull();
     expect(isVendorListingActionAttention("awaiting_review")).toBe(true);
     expect(isVendorListingActionAttention("price_covers_cost")).toBe(false);

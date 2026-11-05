@@ -4,7 +4,7 @@ import { purchaseLineNeedsCostReview } from "./purchase-cost-status";
 import { formatShipmentExceptionAmount, type ShipmentCostException } from "./shipment-cost-exception";
 
 export type CostReviewAction = "invoice_amounts" | "invoice_quantity" | "record_invoice" | "apply_supplier"
-  | "repair_origin" | "repair_links" | "review_history" | "update_shipment" | "measurements" | "tax_treatment" | "receipt_invoice" | "receive_goods" | "accounting";
+  | "repair_origin" | "repair_links" | "review_history" | "update_shipment" | "measurements" | "tax_treatment" | "header_amounts" | "receipt_invoice" | "receive_goods" | "accounting";
 export interface CostReviewTask {
   id: string;
   title: string;
@@ -55,6 +55,9 @@ export function supplierCostReviewTasks(line: PurchaseLineCostStatus): CostRevie
   if (issues.some(issue => issue.code === "PURCHASE_TAX_TYPE_REQUIRED")) {
     add({ title: "Choose the purchase tax type", explanation: "The tax amount is saved. Select its configured type so receiving knows whether it belongs in inventory cost or is recorded separately.", action: "tax_treatment" }, "tax");
   }
+  if (issues.some(issue => issue.code.startsWith("SUPPLIER_HEADER_"))) {
+    add({ title: "Allocate supplier discounts and header charges", explanation: "The supplier amount is saved. Review where its discount, tax or other header charges belong and see each line's exact share before approval.", action: "header_amounts" }, "header");
+  }
   if (issues.some(issue => issue.code === "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW")) {
     add({ title: "Check the supplier return", explanation: "The recorded return could not be verified against its cost records. There is no automatic cost retry for this case; review the saved return and invoice evidence.", action: "accounting" }, "return");
     return tasks;
@@ -99,7 +102,7 @@ export function supplierCostReviewTasks(line: PurchaseLineCostStatus): CostRevie
   if (issues.some(issue => receiptCostHistoryCodes.has(issue.code))) {
     add({ title: "Check the original receipt", explanation: "Confirm the original receipt quantity and cost link, including any receipt reversal. Its stock costs are not yet confirmed.", action: "review_history" }, "receipt");
   }
-  const otherIssues = issues.filter(issue => !issue.code.startsWith("INVOICE_") && !issue.code.startsWith("RECEIPT_INVOICE") && issue.code !== "PURCHASE_ADJUSTMENT_REVIEW"
+  const otherIssues = issues.filter(issue => !issue.code.startsWith("SUPPLIER_HEADER_") && !issue.code.startsWith("INVOICE_") && !issue.code.startsWith("RECEIPT_INVOICE") && issue.code !== "PURCHASE_ADJUSTMENT_REVIEW"
     && !historyCodes.has(issue.code) && !receiptCostHistoryCodes.has(issue.code) && issue.code !== "PURCHASE_TAX_TYPE_REQUIRED");
   if (otherIssues.length) add({ title: "Check the recorded cost", explanation: otherIssues.map(issue => issue.message).join(" "), action: "accounting" }, "record");
   if (!tasks.length) add({ title: "Apply the supplier costs", explanation: "The supplier amounts are recorded. Apply them to the remaining stock and verified sales; review the saved result afterwards.", action: "apply_supplier" }, "apply");

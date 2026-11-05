@@ -261,7 +261,7 @@ describe("DropshipVendorProvisioningService", () => {
       eventType: "dropship_entitlement_blocked",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship entitlement lapsed",
+      title: "Your .ops membership has lapsed",
       idempotencyKey: "entitlement-blocked:1:lapsed:sub-1",
       payload: {
         vendorId: 1,

@@ -9,7 +9,7 @@ import type { CostIssue, CostInventoryEffect } from "@shared/procurement/cost-so
 import { COGSService } from "../inventory/cogs.service";
 import { costInteger, CostEvidenceError, lockInventoryCostGraph, type CostEvidenceTransaction } from "../inventory/infrastructure/cost-evidence.repository";
 import { evaluateSupplierCreditSource, resolveSupplierCreditReductions, supplierCreditIssue,
-  supplierCreditSourceEvidenceSchema, supplierCreditInvoiceSourceFingerprint, type SupplierCreditSourceEvidence } from "./domain/supplier-credit-source";
+  supplierCreditSourceEvidenceSchema, supplierCreditInvoiceSourceFingerprint, supplierTaxCreditCapIssues, type SupplierCreditSourceEvidence } from "./domain/supplier-credit-source";
 import { readCreditedReturnQuantities, readSupplierCreditCostRows, readSupplierCreditInvoiceLines,
   readSupplierCreditReturns, writeSupplierCreditSourceResult } from "./supplier-credit-source.repository";
 import { reconcilePurchaseCostEvidence } from "./purchase-cost-application.service";
@@ -19,6 +19,9 @@ import { createSupplierCreditCostReadCache, type SupplierCreditCostReadCache } f
 import { readReceiptCostingEvidence } from "./receipt-invoice-costs.repository";
 import { receiptCreditAttributionKey } from "@shared/procurement/receipt-credit-attribution";
 import { invoiceGoodsAmounts } from "@shared/procurement/invoice-cost-evidence";
+import { supplierInvoiceAmounts, supplierInvoiceTaxSource } from "./domain/supplier-invoice-amounts";
+import { validateQuarantineInvoiceCreditIntervals } from "./domain/quarantine-invoice-credit";
+import { readPurchaseTaxTypes } from "./purchase-tax-evidence.repository";
 export { createSupplierCreditCostReadCache, type SupplierCreditCostReadCache } from "./supplier-credit-cost-read-cache";
 
 type CostState = "pending" | "posted" | "review_required" | "not_applicable";
@@ -60,26 +63,35 @@ export async function validateSupplierCreditSourceLines(tx: CostEvidenceTransact
       }
       acceptedGroups.set(group, disposition.quantity);
       const acceptedReturnSource = await reviewAcceptedReturnCreditSource(tx, { invoice, line, creditId: input.creditId });
+      let returnedTax: SupplierCreditSourceEvidence["taxCredit"];
+      if (disposition.taxRefund) {
+        if (!acceptedReturnSource.invoiceAttribution || disposition.component !== (invoice.freight_cost_id == null ? "product" : "landed"))
+          throw new CostEvidenceError("CREDIT_RETURN_TAX_RECEIPT_REQUIRED", "Assign this return's original invoice to its receipt before refunding its recorded tax.");
+        returnedTax = evaluateSupplierCreditSource({ invoice, line: { invoiceLineId: line.invoiceLineId, amountCents: line.amountCents,
+          disposition: { kind: "tax_reduction", ...disposition.taxRefund } } }).sourceEvidence.taxCredit;
+      }
       const sourceEvidence = supplierCreditSourceEvidenceSchema.parse({ contractVersion: 1,
         invoiceLineId: line.invoiceLineId, invoiceId: Number(invoice.vendor_invoice_id),
         invoiceSourceFingerprint: supplierCreditInvoiceSourceFingerprint(invoice),
         purchaseOrderLineId: invoice.purchase_order_line_id == null ? null : Number(invoice.purchase_order_line_id),
         freightCostId: invoice.freight_cost_id == null ? null : Number(invoice.freight_cost_id),
         reduction: { productMills: 0, packagingMills: 0, landedMills: 0, basePieces: 0 },
-        returnSource: null, acceptedReturnSource, issues: [] });
+        returnSource: null, acceptedReturnSource, issues: [], ...(returnedTax ? { taxCredit: returnedTax } : {}) });
       result.push({ invoiceLineId: line.invoiceLineId, sourceEvidence, costState: "pending" as const, costIssues: [] });
       continue;
     }
     let returnSource: SupplierCreditSourceEvidence["returnSource"] = null;
-    if (line.disposition.kind === "quarantine_return") {
-      const disposition = line.disposition;
+    const returnAttribution = line.disposition.kind === "quarantine_return" ? line.disposition
+      : line.disposition.kind === "tax_reduction" ? line.disposition.quarantineAllocation : undefined;
+    if (returnAttribution) {
+      const disposition = returnAttribution;
       const returns = await readSupplierCreditReturns(tx, invoice, true);
       const source = returns.find(row => Number(row.id) === disposition.returnDispositionId);
       if (!source || source.evidence_reference !== disposition.evidenceReference) throw new CostEvidenceError("CREDIT_RETURN_SOURCE_MISMATCH", "The return must be an immutable quarantine return for this invoice's vendor and PO line, with its recorded collection evidence.");
       const used = await readCreditedReturnQuantities(tx, [disposition.returnDispositionId], input.creditId);
       const requested = (requestedReturns.get(disposition.returnDispositionId) ?? BigInt(0)) + BigInt(disposition.quantity);
-      requestedReturns.set(disposition.returnDispositionId, requested);
-      if (requested + (used.get(disposition.returnDispositionId) ?? BigInt(0)) > BigInt(costInteger(source.observation_qty, "returnedQuantity", 1))) {
+      if (line.disposition.kind === "quarantine_return") requestedReturns.set(disposition.returnDispositionId, requested);
+      if ((line.disposition.kind === "quarantine_return" ? requested + (used.get(disposition.returnDispositionId) ?? BigInt(0)) : BigInt(disposition.quantity)) > BigInt(costInteger(source.observation_qty, "returnedQuantity", 1))) {
         throw new CostEvidenceError("CREDIT_RETURN_QUANTITY_EXCEEDED", "Credits already use this physical return quantity. Review the current return and active credits.");
       }
       returnSource = { dispositionId: disposition.returnDispositionId, observationId: costInteger(source.observation_id, "observationId", 1),
@@ -89,12 +101,12 @@ export async function validateSupplierCreditSourceLines(tx: CostEvidenceTransact
         evidenceReference: disposition.evidenceReference };
     }
     const evaluated = evaluateSupplierCreditSource({ line, invoice, returnSource });
-    if (line.disposition.kind === "price_reduction") {
+    if (line.disposition.kind === "price_reduction" || line.disposition.kind === "tax_reduction") {
       const assignment = line.disposition.receiptAllocation;
       const scoped = costInteger(invoice.receipt_costing_enabled ?? 0, "receipt costing policy") === 1;
-      if (assignment && (!scoped || line.disposition.component === "landed"))
+      if (assignment && (!scoped || line.disposition.kind === "price_reduction" && line.disposition.component === "landed"))
         throw new CostEvidenceError("CREDIT_RECEIPT_SCOPE_INVALID", "A receipt assignment requires receipt-specific supplier goods costs.");
-      if (scoped) {
+      if (scoped && !(line.disposition.kind === "tax_reduction" && line.disposition.quarantineAllocation)) {
         const evidence = await readReceiptCostingEvidence(tx, costInteger(invoice.purchase_order_line_id, "purchaseOrderLineId", 1));
         if (!assignment) {
           const issue = supplierCreditIssue("CREDIT_RECEIPT_ATTRIBUTION_REQUIRED", "Choose the original billed receipt for this credit; other receipts keep their own costs.");
@@ -107,7 +119,18 @@ export async function validateSupplierCreditSourceLines(tx: CostEvidenceTransact
     result.push({ invoiceLineId: line.invoiceLineId, ...evaluated });
   }
   const poIds = [...new Set(invoices.filter(row => row.purchase_order_line_id != null).map(row => Number(row.purchase_order_line_id)))];
-  const existing = (await readSupplierCreditCostRows(tx, { purchaseOrderLineIds: poIds })).filter(row => Number(row.supplier_credit_id) !== input.creditId);
+  const existing = (await readSupplierCreditCostRows(tx, { purchaseOrderLineIds: poIds,
+    freightCostIds: invoices.filter(row => row.freight_cost_id != null).map(row => costInteger(row.freight_cost_id, "credited shipment charge", 1)) })).filter(row => Number(row.supplier_credit_id) !== input.creditId);
+  for (const invoice of invoices.filter(row => costInteger(row.receipt_costing_enabled ?? 0, "receipt costing") === 1)) {
+    const receipt = await readReceiptCostingEvidence(tx, costInteger(invoice.purchase_order_line_id, "PO line", 1));
+    const evidence = [...existing.filter(row => row.status === "approved" && Number(row.invoice_line_id) === Number(invoice.id)).map(row => supplierCreditSourceEvidenceSchema.parse(row.source_evidence)),
+      ...result.filter(row => row.invoiceLineId === Number(invoice.id)).map(row => row.sourceEvidence)];
+    if (evidence.some(row => row.returnSource && row.returnInvoiceStartPiece === undefined
+      && (BigInt(row.returnSource.observationQuantity) * BigInt(row.returnSource.unitsPerVariant) !== BigInt(costInteger(invoice.qty_invoiced, "original invoice pieces", 1))
+        || receipt.allocations.some(assignment => assignment.invoiceLineId === Number(invoice.id)))))
+      throw new CostEvidenceError("CREDIT_RETURN_INVOICE_INTERVAL_REQUIRED", "Identify which original billed pieces were returned. Accepted receipts keep their own prices.");
+    validateQuarantineInvoiceCreditIntervals(costInteger(invoice.qty_invoiced, "invoice pieces", 1), receipt.allocations.filter(row => row.invoiceLineId === Number(invoice.id)), evidence);
+  }
   // Evaluate the complete component cap, including distinct product/packaging
   // entries on the same document. Drafts do not reserve financial entitlement.
   const provisionalIdBase = existing.reduce((maximum, row) => Math.max(maximum, costInteger(row.id, "creditLineId", 1)), 0);
@@ -115,8 +138,10 @@ export async function validateSupplierCreditSourceLines(tx: CostEvidenceTransact
     invoice_line_id: row.invoiceLineId, amount_cents: lines[index].amountCents, disposition: lines[index].disposition,
     source_evidence: row.sourceEvidence, status: "approved" }));
   const cap = resolveSupplierCreditReductions(invoices, [...existing.filter(row => invoices.some(invoice => Number(invoice.id) === Number(row.invoice_line_id))),
-    ...proposed.filter(row => row.source_evidence.freightCostId === null)]);
-  const exceeded = cap.issues.find(issue => ["CREDIT_SOURCE_EXCEEDED", "CREDIT_COMPONENT_EXCEEDED"].includes(issue.code));
+    ...proposed].filter(row => row.source_evidence != null && supplierCreditSourceEvidenceSchema.parse(row.source_evidence).freightCostId === null));
+  const taxExceeded = supplierTaxCreditCapIssues(invoices, [...existing, ...proposed])[0];
+  if (taxExceeded) throw new CostEvidenceError(taxExceeded.code, taxExceeded.message);
+  const exceeded = cap.issues.find(issue => ["CREDIT_SOURCE_EXCEEDED", "CREDIT_COMPONENT_EXCEEDED", "CREDIT_TAX_EXCEEDED"].includes(issue.code));
   if (exceeded) throw new CostEvidenceError(exceeded.code, exceeded.message);
   return result;
 }
@@ -124,16 +149,16 @@ export async function validateSupplierCreditSourceLines(tx: CostEvidenceTransact
 export async function readSupplierCreditSourceOptions(tx: CostEvidenceTransaction, input: SourceContext & { invoiceId: number }) {
   validateContext(input);
   const invoices = await readSupplierCreditInvoiceLines(tx, input.invoiceId, false);
+  const taxTypes = new Map((await readPurchaseTaxTypes(tx)).map(type => [type.id, type.name]));
   const result = [];
   for (const invoice of invoices) {
     const components: Array<"product" | "packaging" | "landed"> = [];
     const issues: CostIssue[] = [];
     const evidence = invoiceCostComponentEvidenceSchema.safeParse(invoice.cost_component_evidence);
-    let goods: ReturnType<typeof invoiceGoodsAmounts> | null = null;
-    if (evidence.success) { try { goods = invoiceGoodsAmounts(evidence.data); } catch (error) { if (!(error instanceof RangeError)) throw error; } }
+    let goods: ReturnType<typeof supplierInvoiceAmounts> | null = null;
+    try { goods = supplierInvoiceAmounts(invoice); } catch (error) { if (!(error instanceof RangeError || error instanceof CostEvidenceError || error instanceof z.ZodError)) throw error; }
     if (invoice.freight_cost_id != null && invoice.purchase_order_line_id == null) components.push("landed");
-    else if (invoice.purchase_order_line_id != null && evidence.success && goods && evidence.data.adjustmentMills === goods.adjustmentMills
-      && BigInt(evidence.data.productMills) + BigInt(evidence.data.packagingMills) + BigInt(evidence.data.adjustmentMills) === BigInt(costInteger(invoice.line_total_cents, "invoiceTotal")) * BigInt(100)) {
+    else if (invoice.purchase_order_line_id != null && goods) {
       if (goods.productMills > 0) components.push("product");
       if (goods.packagingMills > 0) components.push("packaging");
     } else issues.push(supplierCreditIssue("CREDIT_COMPONENT_SOURCE_REVIEW", "Review the original invoice cost components before recording a price reduction."));
@@ -150,6 +175,7 @@ export async function readSupplierCreditSourceOptions(tx: CostEvidenceTransactio
     const receiptAllocations = receiptEvidence?.allocations.filter(row => row.invoiceLineId === Number(invoice.id)).map(({ invoiceLineId: _id, ...row }) => ({ ...row,
       receiptNumber: receiptEvidence.receipts.find(receipt => receipt.receivingLineId === row.receivingLineId)!.receiptNumber })) ?? [];
     result.push({ invoiceLineId: costInteger(invoice.id, "invoiceLineId", 1), components, returnDispositions, acceptedReturns, issues,
+      ...(goods ? { combinedGoods: goods.packagingTreatment === "combined", taxSources: goods.taxes.map(tax => ({ key: tax.key, label: taxTypes.get(tax.taxTypeId!)!, taxTypeId: tax.taxTypeId!, amountCents: costInteger((BigInt(tax.amountMills) / BigInt(100)).toString(), "tax credit source"), treatment: tax.treatment as "inventory" | "recoverable" })) } : {}),
       ...(receiptCosting ? { receiptCosting, receiptAllocations } : {}) });
   }
   return result;
@@ -199,11 +225,13 @@ export async function readSupplierCreditCostStatus(tx: CostEvidenceTransaction, 
   const cache = input.cache ?? createSupplierCreditCostReadCache(tx);
   cache.assertTransaction(tx);
   const rows = (await tx.execute(sql`SELECT line.id,line.disposition,line.source_evidence,line.cost_state,line.cost_issues,
-      invoice_line.purchase_order_line_id,invoice_line.freight_cost_id,credit.status,credit.approved_at
+      invoice_line.purchase_order_line_id,invoice_line.freight_cost_id,invoice_line.id AS original_invoice_line_id,credit.source_invoice_id,credit.status,credit.approved_at
     FROM procurement.supplier_credit_lines line JOIN procurement.supplier_credits credit ON credit.id=line.supplier_credit_id
     JOIN procurement.vendor_invoice_lines invoice_line ON invoice_line.id=line.invoice_line_id
     WHERE credit.id=${costInteger(input.creditId, "creditId", 1)} ORDER BY line.id`)).rows;
   const postedDocument = rows.some(row => row.approved_at !== null);
+  const taxInvoices = postedDocument && rows.some(row => row.disposition.kind === "tax_reduction")
+    ? await readSupplierCreditInvoiceLines(tx, costInteger(rows[0].source_invoice_id, "tax credit invoice", 1), false) : [];
   const poIds = [...new Set(rows.filter(row => row.disposition.kind !== "accepted_stock_return" && row.purchase_order_line_id != null).map(row => Number(row.purchase_order_line_id)))];
   const purchaseLines = postedDocument && poIds.length ? await cache.readPurchaseLines(poIds) : [];
   const lines: Array<{ id: number; costState: CostState; costIssues: CostIssue[]; inventoryEffect?: CostInventoryEffect }> = [];
@@ -221,9 +249,22 @@ export async function readSupplierCreditCostStatus(tx: CostEvidenceTransaction, 
     } else if (postedDocument) {
       const original = supplierCreditSourceEvidenceSchema.safeParse(row.source_evidence);
       const issues = row.status === "approved" && original.success ? original.data.issues : [];
+      if (row.disposition.kind === "tax_reduction" && original.success && original.data.taxCredit) {
+        const invoice = taxInvoices.find(invoice => Number(invoice.id) === Number(row.original_invoice_line_id));
+        const tax = invoice ? supplierInvoiceTaxSource(invoice, original.data.taxCredit.key) : null;
+        if (!invoice || original.data.invoiceSourceFingerprint !== supplierCreditInvoiceSourceFingerprint(invoice)
+          || !tax || tax.amountMills !== original.data.taxCredit.sourceAmountMills || tax.taxTypeId !== original.data.taxCredit.taxTypeId) {
+          lines.push({ id: Number(row.id), costState: "review_required", costIssues: [supplierCreditIssue("CREDIT_TAX_SOURCE_CHANGED", "Review this refund's original tax source.")] }); continue;
+        }
+        // Recoverable tax has no inventory value. A refund on unaccepted
+        // returned pieces likewise cannot reduce prices on retained receipts.
+        if (tax.treatment === "recoverable" || original.data.returnSource) {
+          lines.push({ id: Number(row.id), costState: "posted", costIssues: [] }); continue;
+        }
+      }
       if (row.purchase_order_line_id != null) {
         const current = purchaseLines.find(line => line.purchaseOrderLineId === Number(row.purchase_order_line_id));
-        const components = current?.components.filter(component => row.disposition.kind === "quarantine_return" || component.component === row.disposition.component) ?? [];
+        const components = current?.components.filter(component => row.disposition.kind === "quarantine_return" || component.component === (row.disposition.kind === "tax_reduction" ? "product" : row.disposition.component)) ?? [];
         costIssues = [...issues, ...components.flatMap(component => component.issues)];
         costState = costIssues.length || !components.length ? "review_required" : components.every(component => component.status === "applied") ? "posted" : "pending";
         if (row.status === "approved" && row.disposition.kind === "quarantine_return" && costState === "posted" && components.length === 2

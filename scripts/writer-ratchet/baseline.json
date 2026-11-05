@@ -1450,6 +1450,9 @@
   "procurement.supplier_credits": [
     "modules/procurement"
   ],
+  "procurement.supplier_header_cost_reviews": [
+    "modules/procurement"
+  ],
   "procurement.supplier_return_credit_entitlements": [
     "modules/procurement"
   ],

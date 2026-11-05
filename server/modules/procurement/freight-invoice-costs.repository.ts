@@ -114,12 +114,30 @@ export async function readFreightInvoiceReviewSource(tx: AmendmentTransaction, i
 export async function persistFreightInvoiceChargeAmounts(tx: AmendmentTransaction,
   source: Awaited<ReturnType<typeof readFreightInvoiceReviewSource>>, at: Date) {
   if (!source.plan) throw new FreightInvoiceCostError("Reload the complete shipment cost review.", "FREIGHT_INVOICE_SCOPE_REVIEW");
-  for (const charge of source.plan.charges) {
-    const changed = (await tx.execute(sql`UPDATE procurement.inbound_freight_costs
-      SET actual_cents=${charge.invoiceCents},updated_at=${at}
-      WHERE id=${charge.chargeId} AND vendor_invoice_id=${source.context.invoiceId}
-      AND inbound_shipment_id=${charge.shipmentId} RETURNING id`)).rows;
-    if (changed.length !== 1) throw new FreightInvoiceCostError("Shipment charge ownership changed. Reload this review.", "FREIGHT_INVOICE_STALE");
+  await persistReviewedFreightChargeAmounts(tx, source.context.invoiceId, source.plan.charges, at);
+}
+
+/** Shared accepted-amount writer for explicit bill/charge and header reviews.
+ * The caller proves the complete source and binds the existing cost effects.
+ * Unchanged amounts retain their original version time. */
+export async function persistReviewedFreightChargeAmounts(tx: AmendmentTransaction, invoiceId: number,
+  charges: readonly { chargeId: number; shipmentId: number; invoiceCents: number }[], at: Date) {
+  costInteger(invoiceId, "freight invoice", 1);
+  if (new Set(charges.map(row => row.chargeId)).size !== charges.length)
+    throw new FreightInvoiceCostError("Review each shipment charge only once.", "FREIGHT_INVOICE_SCOPE_REVIEW");
+  for (const charge of charges) {
+    costInteger(charge.chargeId, "shipment charge", 1);
+    costInteger(charge.shipmentId, "shipment", 1);
+    costInteger(charge.invoiceCents, "accepted freight amount");
+    const owned = (await tx.execute(sql`WITH owned AS (
+      SELECT id FROM procurement.inbound_freight_costs WHERE id=${charge.chargeId} AND vendor_invoice_id=${invoiceId}
+        AND inbound_shipment_id=${charge.shipmentId} AND currency='USD'
+        AND vendor_id=(SELECT vendor_id FROM procurement.vendor_invoices WHERE id=${invoiceId}) FOR UPDATE
+    ), changed AS (
+      UPDATE procurement.inbound_freight_costs SET actual_cents=${charge.invoiceCents},updated_at=${at}
+      WHERE id IN (SELECT id FROM owned) AND actual_cents IS DISTINCT FROM ${charge.invoiceCents} RETURNING id
+    ) SELECT id FROM owned`)).rows;
+    if (owned.length !== 1) throw new FreightInvoiceCostError("Shipment charge ownership changed. Reload this review.", "FREIGHT_INVOICE_STALE");
   }
 }
 

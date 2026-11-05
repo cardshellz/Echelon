@@ -156,12 +156,12 @@ test("an accepted order's detail shows shipping as one amount, with no insurance
   await page.getByRole("row", { name: /10-03/ }).getByRole("button", { name: "Details" }).click();
 
   const sheet = page.getByRole("dialog");
-  const economics = sheet.locator("section").filter({ has: page.getByRole("heading", { name: "Acceptance Economics" }) });
-  await expect(economics).toContainText("Wholesale");
+  const economics = sheet.locator("section").filter({ has: page.getByRole("heading", { name: "Your cost" }) });
+  await expect(economics).toContainText("Products");
   await expect(economics).toContainText("$6.99");
   await expect(economics).toContainText("Shipping");
   await expect(economics).toContainText("$9.25");
-  await expect(economics).toContainText("Total debit");
+  await expect(economics).toContainText("Total");
   await expect(economics).toContainText("$16.24");
   await expect(sheet).not.toContainText("Insurance pool");
   await expect(sheet).not.toContainText("$0.18");

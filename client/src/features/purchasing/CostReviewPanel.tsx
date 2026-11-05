@@ -1,4 +1,5 @@
 import { ReceiptInvoiceCosts } from "./ReceiptInvoiceCosts";
+import { SupplierHeaderCosts } from "./SupplierHeaderCosts";
 import React, { useState } from "react";
 import { Link } from "wouter";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
@@ -41,6 +42,10 @@ function TaskAction({ task, group, navigation, showShipmentUpdates, openReview }
   const line = group.supplier;
   if (task.action === "receipt_invoice" && line) return <ReceiptInvoiceCosts purchaseOrderLineId={line.purchaseOrderLineId} label="Review receipt costs" />;
   if (task.action === "tax_treatment" && group.purchaseOrderId !== null) return <PurchaseTaxReview target={{ kind: "purchase_order", id: group.purchaseOrderId }} label="Choose tax treatment" />;
+  if (task.action === "header_amounts" && group.purchaseOrderId !== null) return <div className="flex flex-wrap gap-2">
+    {(line?.invoices.length ? [...new Set(line.invoices.map(row => row.invoiceId))] : []).map(id => <SupplierHeaderCosts key={id} target={{ kind: "invoice", id }} />)}
+    {!line?.invoices.length && <SupplierHeaderCosts target={{ kind: "purchase_order", id: group.purchaseOrderId }} />}
+  </div>;
   if (task.action === "invoice_amounts" || task.action === "invoice_quantity") return <InvoiceTaskActions task={task} group={group} openReview={openReview} />;
   if (task.action === "repair_origin" && task.lotId) return <Button size="sm" variant="outline" onClick={() => openReview({ kind: "origin", lotId: task.lotId! })}>Review receipt link</Button>;
   if (task.action === "apply_supplier" && line?.receipts[0]) return <ApplySupplierCosts receiptId={line.receipts[0].receiptId} />;

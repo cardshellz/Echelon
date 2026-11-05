@@ -48,10 +48,12 @@ function ReviewResult({ result }: { result: InvoiceCostReviewResult }) {
 }
 
 export function InvoiceCostImpactReview({ preview, currency }: { preview: InvoiceCostImpactPreview; currency: string }) {
-  const money = (value: number | null) => value === null ? "Not confirmed" : `${exactMoneyAsInput(value, 4)} ${currency}`;
-  const rows: Array<[string, number | null, number | null]> = [
-    ["Product amount", preview.before?.productMills ?? null, preview.after.productMills],
-    ["Packaging amount", preview.before?.packagingMills ?? null, preview.after.packagingMills],
+  const money = (value: number | bigint | null) => value === null ? "Not confirmed" : `${exactMoneyAsInput(value, 4)} ${currency}`;
+  const rows: Array<[string, number | bigint | null, number | bigint | null]> = [
+    ...(preview.after.packagingTreatment === "combined"
+      ? [["Goods total (product and packaging)", preview.before ? BigInt(preview.before.productMills) + BigInt(preview.before.packagingMills) : null, preview.after.productMills] as [string, bigint | null, number]]
+      : [["Product amount", preview.before?.packagingTreatment === "combined" ? null : preview.before?.productMills ?? null, preview.after.productMills],
+        ["Packaging amount", preview.before?.packagingTreatment === "combined" ? null : preview.before?.packagingMills ?? null, preview.after.packagingMills]] as Array<[string, number | null, number | null]>),
     ["Other adjustments", preview.before?.adjustmentMills ?? null, preview.after.adjustmentMills],
     ...(preview.inventoryValues === undefined
       ? preview.impact.lots.filter(row => row.unitCostMills.before !== row.unitCostMills.after).map(row => [`${row.lotNumber} · cost per stock unit`, row.unitCostMills.before, row.unitCostMills.after] as [string, number | null, number | null])
@@ -138,7 +140,7 @@ function ReviewEditor({ line, currency, blockedReason, onSaved, onDiscard, onClo
   } catch { /* Incomplete fields are represented as unknown, never zero. */ }
   const balanced = componentTotal !== null && validTotal && componentTotal === BigInt(line.lineTotalCents) * BigInt(100);
   function field(name: Exclude<keyof InvoiceCostReviewForm, "adjustments">, value: string) {
-    setForm((current) => ({ ...current, [name]: value })); setValidationError(null);
+    setForm((current) => ({ ...current, [name]: value, ...(name === "packagingTreatment" && value === "combined" ? { packaging: "0" } : {}) })); setValidationError(null);
   }
   function submit(event: FormEvent) {
     event.preventDefault();
@@ -162,9 +164,9 @@ function ReviewEditor({ line, currency, blockedReason, onSaved, onDiscard, onClo
     </div>
     {!known && !saved && <p className="text-sm text-amber-700 dark:text-amber-300">The product and packaging amounts are missing. Check the supplier's invoice. Enter totals for this whole line, using 0 for amounts not charged.</p>}
     <fieldset disabled={locked || stale || reviewed !== null} className="grid gap-3 sm:grid-cols-2">
-      <div className="sm:col-span-2"><Label htmlFor={`${prefix}-treatment`}>Is packaging included in the product price?</Label><Select value={form.packagingTreatment} onValueChange={(value) => field("packagingTreatment", value)} disabled={locked || stale}><SelectTrigger id={`${prefix}-treatment`}><SelectValue placeholder="Check how the supplier billed packaging" /></SelectTrigger><SelectContent><SelectItem value="separate">No, packaging is charged separately</SelectItem><SelectItem value="included_in_product">Yes, packaging is included</SelectItem></SelectContent></Select></div>
-      <div><Label htmlFor={`${prefix}-product`}>Product total ({currency})</Label><Input id={`${prefix}-product`} inputMode="decimal" value={form.product} onChange={(event) => field("product", event.target.value)} /></div>
-      <div><Label htmlFor={`${prefix}-packaging`}>Packaging total ({currency})</Label><Input id={`${prefix}-packaging`} inputMode="decimal" value={form.packaging} onChange={(event) => field("packaging", event.target.value)} /></div>
+      <div className="sm:col-span-2"><Label htmlFor={`${prefix}-treatment`}>Is packaging included in the product price?</Label><Select value={form.packagingTreatment} onValueChange={(value) => field("packagingTreatment", value)} disabled={locked || stale}><SelectTrigger id={`${prefix}-treatment`}><SelectValue placeholder="Check how the supplier billed packaging" /></SelectTrigger><SelectContent><SelectItem value="separate">No, packaging is charged separately</SelectItem><SelectItem value="included_in_product">Yes, packaging is included</SelectItem><SelectItem value="combined">One goods total; the split is not shown</SelectItem></SelectContent></Select></div>
+      <div><Label htmlFor={`${prefix}-product`}>{form.packagingTreatment === "combined" ? "Goods total" : "Product total"} ({currency})</Label><Input id={`${prefix}-product`} inputMode="decimal" value={form.product} onChange={(event) => field("product", event.target.value)} /></div>
+      {form.packagingTreatment === "combined" ? <p className="text-sm text-muted-foreground">This records the supplier's combined goods amount. Product and packaging are not priced separately.</p> : <div><Label htmlFor={`${prefix}-packaging`}>Packaging total ({currency})</Label><Input id={`${prefix}-packaging`} inputMode="decimal" value={form.packaging} onChange={(event) => field("packaging", event.target.value)} /></div>}
       <div className="sm:col-span-2"><Label htmlFor={`${prefix}-adjustment`}>Billed adjustments total, including tax ({currency})</Label><Input id={`${prefix}-adjustment`} inputMode="decimal" value={form.adjustment} onChange={(event) => field("adjustment", event.target.value)} /><p className="mt-1 text-xs text-muted-foreground">Amounts already on this invoice. Enter discounts as negative amounts. Classify non-tax amounts below; use Tax review for tax. Supplier credit notes are recorded separately.</p></div>
       <div className="sm:col-span-2"><InvoiceCostAdjustmentEditor rows={form.adjustments} currency={currency} onChange={adjustments => setForm(current => ({ ...current, adjustments }))} /></div>
       {!blockedReason && <div className="sm:col-span-2"><Label htmlFor={`${prefix}-reason`}>Notes / supplier invoice reference</Label><Textarea id={`${prefix}-reason`} maxLength={2000} value={form.reason} onChange={(event) => field("reason", event.target.value)} /></div>}
@@ -173,7 +175,7 @@ function ReviewEditor({ line, currency, blockedReason, onSaved, onDiscard, onClo
     </>}
     {reviewed && !saved && <><InvoiceCostImpactReview preview={reviewed.preview} currency={currency} />
       {reviewed.body.adjustments?.map(row => <p key={row.key} className="text-sm">{row.label}: {exactMoneyAsInput(row.amountMills, 4)} {currency} · {row.destination === "excluded" ? "outside inventory cost" : `${row.destination} cost`}</p>)}
-      <p className="text-sm">Packaging: {reviewed.body.packagingTreatment === "included_in_product" ? "included in the product amount" : "billed separately"}.<br />Supplier reference: {reviewed.body.reason}</p>
+      <p className="text-sm">Packaging: {reviewed.body.packagingTreatment === "combined" ? "part of one goods total; separate amounts are unknown" : reviewed.body.packagingTreatment === "included_in_product" ? "included in the product amount" : "billed separately"}.<br />Supplier reference: {reviewed.body.reason}</p>
       {reviewed.application?.costApplications.some(item => item.status === "review_required") && <p className="text-sm text-amber-700">These supplier amounts can be saved, but some cost records still need attention. Their saved reasons will remain in Cost review.</p>}</>}
     {(validationError || failure) && <p role="alert" className="text-sm text-destructive">{validationError ?? failure?.message}</p>}
     {saved && <ReviewResult result={saved} />}

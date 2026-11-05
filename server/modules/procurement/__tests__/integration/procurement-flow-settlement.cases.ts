@@ -2,7 +2,7 @@ import { expect } from "vitest";
 import { z } from "zod";
 import { recordPaymentResultSchema, paymentApplicationResultSchema } from "@shared/procurement/ap-payment-contract";
 import { invoiceWorkListQuerySchema, paymentWorkListQuerySchema } from "@shared/procurement/ap-work-list";
-import { supplierCreditCommandResultSchema, type SupplierCreditCommand, type SourceLineInput } from "@shared/procurement/supplier-credit";
+import { supplierCreditCommandResultSchema, supplierCreditLineRequiresCostReview, type SupplierCreditCommand, type SourceLineInput } from "@shared/procurement/supplier-credit";
 import { supplierReturnCommandResultSchema } from "@shared/procurement/supplier-return";
 import { supplierReturnCreditReviewCommandResultSchema } from "@shared/procurement/supplier-return-credit";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
@@ -36,12 +36,12 @@ export async function verifyFlowSettlementAndReturn(harness: FlowCostHarness, sc
   // Import owners only after the FLOW harness has redirected legacy module SQL
   // to its exclusively leased local pool. Never initialize an external DB here.
   const [commandModule, paymentModule, creditModule, creditRepository, returnModule,
-    returnCommandsModule, reviewModule, reviewRepository, financialModule] = await Promise.all([
+    returnCommandsModule, reviewModule, reviewRepository, financialModule, receiptModule, creditService] = await Promise.all([
     import("../../../../platform/commands/command-results.repository"), import("../../ap-payment-commands"),
     import("../../supplier-credit.commands"), import("../../supplier-credit.repository"),
     import("../../supplier-return.service"), import("../../supplier-return.commands"),
     import("../../supplier-return-difference.commands"), import("../../supplier-return-credit-review.service"),
-    import("../../po-financial-evidence.service"),
+    import("../../po-financial-evidence.service"), import("../../receipt-invoice-costs.service"), import("../../supplier-credit.service"),
   ]);
   const repository = commandModule.createDrizzleFinancialCommandRepository(harness.database);
   const payments = paymentModule.createApPaymentCommands(repository, () => FLOW_AT);
@@ -58,6 +58,22 @@ export async function verifyFlowSettlementAndReturn(harness: FlowCostHarness, sc
     .length(1).parse((await harness.pool.query(`SELECT il.vendor_invoice_id AS invoice_id,il.id AS invoice_line_id
       FROM procurement.vendor_invoice_lines il WHERE il.purchase_order_line_id=$1`, [scope.purchaseOrderLineId])).rows);
   expect(invoices.find(row => row.id === source.invoice_id)).toMatchObject({ vendor_id: FLOW_IDS.vendor, invoiced_amount_cents: 210_000 });
+  // The PO opts into receipt-specific costing. Explicitly assign its original
+  // bill to the actual received batches before attributing a returned case.
+  const receiptCosts = receiptModule.createReceiptInvoiceCostService(harness.database, () => FLOW_AT);
+  const receiptContext = await receiptCosts.context(scope.purchaseOrderLineId, FLOW_ACTOR);
+  let invoiceStartPiece = 0;
+  const assignments = receiptContext.receipts.map(receipt => {
+    const assignment = { receivingLineId: receipt.receivingLineId, invoiceLineId: source.invoice_line_id,
+      receiptStartPiece: 0, invoiceStartPiece, pieces: receipt.pieces };
+    invoiceStartPiece += receipt.pieces; return assignment;
+  });
+  const receiptDraft = { sourceVersion: receiptContext.sourceVersion, change: { purchaseOrderLineId: scope.purchaseOrderLineId, allocations: assignments } };
+  const receiptPreview = await receiptCosts.preview(receiptDraft, FLOW_ACTOR);
+  const receiptBody = { ...receiptDraft, previewVersion: receiptPreview.previewVersion,
+    reason: "Verified this original supplier bill covers each recorded received batch", approvalConfirmed: true };
+  succeeded(await receiptCosts.approve(receiptBody, FLOW_ACTOR, identity({ method: "POST",
+    ...receiptModule.receiptInvoiceCommandScope(scope.purchaseOrderLineId) }, receiptBody, "original-receipt-assignments")));
   const lot = z.object({ id: z.number().int().positive() }).parse((await harness.pool.query(`SELECT id FROM inventory.inventory_lots
     WHERE po_line_id=$1 AND inbound_shipment_id=$2 AND qty_on_hand>0 ORDER BY id LIMIT 1`,
   [scope.purchaseOrderLineId, scope.shipmentId])).rows[0]);
@@ -105,6 +121,9 @@ export async function verifyFlowSettlementAndReturn(harness: FlowCostHarness, sc
   succeeded(returnedResponse);
   const returned = supplierReturnCommandResultSchema.parse(returnedResponse.body).return;
   expect(returned.lines[0].currentCosts).toEqual({ productMills: 2_000_000, packagingMills: 100_000, landedMills: 300_000, totalMills: 2_400_000 });
+  expect(returned.lines[0].sourceInvoices).toEqual(expect.arrayContaining([expect.objectContaining({
+    sourceInvoiceId: source.invoice_id, invoiceLineId: source.invoice_line_id,
+  })]));
   expect(await originalSourceHistory()).toEqual(sourceHistory);
   const afterReturn = await physical();
   await values();
@@ -117,6 +136,11 @@ export async function verifyFlowSettlementAndReturn(harness: FlowCostHarness, sc
       : command === "reverse" ? "/api/supplier-credits/:id/applications/:applicationId/reverse" : `/api/supplier-credits/:id/${command}`;
     const params: Record<string, string> = creditId === undefined ? {} : { id: String(creditId) };
     if (applicationId !== undefined) params.applicationId = String(applicationId);
+    if (creditId !== undefined && (command === "approve" || command === "void" || command === "reconcile_costs")
+      && (await creditDetail(creditId)).lines.some(supplierCreditLineRequiresCostReview)) {
+      const preview = await creditService.createSupplierCreditCostPreview(harness.database, () => FLOW_AT)(creditId, command, body, FLOW_ACTOR);
+      body = { ...z.record(z.string(), z.unknown()).parse(body), previewVersion: preview.previewVersion };
+    }
     const descriptor = identity({ method: "POST", routeTemplate, resourceKey: `supplier-credit:${creditId ?? "new"}:${applicationId ?? "document"}`,
       commandName: `supplier_credit.${command}` }, body, key, params);
     const response = await credits.execute(command, body, descriptor, creditId, applicationId);

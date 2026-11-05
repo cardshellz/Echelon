@@ -82,7 +82,7 @@ export class DropshipOrderRejectionService {
       eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_REJECTED,
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship order rejected",
+      title: "Order rejected",
       message: `Order ${result.externalOrderNumber || result.externalOrderId} was rejected and marketplace cancellation is being processed.`,
       payload: {
         intakeId: result.intakeId,
