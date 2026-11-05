@@ -8,6 +8,7 @@ const repository = vi.hoisted(() => ({
   markVariantAvailabilityNotApplicable: vi.fn(),
   markVariantAvailabilityFailed: vi.fn(),
   markVariantAvailabilitySynced: vi.fn(),
+  retainVariantAvailabilityAcknowledgement: vi.fn(),
   supersedeAvailabilityClaim: vi.fn(),
 }));
 
@@ -58,6 +59,8 @@ const CONTEXT = {
   externalInventoryItemId: null,
   externalSku: "ARM-ENV-SGL-C700",
   previousQuantity: 226,
+  mappingSnapshot: { productId: 10, catalogSku: "ARM-ENV-SGL-C700", feed: { id: 798,
+    productId: "298148438778", variantId: "136412217011", inventoryItemId: null, sku: "ARM-ENV-SGL-C700" }, listing: null },
 };
 
 function createHarness() {
@@ -92,11 +95,12 @@ describe("variant availability sync service", () => {
     vi.clearAllMocks();
     repository.claimVariantAvailabilitySyncs.mockResolvedValue([CLAIM]);
     repository.loadVariantAvailabilityContext.mockResolvedValue(CONTEXT);
-    repository.markVariantAvailabilitySynced.mockResolvedValue(true);
+    repository.markVariantAvailabilitySynced.mockResolvedValue("synced");
+    repository.retainVariantAvailabilityAcknowledgement.mockResolvedValue("needs_review");
     repository.markVariantAvailabilityDelegated.mockResolvedValue(true);
     repository.markVariantAvailabilityNotApplicable.mockResolvedValue(true);
     repository.markVariantAvailabilityFailed.mockResolvedValue("retryable");
-    repository.supersedeAvailabilityClaim.mockResolvedValue(undefined);
+    repository.supersedeAvailabilityClaim.mockResolvedValue("superseded");
   });
 
   it("routes reconciliation repairs through the owning repository", async () => {
@@ -132,6 +136,7 @@ describe("variant availability sync service", () => {
       synced: 1,
       retried: 0,
       superseded: 0,
+      needsReview: 0,
     });
     expect(allocationEngine.allocateProduct).not.toHaveBeenCalled();
     expect(pushInventory).toHaveBeenCalledWith(67, [{
@@ -140,12 +145,47 @@ describe("variant availability sync service", () => {
       externalVariantId: "136412217011",
       externalInventoryItemId: null,
       allocatedQty: 0,
-    }]);
+    }], undefined, expect.any(Function));
     expect(repository.markVariantAvailabilitySynced).toHaveBeenCalledWith(
       expect.anything(),
       CLAIM,
       expect.objectContaining({ quantity: 0, feedActive: false }),
+      CONTEXT.mappingSnapshot,
     );
+  });
+
+  it("reports a changed link after acknowledgement as needing review, not as a completed sync", async () => {
+    repository.markVariantAvailabilitySynced.mockResolvedValue("needs_review");
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { service } = createHarness();
+      await expect(service.processDue()).resolves.toEqual({ claimed: 1,synced: 0,retried: 0,superseded: 0,needsReview: 1 });
+      expect(repository.markVariantAvailabilityFailed).not.toHaveBeenCalled();
+      expect(log).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({
+        code: "VARIANT_AVAILABILITY_ACKNOWLEDGEMENT_REVIEW",productVariantId: 67,
+      }));
+    } finally { log.mockRestore(); }
+  });
+  it("retains an acknowledged provider result when its local projection fails", async () => {
+    repository.markVariantAvailabilitySynced.mockRejectedValue(new Error("projection unavailable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { service } = createHarness();
+      await expect(service.processDue()).resolves.toEqual({ claimed: 1,synced: 0,retried: 0,superseded: 0,needsReview: 1 });
+      expect(repository.retainVariantAvailabilityAcknowledgement).toHaveBeenCalledWith(expect.anything(),CLAIM,
+        expect.objectContaining({ quantity: 0 }),CONTEXT.mappingSnapshot);
+      expect(repository.markVariantAvailabilityFailed).not.toHaveBeenCalled();
+    } finally { log.mockRestore(); }
+  });
+  it("does not mark an acknowledged result retryable if its recovery receipt also fails", async () => {
+    repository.markVariantAvailabilitySynced.mockRejectedValue(new Error("projection unavailable"));
+    repository.retainVariantAvailabilityAcknowledgement.mockRejectedValue(new Error("database unavailable"));
+    const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const { service } = createHarness();
+      await expect(service.processDue()).rejects.toThrow("database unavailable");
+      expect(repository.markVariantAvailabilityFailed).not.toHaveBeenCalled();
+    } finally { log.mockRestore(); }
   });
 
   it("recalculates and restores current allocation on reactivation", async () => {
@@ -165,6 +205,7 @@ describe("variant availability sync service", () => {
       synced: 1,
       retried: 0,
       superseded: 0,
+      needsReview: 0,
     });
     expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(
       10,
@@ -174,20 +215,24 @@ describe("variant availability sync service", () => {
     expect(pushInventory).toHaveBeenCalledWith(
       67,
       [expect.objectContaining({ allocatedQty: 31 })],
+      undefined,
+      expect.any(Function),
     );
     expect(repository.markVariantAvailabilitySynced).toHaveBeenCalledWith(
       expect.anything(),
       activeClaim,
       expect.objectContaining({ quantity: 31, feedActive: true }),
+      CONTEXT.mappingSnapshot,
     );
   });
 
   it("holds an archived legacy zero instead of treating it as an explicit stock repair", async () => {
     const legacyClaim = { ...CLAIM, requestKind: null };
     repository.claimVariantAvailabilitySyncs.mockResolvedValue([legacyClaim]);
+    repository.supersedeAvailabilityClaim.mockResolvedValue("needs_review");
     const { service, inventoryPublication, pushInventory } = createHarness();
 
-    await expect(service.processDue()).resolves.toMatchObject({ claimed: 1, superseded: 1 });
+    await expect(service.processDue()).resolves.toMatchObject({ claimed: 1, superseded: 0, needsReview: 1 });
     expect(repository.supersedeAvailabilityClaim).toHaveBeenCalledWith(expect.anything(), legacyClaim, false);
     expect(inventoryPublication.publishVariantAvailability).not.toHaveBeenCalled();
     expect(pushInventory).not.toHaveBeenCalled();
@@ -228,6 +273,7 @@ describe("variant availability sync service", () => {
       synced: 1,
       retried: 0,
       superseded: 0,
+      needsReview: 0,
     });
     expect(inventoryPublication.publishVariantAvailability).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -236,6 +282,7 @@ describe("variant availability sync service", () => {
         channelId: 67,
         desiredActive: false,
       }),
+      expect.any(Function),
       expect.any(Function),
     );
     expect(repository.markVariantAvailabilityDelegated).toHaveBeenCalledWith(
@@ -259,6 +306,7 @@ describe("variant availability sync service", () => {
       synced: 0,
       retried: 1,
       superseded: 0,
+      needsReview: 0,
     });
     expect(repository.markVariantAvailabilityFailed).toHaveBeenCalledWith(
       expect.anything(),
@@ -294,6 +342,7 @@ describe("variant availability sync service", () => {
       synced: 0,
       retried: 0,
       superseded: 1,
+      needsReview: 0,
     });
     expect(repository.markVariantAvailabilitySynced).not.toHaveBeenCalled();
     expect(pushInventory).not.toHaveBeenCalled();
@@ -312,6 +361,7 @@ describe("variant availability sync service", () => {
       synced: 1,
       retried: 0,
       superseded: 0,
+      needsReview: 0,
     });
     expect(repository.markVariantAvailabilityNotApplicable).toHaveBeenCalledWith(
       expect.anything(),
@@ -337,6 +387,7 @@ describe("variant availability sync service", () => {
       synced: 1,
       retried: 0,
       superseded: 0,
+      needsReview: 0,
     });
     expect(repository.markVariantAvailabilityNotApplicable).toHaveBeenCalledWith(
       expect.anything(),
@@ -352,12 +403,12 @@ describe("variant availability sync service", () => {
       ...CONTEXT,catalogVariantActive: true,catalogSalesEligibility: "internal_only",
     });
     const { service,pushInventory,allocationEngine,inventoryPublication } = createHarness();
-    await expect(service.processDue()).resolves.toEqual({ claimed: 1,synced: 1,retried: 0,superseded: 0 });
+    await expect(service.processDue()).resolves.toEqual({ claimed: 1,synced: 1,retried: 0,superseded: 0,needsReview: 0 });
     expect(repository.supersedeAvailabilityClaim).not.toHaveBeenCalled();
     expect(repository.markVariantAvailabilityNotApplicable).not.toHaveBeenCalled();
     expect(inventoryPublication.publishVariantAvailability).toHaveBeenCalledWith(
-      expect.objectContaining({ productId: 10,productVariantId: 67,channelId: 67,desiredActive: false }),expect.any(Function));
-    expect(pushInventory).toHaveBeenCalledWith(67,[expect.objectContaining({ variantId: 67,allocatedQty: 0 })]);
+      expect.objectContaining({ productId: 10,productVariantId: 67,channelId: 67,desiredActive: false }),expect.any(Function),expect.any(Function));
+    expect(pushInventory).toHaveBeenCalledWith(67,[expect.objectContaining({ variantId: 67,allocatedQty: 0 })],undefined,expect.any(Function));
     expect(allocationEngine.allocateProduct).not.toHaveBeenCalled();
   });
 
@@ -373,6 +424,7 @@ describe("variant availability sync service", () => {
       synced: 0,
       retried: 0,
       superseded: 1,
+      needsReview: 0,
     });
     expect(repository.supersedeAvailabilityClaim).toHaveBeenCalledWith(
       expect.anything(),
@@ -397,6 +449,7 @@ describe("variant availability sync service", () => {
       synced: 0,
       retried: 1,
       superseded: 0,
+      needsReview: 0,
     });
     expect(repository.markVariantAvailabilityFailed).toHaveBeenCalledWith(
       expect.anything(),

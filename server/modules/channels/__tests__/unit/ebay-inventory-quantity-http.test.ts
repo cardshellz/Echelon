@@ -27,6 +27,24 @@ beforeEach(() => vi.stubEnv("DRY_RUN", "false"));
 afterEach(() => vi.unstubAllEnvs());
 
 describe("eBay quantity protocol through the actual HTTP client and admission boundary", () => {
+  it("passes the explicit owner only to its own client without changing the cached client", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(null,{ status: 204 }));
+    const admission: EbayQuantityRequestAdmission = {
+      item: async (_sku,work) => work(null),group: async (_key,_members,work) => work(null),
+      reducing: async (_sku,work) => work(),
+    };
+    const factory = vi.fn(async () => admission);
+    const client = new EbayApiClient({ getAccessToken: async () => "test-only" },67,"sandbox",{ request,now,quantityAdmission: factory });
+    const guard = vi.fn(async () => undefined);
+    const guarded = client.withPublicationGuard(guard);
+    const item = { product: { title: "Test",imageUrls: [] },condition: "NEW" as const,
+      availability: { shipToLocationAvailability: { quantity: 5 } } };
+    await Promise.all([guarded.createOrReplaceInventoryItem("P5",item),client.createOrReplaceInventoryItem("P6",item)]);
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(factory).toHaveBeenCalledWith(guard);
+    expect(factory).toHaveBeenCalledWith(undefined);
+    expect(() => guarded.withPublicationGuard(vi.fn(async () => undefined))).toThrow("cannot replace its publication owner");
+  });
   it("records fresh exact convergence without inventing a mutation receipt, then reads independently", async () => {
     const item = { sku, availability: { shipToLocationAvailability: { quantity: 38 } } };
     const request = vi.fn<typeof fetch>().mockResolvedValueOnce(json(page())).mockResolvedValueOnce(json(item))

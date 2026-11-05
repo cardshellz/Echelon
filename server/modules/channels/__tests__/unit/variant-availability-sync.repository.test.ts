@@ -54,18 +54,24 @@ describe("variant availability sync repository", () => {
     const query = vi.fn()
       .mockResolvedValueOnce({ rows: [], rowCount: null })
       .mockResolvedValueOnce({ rows: [{ promoted: 0 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
+      .mockResolvedValueOnce({ rows: [{ channel_id: 67,product_variant_id: 67,revision: "9",attempt_count: 0,
+        enqueued_revision: "9",lease_token: null,before_state: { status: "pending" } }],rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ complete: true }],rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
       .mockResolvedValueOnce({
         rows: [{
           channel_id: 67,
           product_variant_id: 67,
           desired_active: false,
           revision: "9",
-          attempt_count: 2,
+          attempt_count: 1,
           lease_token: "00000000-0000-4000-8000-000000000002",
-          request_kind: null,
+          request_kind: "stock_repair",
         }],
         rowCount: 1,
       })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: null });
     const release = vi.fn();
     const client = { query, release } as unknown as SqlClient;
@@ -79,18 +85,34 @@ describe("variant availability sync repository", () => {
       productVariantId: 67,
       desiredActive: false,
       revision: 9,
-      attemptCount: 2,
+      attemptCount: 1,
       leaseToken: "00000000-0000-4000-8000-000000000002",
-      requestKind: null,
+      requestKind: "stock_repair",
     }]);
 
     expect(query.mock.calls[0][0]).toBe("BEGIN");
     expect(query.mock.calls[1][0]).toContain("promote_completed_availability_followups");
     expect(query.mock.calls[1][1]).toEqual([10]);
-    expect(query.mock.calls[2][0]).toContain("FOR UPDATE SKIP LOCKED");
-    expect(query.mock.calls[2][0]).toContain("lease_expires_at");
-    expect(query.mock.calls[3][0]).toBe("COMMIT");
+    expect(query.mock.calls[2][0]).toContain("q.status='needs_review'");
+    expect(query.mock.calls[3][0]).toContain("FOR UPDATE OF q SKIP LOCKED");
+    expect(query.mock.calls[3][0]).toContain("lease_expires_at");
+    expect(query.mock.calls[4][0]).toContain("has_complete_availability_claim_history");
+    expect(query.mock.calls[5][0]).toContain("channel_variant_availability_attempts");
+    expect(query.mock.calls[6][0]).toContain("SET status='processing'");
+    expect(query.mock.calls[7][0]).toContain("INSERT INTO channels.channel_variant_availability_claims");
+    expect(query.mock.calls[8][0]).toBe("COMMIT");
     expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("discards a connection and preserves both errors when rollback fails", async () => {
+    const failure = new Error("claim failed");
+    const rollback = new Error("rollback failed");
+    const query = vi.fn().mockResolvedValueOnce({ rows: [] }).mockRejectedValueOnce(failure).mockRejectedValueOnce(rollback);
+    const release = vi.fn();
+    const pool = { connect: vi.fn().mockResolvedValue({ query,release }) } as unknown as SqlPool;
+    await expect(claimVariantAvailabilitySyncs(pool,{ batchSize: 1,leaseSeconds: 60 }))
+      .rejects.toMatchObject({ errors: [failure,rollback] });
+    expect(release).toHaveBeenCalledWith(rollback);
   });
 
   it("keeps failed safety updates retryable with a capped 30-minute delay", async () => {
@@ -120,7 +142,9 @@ describe("variant availability sync repository", () => {
       .mockResolvedValueOnce({ rows: [], rowCount: null })
       .mockResolvedValueOnce({ rows: [{ id: 30,is_active: true,status: "active" }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ product_id: 30,is_active: true }], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ desired_active: false,request_kind: "stock_repair" }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ live: true }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [{ requires_shipping: false,track_inventory: false,sales_eligibility: "sellable" }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [{ completed: true }], rowCount: 1 })
       .mockResolvedValueOnce({ rows: [], rowCount: null });
@@ -134,13 +158,15 @@ describe("variant availability sync repository", () => {
       "BEGIN",
       expect.stringContaining("FROM catalog.products"),
       expect.stringContaining("FROM catalog.product_variants"),
-      expect.stringContaining("SELECT 1 FROM channels.channel_variant_availability_sync"),
+      expect.stringContaining("FROM channels.channel_variant_availability_sync"),
+      expect.stringContaining("lease_expires_at>clock_timestamp()"),
+      expect.stringContaining("SELECT requires_shipping,track_inventory,sales_eligibility"),
       expect.stringContaining("UPDATE channels.channel_feeds"),
       expect.stringContaining("complete_variant_availability_claim"),
       "COMMIT",
     ]);
     expect(query.mock.calls[3][0]).not.toContain("last_synced_quantity");
-    expect(query.mock.calls[4][0]).toContain("SET is_active = 0");
+    expect(query.mock.calls[6][0]).toContain("SET is_active = 0");
     expect(release).toHaveBeenCalledOnce();
   });
 

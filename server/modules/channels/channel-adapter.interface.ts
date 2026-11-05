@@ -13,6 +13,7 @@ import type {
   ShippingChannelAdapterCapabilities,
 } from "@shared/types/shipping-channel-routing";
 import type { ChannelPackageFacts } from "@shared/catalog/shipping-package";
+import type { PublicationTransactionGuard } from "../inventory-planning/publication-transaction-guard";
 
 // ---------------------------------------------------------------------------
 // Canonical Types — channel-agnostic data structures
@@ -313,6 +314,7 @@ export interface IChannelAdapter {
     channelId: number,
     items: InventoryPushItem[],
     context?: InventoryPublicationContext,
+    ownerGuard?: PublicationTransactionGuard,
   ): Promise<InventoryPushResult[]>;
 
   /** Provider inventory scopes this adapter can address without inference. */

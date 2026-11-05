@@ -145,6 +145,90 @@ the draft migration directly; the suite is in the PostgreSQL CI manifest.
 The migration remains incomplete until the unresolved recovery and ownership
 gaps above are addressed.
 
+## Availability admission and acknowledgement checkpoint
+
+The availability queue now supplies a claim guard to the existing Inventory
+publication owner. The guard checks the current lease, Catalog eligibility,
+channel inclusion and each saved feed/listing identity copy in the transaction
+that enqueues canonical work or admits a legacy provider attempt. It uses the
+Catalog foreign-key parent locks to fence insertion of an absent mapping or
+override. Pre-admission catch-up retention uses the same guard. If the claim or
+source changed, these paths refuse the old request; they do not alter ATP.
+
+For newly guarded direct attempts, `channel_variant_availability_attempts`
+records the exact queue revision, lease and source mapping in the same
+transaction as `inventory.quantity_publication_attempts`. A late successful
+response is retained once, including its original source and result. It cannot
+overwrite a changed link or a newer claim. If the response cannot be projected,
+the queue retains it for review. Expiry of a claim does not itself authorize
+another send. A previously parked attempt automatically returns to the queue
+only when Inventory confirms every linked attempt is unsent, rejected with
+explicit finality for every provider request, resolved by Inventory's immutable
+terminal-response recovery receipt, or completed under a versioned journal
+contract with a complete terminal-success receipt for every request. This last
+case replans current work; it does not infer the old quantity. The transition
+and its audit decision commit together;
+the saved mapping must still match each exact current mapping copy, under
+Catalog and mapping locks. A changed or unreadable mapping stays in review and
+does not retarget the old request. Unresolved checks are bounded and deferred
+for one minute. This does not treat
+a rejection as proof that no earlier request in the attempt had an effect.
+These checks do not reconstruct missing evidence for pre-cutover attempts.
+Each modern queue claim also receives an immutable lease receipt in its claim
+transaction. Recovery checks that all claim numbers are represented and that
+each linked provider attempt belongs to a recorded lease. An older claimant
+without that evidence stays in review even if a different attempt has a final
+response. This requires a connected recovery action and a rollout plan for
+pre-cutover work before deployment.
+
+For newly guarded provider attempts, the queue also records Inventory's exact
+provider scope and the connection environment. Admission of a later attempt
+checks those values, so an unchanged SKU cannot silently retarget old work to a
+different verified account or environment. The direct attempt also requires a
+matching channel connection, saved provider item and mutation-journal contract
+before it can be recorded or sent. Pre-cutover attempts may lack this
+evidence, and canonical enqueue paths do not yet carry an environment. These
+cases remain unresolved, not evidence that a retry is safe. The admission
+comparison is not a complete transfer fence: it cannot prevent another writer
+from transferring the remote identity after admission and before HTTP finishes.
+
+The legacy eBay quantity adapter previously caught any bulk failure, looked up
+the first offer for a SKU, and could write to it or replace the original error
+with a lookup error. It also guessed a replacement after a per-offer rejection.
+Those fallback mutations have been removed from this draft; the original
+admission or transport failure reaches the publication owner. A changed offer
+still needs a shared, account-scoped identity-recovery command and a reachable
+user action. Removing the guessed fallback alone is not complete recovery.
+For a legacy multi-item call, separately admitted item results are retained
+individually: an uncertain later request does not erase an earlier confirmed
+result. Queue-owned calls remain restricted to their single claimed variant.
+The availability queue's acknowledgement no longer creates a listing or writes
+feed/listing identity fields. It updates quantity on an existing projection and
+preserves its publication status and errors. Other identity writers in the
+inventory above still require consolidation.
+
+This is a safety checkpoint, not a complete recovery workflow. The new and
+existing `needs_review` queue states still need a user-reachable, evidence-based
+resolution; the follow-up records do not yet prove which remote owner they were
+intended for after a transfer. The guard releases its transaction locks before
+provider HTTP, so it does not by itself prevent a different identity writer
+from transferring a link while a request is in flight. The transfer owner must
+hold a compatible remote-member fence across all provider writers and account
+aliases, inspect both member-removal and quantity-attempt finality, and preserve
+unresolved work. Do not deploy this draft as a finished cutover.
+
+The existing member adapters also need an explicit unpublish capability rather
+than treating every deletion as reversible. eBay documents that an individual
+member of a variation listing can be removed from its item group while retaining
+the offer, whereas `deleteOffer` destroys that offer. A single-SKU offer can be
+withdrawn without deletion. See the [eBay listing-management guide](https://www.developer.ebay.com/develop/guides/sell/listing-management).
+An implementation must preserve the complete group and its siblings under the
+same group fence. The current Shopify adapter calls `productVariantsBulkDelete`;
+the separate publication scope and supported API capability must be established
+before offering a non-destructive Shopify unpublish. Walmart's retire semantics
+must likewise be represented honestly. No provider mutation was performed for
+this checkpoint.
+
 The remote-member lock and the archived-source conflict projection now compare
 Shopify's numeric and GraphQL forms as one exact variant. The lock acquires both
 forms during rolling deployment so it also conflicts with an older worker using

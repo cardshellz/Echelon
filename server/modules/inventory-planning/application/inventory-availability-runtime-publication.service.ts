@@ -1,5 +1,6 @@
 import type { InventoryChannelExposureRuntimePlan } from "@shared/types/inventory-channel-exposure";
 import type { InventoryAvailabilityRuntimeAuthority } from "./inventory-availability-runtime-atp.service";
+import type { PublicationTransactionGuard } from "./publication-transaction-guard";
 
 export interface ActivePublicationVariantMapping {
   productVariantId: number;
@@ -82,6 +83,7 @@ export interface InventoryAvailabilityRuntimePublicationContext {
 export interface InventoryAvailabilityRuntimePublicationExecutor {
   execute<T>(
     work: (context: InventoryAvailabilityRuntimePublicationContext) => Promise<T>,
+    guard?: PublicationTransactionGuard,
   ): Promise<T>;
 }
 
@@ -313,7 +315,7 @@ export class AuthorityAwareInventoryPublicationService {
     channelId: number;
     desiredActive: boolean;
     triggeredBy?: string;
-  }, legacyPublisher: () => Promise<T>): Promise<InventoryPublicationRouteResult<T>> {
+  }, legacyPublisher: () => Promise<T>, guard?: PublicationTransactionGuard): Promise<InventoryPublicationRouteResult<T>> {
     const productId = positiveInteger(input.productId, "productId");
     const productVariantId = positiveInteger(input.productVariantId, "productVariantId");
     const channelId = positiveInteger(input.channelId, "channelId");
@@ -342,7 +344,7 @@ export class AuthorityAwareInventoryPublicationService {
             triggeredBy,
           });
       return { authority: "canonical", publication };
-    });
+    }, guard);
   }
 
   private async planAndPublishCanonical(

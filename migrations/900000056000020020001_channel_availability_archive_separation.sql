@@ -80,15 +80,92 @@ FOR EACH STATEMENT EXECUTE FUNCTION channels.guard_variant_availability_followup
 CREATE TABLE channels.channel_variant_availability_decisions (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   channel_id integer NOT NULL, product_variant_id integer NOT NULL,
-  revision bigint NOT NULL, lease_token uuid NOT NULL,
-  disposition text NOT NULL CHECK(disposition IN ('cancelled_before_dispatch','superseded_before_dispatch','prior_work_unconfirmed')),
+  revision bigint NOT NULL, lease_token uuid,
+  disposition text NOT NULL CHECK(disposition IN ('cancelled_before_dispatch','superseded_before_dispatch','prior_work_unconfirmed',
+    'provider_acknowledged_mapping_changed','provider_acknowledged_claim_changed','provider_acknowledged_projected',
+    'provider_acknowledged_projection_failed','provider_attempt_unsettled','provider_attempt_final','provider_scope_changed',
+    'legacy_attempt_history_unverified')),
+  CHECK (lease_token IS NOT NULL OR disposition='legacy_attempt_history_unverified'),
   before_state jsonb NOT NULL, after_state jsonb NOT NULL,
   actor text NOT NULL DEFAULT 'system:channel-availability',
   occurred_at timestamptz NOT NULL
 );
+CREATE UNIQUE INDEX channel_variant_availability_acknowledgement_uidx
+  ON channels.channel_variant_availability_decisions(channel_id,product_variant_id,revision,lease_token)
+  WHERE disposition IN ('provider_acknowledged_mapping_changed','provider_acknowledged_claim_changed',
+    'provider_acknowledged_projected','provider_acknowledged_projection_failed');
+CREATE INDEX channel_variant_availability_decisions_claim_idx
+  ON channels.channel_variant_availability_decisions(channel_id,product_variant_id,revision,id DESC);
+CREATE INDEX channel_variant_availability_review_idx
+  ON channels.channel_variant_availability_sync(next_attempt_at,updated_at,channel_id,product_variant_id)
+  WHERE status='needs_review';
 CREATE TRIGGER channel_variant_availability_decisions_immutable
 BEFORE UPDATE OR DELETE OR TRUNCATE ON channels.channel_variant_availability_decisions
 FOR EACH STATEMENT EXECUTE FUNCTION channels.guard_variant_availability_followup_events();
+
+-- A claim receipt is committed with each modern lease. A missing receipt for
+-- an earlier claim means an old worker may have sent without the new guard.
+CREATE TABLE channels.channel_variant_availability_claims (
+  channel_id integer NOT NULL,
+  product_variant_id integer NOT NULL,
+  revision bigint NOT NULL CHECK (revision>0),
+  lease_token uuid NOT NULL,
+  attempt_count integer NOT NULL CHECK (attempt_count>0),
+  claimed_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+  PRIMARY KEY (channel_id,product_variant_id,revision,lease_token),
+  UNIQUE (channel_id,product_variant_id,revision,attempt_count)
+);
+CREATE TRIGGER channel_variant_availability_claims_immutable
+BEFORE UPDATE OR DELETE OR TRUNCATE ON channels.channel_variant_availability_claims
+FOR EACH STATEMENT EXECUTE FUNCTION channels.guard_variant_availability_followup_events();
+
+-- A provider attempt and the queue claim that admitted it are recorded in the
+-- same transaction. A later recovery must not guess ownership from timestamps.
+CREATE TABLE channels.channel_variant_availability_attempts (
+  attempt_id bigint PRIMARY KEY REFERENCES inventory.quantity_publication_attempts(id) ON DELETE RESTRICT,
+  channel_id integer NOT NULL,
+  product_variant_id integer NOT NULL,
+  revision bigint NOT NULL CHECK (revision>0),
+  lease_token uuid NOT NULL,
+  desired_active boolean NOT NULL,
+  request_kind text CHECK (request_kind IN ('catalog_activation','stock_repair')),
+  source_mapping jsonb NOT NULL,
+  provider_environment text CHECK (provider_environment IN ('production','sandbox')),
+  recorded_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+  FOREIGN KEY (channel_id,product_variant_id,revision,lease_token)
+    REFERENCES channels.channel_variant_availability_claims(channel_id,product_variant_id,revision,lease_token) ON DELETE RESTRICT
+);
+CREATE INDEX channel_variant_availability_attempts_claim_idx
+  ON channels.channel_variant_availability_attempts(channel_id,product_variant_id,revision,lease_token);
+CREATE TRIGGER channel_variant_availability_attempts_immutable
+BEFORE UPDATE OR DELETE OR TRUNCATE ON channels.channel_variant_availability_attempts
+FOR EACH STATEMENT EXECUTE FUNCTION channels.guard_variant_availability_followup_events();
+
+-- A recorded response is insufficient if an older lease could have sent
+-- without participating in the current admission and evidence protocol.
+CREATE FUNCTION channels.has_complete_availability_claim_history(p_channel_id integer,p_variant_id integer,
+  p_revision bigint,p_attempt_count integer,p_enqueued_revision bigint)
+RETURNS boolean LANGUAGE plpgsql STABLE SET search_path = pg_catalog AS $$
+DECLARE claim_count integer; first_claim integer; last_claim integer;
+BEGIN
+  IF p_revision IS NULL OR p_revision<=0 OR p_attempt_count IS NULL OR p_attempt_count<0 OR p_attempt_count>1000
+    OR p_enqueued_revision IS DISTINCT FROM p_revision THEN RETURN false; END IF;
+  IF NOT EXISTS (SELECT 1 FROM channels.channel_variant_availability_sync q
+    WHERE q.channel_id=p_channel_id AND q.product_variant_id=p_variant_id AND q.revision=p_revision
+      AND ((q.request_kind='catalog_activation' AND q.desired_active) OR (q.request_kind='stock_repair' AND NOT q.desired_active))) THEN
+    RETURN false;
+  END IF;
+  SELECT count(*)::integer,min(attempt_count),max(attempt_count) INTO claim_count,first_claim,last_claim
+    FROM channels.channel_variant_availability_claims
+    WHERE channel_id=p_channel_id AND product_variant_id=p_variant_id AND revision=p_revision;
+  RETURN claim_count=p_attempt_count AND (claim_count=0 OR (first_claim=1 AND last_claim=p_attempt_count))
+    AND NOT EXISTS (SELECT 1 FROM channels.channel_variant_availability_attempts a
+      WHERE a.channel_id=p_channel_id AND a.product_variant_id=p_variant_id AND a.revision=p_revision
+        AND NOT EXISTS (SELECT 1 FROM channels.channel_variant_availability_claims c
+          WHERE c.channel_id=a.channel_id AND c.product_variant_id=a.product_variant_id
+            AND c.revision=a.revision AND c.lease_token=a.lease_token));
+END;
+$$;
 
 -- Match Catalog's parent-then-variant locking order. The queue owner holds
 -- these locks while deciding whether a saved reactivation still applies.
@@ -142,7 +219,9 @@ BEGIN
   IF current_status='pending' AND current_attempts=0 AND current_desired=p_desired_active
     AND current_kind=p_request_kind AND current_xid=pg_current_xact_id()
     AND current_generation=current_revision THEN RETURN; END IF;
-  IF current_status IN ('synced','cancelled') AND NOT EXISTS (
+  IF current_status IN ('synced','cancelled')
+    AND channels.has_complete_availability_claim_history(p_channel_id,p_variant_id,current_revision,current_attempts,current_generation)
+    AND NOT EXISTS (
     SELECT 1 FROM channels.channel_variant_availability_followups
       WHERE channel_id=p_channel_id AND product_variant_id=p_variant_id
   ) THEN
@@ -171,13 +250,24 @@ CREATE FUNCTION channels.promote_one_availability_followup(p_channel_id integer,
 RETURNS boolean LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 DECLARE next_record record; catalog_active boolean; processed boolean := false;
   skipped integer := 0; max_skipped CONSTANT integer := 1000;
+  before_record jsonb; after_record jsonb; current_revision bigint; current_attempts integer; current_generation bigint;
 BEGIN
   catalog_active:=channels.lock_availability_catalog(p_variant_id);
   IF catalog_active IS NULL THEN RETURN false; END IF;
-  PERFORM 1 FROM channels.channel_variant_availability_sync
+  SELECT to_jsonb(q),q.revision,q.attempt_count,q.enqueued_revision
+    INTO before_record,current_revision,current_attempts,current_generation FROM channels.channel_variant_availability_sync q
     WHERE channel_id=p_channel_id AND product_variant_id=p_variant_id AND status IN ('synced','cancelled')
     FOR UPDATE SKIP LOCKED;
   IF NOT FOUND THEN RETURN false; END IF;
+  IF NOT channels.has_complete_availability_claim_history(p_channel_id,p_variant_id,current_revision,current_attempts,current_generation) THEN
+    UPDATE channels.channel_variant_availability_sync q SET status='needs_review',lease_token=NULL,lease_expires_at=NULL,
+      completed_at=NULL,last_error='An older stock update has no complete claim history. Its outcome must be checked before this listing can be transferred or updated.',
+      updated_at=p_now WHERE channel_id=p_channel_id AND product_variant_id=p_variant_id RETURNING to_jsonb(q) INTO after_record;
+    INSERT INTO channels.channel_variant_availability_decisions
+      (channel_id,product_variant_id,revision,lease_token,disposition,before_state,after_state,occurred_at)
+      VALUES(p_channel_id,p_variant_id,current_revision,NULL,'legacy_attempt_history_unverified',before_record,after_record,p_now);
+    RETURN true;
+  END IF;
   LOOP
     SELECT id,desired_active,request_kind INTO next_record FROM channels.channel_variant_availability_followups
       WHERE channel_id=p_channel_id AND product_variant_id=p_variant_id ORDER BY id LIMIT 1 FOR UPDATE;
@@ -262,13 +352,14 @@ $$;
 -- Replan only a proven-unsent lease. Later operations remain ordered behind it.
 CREATE FUNCTION channels.reschedule_variant_availability_claim(
   p_channel_id integer, p_variant_id integer, p_revision bigint, p_lease_token uuid,
-  p_desired_active boolean, p_now timestamptz
+  p_desired_active boolean, p_now timestamptz, p_previous_final boolean DEFAULT false
 ) RETURNS boolean LANGUAGE plpgsql SET search_path = pg_catalog AS $$
 DECLARE catalog_active boolean; before_record jsonb; after_record jsonb;
   current_attempts integer; current_generation bigint; disposition text;
 BEGIN
   IF p_channel_id IS NULL OR p_channel_id<=0 OR p_variant_id IS NULL OR p_variant_id<=0
-    OR p_revision IS NULL OR p_revision<=0 OR p_lease_token IS NULL OR p_desired_active IS NULL OR p_now IS NULL THEN
+    OR p_revision IS NULL OR p_revision<=0 OR p_lease_token IS NULL OR p_desired_active IS NULL OR p_now IS NULL
+    OR p_previous_final IS NULL THEN
     RAISE EXCEPTION 'Invalid availability reschedule' USING ERRCODE='22023';
   END IF;
   catalog_active:=channels.lock_availability_catalog(p_variant_id);
@@ -285,7 +376,15 @@ BEGIN
   -- not evidence that its outcome is known: retain both until recovery can
   -- reconcile the prior work. A first claim of a generation created by this
   -- owner has not yet reached a provider at this point in the worker.
-  IF current_attempts<>1 OR current_generation IS DISTINCT FROM p_revision THEN
+  IF NOT channels.has_complete_availability_claim_history(p_channel_id,p_variant_id,p_revision,current_attempts,current_generation)
+    OR NOT EXISTS (
+    SELECT 1 FROM channels.channel_variant_availability_claims c
+    WHERE c.channel_id=p_channel_id AND c.product_variant_id=p_variant_id AND c.revision=p_revision
+      AND c.lease_token=p_lease_token AND c.attempt_count=current_attempts
+  ) OR EXISTS (SELECT 1 FROM channels.channel_variant_availability_attempts a
+    WHERE a.channel_id=p_channel_id AND a.product_variant_id=p_variant_id AND a.revision=p_revision
+      AND a.lease_token=p_lease_token)
+    OR (current_attempts<>1 AND NOT p_previous_final) THEN
     disposition:='prior_work_unconfirmed';
     UPDATE channels.channel_variant_availability_sync AS q SET
       status='needs_review',lease_token=NULL,lease_expires_at=NULL,completed_at=NULL,

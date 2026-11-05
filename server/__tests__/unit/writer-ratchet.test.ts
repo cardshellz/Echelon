@@ -34,6 +34,12 @@ describe("writer-ratchet (P2.1)", () => {
     roots: ["server", "scripts"],
   });
 
+  it("keeps availability attempt links and decisions with the existing channel queue owner", () => {
+    expect(current["channels.channel_variant_availability_attempts"]).toEqual(["modules/channels"]);
+    expect(current["channels.channel_variant_availability_claims"]).toEqual(["modules/channels"]);
+    expect(current["channels.channel_variant_availability_decisions"]).toEqual(["modules/channels"]);
+  });
+
   it("Catalog owns runtime image writes and the legacy direct import cannot write photos", () => {
     expect(current["catalog.product_assets"]).toEqual(["modules/catalog"]);
     expect(baseline["catalog.product_assets"]).toEqual(["modules/catalog"]);

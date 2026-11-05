@@ -9,6 +9,7 @@ const EMPTY_RESULT = {
   synced: 0,
   retried: 0,
   superseded: 0,
+  needsReview: 0,
 };
 
 describe("variant availability sync worker", () => {
