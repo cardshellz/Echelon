@@ -487,6 +487,37 @@ test("an absent listing does not hide an earlier unconfirmed removal", async ({p
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
+test("an unpublished observation keeps an earlier unconfirmed removal visible", async ({page}) => {
+  const state = await setupEbayChannelPage(page); state.excluded = true; state.feedStatus = "excluded";
+  state.intentChanges.items = [memberChange()];
+  const record = { ...archivedMember, state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+    unconfirmedPriorDispatch: true, recoveryRequired: true };
+  let authorizations = 0, reviews = 0;
+  await page.route("**/api/channels/67/listing-lifecycle/members**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/resume")) { authorizations++; return route.fulfill({ status: 409 }); }
+    if (path.endsWith("/recovery")) {
+      reviews++;
+      return route.fulfill({ json: { record, observation: { identity: record.identity, retired: true },
+        reviewHash: "d".repeat(64), canResume: false,
+        message: "The member is currently unpublished, but an earlier removal has no confirmed final response. This check did not send another removal or establish that the link is safe to reuse." } });
+    }
+    return route.fulfill({ json: { items: [record] } });
+  });
+  await page.reload();
+  const panel = page.getByTestId("listing-intent-changes");
+  await panel.locator("summary").first().click();
+  await panel.getByRole("button", { name: "Review listing", exact: true }).click();
+  await page.getByRole("button", { name: "Review removal: ARCHIVED-PACK", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("an earlier removal has no confirmed final response");
+  await expect(dialog.getByRole("button", { name: "Authorize removal recovery", exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Refresh review", exact: true }).click();
+  await expect.poll(() => reviews).toBeGreaterThanOrEqual(2);
+  expect(authorizations).toBe(0);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("disabled-category work still opens the saved removal operation",async({page})=>{
   const state=await setupEbayChannelPage(page);
   state.feedStatus="type_disabled"; state.jobs=[{...withdrawal,state:"needs_attention",code:"EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN"}];

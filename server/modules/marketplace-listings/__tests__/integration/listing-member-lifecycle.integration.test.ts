@@ -261,7 +261,8 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     const review = await service.preview(10, record.operationId);
     await service.resume(10, { operationId: record.operationId, reviewHash: review.reviewHash, commandKey: randomUUID() }, "operator");
     await worker(new Date(now.getTime() + 240_000)).processDue();
-    expect((await receipts())[0]).toMatchObject({ operationId: record.operationId, state: "retired" });
+    expect((await receipts())[0]).toMatchObject({ operationId: record.operationId, state: "failed",
+      code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED", unconfirmedPriorDispatch: true });
     expect(deleteOffer).toHaveBeenCalledTimes(2);
   });
   // Audit acceptance test: a durable marker alone cannot establish that a
@@ -293,7 +294,8 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     await recovery.resume(10,command,"operator");
     await recovery.resume(10,command,"operator");
     await run(new Date(now.getTime()+900_000));
-    expect((await receipts())[0]).toMatchObject({state:"retired",operationId:id});
+    expect((await receipts())[0]).toMatchObject({state:"failed",operationId:id,
+      code:"LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",unconfirmedPriorDispatch:true});
     expect(deleteOffer).toHaveBeenCalledTimes(1);
     expect((await database.pool.query("SELECT actor,before_record,observation FROM marketplace.listing_member_recovery_commands")).rows)
       .toMatchObject([{actor:"operator",before_record:{state:"failed",dispatch_status:"unknown"},observation:{retired:false}}]);
@@ -362,7 +364,8 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     await store.withMember(record.operationId, session => processListingMemberRetirement(session, dependencies, () => now));
     expect(deleteOffer).toHaveBeenCalledTimes(1);
     const [completed] = await readListingMemberRetirements(database.pool, { destinationKind: "dropship_store_connection", connectionId: 70, productVariantIds: [302] });
-    expect(completed).toMatchObject({ state: "retired", recoveryRequired: false });
+    expect(completed).toMatchObject({ state: "failed", recoveryRequired: true,
+      code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED", unconfirmedPriorDispatch: true });
   });
 
   it("fences reactivation and stale identity changes before a reviewed recovery can authorize dispatch", async () => {
@@ -403,7 +406,8 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     remote.delete("offer-archived");
     await expect(service.resume(10,command,"operator")).rejects.toMatchObject({code:"LISTING_MEMBER_RECOVERY_REVIEW_STALE"});
     await run(new Date(now.getTime()+360_000));
-    expect((await receipts())[0].state).toBe("retired");
+    expect((await receipts())[0]).toMatchObject({ state: "failed", recoveryRequired: true,
+      code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED", unconfirmedPriorDispatch: true });
     expect(deleteOffer).toHaveBeenCalledTimes(1);
   });
 
@@ -423,7 +427,8 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     const review=await recovery.preview(10,id);
     await recovery.resume(10,{operationId:id,commandKey:randomUUID(),reviewHash:review.reviewHash},"operator");
     await store.withMember(id,session=>processListingMemberRetirement(session,dependencies,()=>now));
-    expect((await receipts())[0]).toMatchObject({state:"retired",identity:{provider},recoveryRequired:false});
+    expect((await receipts())[0]).toMatchObject({state:"failed",identity:{provider},recoveryRequired:true,
+      code:"LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",unconfirmedPriorDispatch:true});
     expect(retire).toHaveBeenCalledTimes(1);
   });
 
@@ -633,11 +638,12 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect(remote.get("offer-active")).toEqual({ sku: "ACTIVE-PACK", status: "PUBLISHED" });
     expect((await receipts())[0].state).toBe("retired");
   });
-  it("recovers a lost deletion response by reading the same offer, without resending deletion", async () => {
+  it("retains a lost deletion response after reading the same offer, without resending deletion", async () => {
     remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
     deleteOffer.mockImplementationOnce(async id => { remote.delete(id); throw new Error("response lost"); });
     await run(); expect((await receipts())[0].state).toBe("retiring");
-    await run(new Date(now.getTime()+120_000)); expect((await receipts())[0].state).toBe("retired");
+    await run(new Date(now.getTime()+120_000)); expect((await receipts())[0]).toMatchObject({ state: "failed",
+      code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED", unconfirmedPriorDispatch: true });
     expect(deleteOffer).toHaveBeenCalledTimes(1);
   });
   it("rejects a different provider SKU, marketplace or listing without a write", async () => {
@@ -701,18 +707,19 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     remote.delete("offer-archived");
     await store.withMember(id, session => processListingMemberRetirement(session, { store, adapter: async () => adapter }, () => now));
     const [completed] = await store.listForChannel(10, 30, 25);
-    expect(completed).toMatchObject({ operationId: id, state: "retired", dispatchStatus });
+    expect(completed).toMatchObject({ operationId: id, state: dispatchStatus === "unknown" ? "failed" : "retired", dispatchStatus });
     expect(clearOffer).not.toHaveBeenCalled();
     expect(deleteOffer).not.toHaveBeenCalled();
     if (dispatchStatus === "unknown") {
-      expect(await receipts()).toEqual([expect.objectContaining({ state: "retired", unconfirmedPriorDispatch: true })]);
+      expect(await receipts()).toEqual([expect.objectContaining({ state: "failed", unconfirmedPriorDispatch: true,
+        code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED" })]);
       expect(await recovery.preview(10, id)).toMatchObject({ canResume: false, observation: { retired: true } });
     } else {
       expect(await receipts()).toEqual([]);
       await expect(recovery.preview(10, id)).rejects.toMatchObject({ code: "LISTING_MEMBER_RECOVERY_SCOPE_CHANGED" });
     }
     const events = (await database.pool.query("SELECT after_state FROM marketplace.listing_member_retirement_events WHERE operation_id=$1 ORDER BY version", [id])).rows;
-    expect(events.map(row => row.after_state.state)).toEqual(["pending", "retiring", "failed", "retired"]);
+    expect(events.map(row => row.after_state.state)).toEqual(["pending", "retiring", "failed", dispatchStatus === "unknown" ? "failed" : "retired"]);
   });
   it("does not let a successful retry erase an earlier unconfirmed dispatch", async () => {
     const { record, service } = await unresolvedRecovery();
@@ -723,7 +730,8 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     await store.withMember(record.operationId, session => processListingMemberRetirement(session, { store, adapter: async () => adapter }, () => now));
 
     const [completed] = await receipts();
-    expect(completed).toMatchObject({ state: "retired", dispatchStatus: "accepted", dispatchKey: retryKey, unconfirmedPriorDispatch: true });
+    expect(completed).toMatchObject({ state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+      dispatchStatus: "accepted", dispatchKey: retryKey, unconfirmedPriorDispatch: true });
     expect(archivedListingMemberSelection({ productVariantId: 302, archived: true, retirement: completed }))
       .not.toHaveProperty("retirementEvidence");
     const selected = await readChannelStockSelection(database.pool, { channelId: 10, channelConnectionId: 11, productId: 30, productVariantIds: [302] });
@@ -733,7 +741,7 @@ const now = new Date("2026-10-19T12:00:00.000Z");
       code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED", nextActions: [{ owner: "listing_member_retirement", operationId: record.operationId }] }] } });
     const saved = await service.preview(10, record.operationId);
     expect(saved).toMatchObject({ canResume: false, observation: { retired: true }, record: { unconfirmedPriorDispatch: true } });
-    expect(saved.message).toContain("earlier removal may still finish later");
+    expect(saved.message).toContain("earlier removal has no confirmed final response");
     const owner = worker();
     const oldHistory = (await owner.memberHistory(10, { productId: 30 })).items.find(item => item.operationId === record.operationId);
     const newHistory = (await owner.memberHistory(10, { productId: 30 }, true)).items.find(item => item.operationId === record.operationId);
@@ -744,6 +752,31 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect((await owner.memberRecoveryPreview(10, { operationId: record.operationId }, true)).record).toHaveProperty("unconfirmedPriorDispatch", true);
     expect(await owner.resumeMemberRecovery(10, command, "operator")).not.toHaveProperty("unconfirmedPriorDispatch");
     expect(deleteOffer).toHaveBeenCalledTimes(2);
+  });
+  it.each(["ebay", "shopify", "walmart"])("does not settle an unknown %s removal from an unpublished observation", async provider => {
+    await database.pool.query("UPDATE channels.channels SET provider=$1 WHERE id=10", [provider]);
+    if (provider === "shopify") await database.pool.query("UPDATE channels.channel_connections SET shop_domain='test.myshopify.com' WHERE id=11");
+    if (provider === "walmart") await database.pool.query("INSERT INTO channels.walmart_connections VALUES(11,'seller-one','production','us')");
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await store.withMember(id, session => session.save("retiring", null, "Earlier dispatch", now,
+      { dispatchStatus: "unknown", dispatchKey: id }));
+    const observe = vi.fn(async (identity: ListingMemberIdentity) => ({ identity, retired: true }));
+    const retire = vi.fn();
+    const dependencies = { store, adapter: async () => ({ observe, retire }) };
+
+    await store.withMember(id, session => reconcileArchivedMemberRetirement(session, dependencies, () => now));
+    const [record] = await receipts();
+    expect(record).toMatchObject({ state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+      recoveryRequired: true, unconfirmedPriorDispatch: true, verifiedAt: null });
+    expect(archivedListingMemberSelection({ productVariantId: 302, archived: true, retirement: record }))
+      .not.toHaveProperty("retirementEvidence");
+    const review = await new ListingMemberRecoveryService(dependencies, () => now).preview(10, id);
+    expect(review).toMatchObject({ canResume: false, observation: { retired: true } });
+    expect(review.message).toContain("earlier removal has no confirmed final response");
+    expect(retire).not.toHaveBeenCalled();
+    expect(await store.due(new Date(now.getTime() + 120_000), 25)).toEqual([]);
+    expect(await store.due(new Date(now.getTime() + 16 * 60_000), 25)).toEqual([id]);
   });
   it("accepts a completed dispatch only for its own matching key", async () => {
     remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
@@ -981,7 +1014,8 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect(deleteOffer).toHaveBeenCalledTimes(1);
     remote.delete("offer-archived");
     await run(new Date(now.getTime()+240_000));
-    expect((await receipts())[0].state).toBe("retired");
+    expect((await receipts())[0]).toMatchObject({ state: "failed", recoveryRequired: true,
+      code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED", unconfirmedPriorDispatch: true });
   });
   it("preserves dispatched intent when saving completion fails, then verifies without resending", async () => {
     remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
@@ -1225,7 +1259,8 @@ const now = new Date("2026-10-19T12:00:00.000Z");
       expect(mutations).toBe(1);
       present = false;
       await process(new Date(now.getTime() + 240_000));
-      expect((await receipts())[0]).toMatchObject({ operationId: uncertain.operationId, state: "retired" });
+      expect((await receipts())[0]).toMatchObject({ operationId: uncertain.operationId, state: "failed", recoveryRequired: true,
+        code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED", unconfirmedPriorDispatch: true });
       expect(mutations).toBe(1);
       expect(request).toHaveBeenCalledTimes(5);
     } finally {

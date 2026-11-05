@@ -3,6 +3,7 @@ import {
   validateListingMemberObservation,
   ListingMemberLifecycleError,
   hasUnconfirmedMemberDispatch,
+  hasUnconfirmedPriorMemberDispatch,
 } from "../domain/listing-member-lifecycle";
 import type {
   ListingMemberLifecycleAdapter,
@@ -11,6 +12,28 @@ import type {
 } from "./listing-member-lifecycle.port";
 
 export const RETIREMENT_VERIFICATION_LIMIT = 5;
+
+/** Keep the observed listing state separate from the final outcome of each
+ * previously dispatched request. A later observation cannot exclude a late
+ * provider write from an earlier request with no final receipt. */
+export function saveUnconfirmedRetirementObservation(
+  session: ListingMemberLifecycleSession,
+  record: ListingMemberRetirement,
+  now: Date,
+  retryAfterMs?: number,
+): Promise<ListingMemberRetirement> {
+  return session.save(
+    "failed",
+    "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+    "The channel currently shows this member unpublished, but an earlier removal has no confirmed final response. The listing link is not yet safe to reuse.",
+    now,
+    {
+      recoveryRequired: true,
+      verificationAttempts: (record.verificationAttempts ?? 0) + 1,
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    },
+  );
+}
 
 /** One shared dispatch/reconciliation owner. Only an exact observation proves
  * removal. A saved send marker can never authorize an automatic second send. */
@@ -117,6 +140,8 @@ export async function processListingMemberRetirement(
   } catch (error) {
     return failure(error, record.state === "retiring");
   }
+  if (retired && hasUnconfirmedPriorMemberDispatch(record))
+    return saveUnconfirmedRetirementObservation(session, record, now());
   if (!currentSource) {
     // A changed owner cannot authorize another removal, but neither may it
     // erase a request that might already have reached the channel. Reconcile
@@ -195,6 +220,10 @@ export async function processListingMemberRetirement(
       return failure(error, true);
     }
   }
+  // A successful retry confirms only its own dispatch. It cannot settle an
+  // older unknown request even when the member is now observed unpublished.
+  if (retired && hasUnconfirmedPriorMemberDispatch(record))
+    return saveUnconfirmedRetirementObservation(session, record, now());
   return session.save(
     retired ? "retired" : "retiring",
     retired ? null : record.code,

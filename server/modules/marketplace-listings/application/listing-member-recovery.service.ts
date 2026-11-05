@@ -8,6 +8,7 @@ import {
   validateListingMemberObservation,
   ListingMemberLifecycleError,
   hasUnconfirmedMemberDispatch,
+  hasUnconfirmedPriorMemberDispatch,
 } from "../domain/listing-member-lifecycle";
 import { listingHash } from "../domain/listing-publication";
 import type {
@@ -107,6 +108,7 @@ export class ListingMemberRecoveryService {
         currentSource &&
         record.state !== "superseded" &&
         record.state !== "retired" &&
+        !(observation.retired && hasUnconfirmedPriorMemberDispatch(record)) &&
         (record.recoveryRequired === true || record.state === "retiring"),
       message:
         record.state === "superseded"
@@ -117,6 +119,8 @@ export class ListingMemberRecoveryService {
           ? "The listing link changed after an earlier removal may have been sent. Check the exact channel listing before transferring or publishing it. This review cannot authorize another removal."
           : record.state === "retired"
             ? "Removal of this exact member has been verified."
+            : observation.retired && hasUnconfirmedPriorMemberDispatch(record)
+              ? "The member is currently unpublished, but an earlier removal has no confirmed final response. This check did not send another removal or establish that the link is safe to reuse."
             : record.state === "pending" && record.dispatchStatus === "authorized"
               ? "Recovery is queued. The listing lifecycle will verify and remove this exact archived member."
               : observation.retired

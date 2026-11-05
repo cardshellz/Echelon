@@ -1,7 +1,7 @@
 import type { ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
-import { ListingMemberLifecycleError, validateListingMemberObservation } from "../domain/listing-member-lifecycle";
+import { hasUnconfirmedPriorMemberDispatch, ListingMemberLifecycleError, validateListingMemberObservation } from "../domain/listing-member-lifecycle";
 import type { ListingMemberLifecycleDependencies, ListingMemberLifecycleSession } from "./listing-member-lifecycle.port";
-import { processListingMemberRetirement } from "./process-listing-member-retirement";
+import { processListingMemberRetirement, saveUnconfirmedRetirementObservation } from "./process-listing-member-retirement";
 
 // A still-live result cannot settle an earlier unknown send. Periodic readback
 // remains available without polling the same unresolved listing every minute.
@@ -42,6 +42,8 @@ export async function reconcileArchivedMemberRetirement(
     try {
       const adapter = await dependencies.adapter(record.identity);
       const observation = validateListingMemberObservation(await adapter.observe(record.identity), record.identity);
+      if (observation.retired && hasUnconfirmedPriorMemberDispatch(record))
+        return saveUnconfirmedRetirementObservation(session, record, now(), RECONCILIATION_RETRY_MS);
       if (observation.retired) return session.save("retired", null,
         "The channel confirmed the exact member from the earlier removal is no longer published.", now());
       return session.save("failed", "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",

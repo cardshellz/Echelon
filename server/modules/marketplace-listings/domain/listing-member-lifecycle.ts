@@ -5,6 +5,13 @@ import type { StockPublicationSelection } from "@shared/types/stock-publication-
 import { hasUnconfirmedMemberDispatch } from "@shared/listing-member-dispatch";
 export { hasUnconfirmedMemberDispatch };
 
+/** A current provider observation cannot settle an earlier unknown dispatch.
+ * The persisted history reader supplies unconfirmedPriorDispatch for legacy
+ * markers and for unresolved dispatch keys from earlier recovery attempts. */
+export function hasUnconfirmedPriorMemberDispatch(record: ListingMemberRetirement): boolean {
+  return record.unconfirmedPriorDispatch === true || record.dispatchStatus === "unknown";
+}
+
 export function listingMemberIdentityKey(identity: ListingMemberIdentity): string {
   return createHash("sha256").update(canonicalJson(identity)).digest("hex");
 }
@@ -41,7 +48,7 @@ export function archivedListingMemberSelection(input: {
   const retirement = input.retirement;
   return {
     productVariantId: input.productVariantId, action: "none", blockers: [], catalogArchived: true, listingSelected: false,
-    reason: retirement?.state === "retired"
+    reason: retirement?.state === "retired" && !hasUnconfirmedMemberDispatch(retirement)
       ? "This archived variant's exact external listing was verified unpublished."
       : "This variant is archived and excluded from updates. Its channel listing may still be live until explicitly unpublished.",
     ...(retirement?.state === "retired" && !hasUnconfirmedMemberDispatch(retirement)

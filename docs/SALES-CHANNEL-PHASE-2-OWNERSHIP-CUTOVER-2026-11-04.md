@@ -109,14 +109,17 @@ The eBay member adapter's `retire` method does not forward the lifecycle
 operation ID to `clearOffer` or `deleteOffer`; future requests need an exact,
 durable association between the shared lifecycle operation and provider journal
 entries so recovery need not guess from matching timestamps.
-The existing member processor also marks a changed-source request retired when
-provider readback no longer finds the member, including when dispatch status is
-`unknown` (`processListingMemberRetirement`, changed-source branch). That
-observation confirms the current listing state; it does not, by itself, prove
-that a previously submitted request can no longer arrive after a transfer.
-The cutover must retain and evaluate exact dispatch-finality evidence separately
-from the listing-state observation. Do not use a `retired` label alone as the
-transfer gate.
+The shared member processor and archive reconciler now keep a request in
+`LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED` when a prior dispatch lacks a final
+receipt, even if current readback shows the member unpublished. A successful
+later attempt closes only that attempt, not a different earlier unknown request.
+This preserves the distinction between current listing state and dispatch
+finality, and avoids recording a new unverified terminal status. It does not
+resolve older requests whose provider receipts cannot be associated with their
+lifecycle operation. An exact, durable association and a usable resolution for
+those requests remain necessary before deployment; readback alone does not
+prove an earlier request can no longer arrive after a transfer. Do not use a
+`retired` label alone as the transfer gate, including for historical records.
 
 ## Required acceptance evidence
 
@@ -223,11 +226,18 @@ member of a variation listing can be removed from its item group while retaining
 the offer, whereas `deleteOffer` destroys that offer. A single-SKU offer can be
 withdrawn without deletion. See the [eBay listing-management guide](https://www.developer.ebay.com/develop/guides/sell/listing-management).
 An implementation must preserve the complete group and its siblings under the
-same group fence. The current Shopify adapter calls `productVariantsBulkDelete`;
-the separate publication scope and supported API capability must be established
-before offering a non-destructive Shopify unpublish. Walmart's retire semantics
-must likewise be represented honestly. No provider mutation was performed for
-this checkpoint.
+same group fence. The current Shopify adapter calls `productVariantsBulkDelete`,
+and its composition defaults to API version `2026-04`. Shopify documents that
+`ProductVariant` supports publication-specific `publishableUnpublish` from
+[API version 2026-07](https://shopify.dev/changelog/posts/publish-and-unpublish-product-variants-independently-from-product).
+That action requires an exact publication and the documented
+[`read_publications`, `write_publications`, and `read_products` permissions](https://shopify.dev/docs/apps/build/sales-channels/product-publishing).
+The current lifecycle identity does not contain a Shopify publication ID, and
+the connected stores' effective API versions and permissions have not been
+verified here. A new command must retain the intended publication and verify
+those capabilities; it cannot reinterpret historical delete requests as
+unpublish commands. Walmart's retire semantics must likewise be represented
+honestly. No provider mutation was performed for this checkpoint.
 
 The remote-member lock and the archived-source conflict projection now compare
 Shopify's numeric and GraphQL forms as one exact variant. The lock acquires both
