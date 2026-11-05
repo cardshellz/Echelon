@@ -1,4 +1,5 @@
 import React from "react";
+import { presentOrderDiscountLabel } from "@shared/order-edits/order-edit-member-pricing";
 import { ChevronDown } from "lucide-react";
 import type {
   OrderEditFinancials,
@@ -27,7 +28,7 @@ function DiscountRows({
       {discounts.map((discount) => (
         <React.Fragment key={discount.key}>
           <dt className="oe-saving">
-            {discount.label}
+            {presentOrderDiscountLabel(discount.label)}
             {discount.value.type === "percentage" && (
               <small>
                 {discount.value.percentage}% off

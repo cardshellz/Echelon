@@ -1,4 +1,5 @@
 import type { OrderEditOperation } from "@shared/order-edits/order-edit.contract";
+import { presentOrderDiscountLabel } from "@shared/order-edits/order-edit-member-pricing";
 import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financials";
 import type { OrderEditDiscount } from "@shared/order-edits/order-edit-discounts";
 
@@ -24,7 +25,8 @@ export function orderEditDiscountBreakdown(
           {
             key: "aggregate",
             label:
-              financials.itemDiscountLabels.join(", ") || "Product savings",
+              financials.itemDiscountLabels.map(presentOrderDiscountLabel).join(", ") ||
+              "Product savings",
             amountCents: financials.itemsDiscountCents,
             value: { type: "allocated" },
           },
