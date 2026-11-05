@@ -773,6 +773,7 @@ function CustomerAccount({
         root={root}
         states={totals}
         api={api}
+        ready={session !== null}
         onRetry={(row) => {
           missingAttempts.current = 0;
           void loadSummaries([row]);
