@@ -2,11 +2,12 @@ import { z } from "zod";
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
 import type { ListingMemberLifecycleAdapter } from "../../application/listing-member-lifecycle.port";
 import { ListingMemberLifecycleError } from "../../domain/listing-member-lifecycle";
+import { shopifyListingIdentityAliases } from "./shopify-listing-member-identity";
 
 export interface ShopifyListingMemberClient { graphql(query: string, variables: Record<string, unknown>): Promise<unknown> }
 function gid(kind: "Product" | "ProductVariant", value: string | null): string {
-  if (value && new RegExp(`^(?:gid://shopify/${kind}/)?[1-9][0-9]*$`).test(value))
-    return value.startsWith("gid:") ? value : `gid://shopify/${kind}/${value}`;
+  const aliases = shopifyListingIdentityAliases(kind, value);
+  if (aliases) return aliases[1];
   throw new ListingMemberLifecycleError("LISTING_MEMBER_IDENTITY_INCOMPLETE", "The saved Shopify product and variant IDs are required. Repair this archived variant's listing link.");
 }
 const observationSchema = z.object({ data: z.object({ productVariant: z.object({ id: z.string(), sku: z.string().nullable(),

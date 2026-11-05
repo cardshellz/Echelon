@@ -144,3 +144,14 @@ ownership transfer or prove a live channel result. The queue tests load
 the draft migration directly; the suite is in the PostgreSQL CI manifest.
 The migration remains incomplete until the unresolved recovery and ownership
 gaps above are addressed.
+
+The remote-member lock and the archived-source conflict projection now compare
+Shopify's numeric and GraphQL forms as one exact variant. The lock acquires both
+forms during rolling deployment so it also conflicts with an older worker using
+either representation. The migration changes comparison keys only; it does
+not rewrite stored IDs or historical dispatches. PostgreSQL tests cover both
+forms across direct and Dropship connections, different seller accounts,
+partial-lock cleanup, and an uncertain dispatch retained across the migration.
+These protections cover the member-lifecycle and Dropship removal callers of
+the lock. They do not fence the other mapping or stock writers listed above and
+therefore do not by themselves make ownership transfer safe.

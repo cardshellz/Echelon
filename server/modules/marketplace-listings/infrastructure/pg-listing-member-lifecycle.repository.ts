@@ -8,6 +8,7 @@ import { hasUnconfirmedMemberDispatch } from "@shared/listing-member-dispatch";
 import type { ListingMemberLifecycleSession, ListingMemberLifecycleStore, ListingMemberProgress, ListingMemberRecoveryAuthorization } from "../application/listing-member-lifecycle.port";
 import type { ListingAccount } from "@shared/types/channel-listing-publication";
 import { ListingPublicationError } from "../domain/listing-publication";
+import { shopifyListingIdentityAliases } from "./providers/shopify-listing-member-identity";
 
 const RETRY_MS = 60_000;
 const LOCK_NAMESPACE = 2591013;
@@ -99,9 +100,31 @@ function recordWithHistory(row: Row, evidence: DispatchEvidence | null): Listing
  * the namespace stays private to this file. False: another remover holds it, nothing was locked.
  */
 export async function tryLockListingMemberRemote(client: Pick<PoolClient, "query">, identity: ListingMemberIdentity): Promise<boolean> {
-  const locked = (await client.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS locked",
-    [LOCK_NAMESPACE, listingMemberRemoteKey(listingMemberIdentitySchema.parse(identity))])).rows[0]?.locked;
-  return locked === true;
+  const parsed = listingMemberIdentitySchema.parse(identity);
+  // During rolling deployment old workers still lock their literal stored ID.
+  // Lock both supported Shopify representations so either old worker conflicts
+  // with a new worker. Other providers retain their existing exact key.
+  const aliases = parsed.provider === "shopify"
+    ? shopifyListingIdentityAliases("ProductVariant", parsed.externalVariantId) : null;
+  const keys = aliases
+    ? [...new Set(aliases.map(externalVariantId => listingMemberRemoteKey({ ...parsed, externalVariantId })))].sort()
+    : [listingMemberRemoteKey(parsed)];
+  // A failed multi-key acquisition must not leave its earlier keys held by a
+  // caller that continues the transaction after receiving false.
+  if (keys.length > 1) await client.query("SAVEPOINT listing_member_remote_lock");
+  for (const key of keys) {
+    const locked = (await client.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS locked",
+      [LOCK_NAMESPACE, key])).rows[0]?.locked;
+    if (locked !== true) {
+      if (keys.length > 1) {
+        await client.query("ROLLBACK TO SAVEPOINT listing_member_remote_lock");
+        await client.query("RELEASE SAVEPOINT listing_member_remote_lock");
+      }
+      return false;
+    }
+  }
+  if (keys.length > 1) await client.query("RELEASE SAVEPOINT listing_member_remote_lock");
+  return true;
 }
 
 /** Invoked under the existing account/SKU publication lock. The current catalog

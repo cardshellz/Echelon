@@ -22,14 +22,15 @@ export const listingMemberBaseSql = `CREATE SCHEMA catalog; CREATE SCHEMA channe
   CREATE TABLE dropship.dropship_listing_push_job_items(id integer PRIMARY KEY,job_id integer,listing_id integer,product_variant_id integer,
     action text,status text,result jsonb);`;
 
-export async function installListingMemberLifecycleFixture(pool: Pool) {
+export async function installListingMemberLifecycleFixture(pool: Pool, options: { includeAliasMigration?: boolean } = {}) {
   await installStockSelectionFixture(pool);
   await pool.query(`ALTER TABLE channels.channel_feeds ADD COLUMN channel_product_id text;
     CREATE TABLE ebay.ebay_oauth_tokens(channel_id integer,environment text,external_account_id text,
       external_account_identity_scheme text,external_account_verified_at timestamptz);`);
   for (const file of ["0707_channel_listing_publication.sql", "0724_channel_listing_updates.sql",
     "259_channel_listing_lifecycle.sql", "0748_walmart_listing_presence.sql",
-    "900000013000018480001_shared_listing_member_lifecycle.sql", "900000022000018880002_listing_member_recovery.sql"])
+    "900000013000018480001_shared_listing_member_lifecycle.sql", "900000022000018880002_listing_member_recovery.sql",
+    ...(options.includeAliasMigration === false ? [] : ["900000057000020020002_listing_member_identity_aliases.sql"])])
     await pool.query(readFileSync(resolve("migrations", file), "utf8"));
 }
 

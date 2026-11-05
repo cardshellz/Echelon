@@ -1,20 +1,24 @@
 import { randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { ListingMemberRecoveryService } from "../../application/listing-member-recovery.service";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { readChannelStockSelection } from "../../../channels/channel-stock-selection";
-import { PostgresListingMemberLifecycleRepository, readListingMemberRetirements, assertArchivedMemberPublicationAllowed } from "../../infrastructure/pg-listing-member-lifecycle.repository";
+import { PostgresListingMemberLifecycleRepository, readListingMemberRetirements, assertArchivedMemberPublicationAllowed, tryLockListingMemberRemote } from "../../infrastructure/pg-listing-member-lifecycle.repository";
 import { PostgresListingLifecycleRepository } from "../../infrastructure/pg-listing-lifecycle.repository";
 import { listingAccountKey } from "../../domain/listing-publication";
 import { processListingMemberRetirement } from "../../application/process-listing-member-retirement";
 import { reconcileArchivedMemberRetirement } from "../../application/reconcile-archived-member-retirement";
 import { ListingLifecycleService } from "../../application/listing-lifecycle.service";
 import { archivedListingMemberSelection } from "../../domain/listing-member-lifecycle";
+import { listingMemberRemoteKey } from "../../domain/listing-member-lifecycle";
 import { resolveListingIntentLifecycle } from "../../domain/listing-intent-lifecycle";
 import { EbayListingMemberAdapter } from "../../infrastructure/providers/ebay/ebay-listing-member.adapter";
 import { ShopifyListingMemberAdapter } from "../../infrastructure/providers/shopify-listing-member.adapter";
+import { shopifyListingIdentityAliases } from "../../infrastructure/providers/shopify-listing-member-identity";
 import { WalmartListingMemberAdapter } from "../../../channels/adapters/walmart/walmart-listing-member.adapter";
 import { installListingMemberLifecycleFixture, listingMemberBaseSql, seedLegacyRetirements } from "../fixtures/listing-member-lifecycle.fixture";
 import { createListingMemberLifecycle } from "../../../../listing-member-lifecycle.composition";
@@ -76,6 +80,56 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect((await database.pool.query("SELECT count(*)::integer n FROM marketplace.listing_member_retirements")).rows[0].n).toBe(0);
     expect(getOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled();
     expect(remote.has("offer-archived")).toBe(true);
+  });
+  it.each(["numeric", "gid"] as const)("fences a %s Shopify ID against an old worker and across connection types", async oldForm => {
+    const numeric = "123456789";
+    const gid = `gid://shopify/ProductVariant/${numeric}`;
+    const identity: ListingMemberIdentity = { destinationKind: "channel_connection", connectionId: 11, channelId: 10,
+      vendorId: null, provider: "shopify", accountId: "seller.myshopify.com", environment: "production", market: "shop",
+      productId: 30, productVariantId: 302, externalSku: "REMOTE-PACK", externalProductId: "900",
+      externalVariantId: oldForm === "numeric" ? numeric : gid, externalInventoryItemId: null, identityConflict: false };
+    const otherConnection: ListingMemberIdentity = { ...identity, destinationKind: "dropship_store_connection", connectionId: 70,
+      channelId: null, vendorId: 7, externalVariantId: oldForm === "numeric" ? gid : numeric };
+    const oldWorker = await database.pool.connect();
+    const newWorker = await database.pool.connect();
+    try {
+      await oldWorker.query("BEGIN");
+      await newWorker.query("BEGIN");
+      // The previously deployed worker locked only its literal representation.
+      await oldWorker.query("SELECT pg_advisory_xact_lock($1,hashtext($2))", [2591013, listingMemberRemoteKey(identity)]);
+      expect(await tryLockListingMemberRemote(newWorker, otherConnection)).toBe(false);
+      await newWorker.query("ROLLBACK");
+      await oldWorker.query("ROLLBACK");
+
+      await newWorker.query("BEGIN");
+      await oldWorker.query("BEGIN");
+      expect(await tryLockListingMemberRemote(newWorker, otherConnection)).toBe(true);
+      expect(await tryLockListingMemberRemote(oldWorker, identity)).toBe(false);
+      await oldWorker.query("ROLLBACK");
+      await oldWorker.query("BEGIN");
+      expect(await tryLockListingMemberRemote(oldWorker, { ...identity, accountId: "other.myshopify.com" })).toBe(true);
+      await oldWorker.query("ROLLBACK");
+      await newWorker.query("ROLLBACK");
+    } finally { oldWorker.release(); newWorker.release(); }
+  });
+  it("releases partial Shopify alias locks when a caller continues after a failed acquisition", async () => {
+    const numeric = "123456789";
+    const gid = `gid://shopify/ProductVariant/${numeric}`;
+    const identity: ListingMemberIdentity = { destinationKind: "channel_connection", connectionId: 11, channelId: 10,
+      vendorId: null, provider: "shopify", accountId: "seller.myshopify.com", environment: "production", market: "shop",
+      productId: 30, productVariantId: 302, externalSku: "REMOTE-PACK", externalProductId: "900",
+      externalVariantId: numeric, externalInventoryItemId: null, identityConflict: false };
+    const keys = [listingMemberRemoteKey(identity), listingMemberRemoteKey({ ...identity, externalVariantId: gid })].sort();
+    const blocker = await database.pool.connect(), contender = await database.pool.connect(), witness = await database.pool.connect();
+    try {
+      await blocker.query("BEGIN"); await contender.query("BEGIN"); await witness.query("BEGIN");
+      // Occupy the second key: the contender must first acquire and then release the first.
+      await blocker.query("SELECT pg_advisory_xact_lock($1,hashtext($2))", [2591013, keys[1]]);
+      expect(await tryLockListingMemberRemote(contender, identity)).toBe(false);
+      const acquired = await witness.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS locked", [2591013, keys[0]]);
+      expect(acquired.rows[0].locked).toBe(true);
+      await witness.query("ROLLBACK"); await contender.query("ROLLBACK"); await blocker.query("ROLLBACK");
+    } finally { blocker.release(); contender.release(); witness.release(); }
   });
   it.each(["unknown", "legacy"] as const)("keeps a superseded %s dispatch visible and read-only", async dispatch => {
     await seedLegacyRetirements(database.pool, now, 25);
@@ -401,6 +455,95 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     await run();
     expect((await receipts())[0]).toMatchObject({ state: "failed", code: "LISTING_MEMBER_IDENTITY_CONFLICT", identity: { identityConflict: true } });
     expect(getOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled();
+  });
+  it.each([
+    { archived: "123456789", active: "gid://shopify/ProductVariant/123456789", destination: "direct" },
+    { archived: "gid://shopify/ProductVariant/123456789", active: "123456789", destination: "direct" },
+    { archived: "123456789", active: "gid://shopify/ProductVariant/123456789", destination: "dropship" },
+    { archived: "gid://shopify/ProductVariant/123456789", active: "123456789", destination: "dropship" },
+  ])("rejects Shopify ID aliases across $destination ownership before any removal", async ({ archived, active, destination }) => {
+    await database.pool.query("UPDATE channels.channels SET provider='shopify'");
+    await database.pool.query("UPDATE channels.channel_connections SET shop_domain='shared.myshopify.com'");
+    await database.pool.query("UPDATE channels.channel_listings SET external_variant_id=$1 WHERE product_variant_id=302", [archived]);
+    if (destination === "direct") {
+      await database.pool.query("UPDATE channels.channel_listings SET external_variant_id=$1 WHERE product_variant_id=301", [active]);
+    } else {
+      await database.pool.query(`INSERT INTO dropship.dropship_store_connections(id,vendor_id,platform,shop_domain,provider_environment)
+        VALUES(21,22,'shopify','shared.myshopify.com','production')`);
+      await database.pool.query(`INSERT INTO dropship.dropship_vendor_listings(id,vendor_id,store_connection_id,product_variant_id,external_offer_id)
+        VALUES(23,22,21,301,$1)`, [active]);
+    }
+    const source = (await database.pool.query("SELECT identity FROM marketplace.listing_member_retirement_sources WHERE product_variant_id=302")).rows[0];
+    expect(source.identity.identityConflict).toBe(true);
+    await run();
+    expect((await receipts())[0]).toMatchObject({ state: "failed", code: "LISTING_MEMBER_IDENTITY_CONFLICT" });
+    expect(getOffer).not.toHaveBeenCalled(); expect(clearOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled();
+  });
+  it("does not treat the same Shopify ID in another seller account as a conflict", async () => {
+    await database.pool.query("UPDATE channels.channels SET provider='shopify'");
+    await database.pool.query("UPDATE channels.channel_connections SET shop_domain='first.myshopify.com'");
+    await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='123456789' WHERE product_variant_id=302");
+    await database.pool.query(`INSERT INTO dropship.dropship_store_connections(id,vendor_id,platform,shop_domain,provider_environment)
+      VALUES(21,22,'shopify','second.myshopify.com','production');
+      INSERT INTO dropship.dropship_vendor_listings(id,vendor_id,store_connection_id,product_variant_id,external_offer_id)
+      VALUES(23,22,21,301,'gid://shopify/ProductVariant/123456789');`);
+    const source = (await database.pool.query("SELECT identity FROM marketplace.listing_member_retirement_sources WHERE product_variant_id=302")).rows[0];
+    expect(source.identity.identityConflict).toBe(false);
+  });
+  it("accepts the same Shopify member stored in numeric and GID form on the same local variant", async () => {
+    await database.pool.query("UPDATE channels.channels SET provider='shopify'");
+    await database.pool.query("UPDATE channels.channel_connections SET shop_domain='shared.myshopify.com'");
+    await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='123456789',external_product_id='456' WHERE product_variant_id=302");
+    await database.pool.query(`INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_variant_id,channel_sku,channel_product_id)
+      VALUES(10,302,'gid://shopify/ProductVariant/123456789','OLD-REMOTE-SKU','gid://shopify/Product/456')`);
+    const source = (await database.pool.query("SELECT identity FROM marketplace.listing_member_retirement_sources WHERE product_variant_id=302")).rows[0];
+    expect(source.identity.identityConflict).toBe(false);
+    expect(source.identity.externalVariantId).toBe("123456789");
+    expect(source.identity.externalProductId).toBe("456");
+  });
+  it.each([
+    "123", "gid://shopify/ProductVariant/123", "gid://shopify/Product/123", "other-123",
+    "123\n", "gid://shopify/ProductVariant/123\n", "0", "00123",
+  ])("keeps PostgreSQL and the shared Shopify ID comparison consistent for %j", async value => {
+    const result = (await database.pool.query<{ normalized: string }>(
+      "SELECT marketplace.normalized_listing_identity('shopify','variant',$1) AS normalized", [value])).rows[0].normalized;
+    expect(result).toBe(shopifyListingIdentityAliases("ProductVariant", value)?.[0] ?? value);
+  });
+  it("does not normalize another provider or another Shopify resource as a variant", async () => {
+    const value = "gid://shopify/Product/123";
+    const result = (await database.pool.query<{ other_provider: string; wrong_resource: string }>(
+      "SELECT marketplace.normalized_listing_identity('ebay','variant',$1) AS other_provider, marketplace.normalized_listing_identity('shopify','variant',$1) AS wrong_resource", [value])).rows[0];
+    expect(result).toEqual({ other_provider: value, wrong_resource: value });
+  });
+  it("preserves an earlier uncertain dispatch and its audit when alias detection changes during migration", async () => {
+    const older = await createInventoryCutoverTestDatabase(url, disposable, listingMemberBaseSql);
+    try {
+      await installListingMemberLifecycleFixture(older.pool, { includeAliasMigration: false });
+      await older.pool.query(`INSERT INTO catalog.products(id,is_active,status) VALUES(30,true,'active');
+        INSERT INTO catalog.product_variants(id,product_id,sku,is_active,requires_shipping,track_inventory,sales_eligibility)
+          VALUES(301,30,'ACTIVE',true,true,true,'sellable'),(302,30,'ARCHIVED',false,true,true,'sellable');
+        INSERT INTO channels.channels VALUES(10,'shopify');
+        INSERT INTO channels.channel_connections(id,channel_id,shop_domain) VALUES(11,10,'shared.myshopify.com');
+        INSERT INTO channels.channel_listings(channel_id,product_variant_id,external_sku,external_variant_id)
+          VALUES(10,301,'ACTIVE','gid://shopify/ProductVariant/123'),(10,302,'OLD','123');`);
+      const previousSource = (await older.pool.query("SELECT identity FROM marketplace.listing_member_retirement_sources WHERE product_variant_id=302")).rows[0].identity;
+      expect(previousSource.identityConflict).toBe(false);
+      await seedLegacyRetirements(older.pool, now, 25);
+      const oldStore = new PostgresListingMemberLifecycleRepository(older.pool);
+      const [operationId] = await oldStore.due(now, 25);
+      await oldStore.withMember(operationId, session => session.save("retiring", null, "Earlier request", now,
+        { dispatchStatus: "unknown", dispatchKey: operationId }));
+      const before = (await older.pool.query("SELECT source_identity,identity,state,dispatch_status FROM marketplace.listing_member_retirements WHERE id=$1", [operationId])).rows[0];
+      const eventsBefore = (await older.pool.query("SELECT * FROM marketplace.listing_member_retirement_events WHERE operation_id=$1 ORDER BY version", [operationId])).rows;
+
+      await older.pool.query(readFileSync(resolve("migrations", "900000057000020020002_listing_member_identity_aliases.sql"), "utf8"));
+      const currentSource = (await older.pool.query("SELECT identity FROM marketplace.listing_member_retirement_sources WHERE product_variant_id=302")).rows[0].identity;
+      expect(currentSource.identityConflict).toBe(true);
+      expect((await older.pool.query("SELECT source_identity,identity,state,dispatch_status FROM marketplace.listing_member_retirements WHERE id=$1", [operationId])).rows[0]).toEqual(before);
+      expect((await older.pool.query("SELECT * FROM marketplace.listing_member_retirement_events WHERE operation_id=$1 ORDER BY version", [operationId])).rows).toEqual(eventsBefore);
+      expect(await readListingMemberRetirements(older.pool, { destinationKind: "channel_connection", connectionId: 11, productVariantIds: [302] }))
+        .toEqual([expect.objectContaining({ operationId, state: "retiring", unconfirmedPriorDispatch: true })]);
+    } finally { await older.close(); }
   });
   it("defers a conflicting identity without retries, then cancels its proven unsent automatic removal", async () => {
     await database.pool.query("UPDATE channels.channel_listings SET external_variant_id='offer-archived' WHERE product_variant_id=301");
