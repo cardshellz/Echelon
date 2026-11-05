@@ -49,7 +49,7 @@ export function ListingMemberRecoveryDialog({
     refetchOnWindowFocus: false,
     retry: false,
     queryFn: () =>
-      publicationRequest("POST", base, listingMemberRecoveryReviewSchema, {
+      publicationRequest("POST", base + "?dispatchHistory=1", listingMemberRecoveryReviewSchema, {
         operationId,
       }),
   });

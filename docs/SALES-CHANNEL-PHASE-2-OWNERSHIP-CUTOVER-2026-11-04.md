@@ -42,9 +42,9 @@ The local queue prototype preserves an in-flight lease, retains distinct newer
 requests in order, distinguishes a recorded stock repair from a legacy request
 whose origin is unknown, and records immutable follow-up history. PostgreSQL
 tests exercise completion, rollback, races, reactivation, and an older worker
-completing during deployment. The schema is currently in
-`.verification/archive-separation.sql`; it is not an allocated production
-migration. The prototype routes both Catalog sellability guards through one
+completing during deployment. The prototype is now in the draft migration
+`migrations/900000056000020020001_channel_availability_archive_separation.sql`.
+It routes both Catalog sellability guards through one
 decision that accounts for queued activations; PostgreSQL tests cover an
 internal-only transition racing an activation. This is not a completed cutover:
 the prototype parks some uncertain requests in `needs_review` without a
@@ -88,11 +88,15 @@ Older code could already mark an uncertain request `superseded`. A read-only
 production census found one such record. The request journal contains rejected
 deletions for the same offer and time window, but does not persist the lifecycle
 operation ID, so it cannot by itself establish which deletion belongs to that
-receipt. The local reader now exposes these records and permits a read-only
-provider observation without changing the immutable history or authorizing
-another deletion. An incomplete or malformed event stream is also treated as
-unconfirmed. This is visibility, not durable settlement or a safe transfer
-gate: both remain required before this cutover can be called complete.
+receipt. The local reader exposes superseded and retired records with uncertain
+dispatch history and permits a read-only provider observation without changing
+the immutable history or authorizing another deletion. The shared domain checks
+the complete event sequence: an accepted receipt closes only the matching
+dispatch key; a successful later retry cannot close a different earlier unknown
+request. An incomplete or malformed event stream is treated as unconfirmed.
+Older client bundles keep the original strict response format; current clients
+opt in to the additional evidence. This is visibility, not durable settlement or
+a safe transfer gate: both remain required before this cutover can be complete.
 The eBay member adapter's `retire` method does not forward the lifecycle
 operation ID to `clearOffer` or `deleteOffer`; future requests need an exact,
 durable association between the shared lifecycle operation and provider journal
@@ -125,10 +129,10 @@ transfer gate.
 
 ## Local verification of the partial work
 
-The affected lifecycle, mapping, queue, and Catalog policy suites passed 231
-tests against a disposable PostgreSQL instance and unit fixtures. The archive
-and recovery browser selection passed 12 desktop/mobile tests with mocked APIs.
-Those browser tests do not exercise an ownership transfer. The queue tests load
-`.verification/archive-separation.sql` directly; the suite is in the
-PostgreSQL CI manifest, but that prototype must be replaced with an allocated
-production migration before a release candidate is valid.
+The affected lifecycle, mapping, queue, and Catalog policy suites have run
+against a disposable PostgreSQL instance and unit fixtures. The archive and
+recovery browser tests use mocked provider APIs; they do not exercise an
+ownership transfer or prove a live channel result. The queue tests load
+the draft migration directly; the suite is in the PostgreSQL CI manifest.
+The migration remains incomplete until the unresolved recovery and ownership
+gaps above are addressed.

@@ -96,6 +96,7 @@ export class ListingMemberRecoveryService {
       version: record.version,
       identity: record.identity,
       dispatchStatus: record.dispatchStatus,
+      unconfirmedPriorDispatch: record.unconfirmedPriorDispatch ?? false,
       observation,
     });
     return listingMemberRecoveryReviewSchema.parse({
@@ -110,6 +111,8 @@ export class ListingMemberRecoveryService {
       message:
         record.state === "superseded"
           ? "An earlier removal may have reached the channel before this request was superseded. This review checks the saved listing without sending another removal; its historical outcome remains unconfirmed."
+          : record.state === "retired" && record.unconfirmedPriorDispatch
+            ? "The listing is not currently published. An earlier removal may still finish later, so Echelon cannot confirm that the link is safe to reuse. This check did not send another removal."
           : !currentSource
           ? "The listing link changed after an earlier removal may have been sent. Check the exact channel listing before transferring or publishing it. This review cannot authorize another removal."
           : record.state === "retired"

@@ -179,7 +179,8 @@ export class PostgresListingIntentLifecycleReader implements ListingIntentLifecy
           (row.identity.accountId === d.accountId &&
             row.identity.environment === d.environment &&
             (d.marketplaceId === null || row.identity.market === d.marketplaceId)) ||
-          (row.state !== "retired" && (row.state !== "superseded" || hasUnconfirmedMemberDispatch(row))),
+          ((row.state !== "retired" || hasUnconfirmedMemberDispatch(row))
+            && (row.state !== "superseded" || hasUnconfirmedMemberDispatch(row))),
       );
       const members = selection.variants.map((row) => row.productVariantId);
       const stock = members.length

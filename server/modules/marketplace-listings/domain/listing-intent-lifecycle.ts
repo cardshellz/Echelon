@@ -80,17 +80,19 @@ export function resolveListingIntentLifecycle(input: {
         );
         // A new catalog generation must not hide an older, possibly dispatched
         // removal. Keep each unresolved receipt reachable in the workspace.
-        const outstanding = matching.filter((row) => row.state !== "retired"
+        const outstanding = matching.filter((row) => (row.state !== "retired" || hasUnconfirmedMemberDispatch(row))
           && (row.state !== "superseded" || hasUnconfirmedMemberDispatch(row))
           && !(row.code === "LISTING_MEMBER_IDENTITY_INVALID" && row.dispatchStatus === "none"));
         if (outstanding.length > 0) {
-          const primary = outstanding.find((row) => row.state === "failed" || row.state === "superseded") ?? outstanding[0];
+          const primary = outstanding.find((row) => row.state === "failed" || row.state === "superseded" || row.state === "retired") ?? outstanding[0];
           return {
             ...base, duty: "retirement",
-            state: outstanding.some((row) => row.state === "failed" || row.state === "superseded") ? "attention" : "pending",
-            code: primary.state === "superseded" ? "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED"
+            state: outstanding.some((row) => row.state === "failed" || row.state === "superseded" || row.state === "retired") ? "attention" : "pending",
+            code: primary.state === "superseded" || primary.state === "retired" ? "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED"
               : primary.code ?? "LISTING_LIFECYCLE_RETIREMENT_PENDING",
-            message: primary.state === "superseded"
+            message: primary.state === "retired"
+              ? "The listing was observed as removed, but an earlier removal may still finish later. Echelon cannot confirm that its link is safe to reuse."
+              : primary.state === "superseded"
               ? "An older removal was marked superseded after it may have been sent. Review the saved channel listing; its outcome has not been confirmed."
               : primary.message ?? "The listing lifecycle must confirm this archived member's remaining channel work.",
             references: outstanding.slice(0, 100).map((row) => row.operationId),

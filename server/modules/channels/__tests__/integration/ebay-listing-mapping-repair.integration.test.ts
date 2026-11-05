@@ -109,7 +109,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     const sellabilityEnd = eligibilityMigration.indexOf("CREATE OR REPLACE FUNCTION catalog.guard_internal_only_variant_transition()");
     expect(sellabilityStart).toBeGreaterThan(0); expect(sellabilityEnd).toBeGreaterThan(sellabilityStart);
     await database.pool.query(eligibilityMigration.slice(sellabilityStart,sellabilityEnd));
-    await database.pool.query(readFileSync(resolve(process.cwd(),".verification/archive-separation.sql"),"utf8"));
+    await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/900000056000020020001_channel_availability_archive_separation.sql"),"utf8"));
     const syncMigration = readFileSync(resolve(process.cwd(), "migrations/0729_ebay_listing_sync_recovery.sql"), "utf8");
     const start = syncMigration.indexOf("CREATE TABLE channels.ebay_listing_sync_jobs");
     const end = syncMigration.indexOf("CREATE TRIGGER publication_response_recoveries_no_truncate", start);

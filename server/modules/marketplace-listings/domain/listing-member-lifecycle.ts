@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { listingMemberObservationSchema, type ListingMemberIdentity, type ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 import type { StockPublicationSelection } from "@shared/types/stock-publication-selection";
-export { hasUnconfirmedMemberDispatch } from "@shared/listing-member-dispatch";
+import { hasUnconfirmedMemberDispatch } from "@shared/listing-member-dispatch";
+export { hasUnconfirmedMemberDispatch };
 
 export function listingMemberIdentityKey(identity: ListingMemberIdentity): string {
   return createHash("sha256").update(canonicalJson(identity)).digest("hex");
@@ -43,7 +44,8 @@ export function archivedListingMemberSelection(input: {
     reason: retirement?.state === "retired"
       ? "This archived variant's exact external listing was verified unpublished."
       : "This variant is archived and excluded from updates. Its channel listing may still be live until explicitly unpublished.",
-    ...(retirement?.state === "retired" && retirement.verifiedAt && retirement.identity.accountId && retirement.identity.externalSku ? { retirementEvidence: {
+    ...(retirement?.state === "retired" && !hasUnconfirmedMemberDispatch(retirement)
+      && retirement.verifiedAt && retirement.identity.accountId && retirement.identity.externalSku ? { retirementEvidence: {
       operationId: retirement.operationId, externalAccountId: retirement.identity.accountId,
       externalSku: retirement.identity.externalSku, externalOfferId: retirement.identity.externalVariantId,
       externalListingId: retirement.identity.externalProductId,

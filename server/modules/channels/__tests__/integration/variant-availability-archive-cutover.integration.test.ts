@@ -52,8 +52,7 @@ const claim: ClaimedVariantAvailabilitySync = {
     const sellabilityEnd = eligibilityMigration.indexOf("CREATE OR REPLACE FUNCTION catalog.guard_internal_only_variant_transition()");
     expect(sellabilityStart).toBeGreaterThan(0); expect(sellabilityEnd).toBeGreaterThan(sellabilityStart);
     await database.pool.query(eligibilityMigration.slice(sellabilityStart,sellabilityEnd));
-    // The production migration will replace this prototype after PR allocation.
-    await database.pool.query(readFileSync(resolve(".verification/archive-separation.sql"), "utf8"));
+    await database.pool.query(readFileSync(resolve("migrations/900000056000020020001_channel_availability_archive_separation.sql"), "utf8"));
     await database.pool.query(`CREATE TRIGGER product_variants_guard_internal_only_transition
       BEFORE UPDATE OF sales_eligibility,shopify_variant_id,shopify_inventory_item_id,dropship_eligible
       ON catalog.product_variants FOR EACH ROW EXECUTE FUNCTION catalog.guard_internal_only_variant_transition()`);

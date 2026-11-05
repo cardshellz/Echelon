@@ -83,8 +83,8 @@ export function ListingRemainingWorkDialog({
       publicationRequest(
         "POST",
         scope.kind === "channel"
-          ? `/api/channels/${scope.channelId}/listing-lifecycle/members`
-          : `/api/dropship/listings/stores/${scope.storeConnectionId}/listing-lifecycle/members`,
+          ? `/api/channels/${scope.channelId}/listing-lifecycle/members?dispatchHistory=1`
+          : `/api/dropship/listings/stores/${scope.storeConnectionId}/listing-lifecycle/members?dispatchHistory=1`,
         z.object({ items: z.array(listingMemberRetirementSchema) }),
         { productId: row.product_id },
       ),
@@ -142,7 +142,7 @@ export function ListingRemainingWorkDialog({
           </p>
         )}
         {members.data?.items
-          .filter((member) => member.state !== "retired"
+          .filter((member) => (member.state !== "retired" || hasUnconfirmedMemberDispatch(member))
             && (member.state !== "superseded" || hasUnconfirmedMemberDispatch(member)))
           .map((member) => (
             <Button

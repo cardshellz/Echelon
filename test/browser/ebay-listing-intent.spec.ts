@@ -461,6 +461,32 @@ test("an old superseded dispatch can be reviewed without authorizing another rem
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
+test("an absent listing does not hide an earlier unconfirmed removal", async ({page}) => {
+  const state = await setupEbayChannelPage(page); state.excluded = true; state.feedStatus = "excluded";
+  state.intentChanges.items = [memberChange()];
+  const record = { ...archivedMember, state: "retired", code: null,
+    verifiedAt: "2026-10-20T20:01:00.000Z", unconfirmedPriorDispatch: true };
+  let authorizations = 0;
+  await page.route("**/api/channels/67/listing-lifecycle/members**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/resume")) { authorizations++; return route.fulfill({ status: 409 }); }
+    if (path.endsWith("/recovery")) return route.fulfill({ json: { record,
+      observation: { identity: record.identity, retired: true }, reviewHash: "d".repeat(64), canResume: false,
+      message: "The listing is not currently published. An earlier removal may still finish later, so Echelon cannot confirm that the link is safe to reuse. This check did not send another removal." } });
+    return route.fulfill({ json: { items: [record] } });
+  });
+  await page.reload();
+  const panel = page.getByTestId("listing-intent-changes");
+  await panel.locator("summary").first().click();
+  await panel.getByRole("button", { name: "Review listing", exact: true }).click();
+  await page.getByRole("button", { name: "Review removal: ARCHIVED-PACK", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("earlier removal may still finish later");
+  await expect(dialog.getByRole("button", { name: "Authorize removal recovery", exact: true })).toHaveCount(0);
+  expect(authorizations).toBe(0);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
 test("disabled-category work still opens the saved removal operation",async({page})=>{
   const state=await setupEbayChannelPage(page);
   state.feedStatus="type_disabled"; state.jobs=[{...withdrawal,state:"needs_attention",code:"EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN"}];

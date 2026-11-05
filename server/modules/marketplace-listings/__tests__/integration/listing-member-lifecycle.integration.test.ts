@@ -560,10 +560,63 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     expect(completed).toMatchObject({ operationId: id, state: "retired", dispatchStatus });
     expect(clearOffer).not.toHaveBeenCalled();
     expect(deleteOffer).not.toHaveBeenCalled();
-    expect(await receipts()).toEqual([]);
-    await expect(recovery.preview(10, id)).rejects.toMatchObject({ code: "LISTING_MEMBER_RECOVERY_SCOPE_CHANGED" });
+    if (dispatchStatus === "unknown") {
+      expect(await receipts()).toEqual([expect.objectContaining({ state: "retired", unconfirmedPriorDispatch: true })]);
+      expect(await recovery.preview(10, id)).toMatchObject({ canResume: false, observation: { retired: true } });
+    } else {
+      expect(await receipts()).toEqual([]);
+      await expect(recovery.preview(10, id)).rejects.toMatchObject({ code: "LISTING_MEMBER_RECOVERY_SCOPE_CHANGED" });
+    }
     const events = (await database.pool.query("SELECT after_state FROM marketplace.listing_member_retirement_events WHERE operation_id=$1 ORDER BY version", [id])).rows;
     expect(events.map(row => row.after_state.state)).toEqual(["pending", "retiring", "failed", "retired"]);
+  });
+  it("does not let a successful retry erase an earlier unconfirmed dispatch", async () => {
+    const { record, service } = await unresolvedRecovery();
+    const review = await service.preview(10, record.operationId);
+    const retryKey = randomUUID();
+    const command = { operationId: record.operationId, reviewHash: review.reviewHash, commandKey: retryKey };
+    await service.resume(10, command, "operator");
+    await store.withMember(record.operationId, session => processListingMemberRetirement(session, { store, adapter: async () => adapter }, () => now));
+
+    const [completed] = await receipts();
+    expect(completed).toMatchObject({ state: "retired", dispatchStatus: "accepted", dispatchKey: retryKey, unconfirmedPriorDispatch: true });
+    expect(archivedListingMemberSelection({ productVariantId: 302, archived: true, retirement: completed }))
+      .not.toHaveProperty("retirementEvidence");
+    const selected = await readChannelStockSelection(database.pool, { channelId: 10, channelConnectionId: 11, productId: 30, productVariantIds: [302] });
+    const handoff = resolveListingIntentLifecycle({ selection: selected, accountId: "seller-one", retainedVariantIds: [302],
+      retirements: [completed], stock: [], contentWork: [], now });
+    expect(handoff).toMatchObject({ state: "waiting_lifecycle", lifecycle: { members: [{ state: "attention",
+      code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED", nextActions: [{ owner: "listing_member_retirement", operationId: record.operationId }] }] } });
+    const saved = await service.preview(10, record.operationId);
+    expect(saved).toMatchObject({ canResume: false, observation: { retired: true }, record: { unconfirmedPriorDispatch: true } });
+    expect(saved.message).toContain("earlier removal may still finish later");
+    const owner = worker();
+    const oldHistory = (await owner.memberHistory(10, { productId: 30 })).items.find(item => item.operationId === record.operationId);
+    const newHistory = (await owner.memberHistory(10, { productId: 30 }, true)).items.find(item => item.operationId === record.operationId);
+    expect(oldHistory).toBeDefined();
+    expect(oldHistory).not.toHaveProperty("unconfirmedPriorDispatch");
+    expect(newHistory).toHaveProperty("unconfirmedPriorDispatch", true);
+    expect((await owner.memberRecoveryPreview(10, { operationId: record.operationId })).record).not.toHaveProperty("unconfirmedPriorDispatch");
+    expect((await owner.memberRecoveryPreview(10, { operationId: record.operationId }, true)).record).toHaveProperty("unconfirmedPriorDispatch", true);
+    expect(await owner.resumeMemberRecovery(10, command, "operator")).not.toHaveProperty("unconfirmedPriorDispatch");
+    expect(deleteOffer).toHaveBeenCalledTimes(2);
+  });
+  it("accepts a completed dispatch only for its own matching key", async () => {
+    remote.set("offer-archived", { offerId: "offer-archived", sku: "OLD-REMOTE-SKU", marketplaceId: "EBAY_US", status: "PUBLISHED" });
+    await run();
+    const [completed] = await receipts();
+    expect(completed).toMatchObject({ state: "retired", dispatchStatus: "accepted" });
+    expect(completed.unconfirmedPriorDispatch).toBeUndefined();
+    expect(archivedListingMemberSelection({ productVariantId: 302, archived: true, retirement: completed }))
+      .toHaveProperty("retirementEvidence.operationId", completed.operationId);
+  });
+  it("keeps a terminal record visible when its audit stream is incomplete", async () => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await database.pool.query("UPDATE marketplace.listing_member_retirements SET version=version+1 WHERE id=$1", [id]);
+    await store.withMember(id, session => session.save("retired", null, "Earlier observation", now));
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=true,updated_at=updated_at+interval '1 second' WHERE id=302");
+    expect(await receipts()).toEqual([expect.objectContaining({ operationId: id, state: "retired", unconfirmedPriorDispatch: true })]);
   });
   it("keeps an uncertain stale removal when provider readback fails", async () => {
     await seedLegacyRetirements(database.pool, now, 25);
