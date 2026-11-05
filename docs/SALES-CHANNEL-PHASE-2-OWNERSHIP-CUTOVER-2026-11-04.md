@@ -56,6 +56,12 @@ the repository has already been enumerated. Any proposed cutover needs a
 complete writer/read-path inventory and database enforcement that prevents
 legacy paths from bypassing the owner.
 
+The existing `scripts/writer-ratchet/baseline.json` permits writes to channel
+feeds from Catalog, Channels, and Inventory, and to channel listings from Catalog,
+Channels, and eBay routes. The ratchet operates at table/module granularity, so
+it cannot by itself prove that only one owner changes identity columns. The
+cutover must distinguish identity decisions from permitted status projections.
+
 The legacy `recordNonShopifyInventorySyncSuccess` and
 `recordPermanentPushFailure` methods in `echelon-sync-orchestrator.service.ts`
 can also fall back to the local variant ID when constructing a channel variant
@@ -94,6 +100,8 @@ the immutable history or authorizing another deletion. The shared domain checks
 the complete event sequence: an accepted receipt closes only the matching
 dispatch key; a successful later retry cannot close a different earlier unknown
 request. An incomplete or malformed event stream is treated as unconfirmed.
+Audit events are read in bounded pages; a PostgreSQL test covers a history that
+crosses multiple pages and verifies that dispatch keys are reconciled across them.
 Older client bundles keep the original strict response format; current clients
 opt in to the additional evidence. This is visibility, not durable settlement or
 a safe transfer gate: both remain required before this cutover can be complete.

@@ -12,12 +12,12 @@ const snapshotSchema = z.object({
   product_variant_id: z.number().int().positive(),
   state: z.enum(["pending", "retiring", "retired", "failed", "superseded"]),
   code: z.string().nullable(),
-  dispatch_status: z.enum(["none", "unknown", "accepted", "authorized"]).optional(),
+  dispatch_status: z.enum(["none", "unknown", "accepted", "authorized"]).nullable().optional(),
   dispatch_key: z.string().uuid().nullable().optional(),
-  verification_attempts: z.number().int().nonnegative().optional(),
-  recovery_required: z.boolean().optional(),
+  verification_attempts: z.number().int().nonnegative().nullable().optional(),
+  recovery_required: z.boolean().nullable().optional(),
 }).passthrough();
-const eventsSchema = z.array(z.object({ version: z.number().int().positive(), afterState: snapshotSchema }).strict());
+const eventSchema = z.object({ version: z.number().int().positive(), afterState: snapshotSchema }).strict();
 
 export interface ListingMemberDispatchHead {
   id: string;
@@ -37,42 +37,69 @@ export interface ListingMemberDispatchHead {
 /** Current readback and request finality are different facts. Each unknown
  * dispatch is closed only by a later acceptance of that same dispatch key.
  * Historical markers without a key and incomplete audit streams are unknown. */
+export class ListingMemberDispatchHistoryAssessment {
+  private readonly pendingKeys = new Set<string>();
+  private readonly expectedIdentity: string;
+  private readonly expectedSourceIdentity: string;
+  private invalid = false;
+  private unkeyedMarker = false;
+  private hadRetiringEvent = false;
+  private count = 0;
+  private latest: z.infer<typeof snapshotSchema> | null = null;
+
+  constructor(private readonly head: ListingMemberDispatchHead) {
+    try {
+      this.expectedIdentity = canonicalJson(head.identity);
+      this.expectedSourceIdentity = canonicalJson(head.sourceIdentity);
+    } catch {
+      this.expectedIdentity = "";
+      this.expectedSourceIdentity = "";
+      this.invalid = true;
+    }
+  }
+
+  append(raw: unknown): void {
+    if (this.invalid) return;
+    const parsed = eventSchema.safeParse(raw);
+    if (!parsed.success) { this.invalid = true; return; }
+    const { version, afterState: snapshot } = parsed.data;
+    try {
+      if (version !== this.count + 1 || snapshot.version !== version || snapshot.id !== this.head.id
+        || snapshot.identity_key !== this.head.identityKey || snapshot.source_revision !== this.head.sourceRevision
+        || snapshot.product_id !== this.head.productId || snapshot.product_variant_id !== this.head.productVariantId
+        || canonicalJson(snapshot.identity) !== this.expectedIdentity || canonicalJson(snapshot.source_identity) !== this.expectedSourceIdentity) {
+        this.invalid = true;
+        return;
+      }
+    } catch { this.invalid = true; return; }
+    this.count++;
+    this.latest = snapshot;
+    const status = snapshot.dispatch_status ?? "none";
+    const key = snapshot.dispatch_key ?? null;
+    if (snapshot.state === "retiring") this.hadRetiringEvent = true;
+    if (status === "none" && (snapshot.state === "retiring" || snapshot.recovery_required === true
+      || (snapshot.verification_attempts ?? 0) > 0)) this.unkeyedMarker = true;
+    if (status === "unknown") {
+      if (key) this.pendingKeys.add(key);
+      else this.unkeyedMarker = true;
+    } else if (status === "accepted" && key) this.pendingKeys.delete(key);
+  }
+
+  result(): { unconfirmed: boolean; hadRetiringEvent: boolean } {
+    const latest = this.latest;
+    if (this.invalid || this.count !== this.head.version || !latest || latest.state !== this.head.state
+      || latest.code !== this.head.code || (latest.dispatch_status ?? "none") !== this.head.dispatchStatus
+      || (latest.dispatch_key ?? null) !== this.head.dispatchKey)
+      return { unconfirmed: true, hadRetiringEvent: true };
+    return { unconfirmed: this.unkeyedMarker || this.pendingKeys.size > 0, hadRetiringEvent: this.hadRetiringEvent };
+  }
+}
+
 export function assessListingMemberDispatchHistory(head: ListingMemberDispatchHead, rawEvents: unknown): {
   unconfirmed: boolean; hadRetiringEvent: boolean;
 } {
-  const parsed = eventsSchema.safeParse(rawEvents);
-  if (!parsed.success || parsed.data.length !== head.version)
-    return { unconfirmed: true, hadRetiringEvent: true };
-
-  const pendingKeys = new Set<string>();
-  let unkeyedMarker = false;
-  let hadRetiringEvent = false;
-  try {
-    const identity = canonicalJson(head.identity);
-    const sourceIdentity = canonicalJson(head.sourceIdentity);
-    for (const [index, event] of parsed.data.entries()) {
-      const snapshot = event.afterState;
-      if (event.version !== index + 1 || snapshot.version !== event.version || snapshot.id !== head.id
-        || snapshot.identity_key !== head.identityKey || snapshot.source_revision !== head.sourceRevision
-        || snapshot.product_id !== head.productId || snapshot.product_variant_id !== head.productVariantId
-        || canonicalJson(snapshot.identity) !== identity || canonicalJson(snapshot.source_identity) !== sourceIdentity)
-        return { unconfirmed: true, hadRetiringEvent: true };
-      const status = snapshot.dispatch_status ?? "none";
-      const key = snapshot.dispatch_key ?? null;
-      if (snapshot.state === "retiring") hadRetiringEvent = true;
-      if (snapshot.state === "retiring" && status === "none") unkeyedMarker = true;
-      if (status === "none" && (snapshot.recovery_required === true || (snapshot.verification_attempts ?? 0) > 0)) unkeyedMarker = true;
-      if (status === "unknown") {
-        if (key) pendingKeys.add(key);
-        else unkeyedMarker = true;
-      } else if (status === "accepted" && key) pendingKeys.delete(key);
-    }
-    const latest = parsed.data.at(-1)?.afterState;
-    if (!latest || latest.state !== head.state || latest.code !== head.code || (latest.dispatch_status ?? "none") !== head.dispatchStatus
-      || (latest.dispatch_key ?? null) !== head.dispatchKey)
-      return { unconfirmed: true, hadRetiringEvent: true };
-  } catch {
-    return { unconfirmed: true, hadRetiringEvent: true };
-  }
-  return { unconfirmed: unkeyedMarker || pendingKeys.size > 0, hadRetiringEvent };
+  const assessment = new ListingMemberDispatchHistoryAssessment(head);
+  if (!Array.isArray(rawEvents)) return { unconfirmed: true, hadRetiringEvent: true };
+  for (const event of rawEvents) assessment.append(event);
+  return assessment.result();
 }

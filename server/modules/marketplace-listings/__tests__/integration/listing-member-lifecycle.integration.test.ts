@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { ListingMemberRecoveryService } from "../../application/listing-member-recovery.service";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
+import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { readChannelStockSelection } from "../../../channels/channel-stock-selection";
 import { PostgresListingMemberLifecycleRepository, readListingMemberRetirements, assertArchivedMemberPublicationAllowed } from "../../infrastructure/pg-listing-member-lifecycle.repository";
@@ -617,6 +618,65 @@ const now = new Date("2026-10-19T12:00:00.000Z");
     await store.withMember(id, session => session.save("retired", null, "Earlier observation", now));
     await database.pool.query("UPDATE catalog.product_variants SET is_active=true,updated_at=updated_at+interval '1 second' WHERE id=302");
     expect(await receipts()).toEqual([expect.objectContaining({ operationId: id, state: "retired", unconfirmedPriorDispatch: true })]);
+  });
+  it("reads long audit histories in bounded pages without losing dispatch finality across page boundaries", async () => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    const firstKey = randomUUID();
+    const secondKey = randomUUID();
+    await database.pool.query(`UPDATE marketplace.listing_member_retirements
+      SET state='failed',version=1001,dispatch_status='unknown',dispatch_key=$2 WHERE id=$1`, [id, secondKey]);
+    await database.pool.query(`INSERT INTO marketplace.listing_member_retirement_events
+      (operation_id,version,actor,before_state,after_state,occurred_at)
+      SELECT r.id,n,'fixture',NULL,to_jsonb(r) || jsonb_build_object(
+        'version',n,
+        'state',CASE WHEN n<500 THEN 'pending' WHEN n<502 THEN 'retiring' ELSE 'failed' END,
+        'dispatch_status',CASE WHEN n<500 THEN 'none' WHEN n=500 THEN 'unknown' WHEN n=501 THEN 'accepted' ELSE 'unknown' END,
+        'dispatch_key',CASE WHEN n<500 THEN NULL WHEN n<502 THEN $2::text ELSE $3::text END
+      ),$4 FROM marketplace.listing_member_retirements r CROSS JOIN generate_series(2,1001) n WHERE r.id=$1`,
+    [id, firstKey, secondKey, now]);
+    const pageSizes: number[] = [];
+    const client: StockSelectionQueryClient = { query: async <T>(sql: string, values?: readonly unknown[]) => {
+      const result = await database.pool.query(sql, values ? [...values] : []);
+      if (sql.includes("FROM marketplace.listing_member_retirement_events e")) pageSizes.push(result.rows.length);
+      return { rows: result.rows as T[] };
+    } };
+    const [result] = await readListingMemberRetirements(client, { destinationKind: "channel_connection", connectionId: 11, productVariantIds: [302] });
+    expect(pageSizes).toEqual([500, 500, 1]);
+    expect(result).toMatchObject({ operationId: id, state: "failed", unconfirmedPriorDispatch: true });
+  });
+  it("does not call a history settled when a new dispatch is committed between pages", async () => {
+    await seedLegacyRetirements(database.pool, now, 25);
+    const [id] = await store.due(now, 25);
+    await database.pool.query("UPDATE marketplace.listing_member_retirements SET state='failed',version=501 WHERE id=$1", [id]);
+    await database.pool.query(`INSERT INTO marketplace.listing_member_retirement_events
+      (operation_id,version,actor,before_state,after_state,occurred_at)
+      SELECT r.id,n,'fixture',NULL,to_jsonb(r) || jsonb_build_object('version',n,
+        'state',CASE WHEN n=501 THEN 'failed' ELSE 'pending' END),$2
+      FROM marketplace.listing_member_retirements r CROSS JOIN generate_series(2,501) n WHERE r.id=$1`, [id, now]);
+    const dispatchKey = randomUUID();
+    let inserted = false;
+    const client: StockSelectionQueryClient = { query: async <T>(sql: string, values?: readonly unknown[]) => {
+      const result = await database.pool.query(sql, values ? [...values] : []);
+      if (!inserted && sql.includes("FROM marketplace.listing_member_retirement_events e")) {
+        inserted = true;
+        const writer = await database.pool.connect();
+        try {
+          await writer.query("BEGIN");
+          await writer.query(`UPDATE marketplace.listing_member_retirements SET state='retiring',version=502,
+            dispatch_status='unknown',dispatch_key=$2 WHERE id=$1`, [id, dispatchKey]);
+          await writer.query(`INSERT INTO marketplace.listing_member_retirement_events
+            (operation_id,version,actor,before_state,after_state,occurred_at)
+            SELECT id,version,'fixture',NULL,to_jsonb(r),$2 FROM marketplace.listing_member_retirements r WHERE id=$1`, [id, now]);
+          await writer.query("COMMIT");
+        } catch (error) { await writer.query("ROLLBACK"); throw error; }
+        finally { writer.release(); }
+      }
+      return { rows: result.rows as T[] };
+    } };
+    const [result] = await readListingMemberRetirements(client, { destinationKind: "channel_connection", connectionId: 11, productVariantIds: [302] });
+    expect(inserted).toBe(true);
+    expect(result).toMatchObject({ operationId: id, unconfirmedPriorDispatch: true });
   });
   it("keeps an uncertain stale removal when provider readback fails", async () => {
     await seedLegacyRetirements(database.pool, now, 25);

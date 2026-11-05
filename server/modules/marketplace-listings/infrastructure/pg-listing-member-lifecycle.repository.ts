@@ -3,7 +3,7 @@ import { z } from "zod";
 import { listingMemberConflictListSchema, listingMemberIdentitySchema, listingMemberRetirementSchema, type ListingMemberIdentity, type ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
 import { listingMemberRemoteKey } from "../domain/listing-member-lifecycle";
-import { assessListingMemberDispatchHistory } from "../domain/listing-member-dispatch-evidence";
+import { ListingMemberDispatchHistoryAssessment } from "../domain/listing-member-dispatch-evidence";
 import { hasUnconfirmedMemberDispatch } from "@shared/listing-member-dispatch";
 import type { ListingMemberLifecycleSession, ListingMemberLifecycleStore, ListingMemberProgress, ListingMemberRecoveryAuthorization } from "../application/listing-member-lifecycle.port";
 import type { ListingAccount } from "@shared/types/channel-listing-publication";
@@ -11,6 +11,8 @@ import { ListingPublicationError } from "../domain/listing-publication";
 
 const RETRY_MS = 60_000;
 const LOCK_NAMESPACE = 2591013;
+// Bound the evidence loaded per database round trip, even for long retry histories.
+const DISPATCH_HISTORY_PAGE_SIZE = 500;
 const positiveId = z.number().int().positive().max(2_147_483_647);
 const batchLimit = z.number().int().min(1).max(250);
 // Old rows predate dispatch_status. A count alone cannot prove no send: every
@@ -32,27 +34,53 @@ const provenNoDispatchSql = `r.dispatch_status='none' AND r.dispatch_key IS NULL
     AND bool_or(e.version=r.version AND e.after_state->>'state'=r.state
       AND (e.after_state->>'code' IS NOT DISTINCT FROM r.code))
     FROM marketplace.listing_member_retirement_events e WHERE e.operation_id=r.id),false)`;
-// The repository loads immutable evidence; the lifecycle domain classifies it.
-const dispatchHistorySql = `(SELECT COALESCE(jsonb_agg(jsonb_build_object('version',e.version,'afterState',e.after_state)
-  ORDER BY e.version),'[]'::jsonb) FROM marketplace.listing_member_retirement_events e WHERE e.operation_id=r.id)`;
 interface Row { id: string; identity_key: string; identity: unknown; source_identity: unknown; source_revision: string;
   product_id: number; product_variant_id: number; state: string; code: string | null; message: string | null; verified_at: Date | null;
   version: number; dispatch_status: string; dispatch_key: string | null; verification_attempts: number; recovery_required: boolean;
-  dispatch_history?: unknown; source_current?: boolean; next_attempt_at?: Date | number | null }
+  source_current?: boolean; next_attempt_at?: Date | number | null }
 
-function history(row: Row) {
-  if (row.dispatch_history === undefined) return null;
-  return assessListingMemberDispatchHistory({ id: row.id, version: row.version, identityKey: row.identity_key,
+type DispatchEvidence = ReturnType<ListingMemberDispatchHistoryAssessment["result"]>;
+type DispatchHistoryRow = { operation_id: string; version: number; after_state: unknown };
+
+function assessment(row: Row): ListingMemberDispatchHistoryAssessment {
+  return new ListingMemberDispatchHistoryAssessment({ id: row.id, version: row.version, identityKey: row.identity_key,
     identity: row.identity, sourceIdentity: row.source_identity, sourceRevision: row.source_revision,
     productId: row.product_id, productVariantId: row.product_variant_id, state: row.state, code: row.code,
-    dispatchStatus: row.dispatch_status, dispatchKey: row.dispatch_key }, row.dispatch_history);
+    dispatchStatus: row.dispatch_status, dispatchKey: row.dispatch_key });
+}
+
+async function readDispatchEvidence(client: StockSelectionQueryClient, rows: readonly Row[]): Promise<Map<string, DispatchEvidence>> {
+  const assessments = new Map(rows.map(row => [row.id, assessment(row)]));
+  if (!rows.length) return new Map();
+  const operationIds = rows.map(row => row.id);
+  let afterOperation: string | null = null;
+  let afterVersion = 0;
+  for (;;) {
+    const events: DispatchHistoryRow[] = (await client.query<DispatchHistoryRow>(`
+      SELECT e.operation_id::text,e.version,jsonb_build_object(
+        'id',e.after_state->'id','version',e.after_state->'version','identity_key',e.after_state->'identity_key',
+        'identity',e.after_state->'identity','source_identity',e.after_state->'source_identity',
+        'source_revision',e.after_state->'source_revision','product_id',e.after_state->'product_id',
+        'product_variant_id',e.after_state->'product_variant_id','state',e.after_state->'state','code',e.after_state->'code',
+        'dispatch_status',e.after_state->'dispatch_status','dispatch_key',e.after_state->'dispatch_key',
+        'verification_attempts',e.after_state->'verification_attempts','recovery_required',e.after_state->'recovery_required'
+      ) AS after_state FROM marketplace.listing_member_retirement_events e
+      WHERE e.operation_id=ANY($1::uuid[]) AND ($2::uuid IS NULL OR (e.operation_id,e.version)>($2::uuid,$3::integer))
+      ORDER BY e.operation_id,e.version LIMIT $4`, [operationIds, afterOperation, afterVersion, DISPATCH_HISTORY_PAGE_SIZE])).rows;
+    for (const event of events) assessments.get(event.operation_id)?.append({ version: event.version, afterState: event.after_state });
+    if (events.length < DISPATCH_HISTORY_PAGE_SIZE) break;
+    const last: DispatchHistoryRow = events[events.length - 1];
+    afterOperation = last.operation_id;
+    afterVersion = last.version;
+  }
+  return new Map([...assessments].map(([id, value]) => [id, value.result()]));
 }
 
 function record(row: Row): ListingMemberRetirement {
-  return recordWithHistory(row, history(row));
+  return recordWithHistory(row, null);
 }
 
-function recordWithHistory(row: Row, evidence: ReturnType<typeof history>): ListingMemberRetirement {
+function recordWithHistory(row: Row, evidence: DispatchEvidence | null): ListingMemberRetirement {
   return listingMemberRetirementSchema.parse({ operationId: row.id, identity: row.identity, sourceRevision: row.source_revision,
     // Project legacy/incomplete audit evidence without rewriting the immutable
     // original row; current observation and old dispatch finality are separate.
@@ -99,15 +127,16 @@ export async function readListingMemberRetirements(client: StockSelectionQueryCl
   z.object({ destinationKind: z.enum(["channel_connection", "dropship_store_connection"]), connectionId: positiveId,
     productVariantIds: z.array(positiveId).max(250) }).strict().parse(input);
   if (!input.productVariantIds.length) return [];
-  const rows = (await client.query<Row>(`SELECT r.*,${dispatchHistorySql} AS dispatch_history,
+  const rows = (await client.query<Row>(`SELECT r.*,
       EXISTS (SELECT 1 FROM marketplace.listing_member_retirement_sources s
         WHERE s.product_variant_id=r.product_variant_id AND s.source_revision=r.source_revision AND s.identity=r.source_identity) AS source_current
     FROM marketplace.listing_member_retirements r
     WHERE r.identity->>'destinationKind'=$1 AND r.identity->>'connectionId'=$2 AND r.product_variant_id=ANY($3::integer[])
       ORDER BY r.created_at,r.id`,
   [input.destinationKind, String(input.connectionId), input.productVariantIds])).rows;
+  const evidenceById = await readDispatchEvidence(client, rows);
   return rows.flatMap(row => {
-    const evidence = history(row);
+    const evidence = evidenceById.get(row.id) ?? null;
     const current = recordWithHistory(row, evidence);
     const unresolved = hasUnconfirmedMemberDispatch(current);
     const pendingWithHistory = row.state !== "retired" && row.state !== "superseded" && evidence?.hadRetiringEvent === true;
@@ -138,17 +167,25 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
   async listForChannel(channelId: number, productId: number, limit: number): Promise<ListingMemberRetirement[]> {
     positiveId.parse(channelId); positiveId.parse(productId); batchLimit.parse(limit);
     const client = await this.pool.connect();
-    try { return (await client.query<Row>(`SELECT r.*,${dispatchHistorySql} AS dispatch_history FROM marketplace.listing_member_retirements r
+    try {
+      const rows = (await client.query<Row>(`SELECT r.* FROM marketplace.listing_member_retirements r
       WHERE r.identity->>'destinationKind'='channel_connection' AND r.identity->>'channelId'=$1 AND r.product_id=$2
-      ORDER BY r.created_at DESC,r.id DESC LIMIT $3`, [String(channelId), productId, limit])).rows.map(row => record(row)); }
+      ORDER BY r.created_at DESC,r.id DESC LIMIT $3`, [String(channelId), productId, limit])).rows;
+      const evidence = await readDispatchEvidence(client, rows);
+      return rows.map(row => recordWithHistory(row, evidence.get(row.id) ?? null));
+    }
     finally { client.release(); }
   }
   async listForDropship(connectionId:number,vendorId:number,productId:number,limit:number):Promise<ListingMemberRetirement[]> {
     positiveId.parse(connectionId); positiveId.parse(vendorId); positiveId.parse(productId); batchLimit.parse(limit);
     const client = await this.pool.connect();
-    try { return (await client.query<Row>(`SELECT r.*,${dispatchHistorySql} AS dispatch_history FROM marketplace.listing_member_retirements r
+    try {
+      const rows = (await client.query<Row>(`SELECT r.* FROM marketplace.listing_member_retirements r
       WHERE r.identity->>'destinationKind'='dropship_store_connection' AND r.identity->>'connectionId'=$1 AND r.identity->>'vendorId'=$2 AND r.product_id=$3
-      ORDER BY r.created_at DESC,r.id DESC LIMIT $4`,[String(connectionId),String(vendorId),productId,limit])).rows.map(row => record(row)); }
+      ORDER BY r.created_at DESC,r.id DESC LIMIT $4`,[String(connectionId),String(vendorId),productId,limit])).rows;
+      const evidence = await readDispatchEvidence(client, rows);
+      return rows.map(row => recordWithHistory(row, evidence.get(row.id) ?? null));
+    }
     finally { client.release(); }
   }
   async due(now: Date, limit: number): Promise<string[]> {
@@ -166,15 +203,15 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
       await client.query("BEGIN");
       await client.query("SET LOCAL lock_timeout='2s'");
       await client.query("SET LOCAL statement_timeout='10s'");
-      let row = (await client.query<Row>(`SELECT r.*,${dispatchHistorySql} AS dispatch_history FROM marketplace.listing_member_retirements r WHERE r.id=$1`,
+      let row = (await client.query<Row>(`SELECT r.* FROM marketplace.listing_member_retirements r WHERE r.id=$1`,
         [z.string().uuid().parse(id)])).rows[0];
       if (!row) { await client.query("ROLLBACK"); return null; }
       let current = record(row);
       // Two generations/destinations addressing the same remote member cannot race.
       if (!(await tryLockListingMemberRemote(client, current.identity))) { await client.query("ROLLBACK"); return null; }
       // The prior worker may have committed between the first read and lock.
-      row = (await client.query<Row>(`SELECT r.*,${dispatchHistorySql} AS dispatch_history FROM marketplace.listing_member_retirements r WHERE r.id=$1`, [id])).rows[0];
-      current = record(row);
+      row = (await client.query<Row>(`SELECT r.* FROM marketplace.listing_member_retirements r WHERE r.id=$1`, [id])).rows[0];
+      current = recordWithHistory(row, (await readDispatchEvidence(client, [row])).get(row.id) ?? null);
       // Catalog owns archive/reactivation. Hold only this product/member while a
       // remote removal is in flight, so reactivation cannot race a destructive call.
       await client.query("SELECT id FROM catalog.products WHERE id=$1 FOR SHARE", [current.identity.productId]);
@@ -236,7 +273,7 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
       await audit(client, id, record(before), now);
       const saved = await readRecordedMember(client, id);
       await client.query("COMMIT");
-      return record(saved);
+      return saved;
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
   }
@@ -256,17 +293,17 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
       await audit(client,id,record(before),now,input.actor);
       const saved = await readRecordedMember(client, id);
       await client.query("COMMIT");
-      return record(saved);
+      return saved;
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
   }
 }
 
-async function readRecordedMember(client: PoolClient, id: string): Promise<Row> {
-  const row = (await client.query<Row>(`SELECT r.*,${dispatchHistorySql} AS dispatch_history
+async function readRecordedMember(client: PoolClient, id: string): Promise<ListingMemberRetirement> {
+  const row = (await client.query<Row>(`SELECT r.*
     FROM marketplace.listing_member_retirements r WHERE r.id=$1`, [id])).rows[0];
   if (!row) throw new Error("Saved listing-member retirement is missing");
-  return row;
+  return recordWithHistory(row, (await readDispatchEvidence(client, [row])).get(id) ?? null);
 }
 
 async function audit(client: PoolClient, id: string, before: ListingMemberRetirement | null, now: Date, actor = "system:listing-lifecycle") {
