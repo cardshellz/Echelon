@@ -7,7 +7,7 @@ import { SupplierCreditLink } from "./SupplierCreditLink";
 import React, { useCallback, useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { supplierCreditDetailSchema, supplierCreditApplyInputSchema, type SupplierCreditDetail as Credit } from "@shared/procurement/supplier-credit";
+import { supplierCreditDetailSchema, supplierCreditApplyInputSchema, supplierCreditLineRequiresCostReview, type SupplierCreditDetail as Credit } from "@shared/procurement/supplier-credit";
 import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
 import { formatPaymentAmount, paymentAllocationInputs, sumPaymentCents } from "@/lib/ap-payment-command";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
@@ -20,6 +20,7 @@ import { invoiceWorkListQuery } from "./ap-work-list-query";
 import { WorkListPagination } from "./WorkListPagination";
 import { SupplierCreditRecovery } from "./SupplierCreditRecovery";
 import type { SupplierCreditCommands } from "./use-supplier-credit-commands";
+import { acceptedReturnCreditSourceSchema } from "@shared/procurement/supplier-return-credit";
 
 type ReviewAction = { command: "approve" | "void" | "reconcile_costs"; expectedVersion: string } | { command: "reverse"; expectedVersion: string; applicationId: number };
 const actionLabel = { approve: "Approve credit", void: "Void credit", reverse: "Reverse credit application", reconcile_costs: "Recheck cost disposition" };
@@ -48,13 +49,13 @@ export function SupplierCreditDetail({ creditId, commands }: { creditId: number;
   const staleAction = action !== null && action.expectedVersion !== credit?.version;
   const [costPreview, setCostPreview] = useState<SupplierCreditCostPreview | null>(null);
   const [loadingPreview, setLoadingPreview] = useState(false);
-  const receiptCostReview = credit?.lines.some(line => line.disposition.kind === "price_reduction" && line.disposition.receiptAllocation) === true
-    && action !== null && action.command !== "reverse";
+  const receiptScopedPrice = credit?.lines.some(line => line.disposition.kind === "price_reduction" && line.disposition.receiptAllocation) === true;
+  const costReviewRequired = credit?.lines.some(supplierCreditLineRequiresCostReview) === true && action !== null && action.command !== "reverse";
   async function submitReview() {
     if (!credit || !action || blocked || !commands.canApprove || !actionCapability?.allowed || staleAction) return;
     try {
       setError(null);
-      if (receiptCostReview && !costPreview) {
+      if (costReviewRequired && !costPreview) {
         setLoadingPreview(true);
         try {
           const result = supplierCreditCostPreviewSchema.parse(await financialCommandFetchJson(`/api/supplier-credits/${creditId}/${action.command}/preview`, {
@@ -65,7 +66,7 @@ export function SupplierCreditDetail({ creditId, commands }: { creditId: number;
         } finally { setLoadingPreview(false); }
         return;
       }
-      const payload = { expectedVersion: action.expectedVersion, reason: actionReason, ...(receiptCostReview && costPreview ? { previewVersion: costPreview.previewVersion } : {}) };
+      const payload = { expectedVersion: action.expectedVersion, reason: actionReason, ...(costReviewRequired && costPreview ? { previewVersion: costPreview.previewVersion } : {}) };
       if (action.command === "reverse") await commands.execute({ command: "reverse", creditId, applicationId: action.applicationId, payload });
       else await commands.execute({ command: action.command, creditId, payload });
     } catch (failure) { setCostPreview(null); setError(failure instanceof Error ? failure.message : "Credit review failed."); }
@@ -132,9 +133,10 @@ export function SupplierCreditDetail({ creditId, commands }: { creditId: number;
       {credit.lines.map(line => <div key={line.id} className="border-t pt-2 text-sm space-y-1">
         <p className="font-medium">{line.label}: {formatPaymentAmount(line.amountCents)}
         </p>
-        <p>{line.disposition.kind === "price_reduction" ? `Price reduction · ${line.disposition.component}` : line.disposition.kind === "accepted_stock_return" ? `Accepted-stock return line #${line.disposition.supplierReturnLineId} · ${line.disposition.quantity} recorded units · ${line.disposition.component} · ${line.disposition.evidenceReference}${line.disposition.entitlementId ? ` · Existing matched quantity #${line.disposition.entitlementId}` : ""}` : `Physical return #${line.disposition.returnDispositionId} · ${line.disposition.quantity} source units · ${line.disposition.evidenceReference}`}
-          {line.disposition.kind === "price_reduction" && line.disposition.receiptAllocation && ` · Receipt line #${line.disposition.receiptAllocation.receivingLineId} · ${line.disposition.receiptAllocation.pieces.toLocaleString()} billed pieces`}
+        <p>{line.disposition.kind === "price_reduction" ? `Price reduction · ${line.disposition.component}` : line.disposition.kind === "tax_reduction" ? `Tax refund · ${line.disposition.taxSourceKey}` : line.disposition.kind === "accepted_stock_return" ? `Accepted-stock return line #${line.disposition.supplierReturnLineId} · ${line.disposition.quantity} recorded units · ${line.disposition.component} · ${line.disposition.evidenceReference}${line.disposition.entitlementId ? ` · Existing matched quantity #${line.disposition.entitlementId}` : ""}` : `Physical return #${line.disposition.returnDispositionId} · ${line.disposition.quantity} source units · ${line.disposition.evidenceReference}`}
+          {(line.disposition.kind === "tax_reduction" || line.disposition.kind === "price_reduction") && line.disposition.receiptAllocation && ` · Receipt line #${line.disposition.receiptAllocation.receivingLineId} · ${line.disposition.receiptAllocation.pieces.toLocaleString()} billed pieces`}
         </p>
+        <ReturnedInvoiceEvidence evidence={line.sourceEvidence} />
         <p>Cost result: {line.inventoryEffect ? noInventoryEffectLabel : supplierCreditCostLabel(line.costState)}
         </p>{line.costIssues.map(issue => <p key={`${issue.code}:${issue.message}`} role="alert">{issue.message}
         </p>)}
@@ -186,14 +188,24 @@ export function SupplierCreditDetail({ creditId, commands }: { creditId: number;
         <Textarea id="credit-action-reason" value={actionReason} maxLength={2000} disabled={commands.blocked || loadingPreview} onChange={event => { setActionReason(event.target.value); setCostPreview(null); }} />
         {costPreview && <SupplierCreditCostImpact preview={costPreview} />}{error && <p role="alert" className="text-destructive">{error}
         </p>}<div className="flex flex-wrap gap-2">
-          <Button disabled={blocked || loadingPreview || !commands.canApprove || (receiptCostReview && !commands.canApproveReceiptCosts) || !actionCapability?.allowed || staleAction || actionReason.trim().length < 3} onClick={() => void submitReview()}>{loadingPreview ? "Loading cost changes…" : receiptCostReview && !costPreview ? "Review receipt cost changes" : action ? actionLabel[action.command] : "Confirm"}
+          <Button disabled={blocked || loadingPreview || !commands.canApprove || (costReviewRequired && !commands.canApproveReceiptCosts) || !actionCapability?.allowed || staleAction || actionReason.trim().length < 3} onClick={() => void submitReview()}>{loadingPreview ? "Loading cost changes…" : costReviewRequired && !costPreview ? (receiptScopedPrice ? "Review receipt cost changes" : "Review cost changes") : action ? actionLabel[action.command] : "Confirm"}
           </Button>
           <Button variant="outline" onClick={() => setAction(null)}>Cancel review</Button>
         </div>
-        {receiptCostReview && !commands.canApproveReceiptCosts && <p className="text-sm">An Administrator with purchasing approval permission must approve receipt cost changes.</p>}
+        {costReviewRequired && !commands.canApproveReceiptCosts && <p className="text-sm">An Administrator with purchasing approval permission must approve these cost changes.</p>}
       </DialogContent>
     </Dialog>
   </div>;
+}
+
+function ReturnedInvoiceEvidence({ evidence }: { evidence: Record<string, unknown> }) {
+  const parsed = acceptedReturnCreditSourceSchema.safeParse(evidence.acceptedReturnSource);
+  if (!parsed.success || !parsed.data.invoiceAttribution) return null;
+  const source = parsed.data.invoiceAttribution;
+  return <details className="py-1"><summary>Original receipt and billed pieces</summary>
+    <p>{source.receiptNumber} · invoice line #{source.invoiceLineId}. This credit belongs to these returned pieces; costs on the stock you kept are unchanged.</p>
+    <ul>{source.parts.map((part, index) => <li key={index}>{part.pieces.toLocaleString()} pieces · receipt pieces {(part.receiptStartPiece + 1).toLocaleString()}–{(part.receiptStartPiece + part.pieces).toLocaleString()} · billed pieces {(part.invoiceStartPiece + 1).toLocaleString()}–{(part.invoiceStartPiece + part.pieces).toLocaleString()}</li>)}</ul>
+  </details>;
 }
 
 function CreditApplication({ credit, commands, sourceBusy }: { credit: Credit; commands: SupplierCreditCommands; sourceBusy: boolean }) {

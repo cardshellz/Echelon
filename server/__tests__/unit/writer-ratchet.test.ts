@@ -60,6 +60,7 @@ describe("writer-ratchet (P2.1)", () => {
     ["procurement.vendor_invoice_line_taxes", "modules/procurement"],
     ["procurement.receipt_invoice_cost_allocations", "modules/procurement"],
     ["procurement.ap_invoice_transition_reviews", "modules/procurement"],
+    ["procurement.supplier_header_cost_reviews", "modules/procurement"],
     ["procurement.receiving_quarantine_observations", "modules/procurement"],
     ["procurement.receiving_quarantine_acceptances", "modules/procurement"],
     ["procurement.receiving_quarantine_dispositions", "modules/procurement"],

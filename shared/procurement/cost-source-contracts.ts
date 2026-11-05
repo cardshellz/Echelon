@@ -132,7 +132,7 @@ export const costSourceRevisionSchema = z.object({
   receiptCostSegments: z.array(receiptCostSegmentSchema).min(1).max(2001).optional(),
   inventoryEffect: costInventoryEffectSchema.optional(),
   evidence: z.enum(COST_SOURCE_EVIDENCE_STATES),
-  packagingTreatment: z.enum(["separate", "included_in_product", "not_applicable", "unknown"]),
+  packagingTreatment: z.enum(["separate", "included_in_product", "combined", "not_applicable", "unknown"]),
   issue: costIssueSchema.nullable(),
   manualOverride: costManualOverrideSchema.nullable(),
 }).strict().superRefine((source, context) => {

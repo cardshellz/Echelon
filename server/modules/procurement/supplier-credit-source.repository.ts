@@ -4,6 +4,8 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { costInteger, CostEvidenceError, type CostEvidenceTransaction } from "../inventory/infrastructure/cost-evidence.repository";
 import type { SupplierCreditCostRow, SupplierCreditSourceEvidence } from "./domain/supplier-credit-source";
 import type { CostIssue } from "@shared/procurement/cost-source-contracts";
+import { attachSupplierInvoiceTaxEvidence } from "./supplier-invoice-tax-evidence";
+import { attachSupplierHeaderInvoiceEvidence } from "./supplier-header-invoice-evidence";
 
 export type SupplierCreditSourceRow = SupplierCreditCostRow & {
   purchase_order_line_id: unknown; freight_cost_id: unknown;
@@ -24,7 +26,7 @@ export async function readSupplierCreditCostRows(tx: CostEvidenceTransaction, sc
     JOIN procurement.supplier_credits credit ON credit.id=line.supplier_credit_id
     JOIN procurement.vendor_invoice_lines invoice_line ON invoice_line.id=line.invoice_line_id
     WHERE (credit.status='approved' OR (credit.status='voided' AND credit.approved_at IS NOT NULL))
-      AND (line.disposition->>'kind' IS DISTINCT FROM 'accepted_stock_return' OR credit.id=${scope.creditId ?? null})
+      AND (line.disposition->>'kind' IS DISTINCT FROM 'accepted_stock_return' OR line.disposition ? 'taxRefund' OR credit.id=${scope.creditId ?? null})
       AND (invoice_line.purchase_order_line_id=ANY(${sql.param(poIds)}::int[])
         OR invoice_line.freight_cost_id=ANY(${sql.param(freightIds)}::int[])
         OR credit.id=${scope.creditId ?? null})
@@ -78,7 +80,7 @@ export async function readSupplierCreditInvoiceLines(tx: CostEvidenceTransaction
     WHERE invoice.id=${costInteger(invoiceId, "invoiceId", 1)} ORDER BY line.id
     ${lock ? sql`FOR UPDATE OF invoice,line` : sql``}
   `)).rows;
-  return rows;
+  return attachSupplierHeaderInvoiceEvidence(tx, await attachSupplierInvoiceTaxEvidence(tx, rows));
 }
 
 /** Only known pending-recognition custody has a provable PO/vendor relationship.

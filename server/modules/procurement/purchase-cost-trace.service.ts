@@ -163,7 +163,7 @@ function projectInvoiceLine(line: PurchaseCostEvidence["invoiceLines"][number]):
   if (line.lineTotalCents === null || BigInt(components.productMills) + BigInt(components.packagingMills) + BigInt(components.adjustmentMills) !== BigInt(line.lineTotalCents) * BigInt(100)) {
     issues.push("Invoice component amounts do not reconcile to the recorded document total.");
   }
-  if (components.packagingTreatment === "included_in_product" && components.packagingMills !== 0) issues.push("Included packaging must not also carry a separate packaging amount.");
+  if (components.packagingTreatment !== "separate" && components.packagingMills !== 0) issues.push("A combined or packaging-inclusive amount must not also carry a separate packaging charge.");
   try {
     if (components.adjustmentMills !== invoiceGoodsAmounts(components).adjustmentMills)
       issues.push("Tax or unclassified billed adjustments still need their owning cost review.");

@@ -15,6 +15,8 @@ import {
 import type { CostRevisionInput } from "../../inventory/infrastructure/cost-evidence.repository";
 import { resolveSupplierCreditReductions, supplierCreditSourceEvidenceSchema, type SupplierCreditCostRow } from "./supplier-credit-source";
 import { supplierCreditDispositionSchema } from "@shared/procurement/supplier-credit";
+import { validateQuarantineInvoiceCreditIntervals } from "./quarantine-invoice-credit";
+import { supplierInvoiceTaxSource } from "./supplier-invoice-amounts";
 import { receiptCreditAttributionKey } from "@shared/procurement/receipt-credit-attribution";
 
 export interface ReceiptCostingEvidence {
@@ -136,8 +138,11 @@ export function resolveReceiptInvoiceSources(
     id: costInteger(credit.id, "creditLineId", 1), evidence: supplierCreditSourceEvidenceSchema.parse(credit.source_evidence),
   })).sort((a, b) => a.id - b.id);
   const creditsByAssignment = new Map<string, typeof activeCredits>();
+  for (const invoice of source.approvedInvoices) validateQuarantineInvoiceCreditIntervals(costInteger(invoice.qty_invoiced, "invoice pieces", 1),
+    allocations.filter(row => row.invoiceLineId === Number(invoice.id)), activeCredits.filter(row => row.evidence.invoiceLineId === Number(invoice.id)).map(row => row.evidence));
   for (const credit of activeCredits) {
     const evidence = credit.evidence;
+    if (evidence.returnSource && evidence.returnInvoiceStartPiece !== undefined) continue;
     if (!evidence.receiptAllocation || evidence.returnSource || evidence.reduction.basePieces !== 0
       || !assignmentKeys.has(allocationKey(evidence.invoiceLineId, evidence.receiptAllocation)))
       reject("This credit needs its original invoice-to-receipt assignment reviewed. Received quantities and other receipts' costs are preserved.");
@@ -207,7 +212,10 @@ export function resolveReceiptInvoiceSources(
         .get(row.invoiceLineId)!
         .find((item) => item.component === quoted.component)!;
       const receiptCredits = (creditsByAssignment.get(allocationKey(row.invoiceLineId, row)) ?? []).flatMap(credit => {
-        const amountMills = quoted.component === "product" ? credit.evidence.reduction.productMills : credit.evidence.reduction.packagingMills;
+        const tax = credit.evidence.taxCredit;
+        const invoice = source.approvedInvoices.find(invoice => Number(invoice.id) === credit.evidence.invoiceLineId)!;
+        const amountMills = quoted.component === "product" ? credit.evidence.reduction.productMills
+          + (tax && supplierInvoiceTaxSource(invoice, tax.key)?.treatment === "inventory" ? tax.amountMills : 0) : credit.evidence.reduction.packagingMills;
         return amountMills === 0 ? [] : [{ supplierCreditLineId: credit.id, amountMills, pieces: row.pieces }];
       });
       segments.push({
@@ -242,6 +250,7 @@ export function resolveReceiptInvoiceSources(
       issue: null,
       totalMills: projected.totalMills,
       receiptCostSegments: segments,
+      ...(Array.from(actual.values()).some(inputs => inputs.some(input => input.packagingTreatment === "combined")) ? { packagingTreatment: "combined" as const } : {}),
       evidence:
         projected.provisionalPieces > 0
           ? ("estimated" as const)

@@ -9,6 +9,8 @@ function fixture() {
     [{ __shipment_id: 1, id: 11, qty_shipped: 3 }, { __shipment_id: 2, id: 21, qty_shipped: 7 }],
     [{ __shipment_id: 1, id: 31, actual_cents: 101 }, { __shipment_id: 2, id: 32, estimated_cents: 999 }],
     [{ __shipment_ids: [1, 2], id: 41, vendor_invoice_id: 5, document_lines_total_cents: "1100" }],
+    [], // No reviewed headers on these original invoices.
+    [], // No original invoice tax sources.
     [{ __shipment_id: 1, id: 51, allocated_cents: 101 }, { __shipment_id: 2, id: 52, allocated_cents: 999 }],
     [{ __shipment_id: 2, __source_row: "1", id: 61, freight_cost_id: 32, amount_cents: 11 }],
     [{ __shipment_id: 1, inbound_shipment_line_id: 11, contract: { fingerprint: "a".repeat(64) } }],
@@ -33,7 +35,7 @@ describe("bounded shipment economic evidence", () => {
   it("routes complete source rows without changing any fingerprint field or scalar type", async () => {
     const { sets, execute, tx } = fixture(); const before = structuredClone(sets);
     const result = await readShipmentCostRevisionEvidence(tx, [1, 2]);
-    expect(execute).toHaveBeenCalledTimes(6);
+    expect(execute).toHaveBeenCalledTimes(8);
     expect(result.get(1)?.lines).toEqual([{ id: 11, qty_shipped: 3 }]);
     expect(result.get(2)?.charges).toEqual([{ id: 32, estimated_cents: 999 }]);
     const invoice = [{ id: 41, vendor_invoice_id: 5, document_lines_total_cents: "1100" }];

@@ -6,6 +6,8 @@ import { receiptCreditAttributionSchema, receiptCreditAttributionKey } from "@sh
 import { allocateIntegerCostInterval } from "@shared/utils/integer-cost-interval";
 import { supplierCreditDispositionSchema, type SourceLineInput } from "@shared/procurement/supplier-credit";
 import { costFingerprint, costInteger, CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
+import { supplierInvoiceAmounts, supplierInvoiceTaxSource } from "./supplier-invoice-amounts";
+import { supplierHeaderEconomicShareSchema } from "@shared/procurement/supplier-header-costs";
 
 export type SupplierCreditSourceInput = SourceLineInput;
 const integer = z.number().int().nonnegative().safe();
@@ -26,11 +28,15 @@ export const supplierCreditSourceEvidenceSchema = z.object({
   acceptedReturnSource: acceptedReturnCreditSourceSchema.optional(),
   issues: z.array(costIssueSchema),
   receiptAllocation: receiptCreditAttributionSchema.optional(),
+  returnInvoiceStartPiece: integer.optional(),
+  taxCredit: z.object({ key: z.string(), taxTypeId: id, sourceAmountMills: integer,
+    amountMills: integer, treatment: z.enum(["inventory", "recoverable"]) }).strict().optional(),
 }).strict();
 export type SupplierCreditSourceEvidence = z.infer<typeof supplierCreditSourceEvidenceSchema>;
 
 /** Deliberately excludes invoice payment status and mutable display metadata. */
 export function supplierCreditInvoiceSourceFingerprint(row: Record<string, unknown>): string {
+  const header = z.array(supplierHeaderEconomicShareSchema).max(30).parse(row.header_cost_evidence ?? []);
   return costFingerprint({
     id: costInteger(row.id, "invoiceLineId", 1),
     vendor_invoice_id: costInteger(row.vendor_invoice_id, "invoiceId", 1),
@@ -39,6 +45,9 @@ export function supplierCreditInvoiceSourceFingerprint(row: Record<string, unkno
     // Freight uses its exact charge relationship, not product/packaging metadata.
     cost_component_evidence: row.freight_cost_id == null ? row.cost_component_evidence ?? null : null,
     currency: row.currency,
+    // Recording an empty header review cannot invalidate an already approved
+    // credit. Only actual economic shares extend the legacy source identity.
+    ...(header.length ? { header: header.map(({ taxTreatment: _treatment, ...share }) => share) } : {}),
   });
 }
 
@@ -63,11 +72,28 @@ export function evaluateSupplierCreditSource(input: {
     try { goods = invoiceGoodsAmounts(components.data); }
     catch (error) { if (!(error instanceof RangeError)) throw error; }
   }
-  const exactComponents = components.success
-    && goods !== null && components.data.adjustmentMills === goods.adjustmentMills
-    && BigInt(components.data.productMills) + BigInt(components.data.packagingMills) + BigInt(components.data.adjustmentMills) === BigInt(costInteger(invoice.line_total_cents, "lineTotalCents")) * BigInt(100);
+  let selected: ReturnType<typeof supplierInvoiceAmounts> | null = null;
+  try { selected = supplierInvoiceAmounts(invoice); }
+  catch (error) { if (!(error instanceof CostEvidenceError || error instanceof z.ZodError || error instanceof RangeError)) throw error; }
+  if (selected && goods) goods = { ...goods, productMills: selected.productMills, packagingMills: selected.packagingMills };
+  const exactComponents = selected !== null && goods !== null;
+  let taxCredit: SupplierCreditSourceEvidence["taxCredit"];
   let returnSource: SupplierCreditSourceEvidence["returnSource"] = null;
-  if (line.disposition.kind === "accepted_stock_return") {
+  if (line.disposition.kind === "tax_reduction") {
+    const disposition = line.disposition;
+    const tax = selected?.taxes.find(row => row.key === disposition.taxSourceKey && row.taxTypeId === disposition.taxTypeId);
+    if (!tax) throw new CostEvidenceError("CREDIT_TAX_SOURCE_REQUIRED", "Choose the original recorded tax charge on this supplier invoice.");
+    const assignment = disposition.receiptAllocation;
+    if (assignment && disposition.quarantineAllocation) throw new CostEvidenceError("CREDIT_TAX_SCOPE_INVALID", "A tax refund belongs to an accepted receipt or a returned interval, never both.");
+    returnSource = input.returnSource ?? null;
+    if (disposition.quarantineAllocation && !returnSource) throw new CostEvidenceError("CREDIT_RETURN_SOURCE_MISMATCH", "Review the original returned quantity before refunding its tax.");
+    const interval = assignment ?? (disposition.quarantineAllocation && returnSource ? { invoiceStartPiece: disposition.quarantineAllocation.invoiceStartPiece,
+      pieces: costInteger((BigInt(returnSource.observationQuantity) * BigInt(returnSource.unitsPerVariant)).toString(), "returned invoice pieces", 1) } : null);
+    const capacity = interval ? allocateIntegerCostInterval(BigInt(tax.amountMills), BigInt(costInteger(invoice.qty_invoiced, "invoice pieces", 1)), BigInt(interval.invoiceStartPiece), BigInt(interval.pieces)) : BigInt(tax.amountMills);
+    if (amountMills > capacity) throw new CostEvidenceError("CREDIT_TAX_EXCEEDED", "The refund exceeds this original tax source's assigned amount.");
+    taxCredit = { key: tax.key, taxTypeId: tax.taxTypeId!, sourceAmountMills: tax.amountMills,
+      amountMills: costInteger(amountMills.toString(), "tax refund"), treatment: tax.treatment as "inventory" | "recoverable" };
+  } else if (line.disposition.kind === "accepted_stock_return") {
     throw new CostEvidenceError("CREDIT_ACCEPTED_RETURN_OWNER_REQUIRED", "Accepted-stock credits require the independent immutable return-value owner.");
   } else if (line.disposition.kind === "price_reduction" && line.disposition.component === "landed") {
     if (freightCostId === null || purchaseOrderLineId !== null) issues.push(supplierCreditIssue("CREDIT_LANDED_SOURCE_REQUIRED", "The landed credit needs an exact supplier invoice line linked to one freight charge."));
@@ -90,22 +116,28 @@ export function evaluateSupplierCreditSource(input: {
     returnSource = input.returnSource;
     const pieces = BigInt(returnSource.observationQuantity) * BigInt(returnSource.unitsPerVariant);
     const invoicedPieces = BigInt(costInteger(invoice.qty_invoiced, "qtyInvoiced", 1));
-    const product = BigInt(goods!.productMills) * pieces;
-    const packaging = BigInt(goods!.packagingMills) * pieces;
-    if (pieces > invoicedPieces || product % invoicedPieces !== BigInt(0) || packaging % invoicedPieces !== BigInt(0)
-      || (product + packaging) / invoicedPieces !== amountMills) {
+    const start = line.disposition.invoiceStartPiece;
+    const interval = (amount: number) => start === undefined ? (BigInt(amount) * pieces) / invoicedPieces
+      : allocateIntegerCostInterval(BigInt(amount), invoicedPieces, BigInt(start), pieces);
+    const product = interval(goods!.productMills), packaging = interval(goods!.packagingMills);
+    if (pieces > invoicedPieces || start !== undefined && BigInt(start) + pieces > invoicedPieces
+      || start === undefined && (BigInt(goods!.productMills) * pieces % invoicedPieces !== BigInt(0) || BigInt(goods!.packagingMills) * pieces % invoicedPieces !== BigInt(0))
+      || product + packaging !== amountMills) {
       issues.push(supplierCreditIssue("CREDIT_RETURN_VALUE_REVIEW", "The supplier credit does not exactly equal the returned quantity's original invoice components. An explicit difference disposition is required; no inventory loss or residual price is inferred."));
     } else {
       reduction.basePieces = costInteger(pieces.toString(), "credit.returnBasePieces");
-      reduction.productMills = costInteger((product / invoicedPieces).toString(), "credit.returnProductMills");
-      reduction.packagingMills = costInteger((packaging / invoicedPieces).toString(), "credit.returnPackagingMills");
+      reduction.productMills = costInteger(product.toString(), "credit.returnProductMills");
+      reduction.packagingMills = costInteger(packaging.toString(), "credit.returnPackagingMills");
     }
   }
   const sourceEvidence = supplierCreditSourceEvidenceSchema.parse({ contractVersion: 1,
     invoiceLineId: line.invoiceLineId, invoiceId: costInteger(invoice.vendor_invoice_id, "invoiceId", 1),
     invoiceSourceFingerprint: supplierCreditInvoiceSourceFingerprint(invoice), purchaseOrderLineId, freightCostId,
     reduction, returnSource, issues,
-    ...(line.disposition.kind === "price_reduction" && line.disposition.receiptAllocation ? { receiptAllocation: line.disposition.receiptAllocation } : {}) });
+    ...((line.disposition.kind === "price_reduction" || line.disposition.kind === "tax_reduction") && line.disposition.receiptAllocation ? { receiptAllocation: line.disposition.receiptAllocation } : {}),
+    ...(line.disposition.kind === "quarantine_return" && line.disposition.invoiceStartPiece !== undefined ? { returnInvoiceStartPiece: line.disposition.invoiceStartPiece } : {}),
+    ...(line.disposition.kind === "tax_reduction" && line.disposition.quarantineAllocation ? { returnInvoiceStartPiece: line.disposition.quarantineAllocation.invoiceStartPiece } : {}),
+    ...(taxCredit ? { taxCredit } : {}) });
   return { sourceEvidence, costState: issues.length ? "review_required" : "pending", costIssues: issues };
 }
 
@@ -115,22 +147,63 @@ export interface SupplierCreditCostRow {
   purchase_order_line_id?: unknown; freight_cost_id?: unknown;
 }
 
+/** Caps are independent of inventory destination: recoverable refunds and
+ * shipment-tax refunds consume the same original financial tax entitlement. */
+export function supplierTaxCreditCapIssues(invoices: readonly Record<string, unknown>[], credits: readonly SupplierCreditCostRow[]) {
+  const caps = new Map<string, { amount: bigint; capacity: bigint }>();
+  for (const credit of credits) {
+    if (credit.status !== "approved") continue;
+    const evidence = supplierCreditSourceEvidenceSchema.safeParse(credit.source_evidence);
+    if (!evidence.success || !evidence.data.taxCredit) continue;
+    const source = evidence.data, invoice = invoices.find(row => Number(row.id) === Number(credit.invoice_line_id));
+    const tax = invoice ? supplierInvoiceTaxSource(invoice, source.taxCredit!.key) : null;
+    if (!tax) continue; // Source admission reports missing/changed evidence separately.
+    const key = `${invoice!.id}:${tax.key}`, amount = BigInt(costInteger(credit.amount_cents, "tax refund", 1)) * BigInt(100);
+    const add = (suffix: string, capacity: bigint) => { const current = caps.get(key + suffix) ?? { amount: BigInt(0), capacity }; current.amount += amount; caps.set(key + suffix, current); };
+    add("", BigInt(tax.amountMills));
+    const interval = source.receiptAllocation ?? (source.returnSource && source.returnInvoiceStartPiece !== undefined ? {
+      invoiceStartPiece: source.returnInvoiceStartPiece, pieces: costInteger((BigInt(source.returnSource.observationQuantity) * BigInt(source.returnSource.unitsPerVariant)).toString(), "returned tax pieces", 1),
+    } : null);
+    if (interval) add(`:${interval.invoiceStartPiece}:${interval.pieces}`, allocateIntegerCostInterval(BigInt(tax.amountMills), BigInt(costInteger(invoice!.qty_invoiced, "original tax pieces", 1)), BigInt(interval.invoiceStartPiece), BigInt(interval.pieces)));
+    if (source.acceptedReturnSource?.invoiceAttribution) {
+      const parts = source.acceptedReturnSource.invoiceAttribution.parts;
+      const capacity = parts.reduce((sum, part) => sum + allocateIntegerCostInterval(BigInt(tax.amountMills), BigInt(costInteger(invoice!.qty_invoiced, "original tax pieces", 1)), BigInt(part.invoiceStartPiece), BigInt(part.pieces)), BigInt(0));
+      add(`:accepted:${source.acceptedReturnSource.returnLineId}:${parts.map(part => `${part.invoiceStartPiece}:${part.pieces}`).join(",")}`, capacity);
+    }
+  }
+  return [...caps.values()].some(cap => cap.amount > cap.capacity)
+    ? [supplierCreditIssue("CREDIT_TAX_EXCEEDED", "Cumulative refunds exceed the original tax charge or its exact billed interval.")] : [];
+}
+
 export function supplierCreditDispositionMatches(credit: SupplierCreditCostRow, evidence: SupplierCreditSourceEvidence): boolean {
   const parsed = supplierCreditDispositionSchema.safeParse(credit.disposition);
   if (!parsed.success) return false;
   const disposition = parsed.data;
   const reduction = evidence.reduction;
+  if (disposition.kind === "tax_reduction") return !!evidence.taxCredit
+    && disposition.taxSourceKey === evidence.taxCredit.key && disposition.taxTypeId === evidence.taxCredit.taxTypeId
+    && BigInt(evidence.taxCredit.amountMills) === BigInt(costInteger(credit.amount_cents, "tax refund", 1)) * BigInt(100)
+    && Object.values(reduction).every(amount => amount === 0)
+    && (disposition.quarantineAllocation ? evidence.returnSource?.dispositionId === disposition.quarantineAllocation.returnDispositionId
+      && evidence.returnSource.observationQuantity === disposition.quarantineAllocation.quantity && evidence.returnSource.evidenceReference === disposition.quarantineAllocation.evidenceReference
+      && evidence.returnInvoiceStartPiece === disposition.quarantineAllocation.invoiceStartPiece : evidence.returnSource === null)
+    && (disposition.receiptAllocation ? receiptCreditAttributionKey(disposition.receiptAllocation) : null) === (evidence.receiptAllocation ? receiptCreditAttributionKey(evidence.receiptAllocation) : null);
   if (disposition.kind === "accepted_stock_return") {
     const source = evidence.acceptedReturnSource;
+    const taxMatches = disposition.taxRefund ? evidence.taxCredit?.key === disposition.taxRefund.taxSourceKey
+      && evidence.taxCredit.taxTypeId === disposition.taxRefund.taxTypeId && BigInt(evidence.taxCredit.amountMills) === BigInt(costInteger(credit.amount_cents, "returned tax refund", 1)) * BigInt(100)
+      : evidence.taxCredit === undefined;
     return !!source && source.returnLineId === disposition.supplierReturnLineId && source.quantity === disposition.quantity
       && source.entitlementId === (disposition.entitlementId ?? null) && source.evidenceReference === disposition.evidenceReference
-      && evidence.returnSource === null && Object.values(reduction).every(amount => amount === 0);
+      && evidence.returnSource === null && Object.values(reduction).every(amount => amount === 0)
+      && (!source.invoiceAttribution || source.invoiceAttribution.invoiceLineId === evidence.invoiceLineId) && taxMatches;
   }
   if (disposition.kind === "quarantine_return") {
     const source = evidence.returnSource;
     return source !== null && source.dispositionId === disposition.returnDispositionId
       && source.purchaseOrderLineId === evidence.purchaseOrderLineId && evidence.freightCostId === null
       && source.observationQuantity === disposition.quantity && source.evidenceReference === disposition.evidenceReference
+      && evidence.returnInvoiceStartPiece === disposition.invoiceStartPiece
       && (evidence.issues.length > 0 || BigInt(reduction.basePieces) === BigInt(source.observationQuantity) * BigInt(source.unitsPerVariant));
   }
   if (evidence.returnSource !== null || reduction.basePieces !== 0) return false;
@@ -147,6 +220,7 @@ export function supplierCreditDispositionMatches(credit: SupplierCreditCostRow, 
 /** Shared by source reads and posting. Gross invoice evidence is never edited. */
 export function resolveSupplierCreditReductions(invoices: Record<string, unknown>[], credits: readonly SupplierCreditCostRow[] = [], purchaseOrderLineId?: number) {
   let productMills = BigInt(0), packagingMills = BigInt(0), basePieces = BigInt(0);
+  let taxInventoryMills = BigInt(0), taxRecoverableMills = BigInt(0);
   const issues: CostIssue[] = [];
   const sources: CostSourceReference[] = [];
   const returns: CostInventoryEffect["returns"] = [];
@@ -156,7 +230,19 @@ export function resolveSupplierCreditReductions(invoices: Record<string, unknown
   for (const credit of credits) {
     // A return of accepted stock already has its own outgoing cost allocation.
     // Its credit cannot change this gross source or its revision fingerprint.
-    if (supplierCreditDispositionSchema.safeParse(credit.disposition).data?.kind === "accepted_stock_return") continue;
+    if (supplierCreditDispositionSchema.safeParse(credit.disposition).data?.kind === "accepted_stock_return") {
+      // Accepted-return tax is financial attribution against the already
+      // recorded outgoing value. It never changes retained receipt prices.
+      const saved = supplierCreditSourceEvidenceSchema.safeParse(credit.source_evidence);
+      if (credit.status === "approved" && saved.success && saved.data.taxCredit) {
+        const invoice = invoices.find(row => Number(row.id) === Number(credit.invoice_line_id));
+        const tax = invoice ? supplierInvoiceTaxSource(invoice, saved.data.taxCredit.key) : null;
+        if (invoice && saved.data.invoiceSourceFingerprint === supplierCreditInvoiceSourceFingerprint(invoice)
+          && tax?.amountMills === saved.data.taxCredit.sourceAmountMills && tax.treatment === "recoverable")
+          taxRecoverableMills += BigInt(saved.data.taxCredit.amountMills);
+      }
+      continue;
+    }
     const creditId = costInteger(credit.supplier_credit_id, "creditId", 1);
     const lineId = costInteger(credit.id, "creditLineId", 1);
     if (identities.has(lineId)) {
@@ -192,6 +278,15 @@ export function resolveSupplierCreditReductions(invoices: Record<string, unknown
     }
     issues.push(...evidence.issues);
     if (evidence.issues.length) continue;
+    if (evidence.taxCredit) {
+      const tax = supplierInvoiceTaxSource(invoice, evidence.taxCredit.key);
+      if (!tax || tax.taxTypeId !== evidence.taxCredit.taxTypeId || tax.amountMills !== evidence.taxCredit.sourceAmountMills) {
+        issues.push(supplierCreditIssue("CREDIT_TAX_SOURCE_CHANGED", "The refund's original tax charge changed. Review its source; no additional expense is inferred.")); continue;
+      }
+      if (tax.treatment === "inventory") taxInventoryMills += BigInt(evidence.taxCredit.amountMills);
+      else if (tax.treatment === "recoverable") taxRecoverableMills += BigInt(evidence.taxCredit.amountMills);
+      continue;
+    }
     const reduction = evidence.reduction;
     if (BigInt(reduction.productMills) + BigInt(reduction.packagingMills) !== BigInt(costInteger(credit.amount_cents, "creditAmountCents", 1)) * BigInt(100) || reduction.landedMills !== 0) {
       issues.push(supplierCreditIssue("CREDIT_SOURCE_AMOUNT_MISMATCH", "The approved supplier credit does not reconcile to its recorded product and packaging reductions."));
@@ -215,8 +310,7 @@ export function resolveSupplierCreditReductions(invoices: Record<string, unknown
   }
   for (const [invoiceLineId, totals] of byInvoice) {
     const invoice = invoices.find(row => Number(row.id) === invoiceLineId)!;
-    const parsed = invoiceCostComponentEvidenceSchema.safeParse(invoice.cost_component_evidence);
-    const goods = parsed.success ? invoiceGoodsAmounts(parsed.data) : null;
+    const goods = supplierInvoiceAmounts(invoice);
     if (!goods || totals.product > BigInt(goods.productMills) || totals.packaging > BigInt(goods.packagingMills)
       || totals.pieces > BigInt(costInteger(invoice.qty_invoiced, "qtyInvoiced"))) {
       issues.push(supplierCreditIssue("CREDIT_SOURCE_EXCEEDED", "Cumulative supplier credits exceed the original invoice component or quantity. Review the credit source before changing inventory costs."));
@@ -224,11 +318,12 @@ export function resolveSupplierCreditReductions(invoices: Record<string, unknown
   }
   for (const receipt of byReceipt.values()) {
     const invoice = invoices.find(row => Number(row.id) === receipt.invoiceLineId)!;
-    const goods = invoiceGoodsAmounts(invoiceCostComponentEvidenceSchema.parse(invoice.cost_component_evidence));
+    const goods = supplierInvoiceAmounts(invoice);
     const capacity = (amount: number) => allocateIntegerCostInterval(BigInt(amount), BigInt(costInteger(invoice.qty_invoiced, "invoice pieces", 1)),
       BigInt(receipt.allocation.invoiceStartPiece), BigInt(receipt.allocation.pieces));
     if (receipt.product > capacity(goods.productMills) || receipt.packaging > capacity(goods.packagingMills))
       issues.push(supplierCreditIssue("CREDIT_SOURCE_EXCEEDED", "Cumulative credits exceed the original amount assigned to this receipt."));
   }
-  return { productMills, packagingMills, basePieces, issues, sources, returns };
+  issues.push(...supplierTaxCreditCapIssues(invoices, credits));
+  return { productMills, packagingMills, taxInventoryMills, taxRecoverableMills, basePieces, issues, sources, returns };
 }

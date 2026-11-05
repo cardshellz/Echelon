@@ -1,3 +1,4 @@
+import { SupplierHeaderCosts } from "@/features/purchasing/SupplierHeaderCosts";
 import { ReceiptInvoiceApprovalHistory } from "@/features/purchasing/ReceiptInvoiceCosts";
 import { FreightInvoiceApprovalHistory } from "@/features/purchasing/FreightInvoiceCosts";
 import { usePurchaseOrderEntry } from "@/hooks/use-purchase-order-entry";
@@ -3294,7 +3295,7 @@ export default function PurchaseOrderDetail() {
       </div>
 
       {poId && <div className="space-y-3"><PoShipmentCostSummary purchaseOrderId={poId} query={shipmentCosts} onViewShipments={() => setActiveTab("shipments")} />
-        <PurchaseTaxReview target={{ kind: "purchase_order", id: poId }} label="Tax treatment" /></div>}
+        <div className="flex flex-wrap gap-2"><SupplierHeaderCosts target={{ kind: "purchase_order", id: poId }} /><PurchaseTaxReview target={{ kind: "purchase_order", id: poId }} label="Tax treatment" /></div></div>}
 
       {/* Auto-Draft Banner */}
       {immutableRecommendationPo && (

@@ -1,3 +1,5 @@
+// Packing/transaction tests isolate the source reader; real header/tax effects are covered by PostgreSQL flow tests.
+vi.mock("../../shipment-cost-exclusions.repository", () => ({ readShipmentCostExclusions: vi.fn(async () => ({ taxByLine: new Map(), otherByLine: new Map() })) }));
 import type { ShipmentExceptionReader } from "../../shipment-cost-exception.repository";
 import type { PurchaseCostStatusSnapshotReader } from "../../purchase-cost-status-snapshot.repository";
 import { readShipmentCostReviewInTransaction, readShipmentCostReviewProjectionsInTransaction } from "../../shipment-cost-review.repository";

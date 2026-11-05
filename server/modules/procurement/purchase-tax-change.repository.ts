@@ -10,6 +10,7 @@ import { readPurchaseApprovalActor } from "../identity/infrastructure/purchase-a
 import { assertInvoiceQuantityAuthority } from "./invoice-quantity-correction.policy";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import { readPoTaxEvidence, readInvoiceTaxEvidence, readPurchaseTaxTypes, readShipmentTaxEvidence } from "./purchase-tax-evidence.repository";
+import { readSupplierHeaderSources, supplierHeaderTargetKey } from "./supplier-header-cost-source.repository";
 import { PurchaseTaxError, purchaseTaxAmounts } from "./domain/purchase-tax";
 import { invoiceCostReviewVersion } from "./ap-ledger.service";
 import { reviewInvoiceCostComponentsInTransaction } from "./invoice-cost-review.service";
@@ -56,10 +57,14 @@ export async function readPurchaseTaxChangeSource(tx: AmendmentTransaction, targ
         UNION SELECT line.purchase_order_id FROM procurement.inbound_freight_costs cost
           JOIN procurement.inbound_shipment_lines line ON line.inbound_shipment_id=cost.inbound_shipment_id
           WHERE cost.tax_type_id=${target.id} AND line.purchase_order_id IS NOT NULL
+        UNION SELECT unnest(review.purchase_order_ids) FROM procurement.supplier_header_cost_reviews review
+          WHERE EXISTS(SELECT 1 FROM jsonb_array_elements(review.entries_json) entry WHERE entry->>'taxTypeId'=${String(target.id)})
       ) scopes ORDER BY po_id LIMIT ${MAX_TAX_PO_SCOPES + 1}`)).rows, MAX_TAX_PO_SCOPES);
       poIds = scopes.map(row => costInteger(row.po_id, "purchaseOrderId", 1));
-      extraShipmentIds = bounded((await tx.execute(sql`SELECT DISTINCT inbound_shipment_id FROM procurement.inbound_freight_costs
-        WHERE tax_type_id=${target.id} ORDER BY inbound_shipment_id LIMIT 10001`)).rows).map(row => costInteger(row.inbound_shipment_id, "shipmentId", 1));
+      extraShipmentIds = bounded((await tx.execute(sql`SELECT DISTINCT cost.inbound_shipment_id FROM procurement.inbound_freight_costs cost
+        WHERE cost.tax_type_id=${target.id} OR EXISTS(SELECT 1 FROM procurement.supplier_header_cost_reviews review
+          WHERE review.vendor_invoice_id=cost.vendor_invoice_id AND EXISTS(SELECT 1 FROM jsonb_array_elements(review.entries_json) entry WHERE entry->>'taxTypeId'=${String(target.id)}))
+        ORDER BY cost.inbound_shipment_id LIMIT 10001`)).rows).map(row => costInteger(row.inbound_shipment_id, "shipmentId", 1));
     }
   } else if (target.kind === "purchase_order") poIds = [target.id];
   else if (target.kind === "invoice_line") {
@@ -106,11 +111,14 @@ export async function readPurchaseTaxChangeSource(tx: AmendmentTransaction, targ
     if (components.success) current = { kind: "invoice_line", id: target.id!, components: { ...components.data, source: "operator_review" },
       taxes: (invoiceTaxes.get(target.id!) ?? []).map(tax => ({ taxTypeId: tax.taxTypeId!, amountMills: tax.amountMills })) };
   }
+  const invoiceHeaders = await readSupplierHeaderSources(tx, invoices.filter(invoice => invoice.currency === "USD").map(invoice => ({ kind: "invoice", id: costInteger(invoice.id, "tax invoice", 1) })));
   const documents = [
     ...headers.map(header => ({ kind: "purchase_order" as const, id: costInteger(header.id, "purchaseOrderId", 1), reference: String(header.po_number), currency: String(header.currency),
       ...purchaseTaxAmounts(lines.filter(line => line.line_type === "product" && line.purchase_order_id === header.id).flatMap(line => poTaxes.get(costInteger(line.id, "lineId", 1)) ?? [])) })),
     ...invoices.map(invoice => ({ kind: "invoice" as const, id: costInteger(invoice.id, "invoiceId", 1), reference: String(invoice.invoice_number), currency: String(invoice.currency),
-      ...purchaseTaxAmounts(invoiceLines.filter(line => line.vendor_invoice_id === invoice.id).flatMap(line => invoiceTaxes.get(costInteger(line.id, "lineId", 1)) ?? [])) })),
+      ...purchaseTaxAmounts([...invoiceLines.filter(line => line.vendor_invoice_id === invoice.id).flatMap(line => invoiceTaxes.get(costInteger(line.id, "lineId", 1)) ?? []),
+        ...(invoiceHeaders.get(supplierHeaderTargetKey({ kind: "invoice", id: costInteger(invoice.id, "header tax invoice", 1) }))?.shares ?? []).filter(share => share.destination === "tax")
+          .map(share => ({ taxTypeId: share.taxTypeId, amountMills: share.amountMills, treatment: share.taxTreatment!, source: `supplier_header:${share.key}` }))]) })),
     ...shipmentIds.flatMap(id => {
       const rows = taxCharges.filter(row => row.inbound_shipment_id === id);
       // Never add different source currencies into one displayed tax amount.
@@ -122,7 +130,7 @@ export async function readPurchaseTaxChangeSource(tx: AmendmentTransaction, targ
     }),
   ];
   const sourceVersion = costFingerprint({ version: 1, target, typeRows, headers, lines, invoices, invoiceLines,
-    invoiceTaxes: [...invoiceTaxes], poTaxes: [...poTaxes], shipmentTaxes: [...shipmentTaxes], taxCharges, dependencies, actor });
+    invoiceTaxes: [...invoiceTaxes], invoiceHeaders: [...invoiceHeaders], poTaxes: [...poTaxes], shipmentTaxes: [...shipmentTaxes], taxCharges, dependencies, actor });
   let canApprove = true;
   try { assertInvoiceQuantityAuthority(actor); } catch { canApprove = false; }
   const approvals = await readPurchaseTaxApprovals(tx, target, poIds);

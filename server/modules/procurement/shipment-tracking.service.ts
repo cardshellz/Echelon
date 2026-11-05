@@ -1,5 +1,5 @@
 import { readIntegerCents, readIntegerMills } from "@shared/money-read";
-import { readShipmentRecoverableTaxAllocations } from "./purchase-tax-evidence.repository";
+import { readShipmentCostExclusions } from "./shipment-cost-exclusions.repository";
 import { readTaxedShipmentSupplierCosts } from "./purchase-tax-costs.repository";
 import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";
 import { readShipmentReceivingSetup, shipmentReceivingUnitSource } from "./shipment-receiving-setup.service";
@@ -268,7 +268,8 @@ function snapshotAllocatedCostCents(snapshot: any): number | null {
     total += cents;
   }
   const recoverable = nonNegativeIntegerOrNull(snapshot?.recoverableTaxAllocatedCents ?? 0);
-  return recoverable === null || recoverable > total ? null : readIntegerCents(BigInt(total) - BigInt(recoverable), "inventory-valued shipment charges");
+  const excluded = readIntegerCents(snapshot?.excludedSupplierAllocatedCents ?? 0, "supplier header exclusion", true);
+  return recoverable === null || BigInt(recoverable) + BigInt(excluded) > BigInt(total) ? null : readIntegerCents(BigInt(total) - BigInt(recoverable) - BigInt(excluded), "inventory-valued shipment charges");
 }
 
 export type ShipmentTrackingService = ReturnType<typeof createShipmentTrackingService>;
@@ -535,7 +536,8 @@ export function createShipmentTrackingService(
   async function getEnrichedLines(shipmentId: number) {
     const lines = await storage.getInboundShipmentLines(shipmentId);
     const { breakdowns: allocationBreakdowns, pendingCategories, costs } = await getAllocationBreakdownsByLine(shipmentId, lines);
-    const recoverableTaxes = await readShipmentRecoverableTaxAllocations(db, shipmentId, costs);
+    const exclusions = await readShipmentCostExclusions(db, shipmentId, costs);
+    const recoverableTaxes = exclusions.taxByLine;
     const selectedTaxSupplierCosts = await readTaxedShipmentSupplierCosts(db, lines, costs.some(cost => cost.taxTypeId != null));
 
     // Batch-fetch unique variant IDs and PO line IDs
@@ -595,7 +597,7 @@ export function createShipmentTrackingService(
       const allocatedCostCents = savedAllocation === null ? null : readIntegerCents(savedAllocation, "allocatedCents", true);
       const recoverableTaxCents = recoverableTaxes.get(line.id) ?? 0;
       const inventoryAllocatedCostCents = allocatedCostCents === null ? null
-        : readIntegerCents(BigInt(allocatedCostCents) - BigInt(recoverableTaxCents), "inventory shipment share", true);
+        : readIntegerCents(BigInt(allocatedCostCents) - BigInt(recoverableTaxCents) - BigInt(exclusions.otherByLine.get(line.id) ?? 0), "inventory shipment share", true);
       let productValue: ReturnType<typeof projectShipmentProductValue> | null = null;
       let productValueIssue: { code: string; message: string } | null = null;
       try {
@@ -1132,7 +1134,8 @@ export function createShipmentTrackingService(
 
     // Bulk insert all allocations
     let totalAllocated = 0;
-    const recoverableTaxes = await readShipmentRecoverableTaxAllocations(tx, shipmentId, costs);
+    const exclusions = await readShipmentCostExclusions(tx, shipmentId, costs, allNewAllocations.map(row => ({ shipment_cost_id: row.shipmentCostId, inbound_shipment_line_id: row.inboundShipmentLineId, allocated_cents: row.allocatedCents })));
+    const recoverableTaxes = exclusions.taxByLine;
     const resultLines: Awaited<ReturnType<typeof runAllocationInTransaction>>["allocations"] = [];
     const lineUpdates: Array<{ lineId: number; allocatedCostCents: number | null; landedUnitCostCents: number | null }> = [];
 
@@ -1141,7 +1144,7 @@ export function createShipmentTrackingService(
       const totalForLine = acc.freightCents + acc.dutyCents + acc.insuranceCents + acc.otherCents;
       totalAllocated += totalForLine;
 
-      const inventoryChargeCents = readIntegerCents(BigInt(totalForLine) - BigInt(recoverableTaxes.get(line.id) ?? 0), "inventory-valued allocation");
+      const inventoryChargeCents = readIntegerCents(BigInt(totalForLine) - BigInt(recoverableTaxes.get(line.id) ?? 0) - BigInt(exclusions.otherByLine.get(line.id) ?? 0), "inventory-valued allocation");
       const productValue = await projectLineProductValue(line, inventoryChargeCents, tx);
       const poUnitCostCents = productValue?.amounts.poUnitCostCents ?? null;
       const landedUnitCostCents = pendingCostIds.length ? null : productValue?.amounts.landedUnitCostCents ?? null;
@@ -1687,6 +1690,7 @@ export function createShipmentTrackingService(
       sameNullableNumber(existing.insuranceAllocatedCents, (next as any).insuranceAllocatedCents) &&
       sameNullableNumber(existing.otherAllocatedCents, (next as any).otherAllocatedCents) &&
       sameNullableNumber(existing.recoverableTaxAllocatedCents ?? 0, (next as any).recoverableTaxAllocatedCents ?? 0) &&
+      sameNullableNumber(existing.excludedSupplierAllocatedCents ?? 0, next.excludedSupplierAllocatedCents ?? 0) &&
       sameNullableNumber(existing.totalLandedCostCents, (next as any).totalLandedCostCents) &&
       sameNullableNumber(existing.landedUnitCostCents, (next as any).landedUnitCostCents) &&
       sameNullableNumber(existing.qty, (next as any).qty)
@@ -1792,7 +1796,8 @@ export function createShipmentTrackingService(
 
     // Re-fetch lines after allocation
     const updatedLines = await storage.getInboundShipmentLines(shipmentId, tx);
-    const recoverableTaxes = await readShipmentRecoverableTaxAllocations(tx, shipmentId, await storage.getInboundFreightCosts(shipmentId, tx));
+    const exclusions = await readShipmentCostExclusions(tx, shipmentId, await storage.getInboundFreightCosts(shipmentId, tx));
+    const recoverableTaxes = exclusions.taxByLine;
 
     // Fetch old snapshots before deleting
     const oldSnapshotsByLine = new Map<number, any>();
@@ -1823,8 +1828,9 @@ export function createShipmentTrackingService(
       }
 
       const recoverableTaxAllocatedCents = recoverableTaxes.get(line.id) ?? 0;
+      const excludedSupplierAllocatedCents = exclusions.otherByLine.get(line.id) ?? 0;
       const inventoryChargeCents = readIntegerCents(BigInt(freightCents) + BigInt(dutyCents) + BigInt(insuranceCents) + BigInt(otherCents)
-        - BigInt(recoverableTaxAllocatedCents), "inventory-valued finalized allocation");
+        - BigInt(recoverableTaxAllocatedCents) - BigInt(excludedSupplierAllocatedCents), "inventory-valued finalized allocation");
       const productValue = await projectLineProductValue(line, inventoryChargeCents, tx);
       const poUnitCostCents = productValue?.amounts.poUnitCostCents ?? null;
       const totalLandedCostCents = productValue?.amounts.totalLandedCostCents ?? null;
@@ -1884,6 +1890,7 @@ export function createShipmentTrackingService(
         insuranceAllocatedCents: insuranceCents,
         otherAllocatedCents: otherCents,
         recoverableTaxAllocatedCents,
+        excludedSupplierAllocatedCents,
         totalLandedCostCents,
         landedUnitCostCents,
         qty: line.qtyShipped,
