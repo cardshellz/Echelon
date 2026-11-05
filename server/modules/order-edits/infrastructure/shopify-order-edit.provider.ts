@@ -1,3 +1,4 @@
+import { ORDER_EDIT_MEMBER_PRICING_DESCRIPTION, isManagedMemberPricingDescription } from "@shared/order-edits/order-edit-member-pricing";
 import { accountNativeFact, accountNativeNodeSchema, accountNativeObservationNode } from "../../customer-account/infrastructure/shopify-account-native.reader";
 import type { AccountNativeRetainer, AccountNativeObservation } from "../../customer-account/application/account-native-summaries.ports";
 import { matchingRefund, proveRefund } from "./shopify-order-edit-refund-evidence";
@@ -1957,7 +1958,7 @@ export class ShopifyOrderEditProvider
                 id: calculated.id,
                 lineItemId: calcId,
                 discount: {
-                  description: "Echelon member pricing",
+                  description: ORDER_EDIT_MEMBER_PRICING_DESCRIPTION,
                   fixedValue: {
                     amount: decimal(retail - member),
                     currencyCode: "USD",
@@ -3058,7 +3059,7 @@ export class ShopifyOrderEditProvider
                   discount: {
                     description:
                       baseline.codePricing?.description ??
-                      "Echelon member pricing",
+                      ORDER_EDIT_MEMBER_PRICING_DESCRIPTION,
                     fixedValue: {
                       amount: decimal(discountCents),
                       currencyCode: "USD",
@@ -4401,7 +4402,7 @@ function verifyCalculatedFinancials(
     itemDiscountLabels: [
       ...baseline.financials.itemDiscountLabels,
       ...calculatedPromotions(calculated)
-        .filter((entry) => entry.description === "Echelon member pricing")
+        .filter((entry) => isManagedMemberPricingDescription(entry.description))
         .map((entry) => entry.description!),
     ],
     shippingGrossCents: shipping.grossCents,
