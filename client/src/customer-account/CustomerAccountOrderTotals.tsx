@@ -11,14 +11,17 @@ import { formatOrderEditMoney } from "@/lib/order-edits";
 import type { CustomerAccountTransport } from "./customer-account.transport";
 import { useCustomerOrderDetails } from "./use-customer-order-details";
 
-function DirectOrderFinancials({
+function DirectOrderDetails({
   api,
   row,
   root,
+  ready,
 }: {
   api: CustomerAccountTransport;
   row: HTMLElement;
   root: HTMLElement;
+  /** The transport has adopted a verified customer session, not just display facts. */
+  ready: boolean;
 }) {
   const descriptions = useMemo(() => readOrderItemDescriptions(root), [root]);
   const query = useCustomerOrderDetails(
@@ -27,7 +30,7 @@ function DirectOrderFinancials({
       externalOrderId: row.dataset.externalOrderId ?? "",
       orderReference: row.dataset.orderReference ?? "",
     },
-    true,
+    ready,
   );
   const itemsTarget = root.querySelector<HTMLElement>("[data-csz-order-items]");
   const items = query.data && itemsTarget
@@ -88,11 +91,13 @@ export function CustomerAccountOrderTotals({
   root,
   states,
   api,
+  ready,
   onRetry,
 }: {
   root: HTMLElement;
   states: ReadonlyMap<HTMLElement, CustomerOrderTotalsState>;
   api: CustomerAccountTransport;
+  ready: boolean;
   onRetry?(row: HTMLElement): void;
 }) {
   return (
@@ -133,10 +138,12 @@ export function CustomerAccountOrderTotals({
             "[data-csz-order-financials]",
           );
           if (target) {
+            // Cached totals are not authentication. Conversely, a missing
+            // summary must not block an independently authenticated item read.
             portals.push(
               createPortal(
-                order ? (
-                  <DirectOrderFinancials api={api} row={row} root={root} />
+                order || ready || pending ? (
+                  <DirectOrderDetails api={api} row={row} root={root} ready={ready} />
                 ) : (
                   <p role="status" aria-busy={pending}>
                     {pending

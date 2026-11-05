@@ -23,6 +23,13 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
   const config = customerAccountPageConfigSchema.parse(raw);
   let sessionKey: string | undefined;
   async function call(input: { method: "GET" | "POST"; path: string; query?: Record<string, string>; body?: unknown; commandKey?: string }, signal?: AbortSignal | null): Promise<Response> {
+    // Display caches contain purchase facts, never session authority. Every
+    // dependent request must wait for a verified bootstrap/overview adoption.
+    if (!["/account/bootstrap", "/account/overview"].includes(input.path) && !sessionKey)
+      throw new CustomerAccountRequestError(
+        "CUSTOMER_ACCOUNT_SESSION_NOT_READY",
+        "Your account is still loading. Please try again.",
+      );
     const body = customerAccountRequestSchema.parse({ ...input, themeId: config.themeId, expectedCustomerId: config.customerId, ...(sessionKey && !["/account/bootstrap", "/account/overview"].includes(input.path) ? { sessionKey } : {}) });
     const controller = new AbortController();
     const cancel = () => controller.abort(signal?.reason);
