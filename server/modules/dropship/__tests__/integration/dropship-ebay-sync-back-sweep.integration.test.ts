@@ -212,6 +212,40 @@ describeDatabase.sequential("eBay sync-back sweep persistence (PostgreSQL)", () 
       expect(await repository.listDueListingIds({ storeConnectionId: STORE, limit: 50 })).toEqual([ids.live]);
     });
 
+    it("reads the store's listings waiting for stock (blocked for stock, never published) in id order, a rotating window at a time, read only", async () => {
+      await pool.query(`INSERT INTO catalog.product_variants (id, product_id, sku) VALUES (106, 20, 'CS-106'), (107, 20, 'CS-107'),
+        (108, 20, 'CS-108'), (109, 20, 'CS-109'), (110, 20, 'CS-110'), (111, 20, 'CS-111'), (112, 20, 'CS-112'), (113, 20, 'CS-113')`);
+      const blockedAt = new Date("2026-11-01T10:00:00.000Z");
+      const insert = async (store: number, vendor: number, variant: number, status: string, itemNumber: string | null, metadata: unknown) =>
+        (await pool.query<{ id: number }>(`INSERT INTO dropship.dropship_vendor_listings (vendor_id, store_connection_id, product_variant_id,
+          platform, external_listing_id, status, metadata, updated_at) VALUES ($1, $2, $3, 'ebay', $4, $5, $6::jsonb, $7) RETURNING id`,
+        [vendor, store, variant, itemNumber, status, metadata === null ? null : JSON.stringify(metadata), blockedAt])).rows[0]!.id;
+      const stock = "marketplace_quantity_unavailable";
+      const first = await insert(STORE, VENDOR, 106, "blocked", null, { lastPreviewStatus: "blocked", blockers: ["vendor_retail_price_required", stock] });
+      const second = await insert(STORE, VENDOR, 107, "blocked", " ", { blockers: [stock] });
+      await insert(STORE, VENDOR, 108, "blocked", "110000000008", { blockers: [stock] });
+      await insert(STORE, VENDOR, 109, "ended", null, { blockers: [stock] });
+      await insert(STORE, VENDOR, 110, "blocked", null, { blockers: ["vendor_retail_price_required"] });
+      await insert(STORE, VENDOR, 111, "blocked", null, null);
+      await insert(STORE, VENDOR, 112, "blocked", null, { blockers: stock });
+      await insert(23, 11, 113, "blocked", null, { blockers: [stock] });
+      const before = (await pool.query(`SELECT id, status, updated_at, metadata FROM dropship.dropship_vendor_listings ORDER BY id`)).rows;
+
+      const read = (limit: number, rotation: number) => repository.listWaitingForStockListings({ storeConnectionId: STORE, limit, rotation });
+      expect(await read(50, 0)).toEqual([
+        { listingId: first, productVariantId: 106, status: "blocked", externalListingId: null,
+          blockers: ["vendor_retail_price_required", stock], updatedAt: blockedAt },
+        { listingId: second, productVariantId: 107, status: "blocked", externalListingId: " ", blockers: [stock], updatedAt: blockedAt },
+      ]);
+      // One window per tick, wrapping: every waiting listing gets its turn however many are still at 0.
+      expect((await read(1, 0)).map((row) => row.listingId)).toEqual([first]);
+      expect((await read(1, 1)).map((row) => row.listingId)).toEqual([second]);
+      expect((await read(1, 2)).map((row) => row.listingId)).toEqual([first]);
+      expect((await read(50, 1)).map((row) => row.listingId)).toEqual([second, first]);
+      expect(await repository.listWaitingForStockListings({ storeConnectionId: 24, limit: 50, rotation: 0 })).toEqual([]);
+      expect((await pool.query(`SELECT id, status, updated_at, metadata FROM dropship.dropship_vendor_listings ORDER BY id`)).rows).toEqual(before);
+    });
+
     it("loads a listing in one snapshot: its sync events, its newest stored intent, and whether a push is in flight", async () => {
       expect(await repository.loadListing(ids.pushing!)).toMatchObject({ listingId: ids.pushing, hasOpenPushItem: true, events: [] });
       const live = await repository.loadListing(ids.live!);

@@ -51,6 +51,8 @@ export function chooseHintId(productVariantId: number): string {
 function chooseHint(view: ChooseRowView): string | null {
   // Turned off, with the vendor's own pick saved: the box removes the pick (verify V6).
   if (view.how === "turnedOff" && view.pickTurnedOff) return CHOOSE_WORDS.turnedOffPickHint;
+  // Checked while out of stock: harmless, nothing lists at 0, and it lists by itself once stock is back (owner report).
+  if (view.listsWhenBackInStock) return CHOOSE_WORDS.backInStockHint;
   return null;
 }
 
@@ -149,12 +151,14 @@ function ChooseTableRow({ row, view, locked, onToggle }: {
         <div className="mt-1 text-xs text-zinc-600 sm:hidden" data-testid={`catalog-choose-how-line-${row.productVariantId}`}>
           <span className={cn(view.changed && "font-medium text-violet-800")}>{howText}</span>
           <span aria-hidden="true"> · </span>
-          <span>{CHOOSE_WORDS.columns.available} <ChooseQuantity quantity={view.quantity} /></span>
+          <span>{CHOOSE_WORDS.columns.available} <ChooseQuantity view={view} /></span>
           {hint && <span className="block text-zinc-500">{hint}</span>}
         </div>
       </TableCell>
       <TableCell className="hidden sm:table-cell">{row.category ? formatStatus(row.category) : CHOOSE_WORDS.uncategorized}</TableCell>
-      <TableCell className="font-mono hidden sm:table-cell"><ChooseQuantity quantity={view.quantity} /></TableCell>
+      <TableCell className={cn("hidden sm:table-cell", !view.outOfStock && "font-mono")}>
+        <ChooseQuantity view={view} />
+      </TableCell>
       <TableCell className="hidden sm:table-cell">
         <span id={howId} className={cn("text-sm", view.changed ? "font-medium text-violet-800" : "text-zinc-700")}>{howText}</span>
         {hint && <span id={hintId} className="block text-xs text-zinc-500">{hint}</span>}
@@ -163,9 +167,14 @@ function ChooseTableRow({ row, view, locked, onToggle }: {
   );
 }
 
-/** A selected size's quantity; "—" with words read out for any other (the server sends 0, which is not "out of stock"). */
-function ChooseQuantity({ quantity }: { quantity: number | null }) {
-  if (quantity !== null) return <>{formatChooseCount(quantity)}</>;
+/**
+ * "Out of stock" (muted) for a size with nothing to list, whatever its reason; else a selected size's quantity; "—"
+ * with words read out for any other, and for a selected size whose tier is off (the server sends 0 for those).
+ */
+function ChooseQuantity({ view }: { view: Pick<ChooseRowView, "quantity" | "outOfStock"> }) {
+  // Shown twice per row (the phone line and the desktop cell), so it is marked by an attribute, not a test id.
+  if (view.outOfStock) return <span className="text-zinc-500" data-stock="out">{CHOOSE_WORDS.outOfStock}</span>;
+  if (view.quantity !== null) return <>{formatChooseCount(view.quantity)}</>;
   return (
     <>
       <span aria-hidden="true">—</span>

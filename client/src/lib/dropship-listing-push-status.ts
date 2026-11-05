@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { formatListingPreviewIssue } from "./dropship-listing-preview";
+import { isVendorWaitingForStock, VENDOR_WAITING_FOR_STOCK_LINE } from "./dropship-vendor-labels";
 import {
   EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE,
   EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_MESSAGE,
@@ -23,10 +24,14 @@ import {
  */
 const PREVIEW_BLOCKED_CODE = "DROPSHIP_LISTING_PREVIEW_BLOCKED";
 
+/** The blocker codes of a blocked item as stored, trimmed; empty when the list is blank. */
+export function listingPushBlockedCodes(errorMessage: string | null): string[] {
+  return (errorMessage ?? "").split(",").map((code) => code.trim()).filter((code) => code.length > 0);
+}
+
 /** The blocker codes of a blocked item, each in the vendor's words, once; empty when the list is blank. */
 export function listingPushBlockedReasons(errorMessage: string | null): string[] {
-  const codes = (errorMessage ?? "").split(",").map((code) => code.trim()).filter((code) => code.length > 0);
-  return [...new Set(codes.map(formatListingPreviewIssue))];
+  return [...new Set(listingPushBlockedCodes(errorMessage).map(formatListingPreviewIssue))];
 }
 
 const positiveInteger = z.number().int().positive();
@@ -150,6 +155,12 @@ export function describeListingPushOutcome(job: DropshipListingPushJob, storeNam
         ...base, state: "live", line: sandbox ? `Live on ${store} (eBay sandbox).` : `Live on ${store}.`, nextStep: null,
         listingUrl: item.listingUrl, listingUrlLabel: item.listingUrl ? linkLabel : null,
       };
+    }
+    if (item.status === "blocked" && item.errorCode === PREVIEW_BLOCKED_CODE
+      && isVendorWaitingForStock({ platform: job.platform, status: item.status, blockers: listingPushBlockedCodes(item.errorMessage) })) {
+      // Blocked only for want of stock: the eBay sync sweep lists it once stock is back (owner report). Still counted
+      // with the items that did not list now.
+      return { ...base, state: "failed", line: VENDOR_WAITING_FOR_STOCK_LINE, nextStep: null };
     }
     if (FAILED_ITEM_STATUSES.has(item.status)) {
       const gate = listingPushRefusalWords(item, storeName);

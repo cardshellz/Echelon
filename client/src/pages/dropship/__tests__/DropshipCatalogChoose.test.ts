@@ -104,13 +104,36 @@ describe("ChooseTable", () => {
     expect(picked).not.toContain("data-changed");
     expect(picked).toMatch(/<input type="checkbox"[^>]* checked=""/);
     expect(picked).toContain(">Picked by you</span>");
-    expect(picked).toContain(">1,433</td>");
+    // Its case tier is off, so it cannot list: no number (owner report).
+    expect(picked).toContain('<span aria-hidden="true">—</span><span class="sr-only">No quantity shown</span></td>');
+    expect(picked).not.toContain("1,433");
+    const inTier = rowOf(table({ rows: [serverRow(101, "selected", true)], changes: pending([]) }), 101);
+    expect(inTier).toContain(">1,433</td>");
+  });
+
+  it("shows Out of stock, muted, on the desktop cell and the phone line whatever the reason; a checked one says it lists when back in stock", () => {
+    const markup = table({ rows: [serverRow(101, "selected", true, { outOfStock: true,
+      selectionDecision: { selected: true, reason: "selected", picked: true, marketplaceQuantity: 0 } }),
+    serverRow(102, "missing_vendor_include_rule", false, { outOfStock: true })], changes: pending([]) });
+    const picked = rowOf(markup, 101);
+    expect(picked.match(/<span class="text-zinc-500" data-stock="out">Out of stock<\/span>/g)).toHaveLength(2);
+    expect(picked).not.toMatch(/>0<\/td>/);
+    expect(picked).not.toContain("font-mono");
+    expect(picked).toContain(`<span id="${chooseHintId(101)}" class="block text-xs text-zinc-500">Lists when back in stock</span>`);
+    expect(picked).toContain(`aria-describedby="${chooseHowId(101)} ${chooseHintId(101)}"`);
+    const notPicked = rowOf(markup, 102);
+    expect(notPicked.match(/data-stock="out">Out of stock</g)).toHaveLength(2);
+    expect(notPicked).not.toContain("Lists when back in stock");
+    // The box stays usable: picking it is harmless, nothing lists at 0.
+    expect(notPicked).not.toMatch(/<input type="checkbox"[^>]* disabled=""/);
+    expect(rowOf(table({ rows: [serverRow(102, "missing_vendor_include_rule", false, { outOfStock: true })], changes: pending([102]) }), 102))
+      .toContain("Lists when back in stock");
   });
 
   it("shows — with words read out where a size isn't selected, never a 0", () => {
     const markup = table({ changes: EMPTY_CHOOSE_CHANGES });
     for (const id of [102, 103, 104]) {
-      expect(rowOf(markup, id)).toContain('<span aria-hidden="true">—</span><span class="sr-only">No quantity: not selected</span>');
+      expect(rowOf(markup, id)).toContain('<span aria-hidden="true">—</span><span class="sr-only">No quantity shown</span>');
       expect(rowOf(markup, id)).not.toMatch(/>0</);
     }
   });
@@ -146,7 +169,8 @@ describe("ChooseTable", () => {
     expect(cells).toHaveLength(5);
     expect(cells.slice(2).every((cell) => cell.includes("hidden sm:table-cell"))).toBe(true);
     expect(rowOf(markup, 101)).toContain('data-testid="catalog-choose-how-line-101"');
-    expect(rowOf(markup, 101)).toMatch(/class="mt-1 text-xs text-zinc-600 sm:hidden"[^>]*><span class="">Picked by you<\/span><span aria-hidden="true"> · <\/span><span>Available 1,433<\/span>/);
+    expect(rowOf(table({ rows: [serverRow(101, "selected", true)], changes: pending([]) }), 101))
+      .toMatch(/class="mt-1 text-xs text-zinc-600 sm:hidden"[^>]*><span class="">Picked by you<\/span><span aria-hidden="true"> · <\/span><span>Available 1,433<\/span>/);
     expect(rowOf(markup, 101)).toContain("Pack of 50 · ENV-101");
   });
 });

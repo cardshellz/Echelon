@@ -513,7 +513,40 @@ export const VENDOR_LISTING_PREVIEW_STATUS_LABELS: Labels = Object.freeze({
   blocked: "Can't list yet",
 });
 
-export function vendorListingPreviewStatusLabel(status: string | null | undefined): string {
+/**
+ * The blocker a size gets when Card Shellz has none in stock to list
+ * (server dropship-config-driven-marketplace-listing.provider.ts). The server's
+ * eBay sync sweep lists a published size blocked only by it once stock is back
+ * (domain/marketplace-sync-sweep.ts isWaitingForStock).
+ */
+export const WAITING_FOR_STOCK_BLOCKER = "marketplace_quantity_unavailable";
+
+/** PROPOSED (owner report): a blocked size or listing that is only waiting for stock. */
+export const VENDOR_WAITING_FOR_STOCK_LABEL = "Waiting for stock";
+
+/** PROPOSED (owner report): a publish result's line for the same case. */
+export const VENDOR_WAITING_FOR_STOCK_LINE = "Waiting for stock. It lists by itself when stock comes back.";
+
+/**
+ * Whether a `blocked` size, listing or publish item is only waiting for stock:
+ * its one blocker is the stock one, on eBay (the only marketplace the sweep
+ * relists by itself). A size blocked for anything else as well keeps its
+ * other words: stock alone would not list it.
+ */
+export function isVendorWaitingForStock(input: {
+  platform: string | null | undefined; status: string | null | undefined; blockers: readonly string[];
+}): boolean {
+  if (input.platform !== "ebay" || input.status !== "blocked") return false;
+  const blockers = new Set(input.blockers.map((code) => code.trim()).filter((code) => code.length > 0));
+  return blockers.size === 1 && blockers.has(WAITING_FOR_STOCK_BLOCKER);
+}
+
+/** A preview row's status; "Waiting for stock" for a blocked eBay row whose only blocker is stock. */
+export function vendorListingPreviewStatusLabel(
+  status: string | null | undefined,
+  facts: { platform: string | null | undefined; blockers: readonly string[] } | null = null,
+): string {
+  if (facts && isVendorWaitingForStock({ platform: facts.platform, status, blockers: facts.blockers })) return VENDOR_WAITING_FOR_STOCK_LABEL;
   return labelFrom(VENDOR_LISTING_PREVIEW_STATUS_LABELS, status);
 }
 

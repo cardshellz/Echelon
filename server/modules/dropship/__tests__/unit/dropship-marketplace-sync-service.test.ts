@@ -19,7 +19,14 @@ import type { DropshipNotificationSenderInput } from "../../application/dropship
 import { DropshipError } from "../../domain/errors";
 import type { QuantityBaseline } from "../../domain/marketplace-quantity-decision";
 import { marketplaceSyncError, MARKETPLACE_SYNC_CODES } from "../../domain/marketplace-sync-errors";
-import { marketplaceQuantityRestoreJobKey } from "../../domain/marketplace-sync-keys";
+import { marketplaceQuantityRestoreJobKey, marketplaceWaitingForStockJobKey } from "../../domain/marketplace-sync-keys";
+import {
+  MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER,
+  MARKETPLACE_SYNC_INTERVAL_MS,
+  MARKETPLACE_SYNC_MAX_WAITING_FOR_STOCK_PER_STORE_TICK,
+  type MarketplaceWaitingForStockListing,
+} from "../../domain/marketplace-sync-sweep";
+import type { MarketplaceSyncRestoreOutcome } from "../../application/dropship-marketplace-sync-service";
 import { rawInventoryItem, rawOffer, READ_LISTING_ID, READ_OFFER_ID, READ_SKU } from "../fixtures/ebay-sync-back-reads.fixture";
 
 /**
@@ -54,6 +61,7 @@ function listing(overrides: Partial<MarketplaceSyncListing> = {}): MarketplaceSy
 function row(overrides: Partial<MarketplaceSyncPreviewRow> = {}): MarketplaceSyncPreviewRow {
   return {
     productVariantId: 101, sku: READ_SKU, title: "Toploaders 3x4", priceCents: 1100, priceSettingRevisionId: 5, marketplaceQuantity: 10,
+    previewStatus: "ready", blockers: [],
     businessPolicySelection: { fulfillmentPolicyId: "F-1", returnPolicyId: "R-1", paymentPolicyId: "P-1", overriddenFields: [] },
     economics: { currency: "USD", basis: "one_sellable_variant", unitsPerVariant: 100, referenceRetailPriceCents: 1200, listingPriceCents: 1100,
       vendorProductCostCents: 700, channelDiscountPercent: null, productCostStatus: "available", issues: [] },
@@ -85,6 +93,10 @@ class FakeRepository implements MarketplaceSyncRepository {
   applyError: Error | null = null;
 
   pushAttempts: Array<{ listingId: number; jobId: number; jobItemId: number; sent: MarketplacePushSentFields; at: Date }> = [];
+  /** Listings waiting for stock, as the waiting-for-stock read answers them for store 22. */
+  waiting: MarketplaceWaitingForStockListing[] = [];
+  waitingReads: Array<{ storeConnectionId: number; limit: number; rotation: number }> = [];
+  waitingError: Error | null = null;
   loadOptions: Array<{ excludeJobItemId?: number | null } | undefined> = [];
 
   async listSweepStores() { return this.stores; }
@@ -99,6 +111,11 @@ class FakeRepository implements MarketplaceSyncRepository {
   async listDueListingIds(input: { storeConnectionId: number; limit: number }) {
     return [...this.listings.values()].filter((entry) => entry.storeConnectionId === input.storeConnectionId && !entry.observedQuantity
       && !entry.issueCodes.includes("sync_requires_review")).map((entry) => entry.listingId).slice(0, input.limit);
+  }
+  async listWaitingForStockListings(input: { storeConnectionId: number; limit: number; rotation: number }) {
+    this.waitingReads.push(input);
+    if (this.waitingError) throw this.waitingError;
+    return input.storeConnectionId === 22 ? this.waiting.slice(0, input.limit) : [];
   }
   async loadListing(listingId: number, options?: { excludeJobItemId?: number | null }) {
     this.loadOptions.push(options);
@@ -155,12 +172,14 @@ function harness(options: {
   guardError?: Error;
   tickBudgetMs?: number;
   stepMs?: number;
+  restoreOutcome?: (input: { productVariantIds: number[]; idempotencyKey: string }, call: number) => MarketplaceSyncRestoreOutcome;
 } = {}) {
   const repository = new FakeRepository();
   let now = T.getTime();
   const reads: string[] = [];
   const readSkus: string[] = [];
   const restores: Array<{ productVariantIds: number[]; idempotencyKey: string }> = [];
+  const previewCalls: Array<{ productVariantIds: number[]; actor: { actorType: string; actorId: string } }> = [];
   const sent: DropshipNotificationSenderInput[] = [];
   const lines: Array<{ level: string; action: string; data: Record<string, unknown> }> = [];
   const log = (level: string) => (action: string, data: Record<string, unknown> = {}) => { lines.push({ level, action, data }); };
@@ -177,12 +196,16 @@ function harness(options: {
       },
     },
     previews: {
-      async generatePreview() {
+      async generatePreview(input) {
+        previewCalls.push({ productVariantIds: input.productVariantIds, actor: input.actor });
         if (options.previewError) throw options.previewError;
         return { rows: options.rows ?? [row()] };
       },
     },
-    restores: { async queueRestore(input) { restores.push(input); return { queued: true, jobId: 3000 + restores.length, idempotentReplay: false }; } },
+    restores: { async queueRestore(input) {
+      restores.push(input);
+      return options.restoreOutcome?.(input, restores.length) ?? { queued: true, jobId: 3000 + restores.length, idempotentReplay: false };
+    } },
     baselines: {
       async readPublishBaselines(input) {
         return new Map(input.listings.map((entry) => [entry.listingId,
@@ -201,7 +224,7 @@ function harness(options: {
     logger: { debug: log("debug"), info: log("info"), warn: log("warn"), error: log("error") },
     tickBudgetMs: options.tickBudgetMs,
   });
-  return { service, repository, reads, readSkus, restores, sent, lines };
+  return { service, repository, reads, readSkus, restores, previewCalls, sent, lines };
 }
 
 describe("the sweep keeps what the vendor owns on eBay (owner rule 4)", () => {
@@ -747,5 +770,134 @@ describe("shipping policies and vendor notices (owner rule 7)", () => {
     await passing.service.runSweepTick();
     expect(passing.repository.sent).toEqual([]);
     expect(passing.repository.deadLetteredBatches).toEqual([]);
+  });
+});
+
+describe("listings waiting for stock (owner report: a size published at 0 never listed)", () => {
+  const BLOCKED_AT = new Date("2026-11-01T10:00:00.000Z");
+  const waiting = (listingId: number, productVariantId: number): MarketplaceWaitingForStockListing => ({ listingId, productVariantId,
+    status: "blocked", externalListingId: null, blockers: [MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER], updatedAt: BLOCKED_AT });
+  const backInStock = row({ productVariantId: 301, marketplaceQuantity: 5 });
+  const stillOut = row({ productVariantId: 302, marketplaceQuantity: 0, previewStatus: "blocked", blockers: [MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER] });
+  const notPicked = row({ productVariantId: 303, marketplaceQuantity: 0, previewStatus: "blocked",
+    blockers: ["selection:missing_vendor_include_rule", MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER] });
+  const KEY = marketplaceWaitingForStockJobKey({ storeConnectionId: 22, listings: [{ listingId: 201, updatedAt: BLOCKED_AT }] });
+
+  /** A store with no live listings (nothing else to read), only the waiting ones. */
+  function waitingHarness(options: Parameters<typeof harness>[0] = {}) {
+    const run = harness({ rows: [backInStock, stillOut, notPicked], ...options });
+    run.repository.listings.clear();
+    run.repository.waiting = [waiting(201, 301), waiting(202, 302), waiting(203, 303)];
+    return run;
+  }
+
+  it("queues one push of the sizes the current preview would list now, as the system, and leaves the rest waiting at DEBUG", async () => {
+    const { service, repository, restores, previewCalls, lines } = waitingHarness();
+
+    const result = await service.runSweepTick();
+
+    expect(repository.waitingReads).toEqual([{ storeConnectionId: 22, limit: MARKETPLACE_SYNC_MAX_WAITING_FOR_STOCK_PER_STORE_TICK,
+      rotation: Math.floor(T.getTime() / MARKETPLACE_SYNC_INTERVAL_MS) }]);
+    expect(previewCalls).toEqual([{ productVariantIds: [301, 302, 303], actor: { actorType: "system", actorId: "system:ebay-sync-back" } }]);
+    expect(restores).toEqual([{ vendorId: 10, storeConnectionId: 22, productVariantIds: [301], idempotencyKey: KEY }]);
+    expect(KEY.startsWith("ebay-sync:stock-back:22:")).toBe(true);
+    expect(result).toMatchObject({ stockReturnJobs: 1, restoreJobs: 0 });
+    expect(lines).toContainEqual({ level: "info", action: "dropship.marketplace_sync.stock_return_job", data: expect.objectContaining({
+      outcome: "queued", listing_ids: [201], idempotency_key: KEY, job_id: 3001, store_connection_id: 22 }) });
+    for (const [listingId, blockers] of [[202, [MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER]],
+      [203, ["selection:missing_vendor_include_rule", MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER]]] as const) {
+      expect(lines).toContainEqual({ level: "debug", action: "dropship.marketplace_sync.waiting_for_stock", data: expect.objectContaining({
+        listing_id: listingId, outcome: "still_blocked", blockers }) });
+    }
+    expect(lines.filter((line) => line.level === "warn" || line.level === "error")).toEqual([]);
+    // The tick's line counts it, so a tick that only queued these is not quiet.
+    expect(lines).toContainEqual({ level: "info", action: "dropship.marketplace_sync.tick", data: expect.objectContaining({ stock_return_jobs: 1 }) });
+  });
+
+  it("queues nothing when every waiting size is still blocked, and reads nothing when none waits", async () => {
+    const blocked = waitingHarness({ rows: [stillOut, notPicked] });
+    blocked.repository.waiting = [waiting(202, 302), waiting(203, 303)];
+    expect((await blocked.service.runSweepTick()).stockReturnJobs).toBe(0);
+    expect(blocked.restores).toEqual([]);
+    expect(blocked.lines).toContainEqual({ level: "debug", action: "dropship.marketplace_sync.tick", data: expect.objectContaining({ stock_return_jobs: 0 }) });
+
+    const none = waitingHarness();
+    none.repository.waiting = [];
+    await none.service.runSweepTick();
+    expect(none.previewCalls).toEqual([]);
+    expect(none.restores).toEqual([]);
+  });
+
+  it("a replayed tick sends the same key and counts no second job", async () => {
+    const keys = new Set<string>();
+    const { service, restores, lines } = waitingHarness({ restoreOutcome: (input) => {
+      const idempotentReplay = keys.has(input.idempotencyKey);
+      keys.add(input.idempotencyKey);
+      return { queued: true, jobId: 3001, idempotentReplay };
+    } });
+
+    const first = await service.runSweepTick();
+    const replay = await service.runSweepTick();
+
+    expect(first.stockReturnJobs).toBe(1);
+    expect(replay.stockReturnJobs).toBe(0);
+    expect(restores.map((entry) => entry.idempotencyKey)).toEqual([KEY, KEY]);
+    expect(lines).toContainEqual({ level: "info", action: "dropship.marketplace_sync.stock_return_job", data: expect.objectContaining({
+      outcome: "replayed", job_id: 3001 }) });
+  });
+
+  it("a preview refusal that names its resolution is expected (DEBUG): nothing is queued and the listings keep waiting", async () => {
+    const { service, restores, lines } = waitingHarness({ previewError: new DropshipError("DROPSHIP_LISTING_VENDOR_BLOCKED", "blocked",
+      { resolution: "reactivate" }) });
+
+    const result = await service.runSweepTick();
+
+    expect(result.stockReturnJobs).toBe(0);
+    expect(restores).toEqual([]);
+    expect(lines).toContainEqual({ level: "debug", action: "dropship.marketplace_sync.waiting_for_stock_preview_failed",
+      data: expect.objectContaining({ error_code: "DROPSHIP_LISTING_VENDOR_BLOCKED", error_class: "expected", outcome: "skipped", waiting_count: 3 }) });
+    expect(lines.filter((line) => line.level === "warn" || line.level === "error")).toEqual([]);
+  });
+
+  it("a push the store refuses is DEBUG; any other failure is classified, and only a broken invariant ends the tick", async () => {
+    const refused = waitingHarness({ restoreOutcome: () => ({ queued: false, code: "DROPSHIP_LISTING_STORE_BLOCKED" }) });
+    expect((await refused.service.runSweepTick()).stockReturnJobs).toBe(0);
+    expect(refused.lines).toContainEqual({ level: "debug", action: "dropship.marketplace_sync.stock_return_job",
+      data: expect.objectContaining({ outcome: "refused", error_code: "DROPSHIP_LISTING_STORE_BLOCKED" }) });
+
+    const passing = waitingHarness({ previewError: Object.assign(new Error("connection reset"), { code: "08006" }) });
+    await passing.service.runSweepTick();
+    expect(passing.restores).toEqual([]);
+    expect(passing.lines).toContainEqual({ level: "warn", action: "dropship.marketplace_sync.waiting_for_stock_preview_failed",
+      data: expect.objectContaining({ error_code: "08006", error_class: "transient" }) });
+
+    const unreadable = waitingHarness();
+    unreadable.repository.waitingError = Object.assign(new Error("connection reset"), { code: "08006" });
+    await unreadable.service.runSweepTick();
+    expect(unreadable.previewCalls).toEqual([]);
+    expect(unreadable.lines).toContainEqual({ level: "warn", action: "dropship.marketplace_sync.waiting_for_stock_read_failed",
+      data: expect.objectContaining({ error_code: "08006", outcome: "skipped" }) });
+
+    const broken = waitingHarness({ restoreOutcome: () => { throw marketplaceSyncError(MARKETPLACE_SYNC_CODES.invariantFailed, "broken", "fatal"); } });
+    await expect(broken.service.runSweepTick()).rejects.toMatchObject({ code: MARKETPLACE_SYNC_CODES.invariantFailed });
+  });
+
+  it("never re-previews a row the read answered that is not waiting (ended, or published)", async () => {
+    const { service, repository, previewCalls, restores } = waitingHarness();
+    repository.waiting = [{ ...waiting(204, 301), status: "ended" }, { ...waiting(205, 301), externalListingId: "110000000005" }];
+    await service.runSweepTick();
+    expect(previewCalls).toEqual([]);
+    expect(restores).toEqual([]);
+  });
+
+  it("starts nothing once the tick's time budget is spent", async () => {
+    // The live listing's eBay read spends the budget; the waiting listings are not started.
+    const { service, repository, previewCalls } = waitingHarness({ tickBudgetMs: 1_000, stepMs: 2_000,
+      rows: [row(), backInStock, stillOut, notPicked] });
+    repository.listings.set(77, listing());
+    const result = await service.runSweepTick();
+    expect(result.budgetExhausted).toBe(true);
+    expect(repository.waitingReads).toEqual([]);
+    expect(previewCalls).toHaveLength(1);
   });
 });
