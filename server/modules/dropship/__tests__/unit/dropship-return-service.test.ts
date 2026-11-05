@@ -415,7 +415,7 @@ describe("DropshipReturnService", () => {
       eventType: "dropship_rma_opened",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship RMA opened",
+      title: "Return opened",
       idempotencyKey: "rma-opened:1",
       payload: {
         rmaId: 1,
@@ -794,7 +794,7 @@ describe("DropshipReturnService", () => {
       eventType: "dropship_return_credit_posted",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship return credit posted",
+      title: "Return credited",
       idempotencyKey: "rma-credit-posted:1:7",
       payload: {
         rmaId: 1,

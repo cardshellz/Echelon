@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Eye, History, Package, Plus, ReceiptText, RotateCcw, Search, Trash2, Truck, Wallet } from "lucide-react";
+import { AlertCircle, Eye, Package, Plus, ReceiptText, RotateCcw, Search, Trash2, Truck, Wallet } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,9 +28,7 @@ import {
   fetchJson,
   formatCents,
   formatDateTime,
-  formatStatus,
   postJson,
-  queryErrorMessage,
   type DropshipOrderDetailLine,
   type DropshipOrderListItem,
   type DropshipOrderListResponse,
@@ -46,6 +44,19 @@ import type {
   DropshipVendorOrderDetailResponse,
 } from "@shared/dropship/vendor-order-detail";
 import { Textarea } from "@/components/ui/textarea";
+import {
+  vendorErrorMessage,
+  vendorInspectionOutcomeLabel,
+  vendorLedgerEntryLabel,
+  vendorLedgerStatusLabel,
+  vendorMarketplaceOrderLabel,
+  vendorOrderStatusLabel,
+  vendorPlatformName,
+  vendorReturnFaultLabel,
+  vendorReturnLabelSourceLabel,
+  vendorReturnReasonLabel,
+  vendorReturnStatusLabel,
+} from "@/lib/dropship-vendor-labels";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 const statuses = ["all", ...allDropshipRmaStatuses];
@@ -177,14 +188,14 @@ export default function DropshipPortalReturns() {
       const response = await postJson<DropshipPortalReturnCreateResponse>("/api/dropship/returns", input);
       setCreateForm(createInitialReturnCreateForm());
       setCreateOpen(false);
-      setMessage(`RMA ${response.rma.rmaNumber} submitted.`);
+      setMessage(`Return ${response.rma.rmaNumber} submitted.`);
       setSelectedRmaId(response.rma.rmaId);
       await Promise.all([
         returnsQuery.refetch(),
         queryClient.invalidateQueries({ queryKey: ["dropship-return-detail", response.rma.rmaId] }),
       ]);
     } catch (submitError) {
-      setError(queryErrorMessage(submitError, "Unable to submit return."));
+      setError(vendorErrorMessage(submitError, "We couldn't submit your return. Check the order and quantities, then try again."));
     } finally {
       setIsSubmitting(false);
     }
@@ -252,7 +263,7 @@ export default function DropshipPortalReturns() {
               <RotateCcw className="h-6 w-6 text-[#C060E0]" />
               Returns
             </h1>
-            <p className="mt-1 text-sm text-zinc-500">RMA status, inspection progress, and final credit outcomes.</p>
+            <p className="mt-1 text-sm text-zinc-500">Your returns, where they are, and what you're credited.</p>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Button
@@ -265,11 +276,11 @@ export default function DropshipPortalReturns() {
               }}
             >
               <Plus className="h-4 w-4" />
-              Submit RMA
+              Start a return
             </Button>
             <div className="relative min-w-0 sm:w-80">
               <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400" />
-              <Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-9" placeholder="Search RMAs" />
+              <Input value={search} onChange={(event) => setSearch(event.target.value)} className="pl-9" placeholder="Search returns" />
             </div>
             <Select value={status} onValueChange={setStatus}>
               <SelectTrigger className="sm:w-44">
@@ -277,7 +288,7 @@ export default function DropshipPortalReturns() {
               </SelectTrigger>
               <SelectContent>
                 {statuses.map((option) => (
-                  <SelectItem key={option} value={option}>{option === "all" ? "All statuses" : formatStatus(option)}</SelectItem>
+                  <SelectItem key={option} value={option}>{option === "all" ? "All statuses" : vendorReturnStatusLabel(option)}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -305,7 +316,7 @@ export default function DropshipPortalReturns() {
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {queryErrorMessage(returnsQuery.error, "Unable to load dropship returns.")}
+              {vendorErrorMessage(returnsQuery.error, "We couldn't load your returns. Reload the page to try again.")}
             </AlertDescription>
           </Alert>
         )}
@@ -322,7 +333,7 @@ export default function DropshipPortalReturns() {
               <EmptyMedia variant="icon"><AlertCircle /></EmptyMedia>
               <EmptyHeader>
                 <EmptyTitle>Returns unavailable</EmptyTitle>
-                <EmptyDescription>The returns API request failed.</EmptyDescription>
+                <EmptyDescription>We couldn't load your returns. Reload the page to try again.</EmptyDescription>
               </EmptyHeader>
             </Empty>
           ) : returnsQuery.data?.items.length ? (
@@ -336,7 +347,7 @@ export default function DropshipPortalReturns() {
               <EmptyMedia variant="icon"><RotateCcw /></EmptyMedia>
               <EmptyHeader>
                 <EmptyTitle>No returns</EmptyTitle>
-                <EmptyDescription>No dropship RMAs match the current filters.</EmptyDescription>
+                <EmptyDescription>No returns match these filters.</EmptyDescription>
               </EmptyHeader>
             </Empty>
           )}
@@ -427,8 +438,8 @@ function CreateReturnSheet({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
         <SheetHeader>
-          <SheetTitle>Submit RMA</SheetTitle>
-          <SheetDescription>Vendor RMA submission</SheetDescription>
+          <SheetTitle>Start a return</SheetTitle>
+          <SheetDescription>Tell us which order and items are coming back.</SheetDescription>
         </SheetHeader>
 
         <form className="mt-6 space-y-5" onSubmit={onSubmit}>
@@ -454,13 +465,13 @@ function CreateReturnSheet({
               </SelectContent>
             </Select>
             {ordersError ? (
-              <p className="text-sm text-rose-700">{queryErrorMessage(ordersError, "Unable to load orders.")}</p>
+              <p className="text-sm text-rose-700">{vendorErrorMessage(ordersError, "We couldn't load your orders. Reload the page to try again.")}</p>
             ) : null}
           </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
             <div className="space-y-2">
-              <Label>RMA number</Label>
+              <Label>Return number</Label>
               <div className="flex min-h-10 items-center rounded-md border bg-muted/30 px-3 text-sm text-muted-foreground">
                 Assigned automatically when submitted
               </div>
@@ -475,7 +486,7 @@ function CreateReturnSheet({
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="portal-rma-reason">Reason code</Label>
+              <Label htmlFor="portal-rma-reason">Reason</Label>
               <Input
                 id="portal-rma-reason"
                 value={form.reasonCode}
@@ -484,7 +495,7 @@ function CreateReturnSheet({
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="portal-rma-fault">Fault</Label>
+              <Label htmlFor="portal-rma-fault">Whose fault</Label>
               <Select
                 value={form.faultCategory}
                 onValueChange={(value) => onChange("faultCategory", value as DropshipReturnFaultCategory | "none")}
@@ -495,14 +506,14 @@ function CreateReturnSheet({
                 <SelectContent>
                   {returnFaultOptions.map((option) => (
                     <SelectItem key={option} value={option}>
-                      {option === "none" ? "Pending" : formatStatus(option)}
+                      {option === "none" ? "Not sure yet" : vendorReturnFaultLabel(option)}
                     </SelectItem>
                   ))}
                 </SelectContent>
               </Select>
             </div>
             <div className="space-y-2 sm:col-span-2">
-              <Label htmlFor="portal-rma-label-source">Label source</Label>
+              <Label htmlFor="portal-rma-label-source">Who provides the return label</Label>
               <Input
                 id="portal-rma-label-source"
                 value={form.labelSource}
@@ -518,7 +529,7 @@ function CreateReturnSheet({
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <Label>Return items</Label>
-                <p className="mt-1 text-sm text-zinc-500">Add each order line included in this RMA.</p>
+                <p className="mt-1 text-sm text-zinc-500">Add each item from the order that's coming back.</p>
               </div>
               <Button type="button" variant="outline" className="gap-2" onClick={onAddItem}>
                 <Plus className="h-4 w-4" />
@@ -526,10 +537,10 @@ function CreateReturnSheet({
               </Button>
             </div>
             {orderDetailError ? (
-              <p className="text-sm text-rose-700">{queryErrorMessage(orderDetailError, "Unable to load order lines.")}</p>
+              <p className="text-sm text-rose-700">{vendorErrorMessage(orderDetailError, "We couldn't load this order's items. Reload the page to try again.")}</p>
             ) : null}
             {form.intakeId && !isOrderDetailLoading && selectableLines.length === 0 && !orderDetailError ? (
-              <p className="text-sm text-zinc-500">No linked product lines are available for this order.</p>
+              <p className="text-sm text-zinc-500">This order has no items that can be returned here.</p>
             ) : null}
             {form.items.map((item, index) => {
               const availableLines = selectableLines.filter((line) => {
@@ -539,13 +550,13 @@ function CreateReturnSheet({
               return (
                 <div key={item.clientId} className="rounded-md border border-zinc-200 bg-zinc-50 p-3">
                   <div className="mb-3 flex items-center justify-between gap-3">
-                    <span className="text-sm font-medium text-zinc-700">Line {index + 1}</span>
+                    <span className="text-sm font-medium text-zinc-700">Item {index + 1}</span>
                     <Button
                       type="button"
                       variant="ghost"
                       size="icon"
-                      title="Remove line"
-                      aria-label="Remove line"
+                      title="Remove item"
+                      aria-label="Remove item"
                       onClick={() => onRemoveItem(item.clientId)}
                     >
                       <Trash2 className="h-4 w-4" />
@@ -553,7 +564,7 @@ function CreateReturnSheet({
                   </div>
                   <div className="grid gap-4 sm:grid-cols-2">
                     <div className="space-y-2">
-                      <Label htmlFor={`portal-rma-line-${item.clientId}`}>Order line</Label>
+                      <Label htmlFor={`portal-rma-line-${item.clientId}`}>Item</Label>
                       <Select
                         value={item.orderLineIndex || "none"}
                         onValueChange={(value) => {
@@ -577,10 +588,10 @@ function CreateReturnSheet({
                         disabled={!form.intakeId || isOrderDetailLoading || selectableLines.length === 0}
                       >
                         <SelectTrigger id={`portal-rma-line-${item.clientId}`}>
-                          <SelectValue placeholder={isOrderDetailLoading ? "Loading lines" : "Select line"} />
+                          <SelectValue placeholder={isOrderDetailLoading ? "Loading items" : "Choose an item"} />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="none">No linked line</SelectItem>
+                          <SelectItem value="none">No item chosen</SelectItem>
                           {availableLines.map((line) => (
                             <SelectItem key={`${item.clientId}-${line.lineIndex}`} value={String(line.lineIndex)}>
                               {orderLineOptionLabel(line)}
@@ -620,7 +631,7 @@ function CreateReturnSheet({
               Cancel
             </Button>
             <Button type="submit" className="bg-[#C060E0] hover:bg-[#a94bc9]" disabled={isSubmitting}>
-              {isSubmitting ? "Submitting..." : "Submit RMA"}
+              {isSubmitting ? "Submitting..." : "Submit return"}
             </Button>
           </div>
         </form>
@@ -648,7 +659,7 @@ function ReturnDetailSheet({
         <SheetHeader>
           <SheetTitle>{rma ? rma.rmaNumber : "Return details"}</SheetTitle>
           <SheetDescription>
-            {rma ? `${formatStatus(rma.status)} RMA ${rma.rmaId}` : "Dropship return detail"}
+            {rma ? `${vendorReturnStatusLabel(rma.status)} · Return #${rma.rmaId}` : "Return details"}
           </SheetDescription>
         </SheetHeader>
 
@@ -661,19 +672,17 @@ function ReturnDetailSheet({
         ) : error ? (
           <Alert variant="destructive" className="mt-6">
             <AlertCircle className="h-4 w-4" />
-            <AlertDescription>{queryErrorMessage(error, "Unable to load return detail.")}</AlertDescription>
+            <AlertDescription>{vendorErrorMessage(error, "We couldn't load this return. Reload the page to try again.")}</AlertDescription>
           </Alert>
         ) : rma ? (
           <div className="mt-6 space-y-6">
             <section className="grid gap-3 text-sm sm:grid-cols-2">
-              <DetailField label="Status" value={formatStatus(rma.status)} />
-              <DetailField label="Fault" value={rma.faultCategory ? formatStatus(rma.faultCategory) : "Pending"} />
-              <DetailField label="Reason" value={rma.reasonCode ? formatStatus(rma.reasonCode) : "Not recorded"} />
+              <DetailField label="Status" value={vendorReturnStatusLabel(rma.status)} />
+              <DetailField label="Whose fault" value={rma.faultCategory ? vendorReturnFaultLabel(rma.faultCategory) : "Not decided yet"} />
+              <DetailField label="Reason" value={rma.reasonCode ? vendorReturnReasonLabel(rma.reasonCode) : "Not given"} />
               <DetailField label="Return window" value={`${rma.returnWindowDays} days`} />
-              <DetailField label="Platform" value={rma.platform ? formatStatus(rma.platform) : "Not recorded"} />
-              <DetailField label="Label source" value={rma.labelSource ? formatStatus(rma.labelSource) : "Not recorded"} />
-              <DetailField label="Intake" value={rma.intakeId ? String(rma.intakeId) : "Not linked"} />
-              <DetailField label="OMS order" value={rma.omsOrderId ? String(rma.omsOrderId) : "Not linked"} />
+              <DetailField label="Marketplace" value={rma.platform ? vendorPlatformName(rma.platform) : "Not known"} />
+              <DetailField label="Return label from" value={rma.labelSource ? vendorReturnLabelSourceLabel(rma.labelSource) : "Not known"} />
               <DetailField label="Requested" value={formatDateTime(rma.requestedAt)} />
               <DetailField label="Received" value={formatDateTime(rma.receivedAt)} />
               <DetailField label="Inspected" value={formatDateTime(rma.inspectedAt)} />
@@ -683,7 +692,7 @@ function ReturnDetailSheet({
             {rma.vendorNotes && (
               <>
                 <Separator />
-                <ReturnDetailSection icon={<ReceiptText className="h-4 w-4" />} title="Vendor Notes">
+                <ReturnDetailSection icon={<ReceiptText className="h-4 w-4" />} title="Your notes">
                   <p className="whitespace-pre-wrap text-sm text-zinc-700">{rma.vendorNotes}</p>
                 </ReturnDetailSection>
               </>
@@ -703,15 +712,12 @@ function ReturnDetailSheet({
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {rma.items.map((item) => (
+                      {rma.items.map((item, index) => (
                         <TableRow key={item.rmaItemId}>
                           <TableCell>
-                            <div className="font-medium">RMA item {item.rmaItemId}</div>
-                            <div className="text-xs text-zinc-500">
-                              {item.productVariantId ? `Variant ${item.productVariantId}` : "Variant not linked"}
-                            </div>
+                            <div className="font-medium">Item {index + 1}</div>
                           </TableCell>
-                          <TableCell><Badge variant="outline" className={statusTone(item.status)}>{formatStatus(item.status)}</Badge></TableCell>
+                          <TableCell><Badge variant="outline" className={statusTone(item.status)}>{vendorReturnStatusLabel(item.status)}</Badge></TableCell>
                           <TableCell className="text-right font-mono">{item.quantity}</TableCell>
                         </TableRow>
                       ))}
@@ -723,28 +729,27 @@ function ReturnDetailSheet({
               )}
             </ReturnDetailSection>
 
-            <ReturnDetailSection icon={<Truck className="h-4 w-4" />} title="Return Tracking">
+            <ReturnDetailSection icon={<Truck className="h-4 w-4" />} title="Return tracking">
               <div className="grid gap-2 text-sm sm:grid-cols-2">
                 <DetailField label="Tracking number" value={rma.returnTrackingNumber || "None"} />
                 <DetailField label="Updated" value={formatDateTime(rma.updatedAt)} />
               </div>
             </ReturnDetailSection>
 
-            <ReturnDetailSection icon={<ReceiptText className="h-4 w-4" />} title="Inspections">
+            <ReturnDetailSection icon={<ReceiptText className="h-4 w-4" />} title="Checks">
               {rma.inspections.length ? (
                 <div className="space-y-3">
-                  {rma.inspections.map((inspection) => (
+                  {rma.inspections.map((inspection, index) => (
                     <div key={inspection.rmaInspectionId} className="rounded-md border border-zinc-200 p-3">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-medium">Inspection {inspection.rmaInspectionId}</span>
-                          <Badge variant="outline" className={statusTone(inspection.outcome)}>{formatStatus(inspection.outcome)}</Badge>
+                          <span className="text-sm font-medium">Check {index + 1}</span>
+                          <Badge variant="outline" className={statusTone(inspection.outcome)}>{vendorInspectionOutcomeLabel(inspection.outcome)}</Badge>
                         </div>
                         <span className="text-xs text-zinc-500">{formatDateTime(inspection.createdAt)}</span>
                       </div>
                       <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
-                        <DetailField label="Fault" value={inspection.faultCategory ? formatStatus(inspection.faultCategory) : "Not recorded"} />
-                        <DetailField label="Inspected by" value={inspection.inspectedBy || "Not recorded"} />
+                        <DetailField label="Whose fault" value={inspection.faultCategory ? vendorReturnFaultLabel(inspection.faultCategory) : "Not decided"} />
                         <DetailField label="Credit" value={formatCents(inspection.creditCents)} />
                         <DetailField label="Fee" value={formatCents(inspection.feeCents)} />
                         <DetailField label="Photos" value={String(inspection.photos.length)} />
@@ -756,31 +761,30 @@ function ReturnDetailSheet({
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-zinc-500">No inspections recorded.</p>
+                <p className="text-sm text-zinc-500">Card Shellz hasn't checked this return yet.</p>
               )}
             </ReturnDetailSection>
 
-            <ReturnDetailSection icon={<Wallet className="h-4 w-4" />} title="Wallet Ledger">
+            <ReturnDetailSection icon={<Wallet className="h-4 w-4" />} title="Wallet">
               {rma.walletLedger.length ? (
                 <div className="rounded-md border border-zinc-200">
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>Entry</TableHead>
+                        <TableHead>What</TableHead>
                         <TableHead>Status</TableHead>
                         <TableHead className="text-right">Amount</TableHead>
-                        <TableHead className="text-right">Balance After</TableHead>
+                        <TableHead className="text-right">Balance after</TableHead>
                       </TableRow>
                     </TableHeader>
                     <TableBody>
                       {rma.walletLedger.map((entry) => (
                         <TableRow key={entry.ledgerEntryId}>
                           <TableCell>
-                            <div className="font-medium">{formatStatus(entry.type)}</div>
-                            <div className="text-xs text-zinc-500">Ledger {entry.ledgerEntryId}</div>
+                            <div className="font-medium">{vendorLedgerEntryLabel(entry)}</div>
                             <div className="text-xs text-zinc-500">{formatDateTime(entry.createdAt)}</div>
                           </TableCell>
-                          <TableCell><Badge variant="outline" className={statusTone(entry.status)}>{formatStatus(entry.status)}</Badge></TableCell>
+                          <TableCell><Badge variant="outline" className={statusTone(entry.status)}>{vendorLedgerStatusLabel(entry.status)}</Badge></TableCell>
                           <TableCell className="text-right">{formatCents(entry.amountCents)}</TableCell>
                           <TableCell className="text-right">{formatNullableCents(entry.availableBalanceAfterCents)}</TableCell>
                         </TableRow>
@@ -789,15 +793,8 @@ function ReturnDetailSheet({
                   </Table>
                 </div>
               ) : (
-                <p className="text-sm text-zinc-500">No wallet return adjustments recorded.</p>
+                <p className="text-sm text-zinc-500">No wallet credits or fees for this return yet.</p>
               )}
-            </ReturnDetailSection>
-
-            <ReturnDetailSection icon={<History className="h-4 w-4" />} title="Audit References">
-              <div className="grid gap-2 text-sm sm:grid-cols-2">
-                <DetailField label="Idempotency key" value={rma.idempotencyKey || "Not recorded"} />
-                <DetailField label="Request hash" value={rma.requestHash || "Not recorded"} />
-              </div>
             </ReturnDetailSection>
           </div>
         ) : null}
@@ -823,9 +820,9 @@ function ReturnsTable({
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>RMA</TableHead>
+            <TableHead>Return</TableHead>
             <TableHead>Status</TableHead>
-            <TableHead>Fault</TableHead>
+            <TableHead>Whose fault</TableHead>
             <TableHead>Items</TableHead>
             <TableHead>Tracking</TableHead>
             <TableHead>Updated</TableHead>
@@ -837,10 +834,10 @@ function ReturnsTable({
             <TableRow key={rma.rmaId}>
               <TableCell>
                 <div className="font-medium">{rma.rmaNumber}</div>
-                <div className="text-xs text-zinc-500">{rma.reasonCode ? formatStatus(rma.reasonCode) : "No reason"}</div>
+                <div className="text-xs text-zinc-500">{rma.reasonCode ? vendorReturnReasonLabel(rma.reasonCode) : "No reason given"}</div>
               </TableCell>
-              <TableCell><Badge variant="outline">{formatStatus(rma.status)}</Badge></TableCell>
-              <TableCell>{rma.faultCategory ? formatStatus(rma.faultCategory) : "Pending"}</TableCell>
+              <TableCell><Badge variant="outline">{vendorReturnStatusLabel(rma.status)}</Badge></TableCell>
+              <TableCell>{rma.faultCategory ? vendorReturnFaultLabel(rma.faultCategory) : "Not decided yet"}</TableCell>
               <TableCell className="font-mono">{rma.itemCount} / {rma.totalQuantity}</TableCell>
               <TableCell className="font-mono text-xs">{rma.returnTrackingNumber || "None"}</TableCell>
               <TableCell className="whitespace-nowrap text-sm text-zinc-500">{formatDateTime(rma.updatedAt)}</TableCell>
@@ -885,12 +882,11 @@ function ReturnDetailSection({
 }
 
 function orderOptionLabel(order: DropshipOrderListItem): string {
-  const orderNumber = order.externalOrderNumber || order.externalOrderId;
-  return `${formatStatus(order.platform)} ${orderNumber} - ${formatStatus(order.status)} - ${formatDateTime(order.receivedAt)}`;
+  return `${vendorMarketplaceOrderLabel(order)} - ${vendorOrderStatusLabel(order.status)} - ${formatDateTime(order.receivedAt)}`;
 }
 
 function orderLineOptionLabel(line: DropshipOrderDetailLine): string {
-  const label = line.title || line.sku || `Variant ${line.productVariantId}`;
+  const label = line.title || line.sku || "Item";
   const price = typeof line.unitRetailPriceCents === "number"
     ? ` - ${formatCents(line.unitRetailPriceCents)} each`
     : "";
@@ -907,7 +903,7 @@ function DetailField({ label, value }: { label: string; value: string }) {
 }
 
 function formatNullableCents(value: number | null | undefined): string {
-  return typeof value === "number" ? formatCents(value) : "Not recorded";
+  return typeof value === "number" ? formatCents(value) : "Not available";
 }
 
 function returnItemFormIsBlank(item: PortalReturnCreateItemFormState): boolean {

@@ -17,9 +17,7 @@ import {
   fetchJson,
   formatCents,
   formatDateTime,
-  formatStatus,
   postJson,
-  queryErrorMessage,
   sectionStatusTone,
   type DropshipSettingsResponse,
   type DropshipSettingsSection,
@@ -36,6 +34,19 @@ import {
   useDropshipAuth,
   type DropshipSensitiveAction,
 } from "@/lib/dropship-auth";
+import {
+  vendorAccountStatusLabel,
+  vendorErrorMessage,
+  vendorPlatformName,
+  vendorSectionStatusLabel,
+  vendorSettingsBlockerLabel,
+  vendorSetupCheckDetail,
+  vendorSetupCheckLabel,
+  vendorSeverityLabel,
+  vendorStoreConnectionLine,
+  vendorStoreReadinessDetail,
+  vendorStoreStatusLabel,
+} from "@/lib/dropship-vendor-labels";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 import {
   readStoreOAuthCallbackStatus,
@@ -199,7 +210,7 @@ export default function DropshipPortalSettings() {
         ]);
         setEmailChallengeAction(null);
         setVerificationCode("");
-        setMessage(`${connectionDisplayName(response.connection)} moved to ${formatStatus(response.connection.status)}.`);
+        setMessage(disconnectedMessage(connectionDisplayName(response.connection), response.connection.status));
       });
     } finally {
       setDisconnectTargetId(null);
@@ -299,7 +310,7 @@ export default function DropshipPortalSettings() {
       await task();
       return true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Store connection request failed.");
+      setError(vendorErrorMessage(caught));
       return false;
     } finally {
       setPendingStoreAction(null);
@@ -314,7 +325,7 @@ export default function DropshipPortalSettings() {
             <Settings className="h-6 w-6 text-[#C060E0]" />
             Settings
           </h1>
-          <p className="mt-1 text-sm text-zinc-500">Account, store connection, wallet, notification, return contact, and Phase 2 surfaces.</p>
+          <p className="mt-1 text-sm text-zinc-500">Your account, store connection, wallet, alerts and return contact.</p>
         </div>
 
         {connectionStatus && (
@@ -330,7 +341,7 @@ export default function DropshipPortalSettings() {
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {queryErrorMessage(settingsQuery.error, "Unable to load dropship settings.")}
+              {vendorErrorMessage(settingsQuery.error, "We couldn't load your settings. Reload the page to try again.")}
             </AlertDescription>
           </Alert>
         )}
@@ -338,7 +349,7 @@ export default function DropshipPortalSettings() {
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {queryErrorMessage(storeConnectionsQuery.error, "Unable to load store connections.")}
+              {vendorErrorMessage(storeConnectionsQuery.error, "We couldn't load your store connection. Reload the page to try again.")}
             </AlertDescription>
           </Alert>
         )}
@@ -352,12 +363,12 @@ export default function DropshipPortalSettings() {
         ) : settings ? (
           <>
             <section className="mt-5 grid gap-4 lg:grid-cols-3">
-              <Metric title="Vendor" value={settings.vendor.businessName || settings.vendor.email || "Card Shellz member"} detail={formatStatus(settings.vendor.status)} />
+              <Metric title="Account" value={settings.vendor.businessName || settings.vendor.email || "Card Shellz member"} detail={vendorAccountStatusLabel(settings.vendor.status)} />
               <Metric title="Wallet" value={formatCents(settings.wallet.availableBalanceCents)} detail={walletMetricDetail(settings)} />
               <Metric
-                title="Generated"
-                value={formatDateTime(settings.generatedAt)}
-                detail={`${storeConnectionsQuery.data?.connections.length ?? settings.storeConnections.length} store connection(s)`}
+                title="Stores"
+                value={String(storeConnectionsQuery.data?.connections.length ?? settings.storeConnections.length)}
+                detail="Connected stores"
               />
             </section>
 
@@ -419,7 +430,8 @@ export default function DropshipPortalSettings() {
             />
 
             <section className="mt-5 grid gap-4 md:grid-cols-2">
-              {settings.sections.map((section) => (
+              {/* Sections still being built ("coming soon") are for Card Shellz, not vendors. */}
+              {settings.sections.filter((section) => !section.comingSoon).map((section) => (
                 <div key={section.key} className="rounded-md border border-zinc-200 bg-white p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div className="flex min-w-0 items-center gap-3">
@@ -432,14 +444,14 @@ export default function DropshipPortalSettings() {
                       </div>
                     </div>
                     <Badge variant="outline" className={sectionStatusTone(section.status)}>
-                      {section.comingSoon ? "Coming soon" : formatStatus(section.status)}
+                      {vendorSectionStatusLabel(section.status)}
                     </Badge>
                   </div>
                   {section.blockers.length > 0 && (
                     <div className="mt-3 flex flex-wrap gap-2">
                       {section.blockers.map((blocker) => (
                         <Badge key={blocker} variant="outline" className="border-amber-200 bg-amber-50 text-amber-900">
-                          {formatStatus(blocker)}
+                          {vendorSettingsBlockerLabel(blocker)}
                         </Badge>
                       ))}
                     </div>
@@ -454,7 +466,7 @@ export default function DropshipPortalSettings() {
             <EmptyHeader>
               <EmptyTitle>{settingsQuery.error ? "Settings unavailable" : "No settings"}</EmptyTitle>
               <EmptyDescription>
-                {settingsQuery.error ? "The settings API request failed." : "Dropship settings could not be loaded."}
+                {settingsQuery.error ? "We couldn't load your settings. Reload the page to try again." : "Your settings aren't available right now. Reload the page to try again."}
               </EmptyDescription>
             </EmptyHeader>
           </Empty>
@@ -507,11 +519,11 @@ function StoreConnectionsPanel({
         <div>
           <h2 className="text-lg font-semibold">Store connections</h2>
           <p className="mt-1 text-sm text-zinc-500">
-            {launchReadyCount} launch-ready / {result?.vendor.includedStoreConnections ?? 1} included connection(s)
+            {launchReadyCount > 0 ? "Your store is ready for orders." : "Your store needs attention before it can take orders."}
           </p>
         </div>
         <Badge variant="outline" className={launchReadyCount > 0 ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}>
-          {launchReadyCount > 0 ? "Launch ready" : "Attention required"}
+          {launchReadyCount > 0 ? "Ready" : "Needs attention"}
         </Badge>
       </div>
 
@@ -536,8 +548,8 @@ function StoreConnectionsPanel({
         <Empty className="mt-4 rounded-md border border-dashed p-8">
           <EmptyMedia variant="icon"><Store /></EmptyMedia>
           <EmptyHeader>
-            <EmptyTitle>No store connections</EmptyTitle>
-            <EmptyDescription>Connect eBay or Shopify before processing dropship orders.</EmptyDescription>
+            <EmptyTitle>No store connected</EmptyTitle>
+            <EmptyDescription>Connect your eBay or Shopify store to start taking orders.</EmptyDescription>
           </EmptyHeader>
           <Button
             type="button"
@@ -599,25 +611,23 @@ function StoreConnectionCard({
           <p className="mt-1 text-sm text-zinc-500">{connectedStoreIdentityDetail(connection)}</p>
         </div>
         <Badge variant="outline" className={storeConnectionStatusTone(connection.status)}>
-          {formatStatus(connection.status)}
+          {vendorStoreStatusLabel(connection.status)}
         </Badge>
       </div>
 
       <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-        <ConnectionFact label="Setup" value={formatStatus(connection.setupStatus)} />
-        <ConnectionFact label="Default warehouse" value={connection.orderProcessingConfig.defaultWarehouseId ? String(connection.orderProcessingConfig.defaultWarehouseId) : "Admin controlled"} />
-        <ConnectionFact label="Launch ready" value={connection.launchReady ? "Ready" : launchReadinessDetail(connection)} />
-        <ConnectionFact label="Access token" value={connection.hasAccessToken ? "Present" : "Missing"} />
-        <ConnectionFact label="Refresh token" value={connection.hasRefreshToken ? "Present" : "Missing"} />
-        <ConnectionFact label="Last order sync" value={formatDateTime(connection.lastOrderSyncAt)} />
-        <ConnectionFact label="Last inventory sync" value={formatDateTime(connection.lastInventorySyncAt)} />
-        <ConnectionFact label="Token expires" value={formatDateTime(connection.tokenExpiresAt)} />
-        <ConnectionFact label="Updated" value={formatDateTime(connection.updatedAt)} />
+        <ConnectionFact label="Connection" value={vendorStoreConnectionLine(connection)} />
+        <ConnectionFact label="Ready for orders" value={connection.launchReady ? "Yes" : launchReadinessDetail(connection)} />
+        <ConnectionFact label="Last order check" value={formatDateTime(connection.lastOrderSyncAt)} />
+        <ConnectionFact label="Last stock update" value={formatDateTime(connection.lastInventorySyncAt)} />
       </div>
 
-      {connection.disconnectReason && (
+      {/* The stored disconnect reason is the system's or staff's text; the vendor sees what happened. */}
+      {connection.disconnectReason && (connection.status === "grace_period" || connection.status === "disconnected") && (
         <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-          {connection.disconnectReason}
+          {connection.status === "grace_period"
+            ? "This store is being disconnected. Reconnect it to keep selling."
+            : "This store was disconnected. Connect it again to keep selling."}
         </div>
       )}
 
@@ -626,10 +636,10 @@ function StoreConnectionCard({
           {openSetupChecks.slice(0, 3).map((check) => (
             <div key={check.checkKey} className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm">
               <div className="flex items-center justify-between gap-3">
-                <span className="font-medium">{formatStatus(check.checkKey)}</span>
-                <Badge variant="outline" className={setupCheckTone(check.severity)}>{formatStatus(check.severity)}</Badge>
+                <span className="font-medium">{vendorSetupCheckLabel(check.checkKey)}</span>
+                <Badge variant="outline" className={setupCheckTone(check.severity)}>{vendorSeverityLabel(check.severity)}</Badge>
               </div>
-              {check.message && <p className="mt-1 text-zinc-500">{check.message}</p>}
+              {vendorSetupCheckDetail(check.checkKey) && <p className="mt-1 text-zinc-500">{vendorSetupCheckDetail(check.checkKey)}</p>}
             </div>
           ))}
         </div>
@@ -676,7 +686,7 @@ function StoreConnectionCard({
       </div>
       {!canDisconnect && (
         <p className="mt-2 text-xs text-zinc-500">
-          {connection.status === "grace_period" ? "Disconnect grace period is already active." : "This connection is already disconnected."}
+          {connection.status === "grace_period" ? "This store is already being disconnected." : "This store is already disconnected."}
         </p>
       )}
     </div>
@@ -814,29 +824,29 @@ export function canChangeStoreConnection(connection: DropshipStoreConnectionProf
 }
 
 function connectionDisplayName(connection: DropshipStoreConnectionProfileResponse): string {
-  return connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} store name pending`;
+  return connection.externalDisplayName || connection.shopDomain || `${vendorPlatformName(connection.platform)} store`;
 }
 
 function connectedStoreIdentityDetail(connection: DropshipStoreConnectionProfileResponse): string {
-  const details = [formatStatus(connection.platform)];
+  const details = [vendorPlatformName(connection.platform)];
   if (connection.shopDomain && connection.shopDomain !== connectionDisplayName(connection)) {
     details.push(connection.shopDomain);
   }
-  if (connection.externalAccountId && connection.externalAccountId !== connection.externalDisplayName) {
-    details.push(`Account ID ${connection.externalAccountId}`);
-  }
-  if (!connection.externalDisplayName && !connection.shopDomain && !connection.externalAccountId) {
-    details.push("Reauthorize to load store name");
+  if (!connection.externalDisplayName && !connection.shopDomain) {
+    details.push("Reconnect to show your store name");
   }
   return details.join(" | ");
 }
 
 function launchReadinessDetail(connection: DropshipStoreConnectionProfileResponse): string {
-  if (connection.status !== "connected") return formatStatus(connection.status);
-  if (connection.setupStatus !== "ready") return `Setup ${formatStatus(connection.setupStatus)}`;
-  if (!connection.hasAccessToken) return "Access token missing";
-  if (connection.platform === "ebay" && !connection.hasRefreshToken) return "Refresh token missing";
-  return "Not ready";
+  return vendorStoreReadinessDetail(connection);
+}
+
+/** The line after a disconnect: what happens next, not the status code it moved to. */
+function disconnectedMessage(storeName: string, status: DropshipStoreConnectionProfileResponse["status"]): string {
+  if (status === "grace_period") return `${storeName} is being disconnected. You can reconnect it before then to keep selling.`;
+  if (status === "disconnected") return `${storeName} is disconnected.`;
+  return `${storeName}: ${vendorStoreStatusLabel(status).toLowerCase()}.`;
 }
 
 function storeConnectionStatusTone(status: DropshipStoreConnectionProfileResponse["status"]): string {
@@ -907,11 +917,11 @@ export function storeOAuthActionTitle(
   platform: DropshipStoreConnectionProfileResponse["platform"],
   status?: DropshipStoreConnectionProfileResponse["status"],
 ): string {
-  if (intent === "refresh_connection" && status === "grace_period") return `Reconnect ${formatStatus(platform)} store`;
-  if (intent === "change_store" && status === "grace_period") return `Connect a different ${formatStatus(platform)} store`;
-  if (intent === "refresh_connection") return `Refresh ${formatStatus(platform)} connection`;
-  if (intent === "change_store") return `Change ${formatStatus(platform)} store`;
-  return `Connect ${formatStatus(platform)}`;
+  if (intent === "refresh_connection" && status === "grace_period") return `Reconnect ${vendorPlatformName(platform)} store`;
+  if (intent === "change_store" && status === "grace_period") return `Connect a different ${vendorPlatformName(platform)} store`;
+  if (intent === "refresh_connection") return `Refresh ${vendorPlatformName(platform)} connection`;
+  if (intent === "change_store") return `Change ${vendorPlatformName(platform)} store`;
+  return `Connect ${vendorPlatformName(platform)}`;
 }
 
 function storeOAuthActionText(
@@ -919,11 +929,11 @@ function storeOAuthActionText(
   platform: DropshipStoreConnectionProfileResponse["platform"],
   status?: DropshipStoreConnectionProfileResponse["status"],
 ): string {
-  if (intent === "refresh_connection" && status === "grace_period") return `reconnect the ${formatStatus(platform)} store`;
-  if (intent === "change_store" && status === "grace_period") return `connect a different ${formatStatus(platform)} store`;
-  if (intent === "refresh_connection") return `refresh the ${formatStatus(platform)} connection`;
-  if (intent === "change_store") return `change the ${formatStatus(platform)} store`;
-  return `connect ${formatStatus(platform)}`;
+  if (intent === "refresh_connection" && status === "grace_period") return `reconnect the ${vendorPlatformName(platform)} store`;
+  if (intent === "change_store" && status === "grace_period") return `connect a different ${vendorPlatformName(platform)} store`;
+  if (intent === "refresh_connection") return `refresh the ${vendorPlatformName(platform)} connection`;
+  if (intent === "change_store") return `change the ${vendorPlatformName(platform)} store`;
+  return `connect ${vendorPlatformName(platform)}`;
 }
 
 function sensitiveActionVerificationLabel(action: DropshipSensitiveAction): string {
@@ -934,8 +944,8 @@ function sensitiveActionVerificationLabel(action: DropshipSensitiveAction): stri
 
 function walletMetricDetail(settings: DropshipSettingsResponse["settings"]): string {
   // One story on every surface: source → floor → backup card → authorize.
-  if (!settings.wallet.autoReloadEnabled) return "Auto-reload needs setup — choose a top-up source, a floor and a backup card in Wallet";
+  if (!settings.wallet.autoReloadEnabled) return "Autopay needs setup — choose a top-up source, a floor and a backup card in Wallet";
   if (!settings.wallet.autoReloadFundingMethodReady) return "Top-up source needed — choose one in Wallet";
   const usdc = settings.wallet.activeUsdcBaseFundingMethodCount > 0 ? " · USDC deposits enabled" : "";
-  return `Auto-reload on · ${settings.wallet.activeStripeFundingMethodCount} saved Stripe method${settings.wallet.activeStripeFundingMethodCount === 1 ? "" : "s"}${usdc} · Manage in Wallet`;
+  return `Autopay on · ${settings.wallet.activeStripeFundingMethodCount} saved card or bank account${settings.wallet.activeStripeFundingMethodCount === 1 ? "" : "s"}${usdc} · Manage in Wallet`;
 }

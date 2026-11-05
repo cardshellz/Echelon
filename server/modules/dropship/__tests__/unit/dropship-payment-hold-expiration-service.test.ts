@@ -56,7 +56,7 @@ describe("DropshipPaymentHoldExpirationService", () => {
       eventType: "dropship_order_payment_hold_expired",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship order payment hold expired",
+      title: "Order cancelled: not paid in time",
       idempotencyKey: "payment-hold-expiration:1:expired",
       payload: {
         intakeId: 1,
@@ -141,7 +141,7 @@ describe("DropshipPaymentHoldExpirationService", () => {
       eventType: "dropship_order_payment_hold_expiring",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship order payment hold expiring",
+      title: "Order payment due soon",
       idempotencyKey: `payment-hold-expiring:2:${expiringAt.toISOString()}`,
       payload: {
         intakeId: 2,

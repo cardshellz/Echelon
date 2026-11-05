@@ -97,7 +97,7 @@ describe("DropshipOpsSurfaceService", () => {
     });
     expect(sections.find((section) => section.key === "notifications")).toMatchObject({
       status: "ready",
-      summary: expect.stringContaining("launch default notification preference(s) available; 0 vendor override(s) configured."),
+      summary: "You get our standard alerts. Change them on the Alerts page.",
     });
     expect(sections.find((section) => section.key === "store_connection")?.blockers).toContain("store_connection_required");
     expect(sections.find((section) => section.key === "wallet_payment")?.blockers).toEqual([
@@ -137,7 +137,7 @@ describe("DropshipOpsSurfaceService", () => {
 
     expect(sections.find((section) => section.key === "store_connection")).toMatchObject({
       status: "attention_required",
-      summary: "Store connection needs launch-ready credentials.",
+      summary: "Reconnect your store so it can take orders.",
       blockers: ["store_refresh_token_required"],
     });
   });
@@ -173,7 +173,7 @@ describe("DropshipOpsSurfaceService", () => {
 
     expect(sections.find((section) => section.key === "store_connection")).toMatchObject({
       status: "ready",
-      summary: "1 launch-ready store connection configured.",
+      summary: "Your store is connected and ready for orders.",
       blockers: [],
     });
   });
@@ -198,7 +198,7 @@ describe("DropshipOpsSurfaceService", () => {
 
     expect(sections.find((section) => section.key === "wallet_payment")).toMatchObject({
       status: "attention_required",
-      summary: "Auto-reload needs usable Stripe funding.",
+      summary: "Choose a card or bank account for autopay in Wallet.",
       blockers: [
         "auto_reload_funding_method_required",
         "stripe_funding_method_required",
@@ -226,7 +226,7 @@ describe("DropshipOpsSurfaceService", () => {
 
     expect(sections.find((section) => section.key === "wallet_payment")).toMatchObject({
       status: "ready",
-      summary: "Wallet funding and auto-reload ready.",
+      summary: "Your wallet and autopay are set up.",
       blockers: [],
     });
   });
@@ -251,7 +251,7 @@ describe("DropshipOpsSurfaceService", () => {
 
     expect(sections.find((section) => section.key === "wallet_payment")).toMatchObject({
       status: "ready",
-      summary: "Wallet funding and auto-reload ready.",
+      summary: "Your wallet and autopay are set up.",
       blockers: [],
     });
   });

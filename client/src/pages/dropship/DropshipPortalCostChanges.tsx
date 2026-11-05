@@ -17,7 +17,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
 import { catalogBrowserStorage, rememberCatalogStore } from "@/lib/dropship-catalog-steps";
-import { fetchJson, formatDateTime, queryErrorMessage } from "@/lib/dropship-ops-surface";
+import { fetchJson, formatDateTime } from "@/lib/dropship-ops-surface";
+import { vendorErrorMessage } from "@/lib/dropship-vendor-labels";
 import {
   DROPSHIP_COST_CHANGES_URL,
   describeVendorListingAction,
@@ -72,7 +73,7 @@ export default function DropshipPortalCostChanges() {
         {query.error && (
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
-            <AlertDescription>{queryErrorMessage(query.error, "Unable to load cost changes.")}</AlertDescription>
+            <AlertDescription>{vendorErrorMessage(query.error, "We couldn't load cost changes. Reload the page to try again.")}</AlertDescription>
           </Alert>
         )}
         {!data && query.isLoading && (

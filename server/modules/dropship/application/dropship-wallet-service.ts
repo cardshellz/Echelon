@@ -1918,7 +1918,7 @@ export class DropshipWalletService {
       eventType: DROPSHIP_NOTIFICATION_EVENTS.WALLET_FUNDING_FAILED,
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship wallet funding failed",
+      title: "A payment to your wallet failed",
       message: `Wallet funding for ${formatNotificationCurrency(parsed.amountCents, parsed.currency)} failed${parsed.failureMessage ? `: ${parsed.failureMessage}` : "."}${pendingCreditVoided ? " The pending credit has been removed from your balance." : ""}${negativeBalanceSentenceFor(voided?.account ?? null)}`,
       payload: {
         vendorId: parsed.vendorId,

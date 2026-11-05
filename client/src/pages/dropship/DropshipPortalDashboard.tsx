@@ -25,9 +25,7 @@ import {
   fetchJson,
   formatCents,
   formatDateTime,
-  formatStatus,
   listLaunchReadyStoreConnections,
-  queryErrorMessage,
   type DropshipOnboardingState,
   type DropshipOnboardingStep,
   type DropshipOrderListItem,
@@ -50,6 +48,20 @@ import {
   type VendorStandingNotice,
 } from "@/lib/dropship-vendor-standing";
 import { describeChosenItems, isOnboardingVendor, walletTodoDetail } from "@/lib/dropship-onboarding";
+import {
+  vendorAccountStatusLabel,
+  vendorAuthMethodLabel,
+  vendorErrorMessage,
+  vendorLedgerEntryLabel,
+  vendorLedgerStatusLabel,
+  vendorMarketplaceOrderLabel,
+  vendorOrderStatusLabel,
+  vendorPlatformName,
+  vendorStepStatusLabel,
+  vendorStoreConnectionLine,
+  vendorStoreReadinessDetail,
+  vendorStoreStatusLabel,
+} from "@/lib/dropship-vendor-labels";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type DropshipWalletLedgerEntry = DropshipWalletResponse["wallet"]["recentLedger"][number];
@@ -132,7 +144,7 @@ export default function DropshipPortalDashboard() {
           <Alert variant="destructive" className="mb-4">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {queryErrorMessage(settingsQuery.error ?? onboardingQuery.error, "Unable to load dropship dashboard.")}
+              {vendorErrorMessage(settingsQuery.error ?? onboardingQuery.error, "We couldn't load your dashboard. Reload the page to try again.")}
             </AlertDescription>
           </Alert>
         )}
@@ -141,7 +153,7 @@ export default function DropshipPortalDashboard() {
           <Alert variant="destructive" className="mb-4" data-testid="dashboard-payment-hold-error">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {queryErrorMessage(holdSummaryQuery.error, "Unable to check for orders waiting on payment.")}
+              {vendorErrorMessage(holdSummaryQuery.error, "We couldn't check for orders waiting on payment. Reload the page to try again.")}
             </AlertDescription>
           </Alert>
         )}
@@ -246,9 +258,9 @@ function LaunchOverviewPanel({
   const complete = totalStepCount > 0 && completedStepCount === totalStepCount;
   const firstStore = launchReadyStoreConnections[0] ?? storeConnections[0] ?? null;
   const statusLabel = settings?.vendor.entitlementStatus
-    ? formatStatus(settings.vendor.entitlementStatus)
+    ? vendorAccountStatusLabel(settings.vendor.entitlementStatus)
     : onboarding?.entitlement.status
-      ? formatStatus(onboarding.entitlement.status)
+      ? vendorAccountStatusLabel(onboarding.entitlement.status)
       : "Active";
 
   return (
@@ -267,10 +279,10 @@ function LaunchOverviewPanel({
 
         <div className="rounded-md border border-[#C060E0]/25 bg-[#C060E0]/5 px-4 py-3 text-sm">
           <div className="font-semibold text-[#8c35aa]">
-            {isLoading ? "Loading launch status" : complete ? "Launch checklist complete" : `${completedStepCount} of ${totalStepCount} launch steps complete`}
+            {isLoading ? "Loading your setup" : complete ? "Setup complete" : `${completedStepCount} of ${totalStepCount} setup steps done`}
           </div>
           <div className="mt-1 text-zinc-600">
-            {complete ? "Ready for smoke testing." : "Work through the next required launch gate."}
+            {complete ? "You're ready to sell." : "Finish the next step to start selling."}
           </div>
         </div>
       </div>
@@ -300,7 +312,7 @@ function LaunchOverviewPanel({
           value={String(orderTotal)}
           detail={heldCount > 0
             ? `${heldCount} waiting on payment`
-            : orderTotal === 0 ? "No marketplace orders yet" : "Marketplace intake recorded"}
+            : orderTotal === 0 ? "No orders yet" : "Orders from your store"}
         />
       </div>
     </div>
@@ -421,7 +433,7 @@ function NextActionPanel({
       <div className="mt-5 border-t border-zinc-200 pt-4 text-sm">
         <div className="flex items-center justify-between gap-3">
           <span className="text-zinc-500">Signed in with</span>
-          <span className="font-medium">{formatStatus(authMethod)}</span>
+          <span className="font-medium">{vendorAuthMethodLabel(authMethod)}</span>
         </div>
         <div className="mt-2 flex items-center justify-between gap-3">
           <span className="text-zinc-500">Passkey</span>
@@ -470,9 +482,9 @@ function LaunchChecklistPanel({
         <div>
           <h2 className="flex items-center gap-2 text-lg font-semibold">
             <CheckCircle2 className="h-5 w-5 text-[#C060E0]" />
-            Launch checklist
+            Setup checklist
           </h2>
-          <p className="text-sm text-zinc-500">What is complete and what is still blocking launch.</p>
+          <p className="text-sm text-zinc-500">What's done and what's left before you can sell.</p>
         </div>
         {onboarding && isOnboardingVendor(onboarding.vendor.status) && (
           <Button
@@ -502,7 +514,7 @@ function LaunchChecklistPanel({
         </div>
       ) : (
         <div className="mt-5 rounded-md border border-dashed border-zinc-300 p-5 text-sm text-zinc-600">
-          Launch checklist could not be loaded.
+          We couldn't load your checklist. Reload the page to try again.
         </div>
       )}
     </div>
@@ -522,7 +534,7 @@ function LaunchStepRow({
         <div className="flex flex-wrap items-center gap-2">
           <span className="font-medium">{step.label}</span>
           <Badge variant="outline" className={launchStepTone(step.status)}>
-            {formatStatus(step.status)}
+            {vendorStepStatusLabel(step.status)}
           </Badge>
         </div>
         <p className="mt-1 text-sm text-zinc-500">{launchStepDetail(step, onboarding)}</p>
@@ -549,9 +561,9 @@ function StoreHealthPanel({
             <Store className="h-5 w-5 text-[#C060E0]" />
             Store connection
           </h2>
-          <p className="text-sm text-zinc-500">Marketplace account and token readiness.</p>
+          <p className="text-sm text-zinc-500">Your marketplace store and whether it's ready for orders.</p>
         </div>
-        <Badge variant="outline">{launchReadyCount} launch-ready</Badge>
+        <Badge variant="outline">{launchReadyCount} ready</Badge>
       </div>
 
       {isLoading ? (
@@ -567,7 +579,7 @@ function StoreHealthPanel({
         </div>
       ) : (
         <div className="mt-5 rounded-md border border-dashed border-zinc-300 p-5 text-sm text-zinc-600">
-          No store connection configured.
+          No store connected yet.
         </div>
       )}
     </div>
@@ -598,7 +610,7 @@ function RecentOrdersPanel({
             Recent orders
           </h2>
           <p className="text-sm text-zinc-500">
-            {total > 0 ? `${Math.min(orders.length, dashboardActivityLimit)} of ${total} shown` : "Latest marketplace intake"}
+            {total > 0 ? `${Math.min(orders.length, dashboardActivityLimit)} of ${total} shown` : "Your latest orders"}
           </p>
         </div>
         <Button type="button" variant="outline" size="sm" className="h-9 w-fit gap-2" onClick={onViewAll}>
@@ -616,7 +628,7 @@ function RecentOrdersPanel({
       ) : error ? (
         <Alert variant="destructive" className="mt-5">
           <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{queryErrorMessage(error, "Unable to load recent dropship orders.")}</AlertDescription>
+          <AlertDescription>{vendorErrorMessage(error, "We couldn't load your orders. Reload the page to try again.")}</AlertDescription>
         </Alert>
       ) : orders.length ? (
         <div className="mt-5 divide-y divide-zinc-200 rounded-md border border-zinc-200">
@@ -626,7 +638,7 @@ function RecentOrdersPanel({
         </div>
       ) : (
         <div className="mt-5 rounded-md border border-dashed border-zinc-300 p-5 text-sm text-zinc-600">
-          No dropship orders recorded yet.
+          No orders yet.
         </div>
       )}
     </div>
@@ -641,13 +653,13 @@ function RecentOrderRow({ order, now }: { order: DropshipOrderListItem; now: Dat
         <div className="flex flex-wrap items-center gap-2">
           <div className="truncate font-medium">{order.externalOrderNumber || order.externalOrderId}</div>
           <Badge variant="outline" className={statusTone(order.status)}>
-            {formatStatus(order.status)}
+            {vendorOrderStatusLabel(order.status)}
           </Badge>
           {heldDetail && <span className="text-xs font-medium text-amber-800" data-testid="recent-order-hold-detail">{heldDetail}</span>}
         </div>
         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-500">
-          <span>{formatStatus(order.platform)} intake {order.intakeId}</span>
-          <span>{order.storeConnection.externalDisplayName || formatStatus(order.storeConnection.platform)}</span>
+          <span>{vendorMarketplaceOrderLabel({ platform: order.platform })}</span>
+          <span>{order.storeConnection.externalDisplayName || vendorPlatformName(order.storeConnection.platform)}</span>
           <span>{order.lineCount} line{order.lineCount === 1 ? "" : "s"} / {order.totalQuantity} unit{order.totalQuantity === 1 ? "" : "s"}</span>
         </div>
       </div>
@@ -698,7 +710,7 @@ function RecentWalletPanel({
       ) : error ? (
         <Alert variant="destructive" className="mt-5">
           <AlertCircle className="h-4 w-4" />
-          <AlertDescription>{queryErrorMessage(error, "Unable to load wallet activity.")}</AlertDescription>
+          <AlertDescription>{vendorErrorMessage(error, "We couldn't load your wallet activity. Reload the page to try again.")}</AlertDescription>
         </Alert>
       ) : ledger.length ? (
         <div className="mt-5 divide-y divide-zinc-200 rounded-md border border-zinc-200">
@@ -708,7 +720,7 @@ function RecentWalletPanel({
         </div>
       ) : (
         <div className="mt-5 rounded-md border border-dashed border-zinc-300 p-5 text-sm text-zinc-600">
-          No wallet ledger activity recorded yet.
+          No wallet activity yet.
         </div>
       )}
     </div>
@@ -720,14 +732,13 @@ function RecentWalletLedgerRow({ entry }: { entry: DropshipWalletLedgerEntry }) 
     <div className="grid gap-3 p-4 sm:grid-cols-[1fr_auto] sm:items-center">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
-          <div className="font-medium">{formatStatus(entry.type)}</div>
+          <div className="font-medium">{vendorLedgerEntryLabel(entry)}</div>
           <Badge variant="outline" className={statusTone(entry.status)}>
-            {formatStatus(entry.status)}
+            {vendorLedgerStatusLabel(entry.status)}
           </Badge>
         </div>
         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-500">
           <span>{formatDateTime(entry.createdAt)}</span>
-          {entry.referenceType && <span>{formatStatus(entry.referenceType)} {entry.referenceId ?? ""}</span>}
           {entry.settledAt && <span>Settled {formatDateTime(entry.settledAt)}</span>}
         </div>
       </div>
@@ -748,17 +759,13 @@ function StoreConnectionCard({ connection }: { connection: DropshipStoreConnecti
           <p className="mt-1 text-sm text-zinc-500">{connectedStoreSummaryDetail(connection)}</p>
         </div>
         <Badge variant={connection.launchReady ? "default" : "outline"}>
-          {connection.launchReady ? "Launch ready" : formatStatus(connection.status)}
+          {connection.launchReady ? "Ready" : vendorStoreStatusLabel(connection.status)}
         </Badge>
       </div>
       <div className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
         <div>
-          <div className="text-zinc-500">Setup</div>
-          <div className="mt-1 font-medium">{formatStatus(connection.setupStatus)}</div>
-        </div>
-        <div>
-          <div className="text-zinc-500">Tokens</div>
-          <div className="mt-1 font-medium">{tokenStatus(connection)}</div>
+          <div className="text-zinc-500">Connection</div>
+          <div className="mt-1 font-medium">{vendorStoreConnectionLine(connection)}</div>
         </div>
         <div>
           <div className="text-zinc-500">Updated</div>
@@ -773,9 +780,9 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
   if (!onboarding) {
     return {
       actionLabel: null,
-      message: "Launch readiness is loading. If this stays blank, reload the page or open onboarding.",
+      message: "Your setup is loading. If this stays blank, reload the page or open Onboarding.",
       path: null,
-      title: "Loading launch status",
+      title: "Loading your setup",
     };
   }
 
@@ -794,25 +801,25 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
   if (!nextStep) {
     return {
       actionLabel: "Open catalog",
-      message: "The checklist is complete. Push a test listing, place a marketplace order, then verify order intake, fulfillment, and tracking.",
+      message: "Your setup is done. List products on your eBay store from the Catalog page, and orders will show up here.",
       path: "/catalog",
-      title: "Ready for smoke testing",
+      title: "You're ready to sell",
     };
   }
 
   if (nextStep.key === "vendor_profile") {
     return {
       actionLabel: "Open settings",
-      message: "Finish the account profile before launch readiness can be completed.",
+      message: "Finish your account profile to continue setting up.",
       path: "/settings",
-      title: "Complete the vendor profile",
+      title: "Complete your profile",
     };
   }
 
   if (nextStep.key === "store_connection") {
     return {
       actionLabel: "Connect store",
-      message: "Connect or refresh the marketplace store so orders, listings, and tracking can flow through the portal.",
+      message: "Connect your eBay store so your listings, orders and tracking can go through the portal.",
       path: "/onboarding",
       title: "Connect a store",
     };
@@ -821,18 +828,18 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
   if (nextStep.key === "catalog_available") {
     return {
       actionLabel: "Check catalog",
-      message: "Card Shellz ops needs to expose catalog rows before you can select products for dropship.",
+      message: "Card Shellz is getting products ready for you. Check back soon to choose what to sell.",
       path: "/catalog",
-      title: "Waiting on catalog access",
+      title: "Products coming soon",
     };
   }
 
   if (nextStep.key === "catalog_selection") {
     return {
       actionLabel: "Select products",
-      message: "Choose the products or variants you want to make available for marketplace listing.",
+      message: "Choose the products you want to list on your store.",
       path: "/catalog",
-      title: "Select dropship products",
+      title: "Choose products to sell",
     };
   }
 
@@ -855,21 +862,23 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
 function launchStepDetail(step: DropshipOnboardingStep, onboarding: DropshipOnboardingState): string {
   if (step.key === "vendor_profile") {
     return onboarding.vendor.status === "active"
-      ? "Vendor profile is active."
-      : `Vendor profile status is ${formatStatus(onboarding.vendor.status)}.`;
+      ? "Your profile is active."
+      : `Your account: ${vendorAccountStatusLabel(onboarding.vendor.status).toLowerCase()}.`;
   }
   if (step.key === "store_connection") {
-    return `${onboarding.storeConnections.launchReadyConnectedCount} launch-ready of ${onboarding.storeConnections.includedLimit} included connection(s).`;
+    return onboarding.storeConnections.launchReadyConnectedCount > 0
+      ? "Your store is connected and ready."
+      : "No store ready yet.";
   }
   if (step.key === "catalog_available") {
     return onboarding.catalog.adminCatalogAvailable
-      ? `${onboarding.catalog.adminExposureRuleCount} admin exposure rule(s) available.`
-      : "Card Shellz ops has not exposed catalog rows yet.";
+      ? "Products are ready for you to choose from."
+      : "Card Shellz is getting products ready for you.";
   }
   if (step.key === "catalog_selection") {
     return onboarding.catalog.hasVendorSelection
       ? `${describeChosenItems(onboarding.catalog.vendorSelectedItemCount)}.`
-      : "No product selection has been saved yet.";
+      : "You haven't chosen any products yet.";
   }
   return walletGateDetail(onboarding);
 }
@@ -882,16 +891,16 @@ function launchStepTone(status: DropshipOnboardingStep["status"]): string {
 
 function catalogMetricValue(onboarding: DropshipOnboardingState | undefined): string {
   if (!onboarding) return "Loading";
-  if (!onboarding.catalog.adminCatalogAvailable) return "Not available";
+  if (!onboarding.catalog.adminCatalogAvailable) return "Coming soon";
   if (!onboarding.catalog.hasVendorSelection) return "Selection needed";
   return describeChosenItems(onboarding.catalog.vendorSelectedItemCount);
 }
 
 function catalogMetricDetail(onboarding: DropshipOnboardingState | undefined): string {
-  if (!onboarding) return "Catalog readiness loading";
-  if (!onboarding.catalog.adminCatalogAvailable) return "Waiting on admin exposure";
+  if (!onboarding) return "Loading";
+  if (!onboarding.catalog.adminCatalogAvailable) return "Card Shellz is getting products ready";
   if (!onboarding.catalog.hasVendorSelection) return "Pick products to list";
-  return `${onboarding.catalog.adminExposureRuleCount} exposed rule(s)`;
+  return "Products chosen";
 }
 
 function walletMetricValue(
@@ -909,7 +918,7 @@ function walletMetricDetail(
   onboarding: DropshipOnboardingState | undefined,
 ): string {
   if (onboarding) return walletGateDetail(onboarding);
-  if (!settings) return "Wallet readiness loading";
+  if (!settings) return "Loading";
   if (!settings.wallet.autoReloadEnabled) return "Autopay disabled";
   if (!settings.wallet.autoReloadFundingMethodReady) return "Funding method needed";
   return "Autopay ready";
@@ -924,7 +933,7 @@ function walletGateDetail(onboarding: DropshipOnboardingState): string {
 }
 
 function connectedStoreSummaryDetail(connection: DropshipStoreConnectionSummary): string {
-  const details = [formatStatus(connection.platform)];
+  const details = [vendorPlatformName(connection.platform)];
   if (connection.shopDomain && connection.shopDomain !== connection.externalDisplayName) {
     details.push(connection.shopDomain);
   }
@@ -932,19 +941,12 @@ function connectedStoreSummaryDetail(connection: DropshipStoreConnectionSummary)
 }
 
 function storeConnectionDisplayName(connection: DropshipStoreConnectionSummary): string {
-  return connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} store name pending`;
+  return connection.externalDisplayName || connection.shopDomain || `${vendorPlatformName(connection.platform)} store`;
 }
 
 function connectionStatusDetail(connection: DropshipStoreConnectionSummary): string {
-  if (connection.launchReady) return `${formatStatus(connection.platform)} launch-ready`;
-  if (connection.status !== "connected") return formatStatus(connection.status);
-  return `Setup ${formatStatus(connection.setupStatus)}`;
-}
-
-function tokenStatus(connection: DropshipStoreConnectionSummary): string {
-  if (connection.hasAccessToken && connection.hasRefreshToken) return "Access + refresh";
-  if (connection.hasAccessToken) return "Access only";
-  return "Missing";
+  if (connection.launchReady) return `${vendorPlatformName(connection.platform)} store ready`;
+  return vendorStoreReadinessDetail(connection);
 }
 
 function formatLedgerAmount(amountCents: number): string {

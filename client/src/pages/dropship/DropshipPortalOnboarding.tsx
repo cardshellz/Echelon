@@ -45,7 +45,6 @@ import {
 import {
   buildStoreConnectionOAuthStartInput,
   fetchJson,
-  formatStatus,
   postJson,
   type DropshipStoreConnectionListResponse,
   type DropshipOnboardingState,
@@ -56,6 +55,12 @@ import {
   type DropshipStorePlatform,
 } from "@/lib/dropship-ops-surface";
 import { describeVendorStanding } from "@/lib/dropship-vendor-standing";
+import {
+  vendorAccountStatusLabel,
+  vendorErrorMessage,
+  vendorStoreReadinessDetail,
+  vendorStoreStatusLabel,
+} from "@/lib/dropship-vendor-labels";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 import {
   readStoreOAuthCallbackStatus,
@@ -149,7 +154,7 @@ export default function DropshipPortalOnboarding() {
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {onboardingQuery.error instanceof Error ? onboardingQuery.error.message : "Unable to load onboarding state."}
+              {vendorErrorMessage(onboardingQuery.error, "We couldn't load your setup. Reload the page to try again.")}
             </AlertDescription>
           </Alert>
         )}
@@ -182,8 +187,8 @@ export default function DropshipPortalOnboarding() {
           <Empty className="mt-5 rounded-md border border-dashed p-8">
             <EmptyMedia variant="icon"><Plug /></EmptyMedia>
             <EmptyHeader>
-              <EmptyTitle>No onboarding state</EmptyTitle>
-              <EmptyDescription>Dropship onboarding state could not be loaded.</EmptyDescription>
+              <EmptyTitle>Setup unavailable</EmptyTitle>
+              <EmptyDescription>We couldn't load your setup. Reload the page to try again.</EmptyDescription>
             </EmptyHeader>
           </Empty>
         )}
@@ -212,7 +217,7 @@ function LaunchChecklist({
             {onboarding.vendor.businessName || onboarding.vendor.email || "Card Shellz member"}
           </p>
         </div>
-        <Badge variant="outline">{formatStatus(onboarding.vendor.status)}</Badge>
+        <Badge variant="outline">{vendorAccountStatusLabel(onboarding.vendor.status)}</Badge>
       </div>
 
       <ol className="mt-5 divide-y divide-zinc-200 rounded-md border border-zinc-200">
@@ -297,7 +302,7 @@ function AccountSummaryCard({
           <h2 className="text-lg font-semibold">{summary.title}</h2>
           <p className="mt-1 text-sm text-zinc-500">{standing ? `${standing.reason} ${standing.action}` : summary.detail}</p>
         </div>
-        <Badge variant="outline">{formatStatus(onboarding.vendor.status)}</Badge>
+        <Badge variant="outline">{vendorAccountStatusLabel(onboarding.vendor.status)}</Badge>
       </div>
       <Button type="button" className="mt-5 h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={onOpenDashboard}>
         Open dashboard
@@ -386,7 +391,7 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
       await task();
       return true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Request failed");
+      setError(vendorErrorMessage(caught));
       return false;
     } finally {
       setPendingAction(null);
@@ -511,7 +516,7 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
           <Alert className="mt-5 border-amber-200 bg-amber-50 text-amber-900">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              Connected store credentials need attention before launch. eBay requires access and refresh token references.
+              Reconnect your eBay store before you start selling.
             </AlertDescription>
           </Alert>
         )}
@@ -671,7 +676,7 @@ function ConnectedStoreSummary({ connection }: { connection: DropshipStoreConnec
         </div>
       </div>
       <div className="mt-4 grid gap-4 text-sm sm:grid-cols-3">
-        <StoreConnectionDetail label="Status" value={formatStatus(connection.status)} />
+        <StoreConnectionDetail label="Status" value={vendorStoreStatusLabel(connection.status)} />
         <StoreConnectionDetail label="Readiness" value={connection.launchReady ? "Launch ready" : launchReadinessDetail(connection)} />
         <StoreConnectionDetail label="Updated" value={formatDateTime(connection.updatedAt)} />
       </div>
@@ -777,7 +782,7 @@ function connectButtonIcon(input: {
 }
 
 function connectionDisplayName(connection: DropshipStoreConnectionProfileResponse): string {
-  return connection.externalDisplayName || connection.shopDomain || `${storePlatformName(connection.platform)} store name pending`;
+  return connection.externalDisplayName || connection.shopDomain || `${storePlatformName(connection.platform)} store`;
 }
 
 function connectedStoreIdentityDetail(connection: DropshipStoreConnectionProfileResponse): string {
@@ -785,21 +790,14 @@ function connectedStoreIdentityDetail(connection: DropshipStoreConnectionProfile
   if (connection.shopDomain && connection.shopDomain !== connectionDisplayName(connection)) {
     details.push(connection.shopDomain);
   }
-  if (connection.externalAccountId && connection.externalAccountId !== connection.externalDisplayName) {
-    details.push(`Account ID ${connection.externalAccountId}`);
-  }
-  if (!connection.externalDisplayName && !connection.shopDomain && !connection.externalAccountId) {
-    details.push("Reauthorize to load store name");
+  if (!connection.externalDisplayName && !connection.shopDomain) {
+    details.push("Reconnect to show your store name");
   }
   return details.join(" | ");
 }
 
 function launchReadinessDetail(connection: DropshipStoreConnectionProfileResponse): string {
-  if (connection.status !== "connected") return formatStatus(connection.status);
-  if (connection.setupStatus !== "ready") return `Setup ${formatStatus(connection.setupStatus)}`;
-  if (!connection.hasAccessToken) return "Access token missing";
-  if (connection.platform === "ebay" && !connection.hasRefreshToken) return "Refresh token missing";
-  return "Not ready";
+  return vendorStoreReadinessDetail(connection);
 }
 
 function formatDateTime(value: string | null): string {
@@ -896,7 +894,7 @@ function ActivationFooter({
       await task();
       return true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Activation request failed.");
+      setError(vendorErrorMessage(caught));
       return false;
     } finally {
       setPendingAction(null);

@@ -46,7 +46,7 @@ describe("DropshipMarketplaceTrackingService", () => {
       eventType: "dropship_tracking_pushed",
       critical: false,
       channels: ["email", "in_app"],
-      title: "Dropship tracking pushed",
+      title: "Tracking sent",
       idempotencyKey: "tracking-pushed:40",
       payload: {
         pushId: 40,
@@ -148,7 +148,7 @@ describe("DropshipMarketplaceTrackingService", () => {
       vendorId: 20,
       eventType: "dropship_tracking_push_failed",
       critical: true,
-      title: "Dropship tracking push failed",
+      title: "Tracking couldn't be sent",
       idempotencyKey: "tracking-push-failed:40:1:DROPSHIP_EBAY_TRACKING_LINE_ITEM_IDS_REQUIRED",
       payload: {
         pushId: 40,
@@ -224,7 +224,7 @@ describe("DropshipMarketplaceTrackingService failure notices", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({
       critical: false,
-      title: "Dropship tracking push retrying",
+      title: "Tracking not sent yet",
       payload: { retryable: true, failureCode: "DROPSHIP_EBAY_TRACKING_HTTP_ERROR" },
     });
   });
@@ -252,7 +252,7 @@ describe("DropshipMarketplaceTrackingService failure notices", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({
       critical: true,
-      title: "Dropship tracking push failed",
+      title: "Tracking couldn't be sent",
       idempotencyKey: "tracking-push-failed:40:12:DROPSHIP_EBAY_TRACKING_HTTP_ERROR",
       payload: { retryable: false },
     });
@@ -265,7 +265,7 @@ describe("DropshipMarketplaceTrackingService failure notices", () => {
     });
 
     expect(sent).toHaveLength(1);
-    expect(sent[0]).toMatchObject({ critical: true, title: "Dropship tracking push failed" });
+    expect(sent[0]).toMatchObject({ critical: true, title: "Tracking couldn't be sent" });
   });
 });
 

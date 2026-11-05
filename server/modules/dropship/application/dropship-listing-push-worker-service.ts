@@ -712,7 +712,7 @@ export class DropshipListingPushWorkerService {
       eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_PUSH_FAILED,
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship listing push failed",
+      title: "Some listings couldn't be sent to your store",
       message: describeFailedListingPushJob(result, pendingAutomaticRequeue),
       payload: {
         jobId: result.job.jobId,
@@ -921,7 +921,7 @@ export function describeFailedListingPushJob(
   pendingAutomaticRequeue: ReadonlySet<number> = EMPTY_ITEM_IDS,
 ): string {
   const failed = result.summary.failed + result.summary.blocked;
-  const lead = `${failed} of ${result.summary.total} listing${result.summary.total === 1 ? "" : "s"} could not be sent to your store (job ${result.job.jobId}).`;
+  const lead = `${failed} of ${result.summary.total} listing${result.summary.total === 1 ? "" : "s"} could not be sent to your store.`;
   const first = result.items.find((item) => (item.status === "failed" || item.status === "blocked") && item.errorMessage);
   if (!first) return lead;
   const retry = pendingAutomaticRequeue.has(first.itemId) ? ` ${AUTOMATIC_RETRY_EMAIL_SENTENCE}` : "";

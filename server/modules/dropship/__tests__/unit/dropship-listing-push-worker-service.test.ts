@@ -133,7 +133,7 @@ describe("DropshipListingPushWorkerService", () => {
       eventType: "dropship_listing_push_failed",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship listing push failed",
+      title: "Some listings couldn't be sent to your store",
       idempotencyKey: "listing-push:30:failed",
       payload: {
         jobId: 30,
@@ -306,7 +306,7 @@ describe("DropshipListingPushWorkerService", () => {
       },
     });
     expect(notificationSender.sent[0]?.message).toBe(
-      "1 of 1 listing could not be sent to your store (job 30). First reason: eBay listing push failed with HTTP 400: 25002 Invalid value for aspect (aspect: Brand)",
+      "1 of 1 listing could not be sent to your store. First reason: eBay listing push failed with HTTP 400: 25002 Invalid value for aspect (aspect: Brand)",
     );
   });
 
@@ -470,7 +470,7 @@ describe("DropshipListingPushWorkerService", () => {
       message: "A listing push item is blocked until an operator resolves it.",
       context: { jobId: 30, itemId: 1, errorCode: code, inventoryCode: refusal.inventoryCode, outcome: "requires_review" } });
     expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_STOCK_SETUP")).toBeUndefined();
-    expect(notificationSender.sent[0]?.message).toBe(`1 of 1 listing could not be sent to your store (job 30). First reason: ${refusal.message}`);
+    expect(notificationSender.sent[0]?.message).toBe(`1 of 1 listing could not be sent to your store. First reason: ${refusal.message}`);
   });
 
   // Review TW-3: the vendor's email for a code the push sweep re-queues by itself says so; while an automatic
@@ -489,7 +489,7 @@ describe("DropshipListingPushWorkerService", () => {
       await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-1" });
       expect(notificationSender.sent).toHaveLength(1);
       expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed",
-        message: "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment. Card Shellz will try it again automatically." });
+        message: "1 of 1 listing could not be sent to your store. First reason: Card Shellz stock for this item was being updated at the same moment. Card Shellz will try it again automatically." });
       // Asked with the sweep's own guards, once the job is final (review V2-2).
       expect(outlook.calls).toEqual([30]);
     });
@@ -502,7 +502,7 @@ describe("DropshipListingPushWorkerService", () => {
       await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-guards" });
       expect(notificationSender.sent).toHaveLength(1);
       expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed",
-        message: "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment." });
+        message: "1 of 1 listing could not be sent to your store. First reason: Card Shellz stock for this item was being updated at the same moment." });
     });
 
     it("sends the final email when the guards exclude an item that was already re-queued", async () => {
@@ -512,7 +512,7 @@ describe("DropshipListingPushWorkerService", () => {
       await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-guards-2" });
       expect(notificationSender.sent).toHaveLength(1);
       expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed:after-automatic-retry",
-        message: "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment." });
+        message: "1 of 1 listing could not be sent to your store. First reason: Card Shellz stock for this item was being updated at the same moment." });
     });
 
     it("promises nothing, and logs a WARN, when the pending items cannot be read", async () => {
@@ -520,7 +520,7 @@ describe("DropshipListingPushWorkerService", () => {
       marketplacePush.error = busy();
       await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-outlook-failed" });
       expect(notificationSender.sent[0]?.message).toBe(
-        "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment.");
+        "1 of 1 listing could not be sent to your store. First reason: Card Shellz stock for this item was being updated at the same moment.");
       expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_AUTOMATIC_REQUEUE_OUTLOOK_FAILED")).toMatchObject({
         context: { jobId: 30, itemIds: [1], outcome: "no_automatic_retry_promised", error: "connection reset" } });
     });
@@ -550,7 +550,7 @@ describe("DropshipListingPushWorkerService", () => {
       expect(outlook.calls).toEqual([]);
       expect(notificationSender.sent).toHaveLength(1);
       expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed:after-automatic-retry",
-        message: `1 of 1 listing could not be sent to your store (job 30). First reason: ${reason}` });
+        message: `1 of 1 listing could not be sent to your store. First reason: ${reason}` });
     });
 
     // Rebase of PR A onto Fix PR 2a: a publish run's chunk job sends no email of its own (its run sends one when it
