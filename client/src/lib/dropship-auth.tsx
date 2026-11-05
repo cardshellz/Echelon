@@ -7,6 +7,7 @@ import {
   type PublicKeyCredentialCreationOptionsJSON,
   type PublicKeyCredentialRequestOptionsJSON,
 } from "@simplewebauthn/browser";
+import { DropshipApiError } from "./dropship-ops-surface";
 
 export type DropshipSensitiveAction =
   | "account_bootstrap"
@@ -353,22 +354,35 @@ async function dropshipJson<T = unknown>(
   });
 
   if (!response.ok) {
-    throw new Error(await dropshipErrorMessage(response));
+    throw await dropshipAuthError(response);
   }
 
   return await response.json();
 }
 
-async function dropshipErrorMessage(response: Response): Promise<string> {
+/**
+ * The server's refusal as a DropshipApiError, so a vendor page can show words
+ * for its code (vendorErrorMessage) instead of the server's own message. The
+ * message is still the server's, unchanged, for anything that reads it.
+ */
+async function dropshipAuthError(response: Response): Promise<DropshipApiError> {
   const text = await response.text();
-  if (!text) return response.statusText || "Request failed";
-
-  try {
-    const parsed = JSON.parse(text);
-    return parsed?.error?.message || parsed?.message || parsed?.error || response.statusText;
-  } catch {
-    return text;
+  let message = response.statusText || "Request failed";
+  let code: string | null = null;
+  if (text) {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      const body = typeof parsed === "object" && parsed !== null ? parsed as Record<string, unknown> : {};
+      const error = typeof body.error === "object" && body.error !== null ? body.error as Record<string, unknown> : null;
+      const candidate = error?.message ?? body.message ?? (typeof body.error === "string" ? body.error : null);
+      if (typeof candidate === "string" && candidate.trim()) message = candidate;
+      if (typeof error?.code === "string" && error.code.trim()) code = error.code;
+    } catch {
+      // Not JSON: keep the text itself as the message, as before.
+      message = text;
+    }
   }
+  return new DropshipApiError({ message, status: response.status, code });
 }
 
 function createIdempotencyKey(prefix: string): string {

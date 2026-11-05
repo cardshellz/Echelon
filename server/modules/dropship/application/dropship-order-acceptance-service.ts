@@ -518,7 +518,7 @@ export class DropshipOrderAcceptanceService {
       eventType: accepted ? "dropship_order_accepted" : "dropship_order_payment_hold",
       critical: !accepted,
       channels: ["email", "in_app"],
-      title: accepted ? "Dropship order accepted" : "Dropship order needs wallet funding",
+      title: accepted ? "Order accepted" : "Order needs payment",
       message: accepted
         ? `Order intake ${result.intakeId} was accepted into fulfillment for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.${advanceSentenceFor(result)}${chargeSentenceFor(reload)}`
         : result.paymentHoldReason === "vendor_paused"

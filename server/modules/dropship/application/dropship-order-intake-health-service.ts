@@ -11,6 +11,7 @@ import type {
   DropshipLogger,
   DropshipNotificationSender,
 } from "./dropship-ports";
+import { vendorPlatformName } from "../domain/vendor-platform-name";
 
 const positiveIdSchema = z.number().int().positive();
 const platformSchema = z.string().trim().min(1).max(30);
@@ -205,6 +206,8 @@ function transitionNotification(
   const { connection, transition } = result;
   const status = transition.current.status;
   const storeLabel = connection.externalDisplayName ?? connection.shopDomain ?? `${connection.platform} store`;
+  // Words only: `storeLabel` stays as it was because it is part of the payload.
+  const vendorStoreLabel = connection.externalDisplayName ?? connection.shopDomain ?? `your ${vendorPlatformName(connection.platform)} store`;
   const commonPayload = {
     vendorId: connection.vendorId,
     storeConnectionId: connection.storeConnectionId,
@@ -231,8 +234,8 @@ function transitionNotification(
       eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_INTAKE_RECOVERED,
       critical: false,
       channels: ["email", "in_app"],
-      title: "Dropship order intake recovered",
-      message: `Order intake for ${storeLabel} is healthy again. Echelon resumed from the preserved marketplace sync cursor and will continue processing newly observed orders.`,
+      title: "Orders are coming in again",
+      message: `Orders from ${vendorStoreLabel} are coming in again. Any orders placed while it was down will come through too.`,
       payload: commonPayload,
       idempotencyKey,
     };
@@ -243,8 +246,8 @@ function transitionNotification(
       eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_INTAKE_DEGRADED,
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship order intake is degraded",
-      message: `Echelon has detected repeated order-intake failures for ${storeLabel}. Automatic retries are continuing, but marketplace orders may be delayed.`,
+      title: "Orders are coming in slowly",
+      message: `We're having trouble reading new orders from ${vendorStoreLabel}. We're still trying, but your orders may be delayed.`,
       payload: commonPayload,
       idempotencyKey,
     };
@@ -254,8 +257,8 @@ function transitionNotification(
     eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_INTAKE_STOPPED,
     critical: true,
     channels: ["email", "in_app"],
-    title: "Dropship order intake has stopped",
-    message: `Echelon has not recorded a successful order-intake heartbeat for ${storeLabel}. Orders may not reach fulfillment until the connection or worker recovers.`,
+    title: "Orders aren't coming in",
+    message: `We haven't been able to read new orders from ${vendorStoreLabel}. Orders may not ship until this is fixed. Check your store connection in Settings, or contact Card Shellz support.`,
     payload: commonPayload,
     idempotencyKey,
   };

@@ -1197,7 +1197,7 @@ describe("DropshipStoreConnectionService", () => {
       eventType: "dropship_store_disconnected",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship store disconnected",
+      title: "Store disconnected",
       idempotencyKey: "store-disconnect:21:disconnect-1",
       payload: {
         vendorId: 10,

@@ -110,7 +110,7 @@ describe("PgDropshipMarketplaceCredentialRepository token vault configuration", 
         vendorId: 10,
         eventType: "dropship_store_needs_reauth",
         critical: true,
-        title: "Dropship store needs reauthorization",
+        title: "Reconnect your store",
         idempotencyKey: "store-auth-health:22:needs_reauth:2026-05-05T12:00:00.000Z",
       }),
     ]);

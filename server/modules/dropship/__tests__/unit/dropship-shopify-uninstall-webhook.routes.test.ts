@@ -67,7 +67,7 @@ describe("Shopify dropship app uninstall webhook route", () => {
       eventType: "dropship_store_disconnected",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship store disconnected",
+      title: "Store disconnected",
       idempotencyKey: "shopify-uninstall:22:webhook-1",
       payload: {
         vendorId: 10,
