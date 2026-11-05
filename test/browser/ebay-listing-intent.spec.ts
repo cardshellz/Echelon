@@ -461,10 +461,10 @@ test("an old superseded dispatch can be reviewed without authorizing another rem
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
-test("an absent listing does not hide an earlier unconfirmed removal", async ({page}) => {
+for (const dispatchStatus of ["unknown", "accepted"] as const) test(`an absent listing keeps an ${dispatchStatus} removal without finality visible`, async ({page}) => {
   const state = await setupEbayChannelPage(page); state.excluded = true; state.feedStatus = "excluded";
   state.intentChanges.items = [memberChange()];
-  const record = { ...archivedMember, state: "retired", code: null,
+  const record = { ...archivedMember, state: "retired", dispatchStatus, code: null,
     verifiedAt: "2026-10-20T20:01:00.000Z", unconfirmedPriorDispatch: true };
   let authorizations = 0;
   await page.route("**/api/channels/67/listing-lifecycle/members**", route => {
@@ -484,7 +484,7 @@ test("an absent listing does not hide an earlier unconfirmed removal", async ({p
   await expect(dialog).toContainText("earlier removal may still finish later");
   await expect(dialog.getByRole("button", { name: "Authorize removal recovery", exact: true })).toHaveCount(0);
   expect(authorizations).toBe(0);
-  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  expect(state.commands).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
 test("an unpublished observation keeps an earlier unconfirmed removal visible", async ({page}) => {
