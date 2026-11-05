@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isManagedMemberPricingDescription } from "@shared/order-edits/order-edit-member-pricing";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   orderEditFinancialsSchema,
@@ -193,7 +194,7 @@ function preservesRecoveryDiscountRules(
       (historicalAddedLine &&
         rule.type === "ManualDiscountApplication" &&
         rule.targetType === "LINE_ITEM" &&
-        rule.label === "Echelon member pricing") ||
+        isManagedMemberPricingDescription(rule.label)) ||
       (Boolean(codeRecovery?.codePricing) &&
         rule.targetType === "LINE_ITEM" &&
         ((rule.type === "AutomaticDiscountApplication" &&
@@ -202,11 +203,11 @@ function preservesRecoveryDiscountRules(
               discountRuleIdentity(original) === discountRuleIdentity(rule),
           )) ||
           (rule.type === "ManualDiscountApplication" &&
-            [
-              "Echelon member pricing",
-              baseline.codePricing?.description,
-              codeRecovery?.codePricing?.description,
-            ].includes(rule.label)))),
+            (isManagedMemberPricingDescription(rule.label) ||
+              [
+                baseline.codePricing?.description,
+                codeRecovery?.codePricing?.description,
+              ].includes(rule.label))))),
   );
 }
 
