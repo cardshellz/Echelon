@@ -241,7 +241,8 @@ describeDatabase.sequential("eBay sync-back sweep persistence (PostgreSQL)", () 
       expect((await read(1, 0)).map((row) => row.listingId)).toEqual([first]);
       expect((await read(1, 1)).map((row) => row.listingId)).toEqual([second]);
       expect((await read(1, 2)).map((row) => row.listingId)).toEqual([first]);
-      expect((await read(50, 1)).map((row) => row.listingId)).toEqual([second, first]);
+      // A window as large as the list starts at (rotation x limit) mod total = (1 x 50) mod 2 = 0: plain id order.
+      expect((await read(50, 1)).map((row) => row.listingId)).toEqual([first, second]);
       expect(await repository.listWaitingForStockListings({ storeConnectionId: 24, limit: 50, rotation: 0 })).toEqual([]);
       expect((await pool.query(`SELECT id, status, updated_at, metadata FROM dropship.dropship_vendor_listings ORDER BY id`)).rows).toEqual(before);
     });

@@ -170,7 +170,7 @@ test("J2 unchecking a pick removes it, says its Shopify listing is set to quanti
   expect(state.changeCalls.map((call) => call.body.remove)).toEqual([{ productVariantIds: [101] }]);
   expect(state.picks.size).toBe(0);
   await expect(row(page, 101)).toContainText("Not selected");
-  await expect(row(page, 101)).toContainText("No quantity: not selected");
+  await expect(row(page, 101)).toContainText("No quantity shown");
   await expect(row(page, 101)).toContainText("—");
   await expect(page.getByTestId("catalog-action-summary")).toHaveText("0 selected");
   expectClean(state);
@@ -467,7 +467,7 @@ test("J16 (review CT2, CT3, MC4; verify V6) a size turned off for the vendor: th
   const offPicked = box(page, "Select Envelope Single Pocket, Pack of 100");
   await expect(row(page, 102)).toContainText("Turned off for you");
   await expect(row(page, 102)).toContainText(TURNED_OFF_PICK_HINT);
-  await expect(row(page, 102)).toContainText("No quantity: not selected");
+  await expect(row(page, 102)).toContainText("No quantity shown");
   // The vendor's own pick is their choice: checked, and the box can take it back (verify V6).
   await expect(offPicked).toBeChecked();
   await expect(offPicked).toBeEnabled();
