@@ -232,9 +232,12 @@ const navStructure: NavEntry[] = [
   {
     label: "Warehouse (WMS)",
     icon: ShoppingCart,
+    // Unmapped legacy children must not appear for a shipment-only custom role.
+    // Explicit child capabilities still take precedence; remaining migration is tracked.
+    roles: ["admin", "lead", "picker"],
     children: [
       { label: "Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
-      { label: "Picking", icon: ClipboardList, href: "/picking" },
+      { label: "Picking", icon: ClipboardList, href: "/picking", requiredPermission: { resource: "picking", action: "view" } },
       { label: "Assembly work", icon: PackageCheck, href: "/assembly", requiredPermission: { resource: "warehouse_work", action: "assembly" } },
       { label: "Pick Priority", icon: ArrowUpDown, href: "/pick-priority", requiredPermission: { resource: "settings", action: "view" } },
       { label: "Packing", icon: PackageCheck, href: "/packing" },
@@ -245,7 +248,7 @@ const navStructure: NavEntry[] = [
     icon: Truck,
     roles: ["admin", "lead"],
     children: [
-      { label: "Shipments", icon: Truck, href: "/outbound-shipments", requiredPermission: { resource: "orders", action: "view" } },
+      { label: "Shipments", icon: Truck, href: "/outbound-shipments", requiredPermission: { resource: "shipments", action: "view" } },
       { label: "Shipping Groups", icon: Layers, href: "/shipping-groups", requiredPermission: { resource: "inventory", action: "view" } },
       { label: "Service Levels", icon: RouteIcon, href: "/shipping-service-levels", requiredPermission: { resource: "settings", action: "view" } },
       { label: "Settings", icon: Package, href: "/shipping-settings", requiredPermission: { resource: "settings", action: "view" } },
@@ -735,6 +738,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 <DropdownMenuItem>Settings</DropdownMenuItem>
                 <DropdownMenuItem>Billing</DropdownMenuItem>
                 <DropdownMenuSeparator />
+                <DropdownMenuItem asChild><a href="/staff/password">Change password</a></DropdownMenuItem>
                 <DropdownMenuItem onClick={handleLogout}>Log out</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

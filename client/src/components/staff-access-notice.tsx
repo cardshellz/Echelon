@@ -27,6 +27,7 @@ export function StaffAccessNotice({ denied = false }: { denied?: boolean }) {
       <div className="flex flex-wrap gap-2">
         <Button onClick={() => { void act(refetch); }} disabled={pending}>Refresh access</Button>
         <Button variant="outline" onClick={() => { void act(logout); }} disabled={pending}>Sign out</Button>
+        {accessStatus === "authenticated" && <Button variant="link" asChild><Link href="/staff/password">Change password</Link></Button>}
         {denied && hasAssignments && accessStatus === "authenticated" && <Button variant="link" asChild><Link href="/">Home</Link></Button>}
       </div>
     </section>

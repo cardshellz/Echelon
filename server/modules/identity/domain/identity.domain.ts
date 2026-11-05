@@ -1,5 +1,6 @@
 import type { InsertAuthPermission, InsertAdjustmentReason } from "@shared/schema";
 import { WORK_CAPABILITIES, WORK_CAPABILITY_LABELS } from "@shared/warehouse-work";
+import { STAFF_CAPABILITIES } from "@shared/staff-capabilities";
 
 export const DEFAULT_ADJUSTMENT_REASONS: InsertAdjustmentReason[] = [
   { code: "PO_RECEIVED", name: "PO Received", description: "Inventory received from purchase order", transactionType: "receipt", requiresNote: 0, sortOrder: 10 },
@@ -20,6 +21,10 @@ export const DEFAULT_ADJUSTMENT_REASONS: InsertAdjustmentReason[] = [
 ];
 
 export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
+  ...STAFF_CAPABILITIES.map(capability => {
+    const [resource, action] = capability.key.split(":");
+    return { resource, action, description: capability.description, category: capability.category };
+  }),
   { resource: "warehouse_work", action: "view", description: "View draft warehouse station and workflow setup", category: "settings" },
   { resource: "warehouse_work", action: "configure", description: "Configure draft warehouse stations and workflow profiles", category: "settings" },
   { resource: "warehouse_work", action: "manage_access", description: "Manage draft employee warehouse work scopes", category: "users" },

@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+const fixtureCredentialVersion="b656f5e9-9dde-49c0-9c2b-823638ff6b5a";
+const credentialFixtureSql=readFileSync(new URL("../../../../../docs/reviews/configurable-access-2026-11-05/staff-credential-state.DRAFT.sql",import.meta.url),"utf8");
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -43,6 +46,7 @@ const fixtureSql = `
     role varchar(20) NOT NULL DEFAULT 'picker', display_name text,
     active integer NOT NULL DEFAULT 1, created_at timestamp NOT NULL DEFAULT now(), last_login_at timestamp
   );
+  ${credentialFixtureSql}
   CREATE TABLE identity.auth_roles (
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name varchar(100) NOT NULL UNIQUE,
     description text, is_system integer NOT NULL DEFAULT 0,
@@ -97,7 +101,7 @@ integration("Identity constrained grants never become global authority", () => {
     // The synthetic session deliberately retains an admin role label even when
     // current grants are scoped/revoked. Session role strings must not authorize.
     app.use((req, _res, next) => {
-      req.session = { user: sessionUser } as typeof req.session;
+      req.session = { user: sessionUser,staffCredentialVersion:fixtureCredentialVersion } as typeof req.session;
       next();
     });
     app.get("/identity-test/single", requirePermission("settings", "edit"), (_req, res) => res.json({ allowed: true }));
@@ -121,6 +125,7 @@ integration("Identity constrained grants never become global authority", () => {
   beforeEach(async () => {
     await database.pool.query("TRUNCATE identity.auth_role_permissions,identity.auth_user_roles,identity.auth_roles,identity.users CASCADE");
     await database.pool.query("INSERT INTO identity.users(id,username,password,role,display_name) VALUES($1::varchar,$1::text,'unused-synthetic-password','admin','Fixture employee')", [actorId]);
+    await database.pool.query("INSERT INTO identity.staff_credentials(user_id,credential_version) VALUES($1,$2::uuid)",[actorId,fixtureCredentialVersion]);
     sessionUser = { id: actorId, username: actorId, role: "admin", displayName: "Fixture employee", active: 1,
       createdAt: new Date("2026-11-04T00:00:00Z"), lastLoginAt: null };
   });
