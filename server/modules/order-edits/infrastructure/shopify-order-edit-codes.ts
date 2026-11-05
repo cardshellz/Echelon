@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isManagedMemberPricingDescription } from "@shared/order-edits/order-edit-member-pricing";
 import Decimal from "decimal.js";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -437,7 +438,8 @@ export class ShopifyOrderEditCodes {
     if (
       productDiscount &&
       !rules.some((rule) =>
-        ["Member discount", "Echelon member pricing"].includes(rule.label),
+        rule.label === "Member discount" ||
+        isManagedMemberPricingDescription(rule.label),
       )
     )
       rules.push({
@@ -477,7 +479,8 @@ export class ShopifyOrderEditCodes {
         continue;
       const memberPrice =
         rule.targetType === "LINE_ITEM" &&
-        ["Member discount", "Echelon member pricing"].includes(rule.label);
+        (rule.label === "Member discount" ||
+          isManagedMemberPricingDescription(rule.label));
       const memberShipping =
         rule.targetType === "SHIPPING_LINE" &&
         rule.label === "Member free shipping";

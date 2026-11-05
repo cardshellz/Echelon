@@ -1,4 +1,9 @@
 import { createPortal } from "react-dom";
+import { useMemo } from "react";
+import {
+  CustomerOrderCurrentItems,
+  readOrderItemDescriptions,
+} from "./CustomerOrderCurrentItems";
 import type { OrderEditOrder } from "@shared/order-edits/order-edit.contract";
 import type { CustomerAccountOrderSummary } from "@shared/customer-account/customer-account-orders";
 import { OrderEditSummary } from "@/components/order-edits/OrderEditFinancials";
@@ -9,10 +14,13 @@ import { useCustomerOrderDetails } from "./use-customer-order-details";
 function DirectOrderFinancials({
   api,
   row,
+  root,
 }: {
   api: CustomerAccountTransport;
   row: HTMLElement;
+  root: HTMLElement;
 }) {
+  const descriptions = useMemo(() => readOrderItemDescriptions(root), [root]);
   const query = useCustomerOrderDetails(
     api,
     {
@@ -21,27 +29,38 @@ function DirectOrderFinancials({
     },
     true,
   );
+  const itemsTarget = root.querySelector<HTMLElement>("[data-csz-order-items]");
+  const items = query.data && itemsTarget
+    ? createPortal(
+        <CustomerOrderCurrentItems details={query.data} descriptions={descriptions} />,
+        itemsTarget,
+        `${row.dataset.externalOrderId}:items`,
+      )
+    : null;
   if (query.data)
     return (
-      <div className="csz-account-ui">
-        {query.isError && (
-          <div role="alert">
-            <p>We couldn’t refresh your order details. Please try again.</p>
-            <button
-              type="button"
-              className="csz-action"
-              disabled={query.isFetching}
-              onClick={() => void query.refetch()}
-            >
-              Try again
-            </button>
-          </div>
-        )}
-        <OrderEditSummary
-          financials={query.data.financials}
-          totals={[{ label: "Order total", totalCents: query.data.totalCents }]}
-        />
-      </div>
+      <>
+        {items}
+        <div className="csz-account-ui">
+          {query.isError && (
+            <div role="alert">
+              <p>We couldn’t refresh your order details. Please try again.</p>
+              <button
+                type="button"
+                className="csz-action"
+                disabled={query.isFetching}
+                onClick={() => void query.refetch()}
+              >
+                Try again
+              </button>
+            </div>
+          )}
+          <OrderEditSummary
+            financials={query.data.financials}
+            totals={[{ label: "Order total", totalCents: query.data.totalCents }]}
+          />
+        </div>
+      </>
     );
   if (query.isError)
     return (
@@ -117,7 +136,7 @@ export function CustomerAccountOrderTotals({
             portals.push(
               createPortal(
                 order ? (
-                  <DirectOrderFinancials api={api} row={row} />
+                  <DirectOrderFinancials api={api} row={row} root={root} />
                 ) : (
                   <p role="status" aria-busy={pending}>
                     {pending
