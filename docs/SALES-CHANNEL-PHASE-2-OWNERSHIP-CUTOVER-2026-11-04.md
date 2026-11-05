@@ -106,8 +106,10 @@ cannot close a different earlier unknown request. An incomplete or malformed
 event stream is treated as unconfirmed.
 Audit events are read in bounded pages; a PostgreSQL test covers a history that
 crosses multiple pages and verifies that dispatch keys are reconciled across them.
-Older client bundles keep the original strict response format; current clients
-opt in to the additional evidence. This is visibility, not durable settlement or
+Older client bundles keep the original strict response format, but unresolved
+historical `retired` or `superseded` rows are projected as needing attention so
+they are not hidden; the stored history is unchanged. Current clients opt in to
+the additional evidence. This is visibility, not durable settlement or
 a safe transfer gate: both remain required before this cutover can be complete.
 The eBay member adapter's `retire` method does not forward the lifecycle
 operation ID to `clearOffer` or `deleteOffer`; future requests need an exact,

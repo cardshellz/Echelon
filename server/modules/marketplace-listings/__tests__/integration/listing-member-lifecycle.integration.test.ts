@@ -1062,21 +1062,32 @@ const now = new Date("2026-10-19T12:00:00.000Z");
       unconfirmedPriorDispatch: true });
     expect(retire).toHaveBeenCalledTimes(1);
   });
-  it("retains an old accepted response as unconfirmed after a restart and current retired observation", async () => {
+  it.each(["retired", "superseded"] as const)("retains an old accepted response marked %s after a restart", async oldState => {
     await seedLegacyRetirements(database.pool, now, 25);
     const [id] = await store.due(now, 25);
     await store.withMember(id, session => session.save("retiring", null, "Earlier send", now,
       { dispatchStatus: "unknown", dispatchKey: id }));
     // Old binaries saved acceptance without saying whether the request finished.
-    await store.withMember(id, session => session.save("retired", null, "Old completion", now,
+    await store.withMember(id, session => session.save(oldState, null, "Old completion", now,
       { dispatchStatus: "accepted" }));
     store = new PostgresListingMemberLifecycleRepository(database.pool);
     const [saved] = await receipts();
-    expect(saved).toMatchObject({ state: "retired", unconfirmedPriorDispatch: true, dispatchStatus: "accepted" });
+    expect(saved).toMatchObject({ state: oldState, unconfirmedPriorDispatch: true, dispatchStatus: "accepted" });
     expect(archivedListingMemberSelection({ productVariantId: 302, archived: true, retirement: saved }))
       .not.toHaveProperty("retirementEvidence");
     const review = await new ListingMemberRecoveryService({ store, adapter: async () => adapter }, () => now).preview(10, id);
     expect(review).toMatchObject({ canResume: false, observation: { retired: true } });
+    const owner = worker();
+    const legacy = (await owner.memberHistory(10, { productId: 30 })).items.find(item => item.operationId === id);
+    expect(legacy).toMatchObject({ state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+      recoveryRequired: true, verifiedAt: null });
+    expect(legacy).not.toHaveProperty("unconfirmedPriorDispatch");
+    const modern = (await owner.memberHistory(10, { productId: 30 }, true)).items.find(item => item.operationId === id);
+    expect(modern).toMatchObject({ state: oldState, unconfirmedPriorDispatch: true });
+    const legacyReview = await owner.memberRecoveryPreview(10, { operationId: id });
+    expect(legacyReview).toMatchObject({ record: { state: "failed" }, canResume: false });
+    expect((await database.pool.query("SELECT state FROM marketplace.listing_member_retirements WHERE id=$1", [id])).rows[0].state)
+      .toBe(oldState);
     expect(clearOffer).not.toHaveBeenCalled(); expect(deleteOffer).not.toHaveBeenCalled();
   });
   it("clears a terminal receipt when an older worker starts a new dispatch key", async () => {

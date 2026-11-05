@@ -34,6 +34,14 @@ const actorSchema = z.string().trim().min(1).max(100);
 // opt in to additional dispatch evidence so a rolling deploy stays readable.
 function legacyMember(record: ListingMemberRetirement): ListingMemberRetirement {
   const { unconfirmedPriorDispatch: _unconfirmedPriorDispatch, ...legacy } = record;
+  // Older bundles do not understand the additional evidence flag and would
+  // hide terminal rows. Project unresolved history as attention without
+  // changing the stored audit state or permitting another removal.
+  if (record.unconfirmedPriorDispatch && (record.state === "retired" || record.state === "superseded")) {
+    return { ...legacy, state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+      message: "An earlier removal has no confirmed final response. Check the saved channel listing before reusing this link.",
+      verifiedAt: null, recoveryRequired: true };
+  }
   return legacy;
 }
 function assertAccount(
