@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 const fixtureCredentialVersion="b656f5e9-9dde-49c0-9c2b-823638ff6b5a";
-const credentialFixtureSql=readFileSync(new URL("../../../../../docs/reviews/configurable-access-2026-11-05/staff-credential-state.DRAFT.sql",import.meta.url),"utf8");
+const credentialFixtureSql=readFileSync(new URL("../../../../../migrations/900000056000020040001_staff_credential_state.sql",import.meta.url),"utf8");
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";

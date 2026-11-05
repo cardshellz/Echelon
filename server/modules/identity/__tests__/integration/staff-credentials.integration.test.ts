@@ -259,8 +259,8 @@ integration("staff credential ownership, session revocation and recovery",()=>{
     expect(after.dropship).toEqual(before.dropship);expect(after.dropshipProofs).toEqual(before.dropshipProofs);expect(after.passkey).toEqual(before.passkey);
     expect(after.user).toBe(actorId);expect(next).not.toBe(cookie);
   });
-  it("draft upgrade backfills existing accounts without changing hashes, roles or assignments",async()=>{
-    const draft=readFileSync(new URL("../../../../../docs/reviews/configurable-access-2026-11-05/staff-credential-state.DRAFT.sql",import.meta.url),"utf8");
+  it("allocated upgrade backfills existing accounts without changing hashes, roles or assignments",async()=>{
+    const draft=readFileSync(new URL("../../../../../migrations/900000056000020040001_staff_credential_state.sql",import.meta.url),"utf8");
     const baseline=identityAdministrationFixtureSql.replace(draft,"")+"INSERT INTO identity.users(id,username,password,role) VALUES('upgrade-a','upgrade-a','synthetic-retained-hash','admin'),('upgrade-b','upgrade-b','synthetic-retained-hash','picker');";
     const upgrade=await createInventoryCutoverTestDatabase(databaseUrl,true,baseline);
     try{const before=(await upgrade.pool.query("SELECT * FROM identity.users ORDER BY id")).rows;

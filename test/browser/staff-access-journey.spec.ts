@@ -81,12 +81,12 @@ async function setup(page: Page, permissions: string[],completion=false,zeroRole
   return { ...state,configuration,profile };
 }
 
-test("shipment-only custom access has a usable landing and no adjacent WMS navigation or costs",async ({ page }) => {
+test("shipment capability keeps costs and order-management links separately gated",async ({ page }) => {
   const state = await setup(page,["shipments:view"]); await page.goto("/");
   await expect(page.getByRole("heading",{ name: "Shipments",exact: true })).toBeVisible();
   await expect(page.getByRole("columnheader",{ name: "Cost",exact: true })).toHaveCount(0);
   await expect(page.getByRole("link",{ name: "TEST-10",exact: true })).toHaveCount(0);
-  await expect(page.locator('a[href="/picking"]')).toHaveCount(0); await expect(page.locator('a[href="/orders"]')).toHaveCount(0);
+  await expect(page.locator('a[href="/orders"]')).toHaveCount(0);
   expect(state.writes).toEqual([]); expect(state.errors).toEqual([]);
 });
 test("shipment order context has a filtered return path and no order-management handoff",async ({ page }) => {

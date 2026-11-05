@@ -13,6 +13,10 @@ New definitions never automatically grant access or restore revoked memberships.
 - Shipping owns shipment reads. Separate capabilities control shipment visibility,
   carrier costs and a bounded linked order summary. Context does not grant Orders
   management, customer address/email, pricing or adjacent WMS access.
+  Picking and non-live Packing retain their existing assigned-membership admission;
+  that separate legacy policy is not migrated by this shipment slice. The next WMS
+  access increment must change page/server admission and navigation together. A role
+  with shipment capabilities is not yet isolated from all legacy WMS functions.
 - Profile edits reject password fields. Credential reset requires explicit ordinary
   or privileged reset authority, freshly verified actor credentials, a reviewed access
   revision and expected target generation. Protected targets include control-plane
@@ -35,9 +39,10 @@ New definitions never automatically grant access or restore revoked memberships.
 
 ## Release gates
 
-1. Allocate the credential-state candidate under the owning draft PR according to
-   [migration policy](migration-allocation.md). Install schema before enabling the new
-   code. Reads do not backfill missing state. Verify full-schema upgrade and actual
+1. Validate [PR #2004's credential-state migration](../migrations/900000056000020040001_staff_credential_state.sql) according to
+   [migration policy](migration-allocation.md). Apply it only after the old-writer
+   quiescence in gate 4; install schema before enabling the new code. Reads do not
+   backfill missing state. Verify full-schema upgrade and actual
    nonowner runtime-role permissions; reduced fixtures and owner test roles are not that
    acceptance. Existing audit ownership and startup-parity gaps remain separate.
 2. Review actual existing assignments, explicit shipment/reset grants and a usable
@@ -47,8 +52,12 @@ New definitions never automatically grant access or restore revoked memberships.
 3. Existing staff sessions lack generation metadata and must reauthenticate. Verify a
    real nonproduction browser with custom/multiple/empty roles and both forced and voluntary
    password changes, including independent portal sessions and safe credential handoff.
-4. Drain old password writers and session admission before relying on generation
-   revocation. Old instances ignore the generation; old assets cannot complete the new
+4. Quiesce old account-creation/password writers before the one-time backfill and drain
+   old session admission before relying on generation revocation. An old instance can
+   otherwise create a user without credential state after the backfill. Verify zero
+   missing user/state associations after all old writers are stopped; stop and review an
+   explicit correction if any exist. There is no read-side automatic repair. Old
+   instances ignore the generation; old assets cannot complete the new
    lifecycle. Coordinate deployment and test mixed assets/instances without auto-grants.
 5. Require exact-head CI and reviewed changes to guards, baselines and discovery. An
    implementation, local pass, hosted pass, required merge check and deployed behavior

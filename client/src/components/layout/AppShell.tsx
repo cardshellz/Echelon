@@ -232,12 +232,11 @@ const navStructure: NavEntry[] = [
   {
     label: "Warehouse (WMS)",
     icon: ShoppingCart,
-    // Unmapped legacy children must not appear for a shipment-only custom role.
-    // Explicit child capabilities still take precedence; remaining migration is tracked.
-    roles: ["admin", "lead", "picker"],
+    // Preserve these legacy membership-gated routes until their owning WMS slice
+    // migrates both server/page admission and navigation together.
     children: [
       { label: "Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
-      { label: "Picking", icon: ClipboardList, href: "/picking", requiredPermission: { resource: "picking", action: "view" } },
+      { label: "Picking", icon: ClipboardList, href: "/picking" },
       { label: "Assembly work", icon: PackageCheck, href: "/assembly", requiredPermission: { resource: "warehouse_work", action: "assembly" } },
       { label: "Pick Priority", icon: ArrowUpDown, href: "/pick-priority", requiredPermission: { resource: "settings", action: "view" } },
       { label: "Packing", icon: PackageCheck, href: "/packing" },
