@@ -26,6 +26,7 @@ import {
   orderEditPaymentReturnStorage,
 } from "./order-edit-payment-return";
 import { orderEditPaymentDestination } from "./order-edit-payment-handoff";
+import { customerOrderEditUnavailable } from "./order-edit-unavailability";
 
 const closed = new Set<OrderEditOperation["status"]>([
   "completed",
@@ -86,6 +87,7 @@ export function CustomerOrderEditor({
   const [closedOperationId, setClosedOperationId] = useState<string>();
   const [now, setNow] = useState(Date.now);
   const inFlight = useRef(false);
+  const closeAfterAbandon = useRef(false);
   const statusRevision = useRef(0);
   const status = useOrderEditStatus({
     operationId: operation?.operationId ?? null,
@@ -110,12 +112,19 @@ export function CustomerOrderEditor({
       setError(null);
       setObservingCommand(value.commandInProgress === true);
       setUncertain(value.commandInProgress === true);
+      if (closeAfterAbandon.current && !value.canAbandon && !value.commandInProgress) {
+        // A concurrent command may have submitted or closed the operation.
+        // Leave via an owned read rather than attempting to discard it again.
+        finishUnavailableEdit();
+        return;
+      }
       if (closingQuote && value.status === "expired") {
         setClosedOperationId(value.operationId);
         setOperation(null);
         setClosingQuote(false);
         setDraftVisible(true);
-        void reloadCancelledOrder();
+        if (closeAfterAbandon.current) finishUnavailableEdit();
+        else void reloadCancelledOrder();
       } else {
         setDraftVisible(orderEditHasEditableDraft(value));
         if (!value.commandInProgress) setClosingQuote(false);
@@ -218,6 +227,7 @@ export function CustomerOrderEditor({
           setOrder(current);
           if (
             !active.commandInProgress &&
+            !customerOrderEditUnavailable(active) &&
             orderEditNeedsPreparation(active, Date.now())
           )
             await progress("resume", active);
@@ -350,12 +360,26 @@ export function CustomerOrderEditor({
         // Cancellation is confirmed. A failed read must not restore this edit
         // or permit a new review against stale eligibility/revision evidence.
         setBusy(false);
+        if (closeAfterAbandon.current) {
+          finishUnavailableEdit();
+          return true;
+        }
         return Boolean(await reloadCancelledOrder());
       } else if (action === "abandon" || closingQuote) {
         setDraftVisible(false);
         setClosingQuote(false);
       } else setDraftVisible(orderEditHasEditableDraft(result));
     } catch (cause) {
+      if (
+        closeAfterAbandon.current &&
+        cause instanceof OrderEditRequestError &&
+        cause.code === "ORDER_EDIT_ALREADY_SUBMITTED"
+      ) {
+        // Another command won the race. Return to the owned account read;
+        // never discard, replay, or claim a result for that submitted command.
+        finishUnavailableEdit();
+        return false;
+      }
       const recover =
         cause instanceof OrderEditRequestError &&
         (cause.uncertain || cause.code === "ORDER_EDIT_BUSY");
@@ -380,6 +404,42 @@ export function CustomerOrderEditor({
     if (!operation.canAbandon || uncertain) return false;
     return progress("abandon");
   }
+  function finishUnavailableEdit() {
+    if (onDone) onDone();
+    else window.location.assign("/account");
+  }
+  if (customerOrderEditUnavailable(operation) || closeAfterAbandon.current)
+    return (
+      <section className="space-y-4" aria-label="Order changes unavailable">
+        <h2>Order {operation?.orderNumber ?? order?.orderNumber}</h2>
+        <h3>Online changes are no longer available</h3>
+        <p>This order can no longer be changed online. Contact us if you need help.</p>
+        {customerOrderEditUnavailable(operation) && (
+          <p>No changes from this edit were applied.</p>
+        )}
+        {(error || status.error) && (
+          <p role="alert">We couldn’t finish closing this edit. Please try again.</p>
+        )}
+        {(busy || uncertain || status.reading) && (
+          <p role="status">Closing this edit…</p>
+        )}
+        <button
+          type="button"
+          className="csz-action"
+          disabled={busy || status.reading || (observingCommand && !status.error)}
+          onClick={() => {
+            if (status.error) status.retry();
+            else if (operation) {
+              closeAfterAbandon.current = true;
+              void progress("abandon");
+            } else finishUnavailableEdit();
+          }}
+        >
+          {busy || status.reading ? "Closing edit…" : error || status.error ? "Try again" : "Back to order"}
+        </button>
+        <a className="csz-account-link" href="/pages/contact-us">Contact us</a>
+      </section>
+    );
   if (pendingQuote && !operation)
     return (
       <div className="space-y-4">

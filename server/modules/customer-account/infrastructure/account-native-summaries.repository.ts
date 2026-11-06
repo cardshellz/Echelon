@@ -195,11 +195,13 @@ INSERT INTO oms.customer_account_native_summaries AS existing
         .parse(shop);
     // Seeding and claiming only enabled stores prevents unrelated tenants from
     // starting a historical API scan. Multiple dynos share the same SQL lease.
+    // Connection expiry is legacy timestamp; cursor deadlines are timestamptz.
+    // Type shared parameters explicitly so PostgreSQL does not infer both types.
     await this.pool.query(
       `INSERT INTO oms.customer_account_native_cursors(connection_id,delta_since,delta_started_at)
-      SELECT cc.id,$2,$3 FROM channels.channel_connections cc JOIN channels.channels c ON c.id=cc.channel_id
+      SELECT cc.id,$2::timestamptz,$3::timestamptz FROM channels.channel_connections cc JOIN channels.channels c ON c.id=cc.channel_id
       WHERE c.provider='shopify' AND c.status='active' AND cc.shop_domain=ANY($1::text[])
-        AND (cc.expires_at IS NULL OR cc.expires_at>$3)
+        AND (cc.expires_at IS NULL OR cc.expires_at>$3::timestamptz)
       ON CONFLICT(connection_id) DO NOTHING`,
       [this.shopDomains, new Date(now.getTime() - DELTA_OVERLAP_MS), now],
     );
@@ -209,15 +211,15 @@ INSERT INTO oms.customer_account_native_summaries AS existing
       SELECT p.connection_id FROM oms.customer_account_native_cursors p
       JOIN channels.channel_connections cc ON cc.id=p.connection_id JOIN channels.channels c ON c.id=cc.channel_id
       WHERE cc.shop_domain=ANY($1::text[]) AND c.status='active' AND c.provider='shopify'
-        AND (cc.expires_at IS NULL OR cc.expires_at>$2) AND p.next_attempt_at<=$2
-        AND (p.lease_until IS NULL OR p.lease_until<=$2)
+        AND (cc.expires_at IS NULL OR cc.expires_at>$2::timestamptz) AND p.next_attempt_at<=$2::timestamptz
+        AND (p.lease_until IS NULL OR p.lease_until<=$2::timestamptz)
       ORDER BY p.next_attempt_at,p.connection_id FOR UPDATE OF p SKIP LOCKED LIMIT 1)
       UPDATE oms.customer_account_native_cursors p SET lease_id=$3,lease_until=$4
       FROM candidate,channels.channel_connections cc WHERE p.connection_id=candidate.connection_id AND cc.id=p.connection_id
       RETURNING p.connection_id AS "connectionId",cc.channel_id AS "channelId",cc.shop_domain AS "shopDomain",
-        p.lease_id AS "leaseId",p.backfill_after AS "backfillAfter",p.backfill_complete AS "backfillComplete",(p.next_backfill_at<=$2) AS "backfillDue",
+        p.lease_id AS "leaseId",p.backfill_after AS "backfillAfter",p.backfill_complete AS "backfillComplete",(p.next_backfill_at<=$2::timestamptz) AS "backfillDue",
         p.delta_since AS "deltaSince",p.delta_after AS "deltaAfter",p.delta_started_at AS "deltaStartedAt",
-        (p.next_delta_at<=$2) AS "deltaDue"`,
+        (p.next_delta_at<=$2::timestamptz) AS "deltaDue"`,
         [
           this.shopDomains,
           now,

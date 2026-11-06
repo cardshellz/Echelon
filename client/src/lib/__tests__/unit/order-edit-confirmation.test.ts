@@ -169,6 +169,23 @@ describe("same-screen order edit confirmation", () => {
       canConfirmOrderEditPreview(f.order, f.preview, f.operation, now),
     ).toBe(true);
   });
+  it("does not require another Apply for unused native discount descriptions", () => {
+    const f = fixture();
+    const discount = {key:"product",label:"Product discounts",amountCents:92,value:{type:"allocated" as const}};
+    f.preview.financials.itemDiscounts = [discount];
+    f.operation.financials!.quoted!.itemDiscounts = [structuredClone(discount)];
+    f.preview.financials.itemDiscountLabels = ["Product discounts"];
+    f.operation.financials!.quoted!.itemDiscountLabels = ["Member discount","Shellz Club pricing"];
+    expect(canConfirmOrderEditPreview(f.order,f.preview,f.operation,now)).toBe(true);
+    // The actual displayed discount name/terms still require confirmation if changed.
+    f.operation.financials!.quoted!.itemDiscounts![0].label = "Different coupon";
+    expect(canConfirmOrderEditPreview(f.order,f.preview,f.operation,now)).toBe(false);
+  });
+  it("still compares discount descriptions when they are the displayed legacy fallback", () => {
+    const f = fixture();
+    f.operation.financials!.quoted!.itemDiscountLabels = ["Different coupon"];
+    expect(canConfirmOrderEditPreview(f.order,f.preview,f.operation,now)).toBe(false);
+  });
   it("compares the complete displayed breakdown, not just the grand total", () => {
     const f = fixture();
     f.operation.financials!.quoted!.shippingCents += 1;
