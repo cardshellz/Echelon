@@ -35,17 +35,6 @@ export async function getSettingsForWarehouse(
     tx.select().from(warehouseSettings).where(filter).limit(1));
 }
 
-/** Narrow transactional projection, using the identical warehouse fallback chain. */
-export async function getReplenishmentSettingsForWarehouse(
-  warehouseId: number,
-  tx: DbLike,
-): Promise<Pick<WarehouseSettings, "replenMode" | "inlineReplenMaxUnits"> | null> {
-  return resolveWarehouseSettings(warehouseId, tx, filter => tx.select({
-    replenMode: warehouseSettings.replenMode,
-    inlineReplenMaxUnits: warehouseSettings.inlineReplenMaxUnits,
-  }).from(warehouseSettings).where(filter).limit(1));
-}
-
 async function resolveWarehouseSettings<Row>(
   warehouseId: number | null | undefined,
   tx: DbLike,
