@@ -82,7 +82,7 @@ describe("every step 3 issue code has vendor words (plan 12.3)", () => {
     ["listing_config_platform_mismatch", "This store's listing setup is for another marketplace. Contact support."],
     ["listing_config_inactive", "This store's listing setup is turned off. Contact support."],
     ["listing_config_manual_only", "This store lists by hand only. Contact support."],
-    ["marketplace_quantity_unavailable", "Card Shellz couldn't work out how many to list. Preview again later."],
+    ["marketplace_quantity_unavailable", "Out of stock right now. It lists by itself when stock comes back."],
     ["catalog_package_data_required", "Card Shellz hasn't added this size's package size yet. Contact support."],
     ["active_box_required", "Card Shellz has no shipping box for this size yet. Contact support."],
     ["active_rate_table_required", "Card Shellz shipping rates aren't set up yet. Contact support."],

@@ -37,20 +37,26 @@ import { MARKETPLACE_PUSH_STOP_WORDS } from "../domain/marketplace-sync-words";
 import {
   marketplaceQuantityLimitKey,
   marketplaceQuantityRestoreJobKey,
+  marketplaceWaitingForStockJobKey,
   MARKETPLACE_SYNC_ACTOR,
 } from "../domain/marketplace-sync-keys";
 import {
   dropObservationWrites,
   isRepublishWanted,
   isStockOutEndProven,
+  isWaitingForStock,
   marketplaceSyncStoreListingCap,
+  marketplaceWaitingForStockRotation,
+  planWaitingForStockQueue,
   publishableQuantity,
   quantityDecisionWrites,
   MARKETPLACE_SYNC_MAX_NOTICE_BATCHES_PER_TICK,
   MARKETPLACE_SYNC_MAX_OBSERVATIONS_PER_STORE_TICK,
   MARKETPLACE_SYNC_MAX_POLICY_CHECKS_PER_STORE_TICK,
+  MARKETPLACE_SYNC_MAX_WAITING_FOR_STOCK_PER_STORE_TICK,
   MARKETPLACE_SYNC_PREVIEW_CHUNK,
   MARKETPLACE_SYNC_TICK_BUDGET_MS,
+  type MarketplaceWaitingForStockListing,
   type QuantityDecisionWrites,
 } from "../domain/marketplace-sync-sweep";
 import { describeMarketplaceSyncNoticeBatch } from "../domain/marketplace-sync-words";
@@ -76,7 +82,10 @@ import type { DropshipClock, DropshipNotificationSender } from "./dropship-ports
  * looked at (owner rules 2 and 3). A listing eBay ended for lack of stock
  * joins the restore push when stock returns; one the vendor ended is marked
  * ended; a relist is followed. Each store's live shipping policies are
- * checked, and the tick ends by sending the notice outbox (rule 7 kinds only).
+ * checked. A listing the vendor published while Card Shellz had none in stock
+ * (blocked for stock, never published) is queued as an ordinary push once
+ * the current preview would list it. The tick ends by sending the notice
+ * outbox (rule 7 kinds only).
  *
  * Orchestration only: the decisions are the domain's pure functions, the
  * writes are the repository's (one transaction per listing, under the plan's
@@ -229,6 +238,11 @@ export interface MarketplaceSyncRepository {
   listObservedListingIds(input: { storeConnectionId: number; limit: number }): Promise<number[]>;
   /** Listings of the store to read from eBay, never read or read longest ago first. */
   listDueListingIds(input: { storeConnectionId: number; limit: number }): Promise<number[]>;
+  /**
+   * The store's listings waiting for stock (isWaitingForStock): blocked, never published, with the quantity blocker.
+   * At most `limit`, in listing id order from the `rotation` window (marketplaceWaitingForStockRotation). Read only.
+   */
+  listWaitingForStockListings(input: { storeConnectionId: number; limit: number; rotation: number }): Promise<MarketplaceWaitingForStockListing[]>;
   /** `excludeJobItemId`: the asking push item, not counted as an open push. */
   loadListing(listingId: number, options?: { excludeJobItemId?: number | null }): Promise<MarketplaceSyncListing | null>;
   recordAttempt(listingId: number, at: Date): Promise<void>;
@@ -262,7 +276,7 @@ export interface MarketplaceLiveListingReader {
 /** The preview row fields that say what Card Shellz would send now (E) and ATP as today. */
 export type MarketplaceSyncPreviewRow = Pick<DropshipListingPreviewRow,
   "productVariantId" | "sku" | "title" | "priceCents" | "priceSettingRevisionId" | "marketplaceQuantity" | "businessPolicySelection"
-  | "economics">;
+  | "economics" | "previewStatus" | "blockers">;
 
 export interface MarketplaceSyncPreviewPort {
   generatePreview(input: {
@@ -316,6 +330,8 @@ export interface MarketplaceSyncTickResult {
   quantityDecisions: number;
   limitChanges: number;
   restoreJobs: number;
+  /** Push jobs queued for listings that were waiting for stock and can list now (queueWaitingForStock). */
+  stockReturnJobs: number;
   deadLettered: number;
   policyChecks: number;
   noticesSent: number;
@@ -537,7 +553,8 @@ export class DropshipMarketplaceSyncService {
       if (await this.sweepStore(store, deadline, result)) result.storesStopped += 1;
     }
     await this.sendNotices(result);
-    const quiet = result.reads === 0 && result.quantityDecisions === 0 && result.noticesSent === 0 && result.restoreJobs === 0;
+    const quiet = result.reads === 0 && result.quantityDecisions === 0 && result.noticesSent === 0 && result.restoreJobs === 0
+      && result.stockReturnJobs === 0;
     const line = { outcome: result.budgetExhausted ? "budget_exhausted" : "completed", trigger: "sweep", ...tickLogFields(result),
       elapsed_ms: Math.max(0, this.deps.clock.now().getTime() - startedAt.getTime()) };
     if (quiet) this.deps.logger.debug("dropship.marketplace_sync.tick", line);
@@ -574,6 +591,8 @@ export class DropshipMarketplaceSyncService {
         if (state.stopped) return true;
       }
       if (!this.pastDeadline(deadline)) await this.checkPolicies(store, result);
+      if (this.pastDeadline(deadline)) result.budgetExhausted = true;
+      else await this.queueWaitingForStock(store, result);
       return false;
     } catch (error) {
       const classified = classifyMarketplaceSyncError(error);
@@ -878,6 +897,84 @@ export class DropshipMarketplaceSyncService {
   }
 
   /**
+   * Listings the vendor published while Card Shellz had none in stock (owner
+   * report): their push was blocked for want of stock and nothing retries a
+   * blocked item, so they would never list. Each tick, after the store's
+   * other work, the store's waiting listings (at most one preview's worth,
+   * rotating through a longer list) get the current preview as the system,
+   * as prepareStore asks it; those it would now list go out with one ordinary
+   * push job through the restore port, keyed by the listings and the block
+   * each is in, so a replay queues nothing new. Any listing still blocked
+   * (still at 0, no longer picked, tier off, anything else) is left as it is
+   * (DEBUG). A store the preview or the push refuses for its own access rule
+   * is expected (DEBUG); anything else is classified, and only a broken
+   * invariant goes past this store.
+   */
+  private async queueWaitingForStock(store: MarketplaceSyncStore, result: MarketplaceSyncTickResult): Promise<void> {
+    const fields = storeFields(store);
+    let waiting: MarketplaceWaitingForStockListing[];
+    try {
+      waiting = (await this.deps.repository.listWaitingForStockListings({ storeConnectionId: store.storeConnectionId,
+        limit: MARKETPLACE_SYNC_MAX_WAITING_FOR_STOCK_PER_STORE_TICK,
+        rotation: marketplaceWaitingForStockRotation(this.deps.clock.now()) })).filter(isWaitingForStock);
+    } catch (error) {
+      const classified = classifyMarketplaceSyncError(error);
+      if (classified.handling === "abort_tick") throw error;
+      this.logClassified("dropship.marketplace_sync.waiting_for_stock_read_failed", classified, { ...fields, outcome: "skipped" });
+      return;
+    }
+    if (waiting.length === 0) return;
+
+    const variantIds = [...new Set(waiting.map((listing) => listing.productVariantId))].sort((left, right) => left - right);
+    const rows = new Map<number, MarketplaceSyncPreviewRow>();
+    try {
+      for (let index = 0; index < variantIds.length; index += MARKETPLACE_SYNC_PREVIEW_CHUNK) {
+        const preview = await this.deps.previews.generatePreview({ vendorId: store.vendorId, storeConnectionId: store.storeConnectionId,
+          productVariantIds: variantIds.slice(index, index + MARKETPLACE_SYNC_PREVIEW_CHUNK),
+          actor: { actorType: MARKETPLACE_SYNC_ACTOR.actorType, actorId: MARKETPLACE_SYNC_ACTOR.actorId } });
+        for (const row of preview.rows) rows.set(row.productVariantId, row);
+      }
+    } catch (error) {
+      // As prepareStore: a refusal that names its resolution is the store's own access rule (expected).
+      const classified = error instanceof DropshipError && typeof error.context?.resolution === "string"
+        ? { classification: "expected", handling: "ignore", code: error.code, logLevel: "debug" } as const
+        : classifyMarketplaceSyncError(error);
+      if (classified.handling === "abort_tick") throw error;
+      this.logClassified("dropship.marketplace_sync.waiting_for_stock_preview_failed", classified, { ...fields, outcome: "skipped",
+        waiting_count: waiting.length });
+      return;
+    }
+
+    const plan = planWaitingForStockQueue(waiting, rows);
+    for (const held of plan.held) {
+      // Expected: the listing keeps waiting, unchanged, for a later tick.
+      this.deps.logger.debug("dropship.marketplace_sync.waiting_for_stock", { ...fields, listing_id: held.listing.listingId,
+        product_variant_id: held.listing.productVariantId, outcome: held.hold, blockers: [...held.blockers] });
+    }
+    for (let index = 0; index < plan.queue.length; index += MARKETPLACE_SYNC_PREVIEW_CHUNK) {
+      const chunk = plan.queue.slice(index, index + MARKETPLACE_SYNC_PREVIEW_CHUNK);
+      const listingIds = chunk.map((listing) => listing.listingId);
+      const idempotencyKey = marketplaceWaitingForStockJobKey({ storeConnectionId: store.storeConnectionId, listings: chunk });
+      const jobFields = { ...fields, listing_ids: listingIds, idempotency_key: idempotencyKey };
+      try {
+        const outcome = await this.deps.restores.queueRestore({ vendorId: store.vendorId, storeConnectionId: store.storeConnectionId,
+          productVariantIds: chunk.map((listing) => listing.productVariantId), idempotencyKey });
+        if (outcome.queued) {
+          if (!outcome.idempotentReplay) result.stockReturnJobs += 1;
+          this.deps.logger.info("dropship.marketplace_sync.stock_return_job", { ...jobFields,
+            outcome: outcome.idempotentReplay ? "replayed" : "queued", job_id: outcome.jobId });
+        } else {
+          this.deps.logger.debug("dropship.marketplace_sync.stock_return_job", { ...jobFields, outcome: "refused", error_code: outcome.code });
+        }
+      } catch (error) {
+        const classified = classifyMarketplaceSyncError(error);
+        if (classified.handling === "abort_tick") throw error;
+        this.logClassified("dropship.marketplace_sync.stock_return_job", classified, { ...jobFields, outcome: "failed" });
+      }
+    }
+  }
+
+  /**
    * Each live shipping policy of the store, checked fresh once a tick (§6.3,
    * owner rule 4): the verdict is stored, and one that turns incompatible (or
    * another incompatible one) is told to the vendor once, critically, in the
@@ -1091,12 +1188,13 @@ function isMarketplaceAnswer(error: unknown): boolean {
 
 function emptyTickResult(): MarketplaceSyncTickResult {
   return { stores: 0, storesStopped: 0, reads: 0, readFailures: 0, priceAdoptions: 0, policyAdoptions: 0, quantityDecisions: 0,
-    limitChanges: 0, restoreJobs: 0, deadLettered: 0, policyChecks: 0, noticesSent: 0, noticesDeadLettered: 0, budgetExhausted: false };
+    limitChanges: 0, restoreJobs: 0, stockReturnJobs: 0, deadLettered: 0, policyChecks: 0, noticesSent: 0, noticesDeadLettered: 0, budgetExhausted: false };
 }
 
 function tickLogFields(result: MarketplaceSyncTickResult): Record<string, unknown> {
   return { stores: result.stores, stores_stopped: result.storesStopped, reads: result.reads, read_failures: result.readFailures,
     price_adoptions: result.priceAdoptions, policy_adoptions: result.policyAdoptions, quantity_decisions: result.quantityDecisions,
-    limit_changes: result.limitChanges, restore_jobs: result.restoreJobs, dead_lettered: result.deadLettered,
+    limit_changes: result.limitChanges, restore_jobs: result.restoreJobs, stock_return_jobs: result.stockReturnJobs,
+    dead_lettered: result.deadLettered,
     policy_checks: result.policyChecks, notices_sent: result.noticesSent, notices_dead_lettered: result.noticesDeadLettered };
 }

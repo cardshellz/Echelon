@@ -160,6 +160,11 @@ export const chooseCatalogRowSchema = z.object({
     reserveShortfallCents: countSchema,
     balanceShortfallCents: countSchema,
   }).optional(),
+  /**
+   * The size's marketplace quantity from stock is 0, whatever its reason (`DropshipVendorCatalogPreviewRow.outOfStock`).
+   * Optional: an older dyno does not send it (chooseRowOutOfStock falls back to what the row can tell).
+   */
+  outOfStock: z.boolean().optional(),
 });
 export type ChooseCatalogRow = z.infer<typeof chooseCatalogRowSchema>;
 
@@ -401,8 +406,15 @@ export interface ChooseRowView {
   /** False for rows no box press can change. */
   changeable: boolean;
   how: ChooseHow;
-  /** The marketplace quantity of a selected size; null for every other reason (the server sends 0 for those). */
+  /**
+   * The marketplace quantity of a selected size that can list; null for every other reason (the server sends 0 for
+   * those) and for a selected size whose tier is off (it cannot list). Not shown when `outOfStock`.
+   */
   quantity: number | null;
+  /** Nothing in stock to list (chooseRowOutOfStock), whatever the reason: the Available cell says "Out of stock". */
+  outOfStock: boolean;
+  /** A checked size that is out of stock and otherwise sellable: it lists by itself once stock is back (the How hint). */
+  listsWhenBackInStock: boolean;
   /** A selected size whose listing tier is not on sale (the tier badge). */
   tierOff: boolean;
   /** Turned off for the vendor while their pick is saved: the box can only remove the pick (verify V6). */
@@ -430,6 +442,15 @@ function savedHow(reason: ChooseSelectionReason): ChooseHow {
   return "notSelected";
 }
 
+/**
+ * Whether the row has nothing in stock to list. The server's `outOfStock` when it sends one; from an older dyno,
+ * only a selected size can tell (its quantity is computed; every other reason's 0 says nothing about stock).
+ */
+export function chooseRowOutOfStock(row: ChooseCatalogRow): boolean {
+  if (row.outOfStock !== undefined) return row.outOfStock;
+  return row.selectionDecision.reason === "selected" && row.selectionDecision.marketplaceQuantity === 0;
+}
+
 /** One row as the table shows it, with the pending changes. */
 export function chooseRowView(row: ChooseCatalogRow, changes: Pick<ChooseChanges, "add" | "remove">): ChooseRowView {
   const { reason, marketplaceQuantity, picked } = row.selectionDecision;
@@ -437,15 +458,24 @@ export function chooseRowView(row: ChooseCatalogRow, changes: Pick<ChooseChanges
   const id = row.productVariantId;
   const checked = changes.add.has(id) ? true : changes.remove.has(id) ? false : saved.savedChecked;
   const changed = checked === saved.savedChecked ? null : checked ? "add" : "remove";
+  const tierOff = reason === "selected" && row.listingTier !== undefined && !row.listingTier.eligible;
+  const outOfStock = chooseRowOutOfStock(row);
+  const pickTurnedOff = reason === "disabled_by_vendor_override" && picked;
+  // Only a size that would list but for stock: a turned-off pick or an off tier would not list when stock is back.
+  const sellableOnceChecked = reason === "selected" || reason === "missing_vendor_include_rule" || reason === "excluded_by_vendor_rule";
+  const tierEligible = row.listingTier === undefined || row.listingTier.eligible;
   return {
     checked,
     savedChecked: saved.savedChecked,
     changed,
     changeable: saved.changeable,
     how: changed === "add" ? "willAdd" : changed === "remove" ? "willRemove" : savedHow(reason),
-    quantity: reason === "selected" ? marketplaceQuantity : null,
-    tierOff: reason === "selected" && row.listingTier !== undefined && !row.listingTier.eligible,
-    pickTurnedOff: reason === "disabled_by_vendor_override" && picked,
+    // A size whose tier is off cannot list, so it shows no number (review: owner report).
+    quantity: reason === "selected" && !tierOff ? marketplaceQuantity : null,
+    outOfStock,
+    listsWhenBackInStock: checked && outOfStock && sellableOnceChecked && tierEligible,
+    tierOff,
+    pickTurnedOff,
   };
 }
 

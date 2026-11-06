@@ -98,7 +98,11 @@ export const CHOOSE_WORDS = Object.freeze({
     return "Select this item";
   },
   // Interim (step 1 PROPOSAL): read out for the "—" of a size that isn't selected (the server sends 0, not "out of stock").
-  noQuantitySr: "No quantity: not selected",
+  noQuantitySr: "No quantity shown",
+  // Interim (step 1 PROPOSAL): owner report. The Available cell of a size with nothing in stock to list, whatever its How.
+  outOfStock: "Out of stock",
+  // Interim (step 1 PROPOSAL): owner report. Under How for a checked size that is out of stock; it lists by itself once stock is back.
+  backInStockHint: "Lists when back in stock",
   // Interim (step 1 PROPOSAL): the How column, each entry marked above.
   how: HOW_WORDS,
   // Interim (step 1 PROPOSAL): under "Turned off for you" when the vendor's own pick of the size is saved; its box removes the pick (verify V6).

@@ -12,11 +12,16 @@ import {
   VENDOR_ERROR_FALLBACK,
   VENDOR_NOTIFICATION_EVENT_LABELS,
   VENDOR_PASSKEY_CANCELLED,
+  VENDOR_WAITING_FOR_STOCK_LABEL,
+  VENDOR_WAITING_FOR_STOCK_LINE,
+  WAITING_FOR_STOCK_BLOCKER,
   humanizeCode,
+  isVendorWaitingForStock,
   vendorAccountStatusLabel,
   vendorErrorMessage,
   vendorLedgerEntryLabel,
   vendorLedgerStatusLabel,
+  vendorListingPreviewStatusLabel,
   vendorMarketplaceOrderLabel,
   vendorNotificationChannelLabel,
   vendorNotificationEventLabel,
@@ -210,5 +215,31 @@ describe("vendorErrorMessage", () => {
   it("says a closed passkey prompt was cancelled", () => {
     const cancelled = Object.assign(new Error("The operation either timed out or was not allowed."), { name: "NotAllowedError" });
     expect(vendorErrorMessage(cancelled)).toBe(VENDOR_PASSKEY_CANCELLED);
+  });
+});
+
+describe("waiting for stock (owner report)", () => {
+  it("names a blocked eBay size whose only blocker is stock, and nothing else", () => {
+    expect(WAITING_FOR_STOCK_BLOCKER).toBe("marketplace_quantity_unavailable");
+    expect(VENDOR_WAITING_FOR_STOCK_LABEL).toBe("Waiting for stock");
+    expect(VENDOR_WAITING_FOR_STOCK_LINE).toBe("Waiting for stock. It lists by itself when stock comes back.");
+    const facts = { platform: "ebay", blockers: [WAITING_FOR_STOCK_BLOCKER] };
+    expect(isVendorWaitingForStock({ ...facts, status: "blocked" })).toBe(true);
+    expect(isVendorWaitingForStock({ platform: "ebay", status: "blocked", blockers: [` ${WAITING_FOR_STOCK_BLOCKER}`, WAITING_FOR_STOCK_BLOCKER, ""] })).toBe(true);
+    // Another blocker as well: stock alone would not list it, so its own words stay.
+    expect(isVendorWaitingForStock({ platform: "ebay", status: "blocked", blockers: [WAITING_FOR_STOCK_BLOCKER, "vendor_retail_price_required"] })).toBe(false);
+    expect(isVendorWaitingForStock({ ...facts, status: "failed" })).toBe(false);
+    expect(isVendorWaitingForStock({ ...facts, status: "ready" })).toBe(false);
+    // Only eBay stores are relisted by themselves.
+    expect(isVendorWaitingForStock({ platform: "shopify", status: "blocked", blockers: [WAITING_FOR_STOCK_BLOCKER] })).toBe(false);
+    expect(isVendorWaitingForStock({ platform: "ebay", status: "blocked", blockers: [] })).toBe(false);
+  });
+
+  it("reads a preview row's status in those words, and every other status as before", () => {
+    expect(vendorListingPreviewStatusLabel("blocked", { platform: "ebay", blockers: [WAITING_FOR_STOCK_BLOCKER] })).toBe("Waiting for stock");
+    expect(vendorListingPreviewStatusLabel("blocked", { platform: "ebay", blockers: ["listing_config_inactive"] })).toBe("Can't list yet");
+    expect(vendorListingPreviewStatusLabel("blocked")).toBe("Can't list yet");
+    expect(vendorListingPreviewStatusLabel("ready", { platform: "ebay", blockers: [] })).toBe("Ready");
+    expect(vendorListingPreviewStatusLabel("warning", { platform: "ebay", blockers: [] })).toBe("Check this");
   });
 });

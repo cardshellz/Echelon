@@ -295,6 +295,11 @@ describe("a run in the vendor's words", () => {
     const blocked = describeRunProblem(problem({ outcome: "blocked", code: "DROPSHIP_LISTING_PREVIEW_BLOCKED", message: "catalog_package_data_required" }));
     expect(blocked.reason).toBe("Card Shellz hasn't added this size's package size yet. Contact support.");
     expect(blocked.reason).not.toMatch(/[a-z]+_[a-z_]+/);
+    // Owner report: blocked only for want of stock, it lists by itself once stock is back; with another blocker it does not.
+    expect(describeRunProblem(problem({ outcome: "blocked", code: "DROPSHIP_LISTING_PREVIEW_BLOCKED", message: "marketplace_quantity_unavailable" })))
+      .toMatchObject({ reason: "Waiting for stock. It lists by itself when stock comes back.", nextStep: null });
+    expect(describeRunProblem(problem({ outcome: "blocked", code: "DROPSHIP_LISTING_PREVIEW_BLOCKED",
+      message: "marketplace_quantity_unavailable, catalog_package_data_required" })).reason).not.toContain("Waiting for stock");
     expect(describeRunProblem(problem({ message: "  " })).reason).toBe(PUBLISH_WORDS.failedRow);
     // Review round 2 DUX5: operator wording and steps the page no longer has get the vendor's words and a next step.
     expect(describeRunProblem(problem({ retryable: true }))).toMatchObject({ nextStep: PUBLISH_WORDS.ebayTemporaryStep });

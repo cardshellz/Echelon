@@ -25,7 +25,12 @@ import {
   MARKETPLACE_SYNC_ACTOR,
 } from "../domain/marketplace-sync-keys";
 import { hasUnsettledPushAttempt, MARKETPLACE_ATTEMPT_EVENT_TYPE } from "../domain/marketplace-sync-history";
-import { decisionWithoutPriceAdoption, MARKETPLACE_SYNC_SWEPT_STATUSES } from "../domain/marketplace-sync-sweep";
+import {
+  decisionWithoutPriceAdoption,
+  MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER,
+  MARKETPLACE_SYNC_SWEPT_STATUSES,
+  type MarketplaceWaitingForStockListing,
+} from "../domain/marketplace-sync-sweep";
 import { adoptListingPolicyRowWithClient } from "./dropship-ebay-listing-policy-adoption.writer";
 import {
   setFulfillmentPolicyNotifiedVerdictWithClient,
@@ -107,6 +112,26 @@ const SWEPT_LISTING_PREDICATE = `l.store_connection_id = $1 AND l.platform = 'eb
     WHERE item.listing_id = l.id AND item.status IN ('queued', 'processing'))
   AND NOT EXISTS (${openListingEndSql("l.id")})`;
 
+/**
+ * A store's listings waiting for stock (isWaitingForStock, domain/marketplace-sync-sweep.ts): eBay, `blocked`, never
+ * published (no item number) and blocked with the quantity blocker among `metadata.blockers`
+ * (upsertVendorListingForPreview). `ended` rows and rows with an item number are never matched. Each tick reads one
+ * window of at most `limit` ($3) in listing id order, starting at (rotation ($4) × limit) mod count and wrapping, so
+ * a store with more than one tick's bound steps through all of them with no stored cursor. Read only. $1 the store,
+ * $2 the blocker.
+ */
+export const WAITING_FOR_STOCK_LISTINGS_SQL = `WITH waiting AS (
+    SELECT l.id, l.product_variant_id, l.status, l.external_listing_id, l.metadata -> 'blockers' AS blockers, l.updated_at,
+      row_number() OVER (ORDER BY l.id) - 1 AS position, count(*) OVER () AS total
+    FROM dropship.dropship_vendor_listings l
+    WHERE l.store_connection_id = $1 AND l.platform = 'ebay' AND l.status = 'blocked'
+      AND NULLIF(btrim(l.external_listing_id), '') IS NULL
+      AND jsonb_typeof(l.metadata -> 'blockers') = 'array'
+      AND (l.metadata -> 'blockers') @> jsonb_build_array($2::text))
+  SELECT id, product_variant_id, status, external_listing_id, blockers, updated_at FROM waiting
+  ORDER BY (position + total - ($4::bigint * $3::bigint) % total) % total, id
+  LIMIT $3`;
+
 /** The same predicate for the store in the row `sc`, with the statuses as $1. */
 const STORE_LISTING_PREDICATE = SWEPT_LISTING_PREDICATE.replaceAll("$1", "sc.id").replaceAll("$2", "$1");
 
@@ -187,6 +212,18 @@ export class PgDropshipMarketplaceSyncRepository implements MarketplaceSyncRepos
       ORDER BY l.marketplace_sync_attempted_at ASC NULLS FIRST, l.id ASC LIMIT $3`,
     [input.storeConnectionId, MARKETPLACE_SYNC_SWEPT_STATUSES, input.limit]);
     return result.rows.map((row) => row.id);
+  }
+
+  async listWaitingForStockListings(input: { storeConnectionId: number; limit: number; rotation: number }):
+    Promise<MarketplaceWaitingForStockListing[]> {
+    const result = await this.dbPool.query<{ id: number; product_variant_id: number; status: string; external_listing_id: string | null;
+      blockers: unknown; updated_at: Date }>(WAITING_FOR_STOCK_LISTINGS_SQL,
+    [input.storeConnectionId, MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER, input.limit, Number.isSafeInteger(input.rotation) && input.rotation > 0 ? input.rotation : 0]);
+    return result.rows.map((row) => ({ listingId: row.id, productVariantId: row.product_variant_id, status: row.status,
+      externalListingId: row.external_listing_id,
+      // Stored JSON: only its string entries are blocker codes.
+      blockers: Array.isArray(row.blockers) ? row.blockers.filter((code): code is string => typeof code === "string") : [],
+      updatedAt: row.updated_at }));
   }
 
   async loadListing(listingId: number, options: { excludeJobItemId?: number | null } = {}): Promise<MarketplaceSyncListing | null> {
