@@ -1,3 +1,6 @@
+import { AccountNativeSummariesWorker } from "../../application/account-native-summaries.worker";
+import { ShopifyOrderEditProvider } from "../../../order-edits/infrastructure/shopify-order-edit.provider";
+import { readAccountNativeScan, serializeAccountNativeScan } from "../../domain/account-native-pagination";
 import { readFileSync } from "node:fs";
 import { Pool } from "pg";
 import { beforeAll, beforeEach, afterAll, describe, expect, it } from "vitest";
@@ -28,6 +31,7 @@ integration("native account facts without an OMS dependency", () => {
       CREATE TABLE channels.channel_connections(id int PRIMARY KEY,channel_id int,shop_domain text,expires_at timestamp without time zone);
       CREATE TABLE oms.oms_orders(id int PRIMARY KEY,channel_id int,external_order_id text,external_customer_id text);`);
     await pool.query(readFileSync("migrations/900000054000020010001_customer_account_native_summaries.sql", "utf8"));
+    await pool.query(readFileSync("migrations/900000057000020100001_customer_account_scan_checkpoints.sql", "utf8"));
     store = new PostgresAccountNativeSummaries(pool, [fact.shopDomain]);
   });
   beforeEach(async () => {
@@ -90,10 +94,10 @@ integration("native account facts without an OMS dependency", () => {
   });
   it("retains the delta lower bound until completion, then overlaps from scan start", async () => {
     const cursor = (await store.claim(now, lease))!;
-    const page = { observation: { facts: [], startedAt: now, finishedAt: now }, after: "999" };
+    const page = { observation: { facts: [], startedAt: now, finishedAt: now }, after: serializeAccountNativeScan({ ...readAccountNativeScan(4, null, cursor.deltaSince), lower: "999" }) };
     await store.completePage(cursor, "delta", page, now);
-    expect((await pool.query("SELECT delta_since,delta_after FROM oms.customer_account_native_cursors")).rows[0])
-      .toEqual({ delta_since: cursor.deltaSince, delta_after: "999" });
+    expect((await pool.query("SELECT delta_since,delta_checkpoint FROM oms.customer_account_native_cursors")).rows[0])
+      .toEqual({ delta_since: cursor.deltaSince, delta_checkpoint: JSON.parse(page.after) });
     const finished = new Date(now.getTime()+30_000);
     await store.completePage(cursor, "delta", { ...page, after: null }, finished);
     expect((await pool.query("SELECT delta_since,delta_covered_until FROM oms.customer_account_native_cursors")).rows[0])
@@ -162,15 +166,96 @@ integration("native account facts without an OMS dependency", () => {
     const first = (await store.claim(now, lease))!;
     expect(first).toMatchObject({ connectionId: 4, backfillComplete: false, deltaDue: true });
     expect(await store.claim(now, otherLease)).toBeNull();
-    const page = { observation: { facts: [fact], startedAt: now, finishedAt: now }, after: "999" };
+    const page = { observation: { facts: [fact], startedAt: now, finishedAt: now }, after: serializeAccountNativeScan({ ...readAccountNativeScan(4, null, null), lower: "999" }) };
     await expect(store.completePage({ ...first, leaseId: otherLease }, "backfill", page, now)).rejects.toMatchObject({ code: "ACCOUNT_NATIVE_LEASE_LOST" });
-    expect((await pool.query("SELECT backfill_after FROM oms.customer_account_native_cursors")).rows[0].backfill_after).toBeNull();
+    expect((await pool.query("SELECT backfill_checkpoint FROM oms.customer_account_native_cursors")).rows[0].backfill_checkpoint).toBeNull();
     await store.completePage(first, "backfill", page, now);
     await store.release(first, now, false);
     const resumed = (await store.claim(now, otherLease))!;
-    expect(resumed.backfillAfter).toBe("999"); expect(resumed.backfillDue).toBe(false);
+    expect(JSON.parse(resumed.backfillAfter!)).toEqual(JSON.parse(page.after)); expect(resumed.backfillDue).toBe(false);
     await store.release(resumed,now,false);
     expect((await store.claim(new Date(now.getTime()+31_000),lease))!.backfillDue).toBe(true);
+  });
+  it("restarts legacy numeric progress without deleting saved facts and persists retry-safe scoped checkpoints", async () => {
+    await observe();
+    const cursor = (await store.claim(now, lease))!;
+    await pool.query("UPDATE oms.customer_account_native_cursors SET backfill_after='999',backfill_complete=true,delta_after='999' WHERE connection_id=4");
+    await store.release(cursor, now, false);
+    const restart = (await store.claim(now, otherLease))!;
+    expect(restart).toMatchObject({ backfillAfter: null, backfillComplete: false, deltaAfter: null });
+    expect(await store.read(scope)).toMatchObject([fact]);
+    const checkpoint = serializeAccountNativeScan({ ...readAccountNativeScan(4, null, null), upper: "999", pageCursor: "opaque-page-1", seen: 100 });
+    const page = { observation: { facts: [], startedAt: now, finishedAt: now }, after: checkpoint };
+    await store.completePage(restart, "backfill", page, now);
+    await store.release(restart, now, true);
+    const retry = (await store.claim(new Date(now.getTime()+31_000), lease))!;
+    expect(JSON.parse(retry.backfillAfter!)).toEqual(JSON.parse(checkpoint));
+    await expect(store.completePage(retry, "delta", page, now)).rejects.toMatchObject({ code: "ACCOUNT_NATIVE_CURSOR_SCOPE_CHANGED" });
+    await store.completePage(retry, "backfill", { ...page, after: null }, new Date(now.getTime()+31_000));
+    await store.release(retry, new Date(now.getTime()+31_000), false);
+    expect((await store.claim(new Date(now.getTime()+32_000), otherLease))!.backfillComplete).toBe(true);
+    expect((await pool.query("SELECT backfill_after,backfill_complete FROM oms.customer_account_native_cursors")).rows[0])
+      .toEqual({ backfill_after: "999", backfill_complete: true });
+  });
+  it("warms every owned order end-to-end after unordered pages, a lost checkpoint and a provider failure", async () => {
+    let clock = now, failCheckpoint = true, failProvider = true, sequence = 0;
+    const ids = Array.from({ length: 205 }, (_, i) => String(1000+i));
+    [ids[40], ids[140]] = [ids[140], ids[40]];
+    await store.retain({ facts: ids.slice(0,10).map(id => ({ ...fact, externalOrderId: id, orderReference: `#${id}` })), startedAt: now, finishedAt: now });
+    const credentials = { connectionId: 4, channelId: 2, shopDomain: fact.shopDomain, accessToken: "fictional" };
+    const provider = new ShopifyOrderEditProvider({ credentials: { get: async () => credentials }, clock: () => clock,
+      fetch: async (_url, options) => {
+        const { query, variables } = JSON.parse(options!.body as string);
+        if (query.includes("EchelonAccountHistoryAccess")) return Response.json({ data: { currentAppInstallation: { accessScopes: [{ handle: "read_all_orders" }, { handle: "read_orders" }] } } });
+        if (variables.after && failProvider) { failProvider = false; throw new Error("Synthetic connection failure"); }
+        const lower = BigInt(variables.search?.match(/id:>([0-9]+)/)?.[1] ?? "0"), upper = variables.search?.match(/id:<=([0-9]+)/)?.[1];
+        const selected = ids.filter(id => BigInt(id)>lower && (!upper || BigInt(id)<=BigInt(upper)));
+        const offset = variables.after ? Number(variables.after.replace("opaque-", "")) : 0, page = selected.slice(offset,offset+100);
+        const money = { amount: "7.41", currencyCode: "USD" };
+        return Response.json({ data: { orders: { nodes: page.map(id => ({ id: `gid://shopify/Order/${id}`, name: `#${id}`,
+          customer: { id: "gid://shopify/Customer/100" }, updatedAt: now.toISOString(), cancelledAt: null,
+          displayFinancialStatus: "PAID", currentTotalPriceSet: { presentmentMoney: money, shopMoney: money } })),
+          pageInfo: { hasNextPage: offset+page.length<selected.length, endCursor: page.length ? `opaque-${offset+page.length}` : null } } } });
+      } });
+    const events: unknown[] = [];
+    // Delegation preserves the real SQL owner and lease fencing. A crash after
+    // retain but before checkpoint forces an idempotent replay on the next run.
+    const maintenance = new Proxy(store, { get(target, key) {
+      if (key === "completePage") return async (...args: Parameters<typeof store.completePage>) => {
+        if (args[1] === "backfill" && failCheckpoint) { failCheckpoint = false; throw new Error("Synthetic lost checkpoint"); }
+        return target.completePage(...args);
+      };
+      const value = Reflect.get(target, key); return typeof value === "function" ? value.bind(target) : value;
+    } });
+    const worker = new AccountNativeSummariesWorker({ store: maintenance, provider: {
+      page: (connection, after, since) => provider.accountNativePage(connection, after, since),
+      byIds: (connection, ids) => provider.accountNativeByIds(connection, ids),
+    }, now: () => clock, newId: () => `00000000-0000-4000-8000-${String(++sequence).padStart(12,"0")}`, report: event => events.push(event) });
+    // Keep delta out of this test; its fixed-window completion has a separate
+    // executed-SQL test. This is the legacy-history backfill/retry acceptance.
+    const initial = (await store.claim(now, lease))!;
+    await pool.query("UPDATE oms.customer_account_native_cursors SET next_delta_at='infinity'");
+    await store.release(initial, now, false);
+    for (let run=0; run<20; run++) {
+      await worker.run();
+      const checkpoint = (await pool.query("SELECT backfill_checkpoint FROM oms.customer_account_native_cursors")).rows[0].backfill_checkpoint;
+      if (checkpoint?.kind === "complete") break;
+      clock = new Date(clock.getTime()+31_000);
+    }
+    expect((await pool.query("SELECT backfill_checkpoint FROM oms.customer_account_native_cursors")).rows[0].backfill_checkpoint)
+      .toEqual({ version: 1, kind: "complete" });
+    const read: string[] = [];
+    for (let i=0; i<ids.length; i+=20) read.push(...(await store.read({ ...scope, orders: ids.slice(i,i+20).map(id => ({ externalOrderId:id,orderReference:`#${id}` })) })).map(fact => fact.externalOrderId));
+    expect(new Set(read)).toEqual(new Set(ids));
+    expect(events.filter(event => (event as {outcome:string}).outcome === "failed")).toHaveLength(2);
+    expect((await pool.query("SELECT count(*)::int AS count FROM oms.oms_orders")).rows[0].count).toBe(0);
+  });
+  it("rejects malformed checkpoint objects at the database boundary", async () => {
+    await store.claim(now, lease);
+    for (const checkpoint of [{}, [], { version: 1 }, { version: 2, kind: "scan" }]) {
+      await expect(pool.query("UPDATE oms.customer_account_native_cursors SET backfill_checkpoint=$1::jsonb", [JSON.stringify(checkpoint)]))
+        .rejects.toMatchObject({ code: "23514" });
+    }
   });
   it("replays an expired lease, coalesces requests and completes only the observed generation", async () => {
     await pool.query("INSERT INTO oms.oms_orders VALUES(1,2,'99','100')");

@@ -13,7 +13,7 @@ export const ACCOUNT_SUMMARIES_QUERY = `query EchelonAccountOrderSummaries($ids:
 export const ACCOUNT_NATIVE_PAGE_QUERY = `query EchelonAccountNativePage($after: String, $search: String, $sort: OrderSortKeys!) {
   orders(first: 100, after: $after, query: $search, sortKey: $sort, reverse: false) {
     nodes { id name updatedAt customer { id } cancelledAt displayFinancialStatus currentTotalPriceSet { ${MONEY} } }
-    pageInfo { hasNextPage }
+    pageInfo { hasNextPage endCursor }
   }
 }`;
 // Replacing a line cannot preserve customization or subscriptions through

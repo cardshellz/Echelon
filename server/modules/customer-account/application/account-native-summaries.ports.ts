@@ -71,6 +71,7 @@ export interface AccountNativeReader {
 }
 export interface AccountNativePage {
   observation: AccountNativeObservation;
+  /** Scoped serialized range checkpoint, never a last-row numeric seek. Null completes the scan. */
   after: string | null;
 }
 export interface AccountNativeProvider {
