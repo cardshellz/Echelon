@@ -220,7 +220,8 @@ INSERT INTO oms.customer_account_native_summaries AS existing
       RETURNING p.connection_id AS "connectionId",cc.channel_id AS "channelId",cc.shop_domain AS "shopDomain",
         p.lease_id AS "leaseId",CASE WHEN p.backfill_checkpoint->>'kind'='complete' THEN NULL ELSE p.backfill_checkpoint::text END AS "backfillAfter",
         COALESCE(p.backfill_checkpoint->>'kind'='complete',false) AS "backfillComplete",(p.next_backfill_at<=$2::timestamptz) AS "backfillDue",
-        p.delta_since AS "deltaSince",p.delta_checkpoint::text AS "deltaAfter",p.delta_started_at AS "deltaStartedAt",
+        COALESCE((p.delta_checkpoint->>'since')::timestamptz,p.delta_since) AS "deltaSince",p.delta_checkpoint::text AS "deltaAfter",
+        COALESCE((p.delta_checkpoint->>'startedAt')::timestamptz,p.delta_started_at) AS "deltaStartedAt",
         (p.next_delta_at<=$2::timestamptz) AS "deltaDue"`,
         [
           this.shopDomains,
@@ -339,10 +340,13 @@ INSERT INTO oms.customer_account_native_summaries AS existing
     }
     // Keep the lower bound fixed while paginating. On completion restart from
     // scan START minus overlap, so updates arriving during the scan are revisited.
+    // A rolling older release can still update the legacy delta timestamps.
+    // A multi-page scan owns its window/start in its independent checkpoint.
+    const scanStartedAt = cursor.deltaAfter === null ? z.date().parse(page.observation.startedAt) : cursor.deltaStartedAt;
     const result = await this.pool.query(
       `UPDATE oms.customer_account_native_cursors SET delta_checkpoint=$3::jsonb,
       delta_since=CASE WHEN $3::jsonb IS NULL THEN $4 ELSE delta_since END,
-      delta_covered_until=CASE WHEN $3::jsonb IS NULL THEN delta_started_at ELSE delta_covered_until END,
+      delta_covered_until=CASE WHEN $3::jsonb IS NULL THEN $7::timestamptz ELSE delta_covered_until END,
       delta_started_at=CASE WHEN $3::jsonb IS NULL THEN $5 ELSE delta_started_at END,
       next_delta_at=CASE WHEN $3::jsonb IS NULL THEN $6 ELSE $5 END
       WHERE connection_id=$1 AND lease_id=$2 AND lease_until>$5`,
@@ -350,9 +354,10 @@ INSERT INTO oms.customer_account_native_summaries AS existing
         cursor.connectionId,
         cursor.leaseId,
         page.after,
-        new Date(cursor.deltaStartedAt.getTime() - DELTA_OVERLAP_MS),
+        new Date(scanStartedAt.getTime() - DELTA_OVERLAP_MS),
         now,
         new Date(now.getTime() + DELTA_INTERVAL_MS),
+        scanStartedAt,
       ],
     );
     if (result.rowCount !== 1) throw new AccountNativeLeaseLostError();

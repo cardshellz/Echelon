@@ -12,6 +12,7 @@ export const accountNativeScanSchema = z.object({
   version: z.literal(1), kind: z.literal("scan"),
   connectionId: z.number().int().positive().safe(),
   since: z.string().datetime({ offset: true }).nullable(),
+  startedAt: z.string().datetime({ offset: true }).nullable(),
   lower: bound, upper: positive.nullable(),
   pending: z.array(positive).max(100),
   pageCursor: opaque.nullable(),
@@ -26,14 +27,11 @@ export const accountNativeScanSchema = z.object({
     previous = BigInt(end);
   }
   if ((state.upper === null && (state.pending.length > 0 || state.pageCursor !== null || state.seen !== 0))
-    || ((state.pageCursor === null) !== (state.seen === 0)))
+    || ((state.pageCursor === null) !== (state.seen === 0))
+    || ((state.since === null) !== (state.startedAt === null)))
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Inconsistent scan position" });
 });
 export type AccountNativeScan = z.infer<typeof accountNativeScanSchema>;
-export const accountNativeCheckpointSchema = z.union([
-  accountNativeScanSchema,
-  z.object({ version: z.literal(1), kind: z.literal("complete") }).strict(),
-]);
 export const accountNativePageInfoSchema = z.object({
   hasNextPage: z.boolean(), endCursor: opaque.nullable(),
 }).strict();
@@ -46,10 +44,11 @@ export class AccountNativePaginationError extends Error {
   }
 }
 
-export function readAccountNativeScan(connectionId: number, after: string | null, since: Date | null): AccountNativeScan {
+export function readAccountNativeScan(connectionId: number, after: string | null, since: Date | null, startedAt: Date | null = since): AccountNativeScan {
   const expectedSince = since === null ? null : z.date().parse(since).toISOString();
   const scan = after === null
     ? accountNativeScanSchema.parse({ version: 1, kind: "scan", connectionId, since: expectedSince,
+        startedAt: since === null ? null : z.date().parse(startedAt).toISOString(),
         lower: "0", upper: null, pending: [], pageCursor: null, seen: 0 })
     : accountNativeScanSchema.parse(JSON.parse(z.string().max(ACCOUNT_NATIVE_CHECKPOINT_LIMIT).parse(after)));
   if (scan.connectionId !== connectionId || scan.since !== expectedSince)

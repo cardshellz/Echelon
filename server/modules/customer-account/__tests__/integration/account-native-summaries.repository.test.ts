@@ -250,6 +250,22 @@ integration("native account facts without an OMS dependency", () => {
     expect(events.filter(event => (event as {outcome:string}).outcome === "failed")).toHaveLength(2);
     expect((await pool.query("SELECT count(*)::int AS count FROM oms.oms_orders")).rows[0].count).toBe(0);
   });
+  it("keeps an in-flight delta window and coverage independent of a rolling legacy worker", async () => {
+    const cursor = (await store.claim(now, lease))!;
+    const saved = serializeAccountNativeScan({ ...readAccountNativeScan(4, null, cursor.deltaSince, now), upper: "999", pageCursor: "opaque-delta-1", seen: 100 });
+    const page = { observation: { facts: [], startedAt: now, finishedAt: now }, after: saved };
+    await store.completePage(cursor, "delta", page, now);
+    await store.release(cursor, now, false);
+    const later = new Date(now.getTime()+31_000);
+    await pool.query("UPDATE oms.customer_account_native_cursors SET delta_since=$1,delta_started_at=$1,delta_after='123456'", [later]);
+    const resumed = (await store.claim(later, otherLease))!;
+    expect(resumed.deltaSince).toEqual(cursor.deltaSince);
+    expect(resumed.deltaStartedAt).toEqual(now);
+    expect(JSON.parse(resumed.deltaAfter!)).toEqual(JSON.parse(saved));
+    await store.completePage(resumed, "delta", { ...page, after: null, observation: { facts: [], startedAt: later, finishedAt: later } }, later);
+    expect((await pool.query("SELECT delta_since,delta_covered_until FROM oms.customer_account_native_cursors")).rows[0])
+      .toEqual({ delta_since: new Date(now.getTime()-300_000), delta_covered_until: now });
+  });
   it("rejects malformed checkpoint objects at the database boundary", async () => {
     await store.claim(now, lease);
     for (const checkpoint of [{}, [], { version: 1 }, { version: 2, kind: "scan" }]) {

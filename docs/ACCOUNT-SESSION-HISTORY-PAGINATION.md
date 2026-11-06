@@ -18,7 +18,8 @@ ID comparisons use `BigInt`; a sample never establishes that other IDs are absen
 `PostgresAccountNativeSummaries` stores independent, versioned history and delta
 checkpoints bound to the connection and exact delta window. Existing numeric
 checkpoints remain unchanged for compatibility with an overlapping old release.
-The new scan starts from the beginning, preserving cached facts; this deliberately
+An in-flight delta also retains its own start time and update window, so an older
+worker cannot advance those underneath it. The new scan starts from the beginning, preserving cached facts; this deliberately
 revisits rows that the previous seek might have skipped. Facts commit before
 progress advances, and the existing lease fences cursor writes. A failure may
 replay a page but cannot checkpoint its unread successor. Delta coverage advances

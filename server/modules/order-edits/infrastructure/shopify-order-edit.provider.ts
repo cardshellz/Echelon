@@ -434,9 +434,9 @@ export class ShopifyOrderEditProvider
     after: string | null,
     since: Date | null,
   ) {
-    let scan = readAccountNativeScan(connectionId, after, since);
-    const credentials = await this.credentials(connectionId);
     const startedAt = this.options.clock();
+    let scan = readAccountNativeScan(connectionId, after, since, startedAt);
+    const credentials = await this.credentials(connectionId);
     if (after === null && since === null) {
       const access = z
         .object({
