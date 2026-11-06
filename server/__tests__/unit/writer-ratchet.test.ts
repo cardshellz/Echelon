@@ -30,6 +30,12 @@ describe("writer-ratchet (P2.1)", () => {
     readFileSync(join(repoRoot, "scripts/writer-ratchet/baseline.json"), "utf8"),
   );
   const { writers: current } = scanWriterTopology(repoRoot);
+  it("staff credential state has only the Identity owning writer", () => {
+    expect(current["identity.staff_credentials"]).toEqual(["modules/identity"]);
+    expect(scanWriterTopology(repoRoot,{roots:["server","scripts","script"]}).writers["identity.staff_credentials"])
+      .toEqual(["modules/identity"]);
+    expect(baseline["identity.staff_credentials"]).toEqual(["modules/identity"]);
+  });
   const { writers: currentIncludingScripts } = scanWriterTopology(repoRoot, {
     roots: ["server", "scripts"],
   });

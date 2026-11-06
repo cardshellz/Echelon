@@ -1,12 +1,13 @@
+import { isCurrentStaffCredential } from "@shared/staff-credentials";
 import { EventEmitter } from "node:events";
 import type { Server } from "node:http";
 import type { RequestHandler } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { CurrentStaffAccess } from "../../modules/identity/domain/staff-access";
-const { readCurrentStaffAccess, logError, logWarn } = vi.hoisted(() => ({
-  readCurrentStaffAccess: vi.fn(), logError: vi.fn(), logWarn: vi.fn(),
+const { readCurrentStaffAccess, readStaffCredentialState, logError, logWarn } = vi.hoisted(() => ({
+  readCurrentStaffAccess: vi.fn(), readStaffCredentialState:vi.fn(), logError: vi.fn(), logWarn: vi.fn(),
 }));
-vi.mock("../../modules/identity", () => ({ readCurrentStaffAccess }));
+vi.mock("../../modules/identity", () => ({ readCurrentStaffAccess, readStaffCredentialState, isCurrentStaffCredential }));
 vi.mock("../../platform/observability/logger", () => ({ logger: { error: logError, warn: logWarn } }));
 vi.mock("ws", async () => {
   const { EventEmitter } = await import("node:events");
@@ -36,18 +37,18 @@ const empty: CurrentStaffAccess = { ...assigned(), roles: [] };
 let server: EventEmitter;
 let socketServer: ReturnType<typeof setupWebSocket>;
 type TestSocket = EventEmitter & { readyState: number; send: Mock<(message: string) => void>; close: Mock<(code?: number, reason?: string) => void> };
-const flush = async () => { for (let i = 0; i < 8; i++) await Promise.resolve(); };
+const flush = async () => { for (let i = 0; i < 18; i++) await Promise.resolve(); };
 async function connect(userId: string | null = "employee", ip = "synthetic-address") {
   const transport = { write: vi.fn(), destroyed: false, destroy: vi.fn() };
   transport.destroy.mockImplementation(() => { transport.destroyed = true; });
   server.emit("upgrade", { url: "/ws", socket: { remoteAddress: ip },
-    session: { user: userId ? { id: userId, role: "admin" } : undefined } }, transport, Buffer.alloc(0));
+    session: { staffCredentialVersion:"a760c267-283a-43bd-9bfb-c8a6d1048033", user: userId ? { id: userId, role: "admin" } : undefined } }, transport, Buffer.alloc(0));
   await flush();
   return transport;
 }
 const sockets = () => [...socketServer.clients] as unknown as TestSocket[];
 beforeEach(() => {
-  vi.useFakeTimers(); readCurrentStaffAccess.mockReset(); logError.mockReset(); logWarn.mockReset();
+  vi.useFakeTimers(); readStaffCredentialState.mockReset().mockImplementation(async userId=>({userId,credentialVersion:"a760c267-283a-43bd-9bfb-c8a6d1048033",mustChangePassword:false,lastOperationId:null})); readCurrentStaffAccess.mockReset(); logError.mockReset(); logWarn.mockReset();
   readCurrentStaffAccess.mockImplementation(async id => assigned(id));
   server = new EventEmitter();
   const sessionMiddleware: RequestHandler = (_req, _res, next) => next();

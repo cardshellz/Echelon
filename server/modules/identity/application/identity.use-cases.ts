@@ -1,3 +1,4 @@
+import { newStaffPasswordSchema } from "@shared/staff-credentials";
 import { db } from "../../../storage/base";
 import * as repo from "../infrastructure/identity.repository";
 import * as domain from "../domain/identity.domain";
@@ -10,6 +11,8 @@ import { parseRoleAssignment } from "../domain/role-assignment";
 import { z } from "zod";
 import { insertUserSchema } from "@shared/schema";
 import { sql } from "drizzle-orm";
+import { authenticateStaffSession } from "./staff-credentials";
+import { staffCredentials } from "@shared/schema";
 import { runIdentityAdministration, type IdentityAdministrationMutation } from "../infrastructure/access-administration.repository";
 import { IdentityAdministrationError, parseAdministrationActor, parseAdministrationInput, userProfileEditSchema,
   type IdentityAdministrationActor } from "../domain/access-administration";
@@ -62,33 +65,18 @@ async function roleAuditState(tx: IdentityTransaction, roleId: number) {
   return { ...roles.rows[0], grants: grants.rows };
 }
 
-export async function loginUseCase(username: string, passwordString: string): Promise<SafeUser> {
-  const user = await repo.getUserByUsername(username);
-  if (!user || !user.active) throw new Error("Invalid credentials");
-  
-  const validPassword = await bcrypt.compare(passwordString, user.password);
-  if (!validPassword) throw new Error("Invalid credentials");
-
-  await repo.updateUserLastLogin(user.id);
-  
-  return {
-    id: user.id,
-    username: user.username,
-    role: user.role,
-    displayName: user.displayName,
-    active: user.active,
-    createdAt: user.createdAt,
-    lastLoginAt: new Date(),
-  };
+export async function loginUseCase(username:string,passwordString:string):Promise<SafeUser> {
+  return (await authenticateStaffSession(username,passwordString)).user;
 }
 
 export async function createUserUseCase(raw: InsertUser, actor: IdentityAdministrationActor): Promise<SafeUser> {
-  const data = parseAdministrationInput(insertUserSchema.extend({ username: z.string().min(1), password: z.string().min(1) }).strict(), raw);
+  const data = parseAdministrationInput(insertUserSchema.extend({ username: z.string().min(1), password: newStaffPasswordSchema }).strict(), raw);
   const password = await bcrypt.hash(data.password, 10);
   return runAdministration(actor, "users:create", "user_created", async tx => {
     const existing = await repo.getUserByUsername(data.username, tx);
     if (existing) throw new IdentityAdministrationError("IDENTITY_ADMINISTRATION_INVALID", 400, "Username already exists.");
     const user = await repo.createUser({ ...data, password }, tx);
+    await tx.insert(staffCredentials).values({ userId: user.id });
     // Account creation never assigns roles, including for a legacy admin label.
     return { result: safeUser(user), target: `user:${user.id}`, before: null, after: { ...userAuditState(user), roleIds: [] } };
   });
@@ -125,14 +113,14 @@ export async function assignUserRolesUseCase(userId: unknown, roleIds: unknown, 
 export async function updateUserUseCase(userId: string, raw: z.input<typeof userProfileEditSchema>, actor: IdentityAdministrationActor): Promise<SafeUser> {
   const id = parseRoleAssignment(userId, []).userId;
   const data = parseAdministrationInput(userProfileEditSchema, raw);
-  const passwordChanged = !!data.password?.trim();
-  const { password: _plain, ...profile } = data;
-  const password = passwordChanged ? await bcrypt.hash(data.password!, 10) : undefined;
   return runAdministration(actor, "users:edit", "user_updated", async tx => {
     const beforeUser = await lockUser(tx, id);
-    const updated = await repo.updateUser(id, { ...profile, ...(password ? { password } : {}) }, tx) ?? beforeUser;
+    if (data.active !== undefined && data.active !== beforeUser.active && !actor.expectedAccessRevision)
+      throw new IdentityAdministrationError("IDENTITY_ACCESS_REVIEW_REQUIRED", 428,
+        "Reload current account access before changing activation.");
+    const updated = await repo.updateUser(id, data, tx) ?? beforeUser;
     return { result: safeUser(updated), target: `user:${id}`, before: userAuditState(beforeUser),
-      after: { ...userAuditState(updated), passwordChanged } };
+      after: userAuditState(updated) };
   });
 }
 

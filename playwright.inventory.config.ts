@@ -19,6 +19,7 @@ export default defineConfig({
     "inventory-reserved-transfer.spec.ts",
     "return-receiving.spec.ts",
     "inventory-authority-gates.spec.ts",
+    "staff-access-journey.spec.ts",
     "inventory-publication-target-resume.spec.ts",
     "channel-inventory-workspace.spec.ts",
     "walmart-channel-workspace.spec.ts",

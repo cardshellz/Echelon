@@ -527,6 +527,9 @@
   "identity.auth_user_roles": [
     "modules/identity"
   ],
+  "identity.staff_credentials": [
+    "modules/identity"
+  ],
   "identity.users": [
     "modules/identity"
   ],

@@ -1,12 +1,12 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import type { Request, RequestHandler, Response } from "express";
-import { readCurrentStaffAccess } from "./modules/identity";
+import { readCurrentStaffAccess, readStaffCredentialState, isCurrentStaffCredential } from "./modules/identity";
 import { logger } from "./platform/observability/logger";
 import { classify } from "./platform/observability/errors";
 
 let wss: WebSocketServer | null = null;
-type StaffSocket = WebSocket & { userId?: string; ip?: string; isAlive?: boolean };
+type StaffSocket = WebSocket & { userId?: string; ip?: string; isAlive?: boolean; credentialVersion?: string };
 const userConnections = new Map<string, Set<StaffSocket>>();
 
 // A conservative memory bound, not a measured throughput claim. Notifications are
@@ -43,8 +43,10 @@ async function drainBroadcasts(): Promise<void> {
     pending.delete(userId);
     if (![...(userConnections.get(userId) ?? [])].some(ws => ws.readyState === WebSocket.OPEN)) continue;
     let access;
+    let credentials;
     try {
       access = await readCurrentStaffAccess(userId);
+      credentials = await readStaffCredentialState(userId);
     } catch (error) {
       authorityUnavailable(userId, "broadcast", error);
       closeUserConnections(userId, 1011, "Staff authority unavailable");
@@ -60,6 +62,9 @@ async function drainBroadcasts(): Promise<void> {
     // not receive a queued message. No authority is cached across batches.
     for (const ws of userConnections.get(userId) ?? []) {
       if (ws.readyState !== WebSocket.OPEN) continue;
+      if (!isCurrentStaffCredential(ws.credentialVersion,credentials) || credentials?.mustChangePassword) {
+        ws.close(1008,"Staff credentials changed"); continue;
+      }
       try {
         for (const message of messages) {
           if (ws.readyState !== WebSocket.OPEN) break;
@@ -148,6 +153,9 @@ export function setupWebSocket(server: Server, sessionMiddleware: RequestHandler
         if (!userId) return reject("401 Unauthorized");
         const access = await readCurrentStaffAccess(userId);
         if (!access || access.roles.length === 0) return reject("403 Forbidden");
+        const credentials=await readStaffCredentialState(userId);
+        const credentialVersion=(request as unknown as Request).session.staffCredentialVersion;
+        if(!isCurrentStaffCredential(credentialVersion,credentials) || credentials?.mustChangePassword) return reject("401 Unauthorized");
         if (socket.destroyed) return;
         // Other upgrades may have completed during the authority read.
         const currentConns = ipConnections.get(ip) ?? 0;
@@ -155,6 +163,7 @@ export function setupWebSocket(server: Server, sessionMiddleware: RequestHandler
         serverWss.handleUpgrade(request, socket, head, (ws: StaffSocket) => {
           ipConnections.set(ip, currentConns + 1);
           ws.userId = userId;
+          ws.credentialVersion=credentialVersion;
           ws.ip = ip;
           serverWss.emit("connection", ws, request);
         });

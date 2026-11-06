@@ -18,6 +18,7 @@ export const staffAuthoritySchema = z.object({
     displayName: z.string().nullable(), active: z.literal(1),
     createdAt: z.coerce.date(), lastLoginAt: z.coerce.date().nullable(),
   }),
+  credentialActionRequired: z.boolean().default(false),
   permissions: z.array(z.string().regex(/^[^:\s]+:[^:\s]+$/)),
   roles: z.array(z.string().min(1)),
   assignedRoles: z.array(assignedStaffRoleSchema),
@@ -38,6 +39,6 @@ export const staffAuthoritySchema = z.object({
 export type StaffAuthority = z.infer<typeof staffAuthoritySchema>;
 
 export function staffAuthorityKey(value: StaffAuthority): string {
-  return JSON.stringify([value.user.id, [...value.permissions].sort(),
+  return JSON.stringify([value.user.id, value.credentialActionRequired, [...value.permissions].sort(),
     [...value.assignedRoles].sort((left, right) => left.id - right.id), [...value.systemRoles].sort()]);
 }

@@ -110,6 +110,10 @@ export async function createConnectedReceivingDatabase(database: InventoryCutove
         [actor.id, actor.username, passwordHash, actor.role]);
       await pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,$2)", [actor.id, actor.roleId]);
     }
+    // Apply the release's actual credential-state backfill after the synthetic
+    // accounts exist. Real login must exercise the canonical generation read;
+    // a reduced connected fixture must not omit or stub that prerequisite.
+    await pool.query(migration("900000056000020040001_staff_credential_state.sql"));
     await prepareQuantityLotCreationMetadata(pool);
     await addOwnerReadColumns(pool);
     await pool.query("ALTER TABLE inventory.inventory_lots ALTER COLUMN received_at TYPE timestamp USING received_at AT TIME ZONE 'UTC'");

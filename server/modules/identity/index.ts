@@ -4,6 +4,7 @@
 
 import * as repository from "./infrastructure/identity.repository";
 import * as usecases from "./application/identity.use-cases";
+import { hasStaffCapability } from "@shared/staff-capabilities";
 
 // Explicit public surface. Mutation primitives must not leak into composed storage.
 export const identityStorage = {
@@ -38,7 +39,7 @@ export type { IdentityAdministrationActor } from "./domain/access-administration
 
 export async function hasPermission(userId: string, resource: string, action: string): Promise<boolean> {
   const permissions = await repository.getUserPermissions(userId);
-  return permissions.includes(`${resource}:${action}`);
+  return hasStaffCapability(permissions, `${resource}:${action}`);
 }
 
 export { readPurchaseApprovalActor } from "./infrastructure/purchase-approval-access.repository";
@@ -48,4 +49,7 @@ export type { CommandAuthorityActor } from "./domain/command-authority";
 export { readCurrentStaffAccess } from "./infrastructure/staff-access.repository";
 export { hasAssignedSystemRole, assignedSystemRoleKeys } from "./domain/staff-access";
 export type { CurrentStaffAccess, StaffSystemRole, StaffSystemRoleAuthority } from "./domain/staff-access";
+export { readStaffCredentialState } from "./infrastructure/staff-credentials.repository";
+export { isCurrentStaffCredential } from "./staff-session";
+export { createStaffStreamObserver } from "./staff-stream";
 export { readStaffSystemRoleAuthority, readStaffSystemRoleAuthorityPg } from "./staff-authority";
