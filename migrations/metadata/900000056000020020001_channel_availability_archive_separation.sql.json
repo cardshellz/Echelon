@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000056000020020001_channel_availability_archive_separation.sql",
+  "generation": 56,
+  "pr": 2002,
+  "ordinal": 1,
+  "after": [
+    "900000055000020000001_supplier_header_tax_return_sources.sql"
+  ]
+}

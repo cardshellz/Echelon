@@ -1,5 +1,5 @@
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
-import type { ListingMemberLifecycleAdapter } from "../../../marketplace-listings/application/listing-member-lifecycle.port";
+import type { ListingMemberDispatchReceipt, ListingMemberLifecycleAdapter } from "../../../marketplace-listings/application/listing-member-lifecycle.port";
 import { ListingMemberLifecycleError } from "../../../marketplace-listings/domain/listing-member-lifecycle";
 import type { WalmartListingLifecycleProvider } from "./walmart-listing-lifecycle.provider";
 import { WalmartApiError } from "./walmart-client";
@@ -27,7 +27,7 @@ export class WalmartListingMemberAdapter implements ListingMemberLifecycleAdapte
       throw new ListingMemberLifecycleError("LISTING_MEMBER_IDENTITY_CHANGED", "Walmart returned a different seller SKU.");
     return { identity, retired: item.retired };
   }
-  async retire(identity: ListingMemberIdentity, operationId: string) {
+  async retire(identity: ListingMemberIdentity, operationId: string): Promise<ListingMemberDispatchReceipt> {
     const account = await this.account(identity);
     try { await this.provider.retire(account, identity.externalSku!, operationId); }
     catch (error) {
@@ -38,5 +38,7 @@ export class WalmartListingMemberAdapter implements ListingMemberLifecycleAdapte
           : "The Walmart removal response was not confirmed. Echelon will verify this exact seller SKU.",
         rejected ? "not_submitted" : "unknown");
     }
+    // DELETE acknowledges a queued retirement, not that this request is final.
+    return { finality: "pending" };
   }
 }

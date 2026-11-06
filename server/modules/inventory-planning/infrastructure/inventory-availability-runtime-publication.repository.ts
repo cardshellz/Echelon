@@ -30,6 +30,9 @@ import type { SupplySnapshotDto } from "@shared/types/inventory-availability-pla
 import { assertInventoryCutoverFenceHeldInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { InventoryChannelQuantityRuntimeService } from "../application/inventory-channel-quantity-runtime.service";
 import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
+import { assertPublicationTransactionGuard, type PublicationTransactionGuard,
+  type PublicationTransactionContext } from "../application/publication-transaction-guard";
+import { quantityPublicationScopeSchema } from "../domain/quantity-publication-admission";
 
 type ClientPool = Pick<Pool, "connect"> & { options?: { max?: number } };
 type PublicationVariantScope = { publicationTargetId: number; productVariantId: number };
@@ -116,14 +119,17 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
 
   async execute<T>(
     work: (context: InventoryAvailabilityRuntimePublicationContext) => Promise<T>,
+    guard?: PublicationTransactionGuard,
   ): Promise<T> {
-    return this.executeWithClient((_client, context) => work(context));
+    return this.executeWithClient((_client, context) => work(context), guard);
   }
 
   /** Infrastructure composition may resolve exact identities and validate its
    * durable handoff inside this same pinned, local-only publication transaction. */
   async executeWithClient<T>(
     work: (client: PoolClient, context: InventoryAvailabilityRuntimePublicationContext) => Promise<T>,
+    guard?: PublicationTransactionGuard,
+    guardContext?: PublicationTransactionContext,
   ): Promise<T> {
     const releaseRoutingSlot = await this.routingSlots.acquire();
     let client: PoolClient | null = null;
@@ -135,7 +141,8 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
       const connectedClient = client;
       await connectedClient.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
       began = true;
-      const result = await work(connectedClient, await createPublicationContext(connectedClient, this.logger, false));
+      const result = await work(connectedClient, await createPublicationContext(connectedClient, this.logger, false,
+        [], [], [], guard,guardContext));
       committing = true;
       await connectedClient.query("COMMIT");
       began = false;
@@ -219,6 +226,7 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
 
   async execute<T>(
     work: (context: InventoryAvailabilityRuntimePublicationContext) => Promise<T>,
+    guard?: PublicationTransactionGuard,
   ): Promise<T> {
     const settings = (await this.client.query<{ isolation: string; read_only: string }>(
       "SELECT current_setting('transaction_isolation') AS isolation, current_setting('transaction_read_only') AS read_only",
@@ -232,7 +240,8 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
       throw runtimeError("INVENTORY_PUBLICATION_TRANSACTION_REQUIRED",
         "Caller-owned publication requires a SERIALIZABLE read-write transaction.", {});
     }
-    return work(await createPublicationContext(this.client, this.logger, true, this.replacementListings, this.reconciliationObservationIds, this.refreshVerifiedPublications));
+    return work(await createPublicationContext(this.client, this.logger, true, this.replacementListings, this.reconciliationObservationIds,
+      this.refreshVerifiedPublications, guard));
   }
 }
 
@@ -309,6 +318,8 @@ async function createPublicationContext(
   replacementListings: readonly PublicationVariantScope[] = [],
   reconciliationObservationIds: readonly string[] = [],
   refreshVerifiedPublications: readonly PublicationVariantScope[] = [],
+  guard?: PublicationTransactionGuard,
+  guardContext?: PublicationTransactionContext,
 ): Promise<InventoryAvailabilityRuntimePublicationContext> {
   const authority = await loadAndLockRuntimeAuthority(client);
   if (requireCanonical && authority.authority !== "canonical") {
@@ -340,7 +351,7 @@ async function createPublicationContext(
       }, productId, logger, purpose);
     },
     loadActivePublicationTargets: (input) => loadZeroPublicationTargets(client, input),
-    enqueueFullPublications: (activationRunId, intents) => {
+    enqueueFullPublications: async (activationRunId, intents) => {
       if (authority.authority !== "canonical" || activationRunId !== authority.activationRunId) {
         throw runtimeError(
           "INVENTORY_PUBLICATION_AUTHORITY_LINEAGE_MISMATCH",
@@ -348,6 +359,14 @@ async function createPublicationContext(
           { activationRunId, pinnedActivationRunId: authority.activationRunId },
         );
       }
+      const plannedScopes = guard && !guardContext ? intents.flatMap(intent => {
+        const parsed = quantityPublicationScopeSchema.safeParse({ destinationKind: intent.destinationKind,
+          connectionId: intent.channelConnectionId ?? intent.dropshipStoreConnectionId,providerKey: intent.providerKey,
+          providerScopeType: intent.providerScopeType,externalScopeId: intent.externalScopeId,
+          externalInventoryItemId: intent.externalInventoryItemId,productId: null,productVariantId: intent.productVariantId });
+        return parsed.success ? [parsed.data] : [];
+      }) : [];
+      await assertPublicationTransactionGuard(client,guard,guardContext ?? { scopes: plannedScopes,environment: null });
       return enqueueFullPublications(client, activationRunId, intents, replacementListings, reconciliationObservationIds, refreshVerifiedPublications);
     },
   };

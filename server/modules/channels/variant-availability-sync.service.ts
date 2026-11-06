@@ -6,12 +6,14 @@ import type {
 import { resolveVariantAvailabilityTarget } from "./variant-availability-sync.domain";
 import {
   claimVariantAvailabilitySyncs,
+  availabilityClaimPublicationGuard,
   enqueueVariantAvailabilitySync,
   loadVariantAvailabilityContext,
   markVariantAvailabilityDelegated,
   markVariantAvailabilityNotApplicable,
   markVariantAvailabilityFailed,
   markVariantAvailabilitySynced,
+  retainVariantAvailabilityAcknowledgement,
   supersedeAvailabilityClaim,
   type ClaimedVariantAvailabilitySync,
   type SqlPool,
@@ -20,6 +22,7 @@ import {
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import type { AuthorityAwareInventoryPublicationService } from "../inventory-planning/application/inventory-availability-runtime-publication.service";
+import type { PublicationTransactionGuard } from "../inventory-planning/publication-transaction-guard";
 
 const DEFAULT_BATCH_SIZE = 10;
 const DEFAULT_LEASE_SECONDS = 120;
@@ -53,6 +56,7 @@ export interface VariantAvailabilityBatchResult {
   synced: number;
   retried: number;
   superseded: number;
+  needsReview: number;
 }
 
 export interface QueueVariantAvailabilityRepairInput {
@@ -79,6 +83,7 @@ export async function queueVariantAvailabilityRepair(
       channelId,
       productVariantId,
       desiredActive: false,
+      requestKind: "stock_repair",
     },
   );
 }
@@ -89,18 +94,26 @@ async function processClaim(
     "dbPool" | "allocationEngine" | "adapterRegistry" | "inventoryPublication"
   >>,
   claim: ClaimedVariantAvailabilitySync,
-): Promise<"synced" | "retryable" | "superseded"> {
+): Promise<"synced" | "retryable" | "superseded" | "needs_review"> {
+  let providerAcknowledged = false;
   try {
     const context = await loadVariantAvailabilityContext(dependencies.dbPool, claim);
     if (!context) return "superseded";
 
-    if (context.catalogVariantActive !== claim.desiredActive) {
-      await supersedeAvailabilityClaim(
+    const catalogActive = context.catalogProductActive === true
+      && context.catalogProductStatus !== "archived" && context.catalogVariantActive === true;
+    // A status scan can explicitly request a zero for an internal-only
+    // variant. The recorded request kind, not a matching boolean, distinguishes
+    // this existing obligation from an old archive-triggered zero.
+    const internalOnlyRepair = claim.requestKind === "stock_repair" && !claim.desiredActive
+      && (!catalogActive || !isCustomerSellableVariant({ salesEligibility: context.catalogSalesEligibility }));
+    if ((!catalogActive && !internalOnlyRepair)
+      || (context.catalogVariantActive !== claim.desiredActive && !internalOnlyRepair)) {
+      return supersedeAvailabilityClaim(
         dependencies.dbPool,
         claim,
-        context.catalogVariantActive,
+        catalogActive,
       );
-      return "superseded";
     }
 
     if (context.channelProvider.toLowerCase() !== "ebay") {
@@ -122,7 +135,7 @@ async function processClaim(
       });
       return completed ? "synced" : "superseded";
     }
-    if (!isCustomerSellableVariant({ salesEligibility: context.catalogSalesEligibility })) {
+    if (!isCustomerSellableVariant({ salesEligibility: context.catalogSalesEligibility }) && !internalOnlyRepair) {
       const completed = await markVariantAvailabilityNotApplicable(dependencies.dbPool, claim);
       console.info(`${LOG_PREFIX} Skipped quantity publication for internal-only variant`, {
         channelId: context.channelId,
@@ -134,17 +147,46 @@ async function processClaim(
       return completed ? "synced" : "superseded";
     }
 
+    const ownerGuard = availabilityClaimPublicationGuard(claim, context);
     const routed = await dependencies.inventoryPublication.publishVariantAvailability({
       productId: context.productId,
       productVariantId: context.productVariantId,
       channelId: context.channelId,
       desiredActive: claim.desiredActive,
       triggeredBy: "variant_availability_sync",
-    }, async () => publishLegacyAvailability(dependencies, claim, context));
-    const completed = routed.authority === "legacy"
-      ? await markVariantAvailabilitySynced(dependencies.dbPool, claim, routed.legacyResult)
-      : await markVariantAvailabilityDelegated(dependencies.dbPool, claim);
-    if (!completed) return "superseded";
+    }, async () => publishLegacyAvailability(dependencies, claim, context, ownerGuard), ownerGuard);
+    if (routed.authority === "legacy") {
+      providerAcknowledged = true;
+      let completion: Awaited<ReturnType<typeof markVariantAvailabilitySynced>>;
+      try {
+        completion = await markVariantAvailabilitySynced(dependencies.dbPool, claim, routed.legacyResult, context.mappingSnapshot);
+      } catch (error) {
+        // A confirmed provider response must never go through the unsent-work
+        // retry path just because its local projection failed.
+        completion = await retainVariantAvailabilityAcknowledgement(dependencies.dbPool, claim, routed.legacyResult, context.mappingSnapshot);
+        console.error(`${LOG_PREFIX} Could not project an acknowledged provider update`, {
+          channelId: claim.channelId, productVariantId: claim.productVariantId, revision: claim.revision,
+          code: "VARIANT_AVAILABILITY_ACKNOWLEDGEMENT_PROJECTION_FAILED",
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (completion === "needs_review") {
+        console.error(`${LOG_PREFIX} Acknowledged provider update needs review`, {
+          channelId: claim.channelId, productVariantId: claim.productVariantId, revision: claim.revision,
+          code: "VARIANT_AVAILABILITY_ACKNOWLEDGEMENT_REVIEW",
+        });
+        return "needs_review";
+      }
+      if (completion === "claim_changed") {
+        console.warn(`${LOG_PREFIX} Provider acknowledged an update after its claim changed`, {
+          channelId: claim.channelId, productVariantId: claim.productVariantId, revision: claim.revision,
+          code: "VARIANT_AVAILABILITY_ACKNOWLEDGED_CLAIM_CHANGED",
+        });
+        return "superseded";
+      }
+    } else if (!await markVariantAvailabilityDelegated(dependencies.dbPool, claim)) {
+      return "superseded";
+    }
 
     console.info(`${LOG_PREFIX} Synchronized variant availability`, {
       channelId: context.channelId,
@@ -158,6 +200,14 @@ async function processClaim(
     });
     return "synced";
   } catch (error) {
+    if (providerAcknowledged) {
+      console.error(`${LOG_PREFIX} Could not retain an acknowledged provider update`, {
+        channelId: claim.channelId, productVariantId: claim.productVariantId, revision: claim.revision,
+        code: "VARIANT_AVAILABILITY_ACKNOWLEDGEMENT_NOT_SAVED",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
     const disposition = await markVariantAvailabilityFailed(dependencies.dbPool, claim, error);
     console.error(`${LOG_PREFIX} Failed to synchronize variant availability`, {
       channelId: claim.channelId,
@@ -202,6 +252,7 @@ export function createVariantAvailabilitySyncService(
         synced: 0,
         retried: 0,
         superseded: 0,
+        needsReview: 0,
       };
 
       // Process sequentially to respect marketplace rate limits and keep the
@@ -210,6 +261,7 @@ export function createVariantAvailabilitySyncService(
         const disposition = await processClaim(requiredDependencies, claim);
         if (disposition === "synced") summary.synced += 1;
         else if (disposition === "retryable") summary.retried += 1;
+        else if (disposition === "needs_review") summary.needsReview += 1;
         else summary.superseded += 1;
       }
       return summary;
@@ -224,6 +276,7 @@ async function publishLegacyAvailability(
   >>,
   claim: ClaimedVariantAvailabilitySync,
   context: VariantAvailabilityContext,
+  ownerGuard: PublicationTransactionGuard,
 ): Promise<{
   quantity: number;
   feedActive: boolean;
@@ -277,7 +330,7 @@ async function publishLegacyAvailability(
     externalVariantId: context.externalVariantId,
     externalInventoryItemId: context.externalInventoryItemId,
     allocatedQty: target.quantity,
-  }]);
+  }], undefined, ownerGuard);
   const result: InventoryPushResult | undefined = results.find(
     (candidate) => candidate.variantId === context.productVariantId,
   );

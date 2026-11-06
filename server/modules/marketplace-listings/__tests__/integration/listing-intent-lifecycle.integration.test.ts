@@ -13,6 +13,7 @@ import {
   type InventoryCutoverTestDatabase,
 } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { listingIntentBase } from "../fixtures/listing-intent.fixture";
+import { seedLegacyRetirements } from "../fixtures/listing-member-lifecycle.fixture";
 import {
   installIntentLifecycleFixture,
   verifyZero,
@@ -766,7 +767,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       expect(await lifecycle.assess(await claim())).toBeNull();
     });
     it.each(["ebay", "shopify", "walmart"])(
-      "requires exact current retirement receipts for archived-only %s products",
+      "settles local archival without claiming an unpublish for archived-only %s products",
       async (provider) => {
         await database.pool.query(
           "UPDATE channels.channels SET provider=$1 WHERE id=34",
@@ -785,31 +786,12 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
         );
         await repository.expand(20, now);
         const delivery = await claim();
-        expect((await lifecycle.assess(delivery))?.state).toBe(
-          "waiting_lifecycle",
-        );
-        const store = new PostgresListingMemberLifecycleRepository(
-          database.pool,
-        );
-        await store.discover(now, 25);
-        const adapter = {
-          observe: vi.fn(async (identity: ListingMemberIdentity) => ({
-            identity,
-            retired: true,
-          })),
-          retire: vi.fn(),
-        };
-        for (const id of await store.due(now, 25))
-          await store.withMember(id, (session) =>
-            processListingMemberRetirement(
-              session,
-              { store, adapter: async () => adapter },
-              () => now,
-            ),
-          );
         const outcome = await lifecycle.assess(delivery);
         expect(outcome?.state).toBe("not_applicable");
-        expect(adapter.retire).not.toHaveBeenCalled();
+        if (!outcome || outcome.state !== "not_applicable") throw new Error("Expected local archival disposition");
+        expect(outcome.lifecycle.members.every(member => member.code === "LISTING_LIFECYCLE_ARCHIVED_LOCALLY")).toBe(true);
+        expect(outcome.message).toContain("may remain live");
+        expect((await database.pool.query("SELECT count(*)::integer n FROM marketplace.listing_member_retirements")).rows[0].n).toBe(0);
         await repository.finish(delivery, outcome!, now);
         await database.pool.query(
           "UPDATE catalog.products SET is_active=true,updated_at=updated_at+interval '1 second' WHERE id=20",
@@ -957,7 +939,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       );
       await repository.expand(20, now);
       const store = new PostgresListingMemberLifecycleRepository(database.pool);
-      await store.discover(now, 25);
+      await seedLegacyRetirements(database.pool, now, 25);
       const adapter = {
         observe: vi.fn(async (identity: ListingMemberIdentity) => ({
           identity,
@@ -990,7 +972,7 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       await worker().processDue();
       expect((await rows())[0]).toMatchObject({ state: "waiting_lifecycle" });
       expect((await rows())[0].lifecycle.members[0]).toMatchObject({
-        duty: "retirement",
+        duty: "stock_clear",
         code: "LISTING_STOCK_WORK_OUTSTANDING",
       });
     });

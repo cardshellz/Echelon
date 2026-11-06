@@ -43,12 +43,13 @@ import type {
 } from "../channel-adapter.interface";
 import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
 import { QuantityPublicationAdmissionError } from "../../inventory-planning/domain/quantity-publication-admission";
+import type { PublicationTransactionGuard } from "../../inventory-planning/publication-transaction-guard";
 
 import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service";
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
 import { EbayApiRequestError } from "./ebay/ebay-api-error";
 import { EbayInventoryQuantityError, EbayInventoryQuantityPreflightError, discoverEbayInventoryOffers, ebayInventoryMarketplace, publishEbayInventoryQuantity, readEbayInventoryQuantity, type EbayDiscoveredOffer } from "./ebay/ebay-inventory-quantity";
-import { EBAY_QUANTITY_BATCH_LIMIT, EbayQuantityUpdateInputError, sendEbayQuantityUpdates } from "./ebay/ebay-quantity-update";
+import { EBAY_QUANTITY_BATCH_LIMIT, EbayQuantityUpdateInputError, buildEbayQuantityUpdateRequest, sendEbayQuantityUpdates } from "./ebay/ebay-quantity-update";
 import { EbayListingBuilder, createEbayListingBuilder } from "./ebay/ebay-listing-builder";
 import { mapCarrierToEbay } from "./ebay/ebay-category-map";
 import { EbayMarketplaceListingConnector } from "../listing-connectors/ebay-listing.connector";
@@ -267,7 +268,12 @@ export class EbayAdapter implements IChannelAdapter {
     channelId: number,
     items: InventoryPushItem[],
     context?: InventoryPublicationContext,
+    ownerGuard?: PublicationTransactionGuard,
   ): Promise<InventoryPushResult[]> {
+    if (ownerGuard && context) throw new QuantityPublicationAdmissionError("PUBLICATION_OWNER_CONTEXT_INVALID",
+      "A legacy work-owner guard cannot replace the canonical outbox owner.");
+    if (ownerGuard && items.length !== 1) throw new QuantityPublicationAdmissionError("PUBLICATION_OWNER_SCOPE_INVALID",
+      "One saved availability claim can publish only its exact variant.");
     if (context && context.providerScopeType !== "account") {
       return items.map((item) => ({
         variantId: item.variantId,
@@ -284,15 +290,31 @@ export class EbayAdapter implements IChannelAdapter {
     // Never enter the legacy item-only PUT / stale-offer recovery below.
     if (context) return this.pushCanonicalInventory(channelId, items, context);
     const publicationItems = items;
-    const client = await this.getApiClient(channelId);
+    const baseClient = await this.getApiClient(channelId);
+    const client = ownerGuard ? baseClient.withPublicationGuard(ownerGuard) : baseClient;
     const results: InventoryPushResult[] = [];
 
-    // eBay supports bulk update — batch up to 25 items per call
+    // Bound input work; the quantity admission owner sends each SKU separately.
     const BATCH_SIZE = EBAY_QUANTITY_BATCH_LIMIT;
+    if (publicationItems.some(item => !Number.isSafeInteger(item.allocatedQty) || item.allocatedQty < 0)) {
+      throw new EbayQuantityUpdateInputError("An eBay quantity update requires a nonnegative safe integer quantity.");
+    }
     const batches: InventoryPushItem[][] = [];
 
     for (let i = 0; i < publicationItems.length; i += BATCH_SIZE) {
       batches.push(publicationItems.slice(i, i + BATCH_SIZE));
+    }
+    const offers = publicationItems.filter(item => item.externalVariantId);
+    if (new Set(offers.map(item => item.sku)).size !== offers.length
+      || new Set(offers.map(item => item.externalVariantId)).size !== offers.length) {
+      throw new EbayQuantityUpdateInputError("An eBay quantity batch must contain distinct SKU and offer identities.");
+    }
+    // Check every bounded segment before the first provider request.
+    for (const batch of batches) {
+      const updates = batch.filter(item => item.externalVariantId).map(item => ({
+        sku: item.sku ?? "",offerId: item.externalVariantId!,quantity: item.allocatedQty,
+      }));
+      if (updates.length) buildEbayQuantityUpdateRequest(updates);
     }
 
     for (const batch of batches) {
@@ -302,84 +324,39 @@ export class EbayAdapter implements IChannelAdapter {
 
       // Bulk update for items with existing offers
       if (itemsWithOffers.length > 0) {
-        try {
-          const acknowledgements = await sendEbayQuantityUpdates(
-            request => client.bulkUpdatePriceQuantity(request),
-            itemsWithOffers.map((item) => ({
-              sku: item.sku || String(item.variantId),
-              offerId: item.externalVariantId!,
-              quantity: item.allocatedQty,
-            })),
-          );
-
-          for (const item of itemsWithOffers) {
-            const acknowledgement = acknowledgements.find(result => result.offerId === item.externalVariantId)!;
+        // Do not turn an admission failure or an unknown HTTP outcome into a
+        // second write. The publication owner retains the original evidence;
+        // a changed offer must be resolved by the identity owner, not by taking
+        // the first offer returned for a SKU.
+        const updates = itemsWithOffers.map((item) => ({
+            sku: item.sku ?? "",
+            offerId: item.externalVariantId!,
+            quantity: item.allocatedQty,
+          }));
+        for (const [index,item] of itemsWithOffers.entries()) {
+          try {
+            // The transport admits one SKU at a time. Preserve earlier results
+            // if a later SKU fails, rather than treating the entire batch as unsent.
+            const [acknowledgement] = await sendEbayQuantityUpdates(
+              request => client.bulkUpdatePriceQuantity(request), [updates[index]!]);
             const statusCode = acknowledgement.statusCode;
-            if (acknowledgement.confirmed) {
-              results.push({
-                variantId: item.variantId,
-                pushedQty: item.allocatedQty,
-                status: "success",
-              });
-            } else {
-              // A stored offerId can go stale (offer withdrawn + relisted gets
-              // a NEW id) — that surfaces as a per-offer error inside an
-              // otherwise-successful bulk response, so the catch fallback
-              // below never sees it. Re-resolve by SKU and heal the mapping.
-              const recovered = this.isStaleOfferError(statusCode, acknowledgement.errors)
-                ? await this.recoverStaleOffer(client, item)
-                : null;
-              results.push(
-                recovered ?? {
-                  variantId: item.variantId,
-                  pushedQty: 0,
-                  status: "error",
-                  error: acknowledgement.errors.length === 0 && (statusCode === undefined || statusCode < 300)
-                    ? "eBay did not confirm the exact SKU/offer quantity operation."
-                    : formatEbayOfferError(acknowledgement.errors[0], statusCode),
-                },
-              );
-            }
-          }
-        } catch (err: any) {
-          // Local admission/input rejection must not be bypassed by an offer
-          // lookup and individual mutation fallback.
-          if (err instanceof QuantityPublicationAdmissionError || err instanceof EbayQuantityUpdateInputError) throw err;
-          // If bulk fails, try individual updates
-          for (const item of itemsWithOffers) {
-            try {
-              const existingOffers = await client.getOffers(item.sku || "");
-              if (existingOffers.offers?.[0]) {
-                const offer = existingOffers.offers[0];
-                await client.updateOffer(offer.offerId, {
-                  ...offer,
-                  availableQuantity: item.allocatedQty,
-                } as any);
-                results.push({
-                  variantId: item.variantId,
-                  pushedQty: item.allocatedQty,
-                  status: "success",
-                  ...(offer.offerId !== item.externalVariantId
-                    ? { refreshedExternalVariantId: offer.offerId }
-                    : {}),
-                });
-              } else {
-                results.push({
-                  variantId: item.variantId,
-                  pushedQty: 0,
-                  status: "error",
-                  error: "No existing offer found for SKU",
-                });
-              }
-            } catch (innerErr: any) {
-              results.push({
-                variantId: item.variantId,
-                pushedQty: 0,
-                status: "error",
-                error: innerErr.message,
-              });
-            }
-            await this.delay(200);
+            results.push(acknowledgement.confirmed ? {
+              variantId: item.variantId,
+              pushedQty: item.allocatedQty,
+              status: "success",
+            } : {
+              variantId: item.variantId,
+              pushedQty: 0,
+              status: "error",
+              error: acknowledgement.errors.length === 0 && (statusCode === undefined || statusCode < 300)
+                ? "eBay did not confirm the exact SKU/offer quantity operation."
+                : formatEbayOfferError(acknowledgement.errors[0], statusCode),
+            });
+          } catch (error) {
+            // The queue's single saved claim owns failure classification and
+            // recovery; keep its original error and evidence intact.
+            if (ownerGuard || items.length === 1) throw error;
+            results.push(legacyInventoryPushFailure(item,error));
           }
         }
       }
@@ -416,13 +393,9 @@ export class EbayAdapter implements IChannelAdapter {
               error: `Inventory item not found for SKU ${item.sku}`,
             });
           }
-        } catch (err: any) {
-          results.push({
-            variantId: item.variantId,
-            pushedQty: 0,
-            status: "error",
-            error: err.message,
-          });
+        } catch (error) {
+          if (ownerGuard || items.length === 1) throw error;
+          results.push(legacyInventoryPushFailure(item,error));
         }
         await this.delay(200);
       }
@@ -525,69 +498,6 @@ export class EbayAdapter implements IChannelAdapter {
       }
     }
     return results;
-  }
-
-  /**
-   * eBay signals a dead offerId with a per-offer 404, error 25710
-   * ("could not find the entity") / 25713 ("invalid offerId"), or — on some
-   * bulk responses — a generic user error whose MESSAGE says
-   * "Please enter a valid offerId." (seen in prod 2026-07-05, message-only,
-   * different errorId). Match the message too so no stale-offer variant
-   * slips past the by-SKU recovery.
-   */
-  private isStaleOfferError(
-    statusCode: number | undefined,
-    ...errorLists: Array<Partial<EbayError>[] | undefined>
-  ): boolean {
-    if (statusCode === 404) return true;
-    return errorLists.some((errors) =>
-      errors?.some(
-        (e) =>
-          e.errorId === 25710 ||
-          e.errorId === 25713 ||
-          /valid offerId|offerId is invalid|offer.*not found/i.test(e.message ?? ""),
-      ),
-    );
-  }
-
-  /**
-   * The stored offerId no longer exists on eBay (withdraw + relist mints a
-   * new one). Re-resolve the live offer by SKU, push the quantity to it,
-   * and report the fresh offerId so the orchestrator can heal the mapping.
-   * Returns null when there is nothing fresher — caller keeps the original
-   * error result.
-   */
-  private async recoverStaleOffer(
-    client: EbayApiClient,
-    item: InventoryPushItem,
-  ): Promise<InventoryPushResult | null> {
-    if (!item.sku) return null;
-    try {
-      const existing = await client.getOffers(item.sku);
-      const fresh = existing.offers?.[0];
-      if (!fresh?.offerId || fresh.offerId === item.externalVariantId) {
-        return null;
-      }
-      await client.updateOffer(fresh.offerId, {
-        ...fresh,
-        availableQuantity: item.allocatedQty,
-      } as any);
-      console.warn(
-        `[EbayAdapter] Healed stale offerId for SKU ${item.sku}: ` +
-          `${item.externalVariantId} -> ${fresh.offerId}`,
-      );
-      return {
-        variantId: item.variantId,
-        pushedQty: item.allocatedQty,
-        status: "success",
-        refreshedExternalVariantId: fresh.offerId,
-      };
-    } catch (err: any) {
-      console.warn(
-        `[EbayAdapter] Stale-offer recovery failed for SKU ${item.sku}: ${err.message}`,
-      );
-      return null;
-    }
   }
 
   // -------------------------------------------------------------------------
@@ -1151,6 +1061,13 @@ function canonicalEbayInventoryFailure(item: InventoryPushItem, error: unknown, 
       : error instanceof InventoryPublicationConfigurationError ? { errorCode: error.code, retryable: false }
       : preflight ? { errorCode: "EBAY_INVENTORY_PREFLIGHT_FAILED", retryable: true } : {}),
   };
+}
+
+function legacyInventoryPushFailure(item: InventoryPushItem, error: unknown): InventoryPushResult {
+  const code = error instanceof Error && "code" in error && typeof error.code === "string" ? error.code : undefined;
+  const retryable = error instanceof Error && "retryable" in error && typeof error.retryable === "boolean" ? error.retryable : undefined;
+  return { variantId: item.variantId,pushedQty: 0,status: "error",error: error instanceof Error ? error.message : String(error),
+    ...(code ? { errorCode: code } : {}),...(retryable === undefined ? {} : { retryable }) };
 }
 
 function exactEbayInventoryItemKey(

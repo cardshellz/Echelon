@@ -94,9 +94,17 @@ describe("shared listing member recovery HTTP ownership", () => {
     ).toBe(200);
     expect(owner.memberRecoveryPreview).toHaveBeenCalledWith(10, {
       operationId: command.operationId,
-    });
+    }, false);
     expect((await post(channel + "/resume")).status).toBe(403);
     expect(owner.resumeMemberRecovery).not.toHaveBeenCalled();
+  });
+
+  it("opts in to dispatch-history evidence for both channel and Dropship reviews", async () => {
+    expect((await post(channel + "?dispatchHistory=1", { operationId: command.operationId })).status).toBe(200);
+    expect(owner.memberRecoveryPreview).toHaveBeenCalledWith(10, { operationId: command.operationId }, true);
+    const dropship = "/api/dropship/listings/stores/70/listing-lifecycle/members?dispatchHistory=1";
+    expect((await post(dropship, { productId: 30 }, { "x-member": "signed-in" })).status).toBe(200);
+    expect(owner.memberHistory).toHaveBeenCalledWith({ connectionId: 70, vendorId: 7 }, { productId: 30 }, true);
   });
 
   it("passes the authenticated operator, never a body actor, to the shared owner", async () => {

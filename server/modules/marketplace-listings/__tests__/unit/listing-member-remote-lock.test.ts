@@ -6,6 +6,7 @@ import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecyc
 import { listingMemberRemoteKey, tryLockListingMemberRemote } from "../../listing-member-lifecycle";
 import { PostgresListingMemberLifecycleRepository } from "../../infrastructure/pg-listing-member-lifecycle.repository";
 import { decideListingEndClaim } from "../../../dropship/domain/listing-end-claims";
+import { shopifyListingIdentityAliases } from "../../infrastructure/providers/shopify-listing-member-identity";
 
 /**
  * The remote-member lock, published for Dropship's listing end worker (PR C, PLAN-C v4.1 §5.5, §5.8; DC8): one
@@ -33,6 +34,14 @@ function viewIdentity(): ListingMemberIdentity {
 }
 
 describe("tryLockListingMemberRemote", () => {
+  it("normalizes only a valid Shopify variant ID, without treating another resource as the same variant", () => {
+    expect(shopifyListingIdentityAliases("ProductVariant", "123")).toEqual(["123", "gid://shopify/ProductVariant/123"]);
+    expect(shopifyListingIdentityAliases("ProductVariant", "gid://shopify/ProductVariant/123")).toEqual(["123", "gid://shopify/ProductVariant/123"]);
+    expect(shopifyListingIdentityAliases("ProductVariant", "gid://shopify/Product/123")).toBeNull();
+    expect(shopifyListingIdentityAliases("ProductVariant", "other-123")).toBeNull();
+    expect(shopifyListingIdentityAliases("ProductVariant", "123\n")).toBeNull();
+    expect(shopifyListingIdentityAliases("ProductVariant", "gid://shopify/ProductVariant/123\n")).toBeNull();
+  });
   it("tries the retirement namespace with the remote key, without waiting, until the caller's transaction ends", async () => {
     const client = recordingClient(true);
     expect(await tryLockListingMemberRemote(client, viewIdentity())).toBe(true);
@@ -51,7 +60,10 @@ describe("tryLockListingMemberRemote", () => {
       source_revision: "r1", state: "pending", code: null, message: null, verified_at: null, version: 1, dispatch_status: "none",
       dispatch_key: null, verification_attempts: 0, recovery_required: false };
     const pooled = { ...client, query: async (text: string, values: unknown[] = []) => {
-      if (text.startsWith("SELECT * FROM marketplace.listing_member_retirements")) return { rows: [row], rowCount: 1 };
+      if (text.includes("FROM marketplace.listing_member_retirements r WHERE r.id=$1")) {
+        expect(values).toEqual([row.id]);
+        return { rows: [row], rowCount: 1 };
+      }
       return client.query(text, values);
     }, release: () => undefined };
     const repository = new PostgresListingMemberLifecycleRepository({ connect: async () => pooled as never });

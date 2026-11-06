@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { ListingMemberRecoveryService, type ListingMemberRecoveryScope } from "./listing-member-recovery.service";
 import type { ListingMemberLifecycleDependencies } from "./listing-member-lifecycle.port";
-import { processListingMemberRetirement } from "./process-listing-member-retirement";
+import type { ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
+import { reconcileArchivedMemberRetirement } from "./reconcile-archived-member-retirement";
 import {
   listingLifecycleCommandSchema,
   listingLifecycleListSchema,
@@ -29,6 +30,20 @@ import type {
 
 const channelIdSchema = z.number().int().positive().max(2_147_483_647);
 const actorSchema = z.string().trim().min(1).max(100);
+// Existing browser bundles parse the original member contract strictly. They
+// opt in to additional dispatch evidence so a rolling deploy stays readable.
+function legacyMember(record: ListingMemberRetirement): ListingMemberRetirement {
+  const { unconfirmedPriorDispatch: _unconfirmedPriorDispatch, ...legacy } = record;
+  // Older bundles do not understand the additional evidence flag and would
+  // hide terminal rows. Project unresolved history as attention without
+  // changing the stored audit state or permitting another removal.
+  if (record.unconfirmedPriorDispatch && (record.state === "retired" || record.state === "superseded")) {
+    return { ...legacy, state: "failed", code: "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+      message: "An earlier removal has no confirmed final response. Check the saved channel listing before reusing this link.",
+      verifiedAt: null, recoveryRequired: true };
+  }
+  return legacy;
+}
 function assertAccount(
   expected: ListingAccount,
   current: ListingAccount,
@@ -66,21 +81,25 @@ export class ListingLifecycleService {
     if (!this.dependencies.members) throw new ListingPublicationError("LISTING_LIFECYCLE_UNAVAILABLE", "Listing retirement recovery is unavailable.", 503);
     return new ListingMemberRecoveryService(this.dependencies.members, () => this.now());
   }
-  memberRecoveryPreview(channelId: ListingMemberRecoveryScope, input: unknown) {
+  async memberRecoveryPreview(channelId: ListingMemberRecoveryScope, input: unknown, includeDispatchHistory = false) {
     const request = z.object({ operationId: z.string().uuid() }).strict().parse(input);
-    return this.memberRecovery().preview(channelId, request.operationId);
+    const review = await this.memberRecovery().preview(channelId, request.operationId);
+    return includeDispatchHistory ? review : { ...review, record: legacyMember(review.record) };
   }
-  resumeMemberRecovery(channelId: ListingMemberRecoveryScope, input: unknown, actor: string) {
-    return this.memberRecovery().resume(channelId, input, actor);
+  async resumeMemberRecovery(channelId: ListingMemberRecoveryScope, input: unknown, actor: string) {
+    return legacyMember(await this.memberRecovery().resume(channelId, input, actor));
   }
-  async memberHistory(channelId: ListingMemberRecoveryScope, input: unknown) {
+  async memberHistory(channelId: ListingMemberRecoveryScope, input: unknown, includeDispatchHistory = false) {
     const request = z.object({ productId: channelIdSchema, limit: z.number().int().min(1).max(250).default(100) }).strict().parse(input);
     if (!this.dependencies.members) throw new ListingPublicationError("LISTING_LIFECYCLE_UNAVAILABLE", "Listing retirement history is unavailable.", 503);
-    if (typeof channelId === "number")
-      return { items: await this.dependencies.members.store.listForChannel(channelIdSchema.parse(channelId), request.productId, request.limit) };
+    if (typeof channelId === "number") {
+      const items = await this.dependencies.members.store.listForChannel(channelIdSchema.parse(channelId), request.productId, request.limit);
+      return { items: includeDispatchHistory ? items : items.map(legacyMember) };
+    }
     const scope = z.object({connectionId:channelIdSchema,vendorId:channelIdSchema}).strict().parse(channelId);
     if (!this.dependencies.members.store.listForDropship) throw new ListingPublicationError("LISTING_LIFECYCLE_UNAVAILABLE","Listing retirement history is unavailable.",503);
-    return {items:await this.dependencies.members.store.listForDropship(scope.connectionId,scope.vendorId,request.productId,request.limit)};
+    const items = await this.dependencies.members.store.listForDropship(scope.connectionId,scope.vendorId,request.productId,request.limit);
+    return { items: includeDispatchHistory ? items : items.map(legacyMember) };
   }
   async memberConflicts(channelId: number, input: unknown) {
     const request = z.object({ offset: z.number().int().nonnegative().safe().default(0) }).strict().parse(input);
@@ -196,10 +215,9 @@ export class ListingLifecycleService {
       failed = 0;
     const members = this.dependencies.members;
     if (members) {
-      await members.store.discover(this.now(), limit);
       for (const id of await members.store.due(this.now(), limit)) {
         try {
-          const result = await members.store.withMember(id, session => processListingMemberRetirement(session, members, () => this.now()));
+          const result = await members.store.withMember(id, session => reconcileArchivedMemberRetirement(session, members, () => this.now()));
           if (result?.state === "failed") failed++;
           else if (result) processed++;
         } catch (error) {

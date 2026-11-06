@@ -17,6 +17,9 @@ import { dispatchRuntimeFixtureSql, dispatchRuntimeSeedSql } from "../fixtures/i
 import { shipmentPublicationFixtureSql, shipmentPublicationIntent } from "../fixtures/shipment-publication.fixture";
 import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
 import { readChannelStockSelection } from "../../../channels/channel-stock-selection";
+import { QuantityPublicationAdmissionError } from "../../publication-transaction-guard";
+import { availabilityClaimPublicationGuard, claimVariantAvailabilitySyncs,
+  type SqlPool, type VariantAvailabilityContext } from "../../../channels/variant-availability-sync.repository";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -47,18 +50,37 @@ describeDatabase.sequential("shipment publication caller-owned PostgreSQL transa
       ALTER TABLE catalog.product_variants ADD COLUMN product_id integer REFERENCES catalog.products(id),
         ADD COLUMN sku text,ADD COLUMN uom_type text,ADD COLUMN is_active boolean,
         ADD COLUMN requires_shipping boolean,ADD COLUMN track_inventory boolean,ADD COLUMN sales_eligibility text;
-      CREATE TABLE channels.channels(id integer PRIMARY KEY,provider text NOT NULL);
+      CREATE TABLE channels.channels(id integer PRIMARY KEY,provider text NOT NULL,status text DEFAULT 'active',
+        sync_enabled boolean DEFAULT true,sync_mode text DEFAULT 'live');
       CREATE TABLE channels.channel_connections(id integer PRIMARY KEY,channel_id integer NOT NULL REFERENCES channels.channels(id));
-      INSERT INTO channels.channels VALUES(3,'shopify');
+      INSERT INTO channels.channels(id,provider) VALUES(3,'shopify');
       INSERT INTO channels.channel_connections VALUES(33,3);`);
     await installStockSelectionFixture(pool);
-    await pool.query(`INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id,is_active)
+    await pool.query(`CREATE TABLE inventory.quantity_publication_attempts(id bigint PRIMARY KEY,state text NOT NULL,resolution_basis text,outcome_hash text,scope jsonb);
+      CREATE TABLE inventory.quantity_publication_response_recoveries(attempt_id bigint PRIMARY KEY REFERENCES inventory.quantity_publication_attempts(id),evidence_hash text NOT NULL);
+      ALTER TABLE channels.channel_feeds ADD COLUMN id integer GENERATED ALWAYS AS IDENTITY,
+        ADD COLUMN channel_product_id text;
+      INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_sku,channel_inventory_item_id,is_active)
       VALUES(3,105,'EA','inventory-item-105',1)`);
+    const requests = readFileSync(resolve("migrations/0663_quantity_provider_request_evidence.sql"),"utf8");
+    const requestStart = requests.indexOf("CREATE TABLE inventory.quantity_provider_requests");
+    const requestEnd = requests.indexOf("CREATE TRIGGER quantity_provider_requests_immutable");
+    if (requestStart < 0 || requestEnd <= requestStart) throw new Error("The provider request migration fixture changed");
+    await pool.query(requests.slice(requestStart,requestEnd));
+    const finality = readFileSync(resolve("migrations/0733_ebay_provider_response_finality.sql"),"utf8");
+    await pool.query(finality.slice(0,finality.indexOf("COMMENT ON COLUMN")));
+    await pool.query(readFileSync(resolve("migrations/0606_channel_variant_availability_sync.sql"), "utf8"));
+    const eligibility = readFileSync(resolve("migrations/0626_catalog_variant_sales_eligibility.sql"), "utf8");
+    const begin = eligibility.indexOf("CREATE OR REPLACE FUNCTION catalog.assert_customer_sellable_variant()");
+    const end = eligibility.indexOf("CREATE OR REPLACE FUNCTION catalog.guard_internal_only_variant_transition()");
+    if (begin < 0 || end <= begin) throw new Error("The Catalog sellability migration fixture changed");
+    await pool.query(eligibility.slice(begin, end));
+    await pool.query(readFileSync(resolve("migrations/900000056000020020001_channel_availability_archive_separation.sql"), "utf8"));
   });
   beforeEach(async () => {
     await pool.query(`TRUNCATE inventory.inventory_publication_attempts, inventory.inventory_publication_readbacks,
       inventory.inventory_publication_outbox, inventory.availability_activation_runs RESTART IDENTITY;
-      ${dispatchRuntimeSeedSql}
+      ${dispatchRuntimeSeedSql.replace("TRUNCATE ", "TRUNCATE channels.channel_variant_availability_followups, channels.channel_variant_availability_sync, ")}
       UPDATE catalog.product_variants SET product_id=100,sku='EA',uom_type='each',is_active=true,
         requires_shipping=true,track_inventory=true,sales_eligibility='sellable' WHERE id=105;
       INSERT INTO inventory.availability_activation_runs(id,mode,state) VALUES(1,'activation','active');`);
@@ -114,6 +136,46 @@ describeDatabase.sequential("shipment publication caller-owned PostgreSQL transa
     } finally {
       await pool.query("DROP TRIGGER reject_test_queue ON inventory.inventory_publication_outbox; DROP FUNCTION inventory.reject_test_queue()");
     }
+  });
+
+  it("checks a work owner's guard in the same transaction before enqueuing canonical publication", async () => {
+    const executor = new PostgresInventoryAvailabilityRuntimePublicationExecutor(pool);
+    const before = await state();
+    const guard = vi.fn(async (client: { query: (sql: string) => Promise<unknown> }) => {
+      await client.query("SELECT 1");
+      throw new QuantityPublicationAdmissionError("TEST_CLAIM_CHANGED", "The work claim changed");
+    });
+    await expect(executor.execute(context =>
+      context.enqueueFullPublications("1", [shipmentPublicationIntent()]), guard)).rejects.toMatchObject({ code: "TEST_CLAIM_CHANGED" });
+    expect(guard).toHaveBeenCalledOnce();
+    expect(await state()).toEqual(before);
+    // Independent publication still uses its existing owner and succeeds.
+    await executor.execute(context => context.enqueueFullPublications("1", [shipmentPublicationIntent()]));
+    expect((await state()).outbox).toEqual([{ desired_quantity: "6", desired_revision: "1", state: "queued" }]);
+  });
+
+  it("prevents a replaced availability worker from enqueueing through the real canonical publication owner", async () => {
+    await pool.query("SELECT channels.request_variant_availability_refresh(3,105,true,'catalog_activation')");
+    const [claim] = await claimVariantAvailabilitySyncs(pool as unknown as SqlPool, { batchSize: 1, leaseSeconds: 120 });
+    expect(claim).toBeDefined();
+    const feedId = (await pool.query<{ id: number }>("SELECT id FROM channels.channel_feeds WHERE channel_id=3 AND product_variant_id=105")).rows[0].id;
+    const context: VariantAvailabilityContext = { channelId: 3, channelName: "Test", channelProvider: "shopify",
+      channelStatus: "active", channelSyncEnabled: true, channelSyncMode: "live", productId: 100, productVariantId: 105,
+      catalogSku: "EA", catalogVariantActive: true, catalogRequiresShipping: true, catalogTrackInventory: true,
+      catalogSalesEligibility: "sellable", variantExcluded: false, catalogProductActive: true, catalogProductStatus: "active",
+      productExcluded: false, productOverrideIsListed: null, variantOverrideIsListed: null, feedId, listingId: null,
+      externalProductId: null, externalVariantId: null, externalInventoryItemId: "inventory-item-105", externalSku: "EA", previousQuantity: null,
+      mappingSnapshot: { productId: 100, catalogSku: "EA", feed: { id: feedId, productId: null, variantId: null,
+        inventoryItemId: "inventory-item-105", sku: "EA" }, listing: null } };
+    await pool.query("UPDATE channels.channel_variant_availability_sync SET lease_token='123e4567-e89b-42d3-a456-426614174001' WHERE channel_id=3 AND product_variant_id=105");
+    const executor = new PostgresInventoryAvailabilityRuntimePublicationExecutor(pool);
+    await expect(executor.execute(owner => owner.enqueueFullPublications("1", [shipmentPublicationIntent()]),
+      availabilityClaimPublicationGuard(claim!, context))).rejects.toMatchObject({ code: "VARIANT_AVAILABILITY_CLAIM_CHANGED" });
+    expect((await state()).outbox).toEqual([]);
+    const current = { ...claim!, leaseToken: "123e4567-e89b-42d3-a456-426614174001" };
+    await executor.execute(owner => owner.enqueueFullPublications("1", [shipmentPublicationIntent()]),
+      availabilityClaimPublicationGuard(current, context));
+    expect((await state()).outbox).toEqual([{ desired_quantity: "6", desired_revision: "1", state: "queued" }]);
   });
 
   it("rejects inactive activation without leaving dispatched stock or queue changes", async () => {

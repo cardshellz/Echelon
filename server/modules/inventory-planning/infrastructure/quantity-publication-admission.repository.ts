@@ -18,10 +18,13 @@ import { PostgresQuantityProviderRequestEvidenceStore } from "./quantity-provide
 import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, quantityPublicationRecoverySchema,
   type QuantityPublicationScope, type QuantityPublicationDrainProof, type QuantityPublicationRecovery } from "../domain/quantity-publication-admission";
 import { readArchivedListingMember, lockArchivedListingMember, type ArchivedListingMemberSource } from "../../marketplace-listings/listing-member-lifecycle";
+import { assertPublicationTransactionGuard, recordPublicationGuardProviderAttempt,
+  type PublicationTransactionGuard } from "../application/publication-transaction-guard";
 
 // Separate namespace from authority, inventory-admission, and target/variant locks.
 export const QUANTITY_PUBLICATION_LOCK_NAMESPACE = 918419;
-const session = new AsyncLocalStorage<{ scope: QuantityPublicationScope; externalSku: string | null; memberKeys: ReadonlySet<string> }>();
+const session = new AsyncLocalStorage<{ scope: QuantityPublicationScope; externalSku: string | null; memberKeys: ReadonlySet<string>;
+  publicationGuard?: PublicationTransactionGuard; environment: "production" | "sandbox" | null }>();
 // A catch-up expectation binds an eventual provider admission without itself
 // representing a provider request. Resolver failures must not create uncertainty.
 const legacyCatchupScope = new AsyncLocalStorage<{ scope: QuantityPublicationScope; claim: QuantityPublicationCatchup | null }>();
@@ -211,10 +214,17 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     return legacyCatchupScope.run({ scope, claim }, work);
   }
 
-  run<T>(raw: QuantityPublicationScope, work: () => Promise<T>): Promise<T> {
+  run<T>(raw: QuantityPublicationScope, work: () => Promise<T>, guard?: PublicationTransactionGuard,
+    environment: "production" | "sandbox" | null = null): Promise<T> {
     const scope = quantityPublicationScopeSchema.parse(raw);
     const parent = session.getStore();
     if (parent) {
+      if (guard && guard !== parent.publicationGuard) {
+        fail("PUBLICATION_NESTED_OWNER_MISMATCH", "A nested provider request cannot introduce or replace an owner after admission.");
+      }
+      if (environment && environment !== parent.environment) {
+        fail("PUBLICATION_NESTED_ENVIRONMENT_MISMATCH", "A nested provider request cannot change the admitted environment.");
+      }
       const sameDestination = scope.destinationKind === parent.scope.destinationKind && scope.connectionId === parent.scope.connectionId
         && scope.providerKey === parent.scope.providerKey && scope.providerScopeType === parent.scope.providerScopeType
         && scope.externalScopeId === parent.scope.externalScopeId;
@@ -224,7 +234,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       }
       return work();
     }
-    return this.execute(scope, null, work);
+    return this.execute(scope, null, work, { guard,environment });
   }
 
   runOutbox<T>(claim: QuantityPublicationOutboxClaim, work: () => Promise<T>): Promise<T> {
@@ -293,24 +303,27 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       if (!resolved) return fail("PUBLICATION_SETUP_PLAN_MISSING", "Inventory did not authorize initial stock.");
       const admitted = resolved;
       return runWithListingSetupAdmission(admitted, () => work(admitted));
-    }, undefined, scopes, intent, value => { resolved = value; });
+    }, { memberScopes: scopes,setupRequest: intent,receiveSetup: value => { resolved = value; } });
   }
 
   runListing<T>(raw: QuantityPublicationScope,
-    resolveCurrentPlan: () => Promise<{ outboxId: string; quantity: number }>,
-    work: (canonicalQuantity: number | null) => Promise<T>): Promise<T> {
+    resolveCurrentPlan: (guard?: PublicationTransactionGuard, environment?: "production" | "sandbox" | null) => Promise<{ outboxId: string; quantity: number }>,
+    work: (canonicalQuantity: number | null) => Promise<T>, guard?: PublicationTransactionGuard,
+    environment: "production" | "sandbox" | null = null): Promise<T> {
     const scope = quantityPublicationScopeSchema.parse(raw);
-    if (session.getStore()) return this.run(scope, () => work(null));
+    if (session.getStore()) return this.run(scope, () => work(null),guard,environment);
     let quantity: number | null = null;
-    return this.execute(scope, null, () => work(quantity), async () => {
-      const plan = await resolveCurrentPlan(); quantity = plan.quantity; return [{ ...plan, scope }];
-    });
+    return this.execute(scope, null, () => work(quantity), { guard,environment,resolveCurrentPlan: async () => {
+      const plan = await resolveCurrentPlan(guard,environment); quantity = plan.quantity; return [{ ...plan, scope }];
+    } });
   }
 
   async runListingGroup<T>(raw: QuantityPublicationScope, rawMembers: readonly QuantityPublicationScope[],
-    resolveCurrentPlan: (scope: QuantityPublicationScope) => Promise<{ outboxId: string; quantity: number }>,
+    resolveCurrentPlan: (scope: QuantityPublicationScope, guard?: PublicationTransactionGuard,
+      environment?: "production" | "sandbox" | null) => Promise<{ outboxId: string; quantity: number }>,
     work: (canonicalQuantities: ReadonlyMap<string, number> | null, retainedSkus?: readonly string[]) => Promise<T>,
-    archivedMemberScope?: { environment: "production" | "sandbox"; market: string }): Promise<T> {
+    archivedMemberScope?: { environment: "production" | "sandbox"; market: string }, guard?: PublicationTransactionGuard,
+    environment: "production" | "sandbox" | null = null): Promise<T> {
     const scope = quantityPublicationScopeSchema.parse(raw);
     const members = rawMembers.map(member => quantityPublicationScopeSchema.parse(member));
     if (members.length < 1 || members.length > 250 || new Set(members.map(key)).size !== members.length
@@ -328,7 +341,8 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     const retainedScope = (member: QuantityPublicationScope) => ({ destinationKind: member.destinationKind,
       connectionId: member.connectionId, provider: member.providerKey, accountId: member.externalScopeId,
       environment: archivedMemberScope!.environment, market: archivedMemberScope!.market, externalSku: member.externalInventoryItemId });
-    try { return await this.execute(scope, null, () => work(quantities, [...retained.keys()]), async reader => {
+    try { return await this.execute(scope, null, () => work(quantities, [...retained.keys()]), { guard,environment,memberScopes: members,
+      resolveCurrentPlan: async reader => {
       const plans = [];
       quantities = new Map();
       if (archivedMemberScope) {
@@ -345,13 +359,13 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       }
       for (const member of members) {
         if (retained.has(member.externalInventoryItemId)) continue;
-        const plan = await resolveCurrentPlan(member);
+        const plan = await resolveCurrentPlan(member,guard,environment);
         quantities.set(member.externalInventoryItemId, plan.quantity); plans.push({ ...plan, scope: member });
       }
       if (retained.size === members.length)
         fail("PUBLICATION_GROUP_SCOPE_INVALID", "An entirely archived group has no active content maintenance to admit.");
       return plans;
-    }, members, undefined, undefined, async () => {
+    }, validatePlanning: async () => {
       // Catalog/source changes during planning must not turn an unowned member
       // into an implicit omission. The full group still holds exact scope locks.
       if (!retained.size) return;
@@ -362,7 +376,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         const source = retained.get(member.externalInventoryItemId);
         if (source) await lockArchivedListingMember(sourceFence, retainedScope(member), source);
       }
-    }); } catch (error) { failure = error; throw error; }
+    } }); } catch (error) { failure = error; throw error; }
     finally {
       if (sourceFence) {
         let cleanupError: Error | undefined;
@@ -373,7 +387,8 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     }
   }
 
-  runQuantityReducingLifecycle<T>(raw: QuantityPublicationScope, work: () => Promise<T>, rawMembers: readonly QuantityPublicationScope[] = []): Promise<T> {
+  runQuantityReducingLifecycle<T>(raw: QuantityPublicationScope, work: () => Promise<T>, rawMembers: readonly QuantityPublicationScope[] = [],
+    guard?: PublicationTransactionGuard, environment: "production" | "sandbox" | null = null): Promise<T> {
     const scope = quantityPublicationScopeSchema.parse(raw);
     const members = rawMembers.map(member => quantityPublicationScopeSchema.parse(member));
     if (members.length > 250 || new Set(members.map(key)).size !== members.length || members.some(member =>
@@ -382,16 +397,20 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       fail("PUBLICATION_GROUP_SCOPE_INVALID", "A reducing lifecycle requires exact distinct members from one destination.");
     }
     if (members.length && session.getStore()) fail("PUBLICATION_GROUP_NESTING_INVALID", "A reducing group cannot expand a provider capability.");
-    if (session.getStore()) return this.run(scope, work);
-    return this.execute(scope, null, work, async () => [], members);
+    if (session.getStore()) return this.run(scope, work,guard,environment);
+    return this.execute(scope, null, work, { guard,environment,resolveCurrentPlan: async () => [],memberScopes: members });
   }
 
   private async execute<T>(scope: QuantityPublicationScope, claim: QuantityPublicationOutboxClaim | null,
-    work: () => Promise<T>, resolveCurrentPlan?: (client: Client) => Promise<Array<{ outboxId: string; quantity: number; scope: QuantityPublicationScope }>>,
-    memberScopes: readonly QuantityPublicationScope[] = [], setupRequest?: Readonly<ListingSetupIntent>,
-    receiveSetup?: (intent: Readonly<ListingSetupIntent>) => void,
-    validatePlanning?: (client: Client) => Promise<void>): Promise<T> {
+    work: () => Promise<T>, options: {
+      guard?: PublicationTransactionGuard; environment?: "production" | "sandbox" | null;
+      resolveCurrentPlan?: (client: Client) => Promise<Array<{ outboxId: string; quantity: number; scope: QuantityPublicationScope }>>;
+      memberScopes?: readonly QuantityPublicationScope[]; setupRequest?: Readonly<ListingSetupIntent>;
+      receiveSetup?: (intent: Readonly<ListingSetupIntent>) => void; validatePlanning?: (client: Client) => Promise<void>;
+    } = {}): Promise<T> {
+    const { guard,environment = null,resolveCurrentPlan,memberScopes = [],setupRequest,receiveSetup,validatePlanning } = options;
     const requestJournalContract = currentEbayQuantityRequestJournal();
+    const publication = { scopes: [scope,...memberScopes],environment,providerJournaled: requestJournalContract !== null };
     if (requestJournalContract && scope.providerKey !== "ebay") {
       fail("PUBLICATION_REQUEST_JOURNAL_SCOPE_INVALID", "An eBay request journal cannot authorize another provider.");
     }
@@ -402,6 +421,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     }
     // Catch-up restores quantity, not stale group metadata. Known members each get
     // their own resolvable obligation; the attempt still owns the entire group.
+    let retentionRollbackFailure: Error | undefined;
     const retainWork = async (connection: Client, runId: string | null, reason: string): Promise<void> => {
       // Initial item creation is retried/reconciled by its durable listing
       // operation. It has no inventory mapping yet and cannot be an ATP catch-up.
@@ -419,10 +439,30 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       }
       await retainCatchupScopes(connection, memberScopes.length ? memberScopes : [scope], runId, reason, this.clock());
     };
+    // Before provider admission, even retaining catch-up is a write caused by
+    // the caller's claim. Keep that claim pinned in the same transaction as
+    // the retention, including capacity and lock-contention paths.
+    const retainCurrentWork = async (connection: Client, runId: string | null, reason: string, inTransaction: boolean): Promise<void> => {
+      if (!guard) return retainWork(connection, runId, reason);
+      if (inTransaction) {
+        await assertPublicationTransactionGuard(connection,guard,publication);
+        return retainWork(connection, runId, reason);
+      }
+      await connection.query("BEGIN");
+      try {
+        await assertPublicationTransactionGuard(connection,guard,publication);
+        await retainWork(connection, runId, reason);
+        await connection.query("COMMIT");
+      } catch (error) {
+        try { await connection.query("ROLLBACK"); }
+        catch (rollbackError) { retentionRollbackFailure = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError)); }
+        throw error;
+      }
+    };
     if (this.active >= this.maximumConcurrentOwners) {
       const backlogClient = await this.pool.connect();
-      try { await retainWork(backlogClient, null, "admission_capacity_busy"); }
-      finally { backlogClient.release(); }
+      try { await retainCurrentWork(backlogClient, null, "admission_capacity_busy", false); }
+      finally { backlogClient.release(retentionRollbackFailure); }
       fail("PUBLICATION_ADMISSION_CAPACITY_BUSY", "Provider admission capacity is occupied; durable catch-up was retained.");
     }
     this.active += 1;
@@ -436,7 +476,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         "SELECT pg_try_advisory_lock_shared($1,0) AS acquired", [QUANTITY_PUBLICATION_LOCK_NAMESPACE],
       )).rows[0]?.acquired === true;
       if (!locked) {
-        await retainWork(client, null, "publication_gate_busy");
+        await retainCurrentWork(client, null, "publication_gate_busy", false);
         fail("QUANTITY_PUBLICATION_DRAIN_BUSY", "The publication gate is changing; durable catch-up was retained.");
       }
       for (const scopeKey of [...new Set([key(scope), ...memberScopes.map(key)])].sort()) {
@@ -444,7 +484,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
           "SELECT pg_try_advisory_lock(hashtextextended($1,918420)) AS acquired", [scopeKey],
         )).rows[0]?.acquired === true;
         if (!acquired) {
-          await retainWork(client, null, "publication_scope_busy");
+          await retainCurrentWork(client, null, "publication_scope_busy", false);
           fail("PUBLICATION_SCOPE_BUSY", "Another exact-scope publisher is running; durable catch-up was retained.");
         }
         lockedScopeKeys.push(scopeKey);
@@ -456,7 +496,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       if (!gate) fail("PUBLICATION_GATE_MISSING", "Quantity publication admission migration is missing.");
       const globalPublicationEnabled = await readGlobalPublicationEnabled(client);
       if (!globalPublicationEnabled) {
-        if (!claim) await retainWork(client, gate.activation_run_id, "global_publication_disabled");
+        if (!claim) await retainCurrentWork(client, gate.activation_run_id, "global_publication_disabled", true);
         await client.query("COMMIT"); inTransaction = false;
         fail(
           "PUBLICATION_GLOBAL_STOP_ACTIVE",
@@ -465,7 +505,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       }
       if (claim) await this.validateOutbox(client, claim, gate.activation_run_id);
       if (!claim && gate.activation_run_id !== null) {
-        await retainWork(client, gate.activation_run_id, "suppressed_quantity_write");
+        await retainCurrentWork(client, gate.activation_run_id, "suppressed_quantity_write", true);
         await client.query("COMMIT"); inTransaction = false;
         fail("QUANTITY_PUBLICATION_SUPPRESSED", "Quantity publication is suppressed; current-state catch-up was retained.",
           { activationRunId: gate.activation_run_id, scope });
@@ -501,7 +541,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
           const legacyChannel = legacyChannelRows[0];
           if (legacyChannelRows.length !== 1 || legacyChannel.status !== "active"
             || legacyChannel.sync_enabled !== true || legacyChannel.sync_mode !== "live") {
-            await retainWork(client, null, "legacy_channel_publication_disabled");
+            await retainCurrentWork(client, null, "legacy_channel_publication_disabled", true);
             await client.query("COMMIT"); inTransaction = false;
             fail(
               "PUBLICATION_LEGACY_CHANNEL_NOT_LIVE",
@@ -522,7 +562,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
           receiveSetup?.(initialStock);
         } else if (authority.authority === "canonical") {
           if (!resolveCurrentPlan) {
-            await retainWork(client, null, "canonical_outbox_required");
+            await retainCurrentWork(client, null, "canonical_outbox_required", true);
             await client.query("COMMIT"); inTransaction = false;
             fail("PUBLICATION_CANONICAL_OWNER_REQUIRED", "Legacy quantity writes cannot bypass canonical publication authority.");
           }
@@ -558,7 +598,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       const unresolved = (await client.query<{ id: string }>(`SELECT id::text FROM inventory.quantity_publication_attempts
         WHERE affected_scope_keys && $1::text[] AND state IN ('running','uncertain') LIMIT 1`, [lockedScopeKeys])).rows[0];
       if (unresolved) {
-        await retainWork(client, gate.activation_run_id, "uncertain_prior_quantity_write");
+        await retainCurrentWork(client, gate.activation_run_id, "uncertain_prior_quantity_write", true);
         await client.query("COMMIT"); inTransaction = false;
         fail("PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", "A prior provider quantity outcome requires reconciliation.", { attemptId: unresolved.id });
       }
@@ -571,7 +611,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         WHERE retry_not_before>$2`,
       [JSON.stringify([scope,...memberScopes]),now(this.clock())])).rows[0]?.retry_not_before;
       if (cooldown) {
-        await retainWork(client, gate.activation_run_id, "provider_cooldown");
+        await retainCurrentWork(client, gate.activation_run_id, "provider_cooldown", true);
         await client.query("COMMIT"); inTransaction = false;
         fail("PUBLICATION_PROVIDER_COOLDOWN", "The provider retry window has not opened; no quantity request was sent.",
           { retryNotBefore: cooldown.toISOString() });
@@ -582,6 +622,9 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       // Keep these scope locks through the request so takeover cannot race this
       // check. The supplied owner callback must never replace its lost client.
       await assertCurrentEbayQuantityRequestOwner();
+      // A caller-owned lease must be checked under this same admission
+      // transaction before its durable attempt and any provider request.
+      await assertPublicationTransactionGuard(client,guard,publication);
       // Per-scope session lock serializes providers without holding a DB transaction during HTTP.
       attemptId = (await client.query<{ id: string }>(`INSERT INTO inventory.quantity_publication_attempts
         (owner_token,owner_kind,gate_epoch,scope_key,scope,outbox_id,state,started_at,planned_outbox_id,affected_scope_keys,planned_outbox_ids,affected_scopes${setupRequest ? ",listing_setup_operation_id,listing_setup_intent" : ""}${requestJournalContract ? ",request_journal_contract" : ""})
@@ -591,13 +634,14 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         JSON.stringify(lockedScopeKeys.map(scopeKey => [scope, ...memberScopes].find(member => key(member) === scopeKey))),
         ...(setupRequest ? [setupRequest.operationId, JSON.stringify(initialStock)] : []),
         ...(requestJournalContract ? [JSON.stringify(requestJournalContract)] : [])])).rows[0].id;
+      await recordPublicationGuardProviderAttempt(client, attemptId!,guard,publication);
       await client.query("COMMIT"); inTransaction = false;
       const requestEvidence = new QuantityProviderEvidenceCollector(
         new PostgresQuantityProviderRequestEvidenceStore(client, attemptId!, ownerToken, [scope,...memberScopes]), this.clock);
       let result: T;
       try {
         result = await requestEvidence.run(() => session.run({ scope, externalSku: claim?.externalSku ?? null,
-          memberKeys: new Set(memberScopes.map(key)) }, work));
+          memberKeys: new Set(memberScopes.map(key)), publicationGuard: guard,environment }, work));
         requestEvidence.assertNoAmbiguousRequests();
         if (setupRequest) requestEvidence.assertSingleCompletedRequest("POST",["/v3/feeds?feedType=MP_ITEM","/v3/feeds?feedType=MP_ITEM_MATCH"]);
       } catch (error) {
@@ -634,11 +678,12 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       }
       if (client && !discard && attemptId === null && error instanceof Error
         && "code" in error && error.code === "INVENTORY_PUBLICATION_TARGET_BUSY") {
-        await retainWork(client, null, "canonical_planner_target_busy");
+        await retainCurrentWork(client, null, "canonical_planner_target_busy", false);
       }
       // A durable running row intentionally remains unresolved if acknowledgement persistence fails.
       throw error;
     } finally {
+      discard ??= retentionRollbackFailure;
       for (const scopeKey of lockedScopeKeys.reverse()) if (client) {
         try {
           if (!(await client.query<{ released: boolean }>("SELECT pg_advisory_unlock(hashtextextended($1,918420)) AS released", [scopeKey])).rows[0]?.released) {

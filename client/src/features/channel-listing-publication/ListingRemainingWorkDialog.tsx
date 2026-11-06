@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { ListingIntentChangeStatus } from "@shared/listing-intent-propagation";
 import type { ListingWorkAction } from "@shared/listing-work-action";
 import { listingMemberRetirementSchema } from "@shared/types/listing-member-lifecycle";
+import { hasUnconfirmedMemberDispatch } from "@shared/listing-member-dispatch";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -82,8 +83,8 @@ export function ListingRemainingWorkDialog({
       publicationRequest(
         "POST",
         scope.kind === "channel"
-          ? `/api/channels/${scope.channelId}/listing-lifecycle/members`
-          : `/api/dropship/listings/stores/${scope.storeConnectionId}/listing-lifecycle/members`,
+          ? `/api/channels/${scope.channelId}/listing-lifecycle/members?dispatchHistory=1`
+          : `/api/dropship/listings/stores/${scope.storeConnectionId}/listing-lifecycle/members?dispatchHistory=1`,
         z.object({ items: z.array(listingMemberRetirementSchema) }),
         { productId: row.product_id },
       ),
@@ -141,7 +142,8 @@ export function ListingRemainingWorkDialog({
           </p>
         )}
         {members.data?.items
-          .filter((member) => !["retired", "superseded"].includes(member.state))
+          .filter((member) => (member.state !== "retired" || hasUnconfirmedMemberDispatch(member))
+            && (member.state !== "superseded" || hasUnconfirmedMemberDispatch(member)))
           .map((member) => (
             <Button
               key={member.operationId}

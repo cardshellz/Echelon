@@ -56,6 +56,7 @@ export async function installIntentLifecycleFixture(pool: Pool) {
     "migrations/900000038000019440001_quantity_catchup_parking.sql",
     "migrations/900000013000018480001_shared_listing_member_lifecycle.sql",
     "migrations/900000022000018880002_listing_member_recovery.sql",
+    "migrations/900000058000020020003_listing_member_dispatch_finality.sql",
     "migrations/900000018000018580002_listing_intent_propagation.sql",
     lifecycleMigration,
     "migrations/900000023000018880003_listing_work_settlement.sql",

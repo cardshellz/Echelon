@@ -1,7 +1,10 @@
+import { z } from "zod";
 import type { ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 import {
   validateListingMemberObservation,
   ListingMemberLifecycleError,
+  hasUnconfirmedMemberDispatch,
+  hasUnconfirmedPriorMemberDispatch,
 } from "../domain/listing-member-lifecycle";
 import type {
   ListingMemberLifecycleAdapter,
@@ -10,6 +13,29 @@ import type {
 } from "./listing-member-lifecycle.port";
 
 export const RETIREMENT_VERIFICATION_LIMIT = 5;
+const dispatchReceiptSchema = z.object({ finality: z.enum(["pending", "terminal"]) }).strict();
+
+/** Keep the observed listing state separate from the final outcome of each
+ * previously dispatched request. A later observation cannot exclude a late
+ * provider write from an earlier request with no final receipt. */
+export function saveUnconfirmedRetirementObservation(
+  session: ListingMemberLifecycleSession,
+  record: ListingMemberRetirement,
+  now: Date,
+  retryAfterMs?: number,
+): Promise<ListingMemberRetirement> {
+  return session.save(
+    "failed",
+    "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+    "The channel currently shows this member unpublished, but an earlier removal has no confirmed final response. The listing link is not yet safe to reuse.",
+    now,
+    {
+      recoveryRequired: true,
+      verificationAttempts: (record.verificationAttempts ?? 0) + 1,
+      ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+    },
+  );
+}
 
 /** One shared dispatch/reconciliation owner. Only an exact observation proves
  * removal. A saved send marker can never authorize an automatic second send. */
@@ -18,14 +44,15 @@ export async function processListingMemberRetirement(
   dependencies: ListingMemberLifecycleDependencies,
   now: () => Date,
 ): Promise<ListingMemberRetirement> {
-  const record = session.current;
+  let record = session.current;
   if (
     record.state === "retired" ||
     record.state === "superseded" ||
     record.code === "LISTING_MEMBER_IDENTITY_INVALID"
   )
     return record;
-  if (!(await session.isCurrent()))
+  const currentSource = await session.isCurrent();
+  if (!currentSource && !hasUnconfirmedMemberDispatch(record))
     return session.save(
       "superseded",
       "LISTING_MEMBER_SOURCE_CHANGED",
@@ -115,6 +142,22 @@ export async function processListingMemberRetirement(
   } catch (error) {
     return failure(error, record.state === "retiring");
   }
+  if (retired && hasUnconfirmedPriorMemberDispatch(record))
+    return saveUnconfirmedRetirementObservation(session, record, now());
+  if (!currentSource) {
+    // A changed owner cannot authorize another removal, but neither may it
+    // erase a request that might already have reached the channel. Reconcile
+    // only the exact previously submitted identity; never dispatch from here.
+    return session.save(
+      retired ? "retired" : "failed",
+      retired ? null : "LISTING_MEMBER_PRIOR_REMOVAL_UNCONFIRMED",
+      retired
+        ? "The sales channel confirmed that the member from the earlier removal is no longer published."
+        : "An earlier removal may still reach the sales channel after this listing link changed. Check that listing before transferring or publishing it. No new removal was sent.",
+      now(),
+      retired ? undefined : { recoveryRequired: true, verificationAttempts: (record.verificationAttempts ?? 0) + 1 },
+    );
+  }
   if (!retired && (record.state === "retiring" || record.recoveryRequired)) {
     const checks = (record.verificationAttempts ?? 0) + 1;
     // Unknown includes the crash window between the durable marker and dispatch.
@@ -156,8 +199,9 @@ export async function processListingMemberRetirement(
       now(),
       { dispatchStatus: "unknown", dispatchKey, verificationAttempts: 0 },
     );
+    let receipt: z.infer<typeof dispatchReceiptSchema>;
     try {
-      await adapter.retire(record.identity, dispatchKey);
+      receipt = dispatchReceiptSchema.parse(await adapter.retire(record.identity, dispatchKey));
     } catch (error) {
       const unknown =
         !(error instanceof ListingMemberLifecycleError) ||
@@ -166,12 +210,12 @@ export async function processListingMemberRetirement(
     }
     // Keep persistence outside provider catches: a failed commit must retain
     // the previous unknown marker rather than classify a write as not sent.
-    await session.save(
+    record = await session.save(
       "retiring",
       null,
       "The channel accepted removal. Verifying the exact member.",
       now(),
-      { dispatchStatus: "accepted" },
+      { dispatchStatus: "accepted", dispatchFinality: receipt.finality },
     );
     try {
       retired = (await observe()).retired;
@@ -179,6 +223,10 @@ export async function processListingMemberRetirement(
       return failure(error, true);
     }
   }
+  // A successful retry confirms only its own dispatch. It cannot settle an
+  // older unknown request even when the member is now observed unpublished.
+  if (retired && hasUnconfirmedPriorMemberDispatch(record))
+    return saveUnconfirmedRetirementObservation(session, record, now());
   return session.save(
     retired ? "retired" : "retiring",
     retired ? null : record.code,

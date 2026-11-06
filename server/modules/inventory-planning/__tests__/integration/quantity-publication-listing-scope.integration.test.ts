@@ -9,6 +9,7 @@ import { ensureEbayPublicationReady } from "../../infrastructure/ebay-publicatio
 import { createAuthorityAwareInventoryPublicationService, createInventoryChannelQuantityRuntimeService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { createChannelEbayQuantityRequestAdmission, planCurrentCanonicalListingQuantity } from "../../infrastructure/quantity-publication-runtime";
 import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
+import { QuantityPublicationAdmissionError } from "../../publication-transaction-guard";
 import { createEbayRouteListingClient } from "../../../channels/infrastructure/ebay-listing-client";
 import type { QuantityPublicationScope } from "../../domain/quantity-publication-admission";
 import type { EbayOffer } from "../../../channels/adapters/ebay/ebay-types";
@@ -116,6 +117,23 @@ dbDescribe.sequential("exact canonical listing refresh through provider admissio
       .toEqual(["P10", "C500"].map(suffix => expect.objectContaining({ state: "succeeded",
         scope: expect.objectContaining({ providerKey: "ebay", externalInventoryItemId: sku(suffix) }), planned_outbox_id: expect.any(String) })));
     expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.quantity_provider_requests")).rows[0].n).toBe(2);
+  });
+
+  it("passes the work owner into the separate canonical planning transaction before any queue or provider write", async () => {
+    const f = await createEbayListingScopeObservation(database.pool), observed = await f.observe();
+    await ensureEbayPublicationReady(database.pool, ebayListingScopeSource(), { commandKey: randomUUID(), actor: "scope-test",
+      now: new Date(), verifiedListing: { sourceIdentity: f.source, observation: observed.observation } });
+    const before = await rows();
+    const guard = vi.fn(async () => { throw new QuantityPublicationAdmissionError("TEST_OWNER_CHANGED","The saved work changed."); });
+    const request = vi.fn(async () => undefined);
+    const admission = await createChannelEbayQuantityRequestAdmission({ channelId: 67,externalAccountId: "seller-36",
+      expectedConnectionId: 9,publicationGuard: guard });
+    await expect(admission.item(sku("P10"),request)).rejects.toMatchObject({ code: "TEST_OWNER_CHANGED" });
+    expect(guard).toHaveBeenCalledOnce();
+    expect(request).not.toHaveBeenCalled();
+    expect(runtime.http).not.toHaveBeenCalled();
+    expect(await rows()).toEqual(before);
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.quantity_publication_attempts")).rows[0].n).toBe(0);
   });
 
   it("excludes archived members from a full product refresh across both live channels", async () => {

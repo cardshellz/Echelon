@@ -94,9 +94,9 @@ export function registerListingLifecycleRoutes(app: Express): void {
           const scope = { connectionId, vendorId };
           response.json(
             action === "history"
-              ? await service.memberHistory(scope, request.body)
+              ? await service.memberHistory(scope, request.body, request.query.dispatchHistory === "1")
               : action === "review"
-                ? await service.memberRecoveryPreview(scope, request.body)
+                ? await service.memberRecoveryPreview(scope, request.body, request.query.dispatchHistory === "1")
                 : await service.resumeMemberRecovery(
                     scope,
                     request.body,
@@ -116,7 +116,7 @@ export function registerListingLifecycleRoutes(app: Express): void {
     service.history(id, request.body),
   );
   route("/members/recovery", false, (service, id, request) =>
-    service.memberRecoveryPreview(id, request.body),
+    service.memberRecoveryPreview(id, request.body, request.query.dispatchHistory === "1"),
   );
   route("/members/recovery/resume", true, (service, id, request) =>
     service.resumeMemberRecovery(
@@ -126,7 +126,7 @@ export function registerListingLifecycleRoutes(app: Express): void {
     ),
   );
   route("/members", false, (service, id, request) =>
-    service.memberHistory(id, request.body),
+    service.memberHistory(id, request.body, request.query.dispatchHistory === "1"),
   );
   route("/members/conflicts", false, (service, id, request) =>
     service.memberConflicts(id, request.body),

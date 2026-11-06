@@ -7,6 +7,8 @@ import {
 import {
   validateListingMemberObservation,
   ListingMemberLifecycleError,
+  hasUnconfirmedMemberDispatch,
+  hasUnconfirmedPriorMemberDispatch,
 } from "../domain/listing-member-lifecycle";
 import { listingHash } from "../domain/listing-publication";
 import type {
@@ -74,10 +76,11 @@ export class ListingMemberRecoveryService {
     session: ListingMemberLifecycleSession,
   ): Promise<ListingMemberRecoveryReview> {
     const record = session.current;
+    const currentSource = await session.isCurrent();
     if (
-      !(await session.isCurrent()) ||
+      (!currentSource && !hasUnconfirmedMemberDispatch(record)) ||
       record.identity.identityConflict ||
-      record.state === "superseded"
+      (record.state === "superseded" && !hasUnconfirmedMemberDispatch(record))
     )
       throw new ListingMemberLifecycleError(
         "LISTING_MEMBER_RECOVERY_SCOPE_CHANGED",
@@ -94,6 +97,7 @@ export class ListingMemberRecoveryService {
       version: record.version,
       identity: record.identity,
       dispatchStatus: record.dispatchStatus,
+      unconfirmedPriorDispatch: record.unconfirmedPriorDispatch ?? false,
       observation,
     });
     return listingMemberRecoveryReviewSchema.parse({
@@ -101,16 +105,27 @@ export class ListingMemberRecoveryService {
       observation,
       reviewHash,
       canResume:
+        currentSource &&
+        record.state !== "superseded" &&
         record.state !== "retired" &&
+        !(observation.retired && hasUnconfirmedPriorMemberDispatch(record)) &&
         (record.recoveryRequired === true || record.state === "retiring"),
       message:
-        record.state === "retired"
-          ? "Removal of this exact member has been verified."
-          : record.state === "pending" && record.dispatchStatus === "authorized"
-            ? "Recovery is queued. The listing lifecycle will verify and remove this exact archived member."
-            : observation.retired
-              ? "The exact member is already removed. Continue to save verified completion."
-              : "The exact archived member is still published. Continuing authorizes another removal attempt. The earlier unconfirmed outcome remains in history.",
+        record.state === "superseded"
+          ? "An earlier removal may have reached the channel before this request was superseded. This review checks the saved listing without sending another removal; its historical outcome remains unconfirmed."
+          : record.state === "retired" && record.unconfirmedPriorDispatch
+            ? "The listing is not currently published. An earlier removal may still finish later, so Echelon cannot confirm that the link is safe to reuse. This check did not send another removal."
+          : !currentSource
+          ? "The listing link changed after an earlier removal may have been sent. Check the exact channel listing before transferring or publishing it. This review cannot authorize another removal."
+          : record.state === "retired"
+            ? "Removal of this exact member has been verified."
+            : observation.retired && hasUnconfirmedPriorMemberDispatch(record)
+              ? "The member is currently unpublished, but an earlier removal has no confirmed final response. This check did not send another removal or establish that the link is safe to reuse."
+            : record.state === "pending" && record.dispatchStatus === "authorized"
+              ? "Recovery is queued. The listing lifecycle will verify and remove this exact archived member."
+              : observation.retired
+                ? "The exact member is already removed. Continue to save verified completion."
+                : "The exact archived member is still published. Continuing authorizes another removal attempt. The earlier unconfirmed outcome remains in history.",
     });
   }
   private async fenced<T>(
@@ -165,6 +180,13 @@ export class ListingMemberRecoveryService {
           );
         return session.current;
       }
+      // Read-only review of an earlier dispatch remains available after a
+      // mapping change; authorizing another removal never does.
+      if (!(await session.isCurrent()))
+        throw new ListingMemberLifecycleError(
+          "LISTING_MEMBER_RECOVERY_SCOPE_CHANGED",
+          "The listing link changed. This earlier request cannot authorize another removal.",
+        );
       return this.fenced(session, async () => {
         const review = await this.inspect(session);
         if (!review.canResume || review.reviewHash !== command.reviewHash)

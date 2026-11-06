@@ -72,7 +72,7 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       CREATE TABLE channels.channel_connections(id integer PRIMARY KEY,channel_id integer REFERENCES channels.channels,metadata jsonb);
       CREATE TABLE ebay.ebay_oauth_tokens(channel_id integer REFERENCES channels.channels,environment text,external_account_id text,
         external_account_identity_scheme text,external_account_verified_at timestamptz,PRIMARY KEY(channel_id,environment));
-      CREATE TABLE catalog.products(id integer PRIMARY KEY,name text,sku text,is_active boolean DEFAULT true,product_type text DEFAULT 'test',ebay_listing_excluded boolean NOT NULL DEFAULT false,ebay_browse_category_id text);
+      CREATE TABLE catalog.products(id integer PRIMARY KEY,name text,sku text,is_active boolean DEFAULT true,status text DEFAULT 'active',product_type text DEFAULT 'test',ebay_listing_excluded boolean NOT NULL DEFAULT false,ebay_browse_category_id text);
       CREATE TABLE channels.channel_product_overrides(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer REFERENCES channels.channels,product_id integer REFERENCES catalog.products,is_listed integer,created_at timestamptz,updated_at timestamptz,UNIQUE(channel_id,product_id));
       CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer REFERENCES catalog.products,sku text,is_active boolean,sales_eligibility text DEFAULT 'sellable',ebay_listing_excluded boolean DEFAULT false);
       CREATE TABLE channels.channel_variant_overrides(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer REFERENCES channels.channels,product_variant_id integer REFERENCES catalog.product_variants,is_listed integer);
@@ -81,11 +81,8 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
         product_variant_id integer REFERENCES catalog.product_variants,external_sku text,external_variant_id text,external_product_id text,external_url text,
         last_synced_price bigint,last_synced_qty integer,sync_status text,sync_error text,last_synced_at timestamptz,created_at timestamptz,updated_at timestamptz,
         PRIMARY KEY(channel_id,product_variant_id));
-      CREATE TABLE channels.channel_feeds(channel_id integer,product_variant_id integer,channel_variant_id text,channel_inventory_item_id text,channel_sku text,
+      CREATE TABLE channels.channel_feeds(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer,product_variant_id integer,channel_product_id text,channel_variant_id text,channel_inventory_item_id text,channel_sku text,
         is_active integer,last_synced_qty integer,last_synced_at timestamptz,updated_at timestamptz);
-      CREATE TABLE channels.channel_variant_availability_sync(channel_id integer,product_variant_id integer,revision bigint,status text,lease_token uuid,
-        lease_expires_at timestamptz,next_attempt_at timestamptz,last_synced_quantity integer,last_synced_at timestamptz,completed_at timestamptz,last_error text,updated_at timestamptz,
-        PRIMARY KEY(channel_id,product_variant_id));
       CREATE TABLE marketplace.provider_accounts(id integer PRIMARY KEY,owner_kind text,channel_id integer,provider text,account_namespace text,external_account_id text);
       CREATE TABLE marketplace.listing_scopes(id integer PRIMARY KEY,owner_kind text,provider text,marketplace_id text,product_id integer);
       CREATE TABLE marketplace.channel_listing_scopes(scope_id integer,channel_id integer,product_id integer,marketplace_id text);
@@ -102,6 +99,17 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       INSERT INTO channels.channel_connections VALUES(7,67,'{"marketplaceId":"EBAY_US"}');
       INSERT INTO ebay.ebay_oauth_tokens VALUES(67,'production','account-67','provider_user_id','2026-10-01T00:00:00Z');
     `);
+    const availabilityMigration = readFileSync(resolve(process.cwd(),"migrations/0606_channel_variant_availability_sync.sql"),"utf8");
+    const availabilityStart = availabilityMigration.indexOf("CREATE TABLE IF NOT EXISTS channels.channel_variant_availability_sync");
+    const availabilityEnd = availabilityMigration.indexOf("CREATE OR REPLACE FUNCTION channels.enqueue_variant_availability_sync()");
+    expect(availabilityStart).toBeGreaterThan(0); expect(availabilityEnd).toBeGreaterThan(availabilityStart);
+    await database.pool.query(availabilityMigration.slice(availabilityStart,availabilityEnd));
+    const eligibilityMigration = readFileSync(resolve(process.cwd(),"migrations/0626_catalog_variant_sales_eligibility.sql"),"utf8");
+    const sellabilityStart = eligibilityMigration.indexOf("CREATE OR REPLACE FUNCTION catalog.assert_customer_sellable_variant()");
+    const sellabilityEnd = eligibilityMigration.indexOf("CREATE OR REPLACE FUNCTION catalog.guard_internal_only_variant_transition()");
+    expect(sellabilityStart).toBeGreaterThan(0); expect(sellabilityEnd).toBeGreaterThan(sellabilityStart);
+    await database.pool.query(eligibilityMigration.slice(sellabilityStart,sellabilityEnd));
+    await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/900000056000020020001_channel_availability_archive_separation.sql"),"utf8"));
     const syncMigration = readFileSync(resolve(process.cwd(), "migrations/0729_ebay_listing_sync_recovery.sql"), "utf8");
     const start = syncMigration.indexOf("CREATE TABLE channels.ebay_listing_sync_jobs");
     const end = syncMigration.indexOf("CREATE TRIGGER publication_response_recoveries_no_truncate", start);
@@ -651,15 +659,22 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
       else{await action;expect((await mappings()).map(row=>row.external_product_id)).toEqual([listingId,listingId]);expect((await mappings()).every(row=>row.last_synced_qty===null)).toBe(true);}
     }finally{await claim!.release();}
   });
-  it.each([false,true])("inventory ACK preserves publication failure and never creates Listed from an offer-only mapping (existing=%s)",async existing=>{
+  it.each([false,true])("inventory ACK only updates an existing listing's quantity and preserves its identity and failure (existing=%s)",async existing=>{
     const member=plan.source.identity.variants[0];const leaseToken=randomUUID();
     if(!existing) await database.pool.query("DELETE FROM channels.channel_listings WHERE product_variant_id=$1",[member.variantId]);
-    await database.pool.query("INSERT INTO channels.channel_variant_availability_sync(channel_id,product_variant_id,revision,status,lease_token) VALUES(67,$1,1,'processing',$2)",[member.variantId,leaseToken]);
-    const changed=await markVariantAvailabilitySynced(database.pool,{channelId:67,productVariantId:member.variantId,desiredActive:true,revision:1,attemptCount:1,leaseToken},
-      {quantity:88,feedActive:true,externalProductId:null,externalVariantId:member.offerId,externalInventoryItemId:member.sku,externalSku:member.sku});
-    expect(changed).toBe(true);const row=(await mappings()).find(row=>row.product_variant_id===member.variantId);
-    expect(row).toMatchObject({last_synced_qty:88,sync_status:existing?"error":"pending",sync_error:existing?"old quantity error":null});
-    if(!existing) expect(row.external_product_id).toBeNull();
+    await database.pool.query(`INSERT INTO channels.channel_variant_availability_sync(channel_id,product_variant_id,desired_active,revision,status,lease_token,lease_expires_at)
+      VALUES(67,$1,true,1,'processing',$2,transaction_timestamp()+interval '5 minutes')`,[member.variantId,leaseToken]);
+    const source=(await database.pool.query(`SELECT v.product_id,v.sku,to_jsonb(l) AS listing FROM catalog.product_variants v
+      LEFT JOIN channels.channel_listings l ON l.channel_id=67 AND l.product_variant_id=v.id WHERE v.id=$1`,[member.variantId])).rows[0];
+    const changed=await markVariantAvailabilitySynced(database.pool,{channelId:67,productVariantId:member.variantId,desiredActive:true,revision:1,attemptCount:1,leaseToken,requestKind:null},
+      {quantity:88,feedActive:true,externalProductId:null,externalVariantId:member.offerId,externalInventoryItemId:member.sku,externalSku:member.sku},
+      {productId:source.product_id,catalogSku:source.sku,feed:null,listing:source.listing && {id:source.listing.id,
+        productId:source.listing.external_product_id,variantId:source.listing.external_variant_id,sku:source.listing.external_sku}});
+    expect(changed).toBe("synced");const row=(await mappings()).find(row=>row.product_variant_id===member.variantId);
+    if(existing) expect(row).toMatchObject({last_synced_qty:88,sync_status:"error",sync_error:"old quantity error",
+      external_product_id:source.listing.external_product_id,external_variant_id:source.listing.external_variant_id,
+      external_sku:source.listing.external_sku});
+    else expect(row).toBeUndefined();
   });
   it("persists publication admission failures with their operation through replay and list/read responses",async()=>{
     const sync=new PostgresEbayListingSyncRepository(database.pool);

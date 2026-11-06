@@ -32,6 +32,8 @@ export const listingMemberRetirementSchema = z.object({
   dispatchKey: z.string().uuid().nullable().optional(),
   verificationAttempts: z.number().int().nonnegative().optional(),
   recoveryRequired: z.boolean().optional(),
+  /** A current listing observation does not prove an earlier request has terminated. */
+  unconfirmedPriorDispatch: z.boolean().optional(),
   state: z.enum(["pending", "retiring", "retired", "failed", "superseded"]),
   code: z.string().nullable(),
   message: z.string().nullable(),
