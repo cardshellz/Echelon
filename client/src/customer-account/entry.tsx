@@ -360,8 +360,10 @@ function CustomerAccount({
         if (selected.every((row) => previous.get(row)?.status === "verified"))
           return previous;
         const next = new Map(previous);
+        // A retry must not erase the prior failure and alternate the banner
+        // between loading and failed on every background observation.
         for (const row of selected)
-          if (previous.get(row)?.status !== "verified")
+          if (!previous.has(row) || previous.get(row)?.status === "loading")
             next.set(row, { status: "loading" });
         return next;
       });

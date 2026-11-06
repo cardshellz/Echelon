@@ -92,7 +92,10 @@ function displayedFinancials(
       .sort();
   return canonicalJson({
     ...totals,
-    itemDiscountLabels: [...totals.itemDiscountLabels].sort(),
+    // Rich allocations are what the customer sees. Shopify's auxiliary native
+    // labels can differ from the preview without changing any displayed term.
+    // Legacy responses still display these labels and must compare them.
+    itemDiscountLabels: itemDiscounts === undefined ? [...totals.itemDiscountLabels].sort() : [],
     shippingDiscountLabels: [...totals.shippingDiscountLabels].sort(),
     taxLines: (totals.taxLines ?? [])
       .map((value) => canonicalJson(value))

@@ -8,7 +8,7 @@ import type {
 
 export interface AccountNativeReport {
   code: string;
-  connectionId: number;
+  connectionId?: number;
   outcome: "completed" | "failed";
   facts?: number;
   causeCode?: string;
@@ -52,7 +52,15 @@ export class AccountNativeSummariesWorker {
 
   async run(): Promise<void> {
     const { store, provider, now, report } = this.dependencies;
-    const cursor = await store.claim(now(), this.dependencies.newId());
+    let cursor: AccountNativeCursor | null;
+    try {
+      cursor = await store.claim(now(), this.dependencies.newId());
+    } catch (cause) {
+      // A failure before a lease exists cannot be attributed to a connection.
+      // Retain its classified cause instead of only the scheduler's aggregate error.
+      report({ code: "ACCOUNT_NATIVE_CLAIM_FAILED", outcome: "failed", causeCode: failureCode(cause) });
+      throw cause;
+    }
     if (!cursor) return;
     let failed = true;
     try {
@@ -104,21 +112,20 @@ export class AccountNativeSummariesWorker {
         outcome: "completed",
       });
     } catch (cause) {
-      const parsed = z
-        .object({ code: z.string().regex(/^[A-Z0-9_]{1,80}$/) })
-        .safeParse(cause);
       report({
         code: "ACCOUNT_NATIVE_SWEEP_FAILED",
         connectionId: cursor.connectionId,
         outcome: "failed",
-        causeCode: parsed.success
-          ? parsed.data.code
-          : cause instanceof z.ZodError
-            ? "ACCOUNT_NATIVE_RESPONSE_INVALID"
-            : "ACCOUNT_NATIVE_REFRESH_FAILED",
+        causeCode: failureCode(cause),
       });
     } finally {
       await store.release(cursor, now(), failed);
     }
   }
+}
+
+function failureCode(cause: unknown): string {
+  const parsed = z.object({ code: z.string().regex(/^[A-Z0-9_]{1,80}$/) }).safeParse(cause);
+  return parsed.success ? parsed.data.code : cause instanceof z.ZodError
+    ? "ACCOUNT_NATIVE_RESPONSE_INVALID" : "ACCOUNT_NATIVE_REFRESH_FAILED";
 }

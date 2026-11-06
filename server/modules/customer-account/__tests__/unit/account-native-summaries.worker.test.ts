@@ -15,6 +15,17 @@ function fixture() {
   return { store, provider, report, worker: new AccountNativeSummariesWorker({ store, provider, report, now: () => now, newId: () => cursor.leaseId }) };
 }
 describe("bounded native account maintenance", () => {
+  it("reports a database claim failure before a lease exists and lets the scheduler retry", async () => {
+    const h = fixture();
+    const cause = Object.assign(new Error("private database details"), { code: "42P08" });
+    h.store.claim.mockRejectedValueOnce(cause);
+    await expect(h.worker.run()).rejects.toBe(cause);
+    expect(h.report).toHaveBeenCalledWith({ code: "ACCOUNT_NATIVE_CLAIM_FAILED", outcome: "failed", causeCode: "42P08" });
+    expect(h.store.release).not.toHaveBeenCalled();
+    expect(h.provider.page).not.toHaveBeenCalled();
+    await h.worker.run();
+    expect(h.store.completePage).toHaveBeenCalledTimes(2);
+  });
   it("refreshes current changes while historical warming is between its scheduled pages", async () => {
     const h=fixture();h.store.claim.mockResolvedValue({...cursor,backfillDue:false});await h.worker.run();
     expect(h.provider.page.mock.calls).toEqual([[4,"299",now]]);

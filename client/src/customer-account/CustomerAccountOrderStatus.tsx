@@ -20,7 +20,12 @@ export function CustomerAccountOrderStatus({
       const order = state.status === "verified" ? state.order : null;
       const progress = order && "progress" in order ? order.progress : undefined;
       const cancelled = order && "cancelled" in order ? order.cancelled : row.dataset.cancelled === "true";
-      const delivery = order ? orderDeliveryLabel(cancelled, order.fulfillment, progress, "Status unavailable", row.dataset.fulfillment) : undefined;
+      // A loading projection must not unhide delivery for a cancelled native
+      // order. Use the same presentation rule before and after hydration.
+      const delivery = orderDeliveryLabel(
+        cancelled, order?.fulfillment, progress,
+        "Status unavailable", row.dataset.fulfillment,
+      );
       const deliveryTrack = row.querySelector<HTMLElement>("[data-csz-order-delivery-track]");
       if (deliveryTrack) deliveryTrack.hidden = delivery === null;
       const orderTrack = row.querySelector<HTMLElement>("[data-csz-order-order-track]");
