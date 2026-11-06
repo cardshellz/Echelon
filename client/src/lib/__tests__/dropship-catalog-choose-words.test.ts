@@ -34,7 +34,9 @@ describe("catalog step 1 words", () => {
     expect(CHOOSE_WORDS.selectAllShown).toBe("Select all shown");
     expect(CHOOSE_WORDS.itemSizeLine("Pack of 50", "ENV-SGL-P50", 101)).toBe("Pack of 50 · ENV-SGL-P50");
     expect(CHOOSE_WORDS.itemSizeLine("Pack of 50", null, 101)).toBe("Pack of 50 · Size 101");
-    expect(CHOOSE_WORDS.noQuantitySr).toBe("No quantity: not selected");
+    expect(CHOOSE_WORDS.noQuantitySr).toBe("No quantity shown");
+    expect(CHOOSE_WORDS.outOfStock).toBe("Out of stock");
+    expect(CHOOSE_WORDS.backInStockHint).toBe("Lists when back in stock");
   });
 
   it("W3 the How words come from the pick and the reason only (V24): no older-setting words remain", () => {

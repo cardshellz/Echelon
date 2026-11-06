@@ -7,9 +7,17 @@ import {
   dropObservationWrites,
   isRepublishWanted,
   isStockOutEndProven,
+  isWaitingForStock,
   marketplacePublishBaseline,
   marketplaceSyncStoreListingCap,
+  marketplaceWaitingForStockRotation,
+  planWaitingForStockQueue,
+  MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER,
+  MARKETPLACE_SYNC_INTERVAL_MS,
+  MARKETPLACE_SYNC_MAX_WAITING_FOR_STOCK_PER_STORE_TICK,
+  MARKETPLACE_SYNC_PREVIEW_CHUNK,
   MARKETPLACE_SYNC_SWEPT_STATUSES,
+  type MarketplaceWaitingForStockListing,
   publishableQuantity,
   quantityDecisionWrites,
 } from "../../domain/marketplace-sync-sweep";
@@ -184,5 +192,73 @@ describe("a price W9 refused to keep (plan v4 §6.6)", () => {
       status: "active", issueCodes: ["price_outside_card_shellz_limit"], marketplaceEndedAt: null, latestPublishedQuantity: 10 } });
     const kept = decisionWithoutPriceAdoption(flagged, "terminal", { listingIssueCodes: ["price_outside_card_shellz_limit"], oursPriceBaseline: 1100 });
     expect(kept.issues).toEqual({ add: [], remove: [], after: ["price_outside_card_shellz_limit"] });
+  });
+});
+
+describe("listings waiting for stock (owner report: a size published at 0 never listed)", () => {
+  const BLOCKED_AT = new Date("2026-11-01T10:00:00.000Z");
+  const waiting = (overrides: Partial<MarketplaceWaitingForStockListing> = {}): MarketplaceWaitingForStockListing => Object.freeze({
+    listingId: 77, productVariantId: 101, status: "blocked", externalListingId: null,
+    blockers: Object.freeze([MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER]), updatedAt: BLOCKED_AT, ...overrides,
+  });
+  const preview = (previewStatus: string, marketplaceQuantity: number, blockers: string[] = []) =>
+    Object.freeze({ previewStatus, marketplaceQuantity, blockers: Object.freeze(blockers) });
+
+  it("is a blocked, never-published listing with the stock blocker among its blockers", () => {
+    expect(MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER).toBe("marketplace_quantity_unavailable");
+    expect(isWaitingForStock(waiting())).toBe(true);
+    expect(isWaitingForStock(waiting({ externalListingId: "  " }))).toBe(true);
+    expect(isWaitingForStock(waiting({ blockers: ["vendor_retail_price_required", MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER] }))).toBe(true);
+  });
+
+  it.each([
+    ["ended", waiting({ status: "ended" })],
+    ["live with an item number", waiting({ status: "active", externalListingId: "110000000001" })],
+    ["blocked with an item number", waiting({ externalListingId: "110000000001" })],
+    ["failed", waiting({ status: "failed" })],
+    ["blocked for something else", waiting({ blockers: ["vendor_retail_price_required"] })],
+    ["blocked with no blockers", waiting({ blockers: [] })],
+  ])("is never %s", (_name, listing) => {
+    expect(isWaitingForStock(listing)).toBe(false);
+  });
+
+  it("queues only listings the current preview would list now, in listing id order; every other one waits, with why", () => {
+    const listings = [
+      waiting({ listingId: 9, productVariantId: 109 }),
+      waiting({ listingId: 3, productVariantId: 103 }),
+      waiting({ listingId: 5, productVariantId: 105 }),
+      waiting({ listingId: 7, productVariantId: 107 }),
+      waiting({ listingId: 8, productVariantId: 108 }),
+      waiting({ listingId: 4, productVariantId: 104, status: "ended" }),
+      waiting({ listingId: 6, productVariantId: 106 }),
+    ];
+    const rows = new Map([
+      [109, preview("ready", 12)],
+      [103, preview("warning", 1, [])],
+      [105, preview("blocked", 0, [MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER])],
+      [107, preview("blocked", 4, ["selection:missing_vendor_include_rule"])],
+      [108, preview("ready", 0)],
+      [104, preview("ready", 3)],
+    ]);
+    const plan = planWaitingForStockQueue(Object.freeze(listings), rows);
+    expect(plan.queue.map((listing) => listing.listingId)).toEqual([3, 9]);
+    expect(plan.held.map(({ listing, hold, blockers }) => [listing.listingId, hold, blockers])).toEqual([
+      [4, "not_waiting", [MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER]],
+      [5, "still_blocked", [MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER]],
+      [6, "no_preview", [MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER]],
+      [7, "still_blocked", ["selection:missing_vendor_include_rule"]],
+      [8, "no_quantity", []],
+    ]);
+    expect(planWaitingForStockQueue([], rows)).toEqual({ queue: [], held: [] });
+  });
+
+  it("reads one preview's worth per store and tick, and steps the window once a tick from the injected clock", () => {
+    expect(MARKETPLACE_SYNC_MAX_WAITING_FOR_STOCK_PER_STORE_TICK).toBe(MARKETPLACE_SYNC_PREVIEW_CHUNK);
+    const tick = new Date(MARKETPLACE_SYNC_INTERVAL_MS * 1_000);
+    expect(marketplaceWaitingForStockRotation(tick)).toBe(1_000);
+    expect(marketplaceWaitingForStockRotation(new Date(tick.getTime() + MARKETPLACE_SYNC_INTERVAL_MS - 1))).toBe(1_000);
+    expect(marketplaceWaitingForStockRotation(new Date(tick.getTime() + MARKETPLACE_SYNC_INTERVAL_MS))).toBe(1_001);
+    expect(marketplaceWaitingForStockRotation(new Date(0))).toBe(0);
+    expect(marketplaceWaitingForStockRotation(new Date(Number.NaN))).toBe(0);
   });
 });

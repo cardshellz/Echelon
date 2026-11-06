@@ -20,7 +20,8 @@ import { createDropshipNotificationServiceFromEnv } from "./dropship-notificatio
  * The restore push (plan v4 §6.4): an ordinary one-step push job of the
  * current preview, queued by the system under the sweep's key, as the cost
  * change reprice queues one (dropship-cost-change-listing-action.factory.ts).
- * A store that cannot take a push now (its access rule names the step that
+ * The sweep also queues listings that were waiting for stock through it,
+ * under their own key (marketplaceWaitingForStockJobKey). A store that cannot take a push now (its access rule names the step that
  * lifts it) is reported as refused; anything else propagates.
  */
 export function createMarketplaceSyncRestorePort(

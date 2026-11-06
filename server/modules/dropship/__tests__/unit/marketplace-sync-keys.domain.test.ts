@@ -22,6 +22,7 @@ import {
   marketplacePriceAdoptionKey,
   marketplaceQuantityLimitKey,
   marketplaceQuantityRestoreJobKey,
+  marketplaceWaitingForStockJobKey,
   shortHash,
   utcDay,
 } from "../../domain/marketplace-sync-keys";
@@ -64,6 +65,25 @@ describe("sync-back system keys (plan v4 §6.6)", () => {
       .toBe(marketplaceQuantityRestoreJobKey({ storeConnectionId: 22, listingIds: [77, 5], maxEventId: 9 }));
   });
 
+  it("keys a waiting-for-stock job apart from the restore push: the same listings and blocks replay one key, a new block gets a new one", () => {
+    const at = new Date("2026-11-01T10:00:00.000Z");
+    const later = new Date("2026-11-02T10:00:00.000Z");
+    const key = marketplaceWaitingForStockJobKey({ storeConnectionId: 22, listings: [{ listingId: 77, updatedAt: at }, { listingId: 5, updatedAt: at }] });
+    expect(key).toMatch(/^ebay-sync:stock-back:22:[0-9a-f]{16}$/);
+    expect(key).toMatch(KEY);
+    // Order and exact duplicates do not matter: a replay builds the same key.
+    expect(marketplaceWaitingForStockJobKey({ storeConnectionId: 22,
+      listings: [{ listingId: 5, updatedAt: at }, { listingId: 77, updatedAt: new Date(at) }, { listingId: 5, updatedAt: at }] })).toBe(key);
+    // Blocked again later (its updated_at moved): a new key, so a later return of stock queues again.
+    expect(marketplaceWaitingForStockJobKey({ storeConnectionId: 22, listings: [{ listingId: 77, updatedAt: later }, { listingId: 5, updatedAt: at }] }))
+      .not.toBe(key);
+    expect(marketplaceWaitingForStockJobKey({ storeConnectionId: 23, listings: [{ listingId: 77, updatedAt: at }, { listingId: 5, updatedAt: at }] }))
+      .not.toBe(key);
+    // Never the restore push's namespace, even for the same store and listings.
+    expect(key.startsWith(marketplaceQuantityRestoreJobKey({ storeConnectionId: 22, listingIds: [5, 77], maxEventId: 0 }).split(":").slice(0, 2).join(":")))
+      .toBe(false);
+  });
+
   it("puts each notice batch's id range in its key, so a late row never joins a batch already sent", () => {
     expect(marketplaceNoticeBatchKey({ kind: "price_below_cost", storeConnectionId: 22, minNoticeId: 4, maxNoticeId: 9 }))
       .toBe("ebay-sync:price_below_cost:22:4-9");
@@ -87,6 +107,11 @@ describe("sync-back system keys (plan v4 §6.6)", () => {
     ["a negative quantity", () => marketplaceQuantityLimitKey({ listingId: 1, observedAt: AT, quantity: -1 })],
     ["an invalid instant", () => marketplaceQuantityLimitKey({ listingId: 1, observedAt: new Date(Number.NaN), quantity: 1 })],
     ["an empty restore job", () => marketplaceQuantityRestoreJobKey({ storeConnectionId: 1, listingIds: [], maxEventId: 1 })],
+    ["an empty waiting-for-stock job", () => marketplaceWaitingForStockJobKey({ storeConnectionId: 1, listings: [] })],
+    ["a waiting listing twice with different update times", () => marketplaceWaitingForStockJobKey({ storeConnectionId: 1,
+      listings: [{ listingId: 2, updatedAt: AT }, { listingId: 2, updatedAt: new Date(AT.getTime() + 1) }] })],
+    ["a waiting listing with an invalid update time", () => marketplaceWaitingForStockJobKey({ storeConnectionId: 1,
+      listings: [{ listingId: 2, updatedAt: new Date(Number.NaN) }] })],
     ["a reversed batch range", () => marketplaceNoticeBatchKey({ kind: "sku_changed", storeConnectionId: 1, minNoticeId: 5, maxNoticeId: 4 })],
     ["a kind with capitals", () => marketplaceNoticeBatchKey({ kind: "Price", storeConnectionId: 1, minNoticeId: 1, maxNoticeId: 1 })],
     ["an item id with a space", () => marketplaceItemSubjectKey("1 2")],

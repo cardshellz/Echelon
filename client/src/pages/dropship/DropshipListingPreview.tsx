@@ -312,7 +312,7 @@ function PreviewStatus({ row }: { row: DropshipListingPreviewRow }) {
   const issues = [...new Set([...row.blockers, ...row.warnings])];
   const hidden = issues.length - MAX_INLINE_ROW_ISSUES;
   return <div className="space-y-1">
-    <Badge variant="outline" className={listingPreviewStatusTone(row.previewStatus)}>{vendorListingPreviewStatusLabel(row.previewStatus)}</Badge>
+    <Badge variant="outline" className={listingPreviewStatusTone(row.previewStatus)}>{vendorListingPreviewStatusLabel(row.previewStatus, { platform: row.platform, blockers: row.blockers })}</Badge>
     {issues.length > 0 && <ul className="max-w-72 space-y-0.5 text-xs text-zinc-600" data-testid={`listing-row-issues-${row.productVariantId}`}>
       {issues.slice(0, MAX_INLINE_ROW_ISSUES).map((issue) => <li key={issue}>{formatListingPreviewIssue(issue)}</li>)}
       {hidden > 0 && <li>{hidden} more in the preview.</li>}

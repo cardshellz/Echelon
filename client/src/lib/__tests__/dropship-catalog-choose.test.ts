@@ -36,6 +36,7 @@ import {
   chooseNextPageParam,
   choosePausedDelayMs,
   chooseRoom,
+  chooseRowOutOfStock,
   chooseRowView,
   chooseSavedState,
   classifyChooseSaveError,
@@ -244,7 +245,8 @@ describe("row model (from picked, V24)", () => {
 
   it("V1 a picked selected size is checked, picked by you, with its quantity", () => {
     expect(chooseRowView(row(101, "selected", true), none)).toEqual({
-      checked: true, savedChecked: true, changed: null, changeable: true, how: "picked", quantity: 1_433, tierOff: false, pickTurnedOff: false,
+      checked: true, savedChecked: true, changed: null, changeable: true, how: "picked", quantity: 1_433, outOfStock: false,
+      listsWhenBackInStock: false, tierOff: false, pickTurnedOff: false,
     });
   });
 
@@ -277,6 +279,43 @@ describe("row model (from picked, V24)", () => {
     expect(chooseRowView(row(101, "selected", true, { listingTier: tier }), none).tierOff).toBe(true);
     expect(chooseRowView(row(102, "missing_vendor_include_rule", false, { listingTier: tier }), none).tierOff).toBe(false);
     expect(chooseRowView(row(101, "selected", true, { listingTier: { ...tier, eligible: true, reason: null } }), none).tierOff).toBe(false);
+  });
+
+  it("V6b a selected size whose tier is off shows no number (it cannot list)", () => {
+    const tier = { tier: "case", eligible: false, reason: "autopay_off", policyMinimumCents: 50_000, reserveShortfallCents: 0, balanceShortfallCents: 0 };
+    expect(chooseRowView(row(101, "selected", true, { listingTier: tier }), none)).toMatchObject({ tierOff: true, quantity: null, outOfStock: false });
+    expect(chooseRowView(row(101, "selected", true, { listingTier: { ...tier, eligible: true, reason: null } }), none)).toMatchObject({ quantity: 1_433 });
+  });
+
+  it("V6c out of stock whatever the reason, from the server's flag; a picked one lists when back in stock", () => {
+    const out = { outOfStock: true };
+    // Not picked: out of stock shows, no hint until it is checked; a pending add gets the hint; the box stays usable.
+    expect(chooseRowView(row(102, "missing_vendor_include_rule", false, out), none))
+      .toMatchObject({ outOfStock: true, quantity: null, listsWhenBackInStock: false, changeable: true });
+    expect(chooseRowView(row(102, "missing_vendor_include_rule", false, out), changes([102], [])))
+      .toMatchObject({ checked: true, outOfStock: true, listsWhenBackInStock: true });
+    // Picked (selected at 0): out of stock with the hint; a pending remove drops the hint.
+    const selectedAtZero = row(101, "selected", true, { ...out, selectionDecision: { selected: true, reason: "selected", picked: true,
+      marketplaceQuantity: 0 } });
+    expect(chooseRowView(selectedAtZero, none)).toMatchObject({ outOfStock: true, quantity: 0, listsWhenBackInStock: true });
+    expect(chooseRowView(selectedAtZero, changes([], [101]))).toMatchObject({ checked: false, listsWhenBackInStock: false });
+    // A pick that would not list when stock is back gets no promise: turned off, or its tier off.
+    expect(chooseRowView(row(104, "disabled_by_vendor_override", true, out), none)).toMatchObject({ outOfStock: true, listsWhenBackInStock: false });
+    const tierOff = { tier: "pack", eligible: false, reason: "autopay_off", policyMinimumCents: 0, reserveShortfallCents: 0, balanceShortfallCents: 0 };
+    expect(chooseRowView(row(101, "selected", true, { ...out, listingTier: tierOff }), none))
+      .toMatchObject({ outOfStock: true, tierOff: true, listsWhenBackInStock: false });
+    // In stock: never out of stock, whatever the reason.
+    expect(chooseRowView(row(102, "missing_vendor_include_rule", false, { outOfStock: false }), changes([102], [])))
+      .toMatchObject({ outOfStock: false, listsWhenBackInStock: false });
+  });
+
+  it("V6d an older dyno's row (no flag) is out of stock only when it is selected at 0", () => {
+    const atZero = (reason: ChooseSelectionReason, picked: boolean) => row(101, reason, picked, { selectionDecision: { selected: reason === "selected",
+      reason, picked, marketplaceQuantity: 0 } });
+    expect(chooseRowOutOfStock(atZero("selected", true))).toBe(true);
+    expect(chooseRowOutOfStock(atZero("missing_vendor_include_rule", false))).toBe(false);
+    expect(chooseRowOutOfStock(row(101, "selected", true))).toBe(false);
+    expect(chooseCatalogRowSchema.safeParse({ ...row(101, "selected", true), outOfStock: "yes" }).success).toBe(false);
   });
 
   it("V7 the header box: all, some, none, and off with no changeable row", () => {

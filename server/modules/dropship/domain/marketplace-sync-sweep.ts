@@ -202,3 +202,96 @@ export function decisionWithoutPriceAdoption(decision: MarketplaceSyncDecision, 
   const remove = MARKETPLACE_ISSUE_CODES.filter((code) => !after.includes(code) && input.listingIssueCodes.includes(code));
   return { ...decision, price: { kind: "unchanged" }, notices, syncedBaseline, issues: { add, remove, after } };
 }
+
+/**
+ * The blocker a preview gives a size it would list at 0
+ * (dropship-config-driven-marketplace-listing.provider.ts buildListingIntent).
+ * A push of that size is blocked, and the vendor listing row keeps it in
+ * `metadata.blockers` (dropship-listing-preview.repository.ts
+ * upsertVendorListingForPreview).
+ */
+export const MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER = "marketplace_quantity_unavailable";
+
+/**
+ * Listings waiting for stock read per store and tick: one preview call and one
+ * push job, so the preview service's own per-call limit is the bound. A store
+ * with more waits its turn (marketplaceWaitingForStockRotation).
+ */
+export const MARKETPLACE_SYNC_MAX_WAITING_FOR_STOCK_PER_STORE_TICK = MARKETPLACE_SYNC_PREVIEW_CHUNK;
+
+/** A vendor listing row as the waiting-for-stock read answers it (never published, so no eBay ids to compare). */
+export interface MarketplaceWaitingForStockListing {
+  listingId: number;
+  productVariantId: number;
+  status: string;
+  externalListingId: string | null;
+  /** `metadata.blockers` as stored; non-string entries are dropped by the reader. */
+  blockers: readonly string[];
+  /** Moves on every queue of the listing, so each new block gets its own job key (marketplaceWaitingForStockJobKey). */
+  updatedAt: Date;
+}
+
+/**
+ * A listing the vendor published while Card Shellz had none in stock, still
+ * waiting to list (owner report): its push was blocked only for want of stock
+ * at the time (status `blocked`, the quantity blocker among its blockers) and
+ * it was never published (no item number). Nothing else retries it: an ops
+ * retry requeues failed items only. An `ended` listing, or one with an item
+ * number, is never one: eBay sync-back's restore and relist rules own those.
+ */
+export function isWaitingForStock(listing: Pick<MarketplaceWaitingForStockListing, "status" | "externalListingId" | "blockers">): boolean {
+  return listing.status === "blocked"
+    && (listing.externalListingId === null || listing.externalListingId.trim() === "")
+    && listing.blockers.includes(MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER);
+}
+
+/** Why a waiting listing is left alone this tick (each is expected: DEBUG). */
+export type WaitingForStockHold = "not_waiting" | "no_preview" | "still_blocked" | "no_quantity";
+
+export interface WaitingForStockPlan<L extends MarketplaceWaitingForStockListing> {
+  /** Listings whose current preview would list them: queued with one push job. Sorted by listing id. */
+  queue: L[];
+  /** Listings left alone, with why. */
+  held: Array<{ listing: L; hold: WaitingForStockHold; blockers: readonly string[] }>;
+}
+
+/**
+ * Which waiting listings to queue now, from the current preview (as the
+ * system) of their sizes: only those it would list (not blocked, more than
+ * 0). Any other block (no longer picked, tier off, still at 0, a missing
+ * price) leaves the listing waiting, unchanged, for a later tick. Pure: the
+ * caller passes the listings and the preview rows by size.
+ */
+export function planWaitingForStockQueue<L extends MarketplaceWaitingForStockListing>(
+  listings: readonly L[],
+  previewRows: ReadonlyMap<number, { previewStatus: string; blockers: readonly string[]; marketplaceQuantity: number }>,
+): WaitingForStockPlan<L> {
+  const queue: L[] = [];
+  const held: WaitingForStockPlan<L>["held"] = [];
+  for (const listing of [...listings].sort((left, right) => left.listingId - right.listingId)) {
+    if (!isWaitingForStock(listing)) {
+      held.push({ listing, hold: "not_waiting", blockers: listing.blockers });
+      continue;
+    }
+    const row = previewRows.get(listing.productVariantId);
+    if (!row) held.push({ listing, hold: "no_preview", blockers: listing.blockers });
+    else if (row.previewStatus === "blocked") held.push({ listing, hold: "still_blocked", blockers: row.blockers });
+    // Defensive: a preview that is not blocked always has stock to list (the provider's own blocker says so).
+    else if (!Number.isSafeInteger(row.marketplaceQuantity) || row.marketplaceQuantity <= 0) {
+      held.push({ listing, hold: "no_quantity", blockers: row.blockers });
+    } else queue.push(listing);
+  }
+  return { queue, held };
+}
+
+/**
+ * Which window of a store's waiting listings a tick reads, when it has more
+ * than one tick's bound: the tick's number since the epoch (the injected
+ * clock), so successive ticks step through them in listing id order and none
+ * is starved by others still at 0, with no stored cursor. The reader starts
+ * at (rotation × limit) mod count and wraps.
+ */
+export function marketplaceWaitingForStockRotation(at: Date): number {
+  const ms = at.getTime();
+  return Number.isFinite(ms) && ms > 0 ? Math.floor(ms / MARKETPLACE_SYNC_INTERVAL_MS) : 0;
+}
