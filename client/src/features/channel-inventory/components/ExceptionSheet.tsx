@@ -41,6 +41,7 @@ import { NodeChecklist } from "./NodeChecklist";
 import { Checkbox } from "@/components/ui/checkbox";
 import { PolicyFields } from "./PolicyFields";
 import { ProductPicker } from "./ProductPicker";
+import { RuleApplyPanel } from "./RuleApplyPanel";
 import { ActivePill, Callout, EvidenceNote, NoteField, PendingPill } from "./primitives";
 
 export interface ExceptionSubject {
@@ -53,7 +54,7 @@ export interface ExceptionSubject {
  * independently (SKU → product → channel default), so each shows the value
  * it would inherit right beside the option to override it.
  */
-export function ExceptionSheet({ open, onOpenChange, view, channel, subject, canEdit, focusProductId, onFocusProduct, onReload, reloading }: {
+export function ExceptionSheet({ open, onOpenChange, view, channel, subject, canEdit, canActivate, focusProductId, onFocusProduct, onReload, reloading }: {
   open: boolean;
   onOpenChange(open: boolean): void;
   view: View;
@@ -61,6 +62,7 @@ export function ExceptionSheet({ open, onOpenChange, view, channel, subject, can
   /** Null opens the sheet in "new exception" mode. */
   subject: ExceptionSubject | null;
   canEdit: boolean;
+  canActivate: boolean;
   focusProductId: number | null;
   onFocusProduct(productId: number): void;
   onReload(): void;
@@ -132,7 +134,10 @@ export function ExceptionSheet({ open, onOpenChange, view, channel, subject, can
               scope={scope}
               unitNoun={variant ? `units (${describePackUnit(variant.unitsPerVariant)})` : "units of the exact SKU"}
               canEdit={canEdit}
-              onSaved={() => onOpenChange(false)}
+              canActivate={canActivate}
+              // After cutover the sheet stays open so the saved rule's effect can
+              // be checked and applied right here; before it, saving is all there is.
+              onSaved={() => { if (view.runtimeAuthority !== "canonical") onOpenChange(false); }}
               onReload={onReload}
               reloading={reloading}
             />
@@ -185,12 +190,13 @@ function ScopeChoice({ variants, value, onChange, locked }: {
   );
 }
 
-function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload, reloading }: {
+function RuleEditor({ view, channel, scope, unitNoun, canEdit, canActivate, onSaved, onReload, reloading }: {
   view: View;
   channel: Channel;
   scope: ChannelExposurePolicyScope;
   unitNoun: string;
   canEdit: boolean;
+  canActivate: boolean;
   onSaved(): void;
   onReload(): void;
   reloading: boolean;
@@ -229,7 +235,9 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
       await invalidateChannelInventory(queryClient);
       toast({
         title: "Exception saved",
-        description: "Pending activation. Quantities on the marketplace are unchanged until it is activated.",
+        description: view.runtimeAuthority === "canonical"
+          ? "Not applied yet. Check what it changes under \"What applying this rule changes\", then apply it."
+          : "Pending activation. Quantities on the marketplace are unchanged until it is activated.",
       });
       onSaved();
     },
@@ -241,9 +249,10 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
         {head?.activePolicy && <ActivePill>Active rule v{head.activePolicy.version}</ActivePill>}
-        {head?.draftPolicy && <PendingPill>Saved draft v{head.draftPolicy.version}, pending activation</PendingPill>}
+        {head?.draftPolicy && <PendingPill>Saved draft v{head.draftPolicy.version}, not applied yet</PendingPill>}
         {!saved && <span>No rule saved yet for this item on {channel.name}.</span>}
       </div>
+      <RuleApplyPanel view={view} channel={channel} scope={scope} head={head} canActivate={canActivate} unsavedEdits={editor.dirty} />
       <DraftSaveFeedback {...editor} onReload={() => { editor.reset(); setErrors([]); onReload(); }} reloading={reloading} />
       <PolicyFields
         idPrefix={`exception-${scopeKey(scope)}`}
@@ -273,7 +282,9 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
       {formError && <Callout tone="warning">{formError}</Callout>}
       <EvidenceNote>
         Use default removes a field's override so it follows future changes to its product or channel settings.
-        Saved changes take effect after Review and Apply.
+        {view.runtimeAuthority === "canonical"
+          ? " A saved change takes effect when you apply it here; only this rule is applied."
+          : " Saved changes take effect after Review and Apply."}
       </EvidenceNote>
       {canEdit && saved && <Button type="button" variant="outline" disabled={editor.locked || reloading}
         onClick={() => editor.setValue(current => ({ ...current, form: EMPTY_POLICY_FORM, sources: null }))}>
