@@ -108,17 +108,24 @@ describe("salesStatusStopsForChannel", () => {
   });
 
   it("returns only the SKUs stopped on this channel, each with its deciding setting's hold", () => {
-    const entries = [entry(productEverywhere, "stopped"), entry({ channelId: 36, productId: 11, productVariantId: 21 }, "selling")];
-    expect(salesStatusStopsForChannel({ channelId: 36, productId: 11, productVariantIds: [22, 21, 22], entries })).toEqual([
-      { productVariantId: 22, hold: { reason: "Sales status: stopped on all channels (product setting)", heldAt: AT, heldBy: "admin" } },
+    const entries = [entry({ channelId: null, productId: 11, productVariantId: 22 }, "stopped"),
+      entry({ channelId: 36, productId: 11, productVariantId: 22 }, "selling")];
+    expect(salesStatusStopsForChannel({ channelId: 67, productId: 11, productVariantIds: [22, 21, 22], entries })).toEqual([
+      { productVariantId: 22, hold: { reason: "Sales status: stopped on all channels (SKU setting)", heldAt: AT, heldBy: "admin" } },
     ]);
-    expect(salesStatusStopsForChannel({ channelId: 67, productId: 11, productVariantIds: [21, 22], entries })
-      .map((stop) => stop.productVariantId)).toEqual([21, 22]);
+    // The SKU's own Selling exception on channel 36 beats its own all-channels stop.
+    expect(salesStatusStopsForChannel({ channelId: 36, productId: 11, productVariantIds: [21, 22], entries })).toEqual([]);
   });
 
-  it("returns nothing without settings, and nothing for a SKU set back to Selling", () => {
+  it("stops every SKU of a stopped product, and a SKU's Selling exception cannot override the product", () => {
+    const entries = [entry(productEverywhere, "stopped"), entry(skuOnShopify, "selling")];
+    const productHold = { reason: "Sales status: stopped on all channels (product setting)", heldAt: AT, heldBy: "admin" };
+    expect(salesStatusStopsForChannel({ channelId: 36, productId: 11, productVariantIds: [22, 21], entries })).toEqual([
+      { productVariantId: 21, hold: productHold }, { productVariantId: 22, hold: productHold },
+    ]);
+  });
+
+  it("returns nothing without settings", () => {
     expect(salesStatusStopsForChannel({ channelId: 36, productId: 11, productVariantIds: [22], entries: [] })).toEqual([]);
-    expect(salesStatusStopsForChannel({ channelId: 36, productId: 11, productVariantIds: [22],
-      entries: [entry(productEverywhere, "stopped"), entry(skuEverywhere, "selling")] })).toEqual([]);
   });
 });

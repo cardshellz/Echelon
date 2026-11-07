@@ -1042,6 +1042,23 @@ test("the stopped list shows every stop across channels and opens its sales stat
   expect(state.writes).toEqual([]); expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
+test("a SKU under a stopped product says why it is stopped and offers no SKU resume", async ({ page }) => {
+  const state = await setup(page);
+  state.sales.entries.push({ scopeKey: "all:product:10", scope: { channelId: null, productId: 10, productVariantId: null },
+    status: "stopped", note: null, revision: "3", updatedBy: "admin", updatedAt: AT });
+  const panel = await openSalesStatus(page, "CARD-P5");
+  await expect(panel.getByText("Stopped everywhere", { exact: true })).toBeVisible();
+  await expect(panel.getByText("Stopped because the product is stopped", { exact: true }).first()).toBeVisible();
+  await expect(panel.getByRole("button", { name: /everywhere/ })).toHaveCount(0);
+  // A SKU's own Selling exception cannot override its stopped product.
+  await panel.getByRole("group", { name: "Sales status on Shopify US", exact: true }).getByRole("radio", { name: "Sell", exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  await expect(panel.getByText("Stopped everywhere", { exact: true })).toBeVisible();
+  expect(state.writes[0].body).toMatchObject({ changes: [
+    { scope: { channelId: 3, productId: 10, productVariantId: 101 }, status: "selling", expectedRevision: null }] });
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
 test("view-only roles see the sales status but cannot change it", async ({ page }) => {
   const state = await setup(page, { permission: "view" });
   state.sales.entries.push({ scopeKey: "all:variant:101", scope: { channelId: null, productId: 10, productVariantId: 101 },

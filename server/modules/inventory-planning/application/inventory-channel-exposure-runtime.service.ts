@@ -76,7 +76,8 @@ export interface ActiveInventoryPublicationTargetSnapshot {
   variantHolds: readonly ActivePublicationVariantHoldSnapshot[];
   /**
    * SKUs a sales status stops on this target's channel (inventory.sales_statuses,
-   * already resolved through SKU/product and channel/all-channels precedence).
+   * already resolved: stopped when the product or the SKU itself is stopped
+   * here, each level's channel exception beating its all-channels setting).
    * The operator's holder, separate from the automation holds above: any of
    * them zeroes the SKU. Every live reader supplies it; omitted means none.
    */

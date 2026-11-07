@@ -15,7 +15,10 @@ import { salesStatusScopeKey } from "../inventory/sales-status-resolution";
  * cost-change pauses, Walmart unpublish) are separate holders: any holder
  * stops a SKU, and resuming here never releases theirs.
  *
- * Precedence lives in shared/inventory/sales-status-resolution.ts.
+ * A SKU sells only if both its product and the SKU are Selling; a stop always
+ * wins (shared/inventory/sales-status-resolution.ts). Selling everywhere is the
+ * default, so an all-channels setting is only ever Stopped, and Selling exists
+ * only as a channel exception ("stopped everywhere except Shopify").
  */
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
@@ -90,6 +93,12 @@ export const changeSalesStatusRequestSchema = z.object({
       context.addIssue({ code: z.ZodIssueCode.custom, path: ["changes", index, "scope"], message: "Each scope may appear only once in a change." });
     }
     seen.add(key);
+    // Selling everywhere is what "no setting" already means; a stored all-channels
+    // Selling would look like an override but could never override a stop.
+    if (change.scope.channelId === null && change.status === "selling") {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["changes", index, "status"],
+        message: "Selling on all channels is the default: remove the setting (inherit) instead." });
+    }
   });
 });
 export type ChangeSalesStatusRequest = z.infer<typeof changeSalesStatusRequestSchema>;

@@ -1,15 +1,19 @@
 /**
- * Sales status precedence, shared by the publication planner (which zeroes a
+ * Sales status resolution, shared by the publication planner (which zeroes a
  * stopped SKU) and the admin UI (which shows why a SKU is stopped), so the two
  * can never disagree.
  *
- * Owner decision 2026-11-07: the most specific item wins first, then the most
- * specific channel:
- *   SKU on this channel -> SKU on all channels -> product on this channel ->
- *   product on all channels -> Selling.
- * So "SKU X stopped on all channels" stops X even where its product has a
- * "Selling on Shopify" exception, and "Selling on Shopify" for X beats
- * "SKU X stopped on all channels".
+ * Owner decision 2026-11-07: a SKU sells on a channel only if BOTH its product
+ * and the SKU itself are Selling there. A stop always wins:
+ * - A product stopped on a channel stops every SKU under it on that channel,
+ *   and no SKU setting can override that. (Selling only some SKUs is done by
+ *   leaving the product Selling and stopping the other SKUs.)
+ * - Within one level (the product, or the SKU), a channel exception beats the
+ *   all-channels setting, so "stopped everywhere except Shopify" works for a
+ *   product and for a SKU.
+ * - With nothing set, everything sells.
+ * Because Selling on all channels is the default, an all-channels setting is
+ * only ever Stopped; Selling exists only as a channel exception.
  */
 
 export type SalesStatusValue = "selling" | "stopped";
@@ -37,40 +41,50 @@ export function salesStatusScopeKey(scope: SalesStatusScopeInput): string {
   return `${channel}:${item}`;
 }
 
-/** The four scopes that can decide one SKU on one channel, most decisive first. */
-export function salesStatusPrecedence(input: {
-  channelId: number;
-  productId: number;
-  productVariantId: number;
-}): string[] {
-  return [
-    salesStatusScopeKey({ channelId: input.channelId, productId: input.productId, productVariantId: input.productVariantId }),
-    salesStatusScopeKey({ channelId: null, productId: input.productId, productVariantId: input.productVariantId }),
-    salesStatusScopeKey({ channelId: input.channelId, productId: input.productId, productVariantId: null }),
-    salesStatusScopeKey({ channelId: null, productId: input.productId, productVariantId: null }),
-  ];
+type Entry = { scopeKey: string; status: SalesStatusValue };
+
+/**
+ * One level's own setting on one channel: its channel exception if it has
+ * one, else its all-channels setting, else nothing (null).
+ */
+export function levelSetting<TEntry extends Entry>(
+  entries: readonly TEntry[],
+  scope: { channelId: number; productId: number; productVariantId: number | null },
+): TEntry | null {
+  const byKey = new Map(entries.map((entry) => [entry.scopeKey, entry] as const));
+  return byKey.get(salesStatusScopeKey(scope))
+    ?? byKey.get(salesStatusScopeKey({ ...scope, channelId: null }))
+    ?? null;
 }
 
 export interface SalesStatusResolution<TEntry> {
   status: SalesStatusValue;
-  /** The setting that decided it; null when nothing is set and the default applies. */
+  /**
+   * The setting that decided it: the product's stop when the product is
+   * stopped (it outranks everything), else the SKU's own setting, else the
+   * product's Selling exception; null when nothing is set.
+   */
   source: TEntry | null;
+  /** True when the SKU is stopped on this channel because its product is. */
+  stoppedByProduct: boolean;
 }
 
 /**
- * Resolves one SKU on one channel. `entries` may hold settings for other
- * items or channels; only the four scopes in the precedence list are read.
+ * Resolves one SKU on one channel. `entries` may hold settings for other items
+ * or channels; only this product's and this SKU's settings for the channel are
+ * read.
  */
-export function resolveSalesStatus<TEntry extends { scopeKey: string; status: SalesStatusValue }>(input: {
+export function resolveSalesStatus<TEntry extends Entry>(input: {
   channelId: number;
   productId: number;
   productVariantId: number;
   entries: readonly TEntry[];
 }): SalesStatusResolution<TEntry> {
-  const byKey = new Map(input.entries.map((entry) => [entry.scopeKey, entry] as const));
-  for (const scopeKey of salesStatusPrecedence(input)) {
-    const entry = byKey.get(scopeKey);
-    if (entry) return { status: entry.status, source: entry };
-  }
-  return { status: DEFAULT_SALES_STATUS, source: null };
+  const product = levelSetting(input.entries, { channelId: input.channelId, productId: input.productId, productVariantId: null });
+  if (product?.status === "stopped") return { status: "stopped", source: product, stoppedByProduct: true };
+  const sku = levelSetting(input.entries, {
+    channelId: input.channelId, productId: input.productId, productVariantId: input.productVariantId,
+  });
+  if (sku?.status === "stopped") return { status: "stopped", source: sku, stoppedByProduct: false };
+  return { status: DEFAULT_SALES_STATUS, source: sku ?? product, stoppedByProduct: false };
 }

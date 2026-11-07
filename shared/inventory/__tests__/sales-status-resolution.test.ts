@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_SALES_STATUS,
+  levelSetting,
   resolveSalesStatus,
-  salesStatusPrecedence,
   salesStatusScopeKey,
   type SalesStatusValue,
 } from "../sales-status-resolution";
@@ -39,43 +39,46 @@ describe("sales status scope keys", () => {
       .toBe(salesStatusScopeKey({ channelId: 36, productId: 99, productVariantId: 22 }));
   });
 
-  it("lists SKU before product and the channel before all channels", () => {
-    expect(salesStatusPrecedence({ channelId: SHOPIFY, productId: PRODUCT, productVariantId: SKU })).toEqual([
-      "channel:36:variant:22", "all:variant:22", "channel:36:product:11", "all:product:11",
-    ]);
+  it("reads one level's channel exception before its all-channels setting", () => {
+    const entries = [productEverywhere("stopped"), productOnShopify("selling")];
+    expect(levelSetting(entries, { channelId: SHOPIFY, productId: PRODUCT, productVariantId: null })).toBe(entries[1]);
+    expect(levelSetting(entries, { channelId: EBAY, productId: PRODUCT, productVariantId: null })).toBe(entries[0]);
+    expect(levelSetting(entries, { channelId: EBAY, productId: PRODUCT, productVariantId: SKU })).toBeNull();
   });
 });
 
-describe("resolveSalesStatus (owner precedence 2026-11-07)", () => {
+describe("resolveSalesStatus (owner decision 2026-11-07: a stop always wins)", () => {
   it("defaults to Selling with no source when nothing is set", () => {
-    expect(resolve(SHOPIFY, [])).toEqual({ status: DEFAULT_SALES_STATUS, source: null });
+    expect(resolve(SHOPIFY, [])).toEqual({ status: DEFAULT_SALES_STATUS, source: null, stoppedByProduct: false });
     expect(DEFAULT_SALES_STATUS).toBe("selling");
   });
 
-  it("stops everywhere except the channel with a Selling exception", () => {
+  it("stops a product everywhere except the channel with a Selling exception", () => {
     const entries = [productEverywhere("stopped"), productOnShopify("selling")];
-    expect(resolve(SHOPIFY, entries)).toEqual({ status: "selling", source: entries[1] });
-    expect(resolve(EBAY, entries)).toEqual({ status: "stopped", source: entries[0] });
+    expect(resolve(SHOPIFY, entries)).toEqual({ status: "selling", source: entries[1], stoppedByProduct: false });
+    expect(resolve(EBAY, entries)).toEqual({ status: "stopped", source: entries[0], stoppedByProduct: true });
   });
 
-  it("lets a SKU stopped on all channels beat its product's channel exception", () => {
-    const entries = [productEverywhere("stopped"), productOnShopify("selling"), skuEverywhere("stopped")];
-    expect(resolve(SHOPIFY, entries)).toEqual({ status: "stopped", source: entries[2] });
+  it("lets a stopped product stop every SKU, and no SKU setting override it", () => {
+    const entries = [productEverywhere("stopped"), skuOnShopify("selling")];
+    expect(resolve(SHOPIFY, entries)).toEqual({ status: "stopped", source: entries[0], stoppedByProduct: true });
   });
 
-  it("lets a SKU channel exception beat the SKU's all-channels setting", () => {
+  it("stops a product's SKUs only on the channel where the product is stopped", () => {
+    const entries = [productOnShopify("stopped")];
+    expect(resolve(SHOPIFY, entries)).toEqual({ status: "stopped", source: entries[0], stoppedByProduct: true });
+    expect(resolve(EBAY, entries)).toEqual({ status: "selling", source: null, stoppedByProduct: false });
+  });
+
+  it("stops a SKU on its own while the product sells, everywhere except its own Selling exception", () => {
     const entries = [skuEverywhere("stopped"), skuOnShopify("selling")];
-    expect(resolve(SHOPIFY, entries).status).toBe("selling");
-    expect(resolve(EBAY, entries).status).toBe("stopped");
+    expect(resolve(SHOPIFY, entries)).toEqual({ status: "selling", source: entries[1], stoppedByProduct: false });
+    expect(resolve(EBAY, entries)).toEqual({ status: "stopped", source: entries[0], stoppedByProduct: false });
   });
 
-  it("lets a SKU Selling on all channels override a product stopped on all channels", () => {
-    expect(resolve(EBAY, [productEverywhere("stopped"), skuEverywhere("selling")]).status).toBe("selling");
-  });
-
-  it("applies a channel exception only to its own channel", () => {
-    expect(resolve(EBAY, [skuOnShopify("stopped")])).toEqual({ status: "selling", source: null });
-    expect(resolve(SHOPIFY, [skuOnShopify("stopped")]).status).toBe("stopped");
+  it("names the product as the reason when both the product and the SKU are stopped", () => {
+    const entries = [skuEverywhere("stopped"), productEverywhere("stopped")];
+    expect(resolve(EBAY, entries)).toEqual({ status: "stopped", source: entries[1], stoppedByProduct: true });
   });
 
   it("ignores settings for other products and SKUs", () => {
@@ -84,23 +87,22 @@ describe("resolveSalesStatus (owner precedence 2026-11-07)", () => {
       { scopeKey: "all:variant:23", status: "stopped" as const },
       { scopeKey: "channel:36:variant:23", status: "stopped" as const },
     ];
-    expect(resolve(SHOPIFY, other)).toEqual({ status: "selling", source: null });
+    expect(resolve(SHOPIFY, other)).toEqual({ status: "selling", source: null, stoppedByProduct: false });
   });
 
-  it("checks every one of the 16 set/unset combinations against the precedence list", () => {
-    const scopes = [skuOnShopify, skuEverywhere, productOnShopify, productEverywhere];
-    for (let mask = 0; mask < 16; mask += 1) {
-      // Alternate statuses so the winner is always identifiable by its status and key.
-      const entries = scopes.flatMap((make, index) => (mask & (1 << index))
-        ? [make(index % 2 === 0 ? "stopped" : "selling")] : []);
-      const winner = scopes.findIndex((_, index) => mask & (1 << index));
+  it("sells only when both levels sell, across all 81 combinations of the four scopes", () => {
+    const makers = [skuOnShopify, skuEverywhere, productOnShopify, productEverywhere];
+    const choices = [null, "selling", "stopped"] as const;
+    for (let code = 0; code < 81; code += 1) {
+      const picked = makers.map((_, index) => choices[Math.floor(code / 3 ** index) % 3]);
+      const entries = makers.flatMap((make, index) => picked[index] ? [make(picked[index]!)] : []);
+      // Each level reads its channel setting before its all-channels setting.
+      const skuLevel = picked[0] ?? picked[1];
+      const productLevel = picked[2] ?? picked[3];
+      const expected = skuLevel === "stopped" || productLevel === "stopped" ? "stopped" : "selling";
       const result = resolve(SHOPIFY, entries);
-      if (winner === -1) {
-        expect(result).toEqual({ status: "selling", source: null });
-      } else {
-        expect(result.source?.scopeKey).toBe(salesStatusPrecedence({ channelId: SHOPIFY, productId: PRODUCT, productVariantId: SKU })[winner]);
-        expect(result.status).toBe(winner % 2 === 0 ? "stopped" : "selling");
-      }
+      expect(result.status, JSON.stringify(picked)).toBe(expected);
+      expect(result.stoppedByProduct, JSON.stringify(picked)).toBe(productLevel === "stopped");
     }
   });
 });

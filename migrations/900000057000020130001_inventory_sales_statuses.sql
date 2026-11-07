@@ -4,10 +4,16 @@
 -- per-channel overrides"). A change takes effect when it is saved; there is no
 -- draft and no channel review.
 --
--- A row is an explicit setting at one scope. No row means "inherit". The
--- planner resolves the most specific item first, then the most specific channel:
---   SKU on this channel -> SKU on all channels -> product on this channel ->
---   product on all channels -> Selling (the default).
+-- A row is an explicit setting at one scope. No row means "inherit". A SKU
+-- sells on a channel only if BOTH its product and the SKU are Selling there;
+-- a stop always wins (owner decision 2026-11-07):
+--   * a product stopped on a channel stops every SKU under it there, and no
+--     SKU setting overrides it;
+--   * within one level (product, or SKU) a channel exception beats the
+--     all-channels setting ("stopped everywhere except Shopify");
+--   * with nothing set, everything sells.
+-- Selling on all channels is that default, so an all-channels row is always
+-- Stopped; Selling exists only as a channel exception.
 -- Stopped publishes 0 for the SKU on every live destination of the scope's
 -- channel(s) and keeps the listing; canonical ATP is still calculated and
 -- recorded, so resuming restores the calculated quantity.
@@ -57,6 +63,8 @@ CREATE TABLE inventory.sales_statuses (
     CHECK ((product_id IS NULL) <> (product_variant_id IS NULL)),
   CONSTRAINT sales_statuses_status_chk
     CHECK (status IN ('selling', 'stopped')),
+  CONSTRAINT sales_statuses_all_channels_stop_chk
+    CHECK (channel_id IS NOT NULL OR status = 'stopped'),
   CONSTRAINT sales_statuses_note_chk
     CHECK (note IS NULL OR (note = btrim(note) AND note <> '')),
   CONSTRAINT sales_statuses_actor_chk

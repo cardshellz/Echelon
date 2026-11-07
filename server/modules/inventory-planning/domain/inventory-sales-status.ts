@@ -2,7 +2,7 @@ import type { InventoryPublicationTargetHold } from "@shared/types/inventory-cha
 import type { SalesStatus, SalesStatusChange, SalesStatusScope } from "@shared/types/inventory-sales-status";
 import { resolveSalesStatus, salesStatusScopeKey } from "@shared/inventory/sales-status-resolution";
 
-export { resolveSalesStatus, salesStatusPrecedence, salesStatusScopeKey } from "@shared/inventory/sales-status-resolution";
+export { levelSetting, resolveSalesStatus, salesStatusScopeKey } from "@shared/inventory/sales-status-resolution";
 
 /**
  * Sales status rules that need no database: what a change does to the stored

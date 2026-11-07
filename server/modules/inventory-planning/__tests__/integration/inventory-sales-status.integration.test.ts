@@ -23,6 +23,7 @@ const WALMART = 36;
 const productEverywhere = { channelId: null, productId: PRODUCT, productVariantId: null };
 const productOnWalmart = { channelId: WALMART, productId: PRODUCT, productVariantId: null };
 const skuEverywhere = { channelId: null, productId: PRODUCT, productVariantId: SKU };
+const skuOnWalmart = { channelId: WALMART, productId: PRODUCT, productVariantId: SKU };
 const WALMART_DESTINATION = { destinationKind: "channel_connection" as const, connectionId: 8 };
 
 /**
@@ -107,6 +108,15 @@ const WALMART_DESTINATION = { destinationKind: "channel_connection" as const, co
       idempotencyKey: "stop-everywhere" }, "admin");
     expect(await latest()).toMatchObject({ desired_quantity: "0" });
 
+    // A stop always wins: a SKU's own Selling exception cannot override its stopped product.
+    await service().change({ changes: [{ scope: skuOnWalmart, status: "selling", expectedRevision: null }],
+      idempotencyKey: "sku-sell-on-walmart" }, "admin");
+    expect(await latest()).toMatchObject({ desired_quantity: "0" });
+    expect((await planRow()).hold).toMatchObject({ reason: "Sales status: stopped on all channels (product setting)" });
+    await service().change({ changes: [{ scope: skuOnWalmart, status: "inherit",
+      expectedRevision: await revisionOf("channel:36:variant:101") }], idempotencyKey: "sku-sell-removed" }, "admin");
+
+    // The product's own Walmart exception does: "stopped everywhere except Walmart".
     await service().change({ changes: [{ scope: productOnWalmart, status: "selling", expectedRevision: null }],
       idempotencyKey: "sell-on-walmart" }, "admin");
     expect(await latest()).toMatchObject({ desired_quantity: "17" });
@@ -127,12 +137,15 @@ const WALMART_DESTINATION = { destinationKind: "channel_connection" as const, co
     expect(resumed.changes[0]).toMatchObject({ before: { status: "stopped" }, after: null, changed: true });
     expect(await latest()).toMatchObject({ desired_quantity: "17" });
     expect((await service().readProduct(PRODUCT)).entries).toEqual([]);
-    expect((await database.pool.query(`SELECT before_status, after_status FROM inventory.sales_status_events ORDER BY id`)).rows)
+    expect((await database.pool.query(`SELECT channel_id, product_variant_id, before_status, after_status
+      FROM inventory.sales_status_events ORDER BY id`)).rows)
       .toEqual([
-        { before_status: null, after_status: "stopped" },
-        { before_status: null, after_status: "selling" },
-        { before_status: "selling", after_status: null },
-        { before_status: "stopped", after_status: null },
+        { channel_id: null, product_variant_id: null, before_status: null, after_status: "stopped" },
+        { channel_id: WALMART, product_variant_id: SKU, before_status: null, after_status: "selling" },
+        { channel_id: WALMART, product_variant_id: SKU, before_status: "selling", after_status: null },
+        { channel_id: WALMART, product_variant_id: null, before_status: null, after_status: "selling" },
+        { channel_id: WALMART, product_variant_id: null, before_status: "selling", after_status: null },
+        { channel_id: null, product_variant_id: null, before_status: "stopped", after_status: null },
       ]);
   });
 
@@ -199,9 +212,12 @@ const WALMART_DESTINATION = { destinationKind: "channel_connection" as const, co
       .rejects.toMatchObject({ message: "SALES_STATUS_REVISION_MUST_INCREASE" });
     await expect(database.pool.query("UPDATE inventory.sales_statuses SET channel_id = 36, revision = revision + 1000"))
       .rejects.toMatchObject({ message: "SALES_STATUS_SCOPE_IMMUTABLE" });
-    // One setting per scope; a row names exactly one item.
+    // One setting per scope; a row names exactly one item; an all-channels row can only stop.
     await expect(database.pool.query(`INSERT INTO inventory.sales_statuses(channel_id, product_variant_id, status, revision, updated_by, updated_at)
-      VALUES (NULL, $1, 'selling', nextval('inventory.sales_status_revision_seq'), 'admin', now())`, [SKU])).rejects.toMatchObject({ code: "23505" });
+      VALUES (NULL, $1, 'stopped', nextval('inventory.sales_status_revision_seq'), 'admin', now())`, [SKU])).rejects.toMatchObject({ code: "23505" });
+    await expect(database.pool.query(`INSERT INTO inventory.sales_statuses(product_id, status, revision, updated_by, updated_at)
+      VALUES (20, 'selling', nextval('inventory.sales_status_revision_seq'), 'admin', now())`))
+      .rejects.toMatchObject({ code: "23514", constraint: "sales_statuses_all_channels_stop_chk" });
     await refuse(`INSERT INTO inventory.sales_statuses(product_id, product_variant_id, status, revision, updated_by, updated_at)
       VALUES (20, 102, 'stopped', nextval('inventory.sales_status_revision_seq'), 'admin', now())`);
     await refuse(`INSERT INTO inventory.sales_statuses(product_id, status, revision, updated_by, updated_at)

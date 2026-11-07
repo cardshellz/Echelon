@@ -16,16 +16,19 @@ import { formatAbsoluteTime, pluralize } from "../format";
 import { invalidateChannelInventory } from "../hooks";
 import { SALES_STATUS_QUERY_ROOT, changeSalesStatus, fetchSalesStatusProduct } from "../sales-status-api";
 import {
+  STOPPED_BY_PRODUCT,
   allChannelsChanges,
   bulkChanges,
   channelChanges,
+  channelsStoppedByProduct,
   describeChangeResult,
-  describeSource,
+  describeChannelStatus,
   entryAt,
+  hasOwnStop,
   itemStatuses,
+  listNames,
   otherHoldsFor,
   resumeEverywhereChanges,
-  skusSellingDespiteProductStop,
   stopEverywhereChanges,
   summarizeItem,
   type SalesStatusItem,
@@ -57,9 +60,11 @@ type CommandState =
  * Sales status for one product or SKU on every channel at once (owner
  * decision 2026-11-07). A click takes effect immediately: no draft and no
  * review. Stopped publishes 0 and keeps the listing; per-channel exceptions
- * override the all-channels setting. The server resolves precedence for
- * stock; this panel shows the same resolution and sends exactly the changes
- * a click asks for, pinned to the revisions on screen.
+ * override the item's all-channels setting. A SKU sells only if its product
+ * and the SKU are both Selling, so a SKU under a stopped product says so
+ * instead of offering a resume that could not help. The server resolves
+ * stock with the same rules; this panel sends exactly the changes a click
+ * asks for, pinned to the revisions on screen.
  */
 export function SalesStatusPanel({ productId, productVariantId, canChange, onFocusVariant }: {
   productId: number;
@@ -101,6 +106,7 @@ export function SalesStatusPanel({ productId, productVariantId, canChange, onFoc
   const send = (changes: SalesStatusChange[], title: string) => command.run(changes, note, title, () => setNote(""));
   const summary = summarizeItem(view, item);
   const itemName = variant ? (variant.sku ?? variant.name) : (view.product.sku ?? view.product.name);
+  const byProduct = productVariantId === null ? [] : channelsStoppedByProduct(view, productVariantId);
 
   return (
     <section aria-label="Sales status" className="space-y-4 rounded-md border p-3">
@@ -120,6 +126,16 @@ export function SalesStatusPanel({ productId, productVariantId, canChange, onFoc
         <StatePill tone={SUMMARY_TONE[summary.tone]}>{summary.text}</StatePill>
       </div>
 
+      {byProduct.length > 0 && (
+        <Callout title={STOPPED_BY_PRODUCT}>
+          {byProduct.length === view.channels.length ? "On every channel." : `On ${listNames(byProduct.map((channel) => channel.name))}.`}
+          {" "}This SKU sells there only after the product is resumed.
+          {onFocusVariant && (
+            <>{" "}<button type="button" className="underline" onClick={() => onFocusVariant(null)}>Open the whole product</button></>
+          )}
+        </Callout>
+      )}
+
       {canChange ? (
         <div className="flex flex-wrap gap-2">
           {summary.tone !== "stopped" && (
@@ -128,9 +144,10 @@ export function SalesStatusPanel({ productId, productVariantId, canChange, onFoc
               Stop everywhere
             </Button>
           )}
-          {summary.tone !== "selling" && (
+          {/* Resume removes this item's own stops; a product's stop on a SKU is resumed on the product. */}
+          {hasOwnStop(view, item) && (
             <Button type="button" size="sm" variant="outline" disabled={locked}
-              onClick={() => void send(resumeEverywhereChanges(view, item), `${itemName} selling on every channel`)}>
+              onClick={() => void send(resumeEverywhereChanges(view, item), `${itemName} resumed on every channel`)}>
               Resume everywhere
             </Button>
           )}
@@ -155,8 +172,8 @@ export function SalesStatusPanel({ productId, productVariantId, canChange, onFoc
       {canChange && <NoteField id={`sales-status-note-${productId}-${productVariantId ?? "product"}`} value={note}
         onChange={setNote} disabled={locked} maxLength={SALES_STATUS_NOTE_MAX_LENGTH} />}
       <EvidenceNote>
-        A SKU setting beats its product's; on each, a channel exception beats the all-channels setting.
-        Every change is recorded with who made it and when.
+        A SKU sells only if its product and the SKU are both Selling. On each, a channel exception beats the
+        all-channels setting. Every change is recorded with who made it and when.
       </EvidenceNote>
     </section>
   );
@@ -173,33 +190,34 @@ function ScopeSettings({ view, item, disabled, onChange, itemName }: {
   const statuses = itemStatuses(view, item);
   const allChannels = entryAt(view, item, null);
   const isSku = item.productVariantId !== null;
-  const allValue = allChannels?.status ?? (isSku ? "inherit" : "selling");
   const apply = (changes: SalesStatusChange[], title: string) => { if (changes.length > 0) onChange(changes, title); };
   return (
     <div className="space-y-1" role="list" aria-label="Sales status by channel">
       <SettingRow
         label="All channels"
-        detail={allChannels ? `Set ${formatAbsoluteTime(allChannels.updatedAt)} by ${allChannels.updatedBy}`
-          : isSku ? "Follows the product" : "Nothing set: selling"}
-        value={allValue}
-        options={isSku ? [["inherit", "Same as product"], ["selling", "Sell"], ["stopped", "Stop"]] : [["selling", "Sell"], ["stopped", "Stop"]]}
+        detail={allChannels ? `Stopped ${formatAbsoluteTime(allChannels.updatedAt)} by ${allChannels.updatedBy}`
+          : isSku ? "Nothing set on this SKU" : "Nothing set: selling"}
+        // Selling everywhere is the default, so only Stopped is ever stored here.
+        value={allChannels?.status === "stopped" ? "stopped" : "selling"}
+        options={[["selling", "Sell"], ["stopped", "Stop"]]}
         disabled={disabled}
         groupLabel="Sales status on all channels"
         onValue={(next) => apply(allChannelsChanges(view, item, next),
-          `${itemName}: ${next === "stopped" ? "stopped" : next === "selling" ? "selling" : "following the product"} on all channels`)}
+          `${itemName}: ${next === "stopped" ? "stopped" : "resumed"} on all channels`)}
       />
-      {statuses.map(({ channel, status, source }) => {
+      {statuses.map((status) => {
+        const { channel } = status;
         const exception = entryAt(view, item, channel.id);
         return (
           <SettingRow
             key={channel.id}
             label={channel.name}
-            detail={`${status === "stopped" ? "Stopped" : "Selling"} · ${describeSource(view, source)}${channel.publishesStock ? "" : " · Echelon does not send stock to this channel"}`}
+            detail={`${describeChannelStatus(view, status)}${channel.publishesStock ? "" : " · Echelon does not send stock to this channel"}`}
             value={exception?.status ?? "inherit"}
             options={[["inherit", "Same"], ["selling", "Sell"], ["stopped", "Stop"]]}
             disabled={disabled}
             groupLabel={`Sales status on ${channel.name}`}
-            tone={status}
+            tone={status.status}
             onValue={(next) => apply(channelChanges(view, item, channel.id, next),
               `${itemName}: ${next === "inherit" ? "same as all channels" : next === "stopped" ? "stopped" : "selling"} on ${channel.name}`)}
           />
@@ -267,7 +285,6 @@ function SkuList({ view, disabled, canChange, onFocusVariant, onBulk }: {
 }) {
   const sellable = useMemo(() => view.variants.filter((variant) => variant.sellable), [view.variants]);
   const [selected, setSelected] = useState<ReadonlySet<number>>(new Set());
-  const stillSelling = skusSellingDespiteProductStop(view);
   const chosen = sellable.filter((variant) => selected.has(variant.id)).map((variant) => variant.id);
   const toggle = (id: number, checked: boolean) => setSelected((current) => {
     const next = new Set(current);
@@ -292,11 +309,6 @@ function SkuList({ view, disabled, canChange, onFocusVariant, onBulk }: {
           </div>
         )}
       </div>
-      {stillSelling.length > 0 && (
-        <Callout title="Some SKUs still sell where the product is stopped">
-          Their own SKU setting outranks the product: {stillSelling.map((variant) => variant.sku ?? variant.name).join(", ")}.
-        </Callout>
-      )}
       <ul className="divide-y rounded-md border" aria-label="SKU sales status">
         {canChange && (
           <li className="flex items-center gap-3 px-3 py-2 text-xs text-muted-foreground">

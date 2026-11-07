@@ -60,7 +60,7 @@ describe("SalesStatusService.change", () => {
     const service = new SalesStatusService(store({ change }), { now: () => NOW }, logger());
     await service.change({ ...REQUEST, note: "   " }, "admin");
     await service.change({ ...REQUEST, note: "   " }, "operator-2");
-    await service.change({ ...REQUEST, note: "   ", changes: [{ ...REQUEST.changes[0], status: "selling" }] }, "admin");
+    await service.change({ ...REQUEST, note: "   ", changes: [{ ...REQUEST.changes[0], status: "inherit" }] }, "admin");
     const commands = change.mock.calls.map(([command]) => command);
     expect(commands[0]!.note).toBeNull();
     expect(new Set(commands.map((command) => command.requestHash)).size).toBe(3);
@@ -70,6 +70,8 @@ describe("SalesStatusService.change", () => {
     ["no changes", { ...REQUEST, changes: [] }],
     ["a repeated scope", { ...REQUEST, changes: [REQUEST.changes[0], { ...REQUEST.changes[0], status: "selling" }] }],
     ["an unknown status", { ...REQUEST, changes: [{ ...REQUEST.changes[0], status: "paused" }] }],
+    // Selling everywhere is the default; storing it could never override a stop.
+    ["Selling on all channels", { ...REQUEST, changes: [{ ...REQUEST.changes[0], status: "selling" }] }],
     ["a fractional id", { ...REQUEST, changes: [{ ...REQUEST.changes[0], scope: { ...SKU_EVERYWHERE, productVariantId: 2.5 } }] }],
     ["a zero revision", { ...REQUEST, changes: [{ ...REQUEST.changes[0], expectedRevision: "0" }] }],
     ["an extra field", { ...REQUEST, reason: "required?" }],
