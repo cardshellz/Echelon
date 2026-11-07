@@ -27,6 +27,7 @@ import {
   type MarketplaceWaitingForStockListing,
 } from "../../domain/marketplace-sync-sweep";
 import type { MarketplaceSyncRestoreOutcome } from "../../application/dropship-marketplace-sync-service";
+import { DropshipLiveListingZeroQuantityService } from "../../application/dropship-live-listing-zero-quantity-service";
 import { rawInventoryItem, rawOffer, READ_LISTING_ID, READ_OFFER_ID, READ_SKU } from "../fixtures/ebay-sync-back-reads.fixture";
 
 /**
@@ -173,6 +174,10 @@ function harness(options: {
   tickBudgetMs?: number;
   stepMs?: number;
   restoreOutcome?: (input: { productVariantIds: number[]; idempotencyKey: string }, call: number) => MarketplaceSyncRestoreOutcome;
+  /** The quantity authority the baselines reader answers; absent: the reader has no authority method (as before). */
+  authority?: "legacy" | "canonical";
+  /** Wires the zero-quantity owner (real service) over this fake eBay sender. */
+  zeroSender?: (input: { listingId: number; sku: string; externalOfferId: string }) => Promise<{ sku: string; offerId: string }>;
 } = {}) {
   const repository = new FakeRepository();
   let now = T.getTime();
@@ -183,6 +188,15 @@ function harness(options: {
   const sent: DropshipNotificationSenderInput[] = [];
   const lines: Array<{ level: string; action: string; data: Record<string, unknown> }> = [];
   const log = (level: string) => (action: string, data: Record<string, unknown> = {}) => { lines.push({ level, action, data }); };
+  const authorityReads: number[] = [];
+  const zeroSends: Array<{ listingId: number; sku: string; externalOfferId: string }> = [];
+  const zeroSettlements: Array<{ listingId: number; externalOfferId: string; reason: string }> = [];
+  const zeroQuantity = options.zeroSender ? new DropshipLiveListingZeroQuantityService({
+    sender: { async sendZeroQuantity(input) { zeroSends.push(input); return options.zeroSender!(input); } },
+    repository: { async settleZeroQuantity(input) { zeroSettlements.push(input); return { pushedQuantityBefore: 10, lastPushedAtBefore: PUSHED }; } },
+    clock: { now: () => new Date(now) },
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+  }) : undefined;
   const service = new DropshipMarketplaceSyncService({
     repository,
     reader: {
@@ -211,7 +225,9 @@ function harness(options: {
         return new Map(input.listings.map((entry) => [entry.listingId,
           options.baselines?.[entry.listingId] !== undefined ? options.baselines[entry.listingId]! : { quantity: 10, at: PUSHED, settled: true }]));
       },
+      ...(options.authority ? { async readQuantityAuthority() { authorityReads.push(1); return options.authority!; } } : {}),
     },
+    ...(zeroQuantity ? { zeroQuantity } : {}),
     policyGuard: {
       async evaluateForStoreConnection(input) {
         if (options.guardError) throw options.guardError;
@@ -224,7 +240,7 @@ function harness(options: {
     logger: { debug: log("debug"), info: log("info"), warn: log("warn"), error: log("error") },
     tickBudgetMs: options.tickBudgetMs,
   });
-  return { service, repository, reads, readSkus, restores, previewCalls, sent, lines };
+  return { service, repository, reads, readSkus, restores, previewCalls, sent, lines, authorityReads, zeroSends, zeroSettlements };
 }
 
 describe("the sweep keeps what the vendor owns on eBay (owner rule 4)", () => {
@@ -899,5 +915,99 @@ describe("listings waiting for stock (owner report: a size published at 0 never 
     expect(result.budgetExhausted).toBe(true);
     expect(repository.waitingReads).toEqual([]);
     expect(previewCalls).toHaveLength(1);
+  });
+});
+
+/**
+ * A restore to 0 under legacy ATP authority (no inventory planning publisher): a live listing whose preview is
+ * blocked ONLY for want of stock gets 0 on eBay through the zero-quantity owner instead of a staff flag. Under
+ * canonical, inventory planning publishes 0 itself, so nothing changes there.
+ */
+describe("the sweep sends 0 for a blocked restore of a live listing (legacy authority)", () => {
+  const zeroRow = () => row({ marketplaceQuantity: 0, previewStatus: "blocked", blockers: [MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER] });
+  const okSender = async (input: { sku: string; externalOfferId: string }) => ({ sku: input.sku, offerId: input.externalOfferId });
+  const blockedHarness = (options: Partial<Parameters<typeof harness>[0]> = {}) => harness({ reads: { [READ_OFFER_ID]: quantityRead(5) },
+    rows: [zeroRow()], baselines: { 77: { quantity: 3, at: PUSHED, settled: true } }, ...options });
+
+  it("legacy and live: sends 0 once to the recorded offer, settles it, logs INFO and counts it on the tick", async () => {
+    const context = blockedHarness({ authority: "legacy", zeroSender: okSender });
+
+    const result = await context.service.runSweepTick();
+
+    expect(context.repository.quantityWrites[0]!.writes).toMatchObject({ restore: "blocked" });
+    expect(context.zeroSends).toEqual([{ vendorId: 10, storeConnectionId: 22, listingId: 77, productVariantId: 101, sku: READ_SKU,
+      externalOfferId: READ_OFFER_ID }]);
+    expect(context.zeroSettlements).toEqual([expect.objectContaining({ listingId: 77, externalOfferId: READ_OFFER_ID,
+      actorId: "system:ebay-sync-back", reason: context.repository.quantityWrites[0]!.idempotencyKey })]);
+    expect(context.restores).toEqual([]);
+    expect(result.zeroQuantitySends).toBe(1);
+    expect(context.lines).toContainEqual(expect.objectContaining({ level: "info", action: "dropship.marketplace_sync.quantity_decided",
+      data: expect.objectContaining({ outcome: "restore_zero_sent" }) }));
+    expect(context.lines.some((line) => line.level === "warn" && line.data.outcome === "restore_blocked")).toBe(false);
+    expect(context.lines).toContainEqual(expect.objectContaining({ level: "info", action: "dropship.marketplace_sync.tick",
+      data: expect.objectContaining({ zero_quantity_sends: 1 }) }));
+    expect(context.authorityReads).toHaveLength(1);
+  });
+
+  it("canonical: keeps today's blocked path exactly (no send, the WARN and the issue)", async () => {
+    const context = blockedHarness({ authority: "canonical", zeroSender: okSender });
+    const result = await context.service.runSweepTick();
+    expect(context.zeroSends).toEqual([]);
+    expect(result.zeroQuantitySends).toBe(0);
+    expect(context.repository.quantityWrites[0]!.writes).toMatchObject({ restore: "blocked", issues: { add: ["quantity_restore_blocked"] } });
+    expect(context.lines).toContainEqual(expect.objectContaining({ level: "warn", action: "dropship.marketplace_sync.quantity_decided",
+      data: expect.objectContaining({ error_code: "DROPSHIP_LISTING_QUANTITY_RESTORE_BLOCKED", outcome: "restore_blocked" }) }));
+  });
+
+  it("an unknown authority (no authority read wired) sends nothing", async () => {
+    const context = blockedHarness({ zeroSender: okSender });
+    await context.service.runSweepTick();
+    expect(context.zeroSends).toEqual([]);
+  });
+
+  it.each([
+    ["another blocker", { rows: [row({ marketplaceQuantity: 0, previewStatus: "blocked",
+      blockers: [MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER, "variant_not_selected"] })] }],
+    ["a vendor limit of 0 with stock (no quantity blocker)", { rows: [row({ marketplaceQuantity: 0, previewStatus: "blocked",
+      blockers: ["listing_tier_not_on_sale"] })] }],
+  ])("refused (%s): keeps the blocked path and its issue, without reading the authority", async (_name, override) => {
+    const context = blockedHarness({ authority: "legacy", zeroSender: okSender, ...override });
+    await context.service.runSweepTick();
+    expect(context.zeroSends).toEqual([]);
+    expect(context.authorityReads).toEqual([]);
+    expect(context.repository.quantityWrites[0]!.writes).toMatchObject({ restore: "blocked", issues: { add: ["quantity_restore_blocked"] } });
+    expect(context.lines).toContainEqual(expect.objectContaining({ level: "warn", data: expect.objectContaining({ outcome: "restore_blocked" }) }));
+  });
+
+  it("refused (not live: no eBay item number recorded): keeps the blocked path", async () => {
+    const context = blockedHarness({ authority: "legacy", zeroSender: okSender });
+    context.repository.listings.set(77, listing({ externalListingId: null }));
+    await context.service.runSweepTick();
+    expect(context.zeroSends).toEqual([]);
+  });
+
+  it("a send failure is classified by the listing guard; nothing is settled and the issue stays", async () => {
+    const context = blockedHarness({ authority: "legacy", zeroSender: async () => {
+      throw new DropshipError("DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", "eBay down", { status: 503, retryable: true });
+    } });
+    const result = await context.service.runSweepTick();
+    expect(context.zeroSends).toHaveLength(1);
+    expect(context.zeroSettlements).toEqual([]);
+    expect(result.zeroQuantitySends).toBe(0);
+    expect(result.readFailures).toBe(1);
+    expect(context.repository.quantityWrites[0]!.writes).toMatchObject({ restore: "blocked", issues: { add: ["quantity_restore_blocked"] } });
+    expect(context.lines).toContainEqual(expect.objectContaining({ level: "warn", action: "dropship.marketplace_sync.listing_skipped",
+      data: expect.objectContaining({ error_code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", outcome: "skip_listing" }) }));
+    expect(context.repository.deadLettered).toEqual([]);
+  });
+
+  it("an inventory admission refusal (busy scope) is read again next tick, never dead-lettered as unexpected", async () => {
+    const busy = Object.assign(new Error("busy"), { name: "QuantityPublicationAdmissionError", code: "PUBLICATION_SCOPE_BUSY", retryable: true });
+    const context = blockedHarness({ authority: "legacy", zeroSender: async () => { throw busy; } });
+    await context.service.runSweepTick();
+    expect(context.repository.deadLettered).toEqual([]);
+    expect(context.repository.due).toContain(77);
+    expect(context.lines).toContainEqual(expect.objectContaining({ action: "dropship.marketplace_sync.listing_deferred",
+      data: expect.objectContaining({ error_code: "PUBLICATION_SCOPE_BUSY" }) }));
   });
 });
