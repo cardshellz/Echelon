@@ -218,6 +218,19 @@ export async function loadChannelDefinitionReviewTargets(
   return loadSelectedPublicationTargets(client, productId, productVariantIds, undefined, false, undefined, false, draftChannelId);
 }
 
+/** Review only: the one channel rule being applied uses its saved draft; every
+ * other rule, warehouse binding and listing link on every live destination
+ * stays active. Other pending drafts on the same channel are not reviewed. */
+export async function loadChannelRuleReviewTargets(
+  client: InventoryAvailabilityTransactionQueryClient,
+  productId: number,
+  productVariantIds: readonly number[],
+  draftPolicyScopeKey: string,
+): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
+  return loadSelectedPublicationTargets(client, productId, productVariantIds, undefined, false, undefined, false,
+    undefined, false, channelRuleScopeKey(draftPolicyScopeKey));
+}
+
 /**
  * Projects draft-preferred preview targets into their proposed post-cutover state.
  * It writes nothing and must never be used by a live runtime reader/publisher.
@@ -262,16 +275,23 @@ async function loadSelectedPublicationTargets(
   activeDefinitionsOnly = false,
   draftChannelId?: number,
   includeDeferredDropshipQuantities = false,
+  draftPolicyScopeKey?: string,
 ): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
   const targetState = proposed ? "preview" : "live";
   const useProposedDefinitions = proposed && !activeDefinitionsOnly;
   const channelDraft = draftChannelId == null ? null : positiveInteger(draftChannelId, "draftChannelId");
+  if (draftPolicyScopeKey != null && (channelDraft !== null || proposed)) {
+    throw invalidRow("A single-rule review cannot be combined with another draft projection.", {});
+  }
   const bindingPointer = channelDraft !== null
     ? `CASE WHEN target.channel_id=${channelDraft} THEN COALESCE(head.draft_binding_id, head.active_binding_id) ELSE head.active_binding_id END`
     : useProposedDefinitions
     ? "COALESCE(head.draft_binding_id, head.active_binding_id)"
     : "head.active_binding_id";
-  const policyPointer = channelDraft !== null
+  // $3 is the reviewed rule's scope key, bound as a parameter (never interpolated).
+  const policyPointer = draftPolicyScopeKey != null
+    ? "CASE WHEN head.scope_key = $3 THEN COALESCE(head.draft_policy_id, head.active_policy_id) ELSE head.active_policy_id END"
+    : channelDraft !== null
     ? `CASE WHEN head.channel_id=${channelDraft} THEN COALESCE(head.draft_policy_id, head.active_policy_id) ELSE head.active_policy_id END`
     : useProposedDefinitions
     ? "COALESCE(head.draft_policy_id, head.active_policy_id)"
@@ -282,6 +302,10 @@ async function loadSelectedPublicationTargets(
     ? "COALESCE(head.draft_mapping_id, head.active_mapping_id)"
     : "head.active_mapping_id";
   const definitionStates = useProposedDefinitions || channelDraft !== null ? "('draft', 'sealed')" : "('sealed')";
+  // Only the policy query may resolve a draft for a single-rule review; bindings
+  // and listing links stay sealed-only. Every other policy head still points at
+  // its active (sealed) version through the CASE above.
+  const policyStates = draftPolicyScopeKey != null ? "('draft', 'sealed')" : definitionStates;
   const targetValues: unknown[] = [];
   const channelFilter = channelId == null ? "" : "AND target.channel_id = $1";
   if (channelId != null) targetValues.push(positiveInteger(channelId, "channelId"));
@@ -367,11 +391,11 @@ async function loadSelectedPublicationTargets(
      FROM inventory.channel_exposure_policy_heads AS head
      JOIN inventory.channel_exposure_policy_versions AS policy
        ON policy.id = ${policyPointer}
-      AND policy.lifecycle_status IN ${definitionStates}
+      AND policy.lifecycle_status IN ${policyStates}
      WHERE head.channel_id = ANY($1::integer[])
        AND (policy.scope_type = 'channel' OR policy.product_id = $2)
      ORDER BY head.channel_id, head.scope_key`,
-    [channelIds, productId],
+    draftPolicyScopeKey != null ? [channelIds, productId, draftPolicyScopeKey] : [channelIds, productId],
   );
   const mappingResult = productVariantIds.length === 0
     ? { rows: [] as MappingRow[] }
@@ -741,6 +765,15 @@ function positiveBigintString(value: unknown, field: string): string {
     throw invalidRow(`${field} must be a positive PostgreSQL bigint.`, { field, value });
   }
   return parsed;
+}
+
+/** A product or SKU rule key (channelExposurePolicyScopeKey). Channel defaults are
+ * excluded: they affect every product and keep the whole-channel review. */
+function channelRuleScopeKey(value: string): string {
+  if (!/^channel:[1-9][0-9]{0,9}:(product|variant):[1-9][0-9]{0,9}$/.test(value)) {
+    throw invalidRow("A single-rule review needs a product or SKU rule scope key.", { value });
+  }
+  return value;
 }
 
 function nonblank(value: unknown, field: string): string {
