@@ -26,6 +26,7 @@ import {
   type View,
 } from "../model";
 import { ExceptionSheet, type ExceptionSubject } from "./ExceptionSheet";
+import { StoppedSalesCard } from "./StoppedSalesCard";
 import { PolicyFields } from "./PolicyFields";
 import { PolicyQuantityExample } from "./PolicyQuantityExample";
 import { ActivePill, Callout, EvidenceNote, NoteField, PendingPill, SectionCard, StatePill } from "./primitives";
@@ -53,6 +54,10 @@ export function SellingRulesTab({ view, channel, canEdit, canActivate, focusProd
         canEdit={canEdit}
         onOpen={(subject) => navigate(() => setSheet({ open: true, subject }))}
       />
+      {/* Sales status is all-channels and takes effect only under canonical authority. */}
+      {view.runtimeAuthority === "canonical" && (
+        <StoppedSalesCard onOpen={(subject) => navigate(() => setSheet({ open: true, subject }))} />
+      )}
       {sheet.open && (
         <ExceptionSheet
           open={sheet.open}
