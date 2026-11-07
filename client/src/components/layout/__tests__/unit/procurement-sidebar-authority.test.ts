@@ -64,12 +64,15 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("procurement sidebar grant boundaries", () => {
-  it("matches the non-live packing route's assigned-membership gate without inventing a capability", () => {
+  it("requires picking:view for Picking navigation and hides non-live Packing", () => {
     identity.permissions = [];
-    expect(hrefs(renderAt("/packing"))).toContain("/packing");
-    expect(hrefs(renderAt("/packing"))).toContain("/picking");
+    expect(hrefs(renderAt("/picking"))).not.toContain("/picking");
+    expect(hrefs(renderAt("/picking"))).not.toContain("/packing");
+    identity.permissions = ["picking:view"];
+    expect(hrefs(renderAt("/picking"))).toContain("/picking");
+    expect(hrefs(renderAt("/picking"))).not.toContain("/packing");
     identity.assignedRoles = [];
-    expect(hrefs(renderAt("/packing"))).not.toContain("/packing");
+    expect(hrefs(renderAt("/picking"))).not.toContain("/picking");
   });
   it("uses the dashboard's inventory read grant rather than a system-role fallback", () => {
     expect(hrefs(renderAt("/"))).toContain("/");

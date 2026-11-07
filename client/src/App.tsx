@@ -365,7 +365,10 @@ function Router() {
   if (assignedRoles.length === 0) return <StaffAccessNotice />;
 
   const landingPath = [
-    { path: "/picking", allowed: hasPermission("picking", "view") || hasSystemRole("picker") },
+    { path: "/picking", allowed: hasPermission("picking", "view") },
+    { path: "/picking/logs", allowed: hasPermission("picking", "view_logs") },
+    { path: "/picking/metrics", allowed: hasPermission("picking", "view_metrics") },
+    { path: "/picking/settings", allowed: hasPermission("picking", "manage_settings") },
     { path: "/users", allowed: hasPermission("users", "view") },
     { path: "/roles", allowed: hasPermission("roles", "view") },
     { path: "/channels", allowed: hasPermission("channels", "view") },
@@ -439,14 +442,24 @@ function Router() {
         <Route path="/vendors">
           <ProtectedRoute component={VendorList} allowedSystemRoles={["admin", "lead"]} />
         </Route>
-        <Route path="/picking" component={PickingPage} />
-        <Route path="/picking/logs" component={PickingPage} />
-        <Route path="/picking/metrics" component={PickingPage} />
-        <Route path="/picking/settings" component={PickingPage} />
+        <Route path="/picking">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "view" }} />
+        </Route>
+        <Route path="/picking/logs">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "view_logs" }} />
+        </Route>
+        <Route path="/picking/metrics">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "view_metrics" }} />
+        </Route>
+        <Route path="/picking/settings">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "manage_settings" }} />
+        </Route>
         <Route path="/pick-priority">
           <ProtectedRoute component={PickPriority} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
-        <Route path="/packing" component={Packing} />
+        <Route path="/packing">
+          <StaffAccessNotice denied />
+        </Route>
         <Route path="/order-history">
           <ProtectedRoute component={OrderHistory} allowedSystemRoles={["admin", "lead"]} />
         </Route>
