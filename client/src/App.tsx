@@ -93,6 +93,7 @@ import {
 } from "@shared/returns/customer-return-portal-paths";
 import InboundShipments from "@/pages/InboundShipments";
 import OutboundShipments from "@/pages/OutboundShipments";
+import ShipmentOrderContext from "@/pages/ShipmentOrderContext";
 import InboundShipmentDetail from "@/pages/InboundShipmentDetail";
 import CostDashboard from "@/pages/CostDashboard";
 import APDashboard from "@/pages/APDashboard";
@@ -101,6 +102,7 @@ import APInvoiceDetail from "@/pages/APInvoiceDetail";
 import APPayments from "@/pages/APPayments";
 import SupplierCredits from "@/pages/SupplierCredits";
 import SupplierReturns from "@/pages/SupplierReturns";
+import { StaffPasswordChange } from "@/components/identity/StaffPasswordChange";
 import Login from "@/pages/Login";
 import Settings from "@/pages/Settings";
 import ProcurementSettings from "@/pages/ProcurementSettings";
@@ -316,7 +318,7 @@ function DropshipPortalRouter() {
 
 function Router() {
   const [location] = useLocation();
-  const { user, isLoading, accessStatus, assignedRoles, hasPermission, hasSystemRole } = useAuth();
+  const { user, isLoading, accessStatus, assignedRoles, hasPermission, hasSystemRole,credentialActionRequired } = useAuth();
 
   // The prelaunch customer experience has its own access screen and never
   // renders the warehouse application shell, including during sign-in.
@@ -358,6 +360,8 @@ function Router() {
     return <Redirect to="/login" />;
   }
 
+  if(credentialActionRequired || location === "/staff/password") return <StaffPasswordChange/>;
+
   if (assignedRoles.length === 0) return <StaffAccessNotice />;
 
   const landingPath = [
@@ -368,7 +372,7 @@ function Router() {
     { path: "/inventory/supply-transformations", allowed: hasPermission("inventory_planning", "view") },
     { path: "/assembly", allowed: hasPermission("warehouse_work", "assembly") },
     { path: "/order-edits", allowed: hasPermission("orders", "edit") },
-    { path: "/outbound-shipments", allowed: hasPermission("orders", "view") },
+    { path: "/outbound-shipments", allowed: hasPermission("shipments", "view") },
     { path: "/purchase-orders", allowed: hasPermission("purchasing", "view") },
     { path: "/receiving", allowed: RECEIVING_READ_PERMISSIONS.some(permission => hasPermission(permission.resource, permission.action)) },
     { path: "/dropship", allowed: hasPermission("dropship", "view") },
@@ -534,8 +538,11 @@ function Router() {
         <Route path="/shipping">
           <ProtectedRoute component={Orders} allowedSystemRoles={["admin", "lead"]} />
         </Route>
+        <Route path="/outbound-shipments/:id/order">
+          <ProtectedRoute component={ShipmentOrderContext} allOfPermissions={[{ resource: "shipments", action: "view" }, { resource: "shipments", action: "view_order_context" }]} />
+        </Route>
         <Route path="/outbound-shipments">
-          <ProtectedRoute component={OutboundShipments} requiredPermission={{ resource: "orders", action: "view" }} />
+          <ProtectedRoute component={OutboundShipments} requiredPermission={{ resource: "shipments", action: "view" }} />
         </Route>
         <Route path="/enterprise"><Redirect to="/" /></Route>
         <Route path="/demand-planner">

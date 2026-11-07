@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+const credentialStateSql=readFileSync(new URL("../../../../../migrations/900000056000020040001_staff_credential_state.sql",import.meta.url),"utf8");
 /**
  * Reduced current Identity and audit contracts for isolated command tests.
  * This is query/transaction/locking evidence, not production migration, grants,
@@ -10,6 +12,7 @@ export const identityAdministrationFixtureSql = `
     password text NOT NULL, role varchar(20) NOT NULL DEFAULT 'picker', display_name text,
     active integer NOT NULL DEFAULT 1, created_at timestamp NOT NULL DEFAULT now(), last_login_at timestamp
   );
+  ${credentialStateSql}
   CREATE TABLE identity.auth_roles (
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name varchar(100) NOT NULL UNIQUE,
     description text, is_system integer NOT NULL DEFAULT 0,
@@ -39,7 +42,8 @@ export const identityAdministrationFixtureSql = `
   );
   INSERT INTO identity.auth_permissions(resource,action,category) VALUES
     ('users','view','users'), ('users','create','users'), ('users','edit','users'),
-    ('users','manage_roles','users'), ('roles','view','users'), ('roles','create','users'),
+    ('users','manage_roles','users'), ('users','reset_password','users'), ('users','reset_privileged_password','users'),
+    ('warehouse_work','manage_access','users'), ('roles','view','users'), ('roles','create','users'),
     ('roles','edit','users'), ('roles','delete','users'),
     ('inventory','view','inventory'), ('orders','view','orders');
 `;

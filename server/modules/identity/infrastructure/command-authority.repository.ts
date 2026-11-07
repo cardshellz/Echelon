@@ -1,3 +1,4 @@
+import { effectiveStaffCapabilities } from "@shared/staff-capabilities";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { commandAuthorityActorSchema, type CommandAuthorityActor } from "../domain/command-authority";
@@ -47,7 +48,7 @@ export async function readCommandAuthorityActor(
 
   return commandAuthorityActorSchema.parse({
     userId: user.id, active: true,
-    permissions: permissionNames(false),
+    permissions: effectiveStaffCapabilities(permissionNames(false)),
     // Generic Identity constraints have no implemented command scope contract.
     // Preserve this evidence without turning a restricted grant into a global one.
     // Decide in SQL: node-postgres decodes SQL NULL and JSONB null identically.

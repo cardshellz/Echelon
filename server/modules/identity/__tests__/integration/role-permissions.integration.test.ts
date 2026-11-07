@@ -1,3 +1,7 @@
+const credentialFixtureSql=readFileSync(new URL("../../../../../migrations/900000056000020040001_staff_credential_state.sql",import.meta.url),"utf8");
+import { readFileSync } from "node:fs";
+const fixtureCredentialVersion="b656f5e9-9dde-49c0-9c2b-823638ff6b5a";
+import { readAccessConfiguration } from "../../infrastructure/access-configuration.repository";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
@@ -39,6 +43,7 @@ const fixtureSql = `
     role varchar(20) NOT NULL DEFAULT 'picker', display_name text,
     active integer NOT NULL DEFAULT 1, created_at timestamp NOT NULL DEFAULT now(), last_login_at timestamp
   );
+  ${credentialFixtureSql}
   CREATE TABLE identity.auth_roles (
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name varchar(100) NOT NULL UNIQUE,
     description text, is_system integer NOT NULL DEFAULT 0,
@@ -110,7 +115,7 @@ integration("generic role editor preserves existing grant restrictions", () => {
     )).rows.map(row => [`${row.resource}:${row.action}`, row.id]));
     const app = express();
     app.use(express.json());
-    app.use((req, _res, next) => { req.session = { user: sessionUser } as typeof req.session; next(); });
+    app.use((req, _res, next) => { req.session = { user: sessionUser,staffCredentialVersion:fixtureCredentialVersion } as typeof req.session; next(); });
     registerAuthRoutes(app);
     server = createServer(app);
     await new Promise<void>((resolve, reject) => {
@@ -130,6 +135,7 @@ integration("generic role editor preserves existing grant restrictions", () => {
   beforeEach(async () => {
     await database.pool.query("TRUNCATE public.audit_events,identity.auth_role_permissions,identity.auth_user_roles,identity.auth_roles,identity.users CASCADE");
     await database.pool.query("INSERT INTO identity.users(id,username,password,role) VALUES($1::varchar,$1::text,'unused-synthetic-password','admin')", [actorId]);
+    await database.pool.query("INSERT INTO identity.staff_credentials(user_id,credential_version) VALUES($1,$2::uuid)",[actorId,fixtureCredentialVersion]);
     operatorRoleId = (await database.pool.query<{ id: number }>("INSERT INTO identity.auth_roles(name) VALUES('Fixture operator') RETURNING id")).rows[0].id;
     targetRoleId = (await database.pool.query<{ id: number }>("INSERT INTO identity.auth_roles(name) VALUES('Fixture target') RETURNING id")).rows[0].id;
     await database.pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,$2)", [actorId, operatorRoleId]);
@@ -139,10 +145,10 @@ integration("generic role editor preserves existing grant restrictions", () => {
       createdAt: new Date("2026-11-04T00:00:00Z"), lastLoginAt: null };
   });
 
-  function edit(body: unknown, roleId: string | number = targetRoleId) {
+  async function edit(body: unknown, roleId: string | number = targetRoleId) {
     return requestLocalHttp(`${baseUrl}/api/roles/${encodeURIComponent(roleId)}/permissions`, {
       method: "PUT", headers: { "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(body === undefined ? {} : { body: JSON.stringify(typeof body === "object" && body !== null && !Array.isArray(body) ? { ...body, expectedAccessRevision: (await readAccessConfiguration(connection.database!)).revision } : body) }),
     });
   }
   async function snapshot() {
@@ -260,9 +266,9 @@ integration("generic role editor preserves existing grant restrictions", () => {
   });
   it("validates direct use-case callers and requires an explicit repository transaction", async () => {
     const before = await snapshot();
-    await expect(updateRolePermissionsUseCase(0, [], { actorId })).rejects.toThrow();
-    await expect(updateRolePermissionsUseCase(targetRoleId, undefined as unknown as number[], { actorId })).rejects.toThrow();
-    await expect(updateRolePermissionsUseCase(targetRoleId, [inventoryView(), -1], { actorId })).rejects.toThrow();
+    await expect(updateRolePermissionsUseCase(0, [], { credentialVersion: fixtureCredentialVersion, actorId })).rejects.toThrow();
+    await expect(updateRolePermissionsUseCase(targetRoleId, undefined as unknown as number[], { credentialVersion: fixtureCredentialVersion, actorId })).rejects.toThrow();
+    await expect(updateRolePermissionsUseCase(targetRoleId, [inventoryView(), -1], { credentialVersion: fixtureCredentialVersion, actorId })).rejects.toThrow();
     // @ts-expect-error The raw writer must not fall back to the ambient database.
     await expect(updateRolePermissions(targetRoleId, [])).rejects.toThrow();
     expect(await snapshot()).toEqual(before);

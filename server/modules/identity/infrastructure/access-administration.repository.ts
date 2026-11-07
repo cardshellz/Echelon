@@ -5,6 +5,9 @@ import { readCommandAuthorityActor } from "./command-authority.repository";
 import { assertAccessManagersPreserved, IdentityAdministrationError,
   parseAdministrationActor, type AccessManagerCounts, type IdentityAdministrationActor } from "../domain/access-administration";
 import { readIdentityAccessPreflight } from "./access-preflight.repository";
+import { readAccessConfiguration } from "./access-configuration.repository";
+import { assertNoNewDependencyGaps } from "../domain/access-review";
+import { readStaffCredentialState } from "./staff-credentials.repository";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type Evidence = Record<string, unknown> | null;
@@ -36,8 +39,21 @@ export async function runIdentityAdministration<T>(tx: Transaction, rawActor: Id
   if (!authority.active || !authority.permissions.includes(permission)) {
     throw new IdentityAdministrationError("IDENTITY_ADMINISTRATION_FORBIDDEN", 403, "Current permission is required for this access change.");
   }
+  {
+    const state=await readStaffCredentialState(actor.actorId,tx);
+    if(!actor.credentialVersion || !state || state.credentialVersion!==actor.credentialVersion || state.mustChangePassword)
+      throw new IdentityAdministrationError("IDENTITY_CREDENTIAL_STALE",403,"Sign in again with current credentials.");
+  }
+  const beforeConfiguration = await readAccessConfiguration(tx);
+  if (["role_permissions_replaced", "user_roles_replaced", "role_deleted"].includes(action) || actor.expectedAccessRevision !== undefined) {
+    if (!actor.expectedAccessRevision) throw new IdentityAdministrationError(
+      "IDENTITY_ACCESS_REVIEW_REQUIRED", 428, "Reload and review current access before saving.");
+    if (actor.expectedAccessRevision !== beforeConfiguration.revision) throw new IdentityAdministrationError(
+      "IDENTITY_ACCESS_STALE", 409, "Access changed since your review. Reload and review the current assignments.");
+  }
   const beforeCounts = await readAccessManagerCoverage(tx);
   const mutation = await change();
+  assertNoNewDependencyGaps(beforeConfiguration, await readAccessConfiguration(tx));
   const afterCounts = await readAccessManagerCoverage(tx);
   assertAccessManagersPreserved(beforeCounts.commands, afterCounts.commands);
   assertAccessManagersPreserved(beforeCounts.ui, afterCounts.ui);

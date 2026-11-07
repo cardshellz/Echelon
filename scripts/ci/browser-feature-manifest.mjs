@@ -37,6 +37,7 @@ export const BROWSER_FEATURES = Object.freeze({
       "tests": [
         "test/browser/inventory-availability.spec.ts",
         "test/browser/inventory-authority-gates.spec.ts",
+        "test/browser/staff-access-journey.spec.ts",
         "test/browser/inventory-publication-target-resume.spec.ts"
       ],
       "roots": []

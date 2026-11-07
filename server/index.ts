@@ -25,6 +25,7 @@ import { startListingPublicationWorker } from "./modules/marketplace-listings/ap
 import { startArchonOrderDelivery } from "./modules/oms/archon-order-delivery.worker";
 import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
+import { createStaffSessionGate } from "./modules/identity/staff-session";
 import connectPgSimple from "connect-pg-simple";
 import { Pool } from "pg";
 import cookieParser from "cookie-parser";
@@ -213,6 +214,7 @@ const sessionMiddleware = session({
 });
 
 app.use(sessionMiddleware);
+app.use(createStaffSessionGate());
 
 // Initialize WebSocket server with session support
 setupWebSocket(httpServer, sessionMiddleware);

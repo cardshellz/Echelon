@@ -285,7 +285,9 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/identity/__tests__/integration/role-permissions.integration.test.ts",
       // Employee assignment requires an explicit valid selection and serialized replacement.
       "server/modules/identity/__tests__/integration/role-assignments.integration.test.ts",
+      "server/modules/identity/__tests__/integration/staff-credentials.integration.test.ts",
       "server/modules/identity/__tests__/integration/identity-administration.integration.test.ts",
+      "server/modules/shipping/__tests__/integration/outbound-shipment-access.integration.test.ts",
       "server/modules/identity/__tests__/integration/staff-access.integration.test.ts",
       "server/modules/identity/__tests__/integration/identity-access-audit-migration.integration.test.ts",
       // Startup registers definitions only; it must not resurrect employee authority.

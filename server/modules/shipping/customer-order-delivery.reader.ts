@@ -57,10 +57,10 @@ const owned = `SELECT o.id,replace(o.external_order_id,'gid://shopify/Order/',''
     ON expected."omsOrderId"=o.id AND replace(o.external_order_id,'gid://shopify/Order/','')=expected."externalOrderId"
   WHERE o.channel_id=$1 AND o.external_customer_id=$2`;
 
-/** Query-only adapter over exact outbound package bindings and shipping's
+/** Query-only adapter over exact physical package bindings and shipping's
  * matched carrier projection. Return labels and tracking-only guesses cannot
- * complete original delivery. Verified package-history documents cover legacy
- * purchases without inventing native package rows. */
+ * complete original delivery. Warehouse shipment headers describe planned work,
+ * not physical packages. Verified package-history documents cover legacy purchases. */
 export class PostgresCustomerOrderDeliveryReader
   implements CustomerAccountDeliveryProgressReader
 {
@@ -97,23 +97,16 @@ export class PostgresCustomerOrderDeliveryReader
           await this.pool.query(
             `WITH owned AS (${owned}), packages AS (
       SELECT DISTINCT o.id AS order_id,'physical:'||p.id::text AS package_key,CASE WHEN p.provider='shipstation' THEN regexp_replace(p.provider_physical_shipment_id,'^shipstation_shipment:','') ELSE NULL END AS provider_reference,
-        p.tracking_number,p.id AS physical_id,NULL::integer AS legacy_id
+        p.tracking_number,p.id AS physical_id
       FROM owned o JOIN wms.fulfillment_plans fp ON fp.oms_order_id=o.id
       JOIN wms.fulfillment_plan_lines fl ON fl.fulfillment_plan_id=fp.id
       JOIN wms.physical_shipment_items pi ON pi.fulfillment_plan_line_id=fl.id
       JOIN wms.physical_shipments p ON p.id=pi.physical_shipment_id AND p.status<>'voided'
       WHERE pi.shipment_item_purpose='customer_fulfillment'
-      UNION
-      SELECT DISTINCT o.id,'legacy:'||s.id::text,NULL,s.tracking_number,NULL::bigint,s.id
-      FROM owned o JOIN wms.orders wo ON (${binding}=o.id OR replace(wo.external_order_id,'gid://shopify/Order/','')=o."externalOrderId") AND wo.channel_id=$1
-      JOIN wms.outbound_shipments s ON s.order_id=wo.id AND s.status NOT IN ('voided','cancelled')
-      WHERE NOT EXISTS(SELECT 1 FROM wms.outbound_shipment_items si JOIN wms.physical_shipment_items pi
-        ON pi.legacy_wms_shipment_item_id=si.id WHERE si.shipment_id=s.id)
-    ) SELECT p.order_id AS "orderId",p.package_key AS key,COALESCE(l.provider_label_id,p.provider_reference) AS "providerReference",
+    ) SELECT p.order_id AS "orderId",p.package_key AS key,p.provider_reference AS "providerReference",
       COALESCE(l.tracking_number,p.tracking_number) AS "trackingNumber",l.id AS "labelId"
     FROM packages p LEFT JOIN wms.shipping_provider_label_links link
-      ON (p.physical_id IS NOT NULL AND link.physical_shipment_id=p.physical_id)
-      OR (p.legacy_id IS NOT NULL AND link.legacy_wms_shipment_id=p.legacy_id)
+      ON link.physical_shipment_id=p.physical_id
     LEFT JOIN wms.shipping_provider_labels l ON l.id=link.shipping_provider_label_id
       AND l.label_direction='outbound' AND l.label_status='active'
     ORDER BY p.order_id,p.package_key,l.id LIMIT 4001`,
@@ -134,14 +127,18 @@ export class PostgresCustomerOrderDeliveryReader
       const saved = savedHistory.get(order.id);
       const rows = native.filter((p) => p.orderId === order.id);
       for (const parcel of saved?.packages ?? []) {
-        const matching = rows.filter(
-          (p) =>
-            p.providerReference === parcel.providerShipmentId &&
-            p.trackingNumber !== null &&
-            normalizeTrackingNumber(p.trackingNumber) ===
-              normalizeTrackingNumber(parcel.trackingNumber),
-        );
-        if (!matching.length)
+        // Package identity is the provider shipment, not its optional tracking
+        // or a replaceable label ID. History can fill missing tracking but must
+        // not duplicate that physical package or replace current label tracking.
+        let matched = false;
+        for (let index = 0; index < rows.length; index++) {
+          const physical = rows[index];
+          if (physical.providerReference !== parcel.providerShipmentId) continue;
+          matched = true;
+          if (physical.trackingNumber === null)
+            rows[index] = { ...physical, trackingNumber: parcel.trackingNumber };
+        }
+        if (!matched)
           rows.push({
             orderId: order.id,
             key: `history:${parcel.providerShipmentId}`,

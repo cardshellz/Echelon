@@ -362,6 +362,22 @@ describe("private order edit orchestration", () => {
       settlement: { outstandingCents: 0, netPaidCents: 2000 },
     });
   });
+  it.each(["ORDER_EDIT_PROVIDER_NOT_EDITABLE", "ORDER_EDIT_PROVIDER_LABEL_EXISTS"])(
+    "retains a discardable draft without a commit intent after warehouse cutoff %s", async (code) => {
+      const h = serviceHarness();
+      await h.service.quote(h.input, "staff");
+      h.warehouse.acquire.mockRejectedValueOnce(new OrderEditError(code, "Internal provider detail"));
+      const rejected = await h.service.commit(OP, OP, "staff");
+      expect(rejected).toMatchObject({status:"review_required",canAbandon:true,error:{code}});
+      expect(h.record()).toMatchObject({commitStartedAt:null,commitKey:null,paymentDeadline:null});
+      expect(h.events.map(event=>event.action)).not.toContain("commit_intent");
+      expect(h.provider.commit).not.toHaveBeenCalled();
+      expect(h.provider.refund).not.toHaveBeenCalled();
+      expect(h.warehouse.releaseUnsubmitted).toHaveBeenCalledTimes(1);
+      expect((await h.service.abandon(OP,"staff")).status).toBe("expired");
+      expect(h.warehouse.releaseUnsubmitted).toHaveBeenCalledTimes(2);
+    },
+  );
   it("allows safe cancellation only after an explicit not-submitted result", async () => {
     const h = serviceHarness();
     await h.service.quote(h.input, "staff");

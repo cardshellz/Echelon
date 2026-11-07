@@ -2,10 +2,12 @@ import React, { createContext, useContext, useState, useEffect, useCallback, use
 import type { SafeUser } from "@shared/schema";
 import { queryClient } from "./queryClient";
 import { staffAuthorityKey, staffAuthoritySchema, type AssignedStaffRole, type StaffSystemRole } from "./staff-authority";
+import { hasStaffCapability } from "@shared/staff-capabilities";
 
 type AccessStatus = "loading" | "authenticated" | "anonymous" | "unverified";
 interface AuthContextType {
   user: SafeUser | null;
+  credentialActionRequired: boolean;
   permissions: string[];
   roles: string[];
   assignedRoles: AssignedStaffRole[];
@@ -26,6 +28,7 @@ const verificationError = "Your access could not be verified. Refresh access or 
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<SafeUser | null>(null);
+  const [credentialActionRequired,setCredentialActionRequired]=useState(false);
   const [permissions, setPermissions] = useState<string[]>([]);
   const [roles, setRoles] = useState<string[]>([]);
   const [assignedRoles, setAssignedRoles] = useState<AssignedStaffRole[]>([]);
@@ -39,6 +42,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const clearAuthority = useCallback(() => {
     const hadVerifiedStaffAuthority = authorityKey.current !== null;
     setPermissions([]);
+    setCredentialActionRequired(false);
     setRoles([]);
     setAssignedRoles([]);
     setSystemRoles([]);
@@ -73,6 +77,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       }
       authorityKey.current = nextKey;
       setUser(authority.user);
+      setCredentialActionRequired(authority.credentialActionRequired);
       setPermissions(authority.permissions);
       setRoles(authority.roles);
       setAssignedRoles(authority.assignedRoles);
@@ -162,7 +167,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const hasPermission = useCallback((resource: string, action: string) => (
-    accessStatus === "authenticated" && assignedRoles.length > 0 && permissions.includes(`${resource}:${action}`)
+    accessStatus === "authenticated" && assignedRoles.length > 0 && hasStaffCapability(permissions, `${resource}:${action}`)
   ), [accessStatus, assignedRoles, permissions]);
   const hasAnyPermission = useCallback((perms: Array<{ resource: string; action: string }>) => (
     perms.some(({ resource, action }) => hasPermission(resource, action))
@@ -171,7 +176,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     accessStatus === "authenticated" && assignedRoles.length > 0 && systemRoles.includes(role)
   ), [accessStatus, assignedRoles, systemRoles]);
 
-  return <AuthContext.Provider value={{ user, permissions, roles, assignedRoles, systemRoles, accessStatus, accessError,
+  return <AuthContext.Provider value={{ user, credentialActionRequired, permissions, roles, assignedRoles, systemRoles, accessStatus, accessError,
     isLoading: accessStatus === "loading", login, logout, refetch, hasPermission, hasAnyPermission, hasSystemRole }}>
     {children}
   </AuthContext.Provider>;

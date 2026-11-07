@@ -1,3 +1,4 @@
+import { effectiveStaffCapabilities } from "@shared/staff-capabilities";
 import { sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../../../db";
@@ -44,5 +45,5 @@ export async function readCurrentStaffAccess(
   const row = z.object({ rows: z.array(snapshotSchema).max(1) }).parse(result).rows[0];
   if (!row) return undefined;
   const { roles, permissions, ...user } = row;
-  return { user, roles, permissions: [...new Set(permissions)].sort() };
+  return { user, roles, permissions: effectiveStaffCapabilities(permissions) };
 }

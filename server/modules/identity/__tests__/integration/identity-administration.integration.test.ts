@@ -1,3 +1,4 @@
+const fixtureCredentialVersion="b656f5e9-9dde-49c0-9c2b-823638ff6b5a";
 import { setTimeout as delay } from "node:timers/promises";
 import { readFileSync } from "node:fs";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
@@ -15,9 +16,24 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, {
     return typeof value === "function" ? value.bind(connection.database) : value;
   },
 }) }));
-import * as commands from "../../application/identity.use-cases";
+import * as actualCommands from "../../application/identity.use-cases";
+import { readAccessConfiguration } from "../../infrastructure/access-configuration.repository";
+import { queryAccessReview, queryStaffUserList } from "../../application/access-review.query";
 import { readIdentityAccessPreflight } from "../../infrastructure/access-preflight.repository";
 import { logger } from "../../../../platform/observability/logger";
+
+// Existing command cases explicitly review current configuration first. Dedicated
+// cases below call actualCommands directly to prove missing/stale review rejection.
+async function reviewedActor(actor: Parameters<typeof actualCommands.assignUserRolesUseCase>[2]) {
+  return actor ? { ...actor, expectedAccessRevision: actor.expectedAccessRevision ?? (await readAccessConfiguration(connection.database!)).revision } : actor;
+}
+const commands = {
+  ...actualCommands,
+  updateUserUseCase: async (...args: Parameters<typeof actualCommands.updateUserUseCase>) => actualCommands.updateUserUseCase(args[0],args[1],args[1].active === undefined ? args[2] : await reviewedActor(args[2])),
+  assignUserRolesUseCase: async (...args: Parameters<typeof actualCommands.assignUserRolesUseCase>) => actualCommands.assignUserRolesUseCase(args[0],args[1],await reviewedActor(args[2])),
+  updateRolePermissionsUseCase: async (...args: Parameters<typeof actualCommands.updateRolePermissionsUseCase>) => actualCommands.updateRolePermissionsUseCase(args[0],args[1],await reviewedActor(args[2])),
+  deleteRoleUseCase: async (...args: Parameters<typeof actualCommands.deleteRoleUseCase>) => actualCommands.deleteRoleUseCase(args[0],await reviewedActor(args[1])),
+};
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 if (databaseUrl) validatePostgresTestEnvironment(process.env);
@@ -34,7 +50,7 @@ integration("current explicit authority for Identity administration commands", (
   const actorId = "administration-operator-fixture";
   const targetId = "administration-target-fixture";
   const otherId = "administration-other-fixture";
-  const actor = () => ({ actorId });
+  const actor = () => ({ credentialVersion: fixtureCredentialVersion, actorId });
   const managerRole = () => roles["Custom administration"];
   const alphaRole = () => roles["Target alpha"];
   const betaRole = () => roles["Target beta"];
@@ -56,6 +72,7 @@ integration("current explicit authority for Identity administration commands", (
       ($1::varchar,$1::text,'synthetic-existing-password','picker'),
       ($2::varchar,$2::text,'synthetic-target-password','admin'),
       ($3::varchar,$3::text,'synthetic-other-password','admin')`, [actorId, targetId, otherId]);
+    await database.pool.query("INSERT INTO identity.staff_credentials(user_id,credential_version) SELECT id,$1::uuid FROM identity.users",[fixtureCredentialVersion]);
     roles = Object.fromEntries((await database.pool.query<{ id: number; name: string }>(`
       INSERT INTO identity.auth_roles(name) VALUES
         ('Custom administration'),('Target alpha'),('Target beta'),('Limited administration')
@@ -178,8 +195,9 @@ integration("current explicit authority for Identity administration commands", (
   it("preserves a genuinely padded opaque actor ID in authorization and audit", async () => {
     const paddedId = " padded-actor-fixture ";
     await database.pool.query("INSERT INTO identity.users(id,username,password) VALUES($1::varchar,$1::text,'synthetic-padded-password')", [paddedId]);
+    await database.pool.query("INSERT INTO identity.staff_credentials(user_id,credential_version) VALUES($1,$2::uuid)",[paddedId,fixtureCredentialVersion]);
     await database.pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,$2)", [paddedId, managerRole()]);
-    await commands.assignUserRolesUseCase(targetId, [], { actorId: paddedId });
+    await commands.assignUserRolesUseCase(targetId, [], { actorId: paddedId,credentialVersion:fixtureCredentialVersion });
     expect(await currentMemberships(targetId)).toEqual([]);
     expect(await auditRows()).toEqual([expect.objectContaining({ actor: paddedId })]);
   });
@@ -187,23 +205,18 @@ integration("current explicit authority for Identity administration commands", (
     const operationId = "d9bc3268-e122-43fa-a635-5b5c2f939a7e";
     const firstAttempt = "cbe0b118-8720-47f3-a5af-f03b371ae610";
     const secondAttempt = "f254c752-3795-4b15-8ee9-c823fc802021";
-    await commands.assignUserRolesUseCase(targetId, [betaRole()], { actorId, operationId, attemptId: firstAttempt });
-    await commands.assignUserRolesUseCase(targetId, [betaRole()], { actorId, operationId, attemptId: secondAttempt });
+    await commands.assignUserRolesUseCase(targetId, [betaRole()], { credentialVersion: fixtureCredentialVersion, actorId, operationId, attemptId: firstAttempt });
+    await commands.assignUserRolesUseCase(targetId, [betaRole()], { credentialVersion: fixtureCredentialVersion, actorId, operationId, attemptId: secondAttempt });
     expect(await currentMemberships(targetId)).toEqual([betaRole()]);
     expect((await auditRows()).map(row => row.context)).toEqual([
       expect.objectContaining({ operationId, attemptId: firstAttempt }),
       expect.objectContaining({ operationId, attemptId: secondAttempt }),
     ]);
   });
-  it("audits password replacement as a fact without storing its plaintext or hash", async () => {
-    const updated = await commands.updateUserUseCase(targetId, { password: "synthetic-replacement-password" }, actor());
-    expect(updated).not.toHaveProperty("password");
-    const stored = (await database.pool.query<{ password: string }>("SELECT password FROM identity.users WHERE id=$1", [targetId])).rows[0].password;
-    expect(stored).toMatch(/^\$2[aby]\$/);
-    const audit = await auditRows();
-    expect(audit[0].changes).toMatchObject({ after: { passwordChanged: true } });
-    expect(JSON.stringify(audit)).not.toContain("synthetic-replacement-password");
-    expect(JSON.stringify(audit)).not.toContain(stored);
+  it("rejects credential replacement through ordinary profile administration", async () => {
+    const before=await snapshot();
+    await expect(commands.updateUserUseCase(targetId, { password: "synthetic-replacement-password" } as never, actor())).rejects.toMatchObject({ code:"IDENTITY_ADMINISTRATION_INVALID" });
+    expect(await snapshot()).toEqual(before);
   });
   it("records users affected by role deletion and preserves SQL-null versus JSON-null grant evidence", async () => {
     await database.pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,$3),($2,$3)", [targetId, otherId, betaRole()]);
@@ -417,4 +430,104 @@ integration("current explicit authority for Identity administration commands", (
       ] });
     expect(await snapshot()).toEqual(before);
   });
+  it.each([
+    () => actualCommands.assignUserRolesUseCase(targetId,[],actor()),
+    () => actualCommands.updateRolePermissionsUseCase(alphaRole(),[],actor()),
+    () => actualCommands.deleteRoleUseCase(betaRole(),actor()),
+  ])("rejects a replacement/deletion without a reviewed revision (%#)", async run => {
+    const before = await snapshot();
+    await expect(run()).rejects.toMatchObject({ statusCode: 428,code: "IDENTITY_ACCESS_REVIEW_REQUIRED" });
+    expect(await snapshot()).toEqual(before);
+  });
+  it("rejects a stale role save without changing assignments or audit", async () => {
+    const reviewed = await queryAccessReview(actorId,{ kind: "role",id: alphaRole(),permissionIds: [] });
+    await commands.assignUserRolesUseCase(otherId,[betaRole()],actor());
+    const before = await snapshot();
+    await expect(actualCommands.updateRolePermissionsUseCase(alphaRole(),[],{ credentialVersion: fixtureCredentialVersion, actorId,expectedAccessRevision: reviewed.revision }))
+      .rejects.toMatchObject({ statusCode: 409,code: "IDENTITY_ACCESS_STALE" });
+    expect(await snapshot()).toEqual(before);
+  });
+  it("serializes two saves of one reviewed state so exactly one succeeds", async () => {
+    const expectedAccessRevision = (await queryAccessReview(actorId,{ kind: "user",id: targetId })).revision;
+    const results = await Promise.allSettled([
+      actualCommands.assignUserRolesUseCase(targetId,[betaRole()],{ credentialVersion: fixtureCredentialVersion, actorId,expectedAccessRevision }),
+      actualCommands.assignUserRolesUseCase(targetId,[],{ credentialVersion: fixtureCredentialVersion, actorId,expectedAccessRevision }),
+    ]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(result => result.status === "rejected")).toEqual([expect.objectContaining({ reason: expect.objectContaining({ code: "IDENTITY_ACCESS_STALE" }) })]);
+    expect(await auditRows()).toHaveLength(1);
+  });
+  it("review is read-only, reports custom-role effects and uses the same revision as saving", async () => {
+    const before = await snapshot();
+    const review = await queryAccessReview(actorId,{ kind: "user",id: targetId,roleIds: [betaRole()] });
+    expect(review.users[0].after.permissions).toEqual(["orders:view"]);
+    expect(review.users[0].before.permissions).toEqual(["inventory:view"]);
+    expect(await snapshot()).toEqual(before);
+    await actualCommands.assignUserRolesUseCase(targetId,[betaRole()],{ credentialVersion: fixtureCredentialVersion, actorId,expectedAccessRevision: review.revision });
+    expect(await currentMemberships(targetId)).toEqual([betaRole()]);
+  });
+  it("review without users:view does not expose staff identities or names", async () => {
+    await setActorPermissions(["roles:view"]);
+    const review = await queryAccessReview(actorId,{ kind: "role",id: alphaRole() });
+    expect(review.affectedCount).toBe(1); expect(review.users).toEqual([]);
+    expect(JSON.stringify(review)).not.toContain(targetId);
+  });
+  it("review refuses a proposed change based on an outdated snapshot", async () => {
+    const review = await queryAccessReview(actorId,{ kind: "role",id: alphaRole() });
+    await commands.updateUserUseCase(targetId,{ displayName: "Changed synthetic label" },actor());
+    await expect(queryAccessReview(actorId,{ kind: "role",id: alphaRole(),permissionIds: [] },review.revision))
+      .rejects.toMatchObject({ statusCode: 409,code: "IDENTITY_ACCESS_STALE" });
+  });
+
+  it("blocks a newly incomplete effective assignment and rolls back membership/audit changes",async () => {
+    await database.pool.query("INSERT INTO identity.auth_permissions(resource,action,category) VALUES('shipments','view','shipping'),('shipments','view_costs','shipping') ON CONFLICT DO NOTHING");
+    await database.pool.query("INSERT INTO identity.auth_role_permissions(role_id,permission_id) SELECT $1,id FROM identity.auth_permissions WHERE resource='shipments' AND action='view'",[alphaRole()]);
+    await database.pool.query("INSERT INTO identity.auth_role_permissions(role_id,permission_id) SELECT $1,id FROM identity.auth_permissions WHERE resource='shipments' AND action='view_costs'",[betaRole()]);
+    await database.pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,$2)",[targetId,betaRole()]);
+    const review = await queryAccessReview(actorId,{ kind: "user",id: targetId,roleIds: [betaRole()] });
+    expect(review.blockingDependencies).toEqual([{ userId: targetId,capability: "shipments:view_costs",required: "shipments:view" }]);
+    const before = await snapshot();
+    await expect(actualCommands.assignUserRolesUseCase(targetId,[betaRole()],{ credentialVersion: fixtureCredentialVersion, actorId,expectedAccessRevision: review.revision }))
+      .rejects.toMatchObject({ code: "IDENTITY_ACCESS_DEPENDENCIES",statusCode: 409 });
+    expect(await snapshot()).toEqual(before);
+  });
+  it("keeps a dependency-satisfying custom-role union and permits explicit zero-access revocation",async () => {
+    await database.pool.query("INSERT INTO identity.auth_permissions(resource,action,category) VALUES('shipments','view','shipping'),('shipments','view_costs','shipping') ON CONFLICT DO NOTHING");
+    await database.pool.query("INSERT INTO identity.auth_role_permissions(role_id,permission_id) SELECT $1,id FROM identity.auth_permissions WHERE resource='shipments' AND action='view'",[alphaRole()]);
+    await database.pool.query("INSERT INTO identity.auth_role_permissions(role_id,permission_id) SELECT $1,id FROM identity.auth_permissions WHERE resource='shipments' AND action='view_costs'",[betaRole()]);
+    const review = await queryAccessReview(actorId,{ kind: "user",id: targetId,roleIds: [alphaRole(),betaRole()] });
+    expect(review.blockingDependencies).toEqual([]);
+    await actualCommands.assignUserRolesUseCase(targetId,[alphaRole(),betaRole()],{ credentialVersion: fixtureCredentialVersion, actorId,expectedAccessRevision: review.revision });
+    await commands.assignUserRolesUseCase(targetId,[],actor());
+    expect(await currentMemberships(targetId)).toEqual([]);
+  });
+
+  it("rejects a stale profile form that would reactivate a revoked account",async () => {
+    const expectedAccessRevision = (await readAccessConfiguration(connection.database!)).revision;
+    await actualCommands.updateUserUseCase(targetId,{ active: 0 },{ credentialVersion: fixtureCredentialVersion, actorId,expectedAccessRevision });
+    const before = await snapshot();
+    await expect(actualCommands.updateUserUseCase(targetId,{ displayName: "Stale form label",active: 1 },{ credentialVersion: fixtureCredentialVersion, actorId,expectedAccessRevision }))
+      .rejects.toMatchObject({ code: "IDENTITY_ACCESS_STALE",statusCode: 409 });
+    expect(await snapshot()).toEqual(before);
+  });
+
+  it("requires a current review for activation changes but not a text-only profile edit",async () => {
+    const before = await snapshot();
+    await expect(actualCommands.updateUserUseCase(targetId,{ active: 0 },actor())).rejects.toMatchObject({ code: "IDENTITY_ACCESS_REVIEW_REQUIRED",statusCode: 428 });
+    expect(await snapshot()).toEqual(before);
+    await actualCommands.updateUserUseCase(targetId,{ displayName: "Explicit text-only edit" },actor());
+    expect((await database.pool.query("SELECT active FROM identity.users WHERE id=$1",[targetId])).rows[0].active).toBe(1);
+  });
+
+  it("pairs user-list values with the access revision without disclosing role details or requiring roles:view",async () => {
+    await setActorPermissions(["users:view"]);
+    const before = await snapshot();
+    const list = await queryStaffUserList(actorId);
+    expect(list.revision).toMatch(/^[a-f0-9]{64}$/);
+    expect(list.revision).toBe((await readAccessConfiguration(connection.database!)).revision);
+    expect(list.users.find(user => user.id === targetId)?.active).toBe(1);
+    for(const user of list.users) { expect(user).not.toHaveProperty("password"); expect(user).not.toHaveProperty("permissions"); }
+    expect(await snapshot()).toEqual(before);
+  });
+
 });

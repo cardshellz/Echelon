@@ -154,6 +154,8 @@ integration(
       instant = new Date(INTAKE_NOW);
       leaseSequence = 0;
       await pool.query("TRUNCATE wms.saved_label_status_jobs CASCADE");
+      // Legacy fixture headers have no order FK; isolate them explicitly too.
+      await pool.query("TRUNCATE wms.outbound_shipment_items,wms.outbound_shipments RESTART IDENTITY CASCADE");
       await seedComplexSource(pool);
     });
     afterAll(async () => {
@@ -316,6 +318,109 @@ integration(
         enqueue: () => store.enqueue({ request: s.input, scope: COMPLEX_SCOPE, actor: "customer:36:901", now: new Date(instant) }),
         read: () => store.readOwned(principal, s.input.idempotencyKey) };
     }
+
+    const deliveryScope = {
+      channelId: 36, externalCustomerId: "901",
+      orders: [{ omsOrderId: 100, externalOrderId: "1000" }],
+    };
+    async function saveOriginalPackageHistory(provider = complexProvider()) {
+      const store = new PostgresPackageHistoryStore(pool, () => new Date(instant));
+      await store.drain(1000, { orderIds: [100] });
+      const claims = await store.claim(1, instant, "20080000-0000-4000-8000-000000000001", { orderIds: [100] });
+      expect(claims).toHaveLength(1);
+      expect(await store.complete(claims[0], complexHistory(provider), instant)).toBe(true);
+    }
+    async function seedWarehouseShipmentPlans() {
+      // Even a legacy header marked shipped is not a physical package identity.
+      await pool.query(`INSERT INTO wms.outbound_shipments(order_id,channel_id,status,tracking_number)
+        VALUES(201,36,'planned',NULL),(201,36,'queued',NULL),(201,36,'shipped','HEADER-ONLY')`);
+    }
+
+    it("shows zero delivery packages for warehouse plans without actual shipping-owned packages", async () => {
+      await seedComplexSource(pool, true);
+      await seedWarehouseShipmentPlans();
+      await saveOriginalPackageHistory({ ...complexProvider(), fulfillments: [] });
+      const before = await sourceFacts();
+      const reader = new PostgresCustomerOrderDeliveryReader(pool);
+      expect((await reader.read(deliveryScope, instant)).get(100)).toEqual({ delivery: null, packages: [] });
+      expect(await sourceFacts()).toEqual(before);
+    });
+
+    it("retains real physical packages when tracking and labels have not arrived", async () => {
+      await pool.query("UPDATE wms.physical_shipments SET tracking_number=NULL");
+      await seedWarehouseShipmentPlans();
+      const reader = new PostgresCustomerOrderDeliveryReader(pool);
+      expect((await reader.read(deliveryScope, instant)).get(100)).toEqual({
+        delivery: null,
+        packages: [1,2,3].map(id => ({ key: `physical:${id}`, trackingNumber: null,
+          status: { code: "unknown", label: "Tracking unavailable" } })),
+      });
+    });
+
+    it("reads verified historical shipments without native packages or warehouse-header packages", async () => {
+      await seedComplexSource(pool, true);
+      await seedWarehouseShipmentPlans();
+      await saveOriginalPackageHistory();
+      const reader = new PostgresCustomerOrderDeliveryReader(pool);
+      const result = (await reader.read(deliveryScope, instant)).get(100)!;
+      expect(result.packages.map(parcel => parcel.key)).toEqual(["history:901", "history:902", "history:903"]);
+      expect(result.packages.map(parcel => parcel.trackingNumber)).toEqual([
+        "SYNTHETIC-OUTBOUND-1", "SYNTHETIC-OUTBOUND-2", "SYNTHETIC-OUTBOUND-3",
+      ]);
+      expect((await pool.query("SELECT count(*)::int AS n FROM wms.physical_shipments")).rows[0].n).toBe(0);
+    });
+
+    it.each([false, true])("counts overlapping native/history packages once when tracking is missing=%s", async missing => {
+      await pool.query(`UPDATE wms.physical_shipments SET provider_physical_shipment_id='shipstation_shipment:'||provider_physical_shipment_id`);
+      if (missing) await pool.query("UPDATE wms.physical_shipments SET tracking_number=NULL");
+      await saveOriginalPackageHistory();
+      const reader = new PostgresCustomerOrderDeliveryReader(pool);
+      const result = (await reader.read(deliveryScope, instant)).get(100)!;
+      expect(result.packages.map(parcel => parcel.key)).toEqual(["physical:1", "physical:2", "physical:3"]);
+      expect(result.packages.map(parcel => parcel.trackingNumber)).toEqual([
+        "SYNTHETIC-OUTBOUND-1", "SYNTHETIC-OUTBOUND-2", "SYNTHETIC-OUTBOUND-3",
+      ]);
+    });
+
+    it("keeps package reads retryable and read-only without duplicating verified history", async () => {
+      await seedWarehouseShipmentPlans();
+      await saveOriginalPackageHistory();
+      const before = await sourceFacts();
+      const readOnly = new Pool({ connectionString: connectionString!, max: 2,
+        options: "-c default_transaction_read_only=on", statement_timeout: 15000 });
+      try {
+        const reader = new PostgresCustomerOrderDeliveryReader(readOnly);
+        const failure = vi.spyOn(readOnly, "query").mockRejectedValueOnce(new Error("Synthetic temporary read failure"));
+        try { await expect(reader.read(deliveryScope, instant)).rejects.toThrow("Synthetic temporary read failure"); }
+        finally { failure.mockRestore(); }
+        const first = (await reader.read(deliveryScope, instant)).get(100)!;
+        expect(first.packages).toHaveLength(3);
+        expect(await reader.read(deliveryScope, instant)).toEqual(new Map([[100, first]]));
+        for (const invalid of [{ ...deliveryScope, externalCustomerId: "902" }, { ...deliveryScope, channelId: 37 }])
+          expect((await reader.read(invalid, instant)).size).toBe(0);
+        expect(await sourceFacts()).toEqual(before);
+      } finally { await readOnly.end(); }
+    });
+
+    it("excludes voided physical packages without promoting warehouse plans", async () => {
+      await seedWarehouseShipmentPlans();
+      await pool.query("UPDATE wms.physical_shipments SET status='voided' WHERE id=1");
+      const reader = new PostgresCustomerOrderDeliveryReader(pool);
+      expect((await reader.read(deliveryScope, instant)).get(100)!.packages.map(parcel => parcel.key))
+        .toEqual(["physical:2", "physical:3"]);
+    });
+
+    it("keeps distinct physical package identities even when tracking is shared and history differs", async () => {
+      await pool.query("UPDATE wms.physical_shipments SET tracking_number='SYNTHETIC-OUTBOUND-1' WHERE id=2");
+      await saveOriginalPackageHistory();
+      const reader = new PostgresCustomerOrderDeliveryReader(pool);
+      const packages = (await reader.read(deliveryScope, instant)).get(100)!.packages;
+      expect(packages.map(parcel => parcel.key)).toEqual(["physical:1", "physical:2", "physical:3"]);
+      expect(packages.map(parcel => parcel.trackingNumber)).toEqual([
+        "SYNTHETIC-OUTBOUND-1", "SYNTHETIC-OUTBOUND-1", "SYNTHETIC-OUTBOUND-3",
+      ]);
+    });
+
     it("uses the actual ShipStation adapter through purchase, readback, lost-response recovery and PDF download", async () => {
       await publishIntakeTestPolicyShipping(pool, { contactPhone: "555-010-1000" });
       const carrier = shipStationReturnWorkflowFixture(() => new Date(instant));

@@ -1,3 +1,7 @@
+const credentialFixtureSql=readFileSync(new URL("../../../../../migrations/900000056000020040001_staff_credential_state.sql",import.meta.url),"utf8");
+import { readFileSync } from "node:fs";
+const fixtureCredentialVersion="b656f5e9-9dde-49c0-9c2b-823638ff6b5a";
+import { readAccessConfiguration } from "../../infrastructure/access-configuration.repository";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { setTimeout as delay } from "node:timers/promises";
@@ -37,6 +41,7 @@ const fixtureSql = `
     role varchar(20) NOT NULL DEFAULT 'picker', display_name text,
     active integer NOT NULL DEFAULT 1, created_at timestamp NOT NULL DEFAULT now(), last_login_at timestamp
   );
+  ${credentialFixtureSql}
   CREATE TABLE identity.auth_roles (
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name varchar(100) NOT NULL UNIQUE,
     description text, is_system integer NOT NULL DEFAULT 0,
@@ -85,7 +90,7 @@ integration("explicit employee role assignment transaction", () => {
     connection.database = drizzle(database.pool, { schema });
     const app = express();
     app.use(express.json());
-    app.use((req, _res, next) => { req.session = { user: sessionUser } as typeof req.session; next(); });
+    app.use((req, _res, next) => { req.session = { user: sessionUser,staffCredentialVersion:fixtureCredentialVersion } as typeof req.session; next(); });
     registerAuthRoutes(app);
     server = createServer(app);
     await new Promise<void>((resolve, reject) => {
@@ -104,6 +109,7 @@ integration("explicit employee role assignment transaction", () => {
   });
   async function addUser(userId: string) {
     await database.pool.query("INSERT INTO identity.users(id,username,password,role) VALUES($1::varchar,$1::text,'unused-synthetic-password','admin')", [userId]);
+    await database.pool.query("INSERT INTO identity.staff_credentials(user_id,credential_version) VALUES($1,$2::uuid)",[userId,fixtureCredentialVersion]);
   }
   beforeEach(async () => {
     await database.pool.query("TRUNCATE public.audit_events,identity.auth_role_permissions,identity.auth_user_roles,identity.auth_roles,identity.users CASCADE");
@@ -120,10 +126,10 @@ integration("explicit employee role assignment transaction", () => {
     sessionUser = { id: actorId, username: actorId, role: "admin", displayName: "Fixture manager", active: 1,
       createdAt: new Date("2026-11-04T00:00:00Z"), lastLoginAt: null };
   });
-  function edit(body: unknown, userId = targetId) {
+  async function edit(body: unknown, userId = targetId) {
     return requestLocalHttp(`${baseUrl}/api/users/${encodeURIComponent(userId)}/roles`, {
       method: "PUT", headers: { "content-type": "application/json" },
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      ...(body === undefined ? {} : { body: JSON.stringify(typeof body === "object" && body !== null && !Array.isArray(body) ? { ...body, expectedAccessRevision: (await readAccessConfiguration(connection.database!)).revision } : body) }),
     });
   }
   async function memberships(userId = targetId) {
@@ -238,8 +244,8 @@ integration("explicit employee role assignment transaction", () => {
   });
   it("validates direct use-case and transaction-writer inputs", async () => {
     const before = await snapshot();
-    await expect(assignUserRolesUseCase(targetId, undefined, { actorId })).rejects.toMatchObject({ code: "IDENTITY_ROLE_ASSIGNMENT_INVALID" });
-    await expect(assignUserRolesUseCase(" ", [], { actorId })).rejects.toMatchObject({ code: "IDENTITY_ROLE_ASSIGNMENT_INVALID" });
+    await expect(assignUserRolesUseCase(targetId, undefined, { credentialVersion: fixtureCredentialVersion, actorId })).rejects.toMatchObject({ code: "IDENTITY_ROLE_ASSIGNMENT_INVALID" });
+    await expect(assignUserRolesUseCase(" ", [], { credentialVersion: fixtureCredentialVersion, actorId })).rejects.toMatchObject({ code: "IDENTITY_ROLE_ASSIGNMENT_INVALID" });
     await expect(connection.database!.transaction(tx => assignUserRoles(targetId, [0], tx))).rejects.toMatchObject({ code: "IDENTITY_ROLE_ASSIGNMENT_INVALID" });
     expect(await snapshot()).toEqual(before);
   });

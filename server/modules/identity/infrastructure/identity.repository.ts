@@ -1,3 +1,4 @@
+import { effectiveStaffCapabilities } from "@shared/staff-capabilities";
 import { db, users, eq, and, isNull, inArray, sql } from "../../../storage/base";
 import { authRoles, authPermissions, authRolePermissions, authUserRoles, channels, adjustmentReasons } from "@shared/schema";
 import type { User, InsertUser, SafeUser } from "../../../storage/base";
@@ -93,7 +94,7 @@ export async function getUserPermissions(userId: string, tx: Tx = db): Promise<s
       isNull(authRolePermissions.constraints)));
   
   const permSet = new Set(permissions.map((p: any) => `${p.resource}:${p.action}`));
-  return Array.from(permSet) as string[];
+  return effectiveStaffCapabilities(Array.from(permSet) as string[]);
 }
 
 export async function getUserRoles(userId: string, tx: Tx = db): Promise<AuthRole[]> {

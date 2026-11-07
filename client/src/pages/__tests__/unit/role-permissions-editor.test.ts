@@ -3,7 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 type QueryOptions = { queryKey: readonly unknown[]; queryFn: () => Promise<unknown> };
-type UpdateInput = { roleId: number; permissionIds: number[] };
+type UpdateInput = { roleId: number; permissionIds: number[]; expectedAccessRevision: string };
 type UpdateOptions = {
   retry: boolean;
   mutationFn: (data: UpdateInput) => Promise<unknown>;
@@ -12,7 +12,7 @@ type UpdateOptions = {
 };
 type DeleteOptions = {
   retry: boolean;
-  mutationFn: (roleId: number) => Promise<unknown>;
+  mutationFn: (data: { roleId: number; expectedAccessRevision: string }) => Promise<unknown>;
   onError: (error: Error) => Promise<void>;
 };
 type CheckboxProps = { checked: boolean; disabled: boolean; onCheckedChange: () => void; "data-testid": string };
@@ -46,6 +46,7 @@ vi.mock("react", async importOriginal => {
 vi.mock("@tanstack/react-query", () => ({
   useQuery: (options: QueryOptions) => {
     fixture.queries.push(options);
+    if (options.queryKey[0] === "access-review") return { data: { revision: "a".repeat(64), restricted: Array.isArray(fixture.rolePermissions) && fixture.rolePermissions.some((item: { isRestricted?: boolean }) => item.isRestricted), permissionIds: [11], roleIds: [], affectedCount: 0, users: [], dependencies: [], blockingDependencies: [], coverage: "migrated-workflows-only" }, isFetching: fixture.fetching, isError: fixture.error };
     if (options.queryKey[0] === "/api/permissions") return { data: [fixture.permission], isLoading: false };
     if (options.queryKey.length === 1) return { data: [fixture.role], isLoading: false };
     return { data: fixture.rolePermissions, isFetching: fixture.fetching, isError: fixture.error };
@@ -95,12 +96,12 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("role permissions editor restriction containment", () => {
-  it("keeps unrestricted role editing and its existing full-list payload", () => {
+  it("stages unrestricted changes without immediately replacing grants", () => {
     const html = render();
     expect(html).not.toContain("permissions are read-only in this editor");
     expect(editorCheckbox()).toMatchObject({ checked: true, disabled: false });
     editorCheckbox().onCheckedChange();
-    expect(fixture.mutate).toHaveBeenCalledExactlyOnceWith({ roleId: 7, permissionIds: [] });
+    expect(fixture.mutate).not.toHaveBeenCalled();
   });
 
   it("renders a restricted role read-only and cannot submit even if its handler is invoked", () => {
@@ -151,13 +152,13 @@ describe("role permissions editor restriction containment", () => {
   it("refreshes the rejected role and gives safe feedback after a newly restricted role returns 409", async () => {
     render();
     const options = update();
-    const input = { roleId: 7, permissionIds: [] };
+    const input = { roleId: 7, permissionIds: [], expectedAccessRevision: "a".repeat(64) };
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ code: "IDENTITY_ROLE_RESTRICTIONS_UNSUPPORTED", error: "untrusted diagnostic" }), { status: 409 }));
     vi.stubGlobal("fetch", fetch);
     const error = await options.mutationFn(input).catch(value => value as Error);
     expect(error).toBeInstanceOf(Error);
     await options.onError(error as Error, input);
-    expect(fixture.invalidateQueries).toHaveBeenCalledExactlyOnceWith({ queryKey: ["/api/roles", 7, "permissions"], exact: true });
+    expect(fixture.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["/api/roles", 7, "permissions"], exact: true });
     expect(fixture.toast).toHaveBeenCalledWith({ title: "This role's permissions are read-only in this editor because some grants contain restrictions.", variant: "destructive" });
     expect(options.retry).toBe(false);
     expect(fetch).toHaveBeenCalledOnce();
@@ -168,14 +169,14 @@ describe("role permissions editor restriction containment", () => {
   it("does not render arbitrary failed-write diagnostics and keeps successful invalidation", async () => {
     render();
     const options = update();
-    const input = { roleId: 7, permissionIds: [] };
+    const input = { roleId: 7, permissionIds: [], expectedAccessRevision: "a".repeat(64) };
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "private provider details" }), { status: 500 })));
     const error = await options.mutationFn(input).catch(value => value as Error);
     await options.onError(error as Error, input);
     expect(fixture.toast).toHaveBeenCalledWith({ title: "Failed to update permissions. Reload the role before trying again.", variant: "destructive" });
     fixture.invalidateQueries.mockClear();
     await options.onSuccess();
-    expect(fixture.invalidateQueries).toHaveBeenCalledExactlyOnceWith({ queryKey: ["/api/roles"] });
+    expect(fixture.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["/api/roles"] });
   });
 
   it.each(["permissions", "delete"] as const)("rereads current authority after %s commits but its response is lost, without repeating the write", async action => {
@@ -189,18 +190,18 @@ describe("role permissions editor restriction containment", () => {
     vi.stubGlobal("fetch", fetch);
     if (action === "permissions") {
       const options = update();
-      const input = { roleId: 7, permissionIds: [] };
+      const input = { roleId: 7, permissionIds: [], expectedAccessRevision: "a".repeat(64) };
       const error = await options.mutationFn(input).catch(value => value as Error);
       await options.onError(error as Error, input);
       expect(options.retry).toBe(false);
-      expect(fixture.invalidateQueries).toHaveBeenCalledExactlyOnceWith({ queryKey: ["/api/roles", 7, "permissions"], exact: true });
+      expect(fixture.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["/api/roles", 7, "permissions"], exact: true });
       expect(fetch).toHaveBeenCalledWith("/api/roles/7/permissions", expect.objectContaining({ method: "PUT" }));
     } else {
       const options = fixture.mutations[2] as DeleteOptions;
-      const error = await options.mutationFn(7).catch(value => value as Error);
+      const error = await options.mutationFn({ roleId: 7, expectedAccessRevision: "a".repeat(64) }).catch(value => value as Error);
       await options.onError(error as Error);
       expect(options.retry).toBe(false);
-      expect(fixture.invalidateQueries).toHaveBeenCalledExactlyOnceWith({ queryKey: ["/api/roles"] });
+      expect(fixture.invalidateQueries).toHaveBeenCalledWith({ queryKey: ["/api/roles"] });
       expect(fetch).toHaveBeenCalledWith("/api/roles/7", expect.objectContaining({ method: "DELETE" }));
     }
     expect(fixture.refetchAuthority).toHaveBeenCalledOnce();

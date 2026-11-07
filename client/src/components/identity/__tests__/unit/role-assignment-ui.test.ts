@@ -10,12 +10,12 @@ const state = vi.hoisted(() => {
   const available = [...assigned, { id: 12, name: "Custom purchasing", isSystem: 0 }];
   const response = (data: unknown) => ({ data, isSuccess: true, isFetching: false, isError: false, isStale: false, refetch: vi.fn().mockResolvedValue({ isError: false }) });
   return {
-    stateValues: [] as unknown[], index: 0,
+    stateValues: [] as unknown[], index: 0, lastGraph: "", revisionIndex: 0,
     assigned: response(assigned), available: response(available),
     permissions: [] as string[], pending: false,
     buttons: [] as Control[], checks: [] as Control[], inputs: [] as Control[], queries: [] as Query[], mutations: [] as Mutation[],
     mutate: vi.fn(), invalidate: vi.fn().mockResolvedValue(undefined), refreshAccess: vi.fn().mockResolvedValue(undefined),
-    user: { id: "user-7", username: "operator", displayName: "Example Operator", role: "unknown-legacy-label", active: 1,
+    user: { accessRevision: "a".repeat(64), id: "user-7", username: "operator", displayName: "Example Operator", role: "unknown-legacy-label", active: 1,
       createdAt: new Date("2026-11-04T00:00:00Z"), lastLoginAt: null },
   };
 });
@@ -33,7 +33,19 @@ vi.mock("@tanstack/react-query", () => ({
   useQuery: (options: Query) => {
     state.queries.push(options);
     if (options.queryKey[0] === "users") return { data: [state.user], isLoading: false, isError: false, refetch: vi.fn() };
-    return options.queryKey[0] === "/api/users" ? state.assigned : state.available;
+    if (options.queryKey[0] === "user-access-review") {
+      const rows = state.assigned.data as Array<{ id: number; name: string; isSystem: number }> | undefined;
+      const valid = Array.isArray(rows) && rows.every(item => Number.isInteger(item.id) && typeof item.name === "string" && [0,1].includes(item.isSystem));
+      const graph = JSON.stringify({ assigned: rows, available: state.available.data });
+      if (state.lastGraph && state.lastGraph !== graph) state.revisionIndex++;
+      state.lastGraph = graph;
+      const effective = { userId: "user-7", label: "Example Operator", active: true, roleIds: valid ? rows!.map(role => role.id) : [], permissions: [], grantedPermissions: [], restrictedPermissions: [], sources: [] };
+      return { ...state.assigned, isSuccess: valid && state.assigned.isSuccess, data: valid ? {
+        revision: String(state.revisionIndex).padStart(64,"0"), restricted: false, permissionIds: [], roleIds: effective.roleIds,
+        affectedCount: 1, users: [{ before: effective, after: effective }], dependencies: [], blockingDependencies: [], coverage: "migrated-workflows-only",
+      } : undefined };
+    }
+    return state.available;
   },
   useMutation: (options: Mutation) => { state.mutations.push(options); return { mutate: state.mutate, isPending: state.pending }; },
   useQueryClient: () => ({ invalidateQueries: state.invalidate }),
@@ -75,7 +87,7 @@ function input(id: string, value: string) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks(); state.stateValues = []; state.pending = false;
+  vi.clearAllMocks(); state.stateValues = []; state.pending = false; state.lastGraph = ""; state.revisionIndex = 0;
   state.permissions = ["users:view", "users:create", "users:edit", "users:manage_roles", "roles:view"];
   const assigned = [{ id: 11, name: "Warehouse reader", isSystem: 0 }];
   Object.assign(state.assigned, { data: assigned, isSuccess: true, isFetching: false, isError: false, isStale: false });
@@ -87,27 +99,27 @@ afterEach(() => { vi.unstubAllGlobals(); });
 describe("explicit role assignment dialog", () => {
   it("loads only the selected user and keeps a multiple-custom-role selection until explicit Save", () => {
     render();
-    expect(state.queries.map(query => query.queryKey)).toEqual([["/api/users", "user-7", "roles"], ["/api/roles", "assignment-options"]]);
-    expect(button("button-save-assignments").disabled).toBe(true);
+    expect(state.queries.map(query => query.queryKey)).toEqual([["/api/roles", "assignment-options"], ["user-access-review", "user-7"]]);
+    expect(button("button-review-assignments").disabled).toBe(true);
     check("checkbox-assigned-role-12").onCheckedChange!(true);
     expect(state.mutate).not.toHaveBeenCalled();
     render();
     expect(check("checkbox-assigned-role-11").checked).toBe(true);
     expect(check("checkbox-assigned-role-12").checked).toBe(true);
-    button("button-save-assignments").onClick!();
-    expect(state.mutate).toHaveBeenCalledExactlyOnceWith([11, 12]);
+    button("button-review-assignments").onClick!();
+    expect(state.mutate).toHaveBeenCalledExactlyOnceWith({ userId: "user-7", ids: [11,12], revision: "0".repeat(64) });
   });
 
   it("requires a deliberate confirmation before submitting explicit zero roles", () => {
     render(); check("checkbox-assigned-role-11").onCheckedChange!(false);
     const html = render();
-    expect(html).toContain("removes all operational access for @operator");
-    expect(button("button-save-assignments").disabled).toBe(true);
-    button("button-save-assignments").onClick!();
+    expect(html).toContain("removes all operational access for this account");
+    expect(button("button-review-assignments").disabled).toBe(true);
+    button("button-review-assignments").onClick!();
     expect(state.mutate).not.toHaveBeenCalled();
     check("checkbox-confirm-remove-all-roles").onCheckedChange!(true);
-    render(); button("button-save-assignments").onClick!();
-    expect(state.mutate).toHaveBeenCalledExactlyOnceWith([]);
+    render(); button("button-review-assignments").onClick!();
+    expect(state.mutate).toHaveBeenCalledExactlyOnceWith({ userId: "user-7", ids: [], revision: "0".repeat(64) });
   });
 
   it.each(["missing", "loading", "error", "stale", "pending", "malformed", "no manage", "no role read", "no user read"])("blocks assignment changes with %s evidence", condition => {
@@ -122,38 +134,38 @@ describe("explicit role assignment dialog", () => {
     if (condition === "no role read") state.permissions = ["users:view", "users:manage_roles"];
     if (condition === "no user read") state.permissions = ["roles:view", "users:manage_roles"];
     render();
-    expect(button("button-save-assignments").disabled).toBe(true);
-    button("button-save-assignments").onClick!();
+    expect(button("button-review-assignments").disabled).toBe(true);
+    button("button-review-assignments").onClick!();
     expect(state.mutate).not.toHaveBeenCalled();
-    if (condition.startsWith("no ")) expect(state.queries.every(query => query.enabled === false)).toBe(true);
+    if (condition === "no user read" || condition === "no role read") expect(state.queries.every(query => query.enabled === false)).toBe(true);
   });
 
   it("does not discard an assignment missing from the role picker", () => {
     state.assigned.data = [{ id: 99, name: "Unknown assigned role", isSystem: 0 }];
-    expect(render()).toContain("An assigned role is missing");
-    expect(button("button-save-assignments").disabled).toBe(true);
+    expect(render()).toContain("An assigned role is unavailable");
+    expect(button("button-review-assignments").disabled).toBe(true);
   });
 
   it.each(["user switch", "changed assignments", "changed available roles"])("blocks a draft after %s", change => {
     render(); check("checkbox-assigned-role-12").onCheckedChange!(true);
     if (change === "changed assignments") state.assigned.data = [{ id: 12, name: "Custom purchasing", isSystem: 0 }];
     if (change === "changed available roles") state.available.data = [{ id: 11, name: "Renamed", isSystem: 0 }, { id: 12, name: "Custom purchasing", isSystem: 0 }];
-    expect(render("assignments", change === "user switch" ? "another-user" : state.user.id)).toContain("Role data changed");
-    expect(button("button-save-assignments").disabled).toBe(true);
+    expect(render("assignments", change === "user switch" ? "another-user" : state.user.id)).toContain("Access changed");
+    expect(button("button-review-assignments").disabled).toBe(true);
   });
 
   it("treats a verified empty assignment as no access without selecting a default", () => {
     state.assigned.data = [];
-    expect(render()).toContain("no roles selected");
+    expect(render()).toContain("No roles: no operational access.");
     expect(state.checks.every(control => control.checked === false)).toBe(true);
-    expect(button("button-save-assignments").disabled).toBe(true);
+    expect(button("button-review-assignments").disabled).toBe(true);
   });
 
   it("refreshes target data and current authority after an uncertain write without automatic replay", async () => {
-    render(); const mutation = state.mutations[0];
+    render(); const mutation = state.mutations[1];
     await mutation.onError(new Error("lost response"));
     expect(state.invalidate.mock.calls.map(call => call[0])).toEqual([
-      { queryKey: ["/api/users", "user-7", "roles"], exact: true }, { queryKey: ["/api/roles", "assignment-options"], exact: true },
+      { queryKey: ["user-access-review"] },
     ]);
     expect(state.refreshAccess).toHaveBeenCalledOnce();
     expect(mutation.retry).toBe(false); expect(state.mutate).not.toHaveBeenCalled();
@@ -162,7 +174,7 @@ describe("explicit role assignment dialog", () => {
 
   it("reports saved-but-unverified access distinctly after successful persistence", async () => {
     render(); state.refreshAccess.mockRejectedValueOnce(new Error("offline"));
-    await expect(state.mutations[0].onSuccess()).resolves.toBeUndefined();
+    await expect(state.mutations[1].onSuccess()).resolves.toBeUndefined();
     expect(render()).toContain("were saved, but access could not be refreshed");
   });
 });
@@ -171,8 +183,8 @@ describe("assignment transport contract", () => {
   it.each([{ ids: [] }, { ids: [11, 12] }])("sends the explicit ID selection unchanged: $ids", async ({ ids }) => {
     const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ success: true })));
     vi.stubGlobal("fetch", fetch);
-    await replaceUserRoleAssignments("user-7", ids);
-    expect(fetch).toHaveBeenCalledExactlyOnceWith("/api/users/user-7/roles", expect.objectContaining({ method: "PUT", body: JSON.stringify({ roleIds: ids }) }));
+    await replaceUserRoleAssignments("user-7", ids, "a".repeat(64));
+    expect(fetch).toHaveBeenCalledExactlyOnceWith("/api/users/user-7/roles", expect.objectContaining({ method: "PUT", body: JSON.stringify({ roleIds: ids, expectedAccessRevision: "a".repeat(64) }) }));
   });
   it.each([
     { data: [{ id: 11, name: "Role", isSystem: false }] },
@@ -192,14 +204,14 @@ describe("assignment transport contract", () => {
   });
   it("does not expose arbitrary rejection diagnostics", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "private provider trace" }), { status: 409 })));
-    await expect(replaceUserRoleAssignments("user-7", [])).rejects.toThrow("The role update could not be confirmed.");
+    await expect(replaceUserRoleAssignments("user-7", [], "a".repeat(64))).rejects.toThrow("The role update could not be confirmed.");
   });
   it("maps only the verified last-manager code to actionable safe wording", async () => {
     render();
     vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify({ code: "IDENTITY_LAST_ACCESS_MANAGER", error: "untrusted diagnostic" }), { status: 409 }))));
-    const failure = await replaceUserRoleAssignments("user-7", []).catch(error => error as Error);
+    const failure = await replaceUserRoleAssignments("user-7", [], "a".repeat(64)).catch(error => error as Error);
     expect(failure).toBeInstanceOf(Error);
-    await state.mutations[0].onError(failure as Error);
+    await state.mutations[1].onError(failure as Error);
     expect(render()).toContain("Assign an appropriate replacement first");
     expect(render()).not.toContain("untrusted diagnostic");
     await expect(usersApi.update("user-7", { active: 0 })).rejects.toThrow("last active access manager");
@@ -207,6 +219,14 @@ describe("assignment transport contract", () => {
 });
 
 describe("account/profile separation", () => {
+  it("requires verified user-list revision metadata without changing the existing JSON user shape",async () => {
+    const fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify([state.user]),{ headers: { "X-Access-Revision": "a".repeat(64) } }));
+    vi.stubGlobal("fetch",fetch);
+    expect((await usersApi.getAll())[0].accessRevision).toBe("a".repeat(64));
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify([state.user])));
+    await expect(usersApi.getAll()).rejects.toThrow();
+  });
+
   it("does not fetch memberships for every row and gates actions independently", () => {
     state.permissions = ["users:view"];
     const html = render("users");
@@ -233,7 +253,7 @@ describe("account/profile separation", () => {
     render("users"); button("button-edit-user-user-7").onClick!(); render("users");
     input("input-edit-displayname", "Updated operator"); render("users");
     button("button-save-user").onClick!();
-    expect(state.mutate).toHaveBeenCalledExactlyOnceWith({ id: "user-7", data: { displayName: "Updated operator", active: 1 } });
+    expect(state.mutate).toHaveBeenCalledExactlyOnceWith({ id: "user-7", data: { displayName: "Updated operator", expectedAccessRevision: "a".repeat(64) } });
     await state.mutations[1].onSuccess(); expect(state.refreshAccess).toHaveBeenCalledOnce();
   });
   it("transport allowlists profile/create fields even if an old caller supplies a role", async () => {

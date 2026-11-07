@@ -147,7 +147,7 @@ export class PaymentAcceptanceFixture {
       CREATE UNIQUE INDEX payment_fixture_role_assignment ON identity.auth_user_roles(user_id,role_id);
     `);
     this.ownsPublicTables = true;
-    for (const migration of ["0107_audit_events.sql", "136_financial_command_results.sql",
+    for (const migration of ["900000056000020040001_staff_credential_state.sql", "0107_audit_events.sql", "136_financial_command_results.sql",
       "140_financial_command_operations.sql", "157_procurement_usd_financial_authority.sql"]) {
       await this.pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
@@ -274,6 +274,10 @@ export class PaymentAcceptanceFixture {
     // Low bcrypt work factor is solely for synthetic local login fixtures.
     const passwordHash = await bcrypt.hash(DELEGATE_PASSWORD, 4);
     await this.pool.query("UPDATE identity.users SET password=$1 WHERE id=$2", [passwordHash, PAYMENT_ACTORS.delegate]);
+    // reset() recreates only synthetic users; users' CASCADE truncation also
+    // clears credential state. Supply the real login owner's required metadata
+    // without altering the grants, password or deactivation assertions.
+    await this.pool.query("INSERT INTO identity.staff_credentials(user_id) SELECT id FROM identity.users");
   }
 
   async loginDelegate(): Promise<string> {

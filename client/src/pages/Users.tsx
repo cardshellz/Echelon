@@ -38,19 +38,23 @@ import { useAuth } from "@/lib/auth";
 import { RoleAssignmentDialog } from "@/components/identity/RoleAssignmentDialog";
 import { AccessManagementRequestError, readAccessManagementFailure } from "@/components/identity/access-management-error";
 import { z } from "zod";
+import { StaffPasswordReset } from "@/components/identity/StaffPasswordReset";
+import { accessRevisionSchema } from "@shared/staff-capabilities";
 
 type CreateUserInput = { username: string; password: string; displayName: string };
-type UpdateUserInput = { displayName?: string; password?: string; active?: number };
+type UpdateUserInput = { displayName?: string; active?: number; expectedAccessRevision?: string };
+type ManagedUser = SafeUser & { accessRevision: string };
 const safeUserSchema = z.object({
   id: z.string().min(1), username: z.string(), role: z.string(), displayName: z.string().nullable(),
   active: z.union([z.literal(0), z.literal(1)]), createdAt: z.coerce.date(), lastLoginAt: z.coerce.date().nullable(),
 });
 
 export const usersApi = {
-  getAll: async (): Promise<SafeUser[]> => {
-    const res = await fetch("/api/users", { credentials: "include" });
+  getAll: async (): Promise<ManagedUser[]> => {
+    const res = await fetch("/api/users", { credentials: "include",cache: "no-store" });
     if (!res.ok) throw new Error("Failed to fetch users");
-    return z.array(safeUserSchema).parse(await res.json());
+    const accessRevision = accessRevisionSchema.parse(res.headers.get("X-Access-Revision"));
+    return z.array(safeUserSchema).parse(await res.json()).map(user => ({ ...user,accessRevision }));
   },
   create: async (data: CreateUserInput): Promise<SafeUser> => {
     const res = await fetch("/api/users", {
@@ -69,7 +73,8 @@ export const usersApi = {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       credentials: "include",
-      body: JSON.stringify({ displayName: data.displayName, password: data.password, active: data.active }),
+      body: JSON.stringify({ displayName: data.displayName, active: data.active,
+        expectedAccessRevision: data.expectedAccessRevision }),
     });
     if (!res.ok) {
       throw await readAccessManagementFailure(res, "The profile update could not be confirmed. Reload the user list before trying again.");
@@ -101,12 +106,12 @@ export default function Users() {
   
   // Edit state
   const [editDialogOpen, setEditDialogOpen] = useState(false);
-  const [editingUser, setEditingUser] = useState<SafeUser | null>(null);
+  const [editingUser, setEditingUser] = useState<ManagedUser | null>(null);
   const [editDisplayName, setEditDisplayName] = useState("");
-  const [editPassword, setEditPassword] = useState("");
   const [editActive, setEditActive] = useState(true);
   const [editError, setEditError] = useState("");
   const [assignmentUser, setAssignmentUser] = useState<SafeUser | null>(null);
+  const [editRequiresReload, setEditRequiresReload] = useState(false);
   
   const createMutation = useMutation({
     retry: false,
@@ -133,12 +138,14 @@ export default function Users() {
         setEditDialogOpen(false);
         resetEditForm();
       } catch {
+        setEditRequiresReload(true);
         setEditError("The profile was saved, but access could not be refreshed. Reload before continuing.");
       }
     },
     onError: async (error: Error) => {
+      setEditRequiresReload(true);
       setEditError(error instanceof AccessManagementRequestError && error.lastAccessManager
-        ? error.message : "The profile update could not be confirmed. Review the refreshed user list before trying again.");
+        ? error.message : "The profile update could not be confirmed. Close and reopen this account to review current access before trying again.");
       try {
         await queryClient.invalidateQueries({ queryKey: ["users"] });
         await refreshAccess();
@@ -156,35 +163,33 @@ export default function Users() {
   };
   
   const resetEditForm = () => {
+    setEditRequiresReload(false);
     setEditingUser(null);
     setEditDisplayName("");
-    setEditPassword("");
     setEditActive(true);
     setEditError("");
   };
   
-  const openEditDialog = (user: SafeUser) => {
+  const openEditDialog = (user: ManagedUser) => {
     if (!canEdit || !canView) return;
     setEditingUser(user);
+    setEditRequiresReload(false);
     setEditDisplayName(user.displayName || "");
     setEditActive(user.active === 1);
-    setEditPassword("");
     setEditError("");
     setEditDialogOpen(true);
   };
   
   const handleUpdate = () => {
-    if (!editingUser || !canView || !canEdit || updateMutation.isPending) return;
+    if (!editingUser || !canView || !canEdit || updateMutation.isPending || editRequiresReload) return;
     setEditError("");
     
     const data: UpdateUserInput = {
       displayName: editDisplayName.trim() || editingUser.username,
-      active: editActive ? 1 : 0,
+      expectedAccessRevision: editingUser.accessRevision,
+      ...((editActive ? 1 : 0) !== editingUser.active ? { active: editActive ? 1 : 0 } : {}),
     };
     
-    if (editPassword.trim()) {
-      data.password = editPassword;
-    }
     
     updateMutation.mutate({ id: editingUser.id, data });
   };
@@ -321,6 +326,7 @@ export default function Users() {
                           </span>
                         </TableCell>
                         <TableCell>
+                          <StaffPasswordReset userId={user.id} label={user.username}/>
                           {canEdit && <Button
                             variant="ghost" 
                             size="sm"
@@ -330,8 +336,8 @@ export default function Users() {
                           >
                             <Pencil className="h-4 w-4" />
                           </Button>}
-                          {canAssign && <Button variant="outline" size="sm" disabled={!canReadRoles} title={!canReadRoles ? "Viewing roles is also required" : undefined}
-                            onClick={() => { if (canReadRoles) setAssignmentUser(user); }} data-testid={`button-manage-roles-${user.id}`}><Shield className="h-4 w-4 mr-1" />Manage roles</Button>}
+                          {(canAssign || canReadRoles) && <Button variant="outline" size="sm" disabled={!canReadRoles} title={!canReadRoles ? "Viewing roles is also required" : undefined}
+                            onClick={() => { if (canReadRoles) setAssignmentUser(user); }} data-testid={`button-manage-roles-${user.id}`}><Shield className="h-4 w-4 mr-1" />{canAssign ? "Manage access" : "View access"}</Button>}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -361,6 +367,7 @@ export default function Users() {
                         <Pencil className="h-4 w-4" />
                       </Button>}
                     </div>
+                    <StaffPasswordReset userId={user.id} label={user.username}/>
                     <div className="flex flex-wrap items-center gap-2 mt-3">
                       <Badge variant="outline" title="Compatibility label only; does not grant access">Legacy label: {user.role || "No label"}</Badge>
                       {user.active ? (
@@ -375,8 +382,8 @@ export default function Users() {
                         </Badge>
                       )}
                     </div>
-                    {canAssign && <Button variant="outline" size="sm" className="mt-3" disabled={!canReadRoles} title={!canReadRoles ? "Viewing roles is also required" : undefined}
-                      onClick={() => { if (canReadRoles) setAssignmentUser(user); }} data-testid={`button-manage-roles-mobile-${user.id}`}><Shield className="h-4 w-4 mr-1" />Manage roles</Button>}
+                    {(canAssign || canReadRoles) && <Button variant="outline" size="sm" className="mt-3" disabled={!canReadRoles} title={!canReadRoles ? "Viewing roles is also required" : undefined}
+                      onClick={() => { if (canReadRoles) setAssignmentUser(user); }} data-testid={`button-manage-roles-mobile-${user.id}`}><Shield className="h-4 w-4 mr-1" />{canAssign ? "Manage access" : "View access"}</Button>}
                     <div className="text-xs text-muted-foreground mt-2">
                       {user.lastLoginAt ? (
                         <span className="flex items-center gap-1">
@@ -517,22 +524,7 @@ export default function Users() {
             </div>
             
             
-            <div className="space-y-2">
-              <Label htmlFor="edit-password" className="text-sm">New Password (leave blank to keep current)</Label>
-              <Input
-                id="edit-password"
-                type="password"
-                placeholder="Enter new password"
-                value={editPassword}
-                onChange={(e) => setEditPassword(e.target.value)}
-                className="h-11"
-                autoComplete="off"
-                autoCorrect="off"
-                autoCapitalize="off"
-                spellCheck={false}
-                data-testid="input-edit-password"
-              />
-            </div>
+
             
             <div className="flex items-center justify-between">
               <Label htmlFor="edit-active" className="text-sm">Account Status</Label>
@@ -560,7 +552,7 @@ export default function Users() {
             </Button>
             <Button 
               onClick={handleUpdate} 
-              disabled={!canEdit || updateMutation.isPending}
+              disabled={!canEdit || updateMutation.isPending || editRequiresReload}
               className="min-h-[44px] w-full sm:w-auto"
               data-testid="button-save-user"
             >

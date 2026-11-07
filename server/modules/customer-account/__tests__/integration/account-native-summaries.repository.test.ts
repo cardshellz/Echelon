@@ -25,7 +25,7 @@ integration("native account facts without an OMS dependency", () => {
     // its minimal schema; all rows are fictional and no provider is connected.
     await pool.query(`DROP SCHEMA IF EXISTS oms CASCADE; DROP SCHEMA IF EXISTS channels CASCADE; CREATE SCHEMA channels; CREATE SCHEMA oms;
       CREATE TABLE channels.channels(id int PRIMARY KEY,provider text,status text);
-      CREATE TABLE channels.channel_connections(id int PRIMARY KEY,channel_id int,shop_domain text,expires_at timestamptz);
+      CREATE TABLE channels.channel_connections(id int PRIMARY KEY,channel_id int,shop_domain text,expires_at timestamp without time zone);
       CREATE TABLE oms.oms_orders(id int PRIMARY KEY,channel_id int,external_order_id text,external_customer_id text);`);
     await pool.query(readFileSync("migrations/900000054000020010001_customer_account_native_summaries.sql", "utf8"));
     store = new PostgresAccountNativeSummaries(pool, [fact.shopDomain]);
@@ -37,6 +37,14 @@ integration("native account facts without an OMS dependency", () => {
   });
   afterAll(async () => { await pool?.end(); });
   const observe = (value = fact, start = now, finish = now) => store.retain({ facts: [value], startedAt: start, finishedAt: finish });
+
+  it("seeds and claims only enabled unexpired stores with the legacy connection timestamp type", async () => {
+    await pool.query("UPDATE channels.channel_connections SET expires_at=$1 WHERE id=4", [new Date(now.getTime()+60_000)]);
+    await pool.query(`INSERT INTO channels.channel_connections VALUES(5,2,'other.myshopify.com',NULL),(6,2,'fixture.myshopify.com',$1)`, [new Date(now.getTime()-60_000)]);
+    expect(await store.claim(now, lease)).toMatchObject({connectionId:4,backfillComplete:false,backfillDue:true,deltaDue:true});
+    expect((await pool.query("SELECT connection_id FROM oms.customer_account_native_cursors")).rows).toEqual([{connection_id:4}]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM oms.oms_orders")).rows[0].count).toBe(0);
+  });
 
   it("reads a historical order with no OMS row and exact native current cents", async () => {
     await observe();

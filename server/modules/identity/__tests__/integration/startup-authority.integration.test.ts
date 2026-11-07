@@ -1,3 +1,7 @@
+const credentialFixtureSql=readFileSync(new URL("../../../../../migrations/900000056000020040001_staff_credential_state.sql",import.meta.url),"utf8");
+import { readFileSync } from "node:fs";
+const fixtureCredentialVersion="b656f5e9-9dde-49c0-9c2b-823638ff6b5a";
+import { readAccessConfiguration } from "../../infrastructure/access-configuration.repository";
 import { setTimeout as delay } from "node:timers/promises";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -32,6 +36,7 @@ const fixtureSql = `
     role varchar(20) NOT NULL DEFAULT 'picker', display_name text,
     active integer NOT NULL DEFAULT 1, created_at timestamp NOT NULL DEFAULT now(), last_login_at timestamp
   );
+  ${credentialFixtureSql}
   CREATE TABLE identity.auth_roles (
     id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY, name varchar(100) NOT NULL UNIQUE,
     description text, is_system integer NOT NULL DEFAULT 0,
@@ -102,6 +107,7 @@ integration("startup registers definitions without changing employee authority",
   });
   async function addUser(id = "startup-fixture-user", role = "admin", active = 1) {
     await database.pool.query("INSERT INTO identity.users(id,username,password,role,active) VALUES($1::varchar,$1::text,'unused-synthetic-password',$2,$3)", [id, role, active]);
+    await database.pool.query("INSERT INTO identity.staff_credentials(user_id,credential_version) VALUES($1,$2::uuid)",[id,fixtureCredentialVersion]);
     return id;
   }
   async function grant(roleId = adminRoleId, constraintJson: string | null = null) {
@@ -213,8 +219,8 @@ integration("startup registers definitions without changing employee authority",
     await database.pool.query(`INSERT INTO identity.auth_role_permissions(role_id,permission_id)
       SELECT $1,id FROM identity.auth_permissions
       WHERE (resource='roles' AND action='create') OR (resource='users' AND action='manage_roles')`, [actorRoleId]);
-    const role = await createRoleUseCase("Explicit fixture role", "Synthetic explicit provisioning", [permissionId], { actorId });
-    await assignUserRolesUseCase(userId, [role.id], { actorId });
+    const role = await createRoleUseCase("Explicit fixture role", "Synthetic explicit provisioning", [permissionId], { credentialVersion: fixtureCredentialVersion, actorId });
+    await assignUserRolesUseCase(userId, [role.id], { credentialVersion: fixtureCredentialVersion, actorId, expectedAccessRevision: (await readAccessConfiguration(connection.database!)).revision });
     expect(await getUserPermissions(userId)).toEqual(["roles:edit"]);
     await seedTwiceWithoutAuthorityChange();
   });

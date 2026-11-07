@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, uniqueIndex, uuid, boolean } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
 
@@ -31,6 +31,15 @@ export type InsertUser = z.infer<typeof insertUserSchema>;
 export type User = typeof users.$inferSelect;
 
 export type SafeUser = Omit<User, "password">;
+
+// Private authentication state; never part of SafeUser or a password-derived
+// session fingerprint. The additive migration backfills existing accounts once.
+export const staffCredentials = identitySchema.table("staff_credentials", {
+  userId: varchar("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  credentialVersion: uuid("credential_version").notNull().defaultRandom(),
+  mustChangePassword: boolean("must_change_password").notNull().default(false),
+  lastOperationId: uuid("last_operation_id"),
+});
 
 // User audit trail for tracking username/profile changes
 export const userAudit = identitySchema.table("user_audit", {

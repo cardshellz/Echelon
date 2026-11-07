@@ -145,7 +145,9 @@ describe("procurement sidebar grant boundaries", () => {
     identity.assignedRoles = [];
     identity.systemRoles = ["admin"];
     const html = renderAt("/inventory");
-    expect(hrefs(html)).toEqual([]);
+    const links=hrefs(html);
+    expect(links.filter(href=>href!=="/staff/password")).toEqual([]);
+    expect(links).toContain("/staff/password");
     expect(html).toContain("No assigned roles");
     expect(html).not.toContain("button-settings-menu");
   });
