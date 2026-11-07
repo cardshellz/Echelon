@@ -5,7 +5,31 @@ import { view, policyHead, policyValue, previewRow, stockLinkStatus, target, HAS
 import type { StockLinkSupportedStatus } from "../../shared/types/stock-link";
 import type { ChannelPublicationStatus } from "../../shared/types/inventory-channel-publication-status";
 import type { ChannelDefinitionProgress, ChannelDefinitionReview } from "../../shared/types/inventory-channel-definition";
+import type { ChannelRuleProgress, ChannelRuleReview } from "../../shared/types/inventory-channel-rule";
 import type { InventoryChannelExposureAdminView, InventoryChannelExposurePreview } from "../../shared/types/inventory-channel-exposure";
+import type { SalesStatusChangeResult, SalesStatusEntry, SalesStatusProductView, SalesStatusScope } from "../../shared/types/inventory-sales-status";
+import { salesStatusScopeKey } from "../../shared/inventory/sales-status-resolution";
+
+const SALES = "/api/inventory-planning/admin/sales-status";
+
+/** The sales status of the fixture product (Card Shell, id 10) as the server returns it; nothing set means Selling. */
+function salesStatusView(): SalesStatusProductView {
+  return {
+    runtimeAuthority: "canonical",
+    product: { id: 10, sku: "CARD", name: "Card Shell" },
+    variants: [
+      { id: 101, sku: "CARD-P5", name: "Pack of 5", unitsPerVariant: 5, sellable: true },
+      { id: 102, sku: "CARD-EA", name: "Single", unitsPerVariant: 1, sellable: true },
+      { id: 103, sku: "CARD-CMP", name: "Component", unitsPerVariant: 1, sellable: false },
+    ],
+    channels: [
+      { id: 3, name: "Shopify US", provider: "shopify", status: "active", publishesStock: true },
+      { id: 4, name: "eBay", provider: "ebay", status: "active", publishesStock: true },
+    ],
+    entries: [],
+    otherHolds: [],
+  };
+}
 
 const BASE = "/api/inventory-planning/admin/channel-exposure";
 const AT = "2026-09-20T14:00:00.000Z";
@@ -39,7 +63,10 @@ async function setup(page: Page, options: {
   });
   const state = { data, writes: [] as Array<{ path: string; body: Record<string, unknown>; raw: string }>,
     applyLostResponse: false, applyConflict: false, reviewBlocked: false, progress: null as ChannelDefinitionProgress | null,
+    ruleProgress: null as ChannelRuleProgress | null, ruleApplyLostResponse: false, ruleReviews: [] as Array<Record<string, unknown>>,
     reads: [] as string[], errors: [] as string[], unexpected: [] as string[], loseResponse: false, conflict: false, invalidResponse: false,
+    sales: salesStatusView(), salesRevision: 0, salesReceipts: new Map<string, SalesStatusChangeResult>(),
+    salesLostResponse: false, salesConflict: false,
     enableFailed: false, enableLostResponse: false, globalFailed: false, globalChangeFailed: false, previewFailed: false, stopFailed: false,
     global: { globalEnabled: options.globalEnabled ?? true, sweepIntervalMinutes: 15, revision: "1",
       changedBy: "operator-1", changeReason: "Approved" as string | null, lastSweepAt: null },
@@ -72,8 +99,16 @@ async function setup(page: Page, options: {
       if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator-1", username: "operator", role: "operator" }, permissions: options.permission === "none" ? [] : options.permission === "view" ? ["inventory_planning:view"]
           : ["inventory_planning:view", "inventory_planning:edit", "inventory_planning:activate"], systemRoles: [], assignedRoles: [{ id: 101, name: "operator", isSystem: false }] }) });
       if (path === BASE) return route.fulfill({ json: state.data });
+      if (path === `${SALES}/products/10`) return route.fulfill({ json: state.sales });
+      if (path === `${SALES}/entries` && url.searchParams.get("status") === "stopped") return route.fulfill({ json: {
+        entries: state.sales.entries.filter(entry => entry.status === "stopped").map(entry => ({ entry, productName: "Card Shell",
+          productSku: "CARD", variantSku: state.sales.variants.find(variant => variant.id === entry.scope.productVariantId)?.sku ?? null,
+          channelName: state.sales.channels.find(channel => channel.id === entry.scope.channelId)?.name ?? null })),
+        truncated: false,
+      } });
       if (path === "/api/inventory-planning/admin/channel-definitions/3/progress") return route.fulfill({ json: state.progress });
       if ([4,104].some(id => path === `/api/inventory-planning/admin/channel-definitions/${id}/progress`)) return route.fulfill({ json: null });
+      if (path === "/api/inventory-planning/admin/channel-rule-definitions/progress") return route.fulfill({ json: state.ruleProgress });
       if (path === `${BASE}/preview`) return state.previewFailed
         ? route.fulfill({ status: 503, json: { error: { code: "PREVIEW_UNAVAILABLE", message: "Stock calculation could not be loaded." } } })
         : route.fulfill({ json: {
@@ -166,6 +201,65 @@ async function setup(page: Page, options: {
       state.data.policyHeads[0] = policyHead({ scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: { ...defaults, shareBps: 8000 }, revision: "3" });
       if (state.applyLostResponse) { state.applyLostResponse = false; return route.abort("failed"); }
       return route.fulfill({ json: { ...state.progress.receipt, alreadyApplied } });
+    }
+    if (req.method() === "POST" && path === "/api/inventory-planning/admin/channel-rule-definitions/review") {
+      const body = req.postDataJSON(); state.ruleReviews.push(body);
+      const review: ChannelRuleReview = { selection: body, scopeKey: "channel:3:variant:101", channelId: 3, channelName: "Shopify US", productId: 10,
+        authorityRevision: "9", activationRunId: "44", reviewHash: HASH_A, ready: true, blockers: [], skippedDestinations: [],
+        warnings: ["eBay / BOX-C25: The SKU has no active exact provider inventory identity for this publication target."],
+        change: { selection: { kind: "channel_policy", key: "channel:3:variant:101", definitionId: 2, definitionHash: HASH_B },
+          headRevision: "1", label: "CARD-P5", before: null, after: { eligible: false } },
+        quantities: [{ targetId: 5, channelName: "Shopify US", variantId: 101, sku: "CARD-P5", current: "60", proposed: "0" },
+          { targetId: 6, channelName: "eBay", variantId: 101, sku: "CARD-P5", current: "60", proposed: "60" }] };
+      return route.fulfill({ json: review });
+    }
+    if (req.method() === "POST" && path === "/api/inventory-planning/admin/channel-rule-definitions/apply") {
+      const body = req.postDataJSON(); state.writes.push({ path, body, raw: req.postData()! });
+      const alreadyApplied = state.ruleProgress !== null;
+      const receipt = { channelId: 3, appliedAt: AT, appliedBy: "operator-1", reviewHash: HASH_A, publicationIds: ["31"],
+        changedDefinitions: 1, alreadyApplied: false, scopeKey: "channel:3:variant:101", productId: 10, policyId: 2 };
+      state.ruleProgress = { receipt, publications: [{ id: "31", targetId: 5, variantId: 101, state: "verified", desiredQuantity: "0", errorCode: null }] };
+      // Only this rule becomes active; every other saved change on the channel stays a draft.
+      const index = state.data.policyHeads.findIndex(head => head.scopeKey === "channel:3:variant:101");
+      state.data.policyHeads[index] = policyHead({ scopeKey: "channel:3:variant:101", channelId: 3,
+        scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 }, active: policyValue({ eligible: false }), revision: "2" });
+      if (state.ruleApplyLostResponse) { state.ruleApplyLostResponse = false; return route.abort("failed"); }
+      return route.fulfill({ json: { ...receipt, alreadyApplied } });
+    }
+    if (req.method() === "POST" && path === `${SALES}/changes`) {
+      // A reduced stand-in for the server: applies each change, stamps a new revision, keeps receipts by key.
+      const body = req.postDataJSON() as { changes: Array<{ scope: SalesStatusScope; status: "selling" | "stopped" | "inherit" }>;
+        note: string | null; idempotencyKey: string };
+      state.writes.push({ path, body, raw: req.postData()! });
+      if (state.salesConflict) {
+        state.salesConflict = false;
+        return route.fulfill({ status: 409, json: { error: { code: "SALES_STATUS_CHANGED",
+          message: "Someone changed this sales status first.", retryable: false, details: [] } } });
+      }
+      let result = state.salesReceipts.get(body.idempotencyKey);
+      if (result) result = { ...result, alreadyApplied: true };
+      else {
+        const changes = body.changes.map(change => {
+          const scopeKey = salesStatusScopeKey(change.scope);
+          const index = state.sales.entries.findIndex(entry => entry.scopeKey === scopeKey);
+          const before = index >= 0 ? state.sales.entries[index] : null;
+          let after: { status: "selling" | "stopped"; revision: string } | null = null;
+          if (change.status === "inherit") {
+            if (index >= 0) state.sales.entries.splice(index, 1);
+          } else {
+            const next: SalesStatusEntry = { scopeKey, scope: change.scope, status: change.status, note: body.note,
+              revision: String(++state.salesRevision), updatedBy: "operator-1", updatedAt: AT };
+            if (index >= 0) state.sales.entries[index] = next; else state.sales.entries.push(next);
+            after = { status: next.status, revision: next.revision };
+          }
+          return { scopeKey, scope: change.scope, before: before && { status: before.status, revision: before.revision }, after, changed: true };
+        });
+        result = { changes, affectedProductIds: [10], republished: [{ productId: 10, publicationRows: changes.length, skippedDestinations: [] }],
+          queued: [], alreadyApplied: false, providerWriteAttempted: false };
+        state.salesReceipts.set(body.idempotencyKey, result);
+      }
+      if (state.salesLostResponse) { state.salesLostResponse = false; return route.abort("failed"); }
+      return route.fulfill({ json: result });
     }
     if (req.method() === "PUT" && ["policy-draft", "source-binding-draft", "variant-mapping-draft"].some(suffix => path === `${BASE}/${suffix}`)) {
       const body = req.postDataJSON();
@@ -800,6 +894,187 @@ test("an existing SKU exception can restore complete inheritance as an audited d
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });
 
+async function openPendingSkuRule(page: Page, state: Awaited<ReturnType<typeof setup>>) {
+  state.data.policyHeads.push(policyHead({ scopeKey: "channel:3:variant:101", channelId: 3,
+    scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 }, draft: policyValue({ eligible: false }) }));
+  await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
+  await page.getByRole("button", { name: "Add exception", exact: true }).click();
+  const sheet = page.getByRole("dialog");
+  await sheet.getByRole("combobox").click(); await page.getByRole("option", { name: /Card Shell/ }).click();
+  await sheet.getByRole("radio", { name: "CARD-P5", exact: true }).click();
+  return sheet.getByRole("region", { name: "Apply this rule", exact: true });
+}
+
+test("one saved SKU rule applies on its own, without the channel's other saved changes", async ({ page }, testInfo) => {
+  // The channel default also has a saved draft: it must not be reviewed, applied or block this rule.
+  const state = await setup(page, { pending: true });
+  const panel = await openPendingSkuRule(page, state);
+  await expect(panel.getByRole("list", { name: "Quantity changes" })).toContainText("60 → 0");
+  await expect(panel.getByRole("list", { name: "Quantity changes" })).not.toContainText("60 → 60");
+  await expect(panel).toContainText("1 existing problem not caused by this rule");
+  await page.screenshot({ path: testInfo.outputPath("apply-one-sku-rule.png"), fullPage: true });
+  await panel.getByRole("button", { name: "Apply this rule", exact: true }).click();
+  await expect(panel.getByText("Last applied", { exact: false })).toBeVisible();
+  expect(state.ruleReviews[0]).toEqual({ scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 },
+    draftPolicyId: 2, expectedHeadRevision: "1", expectedDefinitionHash: HASH_B });
+  expect(state.writes).toHaveLength(1);
+  expect(state.writes[0].path).toBe("/api/inventory-planning/admin/channel-rule-definitions/apply");
+  expect(state.writes[0].body).toMatchObject({ draftPolicyId: 2, expectedHeadRevision: "1", expectedDefinitionHash: HASH_B, expectedReviewHash: HASH_A });
+  expect(state.data.policyHeads[0].draftPolicy).not.toBeNull();
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a lost rule-apply response retries the identical command", async ({ page }) => {
+  const state = await setup(page);
+  const panel = await openPendingSkuRule(page, state);
+  state.ruleApplyLostResponse = true;
+  await panel.getByRole("button", { name: "Apply this rule", exact: true }).click();
+  await expect(panel.getByText(/The apply outcome is unknown/)).toBeVisible();
+  await panel.getByRole("button", { name: "Retry same apply", exact: true }).click();
+  await expect(panel.getByText("Last applied", { exact: false })).toBeVisible();
+  expect(state.writes).toHaveLength(2);
+  expect(state.writes[1].raw).toBe(state.writes[0].raw);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("view-only roles see what a saved rule changes but cannot apply it", async ({ page }) => {
+  const state = await setup(page, { permission: "view" });
+  state.data.policyHeads.push(policyHead({ scopeKey: "channel:3:variant:101", channelId: 3,
+    scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 }, draft: policyValue({ eligible: false }) }));
+  await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
+  // No subject labels in this fixture, so the exception is listed by its SKU id.
+  await page.getByRole("button", { name: /SKU #101/ }).click();
+  const panel = page.getByRole("dialog").getByRole("region", { name: "Apply this rule", exact: true });
+  await expect(panel.getByRole("list", { name: "Quantity changes" })).toContainText("60 → 0");
+  await expect(panel).toContainText("Applying a rule needs inventory activation permission.");
+  await expect(panel.getByRole("button", { name: "Apply this rule", exact: true })).toHaveCount(0);
+  expect(state.writes).toEqual([]); expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+
+async function openSalesStatus(page: Page, sku?: string) {
+  await page.getByRole("button", { name: "Add exception", exact: true }).click();
+  const sheet = page.getByRole("dialog");
+  await sheet.getByRole("combobox").click(); await page.getByRole("option", { name: /Card Shell/ }).click();
+  if (sku) await sheet.getByRole("radio", { name: sku, exact: true }).click();
+  return sheet.getByRole("region", { name: "Sales status", exact: true });
+}
+
+test("a SKU stops on every channel in one click, sells on one channel again, then resumes", async ({ page }, testInfo) => {
+  const state = await setup(page);
+  const panel = await openSalesStatus(page, "CARD-P5");
+  await expect(panel.getByText("Selling everywhere", { exact: true })).toBeVisible();
+
+  await panel.getByRole("button", { name: "Stop everywhere", exact: true }).click();
+  await expect(panel.getByText("Stopped everywhere", { exact: true })).toBeVisible();
+  expect(state.writes[0]).toMatchObject({ path: `${SALES}/changes`, body: { note: null, idempotencyKey: expect.stringMatching(/^sales-status:10:/),
+    changes: [{ scope: { channelId: null, productId: 10, productVariantId: 101 }, status: "stopped", expectedRevision: null }] } });
+
+  await panel.getByRole("group", { name: "Sales status on Shopify US", exact: true }).getByRole("radio", { name: "Sell", exact: true }).click();
+  await expect(panel.getByText("Stopped everywhere except Shopify US", { exact: true })).toBeVisible();
+  expect(state.writes[1].body).toMatchObject({ changes: [
+    { scope: { channelId: 3, productId: 10, productVariantId: 101 }, status: "selling", expectedRevision: null }] });
+  await page.screenshot({ path: testInfo.outputPath("sales-status-stopped-except-shopify.png"), fullPage: true });
+
+  // Resume everywhere also drops the item's own channel exception, each pinned to the revision on screen.
+  await panel.getByRole("button", { name: "Resume everywhere", exact: true }).click();
+  await expect(panel.getByText("Selling everywhere", { exact: true })).toBeVisible();
+  expect(state.writes[2].body).toMatchObject({ changes: [
+    { scope: { channelId: null, productId: 10, productVariantId: 101 }, status: "inherit", expectedRevision: "1" },
+    { scope: { channelId: 3, productId: 10, productVariantId: 101 }, status: "inherit", expectedRevision: "2" }] });
+  expect(new Set(state.writes.map(write => write.body.idempotencyKey)).size).toBe(3);
+  expect(state.sales.entries).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("selected SKUs stop on every channel together in one change", async ({ page }) => {
+  const state = await setup(page);
+  const panel = await openSalesStatus(page);
+  const skus = panel.getByRole("list", { name: "SKU sales status", exact: true });
+  // Only sellable SKUs publish stock, so only they are listed.
+  await expect(skus).not.toContainText("CARD-CMP");
+  await skus.getByRole("checkbox", { name: "Select CARD-P5", exact: true }).click();
+  await skus.getByRole("checkbox", { name: "Select CARD-EA", exact: true }).click();
+  await panel.getByRole("button", { name: "Stop 2 selected SKUs everywhere", exact: true }).click();
+  await expect(skus.getByText("Stopped everywhere", { exact: true })).toHaveCount(2);
+  expect(state.writes).toHaveLength(1);
+  expect(state.writes[0].body.changes).toEqual([
+    { scope: { channelId: null, productId: 10, productVariantId: 101 }, status: "stopped", expectedRevision: null },
+    { scope: { channelId: null, productId: 10, productVariantId: 102 }, status: "stopped", expectedRevision: null },
+  ]);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a lost sales status response retries the identical change; a conflict saves nothing and shows the latest status", async ({ page }) => {
+  const state = await setup(page);
+  const panel = await openSalesStatus(page, "CARD-EA");
+  state.salesLostResponse = true;
+  await panel.getByRole("button", { name: "Stop everywhere", exact: true }).click();
+  await expect(panel.getByText(/The result of this change is unknown/)).toBeVisible();
+  await panel.getByRole("button", { name: "Retry same change", exact: true }).click();
+  await expect(panel.getByText(/The result of this change is unknown/)).toHaveCount(0);
+  expect(state.writes).toHaveLength(2);
+  expect(state.writes[1].raw).toBe(state.writes[0].raw);
+  await expect(panel.getByText("Stopped everywhere", { exact: true })).toBeVisible();
+
+  state.salesConflict = true;
+  await panel.getByRole("button", { name: "Resume everywhere", exact: true }).click();
+  await expect(panel.getByText("Someone changed this sales status first. Nothing was saved; the latest status is shown.")).toBeVisible();
+  expect(state.writes).toHaveLength(3);
+  expect(state.sales.entries.map(entry => [entry.scopeKey, entry.status])).toEqual([["all:variant:102", "stopped"]]);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("the stopped list shows every stop across channels and opens its sales status", async ({ page }) => {
+  const state = await setup(page);
+  const card = page.getByRole("list", { name: "Stopped from selling", exact: true });
+  await expect(page.getByText("Nothing is stopped.", { exact: true })).toBeVisible();
+  state.sales.entries.push({ scopeKey: "channel:4:variant:102", scope: { channelId: 4, productId: 10, productVariantId: 102 },
+    status: "stopped", note: "Damaged stock", revision: "7", updatedBy: "admin", updatedAt: AT });
+  await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
+  await expect(card).toContainText("CARD-EA");
+  await expect(card).toContainText("Damaged stock");
+  await expect(card.getByText("Stopped on eBay", { exact: true })).toBeVisible();
+  await card.getByRole("button", { name: "Open sales status for CARD-EA", exact: true }).click();
+  const panel = page.getByRole("dialog").getByRole("region", { name: "Sales status", exact: true });
+  await expect(panel.getByText("Selling everywhere except eBay", { exact: true })).toBeVisible();
+  expect(state.writes).toEqual([]); expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a SKU under a stopped product says why it is stopped and offers no SKU resume", async ({ page }) => {
+  const state = await setup(page);
+  state.sales.entries.push({ scopeKey: "all:product:10", scope: { channelId: null, productId: 10, productVariantId: null },
+    status: "stopped", note: null, revision: "3", updatedBy: "admin", updatedAt: AT });
+  const panel = await openSalesStatus(page, "CARD-P5");
+  await expect(panel.getByText("Stopped everywhere", { exact: true })).toBeVisible();
+  await expect(panel.getByText("Stopped because the product is stopped", { exact: true }).first()).toBeVisible();
+  await expect(panel.getByRole("button", { name: /everywhere/ })).toHaveCount(0);
+  // A SKU's own Selling exception cannot override its stopped product.
+  await panel.getByRole("group", { name: "Sales status on Shopify US", exact: true }).getByRole("radio", { name: "Sell", exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  await expect(panel.getByText("Stopped everywhere", { exact: true })).toBeVisible();
+  expect(state.writes[0].body).toMatchObject({ changes: [
+    { scope: { channelId: 3, productId: 10, productVariantId: 101 }, status: "selling", expectedRevision: null }] });
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("view-only roles see the sales status but cannot change it", async ({ page }) => {
+  const state = await setup(page, { permission: "view" });
+  state.sales.entries.push({ scopeKey: "all:variant:101", scope: { channelId: null, productId: 10, productVariantId: 101 },
+    status: "stopped", note: null, revision: "5", updatedBy: "admin", updatedAt: AT });
+  state.data.policyHeads.push(policyHead({ scopeKey: "channel:3:variant:101", channelId: 3,
+    scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 }, draft: policyValue({ eligible: false }) }));
+  await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
+  await page.getByRole("button", { name: /SKU #101/ }).click();
+  const panel = page.getByRole("dialog").getByRole("region", { name: "Sales status", exact: true });
+  await expect(panel.getByText("Stopped everywhere", { exact: true })).toBeVisible();
+  await expect(panel).toContainText("Changing a sales status needs inventory activation permission.");
+  await expect(panel.getByRole("button", { name: /everywhere/ })).toHaveCount(0);
+  await expect(panel.getByRole("group", { name: "Sales status on eBay", exact: true })
+    .getByRole("radio", { name: "Stop", exact: true })).toBeDisabled();
+  expect(state.writes).toEqual([]); expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
 
 test("account toggle confirms a pause, preserves its state on cancellation or failure, and changes only after success", async ({ page }, info) => {
   const state = await setup(page, { query: "?channel=3&destination=5&tab=rules", viewOverrides: {

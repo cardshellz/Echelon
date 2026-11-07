@@ -61,6 +61,8 @@ import {
 } from "../domain/marketplace-sync-sweep";
 import { describeMarketplaceSyncNoticeBatch } from "../domain/marketplace-sync-words";
 import { DropshipError } from "../domain/errors";
+import { decideLiveListingZeroQuantityUpdate } from "../domain/live-listing-zero-quantity";
+import type { DropshipLiveListingZeroQuantityService } from "./dropship-live-listing-zero-quantity-service";
 import type { DropshipEbayFulfillmentPolicyGuard } from "./dropship-ebay-fulfillment-policy-guard";
 import type { DropshipListingPreviewRow } from "./dropship-listing-preview-service";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
@@ -297,6 +299,11 @@ export interface MarketplaceSyncRestorePort {
 /** B per listing from Card Shellz's own last quantity write (marketplacePublishBaseline). */
 export interface MarketplaceQuantityBaselinePort {
   readPublishBaselines(input: { storeConnectionId: number; listings: readonly MarketplaceSyncListing[] }): Promise<Map<number, QuantityBaseline | null>>;
+  /**
+   * The runtime quantity authority readPublishBaselines decides B under (the same read). Read only when a blocked
+   * restore could send 0 (sendZeroForBlockedRestore). Absent: treated as unknown, so nothing is sent.
+   */
+  readQuantityAuthority?(): Promise<"legacy" | "canonical">;
 }
 
 export interface MarketplaceSyncLogger {
@@ -316,6 +323,12 @@ export interface DropshipMarketplaceSyncServiceDependencies {
   notifications: DropshipNotificationSender;
   clock: DropshipClock;
   logger: MarketplaceSyncLogger;
+  /**
+   * Legacy authority only: a blocked restore (Echelon has 0 to publish, eBay shows more) of a live listing whose
+   * preview is blocked ONLY for want of stock sends 0 through this owner (domain/live-listing-zero-quantity).
+   * Absent: the blocked restore is flagged as before.
+   */
+  zeroQuantity?: Pick<DropshipLiveListingZeroQuantityService, "publishZeroIfLive">;
   /** Tests shorten it; production uses MARKETPLACE_SYNC_TICK_BUDGET_MS. */
   tickBudgetMs?: number;
 }
@@ -332,6 +345,8 @@ export interface MarketplaceSyncTickResult {
   restoreJobs: number;
   /** Push jobs queued for listings that were waiting for stock and can list now (queueWaitingForStock). */
   stockReturnJobs: number;
+  /** Blocked restores that sent 0 to a live listing instead (legacy authority, sendZeroForBlockedRestore). */
+  zeroQuantitySends: number;
   deadLettered: number;
   policyChecks: number;
   noticesSent: number;
@@ -349,6 +364,8 @@ interface StoreTickState {
   /** Listings to put back (or republish) with the store's one restore push this tick, by listing id. */
   restores: Map<number, { productVariantId: number; newestEventId: number }>;
   stopped: boolean;
+  /** The quantity authority, read at most once per store tick and only when a blocked restore could send 0. */
+  quantityAuthority?: "legacy" | "canonical" | null;
 }
 
 /** One push job item's pre-read (plan v4 §5 step 2). */
@@ -554,7 +571,7 @@ export class DropshipMarketplaceSyncService {
     }
     await this.sendNotices(result);
     const quiet = result.reads === 0 && result.quantityDecisions === 0 && result.noticesSent === 0 && result.restoreJobs === 0
-      && result.stockReturnJobs === 0;
+      && result.stockReturnJobs === 0 && result.zeroQuantitySends === 0;
     const line = { outcome: result.budgetExhausted ? "budget_exhausted" : "completed", trigger: "sweep", ...tickLogFields(result),
       elapsed_ms: Math.max(0, this.deps.clock.now().getTime() - startedAt.getTime()) };
     if (quiet) this.deps.logger.debug("dropship.marketplace_sync.tick", line);
@@ -762,7 +779,7 @@ export class DropshipMarketplaceSyncService {
         this.deps.logger.debug("dropship.marketplace_sync.quantity_pending", quantityPlan.line);
         quantity = "waiting";
       } else {
-        this.finishQuantity(state, quantityListing, quantityPlan, write.quantityApplied === true, result);
+        await this.finishQuantity(state, quantityListing, quantityPlan, write.quantityApplied === true, result);
         quantity = "decided";
       }
     }
@@ -779,7 +796,7 @@ export class DropshipMarketplaceSyncService {
       return "waiting";
     }
     const applied = await this.deps.repository.applyQuantityDecision(plan.write);
-    this.finishQuantity(state, listing, plan, applied.applied, result);
+    await this.finishQuantity(state, listing, plan, applied.applied, result);
     return "decided";
   }
 
@@ -824,8 +841,8 @@ export class DropshipMarketplaceSyncService {
   }
 
   /** After a quantity decision's write: the counts, the store's restore push (sweep only), and the log line. */
-  private finishQuantity(state: StoreTickState, listing: MarketplaceSyncListing, plan: Extract<QuantityPlan, { kind: "decide" }>,
-    applied: boolean, result: MarketplaceSyncTickResult): void {
+  private async finishQuantity(state: StoreTickState, listing: MarketplaceSyncListing, plan: Extract<QuantityPlan, { kind: "decide" }>,
+    applied: boolean, result: MarketplaceSyncTickResult): Promise<void> {
     if (plan.dropped) {
       this.deps.logger.debug("dropship.marketplace_sync.quantity_decided", plan.line);
       return;
@@ -845,6 +862,12 @@ export class DropshipMarketplaceSyncService {
     const transition = writes.limitChange !== null || writes.restore !== "none";
     const line = { ...plan.line, outcome: writes.restore === "blocked" ? "restore_blocked" : writes.restore === "queue" ? "restore_queued" : plan.decisionKind,
       before: { vendor_quantity_limit: listing.vendorQuantityLimit }, after: { vendor_quantity_limit: limitAfter } };
+    if (writes.restore === "blocked" && await this.sendZeroForBlockedRestore(state, listing, plan)) {
+      // The 0 is on eBay and settled as Card Shellz's own number; the settlement cleared quantity_restore_blocked.
+      result.zeroQuantitySends += 1;
+      this.deps.logger.info("dropship.marketplace_sync.quantity_decided", { ...line, outcome: "restore_zero_sent" });
+      return;
+    }
     if (writes.restore === "blocked") {
       // Staff only (owner rule 1: no quantity notice): Echelon has none to publish but eBay shows some, and a push cannot send 0.
       this.deps.logger.warn("dropship.marketplace_sync.quantity_decided", { ...line, error_code: "DROPSHIP_LISTING_QUANTITY_RESTORE_BLOCKED",
@@ -854,6 +877,44 @@ export class DropshipMarketplaceSyncService {
     } else {
       this.deps.logger.debug("dropship.marketplace_sync.quantity_decided", line);
     }
+  }
+
+  /**
+   * A blocked restore (Echelon would publish 0, eBay shows more) sends 0 instead, only when ALL hold: this is the
+   * sweep; the zero owner is wired; the store's quantity authority is legacy (under canonical, inventory planning
+   * already publishes 0, and a second writer is not added); the current preview row's only blocker is the quantity
+   * one and the listing is live on a recorded offer (decideLiveListingZeroQuantityUpdate). True when 0 was sent and
+   * settled. A refusal answers false (the caller keeps the blocked path and its issue). A send failure is thrown
+   * to guardListing, which classifies it; the issue the decision wrote stays.
+   */
+  private async sendZeroForBlockedRestore(state: StoreTickState, listing: MarketplaceSyncListing,
+    plan: Extract<QuantityPlan, { kind: "decide" }>): Promise<boolean> {
+    if (state.trigger !== "sweep" || !this.deps.zeroQuantity) return false;
+    const row = state.rows.get(listing.productVariantId);
+    if (!row || row.previewStatus !== "blocked") return false;
+    const facts = { status: listing.status, externalListingId: listing.externalListingId, externalOfferId: listing.externalOfferId };
+    // The pure rule first: an ineligible listing costs no authority read.
+    if (decideLiveListingZeroQuantityUpdate({ blockers: row.blockers, listing: facts }).kind !== "send_zero") return false;
+    if (await this.quantityAuthority(state) !== "legacy") return false;
+    const sku = storedIntentSku(listing.storedIntent) ?? row.sku?.trim() ?? null;
+    if (!sku) return false;
+    try {
+      const outcome = await this.deps.zeroQuantity.publishZeroIfLive({
+        target: { vendorId: listing.vendorId, storeConnectionId: listing.storeConnectionId, listingId: listing.listingId,
+          productVariantId: listing.productVariantId, sku },
+        blockers: row.blockers, listing: facts, actorId: MARKETPLACE_SYNC_ACTOR.actorId, reason: plan.write.idempotencyKey,
+      });
+      return outcome.outcome === "sent";
+    } catch (error) {
+      throw asClassifiableZeroQuantityError(error);
+    }
+  }
+
+  private async quantityAuthority(state: StoreTickState): Promise<"legacy" | "canonical" | null> {
+    if (state.quantityAuthority === undefined) {
+      state.quantityAuthority = this.deps.baselines.readQuantityAuthority ? await this.deps.baselines.readQuantityAuthority() : null;
+    }
+    return state.quantityAuthority;
   }
 
   private addRestore(state: StoreTickState, listing: MarketplaceSyncListing, eventId: number | null): void {
@@ -1181,6 +1242,19 @@ function listingFields(listing: MarketplaceSyncListing, state: Pick<StoreTickSta
     external_offer_id: listing.externalOfferId, ...state.logFields };
 }
 
+/**
+ * The zero send's failures as the sweep's classifier reads them: a DropshipError as is; the inventory admission's
+ * own refusal (QuantityPublicationAdmissionError: a busy scope, a suppressed gate, a cooldown; nothing sent, retried
+ * by its own retryable flag) as a DropshipError with the same code, so a passing refusal is read again next tick
+ * instead of dead-lettering the listing as an unexpected error. Anything else passes unchanged.
+ */
+function asClassifiableZeroQuantityError(error: unknown): unknown {
+  if (error instanceof DropshipError || !(error instanceof Error) || !("code" in error) || typeof error.code !== "string") return error;
+  const retryable = "retryable" in error && error.retryable === true;
+  return new DropshipError(error.code, error.message, { retryable, classification: retryable ? "transient" : "permanent",
+    source: "dropship.listing_quantity.zero_sent" });
+}
+
 /** An eBay HTTP answer (it carries eBay's status), as opposed to a failure of Card Shellz's own. */
 function isMarketplaceAnswer(error: unknown): boolean {
   return error instanceof DropshipError && typeof error.context?.status === "number";
@@ -1188,13 +1262,13 @@ function isMarketplaceAnswer(error: unknown): boolean {
 
 function emptyTickResult(): MarketplaceSyncTickResult {
   return { stores: 0, storesStopped: 0, reads: 0, readFailures: 0, priceAdoptions: 0, policyAdoptions: 0, quantityDecisions: 0,
-    limitChanges: 0, restoreJobs: 0, stockReturnJobs: 0, deadLettered: 0, policyChecks: 0, noticesSent: 0, noticesDeadLettered: 0, budgetExhausted: false };
+    limitChanges: 0, restoreJobs: 0, stockReturnJobs: 0, zeroQuantitySends: 0, deadLettered: 0, policyChecks: 0, noticesSent: 0, noticesDeadLettered: 0, budgetExhausted: false };
 }
 
 function tickLogFields(result: MarketplaceSyncTickResult): Record<string, unknown> {
   return { stores: result.stores, stores_stopped: result.storesStopped, reads: result.reads, read_failures: result.readFailures,
     price_adoptions: result.priceAdoptions, policy_adoptions: result.policyAdoptions, quantity_decisions: result.quantityDecisions,
     limit_changes: result.limitChanges, restore_jobs: result.restoreJobs, stock_return_jobs: result.stockReturnJobs,
-    dead_lettered: result.deadLettered,
+    zero_quantity_sends: result.zeroQuantitySends, dead_lettered: result.deadLettered,
     policy_checks: result.policyChecks, notices_sent: result.noticesSent, notices_dead_lettered: result.noticesDeadLettered };
 }

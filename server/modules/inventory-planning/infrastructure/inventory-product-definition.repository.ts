@@ -203,16 +203,25 @@ export async function captureDefinitionImpact(client: PoolClient, affectedProduc
 
 export async function enqueueReviewedDefinitionPublication(client: PoolClient,
   review: Pick<ProductDefinitionReview, "affectedProductIds" | "channels" | "activationRunId">,
+  options: {
+    triggeredBy?: string;
+    /** An intent's codes are the planner's ATP-projection warnings: the row carries
+     * a conservative fail-closed quantity. A channel rule leaves ATP untouched, so
+     * it publishes that row exactly as the stock-change worker does. Applies that
+     * change ATP itself (models, safety) keep refusing it. */
+    acceptProjectionWarnings?: boolean;
+  } = {},
 ): Promise<string[]> {
   const publisher = createTransactionScopedInventoryPublicationService(client);
   const publicationIds: string[] = [];
   for (const productId of review.affectedProductIds) {
-    const result = await publisher.publishProduct({ productId, dryRun: false, triggeredBy: "routine_definition_apply", blockedTargets: "isolate" },
+    const result = await publisher.publishProduct({ productId, dryRun: false,
+      triggeredBy: options.triggeredBy ?? "routine_definition_apply", blockedTargets: "isolate" },
       async () => { throw new ProductDefinitionError("DEFINITION_LEGACY_FORBIDDEN", "Canonical publication is required."); });
     if (result.authority !== "canonical") throw new ProductDefinitionError("DEFINITION_LEGACY_FORBIDDEN", "Canonical publication is required.");
     for (const row of result.publication.rows) {
       const expected = review.channels.find(item => item.productId === productId && item.targetId === row.publicationTargetId && item.variantId === row.productVariantId);
-      if (!expected || expected.proposed !== row.desiredQuantity || row.blockerCodes.length) {
+      if (!expected || expected.proposed !== row.desiredQuantity || (row.blockerCodes.length > 0 && options.acceptProjectionWarnings !== true)) {
         throw new ProductDefinitionError("DEFINITION_PUBLICATION_CHANGED", "Publication differs from the reviewed quantities. Nothing was applied.");
       }
       const outbox = (await client.query<{ id: string }>(

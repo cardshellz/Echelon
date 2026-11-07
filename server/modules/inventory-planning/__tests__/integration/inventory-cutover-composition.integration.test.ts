@@ -37,6 +37,8 @@ import { SafetyDefinitionService } from "../../application/inventory-safety-defi
 import { PostgresSafetyDefinitionStore } from "../../infrastructure/inventory-safety-definition.repository";
 import { ChannelDefinitionService } from "../../application/inventory-channel-definition.service";
 import { PostgresChannelDefinitionStore } from "../../infrastructure/inventory-channel-definition.repository";
+import { ChannelRuleService } from "../../application/inventory-channel-rule.service";
+import { PostgresChannelRuleStore } from "../../infrastructure/inventory-channel-rule.repository";
 import { activateReviewedWarehouseSourcesInsideTransaction } from "../../../warehouse/infrastructure/warehouse-source-activation.repository";
 import { readInventoryProductBalances } from "../../infrastructure/inventory-product-balances.reader";
 import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
@@ -1044,4 +1046,88 @@ dbDescribe.sequential.each([
     await expect(service.apply({ channelId:36,expectedReviewHash:review.reviewHash,idempotencyKey:"reject-retarget" },"operator"))
       .rejects.toMatchObject({ code:"CHANNEL_DEFINITION_REVIEW_BLOCKED" });
   });
+  it("applies one saved SKU rule alone while the channel's other saved change still blocks the whole-channel review", async () => {
+    const channelService = new ChannelDefinitionService(new PostgresChannelDefinitionStore(database.pool));
+    // The previous test left an identity-redirect draft on channel 36 (owner report 2026-11-07: unrelated drafts blocked one SKU).
+    expect((await channelService.review({ channelId:36 })).ready).toBe(false);
+    const service = new ChannelRuleService(new PostgresChannelRuleStore(database.pool), { now:() => now });
+    const authority = (await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows;
+    const targets = (await database.pool.query("SELECT * FROM inventory.inventory_publication_targets ORDER BY id")).rows;
+    const scope = { scopeType:"variant" as const, channelId:36, productId:20, productVariantId:101 };
+    async function saveDraft(values: { eligible?: boolean; sourceNodeIds?: number[] }, hashDigit: string) {
+      const head = (await database.pool.query<{ active_policy_id:number; version:number }>(`SELECT h.active_policy_id,v.version
+        FROM inventory.channel_exposure_policy_heads h JOIN inventory.channel_exposure_policy_versions v ON v.id=h.active_policy_id
+        WHERE h.scope_key='channel:36:variant:101'`)).rows[0];
+      const draft = (await database.pool.query<{ id:number }>(`INSERT INTO inventory.channel_exposure_policy_versions
+        (scope_key,channel_id,scope_type,product_id,product_variant_id,version,eligible,source_fulfillment_node_ids,definition_hash,change_reason,idempotency_key,request_hash,created_by,supersedes_policy_id)
+        VALUES('channel:36:variant:101',36,'variant',20,101,$1,$2,$3,repeat($4,64),'One SKU rule',$5,repeat($4,64),'operator',$6) RETURNING id`,
+      [head.version+1, values.eligible ?? null, values.sourceNodeIds ?? null, hashDigit, `rule-draft-${hashDigit}`, head.active_policy_id])).rows[0];
+      const revision = (await database.pool.query<{ revision:string }>(`UPDATE inventory.channel_exposure_policy_heads
+        SET draft_policy_id=$1,revision=revision+1 WHERE scope_key='channel:36:variant:101' RETURNING revision::text`, [draft.id])).rows[0].revision;
+      return { scope, draftPolicyId:draft.id, expectedHeadRevision:revision, expectedDefinitionHash:hashDigit.repeat(64) };
+    }
+    // Stop selling this SKU on channel 36 only.
+    const selection = await saveDraft({ eligible:false }, "7");
+    const review = await service.review(selection);
+    expect(review).toMatchObject({ ready:true, blockers:[], productId:20, scopeKey:"channel:36:variant:101",
+      change:{ selection:{ kind:"channel_policy", key:"channel:36:variant:101", definitionId:selection.draftPolicyId } } });
+    const row = review.quantities.find(item => item.targetId===1 && item.variantId===101)!;
+    expect(row.proposed).toBe("0");
+    expect(BigInt(row.current ?? "0")).toBeGreaterThan(BigInt(0));
+    // Configuration is pinned, stock is not: an accepted order claimed between Review and Apply
+    // (through the real claim owner; direct level writes are refused by the quantity ledger) keeps the review valid.
+    await database.pool.query("INSERT INTO oms.oms_orders(id,status) VALUES(6,'pending')");
+    await database.pool.query(`INSERT INTO oms.oms_order_lines(id,order_id,product_variant_id,sku,requires_shipping,quantity,authority_fulfillable_quantity,wms_materialized_quantity,authorization_status)
+      VALUES(16,6,101,'P5',true,1,1,1,'authorized')`);
+    await database.pool.query(`INSERT INTO wms.orders(id,warehouse_id,warehouse_status,on_hold,channel_id,source,external_order_id,oms_fulfillment_order_id,fulfillment_partition_key)
+      VALUES(6,1,'ready',0,36,'shopify','example-6','fo-6','default')`);
+    await database.pool.query(`INSERT INTO wms.order_items(id,order_id,oms_order_line_id,source_item_id,sku,product_id,quantity,picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping)
+      VALUES(16,6,16,'source-16','P5',101,1,0,0,'pending',false,1)`);
+    await new PostgresInventoryAvailabilityClaimRepository(new PostgresCanonicalClaimInventoryRepository(),database.pool,() => now)
+      .claimOrder({ orderId:6,idempotencyKey:"rule-review-demand-6",actor:"operator",reason:"Stock moves between rule review and apply" });
+    expect((await service.review(selection)).reviewHash).toBe(review.reviewHash);
+    const claims = (await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows;
+    const stock = (await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;
+    const command = { ...selection, expectedReviewHash:review.reviewHash, idempotencyKey:"rule-apply" };
+    await expect(service.apply({ ...command, expectedReviewHash:"0".repeat(64) },"operator")).rejects.toMatchObject({ code:"CHANNEL_RULE_REVIEW_STALE" });
+    const outbox = (await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox ORDER BY id")).rows;
+    await database.pool.query(`CREATE FUNCTION inventory.test_rule_receipt_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'synthetic rule receipt failure'; END $$;
+      CREATE TRIGGER test_rule_receipt_failure BEFORE INSERT ON inventory.channel_definition_applications
+      FOR EACH ROW EXECUTE FUNCTION inventory.test_rule_receipt_failure()`);
+    try { await expect(service.apply(command,"operator")).rejects.toThrow("synthetic rule receipt failure"); }
+    finally { await database.pool.query("DROP TRIGGER test_rule_receipt_failure ON inventory.channel_definition_applications; DROP FUNCTION inventory.test_rule_receipt_failure()"); }
+    expect((await database.pool.query("SELECT lifecycle_status FROM inventory.channel_exposure_policy_versions WHERE id=$1",[selection.draftPolicyId])).rows[0].lifecycle_status).toBe("draft");
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox ORDER BY id")).rows).toEqual(outbox);
+    const results = await Promise.all([service.apply(command,"operator"),service.apply(command,"operator")]);
+    expect(results.map(result => result.alreadyApplied).sort()).toEqual([false,true]);
+    expect(results[0]).toMatchObject({ channelId:36, scopeKey:"channel:36:variant:101", productId:20, policyId:selection.draftPolicyId, changedDefinitions:1 });
+    // Only this rule was promoted; the channel's other saved change is untouched and still pending.
+    expect((await database.pool.query("SELECT active_policy_id,draft_policy_id FROM inventory.channel_exposure_policy_heads WHERE scope_key='channel:36:variant:101'")).rows)
+      .toEqual([{ active_policy_id:selection.draftPolicyId, draft_policy_id:null }]);
+    expect((await database.pool.query("SELECT draft_mapping_id IS NOT NULL AS pending FROM inventory.publication_variant_mapping_heads WHERE publication_target_id=1 AND product_variant_id=101")).rows)
+      .toEqual([{ pending:true }]);
+    expect((await service.progress("channel:36:variant:101"))?.publications.find(item => item.targetId===1 && item.variantId===101)).toMatchObject({ desiredQuantity:"0" });
+    // The whole-channel progress reads the same append-only receipt.
+    expect((await channelService.progress({ channelId:36 }))?.receipt.reviewHash).toBe(review.reviewHash);
+    await expect(service.apply(command,"another-user")).rejects.toMatchObject({ code:"CHANNEL_RULE_COMMAND_CONFLICT" });
+    // The applied draft is no longer a draft: its old selection cannot be reviewed again.
+    await expect(service.review(selection)).rejects.toMatchObject({ code:"CHANNEL_RULE_DRAFT_CHANGED" });
+    // A rule that creates its own problem (supply from an uncommissioned warehouse) is blocked and changes nothing.
+    const external = (await database.pool.query<{ id:number }>("SELECT id FROM warehouse.fulfillment_nodes WHERE code='EXTERNAL'")).rows[0].id;
+    const blockedSelection = await saveDraft({ sourceNodeIds:[external] }, "8");
+    // The SKU key does not name the product, so a draft is never reviewed under another product.
+    await expect(service.review({ ...blockedSelection, scope:{ ...scope, productId:30 } })).rejects.toMatchObject({ code:"CHANNEL_RULE_SCOPE_MISMATCH" });
+    const blocked = await service.review(blockedSelection);
+    expect(blocked.ready).toBe(false);
+    expect(blocked.blockers.some(message => message.includes("overriding supply warehouse"))).toBe(true);
+    await expect(service.apply({ ...blockedSelection, expectedReviewHash:blocked.reviewHash, idempotencyKey:"rule-blocked" },"operator"))
+      .rejects.toMatchObject({ code:"CHANNEL_RULE_REVIEW_BLOCKED" });
+    expect((await database.pool.query("SELECT active_policy_id FROM inventory.channel_exposure_policy_heads WHERE scope_key='channel:36:variant:101'")).rows[0].active_policy_id)
+      .toBe(selection.draftPolicyId);
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows).toEqual(stock);
+    expect((await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows).toEqual(claims);
+    expect((await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows).toEqual(authority);
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_targets ORDER BY id")).rows).toEqual(targets);
+  },30000);
 });

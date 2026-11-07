@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000057000020130001_inventory_sales_statuses.sql",
+  "generation": 57,
+  "pr": 2013,
+  "ordinal": 1,
+  "after": [
+    "900000056000020040001_staff_credential_state.sql"
+  ]
+}

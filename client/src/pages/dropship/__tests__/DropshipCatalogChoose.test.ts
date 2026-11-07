@@ -98,12 +98,13 @@ describe("ChooseTable", () => {
     const added = rowOf(markup, 102);
     expect(added).toContain('data-changed="add"');
     expect(added).toContain("bg-violet-50");
-    expect(added).toContain(`<span id="${chooseHowId(102)}" class="text-sm font-medium text-violet-800">Will be added</span>`);
+    expect(added).toContain(`<span id="${chooseHowId(102)}" class="font-medium text-violet-800">Will be added</span>`);
     expect(added).toMatch(/<input type="checkbox"[^>]* checked=""/);
     const picked = rowOf(markup, 101);
     expect(picked).not.toContain("data-changed");
     expect(picked).toMatch(/<input type="checkbox"[^>]* checked=""/);
-    expect(picked).toContain(">Picked by you</span>");
+    // A saved pick only repeats the box: its words are read out, not shown (owner report).
+    expect(picked).toContain(`<span id="${chooseHowId(101)}" class="sr-only">Picked by you</span>`);
     // Its case tier is off, so it cannot list: no number (owner report).
     expect(picked).toContain('<span aria-hidden="true">—</span><span class="sr-only">No quantity shown</span></td>');
     expect(picked).not.toContain("1,433");
@@ -119,7 +120,7 @@ describe("ChooseTable", () => {
     expect(picked.match(/<span class="text-zinc-500" data-stock="out">Out of stock<\/span>/g)).toHaveLength(2);
     expect(picked).not.toMatch(/>0<\/td>/);
     expect(picked).not.toContain("font-mono");
-    expect(picked).toContain(`<span id="${chooseHintId(101)}" class="block text-xs text-zinc-500">Lists when back in stock</span>`);
+    expect(picked).toContain(`<span id="${chooseHintId(101)}" class="block text-zinc-500">Lists when back in stock</span>`);
     expect(picked).toContain(`aria-describedby="${chooseHowId(101)} ${chooseHintId(101)}"`);
     const notPicked = rowOf(markup, 102);
     expect(notPicked.match(/data-stock="out">Out of stock</g)).toHaveLength(2);
@@ -143,7 +144,7 @@ describe("ChooseTable", () => {
     for (const [id, words] of [[103, "Not offered by Card Shellz"], [104, "Turned off for you"]] as const) {
       const html = rowOf(markup, id);
       expect(html).toMatch(new RegExp(`<input type="checkbox"[^>]*aria-describedby="${chooseHowId(id)}"[^>]* disabled=""`));
-      expect(html).toContain(`<span id="${chooseHowId(id)}" class="text-sm text-zinc-700">${words}</span>`);
+      expect(html).toContain(`<span id="${chooseHowId(id)}" class="text-zinc-700">${words}</span>`);
     }
     expect(rowOf(markup, 102)).not.toMatch(/<input[^>]* disabled=""/);
     // Locked (saving, an older filter's rows): every box and the header box are off.
@@ -162,15 +163,16 @@ describe("ChooseTable", () => {
     expect(rowOf(markup, 102)).not.toContain("tier not active");
   });
 
-  it("on a phone keeps the box and the item: the other columns hide, and the item says How and Available", () => {
+  it("has no How column; on a phone the other columns hide and the item line says Available, and How only when it adds to the box", () => {
     const markup = table();
-    for (const column of ["Category", "Available", "How"]) expect(markup).toContain(`<th class="h-10 px-2 text-left align-middle font-medium text-muted-foreground [&amp;:has([role=checkbox])]:pr-0 [&amp;&gt;[role=checkbox]]:translate-y-[2px] hidden sm:table-cell">${column}</th>`);
+    expect(markup).not.toContain(">How</th>");
+    for (const column of ["Category", "Available"]) expect(markup).toContain(`<th class="h-10 px-2 text-left align-middle font-medium text-muted-foreground [&amp;:has([role=checkbox])]:pr-0 [&amp;&gt;[role=checkbox]]:translate-y-[2px] hidden sm:table-cell">${column}</th>`);
     const cells = rowOf(markup, 101).match(/<td class="[^"]*"/g) ?? [];
-    expect(cells).toHaveLength(5);
+    expect(cells).toHaveLength(4);
     expect(cells.slice(2).every((cell) => cell.includes("hidden sm:table-cell"))).toBe(true);
     expect(rowOf(markup, 101)).toContain('data-testid="catalog-choose-how-line-101"');
     expect(rowOf(table({ rows: [serverRow(101, "selected", true)], changes: pending([]) }), 101))
-      .toMatch(/class="mt-1 text-xs text-zinc-600 sm:hidden"[^>]*><span class="">Picked by you<\/span><span aria-hidden="true"> · <\/span><span>Available 1,433<\/span>/);
+      .toMatch(/class="mt-1 text-xs text-zinc-600 sm:mt-0"[^>]*><span id="catalog-choose-how-101" class="sr-only">Picked by you<\/span><span class="sm:hidden"><span>Available 1,433<\/span><\/span>/);
     expect(rowOf(markup, 101)).toContain("Pack of 50 · ENV-101");
   });
 });
@@ -260,7 +262,7 @@ describe("verify round (step 1 stage 1), on one-time picks", () => {
     const picked = rowOf(markup, 107);
     expect(picked).toMatch(new RegExp(`<input type="checkbox"[^>]*aria-describedby="${chooseHowId(107)} ${chooseHintId(107)}"[^>]*checked=""`));
     expect(picked).not.toMatch(/<input type="checkbox"[^>]* disabled=""/);
-    expect(picked).toContain(`<span id="${chooseHintId(107)}" class="block text-xs text-zinc-500">${CHOOSE_WORDS.turnedOffPickHint.replace(/'/g, "&#x27;")}</span>`);
+    expect(picked).toContain(`<span id="${chooseHintId(107)}" class="block text-zinc-500">${CHOOSE_WORDS.turnedOffPickHint.replace(/'/g, "&#x27;")}</span>`);
     expect(picked).toContain("Turned off for you");
     // Turned off with no pick: the box stays off and unchecked, with no hint.
     const older = rowOf(markup, 104);

@@ -37,6 +37,17 @@ import { reloadPageWithoutLeavePrompt } from "./UnsavedChangesGuard";
 /** The box's cell: the whole cell is its label, so the target is 44 px on a phone (36 px from `sm`). */
 const BOX_LABEL_CLASS = "flex min-h-11 min-w-11 cursor-pointer items-center justify-center sm:min-h-9 sm:min-w-9";
 
+/**
+ * Whether a row's How words tell the vendor more than its box does (owner
+ * report: "of course it was picked by the vendor"). A saved pick or a saved
+ * no-pick only repeats the box, so those words are read out (the box's
+ * description) but not shown; an unsaved change, a pick turned off for the
+ * vendor and a size Card Shellz no longer offers are shown under the item.
+ */
+export function chooseHowShown(view: Pick<ChooseRowView, "how">): boolean {
+  return view.how !== "picked" && view.how !== "notSelected";
+}
+
 /** The id of a row's How words, which its box names as its description. */
 export function chooseHowId(productVariantId: number): string {
   return `catalog-choose-how-${productVariantId}`;
@@ -91,7 +102,6 @@ export function ChooseTable({ rows, changes, locked, dimmed, onToggle, onToggleS
             <TableHead>{CHOOSE_WORDS.columns.item}</TableHead>
             <TableHead className="hidden sm:table-cell">{CHOOSE_WORDS.columns.category}</TableHead>
             <TableHead className="hidden sm:table-cell">{CHOOSE_WORDS.columns.available}</TableHead>
-            <TableHead className="hidden sm:table-cell">{CHOOSE_WORDS.columns.how}</TableHead>
           </TableRow>
         </TableHeader>
         <TableBody>
@@ -115,6 +125,7 @@ function ChooseTableRow({ row, view, locked, onToggle }: {
   const hintId = chooseHintId(row.productVariantId);
   const howText = CHOOSE_WORDS.how[view.how];
   const hint = chooseHint(view);
+  const howShown = chooseHowShown(view);
   return (
     <TableRow
       data-testid={`catalog-choose-row-${row.productVariantId}`}
@@ -128,7 +139,7 @@ function ChooseTableRow({ row, view, locked, onToggle }: {
             label={CHOOSE_WORDS.rowCheckbox(row.productName, row.variantName)}
             checked={view.checked}
             disabled={locked || !view.changeable}
-            // The How words and the hint, on every screen (the cell holding them is hidden on a phone; a description reads it anyway).
+            // The How words and the hint, on every screen (shown or not, a description reads them).
             describedBy={hint ? `${howId} ${hintId}` : howId}
             onChange={() => onToggle(row)}
           />
@@ -147,21 +158,25 @@ function ChooseTableRow({ row, view, locked, onToggle }: {
             {row.listingTier.tier === "case" ? "Case tier not active" : "Pack tier not active"}
           </Badge>
         )}
-        {/* A phone has no How or Available column: the item says both, and the hint (review DUX9). */}
-        <div className="mt-1 text-xs text-zinc-600 sm:hidden" data-testid={`catalog-choose-how-line-${row.productVariantId}`}>
-          <span className={cn(view.changed && "font-medium text-violet-800")}>{howText}</span>
-          <span aria-hidden="true"> · </span>
-          <span>{CHOOSE_WORDS.columns.available} <ChooseQuantity view={view} /></span>
-          {hint && <span className="block text-zinc-500">{hint}</span>}
+        {/*
+          The How words, under the item when they say more than the box (chooseHowShown), and the hint. A phone has no
+          Available column, so the line also says it there (review DUX9).
+        */}
+        <div
+          className={cn("mt-1 text-xs text-zinc-600", !howShown && !hint && "sm:mt-0")}
+          data-testid={`catalog-choose-how-line-${row.productVariantId}`}
+        >
+          <span id={howId} className={cn(howShown ? (view.changed ? "font-medium text-violet-800" : "text-zinc-700") : "sr-only")}>{howText}</span>
+          <span className="sm:hidden">
+            {howShown && <span aria-hidden="true"> · </span>}
+            <span>{CHOOSE_WORDS.columns.available} <ChooseQuantity view={view} /></span>
+          </span>
+          {hint && <span id={hintId} className="block text-zinc-500">{hint}</span>}
         </div>
       </TableCell>
       <TableCell className="hidden sm:table-cell">{row.category ? formatStatus(row.category) : CHOOSE_WORDS.uncategorized}</TableCell>
       <TableCell className={cn("hidden sm:table-cell", !view.outOfStock && "font-mono")}>
         <ChooseQuantity view={view} />
-      </TableCell>
-      <TableCell className="hidden sm:table-cell">
-        <span id={howId} className={cn("text-sm", view.changed ? "font-medium text-violet-800" : "text-zinc-700")}>{howText}</span>
-        {hint && <span id={hintId} className="block text-xs text-zinc-500">{hint}</span>}
       </TableCell>
     </TableRow>
   );

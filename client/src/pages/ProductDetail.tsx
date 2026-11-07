@@ -73,6 +73,7 @@ import {
 } from "@/features/supplier-catalog/VendorCatalogQuoteEditor";
 import { ProductConversionCard, ProductConversionSummary } from "@/features/inventory-builds/ProductConversionCard";
 import { ProductSafetySummary } from "@/features/inventory-builds/ProductSafetySummary";
+import { ProductSalesStatusCard } from "@/features/channel-inventory/components/ProductSalesStatusCard";
 import { transformationQueryKey } from "@/features/inventory-builds/package-conversion-draft";
 import { createProductVariant } from "@/features/catalog/create-product-variant";
 import { buildVariantPackagePatch } from "@/lib/variant-package";
@@ -3324,18 +3325,15 @@ export default function ProductDetail() {
                 </div>
               </div>
 
-              {inventoryRuntimeAuthorityQuery.data?.authority !== "legacy" ? (
+              {inventoryRuntimeAuthorityQuery.data?.authority === "canonical" ? (
+                // The retired legacy allocation's place: the all-channels sales status.
+                <ProductSalesStatusCard productId={product!.productId} />
+              ) : inventoryRuntimeAuthorityQuery.data?.authority !== "legacy" ? (
                 <Card data-testid="product-legacy-channel-allocation-unavailable">
                   <CardHeader className="p-3 md:p-6">
-                    <CardTitle className="text-base md:text-lg">
-                      {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
-                        ? "Legacy product allocation is retired"
-                        : "Product allocation controls are unavailable"}
-                    </CardTitle>
+                    <CardTitle className="text-base md:text-lg">Product allocation controls are unavailable</CardTitle>
                     <CardDescription className="text-xs md:text-sm">
-                      {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
-                        ? "Per-SKU channel eligibility, holdback, share, and publish limits now live in Channel Inventory."
-                        : "The live inventory authority could not be confirmed, so legacy allocation reads and writes remain disabled."}
+                      The live inventory authority could not be confirmed, so legacy allocation reads and writes remain disabled.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="p-3 md:p-6 pt-0 md:pt-0">

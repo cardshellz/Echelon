@@ -26,15 +26,18 @@ import {
   type View,
 } from "../model";
 import { ExceptionSheet, type ExceptionSubject } from "./ExceptionSheet";
+import { StoppedSalesCard } from "./StoppedSalesCard";
 import { PolicyFields } from "./PolicyFields";
 import { PolicyQuantityExample } from "./PolicyQuantityExample";
 import { ActivePill, Callout, EvidenceNote, NoteField, PendingPill, SectionCard, StatePill } from "./primitives";
 
 /** Channel default plus the product/SKU exceptions that override it. */
-export function SellingRulesTab({ view, channel, canEdit, focusProductId, onFocusProduct, onReload, reloading }: {
+export function SellingRulesTab({ view, channel, canEdit, canActivate, focusProductId, onFocusProduct, onReload, reloading }: {
   view: View;
   channel: Channel;
   canEdit: boolean;
+  /** Applying one saved product or SKU rule needs inventory activation permission. */
+  canActivate: boolean;
   focusProductId: number | null;
   onFocusProduct(productId: number): void;
   onReload(): void;
@@ -51,6 +54,10 @@ export function SellingRulesTab({ view, channel, canEdit, focusProductId, onFocu
         canEdit={canEdit}
         onOpen={(subject) => navigate(() => setSheet({ open: true, subject }))}
       />
+      {/* Sales status is all-channels and takes effect only under canonical authority. */}
+      {view.runtimeAuthority === "canonical" && (
+        <StoppedSalesCard onOpen={(subject) => navigate(() => setSheet({ open: true, subject }))} />
+      )}
       {sheet.open && (
         <ExceptionSheet
           open={sheet.open}
@@ -59,6 +66,7 @@ export function SellingRulesTab({ view, channel, canEdit, focusProductId, onFocu
           channel={channel}
           subject={sheet.subject}
           canEdit={canEdit}
+          canActivate={canActivate}
           focusProductId={focusProductId}
           onFocusProduct={onFocusProduct}
           onReload={onReload}
