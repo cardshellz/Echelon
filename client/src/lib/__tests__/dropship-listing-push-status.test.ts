@@ -143,6 +143,17 @@ describe("a size published while out of stock (owner report)", () => {
     const shopify = describeListingPushOutcome(job({ platform: "shopify", status: "failed", items: [waiting] }), "my shop");
     expect(shopify.items[0]!.line).not.toContain("Waiting for stock");
   });
+
+  it("a live listing whose push was skipped because stock ran out stays live at 0, not a failure", () => {
+    const skipped = item({ itemId: 3, status: "cancelled", errorCode: "DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK", errorMessage: "out of stock" });
+    const outcome = describeListingPushOutcome(job({ items: [skipped] }), "marz_cards");
+    expect(outcome.items[0]).toMatchObject({ state: "live",
+      line: "Out of stock right now. Your listing stays up at quantity 0 and updates by itself when stock comes back.", nextStep: null });
+    expect(outcome.items[0]!.line).not.toContain("Could not list");
+    // Any other cancelled item is still a failure.
+    const stopped = describeListingPushOutcome(job({ status: "failed", items: [item({ status: "cancelled", errorCode: "DROPSHIP_PUSH_STOPPED" })] }), "marz_cards");
+    expect(stopped.items[0]!.state).toBe("failed");
+  });
 });
 
 describe("stock gate refusals", () => {

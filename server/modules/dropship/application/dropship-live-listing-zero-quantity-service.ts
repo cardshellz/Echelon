@@ -32,13 +32,15 @@ export interface DropshipLiveListingZeroQuantitySender {
  * refuses (throws, retryable) when the listing stopped being live on the same
  * offer while the 0 was being sent.
  */
+export interface DropshipLiveListingZeroQuantitySettlement extends DropshipLiveListingZeroQuantityTarget {
+  externalOfferId: string;
+  actorId: string;
+  reason: string;
+  now: Date;
+}
+
 export interface DropshipLiveListingZeroQuantityRepository {
-  settleZeroQuantity(input: DropshipLiveListingZeroQuantityTarget & {
-    externalOfferId: string;
-    actorId: string;
-    reason: string;
-    now: Date;
-  }): Promise<{ pushedQuantityBefore: number; lastPushedAtBefore: Date | null }>;
+  settleZeroQuantity(input: DropshipLiveListingZeroQuantitySettlement): Promise<{ pushedQuantityBefore: number; lastPushedAtBefore: Date | null }>;
 }
 
 export interface DropshipLiveListingZeroQuantityServiceDependencies {
@@ -68,11 +70,17 @@ export class DropshipLiveListingZeroQuantityService {
     actorId: string;
     /** Why the update ran (e.g. the catch-up's job key), kept on the audit row. */
     reason: string;
+    /**
+     * A caller that must settle its own record with the listing in ONE transaction (the push worker: its item and
+     * the listing) settles here instead of the repository's own transaction. Same writes, same conflict refusal.
+     */
+    settle?: DropshipLiveListingZeroQuantityRepository["settleZeroQuantity"];
   }): Promise<DropshipLiveListingZeroQuantityOutcome> {
     const decision = decideLiveListingZeroQuantityUpdate({ blockers: input.blockers, listing: input.listing });
     if (decision.kind === "refuse") return { outcome: "refused", reason: decision.reason };
     const sent = await this.deps.sender.sendZeroQuantity({ ...input.target, externalOfferId: decision.externalOfferId });
-    const before = await this.deps.repository.settleZeroQuantity({
+    const settle = input.settle ?? ((settlement: DropshipLiveListingZeroQuantitySettlement) => this.deps.repository.settleZeroQuantity(settlement));
+    const before = await settle({
       ...input.target,
       externalOfferId: decision.externalOfferId,
       actorId: input.actorId,
