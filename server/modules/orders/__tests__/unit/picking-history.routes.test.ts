@@ -8,7 +8,13 @@ import { resolve } from "node:path";
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../routes/middleware", () => ({
   requireAuth: (req: Request, res: Response, next: NextFunction) => {
-    if (req.headers.authorization !== "test-session") return res.status(401).json({ error: "Unauthorized" });
+    if (!req.headers.authorization) return res.status(401).json({ error: "Unauthorized" });
+    next();
+  },
+  requirePermission: (resource: string, action: string) => (req: Request, res: Response, next: NextFunction) => {
+    if (req.headers.authorization !== "test-session") {
+      return res.status(403).json({ error: `Permission denied: ${resource}:${action}` });
+    }
     next();
   },
 }));
@@ -38,6 +44,12 @@ describe("bounded all-date picking history HTTP contract", () => {
 
   it("requires authentication before reading any history", async () => {
     expect((await fetch(url)).status).toBe(401);
+    expect(page).not.toHaveBeenCalled();
+  });
+  it("requires picking:view permission before reading any history", async () => {
+    const response = await fetch(url, { headers: { authorization: "session-without-picking-view" } });
+    expect(response.status).toBe(403);
+    expect(await response.json()).toEqual({ error: "Permission denied: picking:view" });
     expect(page).not.toHaveBeenCalled();
   });
   it("defaults to a 50-order page without any date cutoff", async () => {

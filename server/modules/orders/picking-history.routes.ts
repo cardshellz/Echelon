@@ -1,6 +1,6 @@
 import type { Express } from "express";
 import { db } from "../../db";
-import { requireAuth } from "../../routes/middleware";
+import { requireAuth, requirePermission } from "../../routes/middleware";
 import { limitPageRead } from "../../platform/http/page-read-limit";
 import { PickingHistoryRepository, pickingHistoryQuerySchema } from "./picking-history.repository";
 
@@ -8,7 +8,7 @@ export function registerPickingHistoryRoutes(
   app: Express,
   repository: Pick<PickingHistoryRepository, "page"> = new PickingHistoryRepository(db),
 ) {
-  app.get("/api/picking/history", requireAuth, limitPageRead(async (req, res) => {
+  app.get("/api/picking/history", requireAuth, requirePermission("picking", "view"), limitPageRead(async (req, res) => {
     const parsed = pickingHistoryQuerySchema.safeParse(req.query);
     if (!parsed.success) return res.status(400).json({ code: "INVALID_PICKING_HISTORY_QUERY", error: "Invalid picking history filters or page size" });
     res.set("Cache-Control", "private, no-store");

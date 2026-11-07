@@ -1,8 +1,9 @@
-# Configurable staff access: first increment and credential reset
+# Configurable staff access: first increment, credential reset and WMS picking
 
 This extends [explicit employee access](identity-explicit-access-rollout.md). It is
-the shared access foundation and a shipment/order-context slice, not a completed
-authorization migration across Echelon. Roles remain explicit configurable bundles.
+the shared access foundation, the shipment/order-context slice and the WMS picking
+access slice (`B1`), not yet a completed authorization migration across all legacy
+Echelon surfaces. Roles remain explicit configurable bundles.
 New definitions never automatically grant access or restore revoked memberships.
 
 ## Behavior and ownership
@@ -13,10 +14,16 @@ New definitions never automatically grant access or restore revoked memberships.
 - Shipping owns shipment reads. Separate capabilities control shipment visibility,
   carrier costs and a bounded linked order summary. Context does not grant Orders
   management, customer address/email, pricing or adjacent WMS access.
-  Picking and non-live Packing retain their existing assigned-membership admission;
-  that separate legacy policy is not migrated by this shipment slice. The next WMS
-  access increment must change page/server admission and navigation together. A role
-  with shipment capabilities is not yet isolated from all legacy WMS functions.
+- WMS Picking (`B1`) migrates sidebar navigation, route admission, `PickingPage`
+  tabs/controls and `/api/picking/*` + picking order endpoints off bare assigned-role
+  membership and `requireAssignedSystemRole("admin", "lead")` onto explicit `/roles`
+  capabilities: `picking:view`, `orders:claim`, `picking:perform`, `picking:complete`,
+  `picking:release_any`, `orders:hold`, `orders:priority`, `orders:resolve_exception`,
+  `picking:view_logs`, `picking:view_metrics` and `picking:manage_settings` (with
+  `picking:view` required as a prerequisite for `picking:view_logs`,
+  `picking:view_metrics` and `picking:manage_settings`). Non-live `/packing` is
+  removed from sidebar navigation and denied at the router boundary until Packing
+  goes live in Phase 10 (`B5`).
 - Profile edits reject password fields. Credential reset requires explicit ordinary
   or privileged reset authority, freshly verified actor credentials, a reviewed access
   revision and expected target generation. Protected targets include control-plane
@@ -45,9 +52,12 @@ New definitions never automatically grant access or restore revoked memberships.
    backfill missing state. Verify full-schema upgrade and actual
    nonowner runtime-role permissions; reduced fixtures and owner test roles are not that
    acceptance. Existing audit ownership and startup-parity gaps remain separate.
-2. Review actual existing assignments, explicit shipment/reset grants and a usable
+2. Review actual existing assignments, explicit shipment/reset/picking grants and a usable
    administrator/recovery path. Do not infer any grants from profile labels or copy
-   existing `users:edit` into reset authority. The application does not create a default
+   existing `users:edit` into reset authority. In `/roles`, review and check
+   `picking:view_logs`, `picking:view_metrics` and `picking:manage_settings` for any
+   role that should retain access to `/picking/logs`, `/picking/metrics`,
+   `/picking/settings` or order combining. The application does not create a default
    administrator or credential. Exact-account production recovery needs explicit approval.
 3. Existing staff sessions lack generation metadata and must reauthenticate. Verify a
    real nonproduction browser with custom/multiple/empty roles and both forced and voluntary
@@ -67,7 +77,8 @@ New definitions never automatically grant access or restore revoked memberships.
 
 Local proof covers current actor denial, profile escalation refusal, protected targets,
 stale/concurrent reset, audit rollback, login/reset races, delayed old-session saves,
-real HTTP/WebSocket/SSE revocation, independent session regeneration and schema backfill
+real HTTP/WebSocket/SSE revocation, independent session regeneration, WMS picking
+route/page/sidebar capability boundaries and schema backfill
 on synthetic disposable data. Desktop/mobile browser journeys exercise the real frontend
 with mocked APIs; they do not replace a connected runtime acceptance.
 

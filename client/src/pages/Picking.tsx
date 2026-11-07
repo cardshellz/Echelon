@@ -698,10 +698,12 @@ export default function Picking() {
 
 function PickingWorkspace() {
   // Supervisor affordances use verified assignments, never the legacy label.
-  const { user, permissions, hasPermission, hasSystemRole } = useAuth();
-  const isAdminOrLead = hasSystemRole("admin") || hasSystemRole("lead");
+  const { user, permissions, hasPermission } = useAuth();
+  const canResolveExceptions = hasPermission("orders", "resolve_exception");
+  const canManagePickingSettings = hasPermission("picking", "manage_settings");
   const canViewReplenTasks = hasPermission("inventory", "view");
-  const canChangePriority = isAdminOrLead;
+  const canChangePriority = hasPermission("orders", "priority");
+  const isAdminOrLead = canChangePriority || canResolveExceptions || canManagePickingSettings;
   const canManageHolds = hasPermission("orders", "hold");
   const { toast } = useToast();
   
@@ -754,7 +756,7 @@ function PickingWorkspace() {
   const { data: exceptionOrders = [], refetch: refetchExceptions } = useQuery({
     queryKey: ["exception-orders"],
     queryFn: fetchExceptions,
-    enabled: !!isAdminOrLead, // Only fetch for admin/lead users
+    enabled: canResolveExceptions, // Only fetch when exception resolution is granted
     refetchOnWindowFocus: true,
   });
 
@@ -3229,7 +3231,7 @@ function PickingWorkspace() {
               </Button>
               
               {/* Exceptions - Admin/Lead Only */}
-              {isAdminOrLead && (
+              {canResolveExceptions && (
                 <Button
                   variant="outline"
                   size="icon"
@@ -3359,7 +3361,7 @@ function PickingWorkspace() {
         </div>
 
         {/* Queue Routing Override (Admins/Leads) */}
-        {isAdminOrLead && activeFilter !== "done" && (
+        {canManagePickingSettings && activeFilter !== "done" && (
           <div className="px-3 py-2 bg-amber-50/50 border-b flex justify-between items-center transition-all duration-300">
             <div className="text-xs text-amber-800">
               <span className="font-semibold block sm:inline">Warehouse Routing Mode:</span> 
@@ -3965,7 +3967,7 @@ function PickingWorkspace() {
   }
   
   // EXCEPTIONS VIEW - Admin/Lead only
-  if (view === "exceptions" && isAdminOrLead) {
+  if (view === "exceptions" && canResolveExceptions) {
     // Transform API orders to display format
     const exceptionItems = exceptionOrders.map((order): SingleOrder => ({
       id: String(order.id),
