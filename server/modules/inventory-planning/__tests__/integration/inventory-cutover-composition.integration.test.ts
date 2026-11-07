@@ -1051,7 +1051,6 @@ dbDescribe.sequential.each([
     // The previous test left an identity-redirect draft on channel 36 (owner report 2026-11-07: unrelated drafts blocked one SKU).
     expect((await channelService.review({ channelId:36 })).ready).toBe(false);
     const service = new ChannelRuleService(new PostgresChannelRuleStore(database.pool), { now:() => now });
-    const claims = (await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows;
     const authority = (await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows;
     const targets = (await database.pool.query("SELECT * FROM inventory.inventory_publication_targets ORDER BY id")).rows;
     const scope = { scopeType:"variant" as const, channelId:36, productId:20, productVariantId:101 };
@@ -1075,10 +1074,19 @@ dbDescribe.sequential.each([
     const row = review.quantities.find(item => item.targetId===1 && item.variantId===101)!;
     expect(row.proposed).toBe("0");
     expect(BigInt(row.current ?? "0")).toBeGreaterThan(BigInt(0));
-    // Configuration is pinned, stock is not: a stock movement between Review and Apply keeps the review valid.
-    await database.pool.query("UPDATE inventory.inventory_levels SET variant_qty=variant_qty+1 WHERE id=10; UPDATE inventory.inventory_lots SET qty_on_hand=qty_on_hand+1 WHERE id=4");
-    try { expect((await service.review(selection)).reviewHash).toBe(review.reviewHash); }
-    finally { await database.pool.query("UPDATE inventory.inventory_levels SET variant_qty=variant_qty-1 WHERE id=10; UPDATE inventory.inventory_lots SET qty_on_hand=qty_on_hand-1 WHERE id=4"); }
+    // Configuration is pinned, stock is not: an accepted order claimed between Review and Apply
+    // (through the real claim owner; direct level writes are refused by the quantity ledger) keeps the review valid.
+    await database.pool.query("INSERT INTO oms.oms_orders(id,status) VALUES(6,'pending')");
+    await database.pool.query(`INSERT INTO oms.oms_order_lines(id,order_id,product_variant_id,sku,requires_shipping,quantity,authority_fulfillable_quantity,wms_materialized_quantity,authorization_status)
+      VALUES(16,6,101,'P5',true,1,1,1,'authorized')`);
+    await database.pool.query(`INSERT INTO wms.orders(id,warehouse_id,warehouse_status,on_hold,channel_id,source,external_order_id,oms_fulfillment_order_id,fulfillment_partition_key)
+      VALUES(6,1,'ready',0,36,'shopify','example-6','fo-6','default')`);
+    await database.pool.query(`INSERT INTO wms.order_items(id,order_id,oms_order_line_id,source_item_id,sku,product_id,quantity,picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping)
+      VALUES(16,6,16,'source-16','P5',101,1,0,0,'pending',false,1)`);
+    await new PostgresInventoryAvailabilityClaimRepository(new PostgresCanonicalClaimInventoryRepository(),database.pool,() => now)
+      .claimOrder({ orderId:6,idempotencyKey:"rule-review-demand-6",actor:"operator",reason:"Stock moves between rule review and apply" });
+    expect((await service.review(selection)).reviewHash).toBe(review.reviewHash);
+    const claims = (await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows;
     const stock = (await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;
     const command = { ...selection, expectedReviewHash:review.reviewHash, idempotencyKey:"rule-apply" };
     await expect(service.apply({ ...command, expectedReviewHash:"0".repeat(64) },"operator")).rejects.toMatchObject({ code:"CHANNEL_RULE_REVIEW_STALE" });
