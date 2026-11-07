@@ -23,7 +23,7 @@ describe("catalog step 1 words", () => {
     expect(CHOOSE_WORDS.categoryOption("trading_card_sleeves", 12)).toBe("Trading Card Sleeves (12)");
     expect(CHOOSE_WORDS.uncategorized).toBe("Uncategorized");
     expect(CHOOSE_WORDS.tableCaption).toBe("Items Card Shellz offers you. Check the ones you want to sell.");
-    expect(CHOOSE_WORDS.columns).toEqual({ item: "Item", category: "Category", available: "Available", how: "How" });
+    expect(CHOOSE_WORDS.columns).toEqual({ item: "Item", category: "Category", available: "Available" });
   });
 
   it("W2 names every row's box, with a fallback for blank names", () => {
