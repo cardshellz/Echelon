@@ -31,10 +31,12 @@ import { PolicyQuantityExample } from "./PolicyQuantityExample";
 import { ActivePill, Callout, EvidenceNote, NoteField, PendingPill, SectionCard, StatePill } from "./primitives";
 
 /** Channel default plus the product/SKU exceptions that override it. */
-export function SellingRulesTab({ view, channel, canEdit, focusProductId, onFocusProduct, onReload, reloading }: {
+export function SellingRulesTab({ view, channel, canEdit, canActivate, focusProductId, onFocusProduct, onReload, reloading }: {
   view: View;
   channel: Channel;
   canEdit: boolean;
+  /** Applying one saved product or SKU rule needs inventory activation permission. */
+  canActivate: boolean;
   focusProductId: number | null;
   onFocusProduct(productId: number): void;
   onReload(): void;
@@ -59,6 +61,7 @@ export function SellingRulesTab({ view, channel, canEdit, focusProductId, onFocu
           channel={channel}
           subject={sheet.subject}
           canEdit={canEdit}
+          canActivate={canActivate}
           focusProductId={focusProductId}
           onFocusProduct={onFocusProduct}
           onReload={onReload}
