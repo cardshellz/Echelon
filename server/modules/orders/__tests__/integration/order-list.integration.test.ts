@@ -75,7 +75,13 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
         user: { id: userId, username: "Fixture operator", active: 1, role: "picker", displayName: null,
           createdAt: new Date("2026-10-05T00:00:00Z"), lastLoginAt: null },
         roles: [{ id: 1, name: "Picker", isSystem: true }], permissions: ["picking:view"],
+      } : userId === "fixture-without-picking" ? {
+        user: { id: userId, username: "No picking grant", active: 1, role: "admin", displayName: null,
+          createdAt: new Date("2026-10-05T00:00:00Z"), lastLoginAt: null },
+        roles: [{ id: 2, name: "Custom role", isSystem: false }], permissions: ["shipments:view"],
       } : undefined,
+      hasPermission: async (userId: string, resource: string, action: string) =>
+        userId === "fixture-operator" && `${resource}:${action}` === "picking:view",
     }));
     orderStorage = (await import("../../orders.storage")).orderMethods;
   });
@@ -167,7 +173,7 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
       } as never);
     const app = express();
     app.use((req, _res, next) => {
-      req.session = { user: req.headers.authorization === "fixture-session" ? { id: "fixture-operator" } : undefined } as Request["session"];
+      req.session = { user: req.headers.authorization === "fixture-session" ? { id: "fixture-operator" } : req.headers.authorization === "fixture-without-picking" ? { id: "fixture-without-picking" } : undefined } as Request["session"];
       next();
     });
     app.locals.services = { picking } as unknown as typeof app.locals.services;
@@ -178,6 +184,7 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     const logging = vi.spyOn(console, "error");
     try {
       expect((await fetch(url)).status).toBe(401);
+      expect((await fetch(url, { headers: { authorization: "fixture-without-picking" } })).status).toBe(403);
       const response = await fetch(url, { headers: { authorization: "fixture-session" } });
       expect(response.status).toBe(200);
       expect(response.headers.get("cache-control")).toContain("no-store");
