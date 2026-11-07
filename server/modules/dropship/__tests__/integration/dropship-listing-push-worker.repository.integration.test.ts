@@ -5,6 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import type { DropshipMarketplaceListingIntent } from "../../application/dropship-marketplace-listing-provider";
 import { PgDropshipListingPushJobQueueRepository } from "../../infrastructure/dropship-listing-push-job-runner";
 import { PgDropshipListingPushWorkerRepository } from "../../infrastructure/dropship-listing-push-worker.repository";
+import { PgDropshipLiveListingZeroQuantityRepository } from "../../infrastructure/dropship-live-listing-zero-quantity.repository";
 import { listingPushRunsMigrationSql } from "../fixtures/listing-push-runs.fixture";
 import { ebaySyncBackListingColumnsSql } from "../fixtures/ebay-sync-back.fixture";
 import { LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL } from "../fixtures/listing-end-reduced.fixture";
@@ -27,6 +28,7 @@ describeDatabase.sequential("listing push worker repository (PostgreSQL)", () =>
   let pool: pg.Pool | undefined;
   let repository: PgDropshipListingPushWorkerRepository;
   let queue: PgDropshipListingPushJobQueueRepository;
+  let zeroQuantity: PgDropshipLiveListingZeroQuantityRepository;
   let created = false;
   // The real publish runs migration runs here too, so the worker reads the job columns production has.
   const qualify = (sql: string) => sql.replaceAll("dropship.", `"${schema}".`).replaceAll("catalog.", `"${schema}".`);
@@ -100,6 +102,7 @@ describeDatabase.sequential("listing push worker repository (PostgreSQL)", () =>
     } as unknown as Pool;
     repository = new PgDropshipListingPushWorkerRepository(scopedPool);
     queue = new PgDropshipListingPushJobQueueRepository(scopedPool);
+    zeroQuantity = new PgDropshipLiveListingZeroQuantityRepository(scopedPool);
   });
 
   beforeEach(async () => {
@@ -406,5 +409,58 @@ describeDatabase.sequential("listing push worker repository (PostgreSQL)", () =>
       { listingId: liveListingId, before: "active", after: "active" },
       { listingId: seeded.listingId, before: "queued", after: "failed" },
     ] }]);
+  });
+  // Legacy ATP authority: a live listing with no stock to sell gets 0 on eBay (DropshipLiveListingZeroQuantityService).
+  // The settlement is the push baseline eBay sync-back reads (pushed_quantity, last_pushed_at); price and status stay.
+  describe("live listing zero-quantity settlement", () => {
+    async function seedLive(status = "active"): Promise<number> {
+      return (await pool!.query<{ id: number }>(qualify(`INSERT INTO dropship.dropship_vendor_listings
+        (vendor_id, store_connection_id, product_variant_id, platform, status, external_listing_id, external_offer_id,
+         vendor_retail_price_cents, pushed_quantity, last_pushed_at, marketplace_sync_attempted_at, marketplace_issue_codes)
+        VALUES (10, 22, 101, 'ebay', $1, '110004', 'OFFER-4', 1299, 6, '2026-09-01T00:00:00Z', '2026-09-28T00:00:00Z',
+          ARRAY['quantity_restore_blocked']::text[])
+        RETURNING id`), [status])).rows[0]!.id;
+    }
+    const settle = (listingId: number, at: Date, externalOfferId = "OFFER-4") => zeroQuantity.settleZeroQuantity({
+      vendorId: 10, storeConnectionId: 22, listingId, productVariantId: 101, sku: "P5", externalOfferId,
+      actorId: "inventory_publication_catchup", reason: "inventory-publication-catchup:3:2", now: at });
+
+    it("settles the sent 0 as the listing's push baseline and leaves price and status alone, with an audit trail", async () => {
+      const listingId = await seedLive("failed");
+      await expect(settle(listingId, NOW)).resolves.toEqual({ pushedQuantityBefore: 6,
+        lastPushedAtBefore: new Date("2026-09-01T00:00:00Z") });
+      const row = (await pool!.query(qualify(`SELECT status, pushed_quantity, last_pushed_at, vendor_retail_price_cents::int AS price,
+        marketplace_sync_attempted_at, marketplace_issue_codes FROM dropship.dropship_vendor_listings WHERE id = $1`), [listingId])).rows[0];
+      expect(row).toEqual({ status: "failed", pushed_quantity: 0, last_pushed_at: NOW, price: 1299, marketplace_sync_attempted_at: null,
+        marketplace_issue_codes: [] });
+      const events = await pool!.query(qualify(`SELECT event_type, payload->>'quantity' AS quantity FROM dropship.dropship_listing_sync_events
+        WHERE listing_id = $1`), [listingId]);
+      expect(events.rows).toEqual([{ event_type: "listing_quantity_zeroed", quantity: "0" }]);
+      const audit = await pool!.query(qualify(`SELECT event_type, payload->'before'->>'pushedQuantity' AS before
+        FROM dropship.dropship_audit_events WHERE entity_id = $1`), [String(listingId)]);
+      expect(audit.rows).toEqual([{ event_type: "listing_quantity_zeroed", before: "6" }]);
+    });
+
+    it("is idempotent on replay: 0 again with the replay's own time and audit row", async () => {
+      const listingId = await seedLive();
+      const later = new Date(NOW.getTime() + 60_000);
+      await settle(listingId, NOW);
+      await expect(settle(listingId, later)).resolves.toEqual({ pushedQuantityBefore: 0, lastPushedAtBefore: NOW });
+      const row = (await pool!.query(qualify(`SELECT pushed_quantity, last_pushed_at FROM dropship.dropship_vendor_listings WHERE id = $1`),
+        [listingId])).rows[0];
+      expect(row).toEqual({ pushed_quantity: 0, last_pushed_at: later });
+    });
+
+    it.each([["ended", "OFFER-4"], ["active", "OFFER-9"]])("refuses (retryable) and writes nothing when the listing is %s or on another offer",
+      async (status, offerId) => {
+        const listingId = await seedLive(status);
+        await expect(settle(listingId, NOW, offerId)).rejects.toMatchObject({ code: "DROPSHIP_LISTING_ZERO_QUANTITY_SETTLEMENT_CONFLICT",
+          context: expect.objectContaining({ retryable: true }) });
+        const row = (await pool!.query(qualify(`SELECT pushed_quantity, marketplace_issue_codes FROM dropship.dropship_vendor_listings
+          WHERE id = $1`), [listingId])).rows[0];
+        expect(row).toEqual({ pushed_quantity: 6, marketplace_issue_codes: ["quantity_restore_blocked"] });
+        const events = await pool!.query(qualify(`SELECT 1 FROM dropship.dropship_listing_sync_events WHERE listing_id = $1`), [listingId]);
+        expect(events.rowCount).toBe(0);
+      });
   });
 });

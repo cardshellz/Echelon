@@ -11,6 +11,7 @@ import { MARKETPLACE_SYNC_ACTOR } from "../domain/marketplace-sync-keys";
 import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./dropship-ebay-fulfillment-policy-guard.factory";
 import { EbayDropshipListingPushProvider } from "./dropship-ebay-listing-push.provider";
 import { createDropshipListingPreviewServiceFromEnv } from "./dropship-listing-preview.factory";
+import { createDropshipLiveListingZeroQuantityServiceFromEnv } from "./dropship-live-listing-zero-quantity.factory";
 import { createDropshipMarketplaceCredentialRepositoryFromEnv } from "./dropship-marketplace-credentials";
 import { PgMarketplaceQuantityBaselineReader } from "./dropship-marketplace-quantity-baseline.reader";
 import { PgDropshipMarketplaceSyncRepository } from "./dropship-marketplace-sync.repository";
@@ -66,6 +67,8 @@ export function createDropshipMarketplaceSyncServiceFromEnv(): DropshipMarketpla
     policyGuard: createDropshipEbayFulfillmentPolicyGuardFromEnv(),
     notifications: createDropshipNotificationServiceFromEnv(),
     clock: systemDropshipListingPreviewClock,
+    // Legacy authority only (the service checks): a blocked restore of a live listing at 0 sends 0 instead.
+    zeroQuantity: createDropshipLiveListingZeroQuantityServiceFromEnv(),
     logger: {
       debug: (action, data) => logger.debug(action, data),
       info: (action, data) => logger.info(action, data),
