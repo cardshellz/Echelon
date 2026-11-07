@@ -13,6 +13,8 @@ import { describeEbayErrors, parseEbayErrorBody } from "./ebay-error-body";
 import { ebaySellRequestHeaders } from "./ebay-sell-headers";
 import { createProviderRequestDeadline } from "../../channels/provider-request-limits";
 import { executeEbayQuantityHttp } from "../../channels/adapters/ebay/ebay-quantity-http";
+import { discoverEbayInventoryOffers, ebayInventoryMarketplace, ebayInventoryOffersPath } from "../../channels/adapters/ebay/ebay-inventory-quantity";
+import { sendEbayQuantityUpdates } from "../../channels/adapters/ebay/ebay-quantity-update";
 import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
 import type {
   DropshipMarketplaceListingPushProvider,
@@ -293,6 +295,67 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       },
       sent,
     };
+  }
+
+  /**
+   * The quantity-only write of 0 for a live listing with no stock to sell
+   * (DropshipLiveListingZeroQuantityService, legacy ATP authority): eBay's
+   * bulk_update_price_quantity with ONLY the item and offer quantity (the
+   * shared quantity body, ebay-quantity-update.ts), so price, content and
+   * policies stay as they are on eBay. The write goes through the same
+   * admitted request path as a push's quantity (requestEbay: the inventory
+   * admission and its request journal; an all-zero write is a reducing
+   * lifecycle). Before anything is sent, complete offer discovery for the SKU
+   * on the store's marketplace must find exactly one PUBLISHED offer and it
+   * must be the listing's recorded offer; otherwise nothing is sent. Always
+   * sends (no "already 0" shortcut), so a replay sends the same 0 and the
+   * admission records a completed attempt each time.
+   */
+  async sendZeroQuantity(input: {
+    vendorId: number; storeConnectionId: number; listingId: number; productVariantId: number; sku: string;
+    externalOfferId: string;
+  }): Promise<{ sku: string; offerId: string }> {
+    const sku = input.sku.trim();
+    const recordedOfferId = input.externalOfferId.trim();
+    if (!sku || sku !== input.sku || !recordedOfferId) {
+      throw new DropshipError("DROPSHIP_EBAY_ZERO_QUANTITY_IDENTITY_REQUIRED",
+        "A zero-quantity update needs the listing's exact SKU and recorded offer id.",
+        { listingId: input.listingId, productVariantId: input.productVariantId, retryable: false, classification: "permanent" });
+    }
+    const credential = await this.tokenOwner.loadFreshForStoreConnection({
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      operation: "listing_push",
+    });
+    const marketplaceId = ebayInventoryMarketplace(credential.config.marketplaceId);
+    const baseUrl = EBAY_BASE_URLS[resolveDropshipEbayProviderEnvironment(credential)];
+    const config = { marketplaceId };
+    const correlation = { listing_id: input.listingId, vendor_id: input.vendorId, product_variant_id: input.productVariantId };
+    const offers = await discoverEbayInventoryOffers({
+      getInventoryOffersPage: (offerSku, offerMarketplaceId, offset, limit) => this.requestEbayUnadmitted<unknown>({
+        credential, config, method: "GET", path: ebayInventoryOffersPath(offerSku, offerMarketplaceId, offset, limit), baseUrl,
+      }),
+    }, sku, marketplaceId);
+    const published = offers.filter((offer) => offer.status === "PUBLISHED");
+    if (published.length !== 1 || published[0]!.offerId !== recordedOfferId) {
+      // Nothing was sent: eBay's live offer is not provably the one this listing recorded.
+      throw new DropshipError("DROPSHIP_EBAY_ZERO_QUANTITY_OFFER_MISMATCH",
+        "eBay's published offer for this SKU is not the listing's recorded offer; no quantity was sent.",
+        { listingId: input.listingId, productVariantId: input.productVariantId, recordedOfferId,
+          publishedOfferIds: published.map((offer) => offer.offerId), retryable: false, classification: "permanent" });
+    }
+    const [result] = await sendEbayQuantityUpdates(
+      (body) => this.requestEbay<unknown>({ credential, config, correlation, method: "POST",
+        path: "/sell/inventory/v1/bulk_update_price_quantity", body, baseUrl }),
+      [{ sku, offerId: recordedOfferId, quantity: 0 }],
+    );
+    if (!result?.confirmed) {
+      // Unknown is not rejected: the caller retries the same 0, never a fallback write.
+      throw new DropshipError("DROPSHIP_EBAY_ZERO_QUANTITY_UNCONFIRMED",
+        "eBay did not confirm the zero quantity for the listing's offer.",
+        { listingId: input.listingId, productVariantId: input.productVariantId, retryable: true });
+    }
+    return { sku, offerId: recordedOfferId };
   }
 
   /**
@@ -706,7 +769,8 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
 
   private async requestEbay<T = Record<string, unknown>>(input: {
     credential: DropshipMarketplaceStoreCredentials;
-    config: EbayListingConfig;
+    // Only the marketplace header is read from it (requestEbayUnadmitted).
+    config: Pick<EbayListingConfig, "marketplaceId">;
     method: "GET" | "POST" | "PUT" | "DELETE";
     path: string;
     body?: unknown;
