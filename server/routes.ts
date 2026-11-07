@@ -124,6 +124,7 @@ import { registerInventoryCutoverCommitRoutes } from "./modules/inventory-planni
 import { registerProductDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-product-definition.routes";
 import { registerChannelDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-channel-definition.routes";
 import { registerChannelRuleDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-channel-rule.routes";
+import { registerSalesStatusRoutes } from "./modules/inventory-planning/interfaces/http/inventory-sales-status.routes";
 import { registerSafetyDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-safety-definition.routes";
 import { registerInventoryCutoverCompletionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-completion.routes";
 import { registerInventoryCutoverOpeningRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-opening.routes";
@@ -196,6 +197,7 @@ export async function registerRoutes(
   registerProductDefinitionRoutes(app);
   registerChannelDefinitionRoutes(app);
   registerChannelRuleDefinitionRoutes(app);
+  registerSalesStatusRoutes(app);
   registerSafetyDefinitionRoutes(app);
   registerInventoryCutoverCompletionRoutes(app);
   registerInventoryCutoverOpeningRoutes(app);

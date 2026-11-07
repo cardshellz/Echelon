@@ -292,6 +292,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/identity/__tests__/integration/identity-access-audit-migration.integration.test.ts",
       // Startup registers definitions only; it must not resurrect employee authority.
       "server/modules/identity/__tests__/integration/startup-authority.integration.test.ts",
+      // Sales status: all-channels stop/resume with channel exceptions through real ATP, holds and the durable outbox.
+      "server/modules/inventory-planning/__tests__/integration/inventory-sales-status.integration.test.ts",
     );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);
