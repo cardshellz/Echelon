@@ -17,12 +17,20 @@ const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..");
 
 const { writers, unresolved } = scanWriterTopology(repoRoot);
+const { routeWriters, scriptWriters } = scanWriterTopology(repoRoot, {
+  roots: ["server", "scripts", "script"],
+});
 
 writeFileSync(
   join(here, "baseline.json"),
   JSON.stringify(writers, null, 2) + "\n",
 );
 
+writeFileSync(
+  join(here, "route-and-script-baseline.json"),
+  JSON.stringify({ routeWriters, scriptWriters }, null, 2) + "\n",
+);
+
 const tables = Object.keys(writers).length;
 const multi = Object.values(writers).filter((w) => w.length > 1).length;
-console.log(`baseline.json written: ${tables} tables, ${multi} multi-writer, ${unresolved.length} unresolved drizzle-ish calls (not gated)`);
+console.log(`baseline.json written: ${tables} tables, ${multi} multi-writer, ${Object.keys(routeWriters).length} route-writer tables, ${Object.keys(scriptWriters).length} script-writer tables, ${unresolved.length} unresolved drizzle-ish calls (not gated)`);
