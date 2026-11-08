@@ -15,7 +15,7 @@ import { catalogStorage } from "../catalog";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
 const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage, ...ordersStorage, ...channelsStorage };
-import { requirePermission, requireAuth, requireAssignedSystemRole, upload } from "../../routes/middleware";
+import { requirePermission, requireAuth, upload } from "../../routes/middleware";
 import { insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema } from "@shared/schema";
 import Papa from "papaparse";
 import { projectInventoryLevels } from "./application/inventory-levels.query";
@@ -252,7 +252,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // Inventory Transactions History
-  app.get("/api/inventory/transactions", requireAuth, limitPageRead(async (req, res) => {
+  app.get("/api/inventory/transactions", requirePermission("inventory", "audit"), limitPageRead(async (req, res) => {
     try {
       const { batchId, transactionType, startDate, endDate, locationCode } = req.query;
       const pageQuery = offsetPageQuerySchema.safeParse(req.query);
@@ -308,7 +308,7 @@ export function registerInventoryRoutes(app: Express) {
   }));
 
   // CSV Inventory Upload - bulk update inventory levels
-  app.post("/api/inventory/upload-csv", requireAuth, requireAssignedSystemRole("admin", "lead"), requireLegacyQuantityImport, upload.single("file"), async (req, res) => {
+  app.post("/api/inventory/upload-csv", requirePermission("inventory", "upload"), requireLegacyQuantityImport, upload.single("file"), async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -1301,7 +1301,7 @@ export function registerInventoryRoutes(app: Express) {
   // BOOTSTRAP ROUTES
   // ============================================
 
-  app.post("/api/inventory/bootstrap/dry-run", requireAuth, requireAssignedSystemRole("admin"), async (req, res) => {
+  app.post("/api/inventory/bootstrap/dry-run", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const user = req.session?.user;
       if (!user) {
@@ -1435,7 +1435,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/bootstrap", requireAuth, requireAssignedSystemRole("admin"), async (req, res) => {
+  app.post("/api/inventory/bootstrap", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const user = req.session?.user;
       if (!user) {
@@ -1942,7 +1942,7 @@ export function registerInventoryRoutes(app: Express) {
   // MIGRATE LOCATIONS & SYNC/DEBUG ROUTES
   // ============================================
 
-  app.post("/api/inventory/migrate-locations", requireAuth, requireAssignedSystemRole("admin"), async (req, res) => {
+  app.post("/api/inventory/migrate-locations", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(403).json({ error: "Admin access required" });
