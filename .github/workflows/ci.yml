@@ -192,6 +192,13 @@ jobs:
           shared/dropship/__tests__/program-finance-definitions.test.ts
           client/src/pages/__tests__/dropship-finance-model.test.ts
           client/src/pages/__tests__/dropship-finance-panel.test.ts
+          server/infrastructure/__tests__/non-overlapping-scheduler.test.ts
+          server/infrastructure/__tests__/postgres-array.test.ts
+          server/infrastructure/__tests__/postgres-pool-observability.test.ts
+          server/infrastructure/__tests__/scheduler-config.test.ts
+          server/infrastructure/__tests__/scheduler-failure-context.test.ts
+          server/infrastructure/__tests__/scheduler-lock.test.ts
+          server/infrastructure/__tests__/session-advisory-lock.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run

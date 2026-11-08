@@ -481,6 +481,16 @@ describe("fast CI preserves coverage and required checks", () => {
     for (const file of onDisk) expect(registered.has(file), "Not run in CI: " + file).toBe(true);
   });
 
+  it("runs every server infrastructure scheduler and lock contract test in the contracts job", () => {
+    const registered = new Set(vitestStepFiles(job(workflow, "contracts"), "Procurement, inventory, channel, and finance UI contracts"));
+    const onDisk = testFilesIn("server/infrastructure/__tests__/", /\.test\.ts$/);
+    expect(onDisk.length).toBeGreaterThan(0);
+    for (const file of onDisk) {
+      expect(existsSync(new URL(file, repositoryRoot)), "Missing test file: " + file).toBe(true);
+      expect(registered.has(file), "Not run in CI: " + file).toBe(true);
+    }
+  });
+
   it("retains the existing required core check and fails closed on every dependency", () => {
     const gate = job(workflow, "check-and-unit");
     expect(gate).toContain("name: Typecheck + unit tests");
