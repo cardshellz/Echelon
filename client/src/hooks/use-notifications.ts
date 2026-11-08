@@ -99,7 +99,10 @@ export function useUnreadCount() {
         if (!isCurrent()) return;
         try {
           const msg: unknown = JSON.parse(event.data);
-          if (msg && typeof msg === "object" && "type" in msg && msg.type === "notification") {
+          if (msg && typeof msg === "object" && "type" in msg && msg.type === "authority:updated") {
+            void refetch();
+            reloadNotifications();
+          } else if (msg && typeof msg === "object" && "type" in msg && msg.type === "notification") {
             reloadNotifications();
           }
         } catch {

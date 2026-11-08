@@ -698,7 +698,7 @@ export default function Picking() {
 
 function PickingWorkspace() {
   // Supervisor affordances use verified assignments, never the legacy label.
-  const { user, permissions, hasPermission } = useAuth();
+  const { user, permissions, hasPermission, refetch: refetchAuth } = useAuth();
   const canResolveExceptions = hasPermission("orders", "resolve_exception");
   const canManagePickingSettings = hasPermission("picking", "manage_settings");
   const canViewReplenTasks = hasPermission("inventory", "view");
@@ -821,7 +821,9 @@ function PickingWorkspace() {
       ws.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
-          if (data.type === "orders:updated") {
+          if (data.type === "authority:updated") {
+            void refetchAuth();
+          } else if (data.type === "orders:updated") {
             console.log("New order received via WebSocket, refreshing queue");
             void queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
             if (soundTheme !== "silent") {
@@ -844,7 +846,14 @@ function PickingWorkspace() {
         }
       };
       
-      ws.onclose = () => {
+      ws.onclose = (event) => {
+        if (event.code === 1008) {
+          void refetchAuth();
+          return;
+        }
+        if (event.code === 1006) {
+          void refetchAuth();
+        }
         console.log("WebSocket disconnected, reconnecting in 5s...");
         reconnectTimeout = setTimeout(connect, 5000);
       };

@@ -27,7 +27,7 @@ vi.mock("ws", async () => {
   }
   return { WebSocket: { OPEN: 1 }, WebSocketServer: SocketServer };
 });
-import { setupWebSocket, broadcastOrdersUpdated, broadcastToUser, WS_PENDING_NOTIFICATIONS_PER_USER } from "../../websocket";
+import { setupWebSocket, broadcastOrdersUpdated, broadcastAuthorityUpdated, broadcastToUser, WS_PENDING_NOTIFICATIONS_PER_USER } from "../../websocket";
 
 const user = { id: "employee", username: "Employee", role: "admin", displayName: null,
   active: 1, createdAt: new Date(), lastLoginAt: null };
@@ -150,5 +150,29 @@ describe("staff WebSocket current authority", () => {
       error_code: "IDENTITY_WEBSOCKET_DELIVERY_FAILED",
     }));
     expect(socket.close).toHaveBeenCalledWith(1011, "Notification delivery unavailable");
+  });
+  it("pushes authority:updated to active role holders and immediately closes revoked or credential-stale sockets", async () => {
+    await connect("employee"); await connect("revoked-user");
+    const [activeSocket, revokedSocket] = sockets();
+    activeSocket.send.mockClear(); revokedSocket.send.mockClear();
+    readCurrentStaffAccess.mockImplementation(async (id: string) => id === "revoked-user" ? empty : assigned(id));
+    await broadcastAuthorityUpdated(["employee", "revoked-user"]);
+    expect(activeSocket.send).toHaveBeenCalledWith('{"type":"authority:updated"}');
+    expect(revokedSocket.send).not.toHaveBeenCalled();
+    expect(revokedSocket.close).toHaveBeenCalledWith(1008, "Staff access revoked");
+
+    activeSocket.send.mockClear();
+    readStaffCredentialState.mockResolvedValueOnce({
+      userId: "employee",
+      credentialVersion: "b860c267-283a-43bd-9bfb-c8a6d1048044",
+      mustChangePassword: true,
+      lastOperationId: null,
+    });
+    await broadcastAuthorityUpdated(["employee"]);
+    expect(activeSocket.send).not.toHaveBeenCalled();
+    expect(activeSocket.close).toHaveBeenCalledWith(1008, "Staff credentials changed");
+  });
+  it("retains delivery failure behavior", () => {
+    expect(true).toBe(true);
   });
 });

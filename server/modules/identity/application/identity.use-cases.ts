@@ -16,6 +16,7 @@ import { staffCredentials } from "@shared/schema";
 import { runIdentityAdministration, type IdentityAdministrationMutation } from "../infrastructure/access-administration.repository";
 import { IdentityAdministrationError, parseAdministrationActor, parseAdministrationInput, userProfileEditSchema,
   type IdentityAdministrationActor } from "../domain/access-administration";
+import { notifyStaffAuthorityChanged } from "../authority-events";
 
 function safeUser(user: User): SafeUser {
   const { password: _password, ...safe } = user;
@@ -93,27 +94,29 @@ export async function createRoleUseCase(name: string, description: string | null
 
 export async function updateRolePermissionsUseCase(roleId: unknown, permissionIds: unknown, actor: IdentityAdministrationActor): Promise<void> {
   const edit = parseRolePermissionEdit(roleId, permissionIds);
-  return runAdministration(actor, "roles:edit", "role_permissions_replaced", async tx => {
+  await runAdministration(actor, "roles:edit", "role_permissions_replaced", async tx => {
     const before = await roleAuditState(tx, edit.roleId);
     await repo.updateRolePermissions(edit.roleId, edit.permissionIds, tx);
     return { result: undefined, target: `role:${edit.roleId}`, before, after: await roleAuditState(tx, edit.roleId) };
   });
+  await notifyStaffAuthorityChanged();
 }
 
 export async function assignUserRolesUseCase(userId: unknown, roleIds: unknown, actor: IdentityAdministrationActor): Promise<void> {
   const assignment = parseRoleAssignment(userId, roleIds);
-  return runAdministration(actor, "users:manage_roles", "user_roles_replaced", async tx => {
+  await runAdministration(actor, "users:manage_roles", "user_roles_replaced", async tx => {
     await lockUser(tx, assignment.userId);
     const before = { roleIds: (await repo.getUserRoles(assignment.userId, tx)).map(role => role.id).sort((a, b) => a - b) };
     await repo.assignUserRoles(assignment.userId, assignment.roleIds, tx);
     return { result: undefined, target: `user:${assignment.userId}`, before, after: { roleIds: [...assignment.roleIds].sort((a, b) => a - b) } };
   });
+  await notifyStaffAuthorityChanged([assignment.userId]);
 }
 
 export async function updateUserUseCase(userId: string, raw: z.input<typeof userProfileEditSchema>, actor: IdentityAdministrationActor): Promise<SafeUser> {
   const id = parseRoleAssignment(userId, []).userId;
   const data = parseAdministrationInput(userProfileEditSchema, raw);
-  return runAdministration(actor, "users:edit", "user_updated", async tx => {
+  const updatedUser = await runAdministration(actor, "users:edit", "user_updated", async tx => {
     const beforeUser = await lockUser(tx, id);
     if (data.active !== undefined && data.active !== beforeUser.active && !actor.expectedAccessRevision)
       throw new IdentityAdministrationError("IDENTITY_ACCESS_REVIEW_REQUIRED", 428,
@@ -122,18 +125,24 @@ export async function updateUserUseCase(userId: string, raw: z.input<typeof user
     return { result: safeUser(updated), target: `user:${id}`, before: userAuditState(beforeUser),
       after: userAuditState(updated) };
   });
+  await notifyStaffAuthorityChanged([id]);
+  return updatedUser;
 }
 
 export async function deleteRoleUseCase(roleId: number, actor: IdentityAdministrationActor): Promise<boolean> {
   const id = parseRolePermissionEdit(roleId, []).roleId;
-  return runAdministration(actor, "roles:delete", "role_deleted", async tx => {
+  let affectedUserIds: string[] = [];
+  const deleted = await runAdministration(actor, "roles:delete", "role_deleted", async tx => {
     const before = await roleAuditState(tx, id);
     const memberships = await tx.execute(sql`SELECT user_id AS "userId" FROM identity.auth_user_roles
       WHERE role_id=${id} ORDER BY user_id FOR UPDATE`);
-    const deleted = await repo.deleteRole(id, tx);
-    if (!deleted) throw new IdentityAdministrationError("IDENTITY_ADMINISTRATION_INVALID", 400, "Cannot delete system roles or a missing role.");
-    return { result: deleted, target: `role:${id}`, before: { ...before, affectedUserIds: memberships.rows.map(row => row.userId) }, after: null };
+    affectedUserIds = memberships.rows.map(row => String(row.userId));
+    const removed = await repo.deleteRole(id, tx);
+    if (!removed) throw new IdentityAdministrationError("IDENTITY_ADMINISTRATION_INVALID", 400, "Cannot delete system roles or a missing role.");
+    return { result: removed, target: `role:${id}`, before: { ...before, affectedUserIds }, after: null };
   });
+  await notifyStaffAuthorityChanged(affectedUserIds.length > 0 ? affectedUserIds : undefined);
+  return deleted;
 }
 
 function reportDefinitionRegistration(level: "info" | "error", fields: Parameters<typeof logger.info>[1]): void {
