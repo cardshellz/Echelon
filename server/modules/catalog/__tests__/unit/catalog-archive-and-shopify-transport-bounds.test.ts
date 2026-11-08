@@ -1,6 +1,8 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { getTableConfig } from "drizzle-orm/pg-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { channelConnections, channelFeeds } from "@shared/schema";
 import {
   ARCHIVABLE_REPLEN_TASK_STATUSES,
   archiveProductReplenishmentInTx,
@@ -239,6 +241,34 @@ describe("Catalog Archive Replenishment Participant & Shopify Transport Bounds (
       ).rejects.toThrow("Shopify API rate limit exceeded after 2 retries (429)");
 
       expect(fetchImpl).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe("Catalog Export PostgreSQL Integration Fixture (COM-03 / EA-W04)", () => {
+    it("aligns channels.channel_connections and channels.channel_feeds DDL with Drizzle schema columns", () => {
+      const testSource = readFileSync(
+        resolve(
+          process.cwd(),
+          "server/modules/catalog-export/__tests__/integration/postgres-catalog-export.repository.integration.test.ts",
+        ),
+        "utf8",
+      );
+
+      for (const table of [channelConnections, channelFeeds]) {
+        const config = getTableConfig(table);
+        const tablePattern = new RegExp(
+          `CREATE TABLE IF NOT EXISTS ${config.schema}\\.${config.name} \\(([\\s\\S]*?)\\n  \\);`,
+        );
+        const tableBody = testSource.match(tablePattern)?.[1];
+        expect(tableBody, `missing DDL for ${config.schema}.${config.name}`).toBeDefined();
+
+        for (const column of config.columns) {
+          expect(
+            tableBody,
+            `missing column ${config.schema}.${config.name}.${column.name}`,
+          ).toMatch(new RegExp(`^    ${column.name}\\s`, "m"));
+        }
+      }
     });
   });
 });
