@@ -37,6 +37,8 @@ export interface SyncRecoveryResult {
   stages: StageResult[];
   /** Convenience: true if every stage succeeded (even with 0 changes). */
   allOk: boolean;
+  /** True when the run was skipped because another run was already in flight. */
+  skipped?: boolean;
 }
 
 const SYNC_RECOVERY_JOB_KEY = "sync_recovery";
@@ -67,7 +69,8 @@ export class SyncRecoveryService {
         startedAt,
         durationMs: 0,
         stages: [{ name: "skipped", ok: true, data: { reason: 0 } }],
-        allOk: true,
+        allOk: false,
+        skipped: true,
       };
     }
 
@@ -317,7 +320,11 @@ export class SyncRecoveryService {
 
       const loopTimer = setInterval(() => {
         runObserved()
-          .then(() => recordRunCompleted(this.db, SYNC_RECOVERY_JOB_KEY))
+          .then((result) => {
+            if (result.allOk && !result.skipped) {
+              return recordRunCompleted(this.db, SYNC_RECOVERY_JOB_KEY);
+            }
+          })
           .catch((err) => {
             console.error("[SyncRecovery] Scheduled run failed:", err);
           });

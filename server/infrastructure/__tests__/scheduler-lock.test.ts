@@ -129,6 +129,51 @@ describe("createAdvisoryLockRunner", () => {
       "connection terminated during unlock",
     );
   });
+
+  it("destroys the pooled client when lock acquisition acknowledgement is lost", async () => {
+    const acquireError = new Error("query read timeout during pg_try_advisory_lock");
+    query = vi.fn(async (): Promise<QueryResult> => {
+      throw acquireError;
+    });
+    connect = vi.fn(async () => ({ query, release }));
+    const activeLocks = new Set<number>();
+    const job = vi.fn(async () => "processed");
+    const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
+
+    await expect(runner(736208, job)).rejects.toBe(acquireError);
+
+    expect(job).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(activeLocks.size).toBe(0);
+    expect(release).toHaveBeenCalledWith(acquireError);
+  });
+
+  it("destroys the pooled client while preserving the job result when pg_advisory_unlock returns false", async () => {
+    query = vi.fn(async (statement: string): Promise<QueryResult> => {
+      if (statement.includes("pg_try_advisory_lock")) {
+        return { rows: [{ acquired: true }] };
+      }
+      if (statement.includes("pg_advisory_unlock")) {
+        return { rows: [{ pg_advisory_unlock: false }] };
+      }
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    connect = vi.fn(async () => ({ query, release }));
+    const activeLocks = new Set<number>();
+    const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
+
+    await expect(runner(736209, async () => "processed")).resolves.toBe("processed");
+
+    expect(activeLocks.size).toBe(0);
+    expect(release).toHaveBeenCalledTimes(1);
+    const releaseArg = release.mock.calls[0]?.[0];
+    expect(releaseArg).toBeInstanceOf(Error);
+    expect((releaseArg as Error).message).toContain("736209");
+    expect(logger.error).toHaveBeenCalledWith(
+      "[AdvisoryLock] Failed to release lock 736209:",
+      expect.stringContaining("736209"),
+    );
+  });
 });
 
 describe("resolveSchedulerLockPoolMax", () => {
