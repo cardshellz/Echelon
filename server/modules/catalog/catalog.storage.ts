@@ -26,6 +26,7 @@ import { OPEN_SHIPMENT_STATUSES } from "@shared/enums/order-status";
 import { prepareVariantInventoryTracking, updateProductInventoryTracking, InventoryTrackingPolicyError } from "./inventory-tracking-policy.repository";
 import { renameWmsOrderItemSku } from "../wms/order-item-commands";
 import { reorderCatalogAssets } from "./product-asset-order.repository";
+import { ProductAssetError } from "./product-asset-errors";
 import type {
   Product,
   InsertProduct,
@@ -43,18 +44,18 @@ export interface IProductStorage {
   getProductByShopifyProductId(shopifyProductId: string): Promise<Product | undefined>;
   createProduct(product: InsertProduct, executor?: any): Promise<Product>;
   updateProduct(id: number, updates: Partial<InsertProduct>, executor?: any): Promise<Product | null>;
-  deleteProduct(id: number): Promise<boolean>;
+  deleteProduct(id: number, executor?: any): Promise<boolean>;
 
   getAllProductVariants(includeInactive?: boolean, executor?: any): Promise<ProductVariant[]>;
   getProductVariantById(id: number, executor?: any): Promise<ProductVariant | undefined>;
   getProductVariantBySku(sku: string): Promise<ProductVariant | undefined>;
-  getActiveVariantBySku(sku: string, excludeId?: number): Promise<ProductVariant | undefined>;
+  getActiveVariantBySku(sku: string, excludeId?: number, executor?: any): Promise<ProductVariant | undefined>;
   getProductVariantsByProductId(productId: number, executor?: any): Promise<ProductVariant[]>;
   getProductVariantsByIds(ids: number[], executor?: any): Promise<ProductVariant[]>;
   getProductsByIds(ids: number[], executor?: any): Promise<Product[]>;
   createProductVariant(variant: InsertProductVariant, executor?: any): Promise<ProductVariant>;
   updateProductVariant(id: number, updates: Partial<InsertProductVariant>, executor?: any): Promise<ProductVariant | null>;
-  deleteProductVariant(id: number): Promise<boolean>;
+  deleteProductVariant(id: number, executor?: any): Promise<boolean>;
 
   getInventoryLevelsByVariantId(variantId: number): Promise<InventoryLevel[]>;
   deleteInventoryLevelsByVariantId(variantId: number): Promise<number>;
@@ -64,14 +65,16 @@ export interface IProductStorage {
   cancelReplenTasksByProductId(productId: number): Promise<number>;
   getPendingShipmentItemsByVariantIds(variantIds: number[]): Promise<{ id: number; shipmentId: number; productVariantId: number | null; qty: number; status: string }[]>;
 
-  getProductAssetsByProductId(productId: number): Promise<ProductAsset[]>;
+  getProductAssetsByProductId(productId: number, executor?: any): Promise<ProductAsset[]>;
   getProductAssetsByVariantId(productVariantId: number): Promise<ProductAsset[]>;
-  createProductAsset(asset: InsertProductAsset): Promise<ProductAsset>;
-  deleteProductAsset(id: number): Promise<boolean>;
+  createProductAsset(asset: InsertProductAsset, executor?: any): Promise<ProductAsset>;
+  deleteProductAsset(id: number, executor?: any): Promise<boolean>;
   deleteProductAssetsByProductId(productId: number): Promise<number>;
   updateProductAsset(id: number, updates: Partial<InsertProductAsset>): Promise<ProductAsset | null>;
   reorderProductAssets(productId: number, orderedIds: number[]): Promise<void>;
-  setPrimaryProductAsset(productId: number, assetId: number): Promise<void>;
+  setPrimaryProductAsset(productId: number, assetId: number, executor?: any): Promise<void>;
+
+  withCatalogTransaction?<T>(fn: (txStorage: IProductStorage, tx: any) => Promise<T>): Promise<T>;
 
   getItemImageUrlBySku(sku: string): Promise<string | null>;
 
@@ -174,8 +177,8 @@ export const productMethods: IProductStorage = {
     return result[0] || null;
   },
 
-  async deleteProduct(id: number): Promise<boolean> {
-    const result = await db.delete(products).where(eq(products.id, id)).returning();
+  async deleteProduct(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(products).where(eq(products.id, id)).returning();
     return result.length > 0;
   },
 
@@ -197,9 +200,9 @@ export const productMethods: IProductStorage = {
     return result[0];
   },
 
-  async getActiveVariantBySku(sku: string, excludeId?: number): Promise<ProductVariant | undefined> {
+  async getActiveVariantBySku(sku: string, excludeId?: number, executor: any = db): Promise<ProductVariant | undefined> {
     const upperSku = sku.trim().toUpperCase();
-    const result = await db.select().from(productVariants)
+    const result = await executor.select().from(productVariants)
       .where(sql`UPPER(${productVariants.sku}) = ${upperSku} AND ${productVariants.isActive} = true${excludeId ? sql` AND ${productVariants.id} != ${excludeId}` : sql``}`);
     return result[0];
   },
@@ -245,8 +248,8 @@ export const productMethods: IProductStorage = {
     return result[0] || null;
   },
 
-  async deleteProductVariant(id: number): Promise<boolean> {
-    const result = await db.delete(productVariants).where(eq(productVariants.id, id)).returning();
+  async deleteProductVariant(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(productVariants).where(eq(productVariants.id, id)).returning();
     return result.length > 0;
   },
 
@@ -313,8 +316,8 @@ export const productMethods: IProductStorage = {
     return result;
   },
 
-  async getProductAssetsByProductId(productId: number): Promise<ProductAsset[]> {
-    return await db.select().from(productAssets)
+  async getProductAssetsByProductId(productId: number, executor: any = db): Promise<ProductAsset[]> {
+    return await executor.select().from(productAssets)
       .where(eq(productAssets.productId, productId))
       .orderBy(asc(productAssets.position));
   },
@@ -325,13 +328,13 @@ export const productMethods: IProductStorage = {
       .orderBy(asc(productAssets.position));
   },
 
-  async createProductAsset(asset: InsertProductAsset): Promise<ProductAsset> {
-    const result = await db.insert(productAssets).values(asset).returning();
+  async createProductAsset(asset: InsertProductAsset, executor: any = db): Promise<ProductAsset> {
+    const result = await executor.insert(productAssets).values(asset).returning();
     return result[0];
   },
 
-  async deleteProductAsset(id: number): Promise<boolean> {
-    const result = await db.delete(productAssets).where(eq(productAssets.id, id)).returning();
+  async deleteProductAsset(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(productAssets).where(eq(productAssets.id, id)).returning();
     return result.length > 0;
   },
 
@@ -352,13 +355,63 @@ export const productMethods: IProductStorage = {
     await reorderCatalogAssets(db, productId, { orderedIds });
   },
 
-  async setPrimaryProductAsset(productId: number, assetId: number): Promise<void> {
-    await db.update(productAssets)
+  async setPrimaryProductAsset(productId: number, assetId: number, executor: any = db): Promise<void> {
+    if (!Number.isInteger(productId) || productId <= 0 || !Number.isInteger(assetId) || assetId <= 0) {
+      throw new ProductAssetError(
+        "ASSET_PRIMARY_INVALID",
+        "Product and asset IDs must be positive integers.",
+        400,
+      );
+    }
+    if (executor === db) {
+      return db.transaction((tx) => productMethods.setPrimaryProductAsset(productId, assetId, tx));
+    }
+    const targetRows = await executor
+      .select({ id: productAssets.id })
+      .from(productAssets)
+      .where(and(eq(productAssets.id, assetId), eq(productAssets.productId, productId)));
+    if (targetRows.length === 0) {
+      throw new ProductAssetError(
+        "ASSET_NOT_FOUND",
+        "Product asset not found for this product.",
+        404,
+      );
+    }
+    await executor.update(productAssets)
       .set({ isPrimary: 0 })
       .where(and(eq(productAssets.productId, productId), eq(productAssets.isPrimary, 1)));
-    await db.update(productAssets)
+    await executor.update(productAssets)
       .set({ isPrimary: 1 })
       .where(and(eq(productAssets.id, assetId), eq(productAssets.productId, productId)));
+  },
+
+  async withCatalogTransaction<T>(fn: (txStorage: IProductStorage, tx: any) => Promise<T>): Promise<T> {
+    return db.transaction(async (tx) => {
+      const txStorage: IProductStorage = {
+        ...productMethods,
+        getAllProducts: (includeInactive) => productMethods.getAllProducts(includeInactive, tx),
+        getProductById: (id) => productMethods.getProductById(id, tx),
+        getProductBySku: (sku) => productMethods.getProductBySku(sku, tx),
+        createProduct: (product) => productMethods.createProduct(product, tx),
+        updateProduct: (id, updates) => productMethods.updateProduct(id, updates, tx),
+        deleteProduct: (id) => productMethods.deleteProduct(id, tx),
+        getAllProductVariants: (includeInactive) => productMethods.getAllProductVariants(includeInactive, tx),
+        getProductVariantById: (id) => productMethods.getProductVariantById(id, tx),
+        getActiveVariantBySku: (sku, excludeId) => productMethods.getActiveVariantBySku(sku, excludeId, tx),
+        getProductVariantsByProductId: (productId) => productMethods.getProductVariantsByProductId(productId, tx),
+        getProductVariantsByIds: (ids) => productMethods.getProductVariantsByIds(ids, tx),
+        getProductsByIds: (ids) => productMethods.getProductsByIds(ids, tx),
+        createProductVariant: (variant) => productMethods.createProductVariant(variant, tx),
+        updateProductVariant: (id, updates) => productMethods.updateProductVariant(id, updates, tx),
+        deleteProductVariant: (id) => productMethods.deleteProductVariant(id, tx),
+        getProductAssetsByProductId: (productId) => productMethods.getProductAssetsByProductId(productId, tx),
+        createProductAsset: (asset) => productMethods.createProductAsset(asset, tx),
+        deleteProductAsset: (id) => productMethods.deleteProductAsset(id, tx),
+        setPrimaryProductAsset: (productId, assetId) => productMethods.setPrimaryProductAsset(productId, assetId, tx),
+        withCatalogTransaction: (nestedFn) => nestedFn(txStorage, tx),
+      };
+      return fn(txStorage, tx);
+    });
   },
 
   async getItemImageUrlBySku(sku: string): Promise<string | null> {
