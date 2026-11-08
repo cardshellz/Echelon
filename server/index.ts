@@ -118,7 +118,7 @@ import { pool as dbPool } from "./db";
 import * as http from "http";
 import { createEbayAuthConfig, EbayAuthService } from "./modules/channels/adapters/ebay/ebay-auth.service";
 import { createEbayApiClient } from "./modules/channels/adapters/ebay/ebay-api.client";
-import { requireAuth, requireAssignedSystemRole } from "./routes/middleware";
+import { requireAuth, requirePermission } from "./routes/middleware";
 import {
   envBoundedPositiveInteger,
   envFlagEnabled,
@@ -592,7 +592,7 @@ function startEchelonSyncScheduler(
 
     // Admin: manually reingest an eBay order that the poller missed.
     // POST /api/admin/ebay/reingest { orderId: '21-14508-76944' }
-    app.post("/api/admin/ebay/reingest", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
+    app.post("/api/admin/ebay/reingest", requirePermission("channels", "sync"), async (req, res) => {
       try {
 
         const { orderId } = req.body || {};

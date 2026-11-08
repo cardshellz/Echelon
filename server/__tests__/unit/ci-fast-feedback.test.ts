@@ -349,7 +349,7 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/pages/__tests__/inventory-history-shipment-quantity.test.ts",
       "client/src/features/channel-listing-publication/__tests__/api.test.ts",
       "client/src/features/channel-listing-publication/__tests__/model.test.ts",
-      // PLAN-CH2 v4.1 §11.5: Channel Inventory stock-link controls (presenter, API, components).
+      // PLAN-CH2 v4.1 Â§11.5: Channel Inventory stock-link controls (presenter, API, components).
       "client/src/features/channel-inventory/__tests__/stock-link-presentation.test.ts",
       "client/src/features/channel-inventory/__tests__/stock-link-api.test.ts",
       "client/src/features/channel-inventory/__tests__/stock-link-controls.test.ts",
@@ -363,16 +363,16 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/lib/__tests__/dropship-catalog-choose-requests.test.ts",
       "client/src/lib/__tests__/dropship-catalog-choose-words.test.ts",
       "client/src/pages/dropship/__tests__/DropshipCatalogChoose.test.ts",
-      // PLAN-B v4.1 §15.4, §17 (B3): step 1's new-items notice (model, requests, words).
+      // PLAN-B v4.1 Â§15.4, Â§17 (B3): step 1's new-items notice (model, requests, words).
       "client/src/lib/__tests__/dropship-catalog-new-items.test.ts",
       "client/src/lib/__tests__/dropship-catalog-new-items-requests.test.ts",
       "client/src/lib/__tests__/dropship-catalog-new-items-words.test.ts",
       // PLAN-B v4.1 V31, TESTS-13: the chosen-items words of onboarding and the dashboard (both green at cea5cb027).
       "client/src/lib/__tests__/dropship-onboarding.test.ts",
       "client/src/pages/dropship/__tests__/DropshipPortalDashboard.test.ts",
-      // Step 1 plan S2-5 §4.9 item 3: "site updating" for the requests stages 2-5 add.
+      // Step 1 plan S2-5 Â§4.9 item 3: "site updating" for the requests stages 2-5 add.
       "client/src/lib/__tests__/dropship-api-json.test.ts",
-      // Step 1 plan S2-5 PR A §4.10: Catalog step 3 on publish runs.
+      // Step 1 plan S2-5 PR A Â§4.10: Catalog step 3 on publish runs.
       "client/src/lib/__tests__/dropship-catalog-publish.test.ts",
       "client/src/lib/__tests__/dropship-catalog-publish-requests.test.ts",
       "client/src/lib/__tests__/dropship-catalog-publish-words.test.ts",
@@ -429,7 +429,7 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/pages/__tests__/dropship-portal-cost-changes-page.test.ts",
       // PLAN-B v4.1 V17 (B2b deviation 11; review CLI-7/TST-3): the only pin of the admin "Items chosen" label.
       "client/src/pages/__tests__/dropship-launch-readiness-panels.test.ts",
-      // PLAN-C v4.1 §13.3 (TST-1, DC33): the admin section's client lib and the page's source contract (no browser harness
+      // PLAN-C v4.1 Â§13.3 (TST-1, DC33): the admin section's client lib and the page's source contract (no browser harness
       // mounts the staff page), registered by hand.
       "client/src/lib/__tests__/dropship-listing-end-ops.test.ts",
       "client/src/pages/__tests__/dropship-listing-end-ops.test.ts",
@@ -446,7 +446,7 @@ describe("fast CI preserves coverage and required checks", () => {
       "test/browser/dropship-policy-catalog-steps.spec.ts", "test/browser/dropship-policy-catalog-choose.spec.ts",
       // PLAN-B v4.1 V29: step 1 at scale, on the same stubs.
       "test/browser/dropship-policy-catalog-choose-scale.spec.ts",
-      // PLAN-C v4.1 §13.4: step 1's listing ends, on the same stubs.
+      // PLAN-C v4.1 Â§13.4: step 1's listing ends, on the same stubs.
       "test/browser/dropship-policy-catalog-end.spec.ts",
       "test/browser/dropship-policy-catalog-publish-runs.spec.ts", "test/browser/dropship-policy-listing-access.spec.ts",
       // Review round 2 CT12: every file the step names, the cost changes portal spec too.
@@ -558,19 +558,7 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(config).toContain('name: "mobile"');
   });
 
-  it("blocks any new hardcoded system-role route or navigation gates outside the legacy ratchet allowlist", () => {
-    const allowedServerRoleGates = new Set([
-      'server/index.ts:app.post("/api/admin/ebay/reingest"',
-      'server/modules/inventory/inventory.routes.ts:app.post("/api/inventory/upload-csv"',
-      'server/modules/inventory/inventory.routes.ts:app.post("/api/inventory/bootstrap/dry-run"',
-      'server/modules/inventory/inventory.routes.ts:app.post("/api/inventory/bootstrap"',
-      'server/modules/inventory/inventory.routes.ts:app.post("/api/inventory/migrate-locations"',
-      'server/modules/orders/picking.routes.ts:app.get("/api/orders/history"',
-      'server/modules/orders/picking.routes.ts:app.get("/api/orders/:id/detail"',
-      'server/modules/orders/picking.routes.ts:app.get("/api/orders/history/export"',
-      'server/modules/warehouse/settings.routes.ts:app.post("/api/inventory/adjustment-reasons"',
-      'server/modules/warehouse/settings.routes.ts:app.post("/api/inventory/adjustment-reasons/seed"',
-    ]);
+  it("blocks any hardcoded system-role route or navigation gates", () => {
     const serverRoot = fileURLToPath(new URL("server", repositoryRoot));
     const walkServer = (dir: string): string[] => {
       const out: string[] = [];
@@ -594,43 +582,16 @@ describe("fast CI preserves coverage and required checks", () => {
         foundServerGates.push(`${rel}:${match ? match[0] : line.trim()}`);
       }
     }
-    expect(foundServerGates.filter(gate => !allowedServerRoleGates.has(gate))).toEqual([]);
+    expect(foundServerGates).toEqual([]);
 
-    const allowedAppRoleRoutes = new Set([
-      '/orders',
-      '/vendors/:id',
-      '/vendors',
-      '/order-history',
-      '/integrations',
-      '/oms/orders',
-      '/oms/flow-monitor',
-      '/channels/shopify',
-      '/shipping',
-      '/returns/label-settings',
-      '/inventory/history',
-    ]);
     const appSource = source("client/src/App.tsx");
     const foundAppRoleRoutes = [...appSource.matchAll(/<Route\s+path="([^"]+)">\s*<ProtectedRoute\b[^>]*\ballowedSystemRoles=/g)]
       .map(match => match[1]);
-    expect(foundAppRoleRoutes.filter(route => !allowedAppRoleRoutes.has(route))).toEqual([]);
+    expect(foundAppRoleRoutes).toEqual([]);
 
-    const allowedNavRoleLabels = new Set([
-      "Operations Control Tower",
-      "Procurement",
-      "Accounts Payable",
-      "Inventory",
-      "History",
-      "Orders (OMS)",
-      "Returns",
-      "Customer portal",
-      "Orders",
-      "Shipping",
-      "Catalog & Channels",
-      "Vendors",
-    ]);
     const navSource = source("client/src/components/layout/AppShell.tsx");
     const foundNavRoleLabels = [...navSource.matchAll(/label:\s*"([^"]+)"[^\n{}]*\broles:\s*\[/g)]
       .map(match => match[1]);
-    expect(foundNavRoleLabels.filter(label => !allowedNavRoleLabels.has(label))).toEqual([]);
+    expect(foundNavRoleLabels).toEqual([]);
   });
 });
