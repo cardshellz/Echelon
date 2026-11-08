@@ -24,7 +24,6 @@ import { getUser, getUserByUsername, updateUser, updateUserLastLogin } from "../
 import { readCommandAuthorityActor } from "../infrastructure/command-authority.repository";
 import { persistAuditEvent } from "../../../infrastructure/transactional-audit";
 import { notifyStaffAuthorityChanged } from "../authority-events";
-import { sendEmail } from "../../notifications/email.service";
 import type { User } from "@shared/schema";
 
 function forbidden(): never { throw new IdentityAdministrationError("IDENTITY_ADMINISTRATION_FORBIDDEN",403,"Current credential authority is required."); }
@@ -444,6 +443,7 @@ export async function requestStaffPasswordRecoveryEmail(
   if (options.sendRecoveryEmail) {
     await options.sendRecoveryEmail({ to: toEmail, subject, html, text, resetUrl, expiresInMinutes });
   } else {
+    const { sendEmail } = await import("../../notifications/email.service");
     await sendEmail({ to: toEmail, subject, html, text });
   }
   return { accepted: true, delivered: true };
