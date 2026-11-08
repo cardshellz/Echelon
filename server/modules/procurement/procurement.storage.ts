@@ -79,14 +79,15 @@ import { normalizePurchasingForecastPolicy } from "./purchasing-forecast-policy"
 export interface IProcurementStorage {
   getAllVendors(): Promise<Vendor[]>;
   getVendorById(id: number, executor?: any): Promise<Vendor | undefined>;
+  getVendorsByIds(ids: number[], executor?: any): Promise<Vendor[]>;
   getVendorByCode(code: string, executor?: any): Promise<Vendor | undefined>;
   createVendor(data: InsertVendor, executor?: any): Promise<Vendor>;
   updateVendor(id: number, updates: Partial<InsertVendor>, executor?: any): Promise<Vendor | null>;
-  getAllReceivingOrders(): Promise<ReceivingOrder[]>;
+  getAllReceivingOrders(options?: { limit?: number; offset?: number }): Promise<ReceivingOrder[]>;
   getReceivingOrderById(id: number, executor?: any): Promise<ReceivingOrder | undefined>;
   getReceivingOrderByReceiptNumber(receiptNumber: string): Promise<ReceivingOrder | undefined>;
   getReceivingOrdersForPurchaseOrder(purchaseOrderId: number, executor?: any): Promise<ReceivingOrder[]>;
-  getReceivingOrdersByStatus(status: string): Promise<ReceivingOrder[]>;
+  getReceivingOrdersByStatus(status: string, options?: { limit?: number; offset?: number }): Promise<ReceivingOrder[]>;
   createReceivingOrder(data: InsertReceivingOrder, executor?: any): Promise<ReceivingOrder>;
   updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>, executor?: any): Promise<ReceivingOrder | null>;
   deleteReceivingOrder(id: number, executor?: any): Promise<boolean>;
@@ -155,6 +156,7 @@ export interface IProcurementStorage {
   getPurchaseOrders(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<PurchaseOrder[]>;
   getPurchaseOrdersCount(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
   getPurchaseOrderById(id: number, executor?: any): Promise<PurchaseOrder | undefined>;
+  getPurchaseOrdersByIds(ids: number[], executor?: any): Promise<PurchaseOrder[]>;
   getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined>;
   createPurchaseOrder(data: InsertPurchaseOrder, historyData?: Omit<InsertPoStatusHistory, "purchaseOrderId">, executor?: any): Promise<PurchaseOrder>;
   updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor?: any): Promise<PurchaseOrder | null>;
@@ -163,6 +165,7 @@ export interface IProcurementStorage {
   generatePoNumber(executor: any, recordedAt?: Date): Promise<string>;
   getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<PurchaseOrderLine[]>;
   getPurchaseOrderLineById(id: number, executor?: any): Promise<PurchaseOrderLine | undefined>;
+  getPurchaseOrderLinesByIds(ids: number[], executor?: any): Promise<PurchaseOrderLine[]>;
   createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine>;
   bulkCreatePurchaseOrderLines(lines: InsertPurchaseOrderLine[]): Promise<PurchaseOrderLine[]>;
   updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>, executor?: any): Promise<PurchaseOrderLine | null>;
@@ -255,6 +258,12 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
+  async getVendorsByIds(ids: number[], executor: any = db): Promise<Vendor[]> {
+    const uniqueIds = [...new Set(ids)].filter((id) => Number.isSafeInteger(id) && id > 0);
+    if (uniqueIds.length === 0) return [];
+    return await executor.select().from(vendors).where(inArray(vendors.id, uniqueIds));
+  },
+
   async getVendorByCode(code: string, executor: any = db): Promise<Vendor | undefined> {
     const result = await executor.select().from(vendors).where(eq(vendors.code, code.toUpperCase())).limit(1);
     return result[0];
@@ -278,8 +287,10 @@ export const procurementMethods: IProcurementStorage = {
     return result[0] || null;
   },
 
-  async getAllReceivingOrders(): Promise<ReceivingOrder[]> {
-    return await db.select().from(receivingOrders).orderBy(desc(receivingOrders.createdAt));
+  async getAllReceivingOrders(options?: { limit?: number; offset?: number }): Promise<ReceivingOrder[]> {
+    const limit = Math.max(1, Math.min(options?.limit ?? 500, 500));
+    const offset = Math.max(0, options?.offset ?? 0);
+    return await db.select().from(receivingOrders).orderBy(desc(receivingOrders.createdAt)).limit(limit).offset(offset);
   },
 
   async getReceivingOrderById(id: number, executor: any = db): Promise<ReceivingOrder | undefined> {
@@ -298,10 +309,14 @@ export const procurementMethods: IProcurementStorage = {
       .orderBy(desc(receivingOrders.createdAt));
   },
 
-  async getReceivingOrdersByStatus(status: string): Promise<ReceivingOrder[]> {
+  async getReceivingOrdersByStatus(status: string, options?: { limit?: number; offset?: number }): Promise<ReceivingOrder[]> {
+    const limit = Math.max(1, Math.min(options?.limit ?? 500, 500));
+    const offset = Math.max(0, options?.offset ?? 0);
     return await db.select().from(receivingOrders)
       .where(eq(receivingOrders.status, status))
-      .orderBy(desc(receivingOrders.createdAt));
+      .orderBy(desc(receivingOrders.createdAt))
+      .limit(limit)
+      .offset(offset);
   },
 
   async createReceivingOrder(data: InsertReceivingOrder, executor: any = db): Promise<ReceivingOrder> {
@@ -785,6 +800,12 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
+  async getPurchaseOrdersByIds(ids: number[], executor: any = db): Promise<PurchaseOrder[]> {
+    const uniqueIds = [...new Set(ids)].filter((id) => Number.isSafeInteger(id) && id > 0);
+    if (uniqueIds.length === 0) return [];
+    return await executor.select().from(purchaseOrders).where(inArray(purchaseOrders.id, uniqueIds));
+  },
+
   async getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined> {
     const result = await db.select().from(purchaseOrders).where(eq(purchaseOrders.poNumber, poNumber)).limit(1);
     return result[0];
@@ -870,6 +891,12 @@ export const procurementMethods: IProcurementStorage = {
   async getPurchaseOrderLineById(id: number, executor: any = db): Promise<PurchaseOrderLine | undefined> {
     const result = await executor.select().from(purchaseOrderLines).where(eq(purchaseOrderLines.id, id)).limit(1);
     return result[0];
+  },
+
+  async getPurchaseOrderLinesByIds(ids: number[], executor: any = db): Promise<PurchaseOrderLine[]> {
+    const uniqueIds = [...new Set(ids)].filter((id) => Number.isSafeInteger(id) && id > 0);
+    if (uniqueIds.length === 0) return [];
+    return await executor.select().from(purchaseOrderLines).where(inArray(purchaseOrderLines.id, uniqueIds));
   },
 
   async createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine> {
