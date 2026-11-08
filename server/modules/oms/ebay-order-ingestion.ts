@@ -28,6 +28,7 @@ import {
 } from "./webhook-inbox.service";
 import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
 import { extractEbayShipByDate } from "./ebay-shipby";
+import { createEbayWebhookSignatureVerifier } from "./ebay-webhook-signature";
 import {
   ebayOrderIsShippable,
   recordChannelOrderFailure,
@@ -755,6 +756,7 @@ export function createEbayOrderWebhookHandler(
   ebayApiClient: EbayApiClient,
 ) {
   return async function handleEbayOrderWebhook(req: Request, res: Response) {
+    const verifySignature = ((handleEbayOrderWebhook as any).__verifier ??= createEbayWebhookSignatureVerifier(ebayApiClient));
     // eBay challenge validation — they send a GET with challenge_code
     if (req.method === "GET" && req.query.challenge_code) {
       const verificationToken = process.env.EBAY_VERIFICATION_TOKEN;
@@ -785,7 +787,14 @@ export function createEbayOrderWebhookHandler(
       // REAL order. Full cryptographic verification of x-ebay-signature
       // (eBay Notification SDK public-key flow) is tracked as follow-up.
       if (!req.headers["x-ebay-signature"]) {
-        return res.status(401).json({ error: "Missing notification signature" });
+        return res.status(401).json({ error: "Missing notification signature", code: "EBAY_SIGNATURE_MISSING" });
+      }
+      const signatureVerification = await verifySignature(req);
+      if (!signatureVerification.ok) {
+        return res.status(signatureVerification.statusCode).json({
+          error: signatureVerification.message,
+          code: signatureVerification.code,
+        });
       }
 
       const payload = req.body as EbayNotificationPayload;

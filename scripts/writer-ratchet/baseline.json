@@ -750,7 +750,6 @@
   "inventory.inventory_transactions": [
     "modules/channels",
     "modules/inventory",
-    "server/routes/diagnostics.ts",
     "server/scripts/fix_orphaned_picks.ts"
   ],
   "inventory.location_promise_policy_heads": [
@@ -811,6 +810,9 @@
     "modules/inventory-planning"
   ],
   "inventory.product_definition_applications": [
+    "modules/inventory-planning"
+  ],
+  "inventory.product_inventory_sync_requests": [
     "modules/inventory-planning"
   ],
   "inventory.promise_safety_policy_heads": [
@@ -955,9 +957,6 @@
     "modules/inventory-planning"
   ],
   "inventory.stock_link_checks": [
-    "modules/inventory-planning"
-  ],
-  "inventory.product_inventory_sync_requests": [
     "modules/inventory-planning"
   ],
   "inventory.stock_link_destinations": [
@@ -1152,11 +1151,15 @@
   "oms.channel_fulfillment_receipts": [
     "modules/oms"
   ],
+  "oms.customer_account_native_cursors": [
+    "modules/customer-account"
+  ],
+  "oms.customer_account_native_summaries": [
+    "modules/customer-account"
+  ],
   "oms.customer_order_action_invalidations": [
     "modules/customer-account"
   ],
-  "oms.customer_account_native_summaries": ["modules/customer-account"],
-  "oms.customer_account_native_cursors": ["modules/customer-account"],
   "oms.customer_order_actions": [
     "modules/customer-account"
   ],
@@ -1915,8 +1918,7 @@
     "modules/orders",
     "modules/wms",
     "server/db.ts",
-    "server/index.ts",
-    "server/routes/diagnostics.ts"
+    "server/index.ts"
   ],
   "wms.outbound_shipment_items": [
     "modules/oms",
