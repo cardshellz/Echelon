@@ -251,7 +251,7 @@ describe("fast CI preserves coverage and required checks", () => {
 
   it("requires the actual App startup smoke before the core check can pass", () => {
     const bootstrap = job(workflow, "app-bootstrap");
-    expect(bootstrap).toContain("needs: preflight");
+    expect(bootstrap).not.toContain("needs: preflight");
     expect(bootstrap).toContain("playwright test --config playwright.app-bootstrap.config.ts --forbid-only");
     expect(bootstrap).not.toMatch(/if:.*needs\.|--grep|--pass-with-no-tests|continue-on-error/);
     const config = source("playwright.app-bootstrap.config.ts");
@@ -267,7 +267,7 @@ describe("fast CI preserves coverage and required checks", () => {
     }
   });
 
-  it("runs cheap coverage, test-exclusion, migration and writer-ownership guards before expensive core jobs", () => {
+  it("runs preflight in parallel with core jobs while gating PostgreSQL shards and the required check on preflight", () => {
     const preflight = job(workflow, "preflight");
     const manifest = source("scripts/ci/guard-test-manifest.mjs");
     for (const file of [
@@ -277,9 +277,11 @@ describe("fast CI preserves coverage and required checks", () => {
       "writer-ratchet.test.ts",
     ]) expect(manifest).toContain(`server/__tests__/unit/${file}`);
     expect(preflight).toContain("node scripts/ci/run-test-lane.mjs guards");
-    for (const name of ["typecheck", "unit-tests", "contracts", "postgres-hardening-shard"]) {
-      expect(job(workflow, name)).toContain("needs: preflight");
+    for (const name of ["app-bootstrap", "typecheck", "unit-tests", "contracts"]) {
+      expect(job(workflow, name)).not.toContain("needs: preflight");
     }
+    expect(job(workflow, "postgres-hardening-shard")).toContain("needs: preflight");
+    expect(job(workflow, "check-and-unit")).toContain("needs: [preflight, app-bootstrap, typecheck, unit-tests, contracts]");
   });
 
   it("runs only the selected feature matrix, with bounded concurrency and an unfiltered failure fallback", () => {
@@ -554,5 +556,81 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(config).toContain(`workers: ${workers}`);
     expect(config).toContain('name: "desktop"');
     expect(config).toContain('name: "mobile"');
+  });
+
+  it("blocks any new hardcoded system-role route or navigation gates outside the legacy ratchet allowlist", () => {
+    const allowedServerRoleGates = new Set([
+      'server/index.ts:app.post("/api/admin/ebay/reingest"',
+      'server/modules/inventory/inventory.routes.ts:app.post("/api/inventory/upload-csv"',
+      'server/modules/inventory/inventory.routes.ts:app.post("/api/inventory/bootstrap/dry-run"',
+      'server/modules/inventory/inventory.routes.ts:app.post("/api/inventory/bootstrap"',
+      'server/modules/inventory/inventory.routes.ts:app.post("/api/inventory/migrate-locations"',
+      'server/modules/orders/picking.routes.ts:app.get("/api/orders/history"',
+      'server/modules/orders/picking.routes.ts:app.get("/api/orders/:id/detail"',
+      'server/modules/orders/picking.routes.ts:app.get("/api/orders/history/export"',
+      'server/modules/warehouse/settings.routes.ts:app.post("/api/inventory/adjustment-reasons"',
+      'server/modules/warehouse/settings.routes.ts:app.post("/api/inventory/adjustment-reasons/seed"',
+    ]);
+    const serverRoot = fileURLToPath(new URL("server", repositoryRoot));
+    const walkServer = (dir: string): string[] => {
+      const out: string[] = [];
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "__tests__" || entry.name === "node_modules") continue;
+        const full = resolve(dir, entry.name);
+        if (entry.isDirectory()) out.push(...walkServer(full));
+        else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) out.push(full);
+      }
+      return out;
+    };
+    const rootDir = fileURLToPath(repositoryRoot).replace(/\\/g, "/").replace(/\/$/, "");
+    const foundServerGates: string[] = [];
+    for (const file of walkServer(serverRoot)) {
+      const rel = file.replace(/\\/g, "/").slice(rootDir.length + 1);
+      if (rel === "server/routes/middleware.ts") continue;
+      const text = readFileSync(file, "utf8");
+      for (const line of text.split(/\r?\n/)) {
+        if (!line.includes("requireAssignedSystemRole(")) continue;
+        const match = line.match(/app\.(?:get|post|put|patch|delete)\("[^"]+"/);
+        foundServerGates.push(`${rel}:${match ? match[0] : line.trim()}`);
+      }
+    }
+    expect(foundServerGates.filter(gate => !allowedServerRoleGates.has(gate))).toEqual([]);
+
+    const allowedAppRoleRoutes = new Set([
+      '/orders',
+      '/vendors/:id',
+      '/vendors',
+      '/order-history',
+      '/integrations',
+      '/oms/orders',
+      '/oms/flow-monitor',
+      '/channels/shopify',
+      '/shipping',
+      '/returns/label-settings',
+      '/inventory/history',
+    ]);
+    const appSource = source("client/src/App.tsx");
+    const foundAppRoleRoutes = [...appSource.matchAll(/<Route\s+path="([^"]+)">\s*<ProtectedRoute\b[^>]*\ballowedSystemRoles=/g)]
+      .map(match => match[1]);
+    expect(foundAppRoleRoutes.filter(route => !allowedAppRoleRoutes.has(route))).toEqual([]);
+
+    const allowedNavRoleLabels = new Set([
+      "Operations Control Tower",
+      "Procurement",
+      "Accounts Payable",
+      "Inventory",
+      "History",
+      "Orders (OMS)",
+      "Returns",
+      "Customer portal",
+      "Orders",
+      "Shipping",
+      "Catalog & Channels",
+      "Vendors",
+    ]);
+    const navSource = source("client/src/components/layout/AppShell.tsx");
+    const foundNavRoleLabels = [...navSource.matchAll(/label:\s*"([^"]+)"[^\n{}]*\broles:\s*\[/g)]
+      .map(match => match[1]);
+    expect(foundNavRoleLabels.filter(label => !allowedNavRoleLabels.has(label))).toEqual([]);
   });
 });
