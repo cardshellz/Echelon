@@ -7,6 +7,8 @@ import {
   type CostEvidenceTransaction,
   type CostRevisionInput,
 } from "../infrastructure/cost-evidence.repository";
+import { readLatestCostApplicationStatuses } from "../cost-application-public";
+import { readLatestLandedCostRevisions } from "../../procurement";
 
 /** Inventory owns this derived flag. Supplier coverage is evaluated per frozen
  * root; mixed transfers/repacking inherit any provisional input. Clearing also
@@ -61,13 +63,16 @@ export async function refreshReceiptProvisional(
         ),
     ),
   ];
-  const freight = (
-    await tx.execute(sql`SELECT revision.inbound_shipment_line_id,revision.contract,
-    (SELECT status FROM inventory.cost_applications app WHERE app.source_revision_id=revision.id ORDER BY app.id DESC LIMIT 1) AS status
-    FROM procurement.cost_source_revisions revision WHERE revision.component='landed' AND revision.inbound_shipment_line_id=ANY(${sql.param(shipmentIds)}::int[])
-      AND NOT EXISTS(SELECT 1 FROM procurement.cost_source_revisions newer WHERE newer.inbound_shipment_line_id=revision.inbound_shipment_line_id
-        AND newer.component='landed' AND newer.revision>revision.revision)`)
-  ).rows;
+  const landedRevisions = await readLatestLandedCostRevisions(tx, shipmentIds);
+  const landedStatuses = await readLatestCostApplicationStatuses(
+    tx,
+    landedRevisions.map((r) => r.sourceRevisionId),
+  );
+  const freight = landedRevisions.map((row) => ({
+    inbound_shipment_line_id: row.inbound_shipment_line_id,
+    contract: row.contract,
+    status: landedStatuses.get(row.sourceRevisionId) ?? null,
+  }));
   const states = new Map<number, boolean>();
   for (const root of roots) {
     const pieces = costInteger(

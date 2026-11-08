@@ -46,6 +46,14 @@ export {
   synchronizeProcurementSkuReferences,
 } from "./procurement-sku-reference.service";
 export { renderPoHtml } from "./po-document";
+export {
+  readReceivingLineCostProvenance,
+  readLatestLandedCostRevisions,
+  readLatestSupplierCostRevisions,
+  type ReceivingLineCostProvenance,
+  type LatestLandedCostRevisionRow,
+  type LatestSupplierCostRevisionRow,
+} from "./cost-source-evidence-public";
 
 // Service types
 export type { PurchasingService, PurchasingError } from "./purchasing.service";

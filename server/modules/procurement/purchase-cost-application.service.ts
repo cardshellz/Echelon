@@ -1,13 +1,22 @@
-import { sql } from "drizzle-orm";
-import { costFingerprint } from "../inventory/infrastructure/cost-evidence-values";
-import { refreshReceiptProvisional } from "../inventory/application/refresh-receipt-provisional";
+import {
+  costFingerprint,
+  costInteger,
+  lockInventoryCostGraph,
+  applyCostRevision,
+  refreshReceiptProvisional,
+  readLatestCostApplicationStatuses,
+  type CostApplicationOptions,
+  type CostComponentWriter,
+  type CostEvidenceTransaction,
+  type CostRevisionApplicationResult,
+  type RecordedCostRevision,
+} from "../inventory";
 import { recordReceiptProvisionalAudit } from "./receipt-invoice-costs.repository";
 import { recordCostRevision } from "./cost-source-revision.repository";
 export { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
 import { readPurchaseCostSource } from "./purchase-cost-source.repository";
 import { resolvePurchaseCostSource } from "./domain/purchase-cost-source";
-import { costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../inventory/infrastructure/cost-evidence.repository";
-import { applyCostRevision, type CostApplicationOptions, type CostComponentWriter, type CostRevisionApplicationResult } from "../inventory/application/apply-cost-revision";
+import { readLatestSupplierCostRevisions } from "./cost-source-evidence-public";
 
 /** Source decisions are shared with status reads. Only this command records
  * the resolved revision under the inventory cost graph lock. */
@@ -46,14 +55,18 @@ export async function refreshReceiptCostProvisionalForLine(tx: CostEvidenceTrans
   const source = await readPurchaseCostSource(tx, lineId);
   if (!source?.receiptCosting) return;
   const selected = resolvePurchaseCostSource(source);
-  const current = (await tx.execute(sql`SELECT revision.component,revision.fingerprint,
-    (SELECT status FROM inventory.cost_applications app WHERE app.source_revision_id=revision.id ORDER BY app.id DESC LIMIT 1) AS status
-    FROM procurement.cost_source_revisions revision WHERE revision.purchase_order_line_id=${lineId}
-      AND revision.inbound_shipment_line_id IS NULL AND revision.component IN ('product','packaging')
-      AND NOT EXISTS(SELECT 1 FROM procurement.cost_source_revisions newer WHERE newer.purchase_order_line_id=revision.purchase_order_line_id
-        AND newer.inbound_shipment_line_id IS NULL AND newer.component=revision.component AND newer.revision>revision.revision)`)).rows;
-  const applied=selected.length===2&&selected.every(input=>current.some(row=>row.component===input.component&&row.status==="applied"
-    && row.fingerprint===costFingerprint({input,sourceEvidence:source})));
-  const changes = await refreshReceiptProvisional(tx,lineId,selected,applied);
-  await recordReceiptProvisionalAudit(tx,lineId,changes,applied,actorId,at);
+  const latestRevisions = await readLatestSupplierCostRevisions(tx, lineId);
+  const statusByRevisionId = await readLatestCostApplicationStatuses(
+    tx,
+    latestRevisions.map((r) => r.sourceRevisionId),
+  );
+  const current = latestRevisions.map((row) => ({
+    component: row.component,
+    fingerprint: row.fingerprint,
+    status: statusByRevisionId.get(row.sourceRevisionId) ?? null,
+  }));
+  const applied = selected.length === 2 && selected.every(input => current.some(row => row.component === input.component && row.status === "applied"
+    && row.fingerprint === costFingerprint({ input, sourceEvidence: source })));
+  const changes = await refreshReceiptProvisional(tx, lineId, selected, applied);
+  await recordReceiptProvisionalAudit(tx, lineId, changes, applied, actorId, at);
 }

@@ -54,6 +54,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { reorderAnalysisSearchParams } from "@/features/purchasing/reorderAnalysisDeepLink";
+import {
+  invalidateRecommendationDecisionQueries,
+  invalidateRecommendationOrderMutationQueries,
+} from "@/features/purchasing/autoDraftSettingsValidation";
 import { ExclusionRulesModal } from "@/components/purchasing/ExclusionRulesModal";
 import { ForecastAccuracyPanel } from "@/components/purchasing/ForecastAccuracyPanel";
 import {
@@ -807,9 +811,7 @@ export default function PurchasingView() {
       return res.json();
     },
     onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-accepted-queue"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-decisions"] });
+      invalidateRecommendationDecisionQueries(queryClient);
       setDecisionDialog(null);
       setDecisionNote("");
       setReviewedControlCodes(new Set());
@@ -853,11 +855,7 @@ export default function PurchasingView() {
       return res.json();
     },
     onSuccess: (data, item) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-accepted-queue"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-decisions"] });
+      invalidateRecommendationOrderMutationQueries(queryClient, { includeDashboard: true });
       toast({
         title: "Draft PO Updated",
         description: `${item.sku} handed off to ${data.count ?? 0} draft PO${data.count === 1 ? "" : "s"}.`,
