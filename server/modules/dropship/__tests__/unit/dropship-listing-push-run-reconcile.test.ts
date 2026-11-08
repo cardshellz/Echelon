@@ -36,6 +36,7 @@ describe("publish run reconcile and finish", () => {
         problems: [{ productVariantId: 102, sku: "TL-25", productName: "Toploader", variantName: "Pack of 25", outcome: "failed",
           code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", message: "eBay listing push failed with HTTP 400." }],
         omittedProblemCount: 1,
+        waitingForStockCount: 0,
       },
       idempotencyKey: "listing-push-run:4:finished",
     }]);
@@ -95,6 +96,34 @@ describe("publish run reconcile and finish", () => {
     ];
     expect(await harness.service.reconcileAndFinish()).toEqual({ changed: 0, finished: 2 });
     expect(harness.notices).toEqual([]);
+  });
+
+  it("sends nothing for a run whose only problem sizes wait for stock, and still stamps its notice step", async () => {
+    const harness = makeSweepHarness();
+    harness.repository.finished = [finishedRun({ run: sweepRunRecord({ status: "partial", completedAt: SWEEP_NOW }),
+      counts: { ...emptyListingPushRunCounts(), completed: 1, blocked: 2 }, waitingForStockCount: 2 })];
+    expect(await harness.service.reconcileAndFinish()).toEqual({ changed: 0, finished: 1 });
+    expect(harness.notices).toEqual([]);
+    expect(harness.repository.callsOf("markRunNotified")).toEqual([{ runId: 4, now: SWEEP_NOW }]);
+    // The run's status and counts are as stored: only the notice leaves the waiting sizes out.
+    expect(harness.logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_RUN_FINISHED")?.context).toMatchObject({
+      status: "partial", counts: { completed: 1, blocked: 2 } });
+  });
+
+  it("counts only the real problems of a run with sizes waiting for stock as well", async () => {
+    const harness = makeSweepHarness();
+    harness.repository.finished = [finishedRun({ run: sweepRunRecord({ status: "partial", targetCount: 5, completedAt: SWEEP_NOW }),
+      counts: { ...emptyListingPushRunCounts(), completed: 1, failed: 1, blocked: 3 }, waitingForStockCount: 2,
+      problems: [{ productVariantId: 102, productId: 1, productName: "Toploader", variantName: null, sku: null, outcome: "failed",
+        code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", message: "eBay listing push failed with HTTP 400.", retryable: false },
+      { productVariantId: 103, productId: 1, productName: "Sleeve", variantName: null, sku: null, outcome: "blocked",
+        code: "DROPSHIP_LISTING_PREVIEW_BLOCKED", message: "variant_not_selected", retryable: false }] })];
+    await harness.service.reconcileAndFinish();
+    expect(harness.notices).toHaveLength(1);
+    expect(harness.notices[0].message).toBe("2 of 5 listings didn't publish to your eBay store. Catalog step 3 shows each one and why."
+      + "\nToploader: It couldn't be sent.\nSleeve: It isn't ready to list yet.");
+    expect(harness.notices[0].payload).toMatchObject({ omittedProblemCount: 0, waitingForStockCount: 2,
+      counts: { completed: 1, failed: 1, blocked: 3 } });
   });
 
   it("tells the vendor eBay stayed down when the job breaker stopped the run", async () => {

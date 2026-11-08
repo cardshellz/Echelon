@@ -199,6 +199,7 @@ export function finishedRun(overrides: Partial<ListingPushRunFinished> = {}): Li
     problems: [],
     storeName: null,
     stockLinkFailuresNotRequeued: [],
+    waitingForStockCount: 0,
     ...overrides,
   };
 }

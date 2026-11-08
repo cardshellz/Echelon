@@ -7,7 +7,9 @@ import {
   dropObservationWrites,
   isRepublishWanted,
   isStockOutEndProven,
+  isListingPushItemWaitingForStock,
   isWaitingForStock,
+  listingPushItemBlockers,
   marketplacePublishBaseline,
   marketplaceSyncStoreListingCap,
   marketplaceWaitingForStockRotation,
@@ -260,5 +262,39 @@ describe("listings waiting for stock (owner report: a size published at 0 never 
     expect(marketplaceWaitingForStockRotation(new Date(tick.getTime() + MARKETPLACE_SYNC_INTERVAL_MS))).toBe(1_001);
     expect(marketplaceWaitingForStockRotation(new Date(0))).toBe(0);
     expect(marketplaceWaitingForStockRotation(new Date(Number.NaN))).toBe(0);
+  });
+});
+
+describe("isListingPushItemWaitingForStock (the push failure notices leave these out)", () => {
+  const item = (overrides: Partial<Parameters<typeof isListingPushItemWaitingForStock>[0]> = {}) => ({
+    platform: "ebay", status: "blocked", errorCode: "DROPSHIP_LISTING_PREVIEW_BLOCKED",
+    errorMessage: "marketplace_quantity_unavailable", externalListingId: null, ...overrides,
+  });
+
+  it("is an eBay preview block whose one blocker is stock, on a listing never published", () => {
+    expect(isListingPushItemWaitingForStock(item())).toBe(true);
+    expect(isListingPushItemWaitingForStock(item({ externalListingId: " " }))).toBe(true);
+    // The same code twice is still one blocker.
+    expect(isListingPushItemWaitingForStock(item({ errorMessage: "marketplace_quantity_unavailable, marketplace_quantity_unavailable" }))).toBe(true);
+  });
+
+  it.each([
+    ["another blocker as well", { errorMessage: "marketplace_quantity_unavailable, variant_not_selected" }],
+    ["another blocker only", { errorMessage: "listing_tier_not_on_sale" }],
+    ["no blockers", { errorMessage: null }],
+    ["failed, not blocked", { status: "failed" }],
+    ["another code", { errorCode: "DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED" }],
+    ["no code", { errorCode: null }],
+    ["already on eBay", { externalListingId: "110100" }],
+    ["off eBay", { platform: "shopify" }],
+    ["no platform", { platform: null }],
+  ])("is not when %s", (_name, overrides) => {
+    expect(isListingPushItemWaitingForStock(item(overrides))).toBe(false);
+  });
+
+  it("reads blockers from the joined message, trimmed, blanks dropped, once each", () => {
+    expect(listingPushItemBlockers(" a, b ,,a ")).toEqual(["a", "b"]);
+    expect(listingPushItemBlockers(null)).toEqual([]);
+    expect(listingPushItemBlockers("")).toEqual([]);
   });
 });
