@@ -22,8 +22,8 @@ vi.mock("../../../../db",()=>({db:new Proxy({},{get(_target,property){
 import { registerAuthRoutes } from "../../identity.routes";
 import { createStaffSessionGate } from "../../staff-session";
 import { requirePermission } from "../../../../routes/middleware";
-import { updateUserUseCase } from "../../application/identity.use-cases";
-import { reviewStaffCredentialReset,resetStaffPassword,changeOwnStaffPassword,authenticateStaffSession } from "../../application/staff-credentials";
+import { updateUserUseCase, assignUserRolesUseCase, updateRolePermissionsUseCase } from "../../application/identity.use-cases";
+import { reviewStaffCredentialReset,resetStaffPassword,changeOwnStaffPassword,authenticateStaffSession,recoverStaffPasswordBreakGlass,requestStaffPasswordRecoveryEmail,resetStaffPasswordWithToken } from "../../application/staff-credentials";
 import { readStaffCredentialState } from "../../infrastructure/staff-credentials.repository";
 import { setupWebSocket,broadcastToUser } from "../../../../websocket";
 import { registerCustomerReturnCustomerAuthRoutes } from "../../../returns/interfaces/http/customer-return-customer-auth.routes";
@@ -272,5 +272,58 @@ integration("staff credential ownership, session revocation and recovery",()=>{
       expect((await upgrade.pool.query("SELECT * FROM identity.auth_user_roles")).rows).toEqual([]);
       await expect(upgrade.pool.query("INSERT INTO identity.staff_credentials(user_id) VALUES('missing-user')")).rejects.toMatchObject({code:"23503"});
     }finally{await upgrade.close();}
+  });
+  it("break-glass CLI recovery rotates credential generation, requires password change on next login, and immediately closes open WebSockets",async()=>{
+    const cookie=await login(targetId),ws=await socket(cookie);
+    const closed=new Promise<number>(resolve=>ws.once("close",code=>resolve(code)));
+    const opId=randomUUID();
+    const outcome=await recoverStaffPasswordBreakGlass({username:targetId,password:replacement,reason:"Emergency break-glass recovery after lockout",operator:"cli-brett",operationId:opId});
+    expect(outcome.userId).toBe(targetId);expect(outcome.mustChangePassword).toBe(true);
+    expect(await closed).toBe(1008);
+    expect((await call("/api/business-check",cookie)).status).toBe(401);
+    const tempCookie=await login(targetId,replacement);
+    expect((await call("/api/business-check",tempCookie)).status).toBe(401);
+    expect((await call("/api/auth/password",tempCookie,{currentPassword:replacement,password:chosen,operationId:randomUUID()})).status).toBe(204);
+    expect((await call("/api/business-check",await login(targetId,chosen))).status).toBe(200);
+    const audits=(await database.pool.query("SELECT action,actor,target FROM public.audit_events WHERE action='identity.access.credential_break_glass_recovery'")).rows;
+    expect(audits).toEqual([{action:"identity.access.credential_break_glass_recovery",actor:"break_glass:cli-brett",target:`user:${targetId}`}]);
+  });
+  it("self-service verified-email recovery issues a single-use 15-minute token, rejects replay, and records immutable audit events",async()=>{
+    vi.stubEnv("SESSION_SECRET","disposable-synthetic-session-signing-fixture-only");
+    vi.stubEnv("STAFF_RECOVERY_EMAILS_JSON",JSON.stringify({[targetId]:"target@example.invalid"}));
+    try{
+      let capturedUrl="";
+      const requested=await requestStaffPasswordRecoveryEmail({identifier:"target@example.invalid"},{
+        publicOrigin:base,
+        sendRecoveryEmail:async(msg)=>{capturedUrl=msg.resetUrl;},
+      });
+      expect(requested).toEqual({accepted:true,delivered:true});
+      const token=new URL(capturedUrl).searchParams.get("resetToken")!;
+      expect(token).toBeTruthy();
+      const resetRes=await call("/api/auth/reset-password-token",undefined,{token,password:chosen,operationId:randomUUID()});
+      expect(resetRes.status).toBe(204);
+      const replayRes=await call("/api/auth/reset-password-token",undefined,{token,password:"AnotherValidPassword!1",operationId:randomUUID()});
+      expect(replayRes.status).toBe(403);
+      expect((await call("/api/business-check",await login(targetId,chosen))).status).toBe(200);
+      const audits=(await database.pool.query("SELECT action FROM public.audit_events WHERE target=$1 ORDER BY id",[ `user:${targetId}` ])).rows.map(r=>r.action);
+      expect(audits).toEqual(["identity.access.credential_recovery_requested","identity.access.credential_self_service_reset"]);
+    }finally{vi.unstubAllEnvs();}
+  });
+  it("pushes authority:updated to active WebSockets on role permission edits and closes sockets immediately when roles are removed",async()=>{
+    await grantActor(["users:view","roles:view","roles:edit","users:manage_roles"]);
+    const cookie=await login(targetId),ws=await socket(cookie),messages:string[]=[];
+    ws.on("message",data=>messages.push(data.toString()));
+    const permRows=(await database.pool.query<{id:number}>("SELECT id FROM identity.auth_permissions WHERE resource IN ('inventory','orders') AND action='view' ORDER BY resource")).rows;
+    const rev1=(await reviewStaffCredentialReset(targetId,await (async()=>{await allowReset(true);return authority();})())).expectedAccessRevision;
+    await grantActor(["users:view","roles:view","roles:edit","users:manage_roles"]);
+    const revAfterGrant=(await (await call("/api/users",await login(actorId))).headers.get("x-access-revision"))!;
+    await updateRolePermissionsUseCase(targetRole,permRows.map(r=>r.id),{...(await authority()),expectedAccessRevision:revAfterGrant});
+    await new Promise(resolve=>setTimeout(resolve,40));
+    expect(messages.some(m=>m.includes('"type":"authority:updated"'))).toBe(true);
+    const closed=new Promise<number>(resolve=>ws.once("close",code=>resolve(code)));
+    const revBeforeRemove=(await (await call("/api/users",await login(actorId))).headers.get("x-access-revision"))!;
+    await assignUserRolesUseCase(targetId,[],{...(await authority()),expectedAccessRevision:revBeforeRemove});
+    expect(await closed).toBe(1008);
+    void rev1;
   });
 });

@@ -10,7 +10,14 @@ import { assignedSystemRoleKeys } from "./domain/staff-access";
 import { queryAccessReview, queryStaffUserList } from "./application/access-review.query";
 import { parseRolePermissionEdit } from "./domain/role-permission-edit";
 import { parseRoleAssignment } from "./domain/role-assignment";
-import { authenticateStaffSession, reviewStaffCredentialReset, resetStaffPassword, changeOwnStaffPassword } from "./application/staff-credentials";
+import {
+  authenticateStaffSession,
+  reviewStaffCredentialReset,
+  resetStaffPassword,
+  changeOwnStaffPassword,
+  requestStaffPasswordRecoveryEmail,
+  resetStaffPasswordWithToken,
+} from "./application/staff-credentials";
 import { staffSessionActor, clearStaffSession, readStaffLifecycleAccess } from "./staff-session";
 import { readStaffCredentialState } from "./infrastructure/staff-credentials.repository";
 
@@ -100,6 +107,40 @@ export function registerAuthRoutes(app: Express) {
     } catch(error) {
       if(error instanceof IdentityAdministrationError) return res.status(error.statusCode).json({code:error.code,error:error.message});
       res.status(503).json({error:"Password change could not be confirmed. Sign in again before retrying."});
+    }
+  });
+  app.post("/api/auth/forgot-password",credentialRateLimiter,async(req,res)=>{
+    try {
+      const identifier = req.body?.identifier ?? req.body?.username;
+      const host = req.get("host");
+      const publicOrigin = process.env.PUBLIC_ORIGIN ?? (host ? `${req.protocol}://${host}` : undefined);
+      await requestStaffPasswordRecoveryEmail({ identifier }, { publicOrigin });
+      res.status(202).json({
+        accepted: true,
+        message: "If an active account with a recovery email matches, a 15-minute single-use reset link has been sent.",
+      });
+    } catch(error) {
+      if(error instanceof IdentityAdministrationError && error.statusCode === 400) {
+        return res.status(400).json({ code: error.code, error: error.message });
+      }
+      // Uniform response on non-input errors prevents user enumeration.
+      res.status(202).json({
+        accepted: true,
+        message: "If an active account with a recovery email matches, a 15-minute single-use reset link has been sent.",
+      });
+    }
+  });
+  app.post("/api/auth/reset-password-token",credentialRateLimiter,async(req,res)=>{
+    try {
+      await resetStaffPasswordWithToken(req.body);
+      if (req.session) {
+        clearStaffSession(req);
+        await new Promise<void>((resolve,reject)=>req.session.save(error=>error?reject(error):resolve()));
+      }
+      res.status(204).end();
+    } catch(error) {
+      if(error instanceof IdentityAdministrationError) return res.status(error.statusCode).json({code:error.code,error:error.message});
+      res.status(503).json({error:"Password reset could not be confirmed. Request a new reset link before retrying."});
     }
   });
 

@@ -38,8 +38,24 @@ New definitions never automatically grant access or restore revoked memberships.
   access. Self-change ends staff sessions and requires sign-in again. Existing login
   strings remain compatible; newly chosen credentials reject bcrypt's 72-byte truncation.
 - HTTP admission, WebSocket delivery and the two eBay SSE observers reject stale
-  generations. Observer refusal does not cancel accepted business work, retract already
+  generations. When role permissions, user role assignments, user activation or staff
+  credentials change, Identity emits an authority-change notification (`authority:updated`)
+  that immediately re-verifies open WebSockets and SSE observers, closing revoked or
+  credential-stale connections (`1008`) and triggering connected browser tabs to refresh
+  their effective authority (`/api/auth/me`) without waiting for a page reload.
+  Observer refusal does not cancel accepted business work, retract already
   delivered/buffered data, or make external provider work atomic.
+- Administrator and staff forgotten-password recovery (`A1b`) provides two audited
+  recovery paths alongside `/users` admin resets:
+  1. **Audited CLI break-glass recovery** (`scripts/identity/recover-admin-password.ts`),
+     delegating to `recoverStaffPasswordBreakGlass` inside `modules/identity` so sole
+     table ownership (`writer-ratchet`) is preserved, rotating `credential_version`,
+     requiring password completion (`must_change_password = true`) on next login and
+     recording an immutable `identity.access.credential_break_glass_recovery` audit row.
+  2. **Self-service verified-email recovery** (`POST /api/auth/forgot-password` and
+     `POST /api/auth/reset-password-token`), issuing a 15-minute single-use HMAC token
+     cryptographically bound to the account's current `credential_version` and password
+     hash so any use or concurrent credential change immediately invalidates replay.
 - Staff login preserves independent customer-return and `.ops` session namespaces and
   secure-cookie requirements. Customer-return regeneration preserves staff generation.
   Pending staff OAuth must restart after staff session rotation.

@@ -1,6 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import type { Request, RequestHandler, Response } from "express";
+import { onStaffAuthorityChanged } from "./modules/identity/authority-events";
 import { readCurrentStaffAccess, readStaffCredentialState, isCurrentStaffCredential } from "./modules/identity";
 import { logger } from "./platform/observability/logger";
 import { classify } from "./platform/observability/errors";
@@ -14,7 +15,7 @@ const userConnections = new Map<string, Set<StaffSocket>>();
 const configuredPendingLimit = Number(process.env.WS_PENDING_NOTIFICATIONS_PER_USER);
 export const WS_PENDING_NOTIFICATIONS_PER_USER = Number.isSafeInteger(configuredPendingLimit)
   && configuredPendingLimit > 0 ? configuredPendingLimit : 32;
-const pending = new Map<string, { ordersUpdated: boolean; notifications: string[] }>();
+const pending = new Map<string, { ordersUpdated: boolean; authorityUpdated: boolean; notifications: string[] }>();
 let dispatch: Promise<void> | undefined;
 
 // Build version changes at restart. It contains no business data.
@@ -56,7 +57,9 @@ async function drainBroadcasts(): Promise<void> {
       closeUserConnections(userId, 1008, "Staff access revoked");
       continue;
     }
-    const messages = batch.ordersUpdated ? [JSON.stringify({ type: "orders:updated" })] : [];
+    const messages: string[] = [];
+    if (batch.authorityUpdated) messages.push(JSON.stringify({ type: "authority:updated" }));
+    if (batch.ordersUpdated) messages.push(JSON.stringify({ type: "orders:updated" }));
     messages.push(...batch.notifications);
     // Re-read connections after awaiting authority. A disconnected socket must
     // not receive a queued message. No authority is cached across batches.
@@ -93,10 +96,12 @@ function dispatchPending(): Promise<void> {
   return dispatch;
 }
 
-function enqueue(userId: string, notification?: string) {
+function enqueue(userId: string, notification?: string, authorityUpdated = false) {
   if (![...(userConnections.get(userId) ?? [])].some(ws => ws.readyState === WebSocket.OPEN)) return;
-  const batch = pending.get(userId) ?? { ordersUpdated: false, notifications: [] };
-  if (notification !== undefined) {
+  const batch = pending.get(userId) ?? { ordersUpdated: false, authorityUpdated: false, notifications: [] };
+  if (authorityUpdated) {
+    batch.authorityUpdated = true;
+  } else if (notification !== undefined) {
     if (batch.notifications.length >= WS_PENDING_NOTIFICATIONS_PER_USER) {
       logger.warn("identity.websocket.backpressure", {
         outcome: "reconnect_required", error_code: "IDENTITY_WEBSOCKET_BACKLOG_LIMIT", user_id: userId,
@@ -118,6 +123,9 @@ export function setupWebSocket(server: Server, sessionMiddleware: RequestHandler
   const MAX_CONNECTIONS_PER_IP = 10;
   const ipConnections = new Map<string, number>();
   const pendingUpgrades = new Map<string, number>();
+  const unsubscribeAuthority = onStaffAuthorityChanged((affectedUserIds) =>
+    broadcastAuthorityUpdated(affectedUserIds)
+  );
 
   server.on("upgrade", (request, socket, head) => {
     if (request.url !== "/ws") {
@@ -222,6 +230,7 @@ export function setupWebSocket(server: Server, sessionMiddleware: RequestHandler
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
   serverWss.on("close", () => {
+    unsubscribeAuthority?.();
     clearInterval(interval);
     process.off("SIGTERM", shutdown);
     process.off("SIGINT", shutdown);
@@ -233,6 +242,13 @@ export function setupWebSocket(server: Server, sessionMiddleware: RequestHandler
 export function broadcastOrdersUpdated(): Promise<void> {
   if (!wss) return Promise.resolve();
   for (const userId of userConnections.keys()) enqueue(userId);
+  return dispatchPending();
+}
+
+export function broadcastAuthorityUpdated(userIds?: Iterable<string>): Promise<void> {
+  if (!wss) return Promise.resolve();
+  const targets = userIds ? Array.from(new Set(userIds)) : Array.from(userConnections.keys());
+  for (const userId of targets) enqueue(userId, undefined, true);
   return dispatchPending();
 }
 
