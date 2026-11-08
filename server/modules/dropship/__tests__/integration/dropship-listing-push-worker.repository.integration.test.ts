@@ -6,6 +6,7 @@ import type { DropshipMarketplaceListingIntent } from "../../application/dropshi
 import { PgDropshipListingPushJobQueueRepository } from "../../infrastructure/dropship-listing-push-job-runner";
 import { PgDropshipListingPushWorkerRepository } from "../../infrastructure/dropship-listing-push-worker.repository";
 import { PgDropshipLiveListingZeroQuantityRepository } from "../../infrastructure/dropship-live-listing-zero-quantity.repository";
+import { WAITING_FOR_STOCK_LISTINGS_SQL } from "../../infrastructure/dropship-marketplace-sync.repository";
 import { listingPushRunsMigrationSql } from "../fixtures/listing-push-runs.fixture";
 import { ebaySyncBackListingColumnsSql } from "../fixtures/ebay-sync-back.fixture";
 import { LISTING_END_REQUESTS_REDUCED_FIXTURE_SQL } from "../fixtures/listing-end-reduced.fixture";
@@ -462,5 +463,75 @@ describeDatabase.sequential("listing push worker repository (PostgreSQL)", () =>
         const events = await pool!.query(qualify(`SELECT 1 FROM dropship.dropship_listing_sync_events WHERE listing_id = $1`), [listingId]);
         expect(events.rowCount).toBe(0);
       });
+  });
+  // Stock gone between queue and push (the push-time refresh's only blocker is the stock one).
+  describe("out of stock at push time", () => {
+    async function claimStarted(idempotencyKey: string, live: boolean) {
+      const seeded = await seedJob({ jobStatus: "queued", itemStatus: "queued" });
+      if (live) {
+        await pool!.query(qualify(`UPDATE dropship.dropship_vendor_listings SET status = 'active', external_listing_id = '110004',
+          external_offer_id = 'OFFER-4', vendor_retail_price_cents = 1299, pushed_quantity = 6, last_pushed_at = '2026-09-01T00:00:00Z',
+          marketplace_issue_codes = ARRAY['quantity_restore_blocked']::text[] WHERE id = $1`), [seeded.listingId]);
+      }
+      const claim = await repository.claimJob({ jobId: seeded.jobId, workerId: WORKER, idempotencyKey, now: NOW });
+      await repository.markItemProcessing({ jobId: seeded.jobId, itemId: seeded.itemId, now: NOW, workerId: WORKER });
+      return { seeded, job: claim.job, item: claim.items[0]! };
+    }
+    const settlement = (listingId: number, at = NOW) => ({ vendorId: 10, storeConnectionId: 22, listingId, productVariantId: 101,
+      sku: "SKU-101", externalOfferId: "OFFER-4", actorId: WORKER, reason: "process-z:1", now: at });
+
+    it("a first publish ends waiting for stock: item and listing blocked, the sweep's waiting read finds it", async () => {
+      const { seeded, job, item } = await claimStarted("process-w", false);
+      const blocked = await repository.blockItem({ job, item, code: "DROPSHIP_LISTING_PREVIEW_BLOCKED",
+        message: "marketplace_quantity_unavailable", listingBlockers: ["marketplace_quantity_unavailable"], workerId: WORKER, now: NOW });
+      expect(blocked).toMatchObject({ status: "blocked", errorCode: "DROPSHIP_LISTING_PREVIEW_BLOCKED",
+        errorMessage: "marketplace_quantity_unavailable" });
+      const listing = (await pool!.query(qualify(`SELECT status, metadata->'blockers' AS blockers, metadata->>'lastPreviewStatus' AS preview
+        FROM dropship.dropship_vendor_listings WHERE id = $1`), [seeded.listingId])).rows[0];
+      expect(listing).toEqual({ status: "blocked", blockers: ["marketplace_quantity_unavailable"], preview: "blocked" });
+      const waiting = await pool!.query(qualify(WAITING_FOR_STOCK_LISTINGS_SQL), [22, "marketplace_quantity_unavailable", 10, 0]);
+      expect(waiting.rows.map((row: { id: number }) => row.id)).toEqual([seeded.listingId]);
+    });
+
+    it("legacy live: the item completes and the listing settles at 0 in one transaction; price, status and ids stay", async () => {
+      const { seeded, job, item } = await claimStarted("process-z", true);
+      await expect(repository.completeItemAtZeroQuantity({ job, item, externalListingId: "110004",
+        settlement: settlement(seeded.listingId), workerId: WORKER, now: NOW })).resolves.toEqual({ pushedQuantityBefore: 6,
+        lastPushedAtBefore: new Date("2026-09-01T00:00:00Z") });
+      const listing = (await pool!.query(qualify(`SELECT status, external_listing_id, external_offer_id, pushed_quantity, last_pushed_at,
+        vendor_retail_price_cents::int AS price, marketplace_issue_codes FROM dropship.dropship_vendor_listings WHERE id = $1`),
+      [seeded.listingId])).rows[0];
+      expect(listing).toEqual({ status: "active", external_listing_id: "110004", external_offer_id: "OFFER-4", pushed_quantity: 0,
+        last_pushed_at: NOW, price: 1299, marketplace_issue_codes: [] });
+      const finalized = await repository.finalizeJob({ jobId: seeded.jobId, workerId: WORKER, now: NOW });
+      expect(finalized.job.status).toBe("completed");
+      expect(finalized.summary).toMatchObject({ total: 1, completed: 1, failed: 0, blocked: 0 });
+      expect(finalized.items[0]).toMatchObject({ status: "completed", externalListingId: "110004" });
+    });
+
+    it("a replay settles 0 again without completing the item twice", async () => {
+      const { seeded, job, item } = await claimStarted("process-r", true);
+      const later = new Date(NOW.getTime() + 60_000);
+      await repository.completeItemAtZeroQuantity({ job, item, externalListingId: "110004", settlement: settlement(seeded.listingId),
+        workerId: WORKER, now: NOW });
+      await repository.completeItemAtZeroQuantity({ job, item, externalListingId: "110004", settlement: settlement(seeded.listingId, later),
+        workerId: WORKER, now: later });
+      const completions = await pool!.query(qualify(`SELECT 1 FROM dropship.dropship_audit_events
+        WHERE event_type = 'listing_push_item_completed' AND entity_id = $1`), [String(item.itemId)]);
+      expect(completions.rowCount).toBe(1);
+      const listing = (await pool!.query(qualify(`SELECT pushed_quantity, last_pushed_at FROM dropship.dropship_vendor_listings WHERE id = $1`),
+        [seeded.listingId])).rows[0];
+      expect(listing).toEqual({ pushed_quantity: 0, last_pushed_at: later });
+    });
+
+    it("a listing no longer live on the offer refuses and rolls the item back with it", async () => {
+      const { seeded, job, item } = await claimStarted("process-c", true);
+      await pool!.query(qualify(`UPDATE dropship.dropship_vendor_listings SET status = 'ended' WHERE id = $1`), [seeded.listingId]);
+      await expect(repository.completeItemAtZeroQuantity({ job, item, externalListingId: "110004", settlement: settlement(seeded.listingId),
+        workerId: WORKER, now: NOW })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_ZERO_QUANTITY_SETTLEMENT_CONFLICT" });
+      const itemRow = (await pool!.query(qualify(`SELECT status FROM dropship.dropship_listing_push_job_items WHERE id = $1`),
+        [item.itemId])).rows[0];
+      expect(itemRow).toEqual({ status: "processing" });
+    });
   });
 });

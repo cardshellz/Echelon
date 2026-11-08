@@ -25,6 +25,10 @@ import { isVendorRelistAllowed } from "../domain/marketplace-push-rule";
 import { MARKETPLACE_SYNC_CODES } from "../domain/marketplace-sync-errors";
 import { MARKETPLACE_PUSH_STOP_WORDS } from "../domain/marketplace-sync-words";
 import { QuantityPublicationAdmissionError } from "../../inventory-planning/domain/quantity-publication-admission";
+import { hasMarketplaceListing } from "../domain/listing-live-status";
+import { decideLiveListingZeroQuantityUpdate } from "../domain/live-listing-zero-quantity";
+import { MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER } from "../domain/marketplace-sync-sweep";
+import type { DropshipLiveListingZeroQuantityService, DropshipLiveListingZeroQuantitySettlement } from "./dropship-live-listing-zero-quantity-service";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
@@ -184,9 +188,24 @@ export interface DropshipListingPushWorkerRepository {
     item: DropshipListingPushWorkerItemRecord;
     code: string;
     message: string;
+    /** Written to the listing's metadata.blockers: an unpublished listing blocked only for stock waits for it. */
+    listingBlockers?: readonly string[];
     workerId: string;
     now: Date;
   }): Promise<DropshipListingPushWorkerItemRecord>;
+  /**
+   * After 0 was sent to a live listing (legacy authority, stock gone since the item was queued): the item completes
+   * and the listing settles at 0, in one transaction. Throws (retryable) when the listing is no longer live on the
+   * offer the 0 went to.
+   */
+  completeItemAtZeroQuantity(input: {
+    job: DropshipListingPushWorkerJobRecord;
+    item: DropshipListingPushWorkerItemRecord;
+    externalListingId: string;
+    settlement: DropshipLiveListingZeroQuantitySettlement;
+    workerId: string;
+    now: Date;
+  }): Promise<{ pushedQuantityBefore: number; lastPushedAtBefore: Date | null }>;
   /**
    * eBay sync-back's quiet stop: nothing is sent for the item and it is not a
    * failure (cancelled, no failure email, never re-queued): the vendor ended
@@ -284,6 +303,14 @@ export interface DropshipListingPushWorkerServiceDependencies {
    * writes anything (plan v4 §5). Absent: pushes run as before it existed.
    */
   marketplaceSync?: DropshipListingPushMarketplaceSync;
+  /**
+   * A queued item whose stock is gone by push time (the refresh's only blocker is the stock one) on a live
+   * listing: under legacy authority 0 goes out through this owner and the item completes at 0. Absent: such an
+   * item fails as before.
+   */
+  zeroQuantity?: Pick<DropshipLiveListingZeroQuantityService, "publishZeroIfLive">;
+  /** The runtime quantity authority (the same read eBay sync-back uses). Absent: unknown, so no live listing is touched. */
+  quantityAuthority?: () => Promise<"legacy" | "canonical">;
   clock: DropshipClock;
   logger: DropshipLogger;
 }
@@ -405,12 +432,22 @@ export class DropshipListingPushWorkerService {
       // eBay sync-back's pre-read (§5 step 2) comes first: what the vendor owns is adopted before the refresh reads it.
       const synced = await this.preReadMarketplace(claim, item);
       // Persisted job intent identifies work, not a quantity snapshot to replay later.
-      const currentIntent = this.deps.refreshListingIntent ? await this.deps.refreshListingIntent({
-        jobId: claim.job.jobId, jobItemId: item.itemId,
-        vendorId: claim.job.vendorId, storeConnectionId: claim.job.storeConnectionId, productVariantId: item.productVariantId,
-        queuedPriceCents: intent!.priceCents,
-        queuedMarketplaceCategory: queuedMarketplaceCategory(intent!),
-      }) : intent!;
+      let currentIntent: DropshipMarketplaceListingIntent;
+      try {
+        currentIntent = this.deps.refreshListingIntent ? await this.deps.refreshListingIntent({
+          jobId: claim.job.jobId, jobItemId: item.itemId,
+          vendorId: claim.job.vendorId, storeConnectionId: claim.job.storeConnectionId, productVariantId: item.productVariantId,
+          queuedPriceCents: intent!.priceCents,
+          queuedMarketplaceCategory: queuedMarketplaceCategory(intent!),
+        }) : intent!;
+      } catch (refreshError) {
+        // Stock ran out after the item was queued: decided here, never a retry that fails the same way again.
+        if (await this.settleOutOfStock(parsed, claim, item, intent!, synced, refreshError)) {
+          state.consecutivePauses = 0;
+          return "done";
+        }
+        throw refreshError;
+      }
       const pushResult = await this.deps.marketplacePush.pushListing({
         vendorId: claim.job.vendorId,
         storeConnectionId: claim.job.storeConnectionId,
@@ -559,6 +596,71 @@ export class DropshipListingPushWorkerService {
       if (endsPauseRun) state.consecutivePauses = 0;
       return "done";
     }
+  }
+
+  /**
+   * The push-time refresh refused the item ONLY because Card Shellz has no stock now
+   * (DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED whose one blocker is marketplace_quantity_unavailable). True when the
+   * item was decided here; false leaves today's failure path (any other refusal or blocker):
+   * - not on eBay yet (no item number): the item is blocked exactly as a queue-time blocked preview is
+   *   (DROPSHIP_LISTING_PREVIEW_BLOCKED with the blockers, the listing `blocked` with metadata.blockers), so the
+   *   listing is "waiting for stock" and the sweep lists it when stock returns; nothing is created at 0;
+   * - live (decideLiveListingZeroQuantityUpdate) under canonical authority: inventory planning owns the quantity
+   *   and publishes 0 itself, so nothing is written; the item closes quietly (cancelled, no failure email, never
+   *   re-queued) as DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK;
+   * - live under legacy authority: 0 goes out through the zero-quantity owner (quantity only, so price and content
+   *   stay) and the item completes as settled at 0, item and listing in one transaction;
+   * - live with an unknown authority, or without the zero owner: today's failure.
+   * A send or settlement failure propagates to the caller's classification, as any push failure does.
+   */
+  private async settleOutOfStock(parsed: ProcessListingPushJobInput, claim: DropshipListingPushWorkerClaim,
+    item: DropshipListingPushWorkerItemRecord, queuedIntent: DropshipMarketplaceListingIntent,
+    synced: MarketplacePrePushResult | null, refreshError: unknown): Promise<boolean> {
+    const blockers = outOfStockOnlyBlockers(refreshError);
+    if (!blockers || !item.listing) return false;
+    const externalListingId = synced ? synced.externalListingId : item.listing.externalListingId;
+    const externalOfferId = synced ? synced.externalOfferId : item.listing.externalOfferId;
+    const fields = { jobId: claim.job.jobId, itemId: item.itemId, vendorId: claim.job.vendorId,
+      storeConnectionId: claim.job.storeConnectionId, listingId: item.listingId, productVariantId: item.productVariantId };
+    const now = this.deps.clock.now();
+    if (!hasMarketplaceListing(externalListingId)) {
+      await this.deps.repository.blockItem({ job: claim.job, item, code: LISTING_PREVIEW_BLOCKED_CODE, message: blockers.join(", "),
+        listingBlockers: blockers, workerId: parsed.workerId, now });
+      // INFO: an expected state transition (CLAUDE.md section 10): the listing waits for stock.
+      this.deps.logger.info({ code: "DROPSHIP_LISTING_PUSH_WAITING_FOR_STOCK",
+        message: "A first publish found no stock at push time; the listing waits for stock and lists by itself when it returns.",
+        context: { action: "dropship.listing_push.out_of_stock", outcome: "waiting_for_stock", ...fields,
+          before: { itemStatus: "processing", listingStatus: item.listing.status }, after: { itemStatus: "blocked", listingStatus: "blocked" } } });
+      return true;
+    }
+    const facts = { status: item.listing.status, externalListingId, externalOfferId };
+    if (decideLiveListingZeroQuantityUpdate({ blockers, listing: facts }).kind !== "send_zero") return false;
+    const authority = this.deps.quantityAuthority ? await this.deps.quantityAuthority() : null;
+    if (authority === "canonical") {
+      await this.deps.repository.skipItem({ job: claim.job, item, code: PUSH_SKIPPED_OUT_OF_STOCK_CODE,
+        message: "Out of stock: Card Shellz sets this listing's quantity to 0 by itself and updates it when stock comes back.",
+        workerId: parsed.workerId, now });
+      this.deps.logger.info({ code: PUSH_SKIPPED_OUT_OF_STOCK_CODE,
+        message: "A queued update of a live listing found no stock; inventory planning publishes its 0, so nothing was sent.",
+        context: { action: "dropship.listing_push.out_of_stock", outcome: "skipped_out_of_stock", authority, ...fields,
+          before: { itemStatus: "processing" }, after: { itemStatus: "cancelled" } } });
+      return true;
+    }
+    const sku = queuedIntent.sku?.trim() ? queuedIntent.sku : null;
+    if (authority !== "legacy" || !this.deps.zeroQuantity || sku === null) return false;
+    const outcome = await this.deps.zeroQuantity.publishZeroIfLive({
+      target: { vendorId: claim.job.vendorId, storeConnectionId: claim.job.storeConnectionId, listingId: item.listing.listingId,
+        productVariantId: item.productVariantId, sku },
+      blockers, listing: facts, actorId: parsed.workerId, reason: `${parsed.idempotencyKey}:${item.itemId}`,
+      settle: (settlement) => this.deps.repository.completeItemAtZeroQuantity({ job: claim.job, item,
+        externalListingId: externalListingId!.trim(), settlement, workerId: parsed.workerId, now: settlement.now }),
+    });
+    if (outcome.outcome !== "sent") return false;
+    this.deps.logger.info({ code: "DROPSHIP_LISTING_PUSH_COMPLETED_AT_ZERO",
+      message: "A queued update of a live listing found no stock; 0 was sent instead and the item completed at 0.",
+      context: { action: "dropship.listing_push.out_of_stock", outcome: "completed_at_zero", authority, ...fields,
+        externalOfferId: outcome.externalOfferId, after: { itemStatus: "completed", pushedQuantity: 0 } } });
+    return true;
   }
 
   /**
@@ -1095,4 +1197,18 @@ function logDropshipListingPushWorkerEvent(
     return;
   }
   console.info(payload);
+}
+
+/** The code a queue-time blocked preview gives its item (dropship-listing-preview.repository insertJobItemForPreview). */
+const LISTING_PREVIEW_BLOCKED_CODE = "DROPSHIP_LISTING_PREVIEW_BLOCKED";
+/** A live listing's queued update closed without a write: inventory planning owns its 0 (canonical authority). */
+export const PUSH_SKIPPED_OUT_OF_STOCK_CODE = "DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK";
+
+/** The refresh's blockers when it refused ONLY for want of stock (dropship-listing-intent-refresh.ts); otherwise null. */
+function outOfStockOnlyBlockers(error: unknown): string[] | null {
+  if (!(error instanceof DropshipError) || error.code !== "DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED") return null;
+  const raw = error.context?.blockers;
+  if (!Array.isArray(raw) || raw.some((code) => typeof code !== "string")) return null;
+  const blockers = [...new Set(raw as string[])];
+  return blockers.length === 1 && blockers[0] === MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER ? blockers : null;
 }
