@@ -425,8 +425,8 @@ function CombineOrderItems({ orderId }: { orderId: number }) {
 
 function PriorityControlCard({ order, onUpdated }: { order: OrderDetail; onUpdated: () => void }) {
   const { toast } = useToast();
-  const { hasSystemRole } = useAuth();
-  const isAuthorized = hasSystemRole("admin") || hasSystemRole("lead");
+  const { hasPermission } = useAuth();
+  const isAuthorized = hasPermission("orders", "priority");
   if (!isAuthorized || isWmsOrderTerminal(order)) return null;
 
   const isBumped = order.priority >= 9999;

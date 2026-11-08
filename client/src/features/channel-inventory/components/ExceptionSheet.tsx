@@ -42,6 +42,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { PolicyFields } from "./PolicyFields";
 import { ProductPicker } from "./ProductPicker";
 import { RuleApplyPanel } from "./RuleApplyPanel";
+import { SalesStatusPanel } from "./SalesStatusPanel";
 import { ActivePill, Callout, EvidenceNote, NoteField, PendingPill } from "./primitives";
 
 export interface ExceptionSubject {
@@ -125,6 +126,14 @@ export function ExceptionSheet({ open, onOpenChange, view, channel, subject, can
                 </p>
               )}
             </div>
+          )}
+          {productId !== null && view.runtimeAuthority === "canonical" && (
+            // Sales status spans every channel; the stock rule below is this channel's only.
+            <SalesStatusPanel key={`sales-${productId}-${variantId ?? "product"}`} productId={productId}
+              productVariantId={variantId} canChange={canActivate} />
+          )}
+          {scope && view.runtimeAuthority === "canonical" && (
+            <p className="text-sm font-medium">Stock rule on {channel.name}</p>
           )}
           {scope && (
             <RuleEditor

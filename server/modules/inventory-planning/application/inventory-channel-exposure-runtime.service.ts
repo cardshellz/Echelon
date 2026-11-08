@@ -74,6 +74,14 @@ export interface ActiveInventoryPublicationTargetSnapshot {
   mappings: readonly ActivePublicationVariantMappingSnapshot[];
   /** SKU-level holds among the product's variants; the target hold above wins when both are set. */
   variantHolds: readonly ActivePublicationVariantHoldSnapshot[];
+  /**
+   * SKUs a sales status stops on this target's channel (inventory.sales_statuses,
+   * already resolved: stopped when the product or the SKU itself is stopped
+   * here, each level's channel exception beating its all-channels setting).
+   * The operator's holder, separate from the automation holds above: any of
+   * them zeroes the SKU. Every live reader supplies it; omitted means none.
+   */
+  salesStatusHolds?: readonly ActivePublicationVariantHoldSnapshot[];
   /** Current listing-owner decision. Every live database reader supplies this. */
   selection?: StockPublicationSelection;
   /** Historical cutover/review inputs only. Live readers never consult the
@@ -348,10 +356,13 @@ function planTarget(
 
   const mappings = new Map(target.mappings.map((mapping) => [mapping.productVariantId, mapping] as const));
   const variantHolds = new Map(target.variantHolds.map((entry) => [entry.productVariantId, entry.hold] as const));
+  const salesStatusHolds = new Map((target.salesStatusHolds ?? []).map((entry) => [entry.productVariantId, entry.hold] as const));
   const rows = selectedVariants.map((variant): RuntimeRow => {
     // The hold that zeroes this SKU: the destination-wide hold covers every SKU
-    // and wins; otherwise a SKU-level hold covers this one alone.
-    const hold = target.hold ?? variantHolds.get(variant.id) ?? null;
+    // and wins; otherwise a SKU-level hold covers this one alone; otherwise the
+    // operator's sales status. Every holder publishes the same zero, so the
+    // order only decides which reason the plan records.
+    const hold = target.hold ?? variantHolds.get(variant.id) ?? salesStatusHolds.get(variant.id) ?? null;
     const selection = target.selection?.variants.find(entry => entry.productVariantId === variant.id);
     const blockers: RuntimeIssue[] = (selection?.blockers ?? []).map(blocker => issue(blocker.code, blocker.message,
       { publicationTargetId: target.publicationTargetId, productVariantId: variant.id }));

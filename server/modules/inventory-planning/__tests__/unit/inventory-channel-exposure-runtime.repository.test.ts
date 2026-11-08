@@ -182,6 +182,48 @@ describe("PostgresInventoryChannelExposureRuntimeExecutor", () => {
     expect(holdRead?.params).toEqual([[91], [101]]);
   });
 
+  it("resolves the operator's sales status for the target's channel into the planner snapshot", async () => {
+    const row = (channelId: number | null, productVariantId: number | null, status: string, id: number) => ({
+      id, channel_id: channelId, item_product_id: 10, product_variant_id: productVariantId, status, note: null,
+      revision: String(id), updated_by: "admin", updated_at: new Date("2026-11-07T15:00:00.000Z"),
+    });
+    const stoppedEverywhere = fakeClient("canonical", { salesStatuses: [row(null, null, "stopped", 1)] });
+    const executor = (client: ReturnType<typeof fakeClient>) => new PostgresInventoryChannelExposureRuntimeExecutor(
+      { connect: vi.fn(async () => client) } as never,
+      vi.fn(async () => ({ productId: 10 }) as never),
+    );
+
+    const context = await executor(stoppedEverywhere).execute(10, async (value) => value);
+
+    expect(context.publicationTargets[0]!.variantHolds).toEqual([]);
+    expect(context.publicationTargets[0]!.salesStatusHolds).toEqual([{
+      productVariantId: 101,
+      hold: { reason: "Sales status: stopped on all channels (product setting)", heldAt: "2026-11-07T15:00:00.000Z", heldBy: "admin" },
+    }]);
+    const statusRead = stoppedEverywhere.query.mock.calls
+      .map((call) => ({ sql: sqlText((call as unknown[])[0]), params: (call as unknown[])[1] }))
+      .find((call) => call.sql.includes("FROM inventory.sales_statuses"));
+    expect(statusRead?.params).toEqual([10]);
+
+    // "Stopped everywhere except this channel" leaves the target's SKU selling.
+    const exceptHere = fakeClient("canonical", { salesStatuses: [row(null, null, "stopped", 1), row(7, null, "selling", 2)] });
+    expect((await executor(exceptHere).execute(10, async (value) => value)).publicationTargets[0]!.salesStatusHolds).toEqual([]);
+    // A stop on another channel does not reach this target.
+    const elsewhere = fakeClient("canonical", { salesStatuses: [row(8, 101, "stopped", 3)] });
+    expect((await executor(elsewhere).execute(10, async (value) => value)).publicationTargets[0]!.salesStatusHolds).toEqual([]);
+  });
+
+  it("fails closed on a malformed stored sales status instead of guessing", async () => {
+    const corrupt = fakeClient("canonical", { salesStatuses: [{ id: 1, channel_id: null, item_product_id: 10,
+      product_variant_id: null, status: "paused", note: null, revision: "1", updated_by: "admin",
+      updated_at: new Date("2026-11-07T15:00:00.000Z") }] });
+    const executor = new PostgresInventoryChannelExposureRuntimeExecutor(
+      { connect: vi.fn(async () => corrupt) } as never,
+      vi.fn(async () => ({ productId: 10 }) as never),
+    );
+    await expect(executor.execute(10, async (value) => value)).rejects.toMatchObject({ code: "SALES_STATUS_EVIDENCE_INVALID" });
+  });
+
   it("loads a Dropship store as the exact transport owner while retaining its allocation channel", async () => {
     const client = fakeClient("canonical", { dropship: true });
     const executor = new PostgresInventoryChannelExposureRuntimeExecutor(
@@ -203,11 +245,15 @@ describe("PostgresInventoryChannelExposureRuntimeExecutor", () => {
 
 function fakeClient(
   authority: "legacy" | "canonical",
-  options: { invalidTargetRevision?: boolean; dropship?: boolean; held?: boolean; variantHeld?: boolean } = {},
+  options: {
+    invalidTargetRevision?: boolean; dropship?: boolean; held?: boolean; variantHeld?: boolean;
+    salesStatuses?: Array<Record<string, unknown>>;
+  } = {},
 ) {
   const query = vi.fn(async (statement: unknown) => {
     const sql = sqlText(statement);
     if (sql.startsWith("BEGIN") || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
+    if (sql.includes("FROM inventory.sales_statuses")) return { rows: options.salesStatuses ?? [] };
     if (sql.startsWith("SELECT authority")) return { rows: [{
       authority,
       authority_revision: "4",

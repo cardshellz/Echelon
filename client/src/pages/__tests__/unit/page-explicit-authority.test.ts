@@ -79,28 +79,39 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("page authority comes from verified assignments and grants", () => {
-  it("does not expose supervisor picking tabs from a legacy admin label", () => {
+  it("does not expose supervisor picking tabs from a legacy admin label or ungranted system role", () => {
+    fixture.systemRoles = ["admin", "lead"];
     const html = render(PickingPage);
     expect(html).not.toContain('>Logs<');
     expect(html).not.toContain('>Metrics<');
     expect(html).not.toContain('>Settings<');
   });
 
-  it("keeps supervisor picking tabs for an explicitly assigned lead with a legacy picker label", () => {
+  it("exposes each supervisor picking tab independently from its explicit capability grant", () => {
     fixture.legacyRole = "picker";
-    fixture.systemRoles = ["lead"];
-    const html = render(PickingPage);
-    expect(html).toContain('>Logs<');
-    expect(html).toContain('>Metrics<');
-    expect(html).toContain('>Settings<');
+    fixture.grants = ["picking:view", "picking:view_logs"];
+    expect(render(PickingPage)).toContain('>Logs<');
+    expect(render(PickingPage)).not.toContain('>Metrics<');
+    expect(render(PickingPage)).not.toContain('>Settings<');
+
+    fixture.grants = ["picking:view", "picking:view_metrics"];
+    expect(render(PickingPage)).not.toContain('>Logs<');
+    expect(render(PickingPage)).toContain('>Metrics<');
+    expect(render(PickingPage)).not.toContain('>Settings<');
+
+    fixture.grants = ["picking:view", "picking:manage_settings"];
+    expect(render(PickingPage)).not.toContain('>Logs<');
+    expect(render(PickingPage)).not.toContain('>Metrics<');
+    expect(render(PickingPage)).toContain('>Settings<');
   });
 
-  it.each([false, true])("controls picking exception reads from explicit assignment %s", assigned => {
-    fixture.legacyRole = assigned ? "picker" : "admin";
-    fixture.systemRoles = assigned ? ["lead"] : [];
+  it.each([false, true])("controls picking exception reads from explicit orders:resolve_exception grant %s", granted => {
+    fixture.legacyRole = granted ? "picker" : "admin";
+    fixture.systemRoles = granted ? [] : ["admin", "lead"];
+    fixture.grants = granted ? ["orders:resolve_exception"] : [];
     const html = render(Picking);
-    expect(fixture.queries.find(query => query.queryKey[0] === "exception-orders")?.enabled).toBe(assigned);
-    expect(html.includes('data-testid="button-exceptions"')).toBe(assigned);
+    expect(fixture.queries.find(query => query.queryKey[0] === "exception-orders")?.enabled).toBe(granted);
+    expect(html.includes('data-testid="button-exceptions"')).toBe(granted);
   });
 
   it("does not mount a Walmart workspace merely because the legacy label is admin", () => {
@@ -148,10 +159,10 @@ describe("page authority comes from verified assignments and grants", () => {
 
   it.each([
     { legacy: "admin", system: [] as string[], grants: [] as string[], allowed: false },
-    { legacy: "admin", system: [] as string[], grants: ["orders:priority"], allowed: false },
-    { legacy: "picker", system: ["admin"], grants: [] as string[], allowed: true },
-    { legacy: "picker", system: ["lead"], grants: [] as string[], allowed: true },
-  ])("matches the assigned Administrator/Team Lead priority boundary on both pages: %j", scenario => {
+    { legacy: "admin", system: ["admin", "lead"], grants: [] as string[], allowed: false },
+    { legacy: "picker", system: [] as string[], grants: ["orders:priority"], allowed: true },
+    { legacy: "picker", system: ["lead"], grants: ["orders:priority"], allowed: true },
+  ])("matches the orders:priority capability boundary on both pages: %j", scenario => {
     fixture.legacyRole = scenario.legacy;
     fixture.systemRoles = scenario.system;
     fixture.grants = scenario.grants;
