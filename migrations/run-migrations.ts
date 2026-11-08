@@ -8,6 +8,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import * as crypto from 'crypto';
 import { validateMigrationDirectory } from '../scripts/migrations/migration-policy.mjs';
+import { createDatabasePoolConfig } from '../server/database-pool-config';
 import {
   acquireMigrationAdvisoryLock,
   executeMigrationWithRetry,
@@ -20,16 +21,49 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) {
-  console.error('DATABASE_URL not set');
-  process.exit(1);
+function summarizeDatabaseTargetIdentity(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    const host = parsed.hostname.toLowerCase();
+    const port = parsed.port || '5432';
+    const database = parsed.pathname.replace(/^\/+/, '');
+    return `${host}:${port}/${database}`;
+  } catch {
+    return '<unparseable-database-url>';
+  }
 }
 
-const pool = new Pool({
-  connectionString,
-  ssl: { rejectUnauthorized: false }
-});
+function resolveMigrationConnectionString(env: NodeJS.ProcessEnv): string | null {
+  const externalUrl = env.EXTERNAL_DATABASE_URL?.trim() || '';
+  const databaseUrl = env.DATABASE_URL?.trim() || '';
+
+  if (!externalUrl && !databaseUrl) {
+    console.error('DATABASE_URL not set');
+    process.exit(1);
+    return null;
+  }
+
+  if (externalUrl && databaseUrl) {
+    const externalTarget = summarizeDatabaseTargetIdentity(externalUrl);
+    const databaseTarget = summarizeDatabaseTargetIdentity(databaseUrl);
+    if (externalTarget !== databaseTarget) {
+      console.error(
+        `Refusing to run release migrations: EXTERNAL_DATABASE_URL (${externalTarget}) and DATABASE_URL (${databaseTarget}) target different databases.`,
+      );
+      process.exit(1);
+      return null;
+    }
+  }
+
+  return externalUrl || databaseUrl;
+}
+
+const connectionString = resolveMigrationConnectionString(process.env);
+
+const pool = new Pool(createDatabasePoolConfig({
+  connectionString: connectionString || 'postgresql://stub:stub@localhost:5432/stub',
+  ssl: { rejectUnauthorized: false },
+}));
 const retryOptions = migrationRetryOptionsFromEnv(process.env);
 
 const RENAMED_FILES: Record<string, string> = {
@@ -43,13 +77,29 @@ function hashSQL(sql: string) {
   return crypto.createHash('sha256').update(sql).digest('hex');
 }
 
+function normalizeRecordedHash(rawHash: unknown): string | null {
+  if (typeof rawHash !== 'string') return null;
+  const trimmed = rawHash.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 async function runMigrations() {
+  if (!connectionString) {
+    return;
+  }
+
   const client = await pool.connect();
   let advisoryLockHeld = false;
+  let releaseClientError: Error | undefined;
   
   try {
-    await acquireMigrationAdvisoryLock(client);
-    advisoryLockHeld = true;
+    try {
+      await acquireMigrationAdvisoryLock(client);
+      advisoryLockHeld = true;
+    } catch (lockError) {
+      releaseClientError = lockError instanceof Error ? lockError : new Error(String(lockError));
+      throw lockError;
+    }
 
     // Use the same dependency-free validation as CI. It preserves legacy names
     // and lexical order while checking ownership and declared dependency order
@@ -72,7 +122,12 @@ async function runMigrations() {
     // Get already-applied migrations
     const { rows: applied } = await client.query('SELECT filename, content_hash FROM _migrations');
     const appliedSet = new Set(applied.map(r => r.filename));
-    const appliedHashes = new Set(applied.map(r => r.content_hash).filter(Boolean));
+    const appliedByFilename = new Map<string, string | null>(
+      applied.map(r => [r.filename, normalizeRecordedHash(r.content_hash)]),
+    );
+    const appliedHashes = new Set(
+      applied.map(r => normalizeRecordedHash(r.content_hash)).filter((hash): hash is string => hash !== null),
+    );
     
     let count = 0;
     for (const file of files) {
@@ -81,18 +136,48 @@ async function runMigrations() {
 
       // Handle renames safely
       if (RENAMED_FILES[file] && appliedSet.has(RENAMED_FILES[file]) && !appliedSet.has(file)) {
-        console.log(`📝 Updating renamed migration tracking: ${RENAMED_FILES[file]} -> ${file}`);
-        await client.query("UPDATE _migrations SET filename = $1, content_hash = $2 WHERE filename = $3", [file, fileHash, RENAMED_FILES[file]]);
+        const legacyName = RENAMED_FILES[file];
+        const recordedLegacyHash = appliedByFilename.get(legacyName) ?? null;
+        if (recordedLegacyHash !== null && recordedLegacyHash !== fileHash) {
+          throw new Error(
+            `Refusing to overwrite conflicting migration hash for renamed migration ${legacyName} -> ${file}: recorded ${recordedLegacyHash}, current file hashes to ${fileHash}`,
+          );
+        }
+        console.log(`📝 Updating renamed migration tracking: ${legacyName} -> ${file}`);
+        await client.query(
+          "UPDATE _migrations SET filename = $1, content_hash = $2 WHERE filename = $3",
+          [file, fileHash, legacyName],
+        );
+        appliedSet.delete(legacyName);
+        appliedByFilename.delete(legacyName);
         appliedSet.add(file);
+        appliedByFilename.set(file, fileHash);
         appliedHashes.add(fileHash);
       }
 
-      // Skip already-applied migrations (by filename or by hash)
-      if (appliedSet.has(file) || appliedHashes.has(fileHash)) {
-        if (appliedSet.has(file) && !appliedHashes.has(fileHash)) {
-            // backfill hash
-            await client.query("UPDATE _migrations SET content_hash = $1 WHERE filename = $2", [fileHash, file]);
+      // Skip already-applied migrations by filename, backfilling only missing historical hashes
+      if (appliedSet.has(file)) {
+        const recordedHash = appliedByFilename.get(file) ?? null;
+        if (recordedHash !== null && recordedHash !== fileHash) {
+          throw new Error(
+            `Refusing to overwrite conflicting migration hash for already-applied migration ${file}: recorded ${recordedHash}, current file hashes to ${fileHash}`,
+          );
         }
+        if (recordedHash === null) {
+          // Backfill missing historical hash without overwriting any non-null hash
+          await client.query(
+            "UPDATE _migrations SET content_hash = $1 WHERE filename = $2 AND (content_hash IS NULL OR content_hash = '')",
+            [fileHash, file],
+          );
+          appliedByFilename.set(file, fileHash);
+          appliedHashes.add(fileHash);
+        }
+        console.log(`⏭️  ${file} (already applied)`);
+        continue;
+      }
+
+      // Skip unchanged SQL adopted under a new filename when its historical hash is recorded
+      if (appliedHashes.has(fileHash)) {
         console.log(`⏭️  ${file} (already applied)`);
         continue;
       }
@@ -119,6 +204,7 @@ async function runMigrations() {
           console.log(`   Applied after ${result.attempts} attempts.`);
         }
         appliedSet.add(file);
+        appliedByFilename.set(file, fileHash);
         appliedHashes.add(fileHash);
         count++;
       } catch (error: unknown) {
@@ -135,10 +221,11 @@ async function runMigrations() {
   } finally {
     if (advisoryLockHeld) {
       await releaseMigrationAdvisoryLock(client).catch((error) => {
+        releaseClientError = error instanceof Error ? error : new Error(String(error));
         console.error('Failed to release migration advisory lock:', error);
       });
     }
-    client.release();
+    client.release(releaseClientError);
     await pool.end();
   }
 }

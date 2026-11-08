@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { requireSuccessfulJobs } from "../../../scripts/ci/require-success.mjs";
+import { RETURN_ACCEPTANCE_DATABASE_FILES, RETURN_ACCEPTANCE_UNIT_FILES } from "../../../scripts/ci/returns-workflow-acceptance";
 
 const repositoryRoot = new URL("../../../", import.meta.url);
 const source = (file: string) => readFileSync(new URL(file, repositoryRoot), "utf8");
@@ -481,13 +482,25 @@ describe("fast CI preserves coverage and required checks", () => {
     for (const file of onDisk) expect(registered.has(file), "Not run in CI: " + file).toBe(true);
   });
 
-  it("runs every server infrastructure scheduler and lock contract test in the contracts job", () => {
+  it("runs every server infrastructure and observability contract test in the contracts job", () => {
     const registered = new Set(vitestStepFiles(job(workflow, "contracts"), "Procurement, inventory, channel, and finance UI contracts"));
-    const onDisk = testFilesIn("server/infrastructure/__tests__/", /\.test\.ts$/);
+    const onDisk = [
+      ...testFilesIn("server/infrastructure/__tests__/", /\.test\.ts$/),
+      ...testFilesIn("server/platform/observability/__tests__/", /\.test\.ts$/),
+    ];
     expect(onDisk.length).toBeGreaterThan(0);
     for (const file of onDisk) {
       expect(existsSync(new URL(file, repositoryRoot)), "Missing test file: " + file).toBe(true);
       expect(registered.has(file), "Not run in CI: " + file).toBe(true);
+    }
+  });
+
+  it("names only real, distinct files in the Returns connected workflow acceptance runner (FC-CI-02)", () => {
+    const allFiles = [...RETURN_ACCEPTANCE_DATABASE_FILES, ...RETURN_ACCEPTANCE_UNIT_FILES];
+    expect(allFiles.length).toBeGreaterThan(0);
+    expect(new Set(allFiles).size).toBe(allFiles.length);
+    for (const file of allFiles) {
+      expect(existsSync(new URL(file, repositoryRoot)), "Missing returns acceptance test file: " + file).toBe(true);
     }
   });
 
@@ -535,6 +548,7 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(job(procurement, "result")).toContain("name: Procurement browser journeys\n");
     const config = source("playwright.procurement.config.ts");
     expect(config).toContain('testMatch: "procurement-*.spec.ts"');
+    expect(config).toContain("forbidOnly: true");
     expect(config).toContain("timeout: 45_000");
     expect(config).toContain("expect: { timeout: 15_000 }");
     expect(config).not.toMatch(/retries:|maxFailures:|testIgnore:|grep:/);
