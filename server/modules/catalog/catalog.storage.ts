@@ -7,8 +7,6 @@ import {
   productLocations,
   inventoryLevels,
   channelFeeds,
-  replenRules,
-  replenTasks,
   outboundShipments,
   outboundShipmentItems,
   warehouseLocations,
@@ -27,6 +25,10 @@ import { prepareVariantInventoryTracking, updateProductInventoryTracking, Invent
 import { renameWmsOrderItemSku } from "../wms/order-item-commands";
 import { reorderCatalogAssets } from "./product-asset-order.repository";
 import { ProductAssetError } from "./product-asset-errors";
+import {
+  cancelProductReplenishmentTasksInTx,
+  deactivateProductReplenishmentRulesInTx,
+} from "../inventory/infrastructure/replenishment-archive.repository";
 import type {
   Product,
   InsertProduct,
@@ -283,19 +285,11 @@ export const productMethods: IProductStorage = {
   },
 
   async deactivateReplenRulesByProductId(productId: number): Promise<number> {
-    const result = await db.update(replenRules)
-      .set({ isActive: 0 })
-      .where(and(eq(replenRules.productId, productId), eq(replenRules.isActive, 1)))
-      .returning();
-    return result.length;
+    return db.transaction((tx) => deactivateProductReplenishmentRulesInTx(tx, productId, new Date()));
   },
 
   async cancelReplenTasksByProductId(productId: number): Promise<number> {
-    const result = await db.update(replenTasks)
-      .set({ status: "cancelled", completedAt: new Date() })
-      .where(and(eq(replenTasks.productId, productId), inArray(replenTasks.status, ["pending", "assigned", "in_progress"])))
-      .returning();
-    return result.length;
+    return db.transaction((tx) => cancelProductReplenishmentTasksInTx(tx, productId, new Date()));
   },
 
   async getPendingShipmentItemsByVariantIds(variantIds: number[]): Promise<{ id: number; shipmentId: number; productVariantId: number | null; qty: number; status: string }[]> {

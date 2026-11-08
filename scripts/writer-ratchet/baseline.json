@@ -924,11 +924,9 @@
     "modules/inventory"
   ],
   "inventory.replen_rules": [
-    "modules/catalog",
     "modules/inventory"
   ],
   "inventory.replen_tasks": [
-    "modules/catalog",
     "modules/inventory",
     "modules/orders"
   ],
