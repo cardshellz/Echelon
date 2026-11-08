@@ -4,127 +4,26 @@ import { sql } from "drizzle-orm";
 import { backfillMemberTiers } from "../modules/oms/member-tier-enrichment";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { createDropshipOmsChannelResolver } from "../modules/dropship/infrastructure/dropship-oms-warehouse-assignments.reader";
-import { deleteDuplicateShopifyWmsOrderItems } from "../modules/wms/order-item-commands";
-
-import { requireAuth, requireInternalApiKey } from "./middleware";
+import { requireAuth, requireInternalApiKey, requirePermission } from "./middleware";
 
 export function registerDiagnosticsRoutes(app: Express) {
   app.use("/api/_internal/diagnostics", requireInternalApiKey);
 
-  // Clean up duplicate orders with normalized Shopify IDs (handles gid:// prefix differences)
-  app.post("/api/_internal/diagnostics/cleanup-duplicates-normalized", requireAuth, async (req, res) => {
-    try {
-      const { confirm } = req.body;
-      if (confirm !== "DELETE_DUPLICATES") {
-        return res.status(400).json({ 
-          error: "Confirmation required",
-          message: "Send { confirm: 'DELETE_DUPLICATES' } to proceed"
-        });
-      }
-
-      // Delete duplicates where shopify_order_id differs only by gid:// prefix
-      // Keep the EARLIEST created row
-      
-      // Soft-delete inventory_transactions that reference duplicate order_items
-      // (C5: ledger rows are immutable — void instead of delete)
-      const transactionsResult = await db.execute(sql`
-        UPDATE inventory.inventory_transactions
-        SET voided_at = NOW()
-        WHERE voided_at IS NULL
-          AND order_item_id IN (
-          SELECT oi.id FROM wms.order_items oi
-          WHERE oi.order_id IN (
-            SELECT id FROM (
-              SELECT
-                id,
-                REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '') as normalized_id,
-                ROW_NUMBER() OVER (
-                  PARTITION BY REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '')
-                  ORDER BY created_at ASC
-                ) as rn
-              FROM wms.orders
-              WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
-            ) t
-            WHERE rn > 1 AND normalized_id != ''
-          )
-        )
-        RETURNING id
-      `);
-
-      // Second: delete order_items
-      const deletedItemIds = await deleteDuplicateShopifyWmsOrderItems(db, true);
-
-      const ordersResult = await db.execute(sql`
-        DELETE FROM wms.orders 
-        WHERE id IN (
-          SELECT id FROM (
-            SELECT 
-              id,
-              REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '') as normalized_id,
-              ROW_NUMBER() OVER (
-                PARTITION BY REPLACE(COALESCE(shopify_order_id, ''), 'gid://shopify/Order/', '')
-                ORDER BY created_at ASC
-              ) as rn
-            FROM wms.orders
-            WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
-          ) t
-          WHERE rn > 1 AND normalized_id != ''
-        )
-        RETURNING id
-      `);
-
-      res.json({
-        success: true,
-        deletedTransactions: transactionsResult.rows.length,
-        deletedItems: deletedItemIds.length,
-        deletedOrders: ordersResult.rows.length,
+  // Retired destructive non-transactional duplicate-delete endpoints (PLAT-01 / FND-3).
+  // Use scripts/cleanup-duplicate-wms-orders.ts, which classifies duplicates, cancels
+  // only unstarted duplicate WMS orders, and writes an OMS audit event without deleting
+  // ledger or order rows.
+  for (const path of ["cleanup-duplicates-normalized", "cleanup-duplicates"]) {
+    app.post(`/api/_internal/diagnostics/${path}`, requireAuth, requirePermission("orders", "edit"), (_req, res) => {
+      res.status(410).json({
+        code: "DIAGNOSTIC_DUPLICATE_DELETE_RETIRED",
+        error: "Direct duplicate order and ledger deletion is retired. Use the audited duplicate-order retirement workflow.",
       });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
+    });
+  }
 
-  // Clean up duplicate orders (DELETE operation - requires confirmation)
-  app.post("/api/_internal/diagnostics/cleanup-duplicates", requireAuth, async (req, res) => {
-    try {
-      const { confirm } = req.body;
-      if (confirm !== "DELETE_DUPLICATES") {
-        return res.status(400).json({ 
-          error: "Confirmation required",
-          message: "Send { confirm: 'DELETE_DUPLICATES' } to proceed"
-        });
-      }
-
-      // Delete order items first (foreign key constraint)
-      const deletedItemIds = await deleteDuplicateShopifyWmsOrderItems(db, false);
-
-      // Delete duplicate orders (keep earliest)
-      const ordersResult = await db.execute(sql`
-        DELETE FROM wms.orders 
-        WHERE id IN (
-          SELECT id FROM (
-            SELECT id, 
-              ROW_NUMBER() OVER (PARTITION BY shopify_order_id ORDER BY created_at ASC) as rn
-            FROM wms.orders
-            WHERE source = 'shopify' AND shopify_order_id IS NOT NULL
-          ) t
-          WHERE rn > 1
-        )
-        RETURNING id
-      `);
-
-      res.json({
-        success: true,
-        deletedItems: deletedItemIds.length,
-        deletedOrders: ordersResult.rows.length,
-      });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  // Check for duplicate orders (admin-only for security)
-  app.get("/api/_internal/diagnostics/duplicate-orders", requireAuth, async (req, res) => {
+  // Check for duplicate orders
+  app.get("/api/_internal/diagnostics/duplicate-orders", requireAuth, requirePermission("orders", "view"), async (_req, res) => {
     try {
       const pickQueueDupes = await db.execute(sql`
         SELECT 
@@ -164,7 +63,7 @@ export function registerDiagnosticsRoutes(app: Express) {
   });
 
   // Backfill member tiers for existing orders
-  app.post("/api/_internal/diagnostics/backfill-member-tiers", requireAuth, async (req, res) => {
+  app.post("/api/_internal/diagnostics/backfill-member-tiers", requireAuth, requirePermission("orders", "edit"), async (req, res) => {
     try {
       const { limit = 100 } = req.body;
       const enriched = await backfillMemberTiers(limit);
@@ -180,7 +79,7 @@ export function registerDiagnosticsRoutes(app: Express) {
   });
 
   // Diagnose broken WMS orders (items mismatch with OMS)
-  app.get("/api/_internal/diagnostics/broken-wms-orders", requireAuth, async (req, res) => {
+  app.get("/api/_internal/diagnostics/broken-wms-orders", requireAuth, requirePermission("orders", "view"), async (req, res) => {
     try {
       const services = (req.app.locals as any).services;
       const wmsSyncSvc = new WmsSyncService({
@@ -197,7 +96,7 @@ export function registerDiagnosticsRoutes(app: Express) {
   });
 
   // Repair broken WMS orders — resyncs items from OMS
-  app.post("/api/_internal/diagnostics/repair-wms-orders", requireAuth, async (req, res) => {
+  app.post("/api/_internal/diagnostics/repair-wms-orders", requireAuth, requirePermission("orders", "edit"), async (req, res) => {
     try {
       const services = (req.app.locals as any).services;
       const wmsSyncSvc = new WmsSyncService({
@@ -214,7 +113,7 @@ export function registerDiagnosticsRoutes(app: Express) {
   });
 
   // Resync a single WMS order's items from OMS
-  app.post("/api/_internal/diagnostics/resync-wms-order/:wmsOrderId", requireAuth, async (req, res) => {
+  app.post("/api/_internal/diagnostics/resync-wms-order/:wmsOrderId", requireAuth, requirePermission("orders", "edit"), async (req, res) => {
     try {
       const wmsOrderId = parseInt(req.params.wmsOrderId, 10);
       const services = (req.app.locals as any).services;
