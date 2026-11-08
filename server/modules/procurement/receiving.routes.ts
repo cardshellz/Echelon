@@ -10,7 +10,16 @@ import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage, ...ordersStorage };
-import { requirePermission, requireAuth } from "../../routes/middleware";
+import { requirePermission, requireAnyPermission, type PermissionGrant } from "../../routes/middleware";
+
+export const RECEIVING_READ_GRANTS: readonly PermissionGrant[] = [
+  ["inventory", "view"],
+  ["inventory", "adjust"],
+  ["purchasing", "view"],
+] as const;
+
+export const DEFAULT_RECEIVING_LIST_LIMIT = 500;
+export const MAX_RECEIVING_LIST_LIMIT = 500;
 import { requireIdempotency } from "../../middleware/idempotency";
 import * as notificationService from "../notifications/notifications.service";
 import { millsToCents, centsToMills } from "@shared/utils/money";
@@ -65,21 +74,43 @@ function resolveUnitCostPair(
 }
 
 export function registerReceivingRoutes(app: Express) {
+  const requireReceivingRead = requireAnyPermission(...RECEIVING_READ_GRANTS);
   registerReceivingEntryRoutes(app);
   registerReceivingQuarantineRoutes(app);
   registerReceiptReversalRoutes(app);
   // ===== RECEIVING ORDERS API =====
   
-  app.get("/api/receiving", requireAuth, async (req, res) => {
+  app.get("/api/receiving", requireReceivingRead, async (req, res) => {
     try {
       const status = req.query.status as string | undefined;
-      const orders = status 
-        ? await storage.getReceivingOrdersByStatus(status)
-        : await storage.getAllReceivingOrders();
+      const hasPagination = req.query.limit !== undefined || req.query.offset !== undefined;
+      const parsedLimit = req.query.limit !== undefined ? parseInt(String(req.query.limit), 10) : DEFAULT_RECEIVING_LIST_LIMIT;
+      const parsedOffset = req.query.offset !== undefined ? parseInt(String(req.query.offset), 10) : 0;
+      const limit = Number.isFinite(parsedLimit) && parsedLimit > 0
+        ? Math.min(parsedLimit, MAX_RECEIVING_LIST_LIMIT)
+        : DEFAULT_RECEIVING_LIST_LIMIT;
+      const offset = Number.isFinite(parsedOffset) && parsedOffset > 0 ? parsedOffset : 0;
+
+      const rawOrders = status
+        ? hasPagination
+          ? await storage.getReceivingOrdersByStatus(status, { limit, offset })
+          : await storage.getReceivingOrdersByStatus(status)
+        : hasPagination
+          ? await storage.getAllReceivingOrders({ limit, offset })
+          : await storage.getAllReceivingOrders();
+      const orders = rawOrders.slice(0, limit);
       
-      // Enrich with vendor info
-      const vendors = await storage.getAllVendors();
-      const vendorMap = new Map(vendors.map(v => [v.id, v]));
+      // Enrich with vendor info (batch-fetch distinct vendorIds when supported)
+      const vendorIds = Array.from(
+        new Set(orders.map(o => o.vendorId).filter((id): id is number => typeof id === "number" && id > 0)),
+      );
+      const vendors =
+        typeof (storage as any).getVendorsByIds === "function"
+          ? vendorIds.length > 0
+            ? await (storage as any).getVendorsByIds(vendorIds)
+            : []
+          : await storage.getAllVendors();
+      const vendorMap = new Map(vendors.map((v: any) => [v.id, v]));
       
       const enriched = orders.map(order => ({
         ...order,
@@ -93,7 +124,7 @@ export function registerReceivingRoutes(app: Express) {
     }
   });
   
-  app.get("/api/receiving/:id", requireAuth, async (req, res) => {
+  app.get("/api/receiving/:id", requireReceivingRead, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       console.log("[RECEIVING] Fetching order id:", id);
@@ -211,7 +242,7 @@ export function registerReceivingRoutes(app: Express) {
   
   // ===== RECEIVING LINES API =====
   
-  app.get("/api/receiving/:orderId/lines", requireAuth, async (req, res) => {
+  app.get("/api/receiving/:orderId/lines", requireReceivingRead, async (req, res) => {
     try {
       const orderId = parseInt(req.params.orderId);
       const lines = await storage.getReceivingLines(orderId);
@@ -357,7 +388,7 @@ export function registerReceivingRoutes(app: Express) {
   // Immutable reversal history; writes use the durable reversal command routes.
   app.get(
     "/api/procurement/receiving-orders/:id/reversals",
-    requireAuth,
+    requireReceivingRead,
     async (req, res) => {
       try {
         const { receiptReversal } = req.app.locals.services;
@@ -374,7 +405,7 @@ export function registerReceivingRoutes(app: Express) {
   // receive UI; the close path persists the same warnings as PO exceptions.
   app.get(
     "/api/procurement/receiving-orders/:id/validation-warnings",
-    requireAuth,
+    requireReceivingRead,
     async (req, res) => {
       try {
         const { receiveValidation } = req.app.locals.services;
