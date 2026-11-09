@@ -3,6 +3,7 @@ import { hasStaffCapability } from "@shared/staff-capabilities";
 import { isCurrentStaffCredential } from "@shared/staff-credentials";
 import { readStaffCredentialState } from "./infrastructure/staff-credentials.repository";
 import { readCurrentStaffAccess } from "./infrastructure/staff-access.repository";
+import { onStaffAuthorityChanged } from "./authority-events";
 import { logger } from "../../platform/observability/logger";
 
 // Observer-only backpressure. Never cancel or repeat the owning business action.
@@ -18,12 +19,21 @@ export function createStaffStreamObserver(req:Request,res:Response,permission:st
       && hasStaffCapability(access.permissions,permission);
   });
   let stopped=false,drain:Promise<void>|undefined;const pending:string[]=[];
+  let unsubscribe:(()=>void)|undefined;
   const stop=(code:string)=>{
-    stopped=true;pending.length=0;
+    if(stopped)return;
+    stopped=true;pending.length=0;unsubscribe?.();unsubscribe=undefined;
     try{logger.warn("identity.stream.delivery",{module:"identity",outcome:"observer_stopped",error_code:code,
       retry_safety:"read_owner_status_before_business_retry"});}catch{/* Diagnostics never cancel accepted work. */}
   };
-  res.on("close",()=>{stopped=true;pending.length=0;});
+  if(id){
+    unsubscribe=onStaffAuthorityChanged(async affected=>{
+      if(stopped||(affected&&!affected.includes(id)))return;
+      try{if(!await check())stop("IDENTITY_STREAM_AUTHORITY_REVOKED");}
+      catch{stop("IDENTITY_STREAM_AUTHORITY_UNAVAILABLE");}
+    });
+  }
+  res.on("close",()=>{stopped=true;pending.length=0;unsubscribe?.();unsubscribe=undefined;});
   async function deliver(){
     try{while(!stopped && pending.length){
       const event=pending.shift()!;

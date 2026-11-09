@@ -303,6 +303,12 @@ export class BinAssignmentService {
       throw new Error(`Location ${loc.code} is not a pick face - cannot assign SKUs to non-pick locations`);
     }
 
+    if (loc.cycleCountFreezeId != null) {
+      throw new Error(
+        `Location ${loc.code} is frozen for cycle count (#${loc.cycleCountFreezeId}) - cannot assign SKUs while frozen`,
+      );
+    }
+
     const product = await this.storage.getProductById(variant.productId);
     const upperSku = (variant.sku || product?.sku || "").toUpperCase();
 
@@ -418,6 +424,7 @@ export class BinAssignmentService {
       sku: assigned?.sku ?? upperSku,
       locationCode: assigned?.location,
       zone: assigned?.zone,
+      warehouseId: loc.warehouseId,
     });
 
     return assigned;

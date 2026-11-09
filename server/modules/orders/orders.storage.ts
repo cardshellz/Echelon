@@ -287,7 +287,7 @@ export interface IOrderStorage {
   getOrderItems(orderId: number): Promise<OrderItem[]>;
   getOrderItemById(itemId: number): Promise<OrderItem | undefined>;
   updateOrderItemStatus(itemId: number, status: ItemStatus, pickedQty?: number, shortReason?: string, expectedCurrentStatus?: ItemStatus): Promise<OrderItem | null>;
-  updateOrderItemLocation(itemId: number, location: string, zone: string, barcode: string | null, imageUrl: string | null): Promise<OrderItem | null>;
+  updateOrderItemLocation(itemId: number, location: string, zone: string, barcode: string | null, imageUrl: string | null, options?: { onlyIfPendingUnpicked?: boolean }): Promise<OrderItem | null>;
   updateOrderProgress(orderId: number, postPickStatus?: string): Promise<Order | null>;
 
   updateItemFulfilledQuantity(shopifyLineItemId: number, additionalQty: number): Promise<OrderItem | null>;
@@ -975,7 +975,8 @@ export const orderMethods: IOrderStorage = {
     location: string,
     zone: string,
     barcode: string | null,
-    imageUrl: string | null
+    imageUrl: string | null,
+    options?: { onlyIfPendingUnpicked?: boolean },
   ): Promise<OrderItem | null> {
     return setWmsOrderItemLocation(db, {
       itemId,
@@ -983,6 +984,7 @@ export const orderMethods: IOrderStorage = {
       zone,
       barcode,
       imageUrl,
+      onlyIfPendingUnpicked: options?.onlyIfPendingUnpicked,
     });
   },
 

@@ -61,6 +61,7 @@ jobs:
     # previous 199-case shards could exhaust it without any failing assertion.
     timeout-minutes: 20
     strategy:
+      max-parallel: 6
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]

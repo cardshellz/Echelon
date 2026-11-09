@@ -1,11 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { duplicateProduct, ProductDuplicateError } from "../../product-duplicate.service";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // duplicateProduct — clones a product into a new DRAFT with fresh SKUs.
 // Verifies copy/reset rules (sync keys nulled, status → draft), variant SKU
-// regeneration + parent-hierarchy remap, asset remap, and validation errors.
-// Storage is mocked in-memory; no DB.
+// regeneration + parent-hierarchy remap, asset remap, atomic rollback, and
+// validation errors. Storage is mocked in-memory; no DB.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function makeSource() {
@@ -56,6 +56,25 @@ function buildMockStorage(source: any, sourceVariants: any[] = [], sourceAssets:
       return row ?? null;
     }),
     createProductAsset: vi.fn(async (a: any) => { const row = { ...a, id: createdAssets.length + 1 }; createdAssets.push(row); return row; }),
+    deleteProduct: vi.fn(async (id: number) => {
+      if (holder.product?.id === id) {
+        holder.product = null;
+        return true;
+      }
+      return false;
+    }),
+    deleteProductVariant: vi.fn(async (id: number) => {
+      const idx = createdVariants.findIndex((v) => v.id === id);
+      if (idx === -1) return false;
+      createdVariants.splice(idx, 1);
+      return true;
+    }),
+    deleteProductAsset: vi.fn(async (id: number) => {
+      const idx = createdAssets.findIndex((a) => a.id === id);
+      if (idx === -1) return false;
+      createdAssets.splice(idx, 1);
+      return true;
+    }),
   };
   return { storage, createdVariants, createdAssets, holder };
 }
@@ -191,6 +210,84 @@ describe("duplicateProduct", () => {
 
     expect(createdVariants.map((v) => v.sku)).toEqual(["V-A-COPY"]); // archived one not duplicated
     expect(createdAssets).toHaveLength(0); // its asset skipped
+  });
+
+  it("executes inside withCatalogTransaction when provided and rolls back on mid-loop failure (CWF-F01)", async () => {
+    const variants = [
+      { id: 50, productId: 10, sku: "V-A", name: "20ct", unitsPerVariant: 20, isActive: true, parentVariantId: null },
+      { id: 51, productId: 10, sku: "V-B", name: "800ct", unitsPerVariant: 800, isActive: true, parentVariantId: null },
+    ];
+    const { storage, createdVariants, holder } = buildMockStorage(makeSource(), variants);
+    let callCount = 0;
+    storage.createProductVariant = vi.fn(async (v: any) => {
+      callCount++;
+      if (callCount === 2) {
+        throw new Error("duplicate key value violates unique constraint on variant #2");
+      }
+      const row = { ...v, id: 1000 + callCount };
+      createdVariants.push(row);
+      return row;
+    });
+    const withCatalogTransaction = vi.fn(async (fn: any) => {
+      try {
+        return await fn(storage);
+      } catch (err) {
+        createdVariants.length = 0;
+        holder.product = null;
+        throw err;
+      }
+    });
+    (storage as any).withCatalogTransaction = withCatalogTransaction;
+
+    await expect(
+      duplicateProduct(storage as any, 10, {
+        ...baseInput,
+        variants: [
+          { sourceVariantId: 50, sku: "V-A-COPY" },
+          { sourceVariantId: 51, sku: "V-B-COPY" },
+        ],
+      }),
+    ).rejects.toThrow("duplicate key value violates unique constraint on variant #2");
+
+    expect(withCatalogTransaction).toHaveBeenCalledTimes(1);
+    expect(holder.product).toBeNull();
+    expect(createdVariants).toHaveLength(0);
+  });
+
+  it("compensates created product, variants, and assets when an in-memory storage fails mid-duplication (CWF-F01)", async () => {
+    const variants = [
+      { id: 50, productId: 10, sku: "V-A", name: "20ct", unitsPerVariant: 20, isActive: true, parentVariantId: null },
+      { id: 51, productId: 10, sku: "V-B", name: "800ct", unitsPerVariant: 800, isActive: true, parentVariantId: null },
+    ];
+    const assets = [
+      { id: 1, productId: 10, productVariantId: null, assetType: "image", url: "http://x/prod.jpg", position: 0, isPrimary: 1 },
+      { id: 2, productId: 10, productVariantId: 50, assetType: "image", url: "http://x/var.jpg", position: 1, isPrimary: 0 },
+    ];
+    const { storage, createdVariants, createdAssets, holder } = buildMockStorage(makeSource(), variants, assets);
+    let assetCalls = 0;
+    storage.createProductAsset = vi.fn(async (a: any) => {
+      assetCalls++;
+      if (assetCalls === 2) {
+        throw new Error("asset storage failure on asset #2");
+      }
+      const row = { ...a, id: assetCalls };
+      createdAssets.push(row);
+      return row;
+    });
+
+    await expect(
+      duplicateProduct(storage as any, 10, {
+        ...baseInput,
+        variants: [
+          { sourceVariantId: 50, sku: "V-A-COPY" },
+          { sourceVariantId: 51, sku: "V-B-COPY" },
+        ],
+      }),
+    ).rejects.toThrow("asset storage failure on asset #2");
+
+    expect(holder.product).toBeNull();
+    expect(createdVariants).toHaveLength(0);
+    expect(createdAssets).toHaveLength(0);
   });
 
   // ── Validation ──────────────────────────────────────────────────────────────

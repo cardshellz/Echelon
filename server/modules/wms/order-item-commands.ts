@@ -598,6 +598,7 @@ export async function setWmsOrderItemLocation(
     zone: string;
     barcode?: string | null;
     imageUrl?: string | null;
+    onlyIfPendingUnpicked?: boolean;
   },
 ): Promise<WmsOrderItem | null> {
   assertPositiveInteger(args.itemId, "itemId");
@@ -614,10 +615,18 @@ export async function setWmsOrderItemLocation(
   if (args.barcode !== undefined) patch.barcode = args.barcode;
   if (args.imageUrl !== undefined) patch.imageUrl = args.imageUrl;
 
+  const whereClause = args.onlyIfPendingUnpicked
+    ? and(
+        eq(wmsOrderItems.id, args.itemId),
+        eq(wmsOrderItems.status, "pending"),
+        eq(wmsOrderItems.pickedQuantity, 0),
+      )
+    : eq(wmsOrderItems.id, args.itemId);
+
   const [updated] = await executor
     .update(wmsOrderItems)
     .set(patch)
-    .where(eq(wmsOrderItems.id, args.itemId))
+    .where(whereClause)
     .returning();
   return updated ?? null;
 }
@@ -817,8 +826,12 @@ export async function repointPendingWmsOrderItemsForInventoryTransfer(
 
 export async function backfillUnassignedWmsOrderItemBin(
   executor: WmsOrderItemExecutor,
-  args: { sku: string; locationCode: string; zone: string },
+  args: { sku: string; locationCode: string; zone: string; warehouseId?: number | null },
 ): Promise<number> {
+  const warehouseFilter =
+    args.warehouseId != null
+      ? sql`AND (o.warehouse_id = ${args.warehouseId} OR o.warehouse_id IS NULL)`
+      : sql``;
   const result = await executor.execute(sql`
     UPDATE wms.order_items oi
     SET location = ${args.locationCode}, zone = ${args.zone}
@@ -828,6 +841,7 @@ export async function backfillUnassignedWmsOrderItemBin(
       AND oi.picked_quantity < oi.quantity
       AND o.warehouse_status NOT IN ('shipped', 'cancelled', 'completed')
       AND UPPER(oi.sku) = UPPER(${args.sku})
+      ${warehouseFilter}
     RETURNING oi.id
   `);
   return affectedRowCount(result);

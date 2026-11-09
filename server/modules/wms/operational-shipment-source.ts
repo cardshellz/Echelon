@@ -1,7 +1,11 @@
 import { z } from "zod";
-import { assertShipmentNotRetiredPg } from "../inventory-planning/infrastructure/inventory-cutover-retired-work";
-import type { OperationalShipmentSourceOwner } from "../inventory/application/operational-shipment-dispatch.port";
-import { OperationalShipmentError, operationalShipmentRequestSchema, type OperationalShipmentSource } from "../inventory/domain/operational-shipment-dispatch";
+import { assertShipmentNotRetiredPg } from "../inventory-planning/cutover-retired-work.api";
+import {
+  OperationalShipmentError,
+  operationalShipmentRequestSchema,
+  type OperationalShipmentSource,
+  type OperationalShipmentSourceOwner,
+} from "../inventory/shipment-evidence.api";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const sourceSchema = z.object({ id, shipment_id: id, order_item_id: id.nullable(),

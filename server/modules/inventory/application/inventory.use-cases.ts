@@ -2,7 +2,7 @@ import { readIntegerMills } from "@shared/money-read";
 import type { ReservedInventoryTransferOwner, ReservedTransferPlan } from "../../inventory-planning/application/reserved-inventory-transfer.port";
 import { repointCanonicalTransferPickLines } from "../../wms/order-item-commands";
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
-import { assertShipmentNotRetired } from "../../inventory-planning/infrastructure/inventory-cutover-retired-work";
+import { assertShipmentNotRetired } from "../../inventory-planning/cutover-retired-work.api";
 import { assertNoOpenPickCorrection } from "../../wms/pick-correction.repository";
 import { openOperationalQuantityPosting, quantityTransactionFromDrizzle, type OperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
 import { assertLegacyQuantityImportAllowed } from "./legacy-quantity-import";
@@ -314,6 +314,8 @@ export class InventoryUseCases {
     purchaseOrderLineId?: number;
     inboundShipmentId?: number;
     costProvisional?: number;
+    /** Internal transaction orchestration hook; effects run only after the caller commits. */
+    deferUntilCommit?: (effect: () => Promise<void>) => void;
   }, externalTx?: any): Promise<void> {
     if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
 
@@ -466,7 +468,11 @@ export class InventoryUseCases {
       await this.db.transaction(doWork);
     }
 
-    if (!replayed) this.triggerNotifyChange(params.productVariantId, "receive");
+    if (!replayed) {
+      const notifyAfterCommit = async () => this.triggerNotifyChange(params.productVariantId, "receive");
+      if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
+      else this.triggerNotifyChange(params.productVariantId, "receive");
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1513,35 +1519,72 @@ export class InventoryUseCases {
 
     const doWork = async (tx: any) => {
       // One order item may have multiple supply segments (finished stock and
-      // recipe-built shortfall). Each segment remains independently idempotent.
+      // recipe-built shortfall). Each segment remains independently idempotent,
+      // while allowing demand-revision or restock replacements after an unreserve
+      // or partial reserve without violating uq_inventory_transactions_reserve_dedup (A-01/A-02).
       const existingReserve = await tx.execute(sql`
-        SELECT id
+        SELECT
+          id,
+          transaction_type AS "transactionType",
+          reserved_qty_delta AS "reservedQtyDelta",
+          reference_id AS "referenceId"
         FROM inventory.inventory_transactions
-        WHERE transaction_type = 'reserve'
+        WHERE transaction_type IN ('reserve', 'unreserve')
           AND order_id = ${params.orderId}
           AND order_item_id = ${params.orderItemId}
           AND COALESCE(reference_type, 'order') = ${referenceType}
-          AND COALESCE(reference_id, order_id::text) = ${referenceId}
+          AND (
+            COALESCE(reference_id, order_id::text) = ${referenceId}
+            OR COALESCE(reference_id, order_id::text) LIKE ${`${referenceId}:rev:%`}
+          )
           AND voided_at IS NULL
-        LIMIT 1
       `);
-      if (existingReserve.rows.length > 0) {
+      const existingRows: any[] = existingReserve?.rows ?? [];
+      let reserveCount = 0;
+      let netReservedQty = 0;
+      for (const row of existingRows) {
+        const rawType = row.transactionType ?? row.transaction_type;
+        const rawDelta = row.reservedQtyDelta ?? row.reserved_qty_delta;
+        if (rawType === undefined && rawDelta === undefined) {
+          // Synthetic/legacy row stub without type/delta metadata represents an active reserve
+          return true;
+        }
+        const txType = rawType ?? "reserve";
+        if (txType === "reserve") {
+          reserveCount += 1;
+        }
+        if (rawDelta !== undefined && rawDelta !== null) {
+          netReservedQty += Number(rawDelta);
+        } else if (txType === "reserve") {
+          netReservedQty += params.qty;
+        } else if (txType === "unreserve") {
+          netReservedQty -= params.qty;
+        }
+      }
+
+      const openReservedQty = Math.max(0, netReservedQty);
+      if (reserveCount > 0 && openReservedQty >= params.qty) {
         return true;
       }
+
+      const qtyToReserve = params.qty - openReservedQty;
+      const effectiveReferenceId = reserveCount === 0
+        ? referenceId
+        : `${referenceId}:rev:${reserveCount + 1}`.slice(0, 100);
 
       const level = await this.storage.upsertInventoryLevel({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
       }, tx);
 
-      await this.storage.adjustInventoryLevel(level.id, { reservedQty: params.qty }, tx);
+      await this.storage.adjustInventoryLevel(level.id, { reservedQty: qtyToReserve }, tx);
 
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
         await lotSvc.reserveFromLots({
           productVariantId: params.productVariantId,
           warehouseLocationId: params.warehouseLocationId,
-          qty: params.qty,
+          qty: qtyToReserve,
         });
       }
 
@@ -1553,13 +1596,13 @@ export class InventoryUseCases {
           variantQtyDelta: 0,
           variantQtyBefore: level.variantQty,
           variantQtyAfter: level.variantQty,
-          reservedQtyDelta: params.qty,
+          reservedQtyDelta: params.qty - openReservedQty,
           sourceState: "on_hand",
           targetState: "committed",
           orderId: params.orderId,
           orderItemId: params.orderItemId,
           referenceType,
-          referenceId,
+          referenceId: effectiveReferenceId,
           userId: params.userId ?? null,
         }, tx);
       } catch (err: any) {
@@ -2620,11 +2663,45 @@ export class InventoryUseCases {
   }
 
   // ---------------------------------------------------------------------------
-  // LEDGER — direct transaction logging
+  // LEDGER — direct transaction logging & administrative level maintenance
   // ---------------------------------------------------------------------------
 
   async logTransaction(txn: InsertInventoryTransaction): Promise<InventoryTransaction> {
     return this.storage.createInventoryTransaction(txn);
+  }
+
+  async undoTransfer(transactionId: number, userId: string): Promise<InventoryTransaction> {
+    if (!Number.isSafeInteger(transactionId) || transactionId <= 0) {
+      throw new ValidationError("Invalid transfer transaction ID", { transactionId });
+    }
+    const txn = await this.storage.undoTransfer(transactionId, userId);
+    if (txn.productVariantId) {
+      this.triggerNotifyChange(txn.productVariantId, "undo_transfer");
+    }
+    return txn;
+  }
+
+  async deleteEmptyUnassignedLevel(id: number): Promise<{
+    deleted: boolean;
+    error?: string;
+    statusCode?: number;
+  }> {
+    const level = await this.storage.getInventoryLevelById(id);
+    if (!level) {
+      return { deleted: false, error: "Inventory level not found", statusCode: 404 };
+    }
+    if (level.variantQty !== 0 || level.reservedQty !== 0) {
+      return { deleted: false, error: "Cannot delete — row still has quantity or reservations", statusCode: 400 };
+    }
+    const hasAssignment = await this.storage.hasProductLocationAssignment(
+      level.productVariantId,
+      level.warehouseLocationId,
+    );
+    if (hasAssignment) {
+      return { deleted: false, error: "Cannot delete — variant is assigned to this location", statusCode: 400 };
+    }
+    await this.storage.deleteInventoryLevel(id);
+    return { deleted: true };
   }
 
   // ---------------------------------------------------------------------------

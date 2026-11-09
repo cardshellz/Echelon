@@ -1,0 +1,230 @@
+{
+  "routeWriters": {
+    "catalog.product_assets": [
+      "server/modules/catalog/catalog.routes.ts"
+    ],
+    "catalog.product_categories": [
+      "server/modules/catalog/catalog.routes.ts"
+    ],
+    "catalog.product_variants": [
+      "server/modules/catalog/catalog.routes.ts",
+      "server/modules/shipping-engine/shipping-admin.routes.ts"
+    ],
+    "catalog.products": [
+      "server/modules/catalog/catalog.routes.ts",
+      "server/routes/ebay-listing-rules.routes.ts",
+      "server/routes/ebay/ebay-config.routes.ts"
+    ],
+    "catalog.shipping_groups": [
+      "server/modules/catalog/catalog.routes.ts"
+    ],
+    "channels.channel_allocation_rules": [
+      "server/modules/channels/channels.routes.ts"
+    ],
+    "channels.channel_connections": [
+      "server/routes/ebay-settings.routes.ts"
+    ],
+    "channels.channel_feeds": [
+      "server/modules/catalog/catalog.routes.ts"
+    ],
+    "channels.channel_listings": [
+      "server/modules/catalog/catalog.routes.ts",
+      "server/routes/ebay/ebay-listings.routes.ts"
+    ],
+    "channels.channel_warehouse_assignments": [
+      "server/modules/channels/channels.routes.ts"
+    ],
+    "channels.channels": [
+      "server/routes/pick-priority.routes.ts"
+    ],
+    "ebay.ebay_category_aspects": [
+      "server/routes/ebay/ebay-taxonomy.routes.ts"
+    ],
+    "ebay.ebay_category_mappings": [
+      "server/routes/ebay/ebay-config.routes.ts"
+    ],
+    "ebay.ebay_listing_rules": [
+      "server/routes/ebay-listing-rules.routes.ts"
+    ],
+    "ebay.ebay_product_aspect_overrides": [
+      "server/routes/ebay/ebay-taxonomy.routes.ts"
+    ],
+    "ebay.ebay_type_aspect_defaults": [
+      "server/routes/ebay/ebay-taxonomy.routes.ts"
+    ],
+    "membership.plans": [
+      "server/routes/pick-priority.routes.ts"
+    ],
+    "shipping.quote_snapshots": [
+      "server/modules/shipping-engine/interfaces/http/carrier-callback.routes.ts"
+    ],
+    "shipping.rate_book_assignments": [
+      "server/modules/shipping-engine/interfaces/http/rate-book-admin.routes.ts"
+    ],
+    "shipping.rate_books": [
+      "server/modules/shipping-engine/interfaces/http/rate-book-admin.routes.ts"
+    ],
+    "shipping.rate_table_rows": [
+      "server/modules/shipping-engine/interfaces/http/rate-table-admin.routes.ts"
+    ],
+    "shipping.rate_tables": [
+      "server/modules/shipping-engine/interfaces/http/rate-book-admin.routes.ts",
+      "server/modules/shipping-engine/interfaces/http/rate-table-admin.routes.ts"
+    ],
+    "shipping.service_levels": [
+      "server/modules/shipping-engine/shipping-admin.routes.ts"
+    ],
+    "shipping.variant_shipping_attrs": [
+      "server/modules/shipping-engine/shipping-admin.routes.ts"
+    ],
+    "warehouse.echelon_settings": [
+      "server/routes/pick-priority.routes.ts"
+    ]
+  },
+  "scriptWriters": {
+    "catalog.product_assets": [
+      "scripts/patch-catalog-sql.js"
+    ],
+    "catalog.product_line_products": [
+      "scripts/patch-catalog-sql.js"
+    ],
+    "catalog.product_lines": [
+      "scripts/patch-catalog-sql.js"
+    ],
+    "catalog.product_types": [
+      "scripts/patch-catalog-sql.js"
+    ],
+    "catalog.product_variants": [
+      "scripts/backfill-parent-variant.cjs",
+      "scripts/patch-catalog-sql.js",
+      "scripts/relink-shopify-variant-ids.ts"
+    ],
+    "catalog.products": [
+      "scripts/patch-catalog-sql.js"
+    ],
+    "channels.channel_feeds": [
+      "scripts/_ca-backfill.ts",
+      "scripts/relink-shopify-variant-ids.ts"
+    ],
+    "channels.channel_listings": [
+      "scripts/cleanup-prod60.ts",
+      "scripts/relink-shopify-variant-ids.ts"
+    ],
+    "inventory.cycle_count_items": [
+      "scripts/create-daily-replen-qa-counts.ts"
+    ],
+    "inventory.cycle_counts": [
+      "scripts/create-daily-replen-qa-counts.ts"
+    ],
+    "inventory.inventory_levels": [
+      "scripts/cleanup-over-reserved.ts",
+      "scripts/clear_reserved.ts",
+      "scripts/clear_reserved_raw.cjs",
+      "scripts/fix-orphaned-reservations.cjs",
+      "scripts/inventory-cutover-records-rehearsal-20260925.ts",
+      "scripts/recover-allocation-exceptions.ts",
+      "scripts/repair-leaked-reservations.ts",
+      "scripts/reserve-existing-orders.cjs"
+    ],
+    "inventory.inventory_lots": [
+      "scripts/migrate-cogs-engine.ts",
+      "scripts/remediate-lot-drift.ts",
+      "scripts/repair-leaked-reservations.ts"
+    ],
+    "inventory.inventory_transactions": [
+      "scripts/backfill-ledger-variances.ts",
+      "scripts/cleanup-over-reserved.ts",
+      "scripts/fix-orphaned-reservations.cjs",
+      "scripts/recover-allocation-exceptions.ts",
+      "scripts/repair-leaked-reservations.ts",
+      "scripts/reserve-existing-orders.cjs"
+    ],
+    "inventory.replen_tasks": [
+      "scripts/recover-blocked-replen.ts",
+      "scripts/recover-replen-health.ts"
+    ],
+    "oms.oms_order_events": [
+      "scripts/backfill-oms-status.ts",
+      "scripts/backfill-shopify-oms-line-fulfillment-status.ts",
+      "scripts/cleanup-duplicate-wms-orders.ts",
+      "scripts/dedup-oms-orders-duplicate-external-order-number.ts",
+      "scripts/inventory-cutover-records-execution-20260925.ts",
+      "scripts/inventory-cutover-records-rehearsal-20260925.ts",
+      "scripts/repair-bug-cancelled-orders.ts"
+    ],
+    "oms.oms_order_line_authority_events": [
+      "scripts/inventory-cutover-records-execution-20260925.ts",
+      "scripts/inventory-cutover-records-rehearsal-20260925.ts"
+    ],
+    "oms.oms_order_lines": [
+      "scripts/backfill-oms-status.ts",
+      "scripts/backfill-shopify-oms-line-fulfillment-status.ts",
+      "scripts/cleanup-oms-wms-authority-readiness.ts",
+      "scripts/dedup-oms-orders-duplicate-external-order-number.ts",
+      "scripts/inventory-cutover-records-rehearsal-20260925.ts",
+      "scripts/recover-unauthorized-paid-lines.ts",
+      "scripts/repair-bug-cancelled-orders.ts",
+      "scripts/repair-cancelled-shipped-shipments.ts"
+    ],
+    "oms.oms_orders": [
+      "scripts/backfill-active-wms-sla-ranks.ts",
+      "scripts/backfill-all-member-tiers.ts",
+      "scripts/backfill-oms-status.ts",
+      "scripts/backfill-oms.ts",
+      "scripts/backfill-priority-and-repush.ts",
+      "scripts/backfill-shopify-oms-line-fulfillment-status.ts",
+      "scripts/dedup-oms-orders-duplicate-external-order-number.ts",
+      "scripts/repair-bug-cancelled-orders.ts",
+      "scripts/repair-cancelled-shipped-shipments.ts"
+    ],
+    "oms.order_line_adjustments": [
+      "scripts/inventory-cutover-records-execution-20260925.ts"
+    ],
+    "warehouse.product_locations": [
+      "scripts/fix-clr-barcode-mismatch.ts"
+    ],
+    "warehouse.warehouse_locations": [
+      "scripts/create-daily-replen-qa-counts.ts",
+      "scripts/fix-bin-locations.cjs"
+    ],
+    "wms.allocation_exceptions": [
+      "scripts/recover-allocation-exceptions.ts"
+    ],
+    "wms.carrier_dispatch_commands": [
+      "scripts/backfill-carrier-dispatch-commands.ts"
+    ],
+    "wms.oms_wms_authority_cleanup_audit": [
+      "scripts/classify-physical-identity-review-exceptions.ts",
+      "scripts/cleanup-oms-wms-authority-readiness.ts",
+      "scripts/enrich-shipstation-physical-shipment-ids.ts"
+    ],
+    "wms.orders": [
+      "scripts/backfill-active-wms-sla-ranks.ts",
+      "scripts/backfill-priority-and-repush.ts",
+      "scripts/backfill-source-ids.cjs",
+      "scripts/backfill-wms-oms-fulfillment-order-id-from-external-order-number.ts",
+      "scripts/backfill-wms-oms-fulfillment-order-id-from-gid.ts",
+      "scripts/backfill-wms-oms-link.ts",
+      "scripts/backfill-wms-source-id.ts",
+      "scripts/clean-digital.ts",
+      "scripts/cleanup-duplicate-wms-orders.ts",
+      "scripts/recover-allocation-exceptions.ts",
+      "scripts/release-auto-held-orders.ts",
+      "scripts/repair-bug-cancelled-orders.ts",
+      "scripts/run-wms-cutover.ts"
+    ],
+    "wms.outbound_shipment_items": [
+      "scripts/cleanup-oms-wms-authority-readiness.ts",
+      "scripts/recover-allocation-exceptions.ts"
+    ],
+    "wms.outbound_shipments": [
+      "scripts/classify-physical-identity-review-exceptions.ts",
+      "scripts/cleanup-duplicate-wms-orders.ts",
+      "scripts/enrich-shipstation-physical-shipment-ids.ts",
+      "scripts/repair-cancelled-shipped-shipments.ts"
+    ],
+    "wms.picking_logs": [
+      "scripts/recover-allocation-exceptions.ts"
+    ]
+  }
+}

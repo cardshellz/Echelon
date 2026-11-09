@@ -131,6 +131,15 @@ describe("migration executor", () => {
     ]);
   });
 
+  it("throws when PostgreSQL reports pg_advisory_unlock=false so the session is disposed", async () => {
+    const query = vi.fn(async () => ({ rows: [{ pg_advisory_unlock: false }] }));
+    const client: MigrationQueryClient = { query };
+
+    await expect(releaseMigrationAdvisoryLock(client)).rejects.toThrow(
+      "PostgreSQL reported pg_advisory_unlock=false",
+    );
+  });
+
   it("loads bounded retry defaults and rejects unsafe configuration", () => {
     expect(migrationRetryOptionsFromEnv({})).toEqual({
       maxAttempts: 5,

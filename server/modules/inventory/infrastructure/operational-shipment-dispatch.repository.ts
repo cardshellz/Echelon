@@ -5,7 +5,7 @@ import { costEvidenceTransactionFromPg } from "./cost-evidence-pg";
 import { lockInventoryCostGraph } from "./cost-evidence.repository";
 import { allocateLotQuantityCost } from "./cost-quantity.repository";
 import { hasExactLotCostTotals } from "../domain/lot-cost";
-import { loadAndLockRuntimeAuthority } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
+import { loadAndLockRuntimeAuthority } from "../../inventory-planning/runtime-availability.api";
 import type { OperationalShipmentBeforeCommit, OperationalShipmentDispatcher, OperationalShipmentSourceOwner } from "../application/operational-shipment-dispatch.port";
 import { OperationalShipmentError, operationalShipmentRequestSchema, planOperationalShipmentConsumption,
   type OperationalShipmentRequest, type OperationalShipmentResult } from "../domain/operational-shipment-dispatch";

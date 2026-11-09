@@ -40,7 +40,8 @@ export function createStaffSessionGate(read = readStaffCredentialState): Request
     const principal=staffLifecyclePrincipal(req);
     if (!principal) return next();
     // A stale cookie must not prevent logging in again or ending this session.
-    if (req.path === "/api/auth/login" || req.path === "/api/auth/logout") return next();
+    if (req.path === "/api/auth/login" || req.path === "/api/auth/logout"
+      || req.path === "/api/auth/forgot-password" || req.path === "/api/auth/reset-password-token") return next();
     try {
       const state = await read(principal.user.id);
       if (!isCurrentStaffCredential(principal.credentialVersion, state)) {

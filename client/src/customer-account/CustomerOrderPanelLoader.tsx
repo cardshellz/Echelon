@@ -42,16 +42,19 @@ export function CustomerOrderPanelLoader(props: {
     actions.omsOrderId === retained.omsOrderId;
   const unverified = props.accessNotice ? null : sameOwnedOrder ? retained.snapshot
     : actions?.state === "ready" ? actions.snapshot : null;
-  const mismatch = Boolean((unverified?.order && unverified.order.connectionId !== props.connectionId)
+  // Cached display is not an authenticated connection. Wait for session adoption
+  // before comparing identities or enabling actions; null is not a mismatch.
+  const initializing = props.connectionId === null && !props.accessNotice;
+  const mismatch = !initializing && Boolean((unverified?.order && unverified.order.connectionId !== props.connectionId)
     || (summary?.omsOrderId != null && actions?.omsOrderId != null && summary.omsOrderId !== actions.omsOrderId));
-  const snapshot = mismatch ? null : unverified;
+  const snapshot = initializing || mismatch ? null : unverified;
   // Retained snapshots keep navigation visible, but must not initialize a new
   // return with invalidated item facts. Resolve those through the owned reader
   // only when the customer actually selects Return items.
-  const returnLookupRequired = props.actionError || actions?.state !== "ready" || actions.snapshot?.returnFailed === true;
+  const returnLookupRequired = initializing || props.actionError || actions?.state !== "ready" || actions.snapshot?.returnFailed === true;
   const state: CustomerOrderPanelState = {
-    loading: !props.actionError && !snapshot && (!actions || actions.state === "refreshing"),
-    error: props.actionError || mismatch || actions?.state === "failed" || (snapshot?.orderFailed && snapshot.returnFailed)
+    loading: initializing || (!props.actionError && !snapshot && (!actions || actions.state === "refreshing")),
+    error: props.actionError || (!initializing && (mismatch || actions?.state === "failed" || (snapshot?.orderFailed && snapshot.returnFailed)))
       ? "Some order options couldn’t be loaded. Try again to refresh them."
       : snapshot?.orderFailed ? snapshot.order ? "Order options couldn’t be refreshed. Your saved options are still available."
         : "Editing, address and cancellation options couldn’t be loaded."

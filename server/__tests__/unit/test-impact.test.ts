@@ -102,6 +102,33 @@ function postgresFixture() {
   return snapshot(sources);
 }
 describe("PostgreSQL coverage selection", () => {
+  let sharedRepoSnapshot: { files: Set<string>; readSource: (file: string) => string; dependencyCache: Map<unknown, unknown> } | undefined;
+  function repositorySnapshot() {
+    if (!sharedRepoSnapshot) {
+      const files = new Set(execFileSync("git", ["ls-files", "-z"], {
+        cwd: root, encoding: "utf8", maxBuffer: 10 * 1024 * 1024,
+      }).split("\0").filter(Boolean));
+      const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "-z", "--",
+        "server", "shared", "client", "scripts", "test"], {
+        cwd: root, encoding: "utf8", maxBuffer: 10 * 1024 * 1024,
+      }).split("\0").filter(file => /\.[cm]?[jt]sx?$/.test(file));
+      for (const file of untracked) files.add(file);
+      const sourceCache = new Map<string, string>();
+      sharedRepoSnapshot = {
+        files,
+        readSource: file => {
+          let cached = sourceCache.get(file);
+          if (cached === undefined) {
+            cached = readFileSync(resolve(root, file), "utf8");
+            sourceCache.set(file, cached);
+          }
+          return cached;
+        },
+        dependencyCache: new Map(),
+      };
+    }
+    return sharedRepoSnapshot;
+  }
   it.each([
     { source: "infrastructure/access-administration.repository.ts", required: [
       "server/modules/identity/__tests__/integration/identity-administration.integration.test.ts",
@@ -157,17 +184,9 @@ describe("PostgreSQL coverage selection", () => {
     // Exercise real source imports, not only the synthetic graph below. Include
     // uncommitted source additions in the application/test roots, while keeping
     // the complete tracked graph and excluding unrelated untracked artifacts.
-    const files = new Set(execFileSync("git", ["ls-files", "-z"], {
-      cwd: root, encoding: "utf8", maxBuffer: 10 * 1024 * 1024,
-    }).split("\0").filter(Boolean));
-    const untracked = execFileSync("git", ["ls-files", "--others", "--exclude-standard", "-z", "--",
-      "server", "shared", "client", "scripts", "test"], {
-      cwd: root, encoding: "utf8", maxBuffer: 10 * 1024 * 1024,
-    }).split("\0").filter(file => /\.[cm]?[jt]sx?$/.test(file));
-    for (const file of untracked) files.add(file);
+    const { files, readSource, dependencyCache } = repositorySnapshot();
     expect(files.has("server/modules/identity/" + source)).toBe(true);
-    const result = selectPostgresTests({ files,
-      readSource: file => readFileSync(resolve(root, file), "utf8"),
+    const result = selectPostgresTests({ files, readSource, dependencyCache,
       changes: [change("server/modules/identity/" + source)],
     });
     expect(result.run).toBe(true);

@@ -1,7 +1,9 @@
 import { inventoryCutoverManifestSchema, type InventoryCutoverManifest } from "@shared/types/inventory-cutover-commit";
 import type { InventoryAvailabilityTransactionQueryClient } from "../application/inventory-availability-transaction-query.port";
-import { readWarehouseSourceActivationEvidence } from "../../warehouse/infrastructure/warehouse-source-activation.repository";
-import { validateWarehouseSourceActivation } from "../../warehouse/domain/warehouse-source-activation";
+import {
+  readWarehouseSourceActivationEvidence,
+  validateWarehouseSourceActivation,
+} from "../../warehouse/cutover-work.api";
 
 /** Capture only warehouse sources reachable from the reviewed Echelon-owned
  * binding/policy definitions. External observe-only destinations have neither. */

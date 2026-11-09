@@ -13,6 +13,7 @@ import { applyNoInventoryEffect } from "./apply-no-inventory-effect";
 import { projectCostForFrozenLot, replaceCostComponent } from "../domain/cost-application.domain";
 import { CostEvidenceError, costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../infrastructure/cost-evidence.repository";
 import type { SupplierReturnCostAdjustment } from "@shared/procurement/supplier-return";
+import { readReceivingLineCostProvenance } from "../../procurement/cost-source-evidence-public";
 
 const MAX_APPLICATION_LOTS = 10_000;
 const MAX_APPLICATION_EDGES = 100_000;
@@ -58,16 +59,27 @@ export async function applyCostRevision(
   const source = revision.contract;
   if (source.inventoryEffect) return applyNoInventoryEffect(tx, revision, actorId, now);
   const shipmentLineId = source.scope.kind === "shipment_line" ? source.scope.inboundShipmentLineId : null;
-  const rootsResult = await tx.execute(sql`
-    SELECT origin.*, line.cost_source_kind, line.cost_source_evidence,
-      EXISTS(SELECT 1 FROM procurement.receipt_reversals reversal WHERE reversal.receiving_line_id = origin.receiving_line_id) AS has_reversal
+  const originsResult = await tx.execute(sql`
+    SELECT origin.*
     FROM inventory.effective_lot_cost_origins origin
-    JOIN procurement.receiving_lines line ON line.id = origin.receiving_line_id
     WHERE origin.purchase_order_line_id = ${source.scope.purchaseOrderLineId}
       AND (${shipmentLineId}::integer IS NULL OR origin.inbound_shipment_line_id = ${shipmentLineId})
     ORDER BY origin.inventory_lot_id LIMIT ${MAX_APPLICATION_LOTS + 1}
   `);
-  const roots = rootsResult.rows;
+  const provenanceByReceivingLineId = await readReceivingLineCostProvenance(
+    tx,
+    originsResult.rows.map((origin) => costInteger(origin.receiving_line_id, "origin.receivingLineId", 1)),
+  );
+  const roots = originsResult.rows.flatMap((origin) => {
+    const provenance = provenanceByReceivingLineId.get(costInteger(origin.receiving_line_id, "origin.receivingLineId", 1));
+    if (!provenance) return [];
+    return [{
+      ...origin,
+      cost_source_kind: provenance.cost_source_kind,
+      cost_source_evidence: provenance.cost_source_evidence,
+      has_reversal: provenance.has_reversal,
+    }];
+  });
   const verifiedSalesOnly = roots.some(root => root.cost_source_evidence?.historicalCostLinks?.verifiedSalesOnly === true);
   if (verifiedSalesOnly && !writer.revalueExactComponent) {
     throw new CostEvidenceError("COST_EXACT_WRITER_REQUIRED", "Repaired history requires the exact costing owner with verified-sale protection.");

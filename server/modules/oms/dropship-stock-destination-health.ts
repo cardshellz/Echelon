@@ -1,7 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 // Direct file import, as OMS already does for inventory-cutover-retired-work: the
 // published barrel (quantity-publication.ts) loads the publication runtime and its pool.
-import { dropshipStockDestinationSourceReadySql } from "../inventory-planning/infrastructure/dropship-stock-destination-source-ready.sql";
+import { dropshipStockDestinationSourceReadySql } from "../inventory-planning/dropship-stock-destination-health.api";
 
 /**
  * DROPSHIP_STOCK_DESTINATION_MISSING (Fix PR 2a-2, plan F2 2.7, owner decision

@@ -81,10 +81,10 @@ describe("staff router authority before operational surfaces", () => {
     expect(renderAt("/users")).not.toContain("Users surface");
     expect(renderAt("/users")).toContain("assigned roles do not provide access to this page");
   });
-  it("keeps an unresolved legacy-only page restricted to explicitly assigned system roles", () => {
-    fixture.assignedRoles = [{ id: 99, name: "Custom order reader", isSystem: false }]; fixture.permissions = ["orders:view"];
+  it("gates /orders on its explicit orders:view capability rather than assigned system-role membership", () => {
+    fixture.assignedRoles = [{ id: 1, name: "Team Lead", isSystem: true }]; fixture.systemRoles = ["lead", "admin"]; fixture.permissions = [];
     expect(renderAt("/orders")).not.toContain("Orders surface");
-    fixture.assignedRoles = [{ id: 1, name: "Team Lead", isSystem: true }]; fixture.systemRoles = ["lead"]; fixture.role = "picker";
+    fixture.systemRoles = []; fixture.assignedRoles = [{ id: 99, name: "Custom order reader", isSystem: false }]; fixture.permissions = ["orders:view"]; fixture.role = "picker";
     expect(renderAt("/orders")).toContain("Orders surface");
   });
   it("allows Dashboard via its established read permission, independently of the compatibility label", () => {

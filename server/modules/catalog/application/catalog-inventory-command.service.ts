@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { QuantityCommand } from "../../inventory/domain/quantity-ledger";
+import type { QuantityCommand } from "../../inventory/catalog-inventory.api";
 
 const count = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const identity = z.object({ id: z.number().int().positive(), sku: z.string().nullable(), name: z.string() });

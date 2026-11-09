@@ -431,6 +431,17 @@ export class EbayApiClient {
    * List every physical shipping fulfillment recorded for an order.
    * GET /sell/fulfillment/v1/order/{orderId}/shipping_fulfillment
    */
+  async getNotificationPublicKey(publicKeyId: string): Promise<{
+    key: string;
+    algorithm?: string;
+    digest?: string;
+  }> {
+    return await this.request({
+      method: "GET",
+      path: `/commerce/notification/v1/public_key/${encodeURIComponent(publicKeyId.trim())}`,
+    });
+  }
+
   async getShippingFulfillments(orderId: string): Promise<EbayShippingFulfillmentsResponse> {
     return await this.request({
       method: "GET",
@@ -1133,7 +1144,7 @@ export function createEbayApiClient(
     { quantityAdmission: async () => {
       const account = await authService.getVerifiedProviderAccount(channelId);
       if (!account) throw new Error("Provider-verified eBay account identity is required for quantity publication.");
-      const { createChannelEbayQuantityRequestAdmission } = await import("../../../inventory-planning/infrastructure/quantity-publication-runtime");
+      const { createChannelEbayQuantityRequestAdmission } = await import("../../../inventory-planning/quantity-publication-admission.api");
       return createChannelEbayQuantityRequestAdmission({ channelId, externalAccountId: account.externalAccountId,
         environment: providerEnvironment });
     } },

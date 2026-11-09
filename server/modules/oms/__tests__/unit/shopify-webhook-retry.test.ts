@@ -36,7 +36,12 @@ vi.mock("../../../../db", () => ({
   },
 }));
 
-import { recordRetryFailure } from "../../webhook-retry.worker";
+import {
+  claimDueWebhookRetryBatch,
+  recordRetryFailure,
+  WEBHOOK_RETRY_CLAIM_LEASE_MS,
+  WEBHOOK_RETRY_LOOPBACK_TIMEOUT_MS,
+} from "../../webhook-retry.worker";
 import {
   buildShopifyFulfillmentRetryEnvelope,
   enqueueShopifyFulfillmentWebhookRetry,
@@ -171,6 +176,143 @@ describe("recordRetryFailure :: shopify dead-letter formatting", () => {
     const expectedDelayMs = Math.pow(2, 3) * 60_000; // 8 minutes
     expect(result.nextRetryAt.getTime()).toBeGreaterThanOrEqual(before + expectedDelayMs - 50);
   });
+
+  it("fences stale claim owners (rowCount === 0) without mirroring inbox dead status or emitting CRITICAL logs", async () => {
+    const errSpy = vi.spyOn(console, "error");
+    const execute = vi.fn(async () => ({ rows: [] }));
+    const db: any = {
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(async () => ({ rowCount: 0 })),
+        })),
+      })),
+      execute,
+    };
+
+    const result = await recordRetryFailure(
+      db,
+      {
+        id: 42,
+        attempts: 4,
+        topic: "orders/paid",
+        sourceInboxId: 500,
+        claimLeaseUntil: new Date("2026-11-08T16:00:00.000Z"),
+      },
+      "stale worker finished late",
+    );
+
+    expect(result.applied).toBe(false);
+    expect(execute).not.toHaveBeenCalled();
+    const critical = errSpy.mock.calls.find((args) =>
+      String(args[0] ?? "").startsWith("CRITICAL:"),
+    );
+    expect(critical).toBeUndefined();
+  });
+});
+
+describe("claimDueWebhookRetryBatch :: exclusive due-row lease & recovery", () => {
+  it("atomically claims due pending rows with FOR UPDATE SKIP LOCKED and advances next_retry_at by the lease window", async () => {
+    const now = new Date("2026-11-08T16:00:00.000Z");
+    const expectedLease = new Date(now.getTime() + WEBHOOK_RETRY_CLAIM_LEASE_MS);
+    const executedQueries: unknown[] = [];
+    const db: any = {
+      execute: vi.fn(async (query: unknown) => {
+        executedQueries.push(query);
+        return {
+          rows: [
+            {
+              id: 77,
+              provider: "shopify",
+              topic: "orders/paid",
+              payload: { id: 9001 },
+              sourceInboxId: 321,
+              attempts: 2,
+              nextRetryAt: expectedLease.toISOString(),
+            },
+          ],
+        };
+      }),
+    };
+
+    const claimed = await claimDueWebhookRetryBatch(db, { limit: 25, now });
+
+    expect(claimed).toEqual([
+      {
+        id: 77,
+        provider: "shopify",
+        topic: "orders/paid",
+        payload: { id: 9001 },
+        sourceInboxId: 321,
+        attempts: 2,
+        claimLeaseUntil: expectedLease,
+      },
+    ]);
+    const sqlString = JSON.stringify(executedQueries[0]);
+    expect(sqlString).toContain("FOR UPDATE SKIP LOCKED");
+    expect(sqlString).toContain("UPDATE oms.webhook_retry_queue");
+  });
+
+  it("prevents a concurrent consumer from claiming an active lease and allows reclaiming after lease expiry", async () => {
+    const rows = [
+      {
+        id: 101,
+        provider: "shopify",
+        topic: "orders/paid",
+        payload: { id: 1 },
+        sourceInboxId: 11,
+        attempts: 0,
+        status: "pending",
+        nextRetryAt: new Date("2026-11-08T15:59:00.000Z"),
+      },
+    ];
+
+    const makeFakePg = () => ({
+      execute: vi.fn(async (query: any) => {
+        const values = (query?.queryChunks ?? []).filter(
+          (chunk: any) => typeof chunk === "string" || typeof chunk === "number",
+        );
+        const nowIso = String(values[0]);
+        const limit = Number(values[1]);
+        const leaseIso = String(values[2]);
+        const nowMs = new Date(nowIso).getTime();
+        const due = rows
+          .filter((r) => r.status === "pending" && r.nextRetryAt.getTime() <= nowMs)
+          .slice(0, limit);
+        for (const r of due) {
+          r.nextRetryAt = new Date(leaseIso);
+        }
+        return {
+          rows: due.map((r) => ({
+            id: r.id,
+            provider: r.provider,
+            topic: r.topic,
+            payload: r.payload,
+            sourceInboxId: r.sourceInboxId,
+            attempts: r.attempts,
+            nextRetryAt: r.nextRetryAt.toISOString(),
+          })),
+        };
+      }),
+    });
+
+    const db = makeFakePg();
+    const t0 = new Date("2026-11-08T16:00:00.000Z");
+    const firstClaim = await claimDueWebhookRetryBatch(db, { now: t0, leaseMs: 60_000 });
+    expect(firstClaim).toHaveLength(1);
+
+    // Second consumer 10s later sees 0 due rows because the lease is active
+    const t1 = new Date("2026-11-08T16:00:10.000Z");
+    const secondClaim = await claimDueWebhookRetryBatch(db, { now: t1, leaseMs: 60_000 });
+    expect(secondClaim).toHaveLength(0);
+
+    // After the 60s lease expires, a consumer reclaims the abandoned row with a strictly newer token
+    const t2 = new Date("2026-11-08T16:01:01.000Z");
+    const reclaimed = await claimDueWebhookRetryBatch(db, { now: t2, leaseMs: 60_000 });
+    expect(reclaimed).toHaveLength(1);
+    expect((reclaimed[0]!.claimLeaseUntil as Date).getTime()).toBeGreaterThan(
+      (firstClaim[0]!.claimLeaseUntil as Date).getTime(),
+    );
+  });
 });
 
 // ─── Source regression: worker shopify branch ────────────────────────
@@ -197,6 +339,12 @@ describe("webhook-retry.worker.ts :: shopify provider branch", () => {
 
   it("includes x-internal-retry header in shopify loopback requests", () => {
     expect(WORKER_SRC).toMatch(/"x-internal-retry":\s*secret/);
+  });
+
+  it("bounds shopify and legacy HTTP loopback requests with AbortSignal.timeout", () => {
+    expect(WEBHOOK_RETRY_LOOPBACK_TIMEOUT_MS).toBe(30_000);
+    const matches = WORKER_SRC.match(/signal:\s*AbortSignal\.timeout\(WEBHOOK_RETRY_LOOPBACK_TIMEOUT_MS\)/g) ?? [];
+    expect(matches).toHaveLength(2);
   });
 
   it("emits shopify-specific CRITICAL: format with Topic and Order on dead-letter", () => {

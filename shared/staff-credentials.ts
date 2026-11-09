@@ -19,6 +19,25 @@ export const changeStaffPasswordSchema = z.object({
   currentPassword: z.string().min(1), password: newStaffPasswordSchema,
   operationId: z.string().uuid(),
 }).strict();
+export const STAFF_PASSWORD_RESET_TTL_MS = 15 * 60 * 1000;
+export const forgotStaffPasswordRequestSchema = z.object({
+  identifier: z.string().trim().min(1).max(320),
+}).strict();
+export const resetStaffPasswordWithTokenSchema = z.object({
+  token: z.string().trim().min(1).max(2048),
+  password: newStaffPasswordSchema,
+  operationId: z.string().uuid(),
+}).strict();
+export const breakGlassStaffPasswordRecoverySchema = z.object({
+  userId: z.string().trim().min(1).optional(),
+  username: z.string().trim().min(1).optional(),
+  password: newStaffPasswordSchema,
+  reason: z.string().trim().min(10).max(500),
+  operator: z.string().trim().min(1).max(200),
+  operationId: z.string().uuid(),
+}).strict().refine(value => Boolean(value.userId || value.username), {
+  message: "Either userId or username is required for break-glass recovery.",
+});
 export const staffCredentialReviewSchema = z.object({
   userId: z.string().min(1), credentialVersion: credentialVersionSchema,
   protectedTarget: z.boolean(), requiredPermission: z.string(),

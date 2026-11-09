@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
 import {
   channelConnections,
@@ -15,12 +16,57 @@ import {
 } from "../../../../../test/setup-integration";
 import { PostgresCatalogExportRepository } from "../../infrastructure/postgres-catalog-export.repository";
 
+const CATALOG_EXPORT_CHANNEL_TABLES_SQL = `
+  CREATE TABLE IF NOT EXISTS channels.channel_connections (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    channel_id integer NOT NULL REFERENCES channels.channels(id) ON DELETE CASCADE,
+    shop_domain varchar(255),
+    access_token text,
+    refresh_token text,
+    webhook_secret varchar(255),
+    api_version varchar(20),
+    scopes text,
+    shopify_location_id varchar(50),
+    expires_at timestamp,
+    last_sync_at timestamp,
+    sync_status varchar(20) DEFAULT 'never',
+    sync_error text,
+    metadata jsonb,
+    created_at timestamp NOT NULL DEFAULT now(),
+    updated_at timestamp NOT NULL DEFAULT now(),
+    UNIQUE (id, channel_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS channels.channel_feeds (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    channel_id integer REFERENCES channels.channels(id) ON DELETE CASCADE,
+    product_variant_id integer NOT NULL REFERENCES catalog.product_variants(id) ON DELETE CASCADE,
+    channel_type varchar(30) NOT NULL DEFAULT 'shopify',
+    channel_variant_id varchar(100),
+    channel_product_id varchar(100),
+    channel_sku varchar(100),
+    channel_inventory_item_id varchar(100),
+    is_active integer NOT NULL DEFAULT 1,
+    last_synced_at timestamp,
+    last_synced_qty integer,
+    consecutive_push_failures integer NOT NULL DEFAULT 0,
+    quarantined_at timestamp,
+    quarantine_reason text,
+    created_at timestamp NOT NULL DEFAULT now(),
+    updated_at timestamp NOT NULL DEFAULT now(),
+    UNIQUE (channel_id, product_variant_id),
+    CONSTRAINT channel_feeds_active_identity_chk
+      CHECK (is_active = 0 OR NULLIF(btrim(channel_variant_id), '') IS NOT NULL)
+  );
+`;
+
 describeWithDisposableDb("catalog export PostgreSQL repository", () => {
   let db: ReturnType<typeof getTestDb>;
 
   beforeAll(async () => {
     db = getTestDb();
     await runMigrations();
+    await db.execute(sql.raw(CATALOG_EXPORT_CHANNEL_TABLES_SQL));
   });
 
   afterAll(async () => {
@@ -29,6 +75,9 @@ describeWithDisposableDb("catalog export PostgreSQL repository", () => {
 
   beforeEach(async () => {
     await truncateTestData();
+    await db.execute(
+      sql.raw("TRUNCATE TABLE channels.channel_feeds, channels.channel_connections RESTART IDENTITY CASCADE"),
+    );
   });
 
   it("joins product and variant identity using monotonic keyset pagination", async () => {

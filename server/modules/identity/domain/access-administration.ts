@@ -15,7 +15,7 @@ export class IdentityAdministrationError extends Error {
   constructor(public readonly code: "IDENTITY_ADMINISTRATION_INVALID" | "IDENTITY_ADMINISTRATION_FORBIDDEN"
     | "IDENTITY_LAST_ACCESS_MANAGER" | "IDENTITY_USER_NOT_FOUND" | "IDENTITY_ACCESS_STALE"
     | "IDENTITY_ACCESS_REVIEW_REQUIRED" | "IDENTITY_ACCESS_DEPENDENCIES" | "IDENTITY_CREDENTIAL_STALE"
-    | "IDENTITY_CREDENTIAL_PROOF_REQUIRED", public readonly statusCode: 400 | 403 | 404 | 409 | 428,
+    | "IDENTITY_CREDENTIAL_PROOF_REQUIRED" | "IDENTITY_CREDENTIAL_RECOVERY_UNAVAILABLE", public readonly statusCode: 400 | 403 | 404 | 409 | 428 | 503,
     message: string) {
     super(message); this.name = "IdentityAdministrationError";
   }

@@ -1,6 +1,6 @@
 import { DropshipLiveListingZeroQuantityService } from "../application/dropship-live-listing-zero-quantity-service";
 import { makeDropshipListingPushWorkerLogger, systemDropshipListingPushWorkerClock } from "../application/dropship-listing-push-worker-service";
-import { createDropshipEbayQuantityRequestAdmission } from "../../inventory-planning/infrastructure/quantity-publication-runtime";
+import { createDropshipEbayQuantityRequestAdmission } from "../../inventory-planning/quantity-publication-admission.api";
 import { EbayDropshipListingPushProvider } from "./dropship-ebay-listing-push.provider";
 import { createDropshipMarketplaceCredentialRepositoryFromEnv } from "./dropship-marketplace-credentials";
 import { PgDropshipLiveListingZeroQuantityRepository } from "./dropship-live-listing-zero-quantity.repository";

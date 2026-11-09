@@ -5,7 +5,7 @@ import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
 import { identityStorage } from "../identity";
 const storage = { ...ordersStorage, ...channelsStorage, ...identityStorage };
-import { requirePermission, requireAnyPermission, requireAuth, requireAssignedSystemRole } from "../../routes/middleware";
+import { requirePermission, requireAnyPermission, requireAuth } from "../../routes/middleware";
 import { orders, orderItems, pickingLogs, outboundShipments } from "@shared/schema";
 import { broadcastOrdersUpdated } from "../../websocket";
 import { db } from "../../db";
@@ -1196,7 +1196,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/orders/history", requireAuth, requireAssignedSystemRole("admin", "lead"), limitPageRead(async (req, res) => {
+  app.get("/api/orders/history", requirePermission("orders", "view"), limitPageRead(async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -1232,7 +1232,7 @@ export function registerPickingRoutes(app: Express) {
     }
   }));
   
-  app.get("/api/orders/:id/detail", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
+  app.get("/api/orders/:id/detail", requirePermission("orders", "view"), async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -1255,7 +1255,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
   
-  app.get("/api/orders/history/export", requireAuth, requireAssignedSystemRole("admin", "lead"), async (req, res) => {
+  app.get("/api/orders/history/export", requirePermission("orders", "view"), async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });

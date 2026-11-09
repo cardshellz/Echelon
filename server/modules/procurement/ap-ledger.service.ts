@@ -2121,6 +2121,10 @@ async function recordPaymentInTransaction(
   }
 }
 
+/**
+ * @deprecated Legacy direct payment helper retained for test fixtures only.
+ * Production callers must use `createApPaymentCommands().recordPayment`.
+ */
 export async function recordPayment(data: RecordApPaymentInput, options: ApPaymentClockOptions = {}) {
   const at = requirePaymentCommandTime(options.now ?? new Date());
   validateRecordPaymentInput(data);
