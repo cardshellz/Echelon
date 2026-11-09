@@ -1,7 +1,9 @@
 import { sql } from "drizzle-orm";
 import { shipStationV1Instant, ShipStationDateError } from "@shared/utils/shipstation-date";
-import { shipmentQuantityEvidenceProjection } from "../inventory/infrastructure/shipment-quantity-evidence.sql";
-import { readSourceShipmentPostedQuantity } from "../inventory/domain/source-shipment-quantity-evidence";
+import {
+  readSourceShipmentPostedQuantity,
+  shipmentQuantityEvidenceProjection,
+} from "../inventory/shipment-evidence.api";
 
 import type {
   ShipStationService,

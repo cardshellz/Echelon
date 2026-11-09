@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { retiredReceiptBatch } from "../inventory-planning/infrastructure/inventory-cutover-retired-work";
-import { loadAndLockShipmentRuntimeAuthority } from "../inventory/application/inventory.use-cases";
+import { loadAndLockShipmentRuntimeAuthority } from "../inventory/shipment-evidence.api";
 
 import {
   sqlIntegerArray,

@@ -69,7 +69,7 @@ import {
   ReplacementInventoryUnavailableError,
   ShipmentInventoryUnavailableError,
   type InventoryUseCases,
-} from "../inventory/application/inventory.use-cases";
+} from "../inventory/shipment-evidence.api";
 import type { InventoryShipmentRuntimeInput } from "../inventory-planning/application/inventory-availability-runtime-shipment.service";
 import {
   type ExactWmsShipmentItem,

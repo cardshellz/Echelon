@@ -2626,11 +2626,45 @@ export class InventoryUseCases {
   }
 
   // ---------------------------------------------------------------------------
-  // LEDGER — direct transaction logging
+  // LEDGER — direct transaction logging & administrative level maintenance
   // ---------------------------------------------------------------------------
 
   async logTransaction(txn: InsertInventoryTransaction): Promise<InventoryTransaction> {
     return this.storage.createInventoryTransaction(txn);
+  }
+
+  async undoTransfer(transactionId: number, userId: string): Promise<InventoryTransaction> {
+    if (!Number.isSafeInteger(transactionId) || transactionId <= 0) {
+      throw new ValidationError("Invalid transfer transaction ID", { transactionId });
+    }
+    const txn = await this.storage.undoTransfer(transactionId, userId);
+    if (txn.productVariantId) {
+      this.triggerNotifyChange(txn.productVariantId, "undo_transfer");
+    }
+    return txn;
+  }
+
+  async deleteEmptyUnassignedLevel(id: number): Promise<{
+    deleted: boolean;
+    error?: string;
+    statusCode?: number;
+  }> {
+    const level = await this.storage.getInventoryLevelById(id);
+    if (!level) {
+      return { deleted: false, error: "Inventory level not found", statusCode: 404 };
+    }
+    if (level.variantQty !== 0 || level.reservedQty !== 0) {
+      return { deleted: false, error: "Cannot delete — row still has quantity or reservations", statusCode: 400 };
+    }
+    const hasAssignment = await this.storage.hasProductLocationAssignment(
+      level.productVariantId,
+      level.warehouseLocationId,
+    );
+    if (hasAssignment) {
+      return { deleted: false, error: "Cannot delete — variant is assigned to this location", statusCode: 400 };
+    }
+    await this.storage.deleteInventoryLevel(id);
+    return { deleted: true };
   }
 
   // ---------------------------------------------------------------------------

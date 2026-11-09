@@ -2,10 +2,12 @@ import { and, asc, eq, inArray } from "drizzle-orm";
 import type { db as applicationDatabase } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import { channelFeeds, inventoryLevels, productLocations, products, productVariants } from "@shared/schema";
-import type { InventoryUseCases } from "../../inventory/application/inventory.use-cases";
-import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
-import { openOperationalQuantityPosting } from "../../inventory/infrastructure/operational-quantity-posting";
-import { archiveProductReplenishmentInTx } from "../../inventory/infrastructure/replenishment-archive.repository";
+import {
+  archiveProductReplenishmentInTx,
+  lockInventoryCostGraph,
+  openOperationalQuantityPosting,
+  type InventoryUseCases,
+} from "../../inventory/catalog-inventory.api";
 import { CatalogInventoryCommandError, CatalogInventoryCommandService,
   type CatalogInventoryCommandRepository, type CatalogInventoryUnitOfWork } from "../application/catalog-inventory-command.service";
 
