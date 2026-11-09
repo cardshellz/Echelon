@@ -2,9 +2,11 @@ import type { Pool } from "pg";
 
 import { pool as defaultPool } from "../../../../db";
 import type { InventoryAtpServiceContract } from "../../../inventory/atp.service";
-import type { InventoryChannelQuantityRuntimeService } from "../../../inventory-planning/application/inventory-channel-quantity-runtime.service";
-import { createAuthorityAwareInventoryAtpService } from "../../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
-import { createInventoryChannelQuantityRuntimeService } from "../../../inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
+import {
+  createAuthorityAwareInventoryAtpService,
+  createInventoryChannelQuantityRuntimeService,
+  type InventoryChannelQuantityRuntimeService,
+} from "../../../inventory-planning/runtime-availability.api";
 
 export interface EbayChannelVariantQuantity {
   productVariantId: number;

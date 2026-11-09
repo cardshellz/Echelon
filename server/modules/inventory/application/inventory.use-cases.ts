@@ -2,7 +2,7 @@ import { readIntegerMills } from "@shared/money-read";
 import type { ReservedInventoryTransferOwner, ReservedTransferPlan } from "../../inventory-planning/application/reserved-inventory-transfer.port";
 import { repointCanonicalTransferPickLines } from "../../wms/order-item-commands";
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
-import { assertShipmentNotRetired } from "../../inventory-planning/infrastructure/inventory-cutover-retired-work";
+import { assertShipmentNotRetired } from "../../inventory-planning/cutover-retired-work.api";
 import { assertNoOpenPickCorrection } from "../../wms/pick-correction.repository";
 import { openOperationalQuantityPosting, quantityTransactionFromDrizzle, type OperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
 import { assertLegacyQuantityImportAllowed } from "./legacy-quantity-import";

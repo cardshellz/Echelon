@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { assertShipmentNotRetiredPg } from "../inventory-planning/infrastructure/inventory-cutover-retired-work";
+import { assertShipmentNotRetiredPg } from "../inventory-planning/cutover-retired-work.api";
 import { WMS_WAREHOUSE_STATUS_VALUES } from "@shared/enums/order-status";
 import { canonicalClaimDispatchCommandSchema, canonicalClaimDispatchEvidenceSchema, type CanonicalClaimDispatchEvidence } from "@shared/types/inventory-availability-dispatch";
 import type { CanonicalClaimDispatchSourceOwner } from "../inventory-planning/application/inventory-availability-dispatch.port";

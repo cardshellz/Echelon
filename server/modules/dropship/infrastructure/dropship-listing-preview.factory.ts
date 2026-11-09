@@ -4,8 +4,10 @@ import { createCatalogPublicImageUrl } from "../../catalog/catalog-public-image"
 import { PgCatalogVariantPublicationPhotoReader } from "../../catalog/catalog-publication-images.reader";
 import { createAllocationEngine } from "../../channels/allocation-engine.service";
 import { resolveDropshipPublicationPreview } from "./dropship-listing-publication-preview.provider";
-import { createAuthorityAwareInventoryAtpService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
-import { createInventoryChannelQuantityRuntimeService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
+import {
+  createAuthorityAwareInventoryAtpService,
+  createInventoryChannelQuantityRuntimeService,
+} from "../../inventory-planning/runtime-availability.api";
 import {
   DropshipListingPreviewService,
   makeDropshipListingPreviewLogger,

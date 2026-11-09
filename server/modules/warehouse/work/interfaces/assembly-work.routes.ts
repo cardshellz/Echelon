@@ -11,7 +11,7 @@ import { logger } from "../../../../platform/observability/logger";
 import type { AssemblyWorkService } from "../application/assembly-work.service";
 import type { AssemblyExecutionService } from "../application/assembly-execution.service";
 import { assemblyExecutionContextsSchema, assemblyOrderInstructionsSchema, assemblyTaskViewSchema, assemblyOutputPickCommandSchema } from "@shared/warehouse-assembly-execution";
-import { InventoryAvailabilityClaimRepositoryError } from "../../../inventory-planning/infrastructure/inventory-availability-claim.repository";
+import { InventoryAvailabilityClaimRepositoryError } from "../../../inventory-planning/claim-execution.api";
 import { AssemblyOrderAuthorityError } from "../../../orders/assembly-handoff-authority";
 import { WmsOrderItemCommandError } from "../../../wms/order-item-commands";
 import { WarehouseWorkError } from "../domain/work-configuration";
