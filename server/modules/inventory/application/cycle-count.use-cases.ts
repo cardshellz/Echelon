@@ -32,7 +32,7 @@ type DrizzleDb = {
 };
 
 import { InventoryUseCases } from "./inventory.use-cases";
-import { validateWarehouseLocationIntegrity } from "../../warehouse/location-integrity";
+import { validateWarehouseLocationIntegrity } from "../../warehouse/inventory-governance.api";
 import { logger } from "../../../platform/observability/logger";
 
 type ChannelSync = {
@@ -904,8 +904,15 @@ export class CycleCountUseCases {
   async resetItem(id: number, itemId: number) {
     const item = await this.storage.getCycleCountItemById(itemId);
     if (!item) throw new CycleCountError("Item not found", 404);
-    if (item.status === "approved" || item.status === "adjusted") {
-      throw new CycleCountError("Cannot reset an approved/adjusted item");
+    if (item.cycleCountId !== undefined && item.cycleCountId !== id) {
+      throw new CycleCountError("Item does not belong to this cycle count", 409);
+    }
+    const cycleCount = await this.storage.getCycleCountById?.(id);
+    if (cycleCount && cycleCount.status !== "in_progress") {
+      throw new CycleCountError(`Cannot reset an item for a ${cycleCount.status} cycle count`, 409);
+    }
+    if (item.status === "approved" || item.status === "adjusted" || item.status === "resolved") {
+      throw new CycleCountError("Cannot reset an approved/adjusted item", 409);
     }
 
     // Clean up linked mismatch items
@@ -934,8 +941,15 @@ export class CycleCountUseCases {
   async investigateItem(id: number, itemId: number, notes?: string) {
     const item = await this.storage.getCycleCountItemById(itemId);
     if (!item) throw new CycleCountError("Item not found", 404);
-    if (item.status === "approved" || item.status === "adjusted") {
-      throw new CycleCountError("Cannot investigate an already approved item");
+    if (item.cycleCountId !== undefined && item.cycleCountId !== id) {
+      throw new CycleCountError("Item does not belong to this cycle count", 409);
+    }
+    const cycleCount = await this.storage.getCycleCountById?.(id);
+    if (cycleCount && cycleCount.status !== "in_progress") {
+      throw new CycleCountError(`Cannot investigate an item for a ${cycleCount.status} cycle count`, 409);
+    }
+    if (item.status === "approved" || item.status === "adjusted" || item.status === "resolved") {
+      throw new CycleCountError("Cannot investigate an already approved item", 409);
     }
 
     await this.storage.updateCycleCountItem(itemId, {
@@ -1702,6 +1716,11 @@ export class CycleCountUseCases {
       throw new CycleCountError(`${unapprovedVariances.length} variances not approved/resolved`);
     }
 
+    // Unfreeze all locations that were frozen by this cycle count BEFORE
+    // marking the count completed so a freeze-release failure never leaves a
+    // count in "completed" status with its bins still frozen.
+    await this.unfreezeLocations(id);
+
     // Completion may be retried after a publication failure. Keep the original
     // completion time rather than rewriting the count's audit history.
     if (cycleCount.status !== "completed") {
@@ -1710,9 +1729,6 @@ export class CycleCountUseCases {
         completedAt: new Date(),
       });
     }
-
-    // Unfreeze all locations that were frozen by this cycle count
-    await this.unfreezeLocations(id);
 
     // Approval publishes while the bin is still frozen, so its stock is not
     // promise eligible yet. Refresh after release, including unchanged counts:
@@ -1761,25 +1777,25 @@ export class CycleCountUseCases {
       throw new CycleCountError(`Cannot cancel a ${cycleCount.status} cycle count`, 409);
     }
 
-    await this.storage.updateCycleCount(id, { status: "cancelled" });
-
-    // Release any bins this count had frozen and stop it blocking replenishment.
+    // Release any bins this count had frozen and stop it blocking replenishment
+    // BEFORE persisting status='cancelled' so a transient failure during
+    // unfreeze or blocker cleanup leaves the count retryable (COUNT-04).
     await this.unfreezeLocations(id);
     const linkedReplenBlockersClosed = await this.closeLinkedReplenExceptionTasks(id);
+    await this.storage.updateCycleCount(id, { status: "cancelled" });
 
     return { success: true, linkedReplenBlockersClosed };
   }
 
   async delete(id: number) {
-    // Unfreeze locations before cascade delete removes the FK reference
-    await this.unfreezeLocations(id);
     let deleted: boolean;
     try {
       deleted = await this.storage.deleteCycleCount(id);
     } catch (err: any) {
       // A count with applied adjustments is referenced by inventory_transactions
       // (FK, no cascade), so Postgres rejects the delete. Surface a clear reason
-      // instead of a generic 500 and point the user at cancel().
+      // instead of a generic 500 and point the user at cancel() without
+      // prematurely unfreezing an active count's bins (COUNT-01).
       if (err?.code === "23503" || /foreign key/i.test(err?.message ?? "")) {
         throw new CycleCountError(
           "This count has applied inventory adjustments and can't be deleted. Cancel it instead to keep the audit trail.",
@@ -1789,6 +1805,7 @@ export class CycleCountUseCases {
       throw err;
     }
     if (!deleted) throw new CycleCountError("Cycle count not found", 404);
+    await this.unfreezeLocations(id);
     return { success: true };
   }
 }

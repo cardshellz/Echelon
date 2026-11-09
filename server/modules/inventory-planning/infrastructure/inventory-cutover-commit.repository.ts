@@ -8,7 +8,7 @@ import { inventoryCutoverEvidenceHash } from "../domain/inventory-cutover-manife
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { captureInventoryCutoverReviewInsideTransaction } from "./inventory-cutover-review.repository";
 import { promoteInventoryCutoverDefinitionsInsideTransaction } from "./inventory-cutover-definitions.repository";
-import { activateReviewedWarehouseSourcesInsideTransaction } from "../../warehouse/infrastructure/warehouse-source-activation.repository";
+import { activateReviewedWarehouseSourcesInsideTransaction } from "../../warehouse/cutover-work.api";
 import { PostgresInventoryCutoverReconstructionRepository } from "./inventory-cutover-reconstruction.repository";
 import { createTransactionScopedInventoryPublicationService } from "./inventory-availability-runtime-publication.repository";
 import { committedInventoryPublicationManifestSchema } from "../domain/inventory-cutover-full-publication-proof";

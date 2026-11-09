@@ -178,12 +178,10 @@ import {
 } from "../procurement";
 import {
   BinAssignmentFilterError,
-  parseBinAssignmentVariantIdsQuery,
-} from "../warehouse/bin-assignment-filter";
-import {
   BinAssignmentValidationError,
+  parseBinAssignmentVariantIdsQuery,
   parseBinAssignmentWriteRequest,
-} from "../warehouse/bin-assignment-contracts";
+} from "../warehouse/bin-assignment.api";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
 
