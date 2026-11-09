@@ -1144,7 +1144,7 @@ export function createEbayApiClient(
     { quantityAdmission: async () => {
       const account = await authService.getVerifiedProviderAccount(channelId);
       if (!account) throw new Error("Provider-verified eBay account identity is required for quantity publication.");
-      const { createChannelEbayQuantityRequestAdmission } = await import("../../../inventory-planning/infrastructure/quantity-publication-runtime");
+      const { createChannelEbayQuantityRequestAdmission } = await import("../../../inventory-planning/quantity-publication-admission.api");
       return createChannelEbayQuantityRequestAdmission({ channelId, externalAccountId: account.externalAccountId,
         environment: providerEnvironment });
     } },

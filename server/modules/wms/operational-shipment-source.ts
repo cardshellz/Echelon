@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { assertShipmentNotRetiredPg } from "../inventory-planning/infrastructure/inventory-cutover-retired-work";
+import { assertShipmentNotRetiredPg } from "../inventory-planning/cutover-retired-work.api";
 import {
   OperationalShipmentError,
   operationalShipmentRequestSchema,

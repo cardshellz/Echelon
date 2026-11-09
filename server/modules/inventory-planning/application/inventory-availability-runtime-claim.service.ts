@@ -26,7 +26,7 @@ import type {
   ReservationResult,
   ReservationServiceContract,
   ReserveForOrderResult,
-} from "../../channels/reservation.service";
+} from "../reservation-authority.api";
 import type { InventoryAvailabilityRuntimeAuthority } from "./inventory-availability-runtime-atp.service";
 
 export type CanonicalClaimStatus = "active" | "released" | "cancelled" | "superseded" | "failed";

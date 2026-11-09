@@ -5,13 +5,13 @@ import * as schema from "@shared/schema";
 import { claimPlanSchema } from "@shared/types/inventory-availability-planner";
 
 import { pool as defaultPool } from "../../../db";
-import {
-  createReservationService,
-  type ChannelSync,
-  type DrizzleDb,
-  type RecipeBuildPromise,
-  type ReservationServiceContract,
-} from "../../channels/reservation.service";
+import { createReservationService } from "../../channels/reservation.service";
+import type {
+  ChannelSync,
+  DrizzleDb,
+  RecipeBuildPromise,
+  ReservationServiceContract,
+} from "../reservation-authority.api";
 import { createLegacyInventoryAtpService } from "../../inventory/atp.service";
 import { InventoryAvailabilityClaimService } from "../application/inventory-availability-claim.service";
 import {
@@ -55,6 +55,11 @@ interface ValidatedRuntimeAuthority {
  * canonical transition irreversible, so that route cannot become legacy
  * between selection and commit.
  */
+export interface RuntimeClaimRoutingSemaphoreOptions {
+  maxWaiters?: number;
+  acquireTimeoutMs?: number;
+}
+
 export class PostgresInventoryAvailabilityRuntimeClaimExecutor
 implements InventoryAvailabilityRuntimeClaimExecutor {
   private readonly routingSlots: AsyncSemaphore;
@@ -63,9 +68,15 @@ implements InventoryAvailabilityRuntimeClaimExecutor {
     private readonly legacy: ReservationServiceContract,
     private readonly canonical: InventoryAvailabilityClaimService,
     private readonly connectionPool: ClientPool = defaultPool,
+    semaphoreOptions: RuntimeClaimRoutingSemaphoreOptions = {},
   ) {
     assertNestedConnectionCapacity(connectionPool);
-    this.routingSlots = new AsyncSemaphore(routingConcurrency(connectionPool));
+    const capacity = routingConcurrency(connectionPool);
+    this.routingSlots = new AsyncSemaphore(
+      capacity,
+      semaphoreOptions.maxWaiters ?? Math.max(256, capacity * 32),
+      semaphoreOptions.acquireTimeoutMs ?? 30_000,
+    );
   }
 
   async execute<T>(
@@ -137,15 +148,57 @@ implements InventoryAvailabilityRuntimeClaimExecutor {
   }
 }
 
+interface QueuedSemaphoreWaiter {
+  resolve: (release: () => void) => void;
+  reject: (error: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
 class AsyncSemaphore {
   private inUse = 0;
-  private readonly waiters: Array<(release: () => void) => void> = [];
+  private readonly waiters: QueuedSemaphoreWaiter[] = [];
 
-  constructor(private readonly capacity: number) {}
+  constructor(
+    private readonly capacity: number,
+    private readonly maxWaiters: number = Math.max(256, capacity * 32),
+    private readonly acquireTimeoutMs: number = 30_000,
+  ) {}
 
   async acquire(): Promise<() => void> {
     if (this.inUse >= this.capacity) {
-      return new Promise<() => void>((resolve) => this.waiters.push(resolve));
+      if (this.waiters.length >= this.maxWaiters) {
+        throw new InventoryAvailabilityRuntimeClaimError(
+          "INVENTORY_CLAIM_ROUTING_QUEUE_EXHAUSTED",
+          "Inventory claim routing admission queue is full; rejecting additional concurrent waiters.",
+          {
+            capacity: this.capacity,
+            maxWaiters: this.maxWaiters,
+            inUse: this.inUse,
+          },
+        );
+      }
+      return new Promise<() => void>((resolve, reject) => {
+        const entry: QueuedSemaphoreWaiter = { resolve, reject };
+        if (Number.isFinite(this.acquireTimeoutMs) && this.acquireTimeoutMs > 0) {
+          entry.timer = setTimeout(() => {
+            const idx = this.waiters.indexOf(entry);
+            if (idx !== -1) this.waiters.splice(idx, 1);
+            reject(
+              new InventoryAvailabilityRuntimeClaimError(
+                "INVENTORY_CLAIM_ROUTING_ACQUIRE_TIMEOUT",
+                "Timed out waiting for an inventory claim routing slot.",
+                {
+                  capacity: this.capacity,
+                  acquireTimeoutMs: this.acquireTimeoutMs,
+                  inUse: this.inUse,
+                },
+              ),
+            );
+          }, this.acquireTimeoutMs);
+          entry.timer.unref?.();
+        }
+        this.waiters.push(entry);
+      });
     }
     this.inUse += 1;
     return this.createRelease();
@@ -158,7 +211,8 @@ class AsyncSemaphore {
       released = true;
       const waiter = this.waiters.shift();
       if (waiter) {
-        waiter(this.createRelease());
+        if (waiter.timer) clearTimeout(waiter.timer);
+        waiter.resolve(this.createRelease());
         return;
       }
       this.inUse -= 1;
