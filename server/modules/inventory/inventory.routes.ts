@@ -496,7 +496,7 @@ export function registerInventoryRoutes(app: Express) {
     res.send(template);
   });
 
-  app.post("/api/inventory/receive", requireAuth, validateInventoryCommandKey, async (req, res) => {
+  app.post("/api/inventory/receive", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     if (!req.session.user) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -835,7 +835,7 @@ export function registerInventoryRoutes(app: Express) {
 
       const { replenishment: breakReplen } = req.app.locals.services;
       if (breakReplen) {
-        const targetLocId = (result as any).targetLocationId || targetLocationId || warehouseLocationId;
+        const targetLocId = result.targetLocationId ?? targetLocationId ?? warehouseLocationId;
         breakReplen.checkReplenForLocation(targetLocId).catch((err: any) =>
           console.warn(`[Replen] Post-break check failed for loc ${targetLocId}:`, err)
         );
@@ -1663,7 +1663,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/locations", requireAuth, async (req, res) => {
+  app.post("/api/inventory/locations", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const parsed = insertWarehouseLocationSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1850,7 +1850,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/items", requireAuth, protectEbayPolicyWriteBoundary("create"), async (req, res) => {
+  app.post("/api/inventory/items", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
     try {
       const parsed = insertProductSchema.safeParse(req.body);
       if (!parsed.success) {

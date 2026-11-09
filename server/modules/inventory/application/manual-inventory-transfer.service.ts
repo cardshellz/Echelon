@@ -155,7 +155,8 @@ export class ManualInventoryTransferService {
   async recover(transferId: number): Promise<boolean> {
     try {
       const result = await this.database
-        .execute(sql`SELECT f.actor,f.completed_at,t.product_variant_id,t.from_location_id,t.voided_at
+        .execute(sql`SELECT f.actor,f.completed_at,t.product_variant_id,t.from_location_id,t.voided_at,
+        EXISTS (SELECT 1 FROM inventory.inventory_transactions u WHERE u.transaction_type='transfer' AND u.notes=('Undo of transfer ' || t.id::text) AND u.voided_at IS NULL) AS undone
         FROM inventory.transfer_followups f JOIN inventory.inventory_transactions t ON t.id=f.transfer_id WHERE f.transfer_id=${transferId}`);
       if (!result.rows[0])
         throw new IntegrityError("Transfer follow-up intent is missing", {
@@ -163,7 +164,7 @@ export class ManualInventoryTransferService {
         });
       const row = result.rows[0];
       if (row.completed_at) return true;
-      if (row.voided_at)
+      if (row.voided_at || row.undone)
         throw new IntegrityError(
           "A voided transfer requires review before follow-up",
           { transferId },
@@ -178,11 +179,13 @@ export class ManualInventoryTransferService {
         fromLocationId: z.number().int().positive().parse(row.from_location_id),
         actor: z.string().min(1).parse(row.actor),
       });
-      return this.database.transaction(async (tx) => {
+      return await this.database.transaction(async (tx) => {
         const current =
-          await tx.execute(sql`SELECT f.completed_at,t.voided_at FROM inventory.transfer_followups f
-          JOIN inventory.inventory_transactions t ON t.id=f.transfer_id WHERE f.transfer_id=${transferId} FOR UPDATE OF f`);
-        if (!current.rows[0] || current.rows[0].voided_at)
+          await tx.execute(sql`SELECT f.completed_at,t.voided_at,
+          EXISTS (SELECT 1 FROM inventory.inventory_transactions u WHERE u.transaction_type='transfer' AND u.notes=('Undo of transfer ' || t.id::text) AND u.voided_at IS NULL) AS undone
+          FROM inventory.transfer_followups f
+          JOIN inventory.inventory_transactions t ON t.id=f.transfer_id WHERE f.transfer_id=${transferId} FOR UPDATE OF f, t`);
+        if (!current.rows[0] || current.rows[0].voided_at || current.rows[0].undone)
           throw new IntegrityError(
             "Transfer evidence changed before follow-up completed",
             { transferId },
