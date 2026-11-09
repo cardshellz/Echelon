@@ -10,7 +10,7 @@ import {
   type CostEvidenceTransaction,
   type CostRevisionApplicationResult,
   type RecordedCostRevision,
-} from "../inventory";
+} from "../inventory/cost-application-public";
 import { recordReceiptProvisionalAudit } from "./receipt-invoice-costs.repository";
 import { recordCostRevision } from "./cost-source-revision.repository";
 export { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";

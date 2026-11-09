@@ -120,14 +120,14 @@ describe("PROC-2: costing boundary decoupling, legacy bypass retirement, and sha
 
       expect(applyCostRevisionSource).not.toContain("procurement.receiving_lines");
       expect(applyCostRevisionSource).not.toContain("procurement.receipt_reversals");
-      expect(applyCostRevisionSource).toContain('from "../../procurement"');
+      expect(applyCostRevisionSource).toContain('from "../../procurement/cost-source-evidence-public"');
 
       expect(refreshReceiptProvisionalSource).not.toContain("procurement.cost_source_revisions");
-      expect(refreshReceiptProvisionalSource).toContain('from "../../procurement"');
+      expect(refreshReceiptProvisionalSource).toContain('from "../../procurement/cost-source-evidence-public"');
 
       expect(purchaseCostApplicationSource).not.toContain("inventory.cost_applications");
       expect(purchaseCostApplicationSource).not.toContain("../inventory/application/");
-      expect(purchaseCostApplicationSource).toContain('from "../inventory"');
+      expect(purchaseCostApplicationSource).toContain('from "../inventory/cost-application-public"');
     });
   });
 
