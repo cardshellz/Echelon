@@ -28,7 +28,7 @@ import { ProductAssetError } from "./product-asset-errors";
 import {
   cancelProductReplenishmentTasksInTx,
   deactivateProductReplenishmentRulesInTx,
-} from "../inventory/infrastructure/replenishment-archive.repository";
+} from "../inventory/catalog-inventory.api";
 import type {
   Product,
   InsertProduct,

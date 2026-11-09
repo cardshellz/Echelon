@@ -3,13 +3,13 @@ import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import { setWmsOrderItemHoldState } from "../order-item-commands";
-import type { BuildUseCases } from "../../inventory/application/build.use-cases";
-import type { BuildOrderCompletedContext } from "../../inventory/infrastructure/build-execution.repository";
 import {
   RecipeCapacityError,
+  type BuildOrderCompletedContext,
+  type BuildUseCases,
+  type RecipeCapacityService,
   type RecipeDemandPlan,
-} from "../../inventory/domain/recipe-capacity.domain";
-import type { RecipeCapacityService } from "../../inventory/recipe-capacity.service";
+} from "../../inventory/work-execution.api";
 
 // Shared with physical reservations so a component cannot be promised to a
 // direct order while the same stock is being committed to a recipe build.

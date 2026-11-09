@@ -8,9 +8,9 @@
  */
 
 // Storage
-export { type IInventoryStorage, inventoryMethods } from "./infrastructure/inventory.repository";
-export { type IReplenishmentStorage, replenishmentMethods } from "./infrastructure/replenishment.repository";
-export { type ICycleCountStorage, cycleCountMethods } from "./infrastructure/cycle-count.repository";
+export type { IInventoryStorage } from "./infrastructure/inventory.repository";
+export type { IReplenishmentStorage } from "./infrastructure/replenishment.repository";
+export type { ICycleCountStorage } from "./infrastructure/cycle-count.repository";
 
 import { type IInventoryStorage, inventoryMethods } from "./infrastructure/inventory.repository";
 import { type IReplenishmentStorage, replenishmentMethods } from "./infrastructure/replenishment.repository";

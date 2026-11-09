@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 
 import { interpretInventoryShipmentQuantity } from "@shared/inventory/shipment-quantity";
-import { shipmentQuantityEvidenceProjection } from "../inventory/infrastructure/shipment-quantity-evidence.sql";
+import { shipmentQuantityEvidenceProjection } from "../inventory/shipment-evidence.api";
 
 import {
   HISTORICAL_SHIPSTATION_CONTENTS_REVIEW_RULE,

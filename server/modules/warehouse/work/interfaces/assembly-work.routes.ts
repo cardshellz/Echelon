@@ -15,8 +15,10 @@ import { InventoryAvailabilityClaimRepositoryError } from "../../../inventory-pl
 import { AssemblyOrderAuthorityError } from "../../../orders/assembly-handoff-authority";
 import { WmsOrderItemCommandError } from "../../../wms/order-item-commands";
 import { WarehouseWorkError } from "../domain/work-configuration";
-import { BuildDomainError } from "../../../inventory/domain/build.domain";
-import { CanonicalClaimInventoryMutationError } from "../../../inventory/infrastructure/canonical-claim-inventory.repository";
+import {
+  BuildDomainError,
+  CanonicalClaimInventoryMutationError,
+} from "../../../inventory/work-execution.api";
 import { canonicalAvailabilityClaimBuildHandoffResultSchema, canonicalAvailabilityClaimOperationExecutionResultSchema, canonicalAvailabilityClaimPickResultSchema } from "@shared/types/inventory-availability-claims";
 
 interface Services {
