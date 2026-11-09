@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { LegacyMaintenanceEvidenceReader, LegacyMaintenanceProof } from "../../inventory-planning/application/legacy-maintenance-evidence.port";
 import type { InventoryAvailabilityTransactionQueryClient } from "../../inventory-planning/application/inventory-availability-transaction-query.port";
 import { quantityPublicationScopeSchema } from "../../inventory-planning/domain/quantity-publication-admission";
-import { quantityPublicationScopeLockKey } from "../../inventory-planning/infrastructure/quantity-publication-admission.repository";
+import { quantityPublicationScopeLockKey } from "../../inventory-planning/quantity-publication-admission.api";
 import { ebayListingSyncIdentitySchema, syncStageHash, type EbayListingSyncIdentity } from "../ebay-listing-sync.domain";
 
 const eventSchema = z.object({ id: z.string(), revision: z.string(), ownerToken: z.string().uuid(), event: z.string(),

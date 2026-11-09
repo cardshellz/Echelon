@@ -1,7 +1,9 @@
 import { db, pool } from "../../../db";
 import { createAllocationEngine } from "../../channels/allocation-engine.service";
-import { createAuthorityAwareInventoryAtpService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
-import { createInventoryChannelQuantityRuntimeService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
+import {
+  createAuthorityAwareInventoryAtpService,
+  createInventoryChannelQuantityRuntimeService,
+} from "../../inventory-planning/runtime-availability.api";
 import { DropshipListingSettingsService } from "../application/dropship-listing-settings-service";
 import { makeDropshipListingPreviewLogger, systemDropshipListingPreviewClock } from "../application/dropship-listing-preview-service";
 import { ChannelAllocationDropshipAtpProvider } from "./dropship-atp.provider";

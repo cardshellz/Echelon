@@ -1,7 +1,9 @@
 import { INVENTORY_PUBLICATION_TARGET_VARIANT_HOLD_MAX_VARIANTS } from "../../../../shared/types/inventory-channel-exposure";
-import { InventoryPublicationTargetVariantHoldService } from "../../inventory-planning/application/inventory-publication-target-variant-hold.service";
-import { InventoryAvailabilityMasterDataError } from "../../inventory-planning/domain/inventory-availability-master-data.contracts";
-import { PostgresInventoryPublicationTargetVariantHoldStore } from "../../inventory-planning/infrastructure/inventory-publication-target-variant-hold.repository";
+import {
+  InventoryAvailabilityMasterDataError,
+  InventoryPublicationTargetVariantHoldService,
+  PostgresInventoryPublicationTargetVariantHoldStore,
+} from "../../inventory-planning/publication-target-hold.api";
 import type { DropshipCostChangeHoldGate } from "../application/dropship-cost-change-listing-action-service";
 import type {
   DropshipListingVariantHoldGate,

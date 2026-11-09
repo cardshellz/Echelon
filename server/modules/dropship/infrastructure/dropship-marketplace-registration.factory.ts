@@ -13,8 +13,10 @@ import {
   type EbayRegistrationCredentialProvider,
   type EbayRegistrationReadTransport,
 } from "../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
-import { createAuthorityAwareInventoryAtpService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
-import { createInventoryChannelQuantityRuntimeService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
+import {
+  createAuthorityAwareInventoryAtpService,
+  createInventoryChannelQuantityRuntimeService,
+} from "../../inventory-planning/runtime-availability.api";
 import { DropshipMarketplaceRegistrationAccountClaimer } from "../application/dropship-marketplace-registration-account-claimer";
 import {
   DropshipMarketplaceRegistrationOwnerReader,

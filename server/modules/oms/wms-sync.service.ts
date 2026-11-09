@@ -108,7 +108,7 @@ import {
 import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
 import { selectWmsCatalogSku } from "./domain/order-line-catalog-identity";
 import { createOrderLineCatalogIdentityRepository } from "./infrastructure/order-line-catalog-identity.repository";
-import type { ReservationResult } from "../channels/reservation.service";
+import type { ReservationResult } from "../inventory-planning/reservation-authority.api";
 
 type WmsBinLocation = { location: string; zone: string };
 type DbLike = typeof db | any;
