@@ -1,3 +1,4 @@
+import { readAccountNativeScan, accountNativeScanQuery, advanceAccountNativeScan, serializeAccountNativeScan, accountNativePageInfoSchema } from "../../customer-account/domain/account-native-pagination";
 import { ORDER_EDIT_MEMBER_PRICING_DESCRIPTION, isManagedMemberPricingDescription } from "@shared/order-edits/order-edit-member-pricing";
 import { accountNativeFact, accountNativeNodeSchema, accountNativeObservationNode } from "../../customer-account/infrastructure/shopify-account-native.reader";
 import type { AccountNativeRetainer, AccountNativeObservation } from "../../customer-account/application/account-native-summaries.ports";
@@ -433,14 +434,9 @@ export class ShopifyOrderEditProvider
     after: string | null,
     since: Date | null,
   ) {
-    z.string()
-      .regex(/^[1-9][0-9]*$/)
-      .max(30)
-      .nullable()
-      .parse(after);
-    if (since) z.date().parse(since);
-    const credentials = await this.credentials(connectionId);
     const startedAt = this.options.clock();
+    let scan = readAccountNativeScan(connectionId, after, since, startedAt);
+    const credentials = await this.credentials(connectionId);
     if (after === null && since === null) {
       const access = z
         .object({
@@ -469,57 +465,30 @@ export class ShopifyOrderEditProvider
           "Historical account warming requires read_all_orders and order read access.",
         );
     }
-    const result = z
-      .object({
-        orders: z.object({
-          nodes: z.array(z.unknown()).max(100),
-          pageInfo: z.object({ hasNextPage: z.boolean() }),
-        }),
-      })
-      .parse(
-        await this.request(credentials, gql.ACCOUNT_NATIVE_PAGE_QUERY, {
-          after: null,
-          search:
-            [
-              since ? `updated_at:>=\"${since.toISOString()}\"` : null,
-              after ? `id:>${after}` : null,
-            ]
-              .filter(Boolean)
-              .join(" AND ") || null,
-          sort: "ID",
-        }),
-      );
-    const observed = result.orders.nodes.map((node) =>
-      accountNativeObservationNode(credentials, node),
-    );
-    // Seek by native ID, not a deep opaque cursor: large histories must not
-    // hit Shopify's pagination ceiling. Changes behind this seek are revisited.
-    let previous = after === null ? BigInt(0) : BigInt(after);
-    for (const item of observed) {
-      if (BigInt(item.externalOrderId) <= previous)
-        fail(
-          "ACCOUNT_CURSOR_INVALID",
-          "The purchase history ID did not advance.",
-        );
-      previous = BigInt(item.externalOrderId);
+    const pageSchema = z.object({ orders: z.object({
+      nodes: z.array(z.unknown()).max(100), pageInfo: accountNativePageInfoSchema,
+    }) });
+    const readPage = async () => pageSchema.parse(await this.request(
+      credentials, gql.ACCOUNT_NATIVE_PAGE_QUERY, accountNativeScanQuery(scan),
+    ));
+    const identities = (nodes: unknown[]) => nodes.map(node =>
+      z.object({ id: z.string().regex(/^gid:\/\/shopify\/Order\/[1-9][0-9]{0,29}$/) })
+        .parse(node).id.replace("gid://shopify/Order/", ""));
+    let result = await readPage();
+    let step = advanceAccountNativeScan(scan, identities(result.orders.nodes), result.orders.pageInfo);
+    if (step.kind === "range") {
+      scan = step.scan;
+      result = await readPage();
+      step = advanceAccountNativeScan(scan, identities(result.orders.nodes), result.orders.pageInfo);
     }
-    if (result.orders.pageInfo.hasNextPage && !observed.length)
-      fail(
-        "ACCOUNT_CURSOR_INVALID",
-        "The purchase history page did not advance.",
-      );
+    const observed = result.orders.nodes.map(node => accountNativeObservationNode(credentials, node));
     return {
       observation: {
-        facts: observed.flatMap((item) => (item.fact ? [item.fact] : [])),
-        failures: observed.flatMap((item) =>
-          item.failure ? [item.failure] : [],
-        ),
-        startedAt,
-        finishedAt: this.options.clock(),
+        facts: observed.flatMap(item => item.fact ? [item.fact] : []),
+        failures: observed.flatMap(item => item.failure ? [item.failure] : []),
+        startedAt, finishedAt: this.options.clock(),
       },
-      after: result.orders.pageInfo.hasNextPage
-        ? observed.at(-1)!.externalOrderId
-        : null,
+      after: step.kind === "complete" ? null : serializeAccountNativeScan(step.scan),
     };
   }
 
