@@ -530,6 +530,7 @@ export default function CycleCounts() {
       setSelectedCount(null);
     },
     onError: (error: Error) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/cycle-counts"] });
       toast({ title: "Cannot complete", description: error.message, variant: "destructive" });
     },
   });
@@ -1682,9 +1683,9 @@ export default function CycleCounts() {
             <Play className="h-4 w-4 mr-2" /> Start Counting ({pendingCount} bins)
           </Button>
         )}
-        {cycleCountDetail.status === "in_progress" && pendingCount === 0 && needsReviewCount === 0 && (
+        {(cycleCountDetail.status === "in_progress" || (cycleCountDetail.status === "completed" && completeMutation.isError)) && pendingCount === 0 && needsReviewCount === 0 && (
           <Button className="w-full" onClick={() => completeMutation.mutate(selectedCount)} disabled={completeMutation.isPending}>
-            <CheckCircle className="h-4 w-4 mr-2" /> Complete
+            <CheckCircle className="h-4 w-4 mr-2" /> {cycleCountDetail.status === "completed" ? "Retry Completion Sync" : "Complete"}
           </Button>
         )}
 
