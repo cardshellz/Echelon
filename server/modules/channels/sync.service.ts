@@ -425,16 +425,16 @@ class ChannelSyncService {
     const productCache = new Map<number, Array<any>>();
 
     for (const feed of feeds) {
-      const variant = variantsById.get(feed.productVariantId);
-      if (!variant) continue;
-      if (!isInventoryManagedVariant(variant)) continue;
-      if (!isCustomerSellableVariant(variant)) continue;
+      const variantRow = variantsById.get(feed.productVariantId);
+      if (!variantRow) continue;
+      if (!isInventoryManagedVariant(variantRow)) continue;
+      if (!isCustomerSellableVariant(variantRow)) continue;
 
       // Cache ATP per product
-      if (!productCache.has(variant.productId)) {
-        productCache.set(variant.productId, await this.atpService.getAtpPerVariant(variant.productId));
+      if (!productCache.has(variantRow.productId)) {
+        productCache.set(variantRow.productId, await this.atpService.getAtpPerVariant(variantRow.productId));
       }
-      const variantAtp = productCache.get(variant.productId)!;
+      const variantAtp = productCache.get(variantRow.productId)!;
       const atp = variantAtp.find((v) => v.productVariantId === feed.productVariantId);
       const currentAtpUnits = atp?.atpUnits ?? 0;
 
