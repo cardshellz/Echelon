@@ -8786,10 +8786,6 @@ export function createPurchasingService(
     recalculateTotals,
     computePoTotalsFromLines,
     computeAllocatedLineCosts,
-    getAllocatedLineCostsForPo: async (poId: number) => {
-      const lines = await storage.getPurchaseOrderLines(poId);
-      return computeAllocatedLineCosts(lines);
-    },
 
     // Receiving integration
     createReceiptFromPO,

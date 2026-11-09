@@ -38,6 +38,21 @@ export { createBuildUseCases, BuildUseCases } from "./application/build.use-case
 export { createCOGSService, COGSService } from "./cogs.service";
 export { registerReplenishmentRoutes } from "./replenishment.routes";
 export { registerBuildRoutes } from "./build.routes";
+export {
+  CostEvidenceError,
+  costFingerprint,
+  costInteger,
+  lockInventoryCostGraph,
+  applyCostRevision,
+  refreshReceiptProvisional,
+  readLatestCostApplicationStatuses,
+  type CostEvidenceTransaction,
+  type CostRevisionInput,
+  type RecordedCostRevision,
+  type CostApplicationOptions,
+  type CostComponentWriter,
+  type CostRevisionApplicationResult,
+} from "./cost-application-public";
 
 // Service types
 export type {

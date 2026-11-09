@@ -100,27 +100,7 @@ interface ChannelSync {
   queueSyncAfterInventoryChange(variantId: number): Promise<void>;
 }
 
-interface Purchasing extends ReceivingOrchestrationPurchasing {
-  // Typed-lines allocator (Option C, 2026-04-28). Returns per-product-line
-  // landed unit cost after spreading non-product line totals
-  // (discount / fee / tax / rebate / adjustment) across the product lines.
-  // Used at receive time so inventory lots are stamped with the true
-  // cost-per-unit, not the raw line cost. Returns null if the PO has no
-  // typed-line allocation to apply (no non-product lines, or no products).
-  getAllocatedLineCostsForPo?(poId: number): Promise<{
-    perLine: Array<{
-      purchaseOrderLineId: number;
-      lineTotalCents: number;
-      allocatedCents: number;
-      landedLineTotalCents: number;
-      landedUnitCostMills: number;
-      landedUnitCostCents: number;
-    }>;
-    pooledCents: number;
-    productSubtotalCents: number;
-    unallocatedCents: number;
-  }>;
-}
+interface Purchasing extends ReceivingOrchestrationPurchasing {}
 
 interface ShipmentTracking {
   getLandedCostForPoLine(purchaseOrderLineId: number): Promise<number | null>;
