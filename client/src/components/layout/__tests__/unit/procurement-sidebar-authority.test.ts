@@ -64,12 +64,15 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe("procurement sidebar grant boundaries", () => {
-  it("matches the non-live packing route's assigned-membership gate without inventing a capability", () => {
+  it("requires picking:view for Picking navigation and hides non-live Packing", () => {
     identity.permissions = [];
-    expect(hrefs(renderAt("/packing"))).toContain("/packing");
-    expect(hrefs(renderAt("/packing"))).toContain("/picking");
+    expect(hrefs(renderAt("/picking"))).not.toContain("/picking");
+    expect(hrefs(renderAt("/picking"))).not.toContain("/packing");
+    identity.permissions = ["picking:view"];
+    expect(hrefs(renderAt("/picking"))).toContain("/picking");
+    expect(hrefs(renderAt("/picking"))).not.toContain("/packing");
     identity.assignedRoles = [];
-    expect(hrefs(renderAt("/packing"))).not.toContain("/packing");
+    expect(hrefs(renderAt("/picking"))).not.toContain("/picking");
   });
   it("uses the dashboard's inventory read grant rather than a system-role fallback", () => {
     expect(hrefs(renderAt("/"))).toContain("/");
@@ -117,18 +120,22 @@ describe("procurement sidebar grant boundaries", () => {
     expect(hrefs(renderAt("/purchasing"))).not.toContain("/purchasing");
   });
 
-  it("preserves assigned system-role inheritance for children without an established permission", () => {
+  it("requires explicit dropship:view and inventory:audit capabilities for /vendors and /inventory/history regardless of assigned system roles", () => {
     expect(hrefs(renderAt("/vendors"))).not.toContain("/vendors");
     identity.role = "lead";
-    expect(hrefs(renderAt("/vendors"))).not.toContain("/vendors");
     identity.assignedRoles = [{ id: 2, name: "Team Lead", isSystem: true }];
-    identity.systemRoles = ["lead"];
+    identity.systemRoles = ["lead", "admin"];
+    expect(hrefs(renderAt("/vendors"))).not.toContain("/vendors");
+    identity.systemRoles = [];
+    identity.permissions.push("dropship:view");
     expect(hrefs(renderAt("/vendors"))).toContain("/vendors");
     expect(hrefs(renderAt("/inventory/history"))).not.toContain("/inventory/history");
     identity.role = "admin";
-    expect(hrefs(renderAt("/inventory/history"))).not.toContain("/inventory/history");
     identity.assignedRoles = [{ id: 1, name: "Administrator", isSystem: true }];
     identity.systemRoles = ["admin"];
+    expect(hrefs(renderAt("/inventory/history"))).not.toContain("/inventory/history");
+    identity.systemRoles = [];
+    identity.permissions.push("inventory:audit");
     expect(hrefs(renderAt("/inventory/history"))).toContain("/inventory/history");
   });
 

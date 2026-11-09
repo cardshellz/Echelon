@@ -92,9 +92,11 @@ export function createAdvisoryLockRunner(
     }
 
     let acquired = false;
+    let acquireResolved = false;
     let releaseError: Error | undefined;
     try {
       const result = await client.query("SELECT pg_try_advisory_lock($1) as acquired", [lockId]);
+      acquireResolved = true;
       acquired = result.rows[0]?.acquired === true;
       if (!acquired) {
         logger.log(`[AdvisoryLock] Lock ${lockId} is already held by another worker. Skipping execution.`);
@@ -104,6 +106,9 @@ export function createAdvisoryLockRunner(
       activeLocks.add(lockId);
       return await observeRuntimeWork(`scheduler.lock_${lockId}`, fn);
     } catch (error) {
+      if (!acquireResolved) {
+        releaseError = toError(error);
+      }
       logger.error(
         `[AdvisoryLock] Error running locked function for ${lockId}:`,
         errorMessage(error),
@@ -112,7 +117,12 @@ export function createAdvisoryLockRunner(
     } finally {
       if (acquired) {
         try {
-          await client.query("SELECT pg_advisory_unlock($1)", [lockId]);
+          const unlockResult = await client.query("SELECT pg_advisory_unlock($1)", [lockId]);
+          const unlockRow = unlockResult?.rows?.[0] as { unlocked?: unknown; pg_advisory_unlock?: unknown } | undefined;
+          const unlocked = unlockRow?.unlocked ?? unlockRow?.pg_advisory_unlock;
+          if (unlocked === false) {
+            throw new Error(`pg_advisory_unlock reported lock ${lockId} was not held by the pinned session`);
+          }
         } catch (error) {
           releaseError = toError(error);
           logger.error(`[AdvisoryLock] Failed to release lock ${lockId}:`, releaseError.message);

@@ -152,11 +152,11 @@ const REORDER_ENGINE_NAV_LABEL = "Reorder Engine";
 
 const navStructure: NavEntry[] = [
   { label: "Dashboard", icon: LayoutDashboard, href: "/", requiredPermission: { resource: "inventory", action: "view" } },
-  { label: "Operations Control Tower", icon: BarChart3, href: "/oms/flow-monitor", roles: ["admin", "lead"] },
+  { label: "Operations Control Tower", icon: BarChart3, href: "/oms/flow-monitor", requiredPermission: { resource: "operations", action: "view" } },
   {
     label: "Procurement",
     icon: ShoppingBag,
-    roles: ["admin", "lead"],
+
     children: [
       { label: "Dashboard", icon: LayoutDashboard, href: "/purchasing", allOfPermissions: PURCHASING_DASHBOARD_READ_PERMISSIONS },
       { label: "Purchase Orders", icon: FileText, href: "/purchase-orders", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
@@ -170,7 +170,7 @@ const navStructure: NavEntry[] = [
   {
     label: "Accounts Payable",
     icon: DollarSign,
-    roles: ["admin", "lead"],
+
     children: [
       { label: "AP Dashboard", icon: BarChart3, href: "/ap", requiredPermission: PURCHASING_READ_PERMISSION },
       { label: "Invoices", icon: Receipt, href: "/ap-invoices", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
@@ -182,7 +182,7 @@ const navStructure: NavEntry[] = [
   {
     label: "Inventory",
     icon: Box,
-    roles: ["admin", "lead"],
+
     children: [
       { label: "Stock Levels", icon: Box, href: "/inventory", requiredPermission: { resource: "inventory", action: "view" } },
       { label: "Builds", icon: PackageCheck, href: "/inventory/builds", requiredPermission: { resource: "inventory", action: "view" } },
@@ -204,27 +204,27 @@ const navStructure: NavEntry[] = [
       { label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts", requiredPermission: { resource: "inventory", action: "view" } },
       { label: "Transfers", icon: ArrowLeftRight, href: "/transfers", requiredPermission: { resource: "inventory", action: "view" } },
       { label: "Replenishment", icon: RefreshCw, href: "/replenishment", requiredPermission: { resource: "inventory", action: "view" } },
-      { label: "History", icon: History, href: "/inventory/history", roles: ["admin"] },
+      { label: "History", icon: History, href: "/inventory/history", requiredPermission: { resource: "inventory", action: "audit" } },
       { label: "Cost Dashboard", icon: DollarSign, href: "/inventory/costs", requiredPermission: { resource: "inventory", action: "view" } },
     ],
   },
   {
     label: "Orders (OMS)",
     icon: Globe,
-    roles: ["admin", "lead"],
+
     children: [
-      { label: "Orders", icon: Globe, href: "/oms/orders" },
+      { label: "Orders", icon: Globe, href: "/oms/orders", requiredPermission: { resource: "orders", action: "view" } },
       { label: "Order editor pilot", icon: FileText, href: "/order-edits", requiredPermission: { resource: "orders", action: "edit" } },
-      { label: "Order History", icon: History, href: "/order-history" },
+      { label: "Order History", icon: History, href: "/order-history", requiredPermission: { resource: "orders", action: "view" } },
     ],
   },
   {
     label: "Returns",
     icon: RotateCcw,
-    roles: ["admin", "lead"],
+
     children: [
       { label: "Cases", icon: ClipboardList, href: "/returns/cases", requiredPermission: { resource: "inventory", action: "view" } },
-      { label: "Customer portal", icon: Store, href: CUSTOMER_RETURN_PORTAL_PATH, roles: ["admin"] },
+      { label: "Customer portal", icon: Store, href: CUSTOMER_RETURN_PORTAL_PATH, requiredPermission: { resource: "settings", action: "edit" } },
       { label: "Policies", icon: FileText, href: "/return-policies", requiredPermission: { resource: "settings", action: "view" } },
       { label: "Receiving", icon: PackageCheck, href: "/returns/receiving", requiredPermission: { resource: "inventory", action: "view" } },
     ],
@@ -235,17 +235,17 @@ const navStructure: NavEntry[] = [
     // Preserve these legacy membership-gated routes until their owning WMS slice
     // migrates both server/page admission and navigation together.
     children: [
-      { label: "Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
-      { label: "Picking", icon: ClipboardList, href: "/picking" },
+      { label: "Orders", icon: ShoppingCart, href: "/orders", requiredPermission: { resource: "orders", action: "view" } },
+      { label: "Picking", icon: ClipboardList, href: "/picking", requiredPermission: { resource: "picking", action: "view" } },
       { label: "Assembly work", icon: PackageCheck, href: "/assembly", requiredPermission: { resource: "warehouse_work", action: "assembly" } },
       { label: "Pick Priority", icon: ArrowUpDown, href: "/pick-priority", requiredPermission: { resource: "settings", action: "view" } },
-      { label: "Packing", icon: PackageCheck, href: "/packing" },
+
     ],
   },
   {
     label: "Shipping",
     icon: Truck,
-    roles: ["admin", "lead"],
+
     children: [
       { label: "Shipments", icon: Truck, href: "/outbound-shipments", requiredPermission: { resource: "shipments", action: "view" } },
       { label: "Shipping Groups", icon: Layers, href: "/shipping-groups", requiredPermission: { resource: "inventory", action: "view" } },
@@ -256,7 +256,7 @@ const navStructure: NavEntry[] = [
   {
     label: "Catalog & Channels",
     icon: Store,
-    roles: ["admin", "lead"],
+
     children: [
       { label: "Catalog", icon: Package, href: "/catalog", requiredPermission: { resource: "inventory", action: "view" } },
       { label: "Product Lines", icon: Tag, href: "/product-lines", requiredPermission: { resource: "channels", action: "view" } },
@@ -301,9 +301,9 @@ const navStructure: NavEntry[] = [
   {
     label: "Vendors",
     icon: Users,
-    roles: ["admin", "lead"],
+
     children: [
-      { label: "All Vendors", icon: Users, href: "/vendors" },
+      { label: "All Vendors", icon: Users, href: "/vendors", requiredPermission: { resource: "dropship", action: "view" } },
     ],
   },
 ];
@@ -613,7 +613,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const { user, assignedRoles, hasPermission, hasSystemRole, logout } = useAuth();
   const hasAssignedAccess = !!user && assignedRoles.length > 0;
-  const isAssignedAdmin = hasSystemRole("admin");
+  const canEditSettings = hasPermission("settings", "edit");
   const canViewSettings = hasPermission("settings", "view");
   const canViewProcurementSettings = hasPermission("purchasing", "view") || hasPermission("settings", "edit");
   const canViewUsers = hasPermission("users", "view");
@@ -665,7 +665,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
           <div className="flex items-center gap-2">
             <NotificationBell />
-            {hasAssignedAccess && (isAssignedAdmin || canViewSettings || canViewProcurementSettings || canViewUsers || canViewRoles) && (
+            {hasAssignedAccess && (canEditSettings || canViewSettings || canViewProcurementSettings || canViewUsers || canViewRoles) && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="icon" className="text-muted-foreground min-h-[44px] min-w-[44px]" data-testid="button-settings-menu">
@@ -693,13 +693,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                       Shipping
                     </Link>
                   </DropdownMenuItem>}
-                  {isAssignedAdmin && <DropdownMenuItem asChild data-testid="link-integrations">
+                  {canEditSettings && <DropdownMenuItem asChild data-testid="link-integrations">
                     <Link href="/integrations" className="w-full cursor-pointer">
                       <Cable className="mr-2 h-4 w-4" />
                       Integrations
                     </Link>
                   </DropdownMenuItem>}
-                  {isAssignedAdmin && <DropdownMenuItem asChild>
+                  {canViewSettings && <DropdownMenuItem asChild>
                     <Link href="/notification-preferences" className="w-full cursor-pointer">
                       <Bell className="mr-2 h-4 w-4" />
                       Notifications

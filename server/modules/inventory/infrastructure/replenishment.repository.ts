@@ -24,7 +24,7 @@ import {
   parseWarehouseSettingsCreation,
   parseWarehouseSettingsId,
   parseWarehouseSettingsWrite,
-} from "../../warehouse/domain/warehouse-settings-write";
+} from "../../warehouse/inventory-governance.api";
 import { getSettingsForWarehouse } from "../../warehouse/settings.resolver";
 
 type ReplenTaskWithDemand = ReplenTask & {

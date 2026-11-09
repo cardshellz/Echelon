@@ -12,10 +12,26 @@ import {
   fullDropshipBrowserPlan, runDropshipBrowserSelection, selectDropshipBrowserFeatures,
 } from "../../../scripts/ci/dropship-browser-impact.mjs";
 
+let cachedRepoSources: { files: Set<string>; readSource: (file: string) => string; dependencyCache: Map<unknown, unknown> } | undefined;
 function repositorySources() {
-  const files = new Set(execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-    { encoding: "utf8" }).split("\0").filter(Boolean));
-  return { files, readSource: (file: string) => readFileSync(file, "utf8") };
+  if (!cachedRepoSources) {
+    const files = new Set(execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      { encoding: "utf8" }).split("\0").filter(Boolean));
+    const sourceCache = new Map<string, string>();
+    cachedRepoSources = {
+      files,
+      readSource: (file: string) => {
+        let cached = sourceCache.get(file);
+        if (cached === undefined) {
+          cached = readFileSync(file, "utf8");
+          sourceCache.set(file, cached);
+        }
+        return cached;
+      },
+      dependencyCache: new Map(),
+    };
+  }
+  return cachedRepoSources;
 }
 
 function fixture(extra: Record<string, string> = {}) {

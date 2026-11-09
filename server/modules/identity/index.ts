@@ -53,3 +53,11 @@ export { readStaffCredentialState } from "./infrastructure/staff-credentials.rep
 export { isCurrentStaffCredential } from "./staff-session";
 export { createStaffStreamObserver } from "./staff-stream";
 export { readStaffSystemRoleAuthority, readStaffSystemRoleAuthorityPg } from "./staff-authority";
+export { onStaffAuthorityChanged, notifyStaffAuthorityChanged } from "./authority-events";
+export {
+  recoverStaffPasswordBreakGlass,
+  requestStaffPasswordRecoveryEmail,
+  resetStaffPasswordWithToken,
+  createStaffPasswordRecoveryToken,
+  resolveStaffRecoveryEmail,
+} from "./application/staff-credentials";

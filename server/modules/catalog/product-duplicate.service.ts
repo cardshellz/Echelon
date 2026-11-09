@@ -56,6 +56,10 @@ export interface DuplicateProductStorage {
   createProduct(product: InsertProduct): Promise<Product>;
   createProductVariant(variant: InsertProductVariant): Promise<ProductVariant>;
   createProductAsset(asset: InsertProductAsset): Promise<ProductAsset>;
+  deleteProduct?(id: number): Promise<boolean>;
+  deleteProductVariant?(id: number): Promise<boolean>;
+  deleteProductAsset?(id: number): Promise<boolean>;
+  withCatalogTransaction?<T>(fn: (txStorage: DuplicateProductStorage) => Promise<T>): Promise<T>;
 }
 
 export async function duplicateProduct(
@@ -71,6 +75,22 @@ export async function duplicateProduct(
     throw new ProductDuplicateError("A duplicate must start as a draft. Review its inventory behavior before activating it.");
   }
 
+  if (typeof storage.withCatalogTransaction === "function") {
+    return storage.withCatalogTransaction((txStorage) =>
+      duplicateProductInUnitOfWork(txStorage, sourceId, input, name, sku, false),
+    );
+  }
+  return duplicateProductInUnitOfWork(storage, sourceId, input, name, sku, true);
+}
+
+async function duplicateProductInUnitOfWork(
+  storage: DuplicateProductStorage,
+  sourceId: number,
+  input: DuplicateProductInput,
+  name: string,
+  sku: string,
+  compensateOnFailure: boolean,
+): Promise<Product & { variants: ProductVariant[] }> {
   const source = await storage.getProductById(sourceId);
   if (!source) throw new ProductDuplicateError("Product not found", 404);
 
@@ -121,55 +141,77 @@ export async function duplicateProduct(
   const { id: _pid, createdAt: _pc, updatedAt: _pu,
     ebayFulfillmentPolicyOverride: _productShipping, ebayReturnPolicyOverride: _productReturns,
     ebayPaymentPolicyOverride: _productPayment, ...productFields } = source as any;
-  const newProduct = await storage.createProduct({
-    ...productFields,
-    name,
-    sku,
-    title: null, // Shopify display title — the unlinked copy has none; falls back to name.
-    shopifyProductId: null, // MUST reset — never bind the copy to the source's Shopify product.
-    lastPushedAt: null,
-    status: "draft",
-    // No source strategy/permission is silently inherited. The new product
-    // has no active model until its own Inventory behavior is reviewed/applied.
-    inventoryStrategy: "physical_only",
-    isActive: true,
-  } as InsertProduct);
-
-  // Copy physical SKU definitions. Parent links are retired conversion controls.
-  const newIdBySourceVariant = new Map<number, number>();
-  for (const v of sourceVariants) {
-    const { id: _vid, createdAt: _vc, updatedAt: _vu, trackInventory: _effectiveTracking,
-      ebayFulfillmentPolicyOverride: _variantShipping, ebayReturnPolicyOverride: _variantReturns,
-      ebayPaymentPolicyOverride: _variantPayment, ...variantFields } = v as any;
-    const created = await storage.createProductVariant({
-      ...variantFields,
-      productId: newProduct.id,
-      sku: newSkuBySourceVariant.get(v.id)!,
-      parentVariantId: null,
-      shopifyVariantId: null, // MUST reset
-      shopifyInventoryItemId: null, // MUST reset
-      isActive: true,
-    } as InsertProductVariant);
-    newIdBySourceVariant.set(v.id, created.id);
-  }
-
-  // ── Copy assets (images/media); remap variant-scoped assets to new variant ids ──
   const sourceAssets = await storage.getProductAssetsByProductId(sourceId);
-  for (const a of sourceAssets) {
-    let newVariantId: number | null = null;
-    if (a.productVariantId != null) {
-      newVariantId = newIdBySourceVariant.get(a.productVariantId) ?? null;
-      // Variant-scoped asset whose variant wasn't duplicated (inactive) → skip.
-      if (newVariantId == null) continue;
-    }
-    const { id: _aid, createdAt: _ac, ...assetFields } = a as any;
-    await storage.createProductAsset({
-      ...assetFields,
-      productId: newProduct.id,
-      productVariantId: newVariantId,
-    } as InsertProductAsset);
-  }
+  let createdProductId: number | null = null;
+  const createdVariantIds: number[] = [];
+  const createdAssetIds: number[] = [];
 
-  const variants = await storage.getProductVariantsByProductId(newProduct.id);
-  return { ...newProduct, variants };
+  try {
+    const newProduct = await storage.createProduct({
+      ...productFields,
+      name,
+      sku,
+      title: null, // Shopify display title — the unlinked copy has none; falls back to name.
+      shopifyProductId: null, // MUST reset — never bind the copy to the source's Shopify product.
+      lastPushedAt: null,
+      status: "draft",
+      // No source strategy/permission is silently inherited. The new product
+      // has no active model until its own Inventory behavior is reviewed/applied.
+      inventoryStrategy: "physical_only",
+      isActive: true,
+    } as InsertProduct);
+    createdProductId = newProduct.id;
+
+    // Copy physical SKU definitions. Parent links are retired conversion controls.
+    const newIdBySourceVariant = new Map<number, number>();
+    for (const v of sourceVariants) {
+      const { id: _vid, createdAt: _vc, updatedAt: _vu, trackInventory: _effectiveTracking,
+        ebayFulfillmentPolicyOverride: _variantShipping, ebayReturnPolicyOverride: _variantReturns,
+        ebayPaymentPolicyOverride: _variantPayment, ...variantFields } = v as any;
+      const created = await storage.createProductVariant({
+        ...variantFields,
+        productId: newProduct.id,
+        sku: newSkuBySourceVariant.get(v.id)!,
+        parentVariantId: null,
+        shopifyVariantId: null, // MUST reset
+        shopifyInventoryItemId: null, // MUST reset
+        isActive: true,
+      } as InsertProductVariant);
+      createdVariantIds.push(created.id);
+      newIdBySourceVariant.set(v.id, created.id);
+    }
+
+    // ── Copy assets (images/media); remap variant-scoped assets to new variant ids ──
+    for (const a of sourceAssets) {
+      let newVariantId: number | null = null;
+      if (a.productVariantId != null) {
+        newVariantId = newIdBySourceVariant.get(a.productVariantId) ?? null;
+        // Variant-scoped asset whose variant wasn't duplicated (inactive) → skip.
+        if (newVariantId == null) continue;
+      }
+      const { id: _aid, createdAt: _ac, ...assetFields } = a as any;
+      const createdAsset = await storage.createProductAsset({
+        ...assetFields,
+        productId: newProduct.id,
+        productVariantId: newVariantId,
+      } as InsertProductAsset);
+      if (createdAsset?.id != null) createdAssetIds.push(createdAsset.id);
+    }
+
+    const variants = await storage.getProductVariantsByProductId(newProduct.id);
+    return { ...newProduct, variants };
+  } catch (error) {
+    if (compensateOnFailure) {
+      for (const assetId of [...createdAssetIds].reverse()) {
+        try { await storage.deleteProductAsset?.(assetId); } catch {}
+      }
+      for (const variantId of [...createdVariantIds].reverse()) {
+        try { await storage.deleteProductVariant?.(variantId); } catch {}
+      }
+      if (createdProductId != null) {
+        try { await storage.deleteProduct?.(createdProductId); } catch {}
+      }
+    }
+    throw error;
+  }
 }

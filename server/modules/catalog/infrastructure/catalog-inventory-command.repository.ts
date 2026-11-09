@@ -1,10 +1,13 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 import type { db as applicationDatabase } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
-import { channelFeeds, inventoryLevels, productLocations, products, productVariants, replenRules, replenTasks } from "@shared/schema";
-import type { InventoryUseCases } from "../../inventory/application/inventory.use-cases";
-import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
-import { openOperationalQuantityPosting } from "../../inventory/infrastructure/operational-quantity-posting";
+import { channelFeeds, inventoryLevels, productLocations, products, productVariants } from "@shared/schema";
+import {
+  archiveProductReplenishmentInTx,
+  lockInventoryCostGraph,
+  openOperationalQuantityPosting,
+  type InventoryUseCases,
+} from "../../inventory/catalog-inventory.api";
 import { CatalogInventoryCommandError, CatalogInventoryCommandService,
   type CatalogInventoryCommandRepository, type CatalogInventoryUnitOfWork } from "../application/catalog-inventory-command.service";
 
@@ -72,11 +75,9 @@ export class PostgresCatalogInventoryCommandRepository implements CatalogInvento
             await tx.update(productVariants).set({ isActive: false, updatedAt: now }).where(eq(productVariants.id, sourceId));
           }
           if (command.operation === "product_archive") {
-            result.replenDeactivated = (await tx.update(replenRules).set({ isActive: 0 })
-              .where(and(eq(replenRules.productId, command.sourceId), eq(replenRules.isActive, 1))).returning({ id: replenRules.id })).length;
-            result.replenTasksCancelled = (await tx.update(replenTasks).set({ status: "cancelled", completedAt: now })
-              .where(and(eq(replenTasks.productId, command.sourceId), inArray(replenTasks.status, ["pending", "assigned", "in_progress"])))
-              .returning({ id: replenTasks.id })).length;
+            const replen = await archiveProductReplenishmentInTx(tx, command.sourceId, now);
+            result.replenDeactivated = replen.replenDeactivated;
+            result.replenTasksCancelled = replen.replenTasksCancelled;
             await tx.update(products).set({ isActive: false, status: "archived", updatedAt: now }).where(eq(products.id, command.sourceId));
           }
           return result;

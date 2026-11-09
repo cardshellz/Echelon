@@ -108,6 +108,10 @@ describe("notification transport uses current assigned staff authority", () => {
     fixture.client.invalidateQueries.mockClear();
     ws.message(JSON.stringify({ type: "notification" })); expectReload();
     fixture.client.invalidateQueries.mockClear();
+    ws.message(JSON.stringify({ type: "authority:updated" }));
+    expect(fixture.auth.refetch).toHaveBeenCalledTimes(1);
+    expectReload();
+    fixture.client.invalidateQueries.mockClear();
     ws.message(JSON.stringify({ type: "version", version: "synthetic" }));
     expect(fixture.client.invalidateQueries).not.toHaveBeenCalled();
   });

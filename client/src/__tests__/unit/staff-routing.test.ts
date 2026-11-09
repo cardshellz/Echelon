@@ -81,14 +81,38 @@ describe("staff router authority before operational surfaces", () => {
     expect(renderAt("/users")).not.toContain("Users surface");
     expect(renderAt("/users")).toContain("assigned roles do not provide access to this page");
   });
-  it("keeps an unresolved legacy-only page restricted to explicitly assigned system roles", () => {
-    fixture.assignedRoles = [{ id: 99, name: "Custom order reader", isSystem: false }]; fixture.permissions = ["orders:view"];
+  it("gates /orders on its explicit orders:view capability rather than assigned system-role membership", () => {
+    fixture.assignedRoles = [{ id: 1, name: "Team Lead", isSystem: true }]; fixture.systemRoles = ["lead", "admin"]; fixture.permissions = [];
     expect(renderAt("/orders")).not.toContain("Orders surface");
-    fixture.assignedRoles = [{ id: 1, name: "Team Lead", isSystem: true }]; fixture.systemRoles = ["lead"]; fixture.role = "picker";
+    fixture.systemRoles = []; fixture.assignedRoles = [{ id: 99, name: "Custom order reader", isSystem: false }]; fixture.permissions = ["orders:view"]; fixture.role = "picker";
     expect(renderAt("/orders")).toContain("Orders surface");
   });
   it("allows Dashboard via its established read permission, independently of the compatibility label", () => {
     fixture.assignedRoles = [{ id: 99, name: "Inventory reader", isSystem: false }]; fixture.permissions = ["inventory:view"]; fixture.role = "picker";
     expect(renderAt("/")).toContain("Dashboard surface");
+  });
+  it.each([
+    ["/picking", "picking:view"],
+    ["/picking/logs", "picking:view_logs"],
+    ["/picking/metrics", "picking:view_metrics"],
+    ["/picking/settings", "picking:manage_settings"],
+  ])("gates %s on its explicit capability (%s) rather than assigned system-role membership", (path, grant) => {
+    fixture.assignedRoles = [{ id: 3, name: "Picker", isSystem: true }];
+    fixture.systemRoles = ["picker", "lead", "admin"];
+    fixture.permissions = [];
+    expect(renderAt(path)).not.toContain("Picking surface");
+    expect(renderAt(path)).toContain("assigned roles do not provide access to this page");
+    fixture.systemRoles = [];
+    fixture.assignedRoles = [{ id: 99, name: "Custom picking role", isSystem: false }];
+    fixture.permissions = [grant];
+    expect(renderAt(path)).toContain("Picking surface");
+  });
+  it("denies non-live /packing even when a staff member has assigned roles and picking permissions", () => {
+    fixture.assignedRoles = [{ id: 3, name: "Picker", isSystem: true }];
+    fixture.systemRoles = ["picker", "admin"];
+    fixture.permissions = ["picking:view", "picking:perform", "picking:complete"];
+    const html = renderAt("/packing");
+    expect(html).not.toContain("Non-live packing surface");
+    expect(html).toContain("assigned roles do not provide access to this page");
   });
 });

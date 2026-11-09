@@ -83,7 +83,7 @@ export const CHOOSE_WORDS = Object.freeze({
   // Interim (step 1 PROPOSAL): the table's caption, read out only.
   tableCaption: "Items Card Shellz offers you. Check the ones you want to sell.",
   // Interim (step 1 PROPOSAL): Product and Variant merge into Item; "Quantity" becomes "Available"; "Status" becomes "How".
-  columns: Object.freeze({ item: "Item", category: "Category", available: "Available", how: "How" }),
+  columns: Object.freeze({ item: "Item", category: "Category", available: "Available" }),
   // Interim (step 1 PROPOSAL): the size line under a product's name.
   itemSizeLine: (variantName: string, variantSku: string | null, productVariantId: number) =>
     `${variantName} · ${variantSku || `Size ${productVariantId}`}`,

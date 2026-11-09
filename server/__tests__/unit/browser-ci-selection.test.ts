@@ -45,12 +45,32 @@ function selection(file: string, suite = "procurement", extra: Record<string, st
   return selectBrowserSuite({ suite, changes: [{ status: "M", paths: [file] }], ...fixture(extra) });
 }
 
+let cachedRepoSources: {
+  files: Set<string>;
+  readSource: (file: string) => string;
+  dependencyCache: Map<(file: string) => string, Map<string, string[]>>;
+} | undefined;
 function repositorySources() {
   // Include new, non-ignored dependencies when running before a commit too.
-  const files = new Set(execFileSync(
-    "git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "utf8" },
-  ).split("\0").filter(Boolean));
-  return { files, readSource: (file: string) => readFileSync(file, "utf8") };
+  if (!cachedRepoSources) {
+    const files = new Set(execFileSync(
+      "git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "utf8" },
+    ).split("\0").filter(Boolean));
+    const sourceCache = new Map<string, string>();
+    cachedRepoSources = {
+      files,
+      readSource: (file: string) => {
+        let cached = sourceCache.get(file);
+        if (cached === undefined) {
+          cached = readFileSync(file, "utf8");
+          sourceCache.set(file, cached);
+        }
+        return cached;
+      },
+      dependencyCache: new Map(),
+    };
+  }
+  return cachedRepoSources;
 }
 
 function connectedDiscovery(shard?: { current: number; total: number }): JSONReport {
@@ -298,7 +318,7 @@ describe("browser CI impact selection", () => {
   it("selects catalog coverage and startup, without procurement, returns or order journeys for the actual Shopify UI change", () => {
     // These decisions share one immutable repository snapshot. Reuse the
     // supported dependency cache instead of reparsing the same files per suite.
-    const evidence = { ...repositorySources(), dependencyCache: new Map(), changes: [{ status: "M", paths: ["client/src/components/catalog/ShopifyProductConnection.tsx"] }] };
+    const evidence = { ...repositorySources(), changes: [{ status: "M", paths: ["client/src/components/catalog/ShopifyProductConnection.tsx"] }] };
     for (const suite of ["procurement", "procurementConnected", "orderEdits"])
       expect(selectBrowserSuite({ suite, ...evidence }), suite).toEqual({ run: false, reason: "Only known paths outside this suite's dependency graph changed" });
     expect(selectBrowserSuite({ suite: "appBootstrap", ...evidence }).run).toBe(true);
@@ -308,7 +328,6 @@ describe("browser CI impact selection", () => {
 
   it("preserves both procurement suites for every existing procurement route entrypoint", () => {
     const sources = repositorySources();
-    const dependencyCache = new Map();
     for (const page of [
       "PurchaseOrders", "PurchaseOrderDetail", "PurchaseOrderEdit", "PurchasingDashboard", "PurchasingView", "ReorderEngine",
       "ProcurementAutomation", "ProcurementRuns", "ProcurementRfqs", "Receiving", "Suppliers", "InboundShipments",
@@ -317,7 +336,7 @@ describe("browser CI impact selection", () => {
     ]) {
       const file = `client/src/pages/${page}.tsx`;
       for (const suite of ["procurement", "procurementConnected"])
-        expect(selectBrowserSuite({ suite, ...sources, dependencyCache, changes: [{ status: "M", paths: [file] }] }), file)
+        expect(selectBrowserSuite({ suite, ...sources, changes: [{ status: "M", paths: [file] }] }), file)
           .toEqual({ run: true, reason: "Transitive suite dependency: " + file });
     }
   });

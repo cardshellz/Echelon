@@ -3,7 +3,7 @@ import { z } from "zod";
 import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
 const storage = { ...warehouseStorage, ...inventoryStorage };
-import { requirePermission, requireAuth, requireAssignedSystemRole } from "../../routes/middleware";
+import { requirePermission, requireAuth } from "../../routes/middleware";
 import { sendInventoryQuantityError } from "../inventory/interfaces/quantity-command.middleware";
 
 export function registerSettingsRoutes(app: Express) {
@@ -85,7 +85,7 @@ export function registerSettingsRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/adjustment-reasons", requireAuth, requireAssignedSystemRole("admin"), async (req, res) => {
+  app.post("/api/inventory/adjustment-reasons", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(403).json({ error: "Admin access required" });
@@ -99,7 +99,7 @@ export function registerSettingsRoutes(app: Express) {
   });
 
   // Seed default adjustment reasons
-  app.post("/api/inventory/adjustment-reasons/seed", requireAuth, requireAssignedSystemRole("admin"), async (req, res) => {
+  app.post("/api/inventory/adjustment-reasons/seed", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(403).json({ error: "Admin access required" });

@@ -22,6 +22,11 @@ describe("configured staff workflow contracts", () => {
     expect(missingCapabilityDependencies([key])).toEqual([{ capability: key,required: "shipments:view" }]);
     expect(hasStaffCapability(["shipments:view",key],key)).toBe(true);
   });
+  it.each(["picking:view_logs","picking:view_metrics","picking:manage_settings"])("denies %s without its picking:view prerequisite", key => {
+    expect(hasStaffCapability([key],key)).toBe(false);
+    expect(missingCapabilityDependencies([key])).toEqual([{ capability: key,required: "picking:view" }]);
+    expect(hasStaffCapability(["picking:view",key],key)).toBe(true);
+  });
   it("explains incomplete administration workflows without granting prerequisites", () => {
     const permissions = ["users:manage_roles"];
     expect(describeStaffWorkflows(permissions).find(item => item.id === "assign-staff-access")).toMatchObject({

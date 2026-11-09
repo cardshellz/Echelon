@@ -39,12 +39,14 @@ export async function runCycleCountFreezeGuard(dbArg: any = db): Promise<{ relea
   try {
     const stale = await dbArg.execute(sql`
       SELECT wl.id AS location_id, wl.code AS location_code,
-             wl.cycle_count_freeze_id AS cycle_count_id, cc.created_at
+             wl.cycle_count_freeze_id AS cycle_count_id, cc.created_at, cc.status
       FROM warehouse.warehouse_locations wl
       JOIN inventory.cycle_counts cc ON cc.id = wl.cycle_count_freeze_id
       WHERE wl.cycle_count_freeze_id IS NOT NULL
-        AND cc.status = 'in_progress'
-        AND cc.created_at < NOW() - make_interval(days => ${maxAgeDays})
+        AND (
+          (cc.status = 'in_progress' AND cc.created_at < NOW() - make_interval(days => ${maxAgeDays}))
+          OR cc.status IN ('completed', 'cancelled')
+        )
     `);
 
     if (stale.rows.length === 0) return { released: 0 };
@@ -62,17 +64,20 @@ export async function runCycleCountFreezeGuard(dbArg: any = db): Promise<{ relea
     }
 
     // ids are integers read back from our own DB — safe to inline.
+    // Release location freezes BEFORE marking in_progress counts completed so a
+    // partial failure between the two statements never leaves a completed count
+    // excluded from future guard passes while its bins remain frozen (COUNT-03).
     const idList = sql.raw(ids.join(","));
+    await dbArg.execute(sql`
+      UPDATE warehouse.warehouse_locations
+      SET cycle_count_freeze_id = NULL, updated_at = NOW()
+      WHERE cycle_count_freeze_id IN (${idList})
+    `);
     await dbArg.execute(sql`
       UPDATE inventory.cycle_counts
       SET status = 'completed', completed_at = NOW(), updated_at = NOW(),
           description = COALESCE(description, '') || ${" [auto-released by freeze guard: in_progress > " + maxAgeDays + "d]"}
       WHERE id IN (${idList}) AND status = 'in_progress'
-    `);
-    await dbArg.execute(sql`
-      UPDATE warehouse.warehouse_locations
-      SET cycle_count_freeze_id = NULL, updated_at = NOW()
-      WHERE cycle_count_freeze_id IN (${idList})
     `);
 
     console.warn(`${LOG_PREFIX} Released ${stale.rows.length} stale freeze(s) across ${ids.length} count(s).`);

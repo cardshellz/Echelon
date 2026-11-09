@@ -7,6 +7,9 @@ import {
   classify,
   logger,
   setLogLevel,
+  getLogLevel,
+  resolveLogLevel,
+  reportError,
 } from "../../observability";
 
 describe("log-context :: AsyncLocalStorage", () => {
@@ -100,7 +103,7 @@ describe("errors :: AppError + classify", () => {
   });
 });
 
-describe("logger :: structured output", () => {
+describe("logger :: structured output & FND-7 safety guarantees", () => {
   let stdoutSpy: ReturnType<typeof vi.spyOn>;
   let stderrSpy: ReturnType<typeof vi.spyOn>;
 
@@ -150,5 +153,122 @@ describe("logger :: structured output", () => {
     logger.warn("should.emit");
     expect(stdoutSpy).not.toHaveBeenCalled();
     expect(stderrSpy).toHaveBeenCalledOnce();
+  });
+
+  it("falls back to info instead of suppressing errors when given an invalid log level (OBS-02)", () => {
+    expect(resolveLogLevel("INVALID_LEVEL")).toBe("info");
+    expect(resolveLogLevel("  WARN  ")).toBe("warn");
+    setLogLevel("not_a_real_level");
+    expect(getLogLevel()).toBe("info");
+
+    logger.debug("should.skip.at.info");
+    logger.error("must.not.be.suppressed", { error_code: "CRITICAL_ERR" });
+    expect(stdoutSpy).not.toHaveBeenCalled();
+    expect(stderrSpy).toHaveBeenCalledOnce();
+    const line = JSON.parse(stderrSpy.mock.calls[0][0] as string);
+    expect(line.action).toBe("must.not.be.suppressed");
+  });
+
+  it("never throws on circular references, BigInt values, or sink write errors, and redacts sensitive fields (OBS-02)", () => {
+    const cyclic: Record<string, unknown> = {
+      orderId: BigInt(9001),
+      client_secret: "shpss_super_secret",
+      nested: {
+        Authorization: "Bearer secret-jwt",
+        safeField: "kept",
+      },
+    };
+    cyclic.self = cyclic;
+
+    expect(() => {
+      logger.error("oauth.callback_failed", { payload: cyclic });
+    }).not.toThrow();
+
+    expect(stderrSpy).toHaveBeenCalledOnce();
+    const line = JSON.parse(stderrSpy.mock.calls[0][0] as string);
+    expect(line.action).toBe("oauth.callback_failed");
+    expect(line.payload.orderId).toBe("9001");
+    expect(line.payload.client_secret).toBe("[REDACTED]");
+    expect(line.payload.nested.Authorization).toBe("[REDACTED]");
+    expect(line.payload.nested.safeField).toBe("kept");
+    expect(line.payload.self).toBe("[Circular]");
+
+    stderrSpy.mockImplementation(() => {
+      throw new Error("broken pipe");
+    });
+    expect(() => {
+      logger.error("sink.broken_pipe", { outcome: "failed" });
+    }).not.toThrow();
+  });
+});
+
+describe("reportError :: bounded & redacted alert delivery (OBS-06)", () => {
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+  const originalFetch = globalThis.fetch;
+
+  beforeEach(() => {
+    stderrSpy = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    setLogLevel("debug");
+    vi.stubEnv("OMS_OPS_ALERT_WEBHOOK_URL", "https://alerts.example.test/webhook");
+  });
+
+  afterEach(() => {
+    stderrSpy.mockRestore();
+    globalThis.fetch = originalFetch;
+    vi.unstubAllEnvs();
+    setLogLevel("info");
+  });
+
+  it("redacts secrets from alert payload, attaches an abort signal, and logs non-2xx alert outcomes without throwing", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 503,
+    });
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+
+    const err = new AppError({
+      code: "CHANNEL.AUTH_FAILED",
+      message: "Permanent token failure",
+      errorClass: "permanent",
+    });
+
+    await expect(
+      reportError(err, {
+        action: "channel.sync",
+        context: {
+          channelId: 36,
+          access_token: "shpat_secret_value",
+          client_secret: "shpss_secret_value",
+        },
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://alerts.example.test/webhook");
+    expect(init.signal).toBeInstanceOf(AbortSignal);
+    const parsedBody = JSON.parse(String(init.body)) as { content: string };
+    expect(parsedBody.content).toContain('"channelId": 36');
+    expect(parsedBody.content).toContain("[REDACTED]");
+    expect(parsedBody.content).not.toContain("shpat_secret_value");
+    expect(parsedBody.content).not.toContain("shpss_secret_value");
+
+    const emittedLines = stderrSpy.mock.calls.map((call: unknown[]) => JSON.parse(String(call[0])));
+    expect(emittedLines).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          level: "error",
+          action: "channel.sync",
+          access_token: "[REDACTED]",
+          client_secret: "[REDACTED]",
+        }),
+        expect.objectContaining({
+          level: "warn",
+          action: "alert.webhook_non_2xx",
+          status: 503,
+          error_code: "CHANNEL.AUTH_FAILED",
+        }),
+      ]),
+    );
   });
 });

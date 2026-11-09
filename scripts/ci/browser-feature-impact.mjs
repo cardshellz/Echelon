@@ -18,7 +18,7 @@ export function selectBrowserFeatures(suite, evidence) {
       ...BROWSER_CONFIGS[suite], roots: group.roots, appRoutes: group.appRoutes, ownedPrefixes: [], isolated: true,
       tests: new RegExp("^(?:" + group.tests.map(file => file.replace(/[.*+?^\${}()|[\]\\]/g, "\\$&")).join("|") + ")$"),
     }]));
-    const dependencyCache = new Map();
+    const dependencyCache = evidence.dependencyCache ?? new Map();
     const decisions = Object.keys(definitions).map(feature => ({ feature,
       ...selectBrowserSuite({ suite: feature, ...evidence, definitions, dependencyCache }) }));
     // Preserve the already-tested full-suite partition when every feature is

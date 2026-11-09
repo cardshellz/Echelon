@@ -49,6 +49,7 @@ import {
 import { updateProductInventoryTracking, InventoryTrackingPolicyError } from "./inventory-tracking-policy.repository";
 import { registerBulkInventoryTrackingRoutes } from "./bulk-inventory-tracking.routes";
 import { registerInventoryTrackingHistoryRoutes } from "./inventory-tracking-history.routes";
+import { ProductAssetError } from "./product-asset-errors";
 import { registerProductAssetRoutes } from "./product-asset.routes";
 import { registerCatalogPublicImageRoutes } from "./catalog-public-image.routes";
 import { readPublicCatalogImage } from "./catalog-publication-images.reader";
@@ -68,6 +69,8 @@ import { sendInventoryLegacyAdminControlError } from "../inventory-planning/inte
 import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work";
 
 type CatalogRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
+
+export const MAX_CATALOG_BATCH_SIZE = 500;
 
 function sendSelectionBusy(res: Response, error: unknown): boolean {
   const busy = publicationSelectionBusyIssue(error);
@@ -175,12 +178,10 @@ import {
 } from "../procurement";
 import {
   BinAssignmentFilterError,
-  parseBinAssignmentVariantIdsQuery,
-} from "../warehouse/bin-assignment-filter";
-import {
   BinAssignmentValidationError,
+  parseBinAssignmentVariantIdsQuery,
   parseBinAssignmentWriteRequest,
-} from "../warehouse/bin-assignment-contracts";
+} from "../warehouse/bin-assignment.api";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
 
@@ -657,6 +658,13 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (!Array.isArray(requestedProductIds) || requestedProductIds.length === 0) {
         return res.status(400).json({ error: "productIds must be a non-empty array of positive integers" });
       }
+      if (requestedProductIds.length > MAX_CATALOG_BATCH_SIZE) {
+        return res.status(400).json({
+          error: `Cannot assign more than ${MAX_CATALOG_BATCH_SIZE} products in a single request`,
+          code: "BATCH_LIMIT_EXCEEDED",
+          maxBatchSize: MAX_CATALOG_BATCH_SIZE,
+        });
+      }
       if (requestedProductIds.some((value) => !Number.isInteger(value) || Number(value) <= 0)) {
         return res.status(400).json({ error: "Every productId must be a positive integer" });
       }
@@ -977,7 +985,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
             INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
             createProduct,
           )
-        : await createProduct();
+        : await db.transaction((tx) => createProduct(tx));
       res.json(created);
     } catch (error: any) {
       if (sendSelectionBusy(res, error)) return;
@@ -1405,13 +1413,18 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
   app.delete("/api/products/:id", requirePermission("inventory", "delete"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      // First delete all variants
-      const variants = await storage.getProductVariantsByProductId(id);
-      for (const variant of variants) {
-        await storage.deleteProductVariant(variant.id);
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid product id" });
       }
-      const success = await storage.deleteProduct(id);
+      // Delete all variants and the product atomically so a mid-loop FK failure rolls back.
+      const success = await db.transaction(async (tx) => {
+        const variants = await storage.getProductVariantsByProductId(id, tx);
+        for (const variant of variants) {
+          await storage.deleteProductVariant(variant.id, tx);
+        }
+        return storage.deleteProduct(id, tx);
+      });
       if (!success) {
         return res.status(404).json({ error: "Product not found" });
       }
@@ -1527,14 +1540,24 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
   app.put("/api/product-assets/:id/primary", requirePermission("inventory", "edit"), async (req, res) => {
     try {
-      const assetId = parseInt(req.params.id);
-      const { productId } = req.body;
-      if (!productId) {
-        return res.status(400).json({ error: "productId required" });
+      const assetId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(assetId) || assetId <= 0) {
+        return res.status(400).json({ error: "Invalid asset id", code: "ASSET_PRIMARY_INVALID" });
+      }
+      const rawProductId = req.body?.productId;
+      if (rawProductId === undefined || rawProductId === null || rawProductId === "") {
+        return res.status(400).json({ error: "productId required", code: "ASSET_PRIMARY_INVALID" });
+      }
+      const productId = Number(rawProductId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "productId must be a positive integer", code: "ASSET_PRIMARY_INVALID" });
       }
       await storage.setPrimaryProductAsset(productId, assetId);
       res.json({ success: true });
     } catch (error) {
+      if (error instanceof ProductAssetError) {
+        return res.status(error.status).json({ error: error.message, code: error.code });
+      }
       console.error("Error setting primary asset:", error);
       res.status(500).json({ error: "Failed to set primary asset" });
     }
@@ -2655,52 +2678,63 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (!Array.isArray(rows)) {
         return res.status(400).json({ error: "rows array required" });
       }
-
-      // Build SKU → variant lookup
-      const allVariants = await storage.getAllProductVariants();
-      const skuMap = new Map<string, typeof allVariants[0]>();
-      for (const v of allVariants) {
-        if (v.sku) skuMap.set(v.sku.toUpperCase(), v);
+      if (rows.length > MAX_CATALOG_BATCH_SIZE) {
+        return res.status(400).json({
+          error: `Cannot update more than ${MAX_CATALOG_BATCH_SIZE} variant rows in a single request`,
+          code: "BATCH_LIMIT_EXCEEDED",
+          maxBatchSize: MAX_CATALOG_BATCH_SIZE,
+        });
       }
 
-      let updated = 0;
-      let skipped = 0;
-      const errors: string[] = [];
-
-      for (const row of rows) {
-        const sku = row.sku?.trim().toUpperCase();
-        if (!sku) { skipped++; continue; }
-
-        const variant = skuMap.get(sku);
-        if (!variant) {
-          errors.push(`SKU not found: ${row.sku}`);
-          continue;
+      const outcome = await db.transaction(async (tx) => {
+        // Build SKU → variant lookup inside the transaction
+        const allVariants = await storage.getAllProductVariants(false, tx);
+        const skuMap = new Map<string, typeof allVariants[0]>();
+        for (const v of allVariants) {
+          if (v.sku) skuMap.set(v.sku.toUpperCase(), v);
         }
 
-        const parentSku = row.parent_sku?.trim().toUpperCase();
-        if (!parentSku) {
-          // Clear parent (set to base variant)
-          await storage.updateProductVariant(variant.id, { parentVariantId: null } as any);
+        let updated = 0;
+        let skipped = 0;
+        const errors: string[] = [];
+
+        for (const row of rows) {
+          const sku = row.sku?.trim().toUpperCase();
+          if (!sku) { skipped++; continue; }
+
+          const variant = skuMap.get(sku);
+          if (!variant) {
+            errors.push(`SKU not found: ${row.sku}`);
+            continue;
+          }
+
+          const parentSku = row.parent_sku?.trim().toUpperCase();
+          if (!parentSku) {
+            // Clear parent (set to base variant)
+            await storage.updateProductVariant(variant.id, { parentVariantId: null } as any, tx);
+            updated++;
+            continue;
+          }
+
+          const parentVariant = skuMap.get(parentSku);
+          if (!parentVariant) {
+            errors.push(`Parent SKU not found: ${row.parent_sku} (for ${row.sku})`);
+            continue;
+          }
+
+          if (parentVariant.productId !== variant.productId) {
+            errors.push(`Parent ${row.parent_sku} belongs to different product than ${row.sku}`);
+            continue;
+          }
+
+          await storage.updateProductVariant(variant.id, { parentVariantId: parentVariant.id }, tx);
           updated++;
-          continue;
         }
 
-        const parentVariant = skuMap.get(parentSku);
-        if (!parentVariant) {
-          errors.push(`Parent SKU not found: ${row.parent_sku} (for ${row.sku})`);
-          continue;
-        }
+        return { updated, skipped, errors, total: rows.length };
+      });
 
-        if (parentVariant.productId !== variant.productId) {
-          errors.push(`Parent ${row.parent_sku} belongs to different product than ${row.sku}`);
-          continue;
-        }
-
-        await storage.updateProductVariant(variant.id, { parentVariantId: parentVariant.id });
-        updated++;
-      }
-
-      res.json({ updated, skipped, errors, total: rows.length });
+      res.json(outcome);
     } catch (error) {
       console.error("Error bulk updating parent variants:", error);
       res.status(500).json({ error: "Failed to bulk update parent variants" });

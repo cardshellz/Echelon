@@ -6,8 +6,10 @@ import type {
   Product102CleanupTransactionPort,
   StoredCleanupReceipt,
 } from "../application/product-102-cleanup.service";
-import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
-import { correctProduct102CountIdentity } from "../../inventory/infrastructure/product-102-count-identity.repository";
+import {
+  correctProduct102CountIdentity,
+  lockInventoryCostGraph,
+} from "../../inventory/catalog-inventory.api";
 import {
   correctProduct102PurchasingIdentity,
   recordProduct102PurchasingCleanupAudit,

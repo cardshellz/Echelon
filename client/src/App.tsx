@@ -365,7 +365,10 @@ function Router() {
   if (assignedRoles.length === 0) return <StaffAccessNotice />;
 
   const landingPath = [
-    { path: "/picking", allowed: hasPermission("picking", "view") || hasSystemRole("picker") },
+    { path: "/picking", allowed: hasPermission("picking", "view") },
+    { path: "/picking/logs", allowed: hasPermission("picking", "view_logs") },
+    { path: "/picking/metrics", allowed: hasPermission("picking", "view_metrics") },
+    { path: "/picking/settings", allowed: hasPermission("picking", "manage_settings") },
     { path: "/users", allowed: hasPermission("users", "view") },
     { path: "/roles", allowed: hasPermission("roles", "view") },
     { path: "/channels", allowed: hasPermission("channels", "view") },
@@ -378,7 +381,7 @@ function Router() {
     { path: "/dropship", allowed: hasPermission("dropship", "view") },
     { path: "/subscriptions", allowed: hasPermission("shellz", "admin") },
     { path: "/settings", allowed: hasPermission("settings", "view") },
-    { path: "/orders", allowed: hasSystemRole("admin") || hasSystemRole("lead") },
+    { path: "/orders", allowed: hasPermission("orders", "view") },
   ].find(candidate => candidate.allowed)?.path;
 
   return (
@@ -425,7 +428,7 @@ function Router() {
           <ProtectedRoute component={Transfers} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/orders">
-          <ProtectedRoute component={Orders} allowedSystemRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Orders} requiredPermission={{ resource: "orders", action: "view" }} />
         </Route>
         <Route path="/dropship">
           <ProtectedRoute component={Dropship} requiredPermission={{ resource: "dropship", action: "view" }} />
@@ -434,21 +437,31 @@ function Router() {
           <ProtectedRoute component={Subscriptions} requiredPermission={{ resource: "shellz", action: "admin" }} />
         </Route>
         <Route path="/vendors/:id">
-          <ProtectedRoute component={VendorDetail} allowedSystemRoles={["admin", "lead"]} />
+          <ProtectedRoute component={VendorDetail} requiredPermission={{ resource: "dropship", action: "view" }} />
         </Route>
         <Route path="/vendors">
-          <ProtectedRoute component={VendorList} allowedSystemRoles={["admin", "lead"]} />
+          <ProtectedRoute component={VendorList} requiredPermission={{ resource: "dropship", action: "view" }} />
         </Route>
-        <Route path="/picking" component={PickingPage} />
-        <Route path="/picking/logs" component={PickingPage} />
-        <Route path="/picking/metrics" component={PickingPage} />
-        <Route path="/picking/settings" component={PickingPage} />
+        <Route path="/picking">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "view" }} />
+        </Route>
+        <Route path="/picking/logs">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "view_logs" }} />
+        </Route>
+        <Route path="/picking/metrics">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "view_metrics" }} />
+        </Route>
+        <Route path="/picking/settings">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "manage_settings" }} />
+        </Route>
         <Route path="/pick-priority">
           <ProtectedRoute component={PickPriority} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
-        <Route path="/packing" component={Packing} />
+        <Route path="/packing">
+          <StaffAccessNotice denied />
+        </Route>
         <Route path="/order-history">
-          <ProtectedRoute component={OrderHistory} allowedSystemRoles={["admin", "lead"]} />
+          <ProtectedRoute component={OrderHistory} requiredPermission={{ resource: "orders", action: "view" }} />
         </Route>
         <Route path="/warehouse/locations">
           <ProtectedRoute component={WarehousePage} requiredPermission={{ resource: "inventory", action: "view" }} />
@@ -472,7 +485,7 @@ function Router() {
           <ProtectedRoute component={AssemblyWorkPage} requiredPermission={{ resource: "warehouse_work", action: "assembly" }} />
         </Route>
         <Route path="/integrations">
-          <ProtectedRoute component={Integrations} allowedSystemRoles={["admin"]} />
+          <ProtectedRoute component={Integrations} requiredPermission={{ resource: "settings", action: "edit" }} />
         </Route>
         <Route path="/users">
           <ProtectedRoute component={Users} requiredPermission={{ resource: "users", action: "view" }} />
@@ -484,16 +497,16 @@ function Router() {
           <ProtectedRoute component={SyncLogPage} requiredPermission={{ resource: "channels", action: "view" }} />
         </Route>
         <Route path="/oms/orders">
-          <ProtectedRoute component={OmsOrders} allowedSystemRoles={["admin", "lead"]} />
+          <ProtectedRoute component={OmsOrders} requiredPermission={{ resource: "orders", action: "view" }} />
         </Route>
         <Route path="/order-edits">
           <ProtectedRoute component={OrderEdits} requiredPermission={{ resource: "orders", action: "edit" }} />
         </Route>
         <Route path="/oms/flow-monitor">
-          <ProtectedRoute component={FlowMonitor} allowedSystemRoles={["admin", "lead"]} />
+          <ProtectedRoute component={FlowMonitor} requiredPermission={{ resource: "operations", action: "view" }} />
         </Route>
         <Route path="/channels/shopify">
-          <ProtectedRoute component={ShopifyChannelPage} allowedSystemRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ShopifyChannelPage} anyOfPermissions={[{ resource: "channels", action: "view" }, { resource: "shopify", action: "view" }]} />
         </Route>
         <Route path="/channels/ebay">
           <ProtectedRoute component={EbayChannelPage} requiredPermission={{ resource: "channels", action: "view" }} />
@@ -536,7 +549,7 @@ function Router() {
           <ProtectedRoute component={ProductDetail} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/shipping">
-          <ProtectedRoute component={Orders} allowedSystemRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Orders} requiredPermission={{ resource: "orders", action: "view" }} />
         </Route>
         <Route path="/outbound-shipments/:id/order">
           <ProtectedRoute component={ShipmentOrderContext} allOfPermissions={[{ resource: "shipments", action: "view" }, { resource: "shipments", action: "view_order_context" }]} />
@@ -602,7 +615,7 @@ function Router() {
           <ProtectedRoute component={Returns} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/returns/label-settings">
-          <ProtectedRoute component={ReturnLabelSettings} allowedSystemRoles={["admin"]} />
+          <ProtectedRoute component={ReturnLabelSettings} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
         <Route path="/returns">
           <Redirect to="/returns/cases" />
@@ -620,7 +633,7 @@ function Router() {
           <ProtectedRoute component={CostDashboard} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/inventory/history">
-          <ProtectedRoute component={InventoryHistory} allowedSystemRoles={["admin"]} />
+          <ProtectedRoute component={InventoryHistory} requiredPermission={{ resource: "inventory", action: "audit" }} />
         </Route>
         <Route path="/ap">
           <ProtectedRoute component={APDashboard} requiredPermission={PURCHASING_READ_PERMISSION} />
@@ -675,7 +688,9 @@ function Router() {
         <Route path="/settings">
           <ProtectedRoute component={Settings} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
-        <Route path="/notification-preferences" component={NotificationPreferences} />
+        <Route path="/notification-preferences">
+          <ProtectedRoute component={NotificationPreferences} requiredPermission={{ resource: "settings", action: "view" }} />
+        </Route>
         {/* Redirects for old URLs */}
         <Route path="/products"><Redirect to="/catalog" /></Route>
         <Route path="/variants"><Redirect to="/catalog/variants" /></Route>

@@ -28,13 +28,16 @@ const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
 // by a unit test).
 const SHOPIFY_PUSH_INVALID_INPUT = "shopify_push_invalid_input";
 const RETRY_SCOPE_UNIQUE_INDEX_PREFIX = "uq_webhook_retry_pending_";
-type RetryDispatchItem = {
+export const WEBHOOK_RETRY_CLAIM_LEASE_MS = 60_000;
+export const WEBHOOK_RETRY_LOOPBACK_TIMEOUT_MS = 30_000;
+export type RetryDispatchItem = {
   id: number;
   provider: string;
   topic: string;
   payload: any;
   attempts: number;
   sourceInboxId?: number | null;
+  claimLeaseUntil?: Date | string | null;
 };
 
 /**
@@ -1926,12 +1929,49 @@ export async function dispatchEbayWebhookRetry(
  * Optional `meta` lets callers shape the headline (e.g. include the
  * shipment id / topic). Per Overlord D6.
  */
+function buildClaimedRowWhere(item: {
+  id: number;
+  attempts?: number;
+  claimLeaseUntil?: Date | string | null;
+}) {
+  const predicates = [
+    eq(webhookRetryQueue.id, item.id),
+    eq(webhookRetryQueue.status, "pending"),
+  ];
+  if (typeof item.attempts === "number" && Number.isInteger(item.attempts)) {
+    predicates.push(eq(webhookRetryQueue.attempts, item.attempts));
+  }
+  if (item.claimLeaseUntil != null) {
+    const leaseDate =
+      item.claimLeaseUntil instanceof Date
+        ? item.claimLeaseUntil
+        : new Date(item.claimLeaseUntil);
+    if (!Number.isNaN(leaseDate.getTime())) {
+      predicates.push(eq(webhookRetryQueue.nextRetryAt, leaseDate));
+    }
+  }
+  return and(...predicates);
+}
+
+function wasRowUpdateApplied(result: unknown): boolean {
+  if (!result || typeof result !== "object") return true;
+  const rowCount = (result as { rowCount?: unknown }).rowCount;
+  return typeof rowCount === "number" ? rowCount > 0 : true;
+}
+
 export async function recordRetryFailure(
   dbArg: any,
-  item: { id: number; attempts: number; topic?: string; payload?: any; sourceInboxId?: number | null },
+  item: {
+    id: number;
+    attempts: number;
+    topic?: string;
+    payload?: any;
+    sourceInboxId?: number | null;
+    claimLeaseUntil?: Date | string | null;
+  },
   errMessage: string,
   meta: { topic?: string; orderId?: number; shipmentId?: number } = {},
-): Promise<{ attempts: number; status: "dead" | "pending"; nextRetryAt: Date }> {
+): Promise<{ attempts: number; status: "dead" | "pending"; nextRetryAt: Date; applied?: boolean }> {
   const attempts = item.attempts + 1;
   const status: "dead" | "pending" = attempts >= MAX_ATTEMPTS ? "dead" : "pending";
 
@@ -1939,7 +1979,7 @@ export async function recordRetryFailure(
   const delayMinutes = Math.pow(2, attempts);
   const nextRetryAt = new Date(Date.now() + delayMinutes * 60000);
 
-  await dbArg
+  const updateResult = await dbArg
     .update(webhookRetryQueue)
     .set({
       attempts,
@@ -1948,7 +1988,12 @@ export async function recordRetryFailure(
       lastError: errMessage,
       updatedAt: new Date(),
     })
-    .where(eq(webhookRetryQueue.id, item.id));
+    .where(buildClaimedRowWhere(item));
+
+  const applied = wasRowUpdateApplied(updateResult);
+  if (!applied) {
+    return { attempts, status, nextRetryAt, applied: false };
+  }
 
   if (status === "dead") {
     await mirrorRetryStatusToInbox(dbArg, item, "dead", errMessage);
@@ -1970,7 +2015,7 @@ export async function recordRetryFailure(
     );
   }
 
-  return { attempts, status, nextRetryAt };
+  return { attempts, status, nextRetryAt, applied: true };
 }
 
 /**
@@ -1980,18 +2025,19 @@ export async function recordRetryFailure(
  */
 async function markRowDead(
   dbArg: any,
-  item: { id: number; sourceInboxId?: number | null },
+  item: { id: number; attempts?: number; sourceInboxId?: number | null; claimLeaseUntil?: Date | string | null },
   reason: string,
 ): Promise<void> {
-  await dbArg
+  const updateResult = await dbArg
     .update(webhookRetryQueue)
     .set({
       status: "dead",
       lastError: reason,
       updatedAt: new Date(),
     })
-    .where(eq(webhookRetryQueue.id, item.id));
+    .where(buildClaimedRowWhere(item));
 
+  if (!wasRowUpdateApplied(updateResult)) return;
   await mirrorRetryStatusToInbox(dbArg, item, "dead", reason);
 }
 
@@ -2102,13 +2148,14 @@ async function keepPending(
  */
 async function markRowSuccess(
   dbArg: any,
-  item: { id: number; sourceInboxId?: number | null },
+  item: { id: number; attempts?: number; sourceInboxId?: number | null; claimLeaseUntil?: Date | string | null },
 ): Promise<void> {
-  await dbArg
+  const updateResult = await dbArg
     .update(webhookRetryQueue)
     .set({ status: "success", updatedAt: new Date() })
-    .where(eq(webhookRetryQueue.id, item.id));
+    .where(buildClaimedRowWhere(item));
 
+  if (!wasRowUpdateApplied(updateResult)) return;
   await mirrorRetryStatusToInbox(dbArg, item, "succeeded", null);
 }
 
@@ -2198,20 +2245,69 @@ export async function dispatchShipStationRetry(
   }
 }
 
-async function processPendingWebhooks(
-  dependencies: WebhookRetryWorkerDependencies,
-) {
-  const defaultDb = getDefaultDb();
-  const pending = await defaultDb
+export async function claimDueWebhookRetryBatch(
+  dbArg: any,
+  options: { limit?: number; now?: Date; leaseMs?: number } = {},
+): Promise<RetryDispatchItem[]> {
+  const now = options.now ?? new Date();
+  const limit = options.limit ?? 50;
+  const leaseMs = options.leaseMs ?? WEBHOOK_RETRY_CLAIM_LEASE_MS;
+  const claimLeaseUntil = new Date(now.getTime() + leaseMs);
+
+  if (typeof dbArg?.execute === "function") {
+    const result = await dbArg.execute(sql`
+      WITH due AS (
+        SELECT id
+        FROM oms.webhook_retry_queue
+        WHERE status = 'pending'
+          AND next_retry_at <= ${now.toISOString()}::timestamptz
+        ORDER BY next_retry_at ASC, id ASC
+        LIMIT ${limit}
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE oms.webhook_retry_queue AS q
+      SET next_retry_at = ${claimLeaseUntil.toISOString()}::timestamptz,
+          updated_at = NOW()
+      FROM due
+      WHERE q.id = due.id
+      RETURNING
+        q.id,
+        q.provider,
+        q.topic,
+        q.payload,
+        q.source_inbox_id AS "sourceInboxId",
+        q.attempts,
+        q.next_retry_at AS "nextRetryAt"
+    `);
+    const rows = Array.isArray(result?.rows) ? result.rows : [];
+    return rows.map((row: any) => ({
+      id: Number(row.id),
+      provider: String(row.provider),
+      topic: String(row.topic),
+      payload: row.payload,
+      attempts: Number(row.attempts ?? 0),
+      sourceInboxId: row.sourceInboxId != null ? Number(row.sourceInboxId) : null,
+      claimLeaseUntil: row.nextRetryAt ? new Date(row.nextRetryAt) : claimLeaseUntil,
+    }));
+  }
+
+  return dbArg
     .select()
     .from(webhookRetryQueue)
     .where(
       and(
         eq(webhookRetryQueue.status, "pending"),
-        lte(webhookRetryQueue.nextRetryAt, new Date())
-      )
+        lte(webhookRetryQueue.nextRetryAt, now),
+      ),
     )
-    .limit(50); // process in chunks
+    .limit(limit);
+}
+
+async function processPendingWebhooks(
+  dependencies: WebhookRetryWorkerDependencies,
+) {
+  const defaultDb = getDefaultDb();
+  const pending = await claimDueWebhookRetryBatch(defaultDb, { limit: 50 });
 
   if (pending.length === 0) return;
 
@@ -2408,6 +2504,7 @@ async function processPendingWebhooks(
             ...sourceHeaders,
           },
           body: JSON.stringify(item.payload),
+          signal: AbortSignal.timeout(WEBHOOK_RETRY_LOOPBACK_TIMEOUT_MS),
         });
 
         if (res.ok) {
@@ -2417,11 +2514,12 @@ async function processPendingWebhooks(
           throw new Error(`Local API returned ${res.status}`);
         }
       } catch (itemErr: any) {
-        const { status, attempts, nextRetryAt } = await recordRetryFailure(
+        const { status, attempts, nextRetryAt, applied } = await recordRetryFailure(
           defaultDb,
           item as any,
           itemErr?.message || String(itemErr),
         );
+        if (applied === false) continue;
 
         if (status === "dead") {
           // Shopify-specific dead-letter format for Discord alerter
@@ -2460,6 +2558,7 @@ async function processPendingWebhooks(
           "x-shopify-shop-domain": payloadDomain,
         },
         body: JSON.stringify(item.payload),
+        signal: AbortSignal.timeout(WEBHOOK_RETRY_LOOPBACK_TIMEOUT_MS),
       });
 
       if (res.ok) {
@@ -2471,11 +2570,12 @@ async function processPendingWebhooks(
         throw new Error(`Local API returned ${res.status}`);
       }
     } catch (itemErr: any) {
-      const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      const { status, attempts, nextRetryAt, applied } = await recordRetryFailure(
         defaultDb,
         item as any,
         itemErr?.message || String(itemErr)
       );
+      if (applied === false) continue;
 
       if (status === "dead") {
         console.error(`${LOG_PREFIX} Item ${item.id} moved to DLQ (dead letter) after ${attempts} attempts`);

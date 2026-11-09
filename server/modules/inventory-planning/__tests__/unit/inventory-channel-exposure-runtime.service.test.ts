@@ -562,6 +562,36 @@ describe("InventoryChannelExposureRuntimeService", () => {
     expect(plan.targets[0]!.rows.map((row) => [row.publishedUnits, row.hold])).toEqual([["0", targetHold], ["0", targetHold]]);
   });
 
+  it("publishes zero for a SKU its sales status stops, keeping canonical ATP and the stop as the reason", async () => {
+    const stop = { reason: "Sales status: stopped on all channels (SKU setting)", heldAt: "2026-11-07T15:00:00.000Z", heldBy: "admin" };
+    const stopped = target({ publicationTargetId: 91 });
+    stopped.salesStatusHolds = [{ productVariantId: 102, hold: stop }];
+    const service = new InventoryChannelExposureRuntimeService(executor(canonicalContext([stopped, target({ publicationTargetId: 92, channelId: 8 })])));
+
+    const plan = await service.planProduct(10);
+
+    // Stopped keeps the listing and its ATP lineage: only the stages after canonical ATP are zero.
+    expect(plan.targets[0]).toMatchObject({ publicationTargetId: 91, hold: null, publishable: true });
+    expect(plan.targets[0]!.rows.map((row) => [row.productVariantId, row.canonicalAtpUnits, row.sharedUnits, row.publishedUnits, row.hold]))
+      .toEqual([[101, "25", "25", "25", null], [102, "7", "0", "0", stop]]);
+    expect(plan.targets[0]!.rows.every((row) => row.mapping !== null && row.blockers.length === 0)).toBe(true);
+    // Another channel's destination is not stopped by this one's resolved stops.
+    expect(plan.targets[1]!.rows.map((row) => row.publishedUnits)).toEqual(["25", "7"]);
+  });
+
+  it("reports an automation hold ahead of a sales status stop; either one zeroes the SKU", async () => {
+    const tierHold = { reason: "Dropship vendor 10: case tier below minimum", heldAt: "2026-09-17T13:00:00.000Z", heldBy: "dropship-listing-tiers" };
+    const stop = { reason: "Sales status: stopped on all channels (product setting)", heldAt: "2026-11-07T15:00:00.000Z", heldBy: "admin" };
+    const both = target({ publicationTargetId: 91, variantHolds: [{ productVariantId: 102, hold: tierHold }] });
+    both.salesStatusHolds = [{ productVariantId: 101, hold: stop }, { productVariantId: 102, hold: stop }];
+    const service = new InventoryChannelExposureRuntimeService(executor(canonicalContext([both])));
+
+    const plan = await service.planProduct(10);
+
+    expect(plan.targets[0]!.rows.map((row) => [row.productVariantId, row.canonicalAtpUnits, row.publishedUnits, row.hold]))
+      .toEqual([[101, "25", "0", stop], [102, "7", "0", tierHold]]);
+  });
+
   it("plans a Dropship storefront with the same exact-target ATP and channel dial", async () => {
     const dropship = target();
     dropship.destinationKind = "dropship_store_connection";

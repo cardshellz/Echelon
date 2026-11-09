@@ -232,6 +232,7 @@ function AuthorizedChannelInventoryPage() {
                     view={view}
                     channel={channel}
                     canEdit={canEdit}
+                    canActivate={canActivate}
                     focusProductId={selection.productId}
                     onFocusProduct={focusProduct}
                     onReload={reload}

@@ -85,6 +85,7 @@ interface InventoryCore {
     purchaseOrderLineId?: number;
     inboundShipmentId?: number;
     costProvisional?: number;
+    deferUntilCommit?: (effect: () => Promise<void>) => void;
   }, tx?: any): Promise<void>;
   adjustInventory(params: {
     productVariantId: number;
@@ -100,27 +101,7 @@ interface ChannelSync {
   queueSyncAfterInventoryChange(variantId: number): Promise<void>;
 }
 
-interface Purchasing extends ReceivingOrchestrationPurchasing {
-  // Typed-lines allocator (Option C, 2026-04-28). Returns per-product-line
-  // landed unit cost after spreading non-product line totals
-  // (discount / fee / tax / rebate / adjustment) across the product lines.
-  // Used at receive time so inventory lots are stamped with the true
-  // cost-per-unit, not the raw line cost. Returns null if the PO has no
-  // typed-line allocation to apply (no non-product lines, or no products).
-  getAllocatedLineCostsForPo?(poId: number): Promise<{
-    perLine: Array<{
-      purchaseOrderLineId: number;
-      lineTotalCents: number;
-      allocatedCents: number;
-      landedLineTotalCents: number;
-      landedUnitCostMills: number;
-      landedUnitCostCents: number;
-    }>;
-    pooledCents: number;
-    productSubtotalCents: number;
-    unallocatedCents: number;
-  }>;
-}
+interface Purchasing extends ReceivingOrchestrationPurchasing {}
 
 interface ShipmentTracking {
   getLandedCostForPoLine(purchaseOrderLineId: number): Promise<number | null>;
@@ -1554,6 +1535,7 @@ export class ReceivingService {
     let linesReceived = 0;
     const receivedVariantIds = new Set<number>();
     const putawayLocationIds = new Set<number>();
+    const postCommitInventoryEffects: Array<() => Promise<void>> = [];
     const receivedPurchaseOrderLineIds = new Set<number>();
 
     const closeResult = await this.db.transaction(async (tx) => {
@@ -1717,6 +1699,7 @@ export class ReceivingService {
           purchaseOrderLineId: line.purchaseOrderLineId || undefined,
           inboundShipmentId,
           costProvisional,
+          deferUntilCommit: (effect) => postCommitInventoryEffects.push(effect),
         }, tx);
         if (line.purchaseOrderLineId) {
           receivedPurchaseOrderLineIds.add(Number(line.purchaseOrderLineId));
@@ -1789,6 +1772,10 @@ export class ReceivingService {
     });
 
     const updated = closeResult.updated;
+
+    for (const effect of postCommitInventoryEffects) {
+      await effect();
+    }
 
     // Queue channel publication only after the inventory/receiving transaction
     // commits. The durable inventory ledger remains authoritative if a channel

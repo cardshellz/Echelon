@@ -56,7 +56,6 @@ jobs:
 
   app-bootstrap:
     name: Application import and startup smoke
-    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 5
     container:
@@ -82,7 +81,6 @@ jobs:
 
   typecheck:
     name: Typecheck (${{ matrix.project }})
-    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -127,7 +125,6 @@ jobs:
 
   unit-tests:
     name: Unit tests (${{ matrix.shard }}/4)
-    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -154,7 +151,6 @@ jobs:
 
   contracts:
     name: Offline maintenance and UI contracts
-    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -168,7 +164,7 @@ jobs:
         run: |
           node --import tsx --test scripts/inventory-cutover-records-proposal-20260925.test.ts scripts/inventory-cutover-records-execution-20260925.test.ts
           npx tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --esModuleInterop --skipLibCheck --strict --types node scripts/inventory-cutover-records-*.ts
-      - name: Procurement planning client contracts
+      - name: Procurement, inventory, channel, and finance UI contracts
         run: >-
           npx vitest run
           client/src/features/purchasing/__tests__/reorderEngine.test.ts
@@ -179,32 +175,34 @@ jobs:
           shared/procurement/__tests__/document-relationships.test.ts
           shared/inventory/__tests__/cost-report-read.test.ts
           shared/inventory/__tests__/order-cogs-report.test.ts
-      - name: Customer order lifecycle and saved cancellation contracts
-        run: >-
-          npx vitest run
           shared/__tests__/customer-order-fulfillment.test.ts
           client/src/customer-account/__tests__/order-cancellation-request.test.ts
-      - name: Inventory shipment quantity UI contracts
-        run: >-
-          npx vitest run
           client/src/lib/__tests__/inventory-transaction-quantity.test.ts
           client/src/pages/__tests__/inventory-history-shipment-quantity.test.ts
-      - name: Channel listing publication UI contracts
-        run: >-
-          npx vitest run
           client/src/features/channel-listing-publication/__tests__/api.test.ts
           client/src/features/channel-listing-publication/__tests__/model.test.ts
           client/src/features/channel-listing-publication/__tests__/listing-update-model.test.ts
           client/src/features/channel-listing-publication/__tests__/listing-intent-change-presentation.test.ts
-      # PLAN-CH2 v4.1 §11.5: Channel Inventory stock-link controls. These paths have no "unit" in them,
-      # so test:unit never selects them.
-      - name: Channel Inventory stock-link UI contracts
-        run: >-
-          npx vitest run
           client/src/features/channel-inventory/__tests__/stock-link-presentation.test.ts
           client/src/features/channel-inventory/__tests__/stock-link-api.test.ts
           client/src/features/channel-inventory/__tests__/stock-link-controls.test.ts
           client/src/features/channel-inventory/__tests__/stock-send-api.test.ts
+          shared/dropship/__tests__/program-finance-money.test.ts
+          shared/dropship/__tests__/program-finance-contract.test.ts
+          shared/dropship/__tests__/program-finance-definitions.test.ts
+          client/src/pages/__tests__/dropship-finance-model.test.ts
+          client/src/pages/__tests__/dropship-finance-panel.test.ts
+          server/infrastructure/__tests__/non-overlapping-scheduler.test.ts
+          server/infrastructure/__tests__/postgres-array.test.ts
+          server/infrastructure/__tests__/postgres-pool-observability.test.ts
+          server/infrastructure/__tests__/scheduler-config.test.ts
+          server/infrastructure/__tests__/scheduler-failure-context.test.ts
+          server/infrastructure/__tests__/scheduler-lock.test.ts
+          server/infrastructure/__tests__/session-advisory-lock.test.ts
+          server/platform/observability/__tests__/background-work-report.test.ts
+          server/platform/observability/__tests__/runtime-memory-observer.test.ts
+          server/platform/observability/__tests__/runtime-memory-wiring.test.ts
+          server/platform/observability/__tests__/runtime-memory.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run
@@ -287,15 +285,6 @@ jobs:
       # review round 2 CT11).
       - name: Dropship catalog browser stub types
         run: npx tsc --noEmit --incremental false --target ES2022 --module ESNext --moduleResolution Bundler --esModuleInterop --skipLibCheck --strict --types node --allowImportingTsExtensions --jsx preserve --lib esnext,dom test/browser/dropship-policy-catalog-stubs.ts test/browser/dropship-policy-listing-settings-*.ts test/browser/dropship-policy-catalog-steps.spec.ts test/browser/dropship-policy-catalog-choose.spec.ts test/browser/dropship-policy-catalog-choose-scale.spec.ts test/browser/dropship-policy-catalog-end.spec.ts test/browser/dropship-policy-catalog-publish-runs.spec.ts test/browser/dropship-policy-listing-access.spec.ts test/browser/dropship-policy-cost-changes-portal.spec.ts
-      # These paths have no "unit" in them, so test:unit never selects them.
-      - name: Dropship program finance contracts
-        run: >-
-          npx vitest run
-          shared/dropship/__tests__/program-finance-money.test.ts
-          shared/dropship/__tests__/program-finance-contract.test.ts
-          shared/dropship/__tests__/program-finance-definitions.test.ts
-          client/src/pages/__tests__/dropship-finance-model.test.ts
-          client/src/pages/__tests__/dropship-finance-panel.test.ts
 
   check-and-unit:
     # Preserve the existing required check name; skipped/cancelled jobs are failures.

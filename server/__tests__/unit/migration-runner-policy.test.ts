@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const doubles = vi.hoisted(() => ({
-  query: vi.fn<(sql: string, values?: unknown[]) => Promise<{ rows: Array<{ filename: string; content_hash: string }> }>>(),
+  query: vi.fn<(sql: string, values?: unknown[]) => Promise<{ rows: Array<{ filename: string; content_hash: string | null }> }>>(),
   releaseClient: vi.fn(),
   connect: vi.fn(),
   end: vi.fn<() => Promise<void>>(),
@@ -46,6 +46,7 @@ describe("release migration runner policy boundary", () => {
     vi.resetModules();
     vi.resetAllMocks();
     vi.stubEnv("DATABASE_URL", "postgresql://unused:unused@127.0.0.1:1/migration_runner_test");
+    vi.stubEnv("EXTERNAL_DATABASE_URL", "");
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -121,6 +122,115 @@ describe("release migration runner policy boundary", () => {
     expect(doubles.query.mock.calls.some(([sql]) => /^(?:INSERT|UPDATE|DELETE)\b/.test(sql.trim()))).toBe(false);
     expect(process.exit).not.toHaveBeenCalled();
     expectCleanup();
+  });
+
+  it("backfills content_hash when an already-applied migration has a null historical hash", async () => {
+    doubles.validateMigrationDirectory.mockReturnValue([firstFile, secondFile]);
+    doubles.query.mockImplementation(async (sql) => ({
+      rows: sql === "SELECT filename, content_hash FROM _migrations"
+        ? [{ filename: firstFile, content_hash: null }]
+        : [],
+    }));
+
+    await import("../../../migrations/run-migrations");
+    await vi.waitFor(() => expect(doubles.end).toHaveBeenCalledOnce());
+
+    expect(doubles.query).toHaveBeenCalledWith(
+      "UPDATE _migrations SET content_hash = $1 WHERE filename = $2 AND (content_hash IS NULL OR content_hash = '')",
+      [sqlHash(firstSql), firstFile],
+    );
+    expect(doubles.execute).toHaveBeenCalledOnce();
+    expect(doubles.execute).toHaveBeenCalledWith(expect.objectContaining({
+      file: secondFile,
+      sql: secondSql,
+      contentHash: sqlHash(secondSql),
+    }));
+    expect(process.exit).not.toHaveBeenCalled();
+    expectCleanup();
+  });
+
+  it("fails the release without overwriting _migrations when an already-applied migration has a conflicting non-null hash (FC-MIG-02)", async () => {
+    const conflictingHash = sqlHash("CREATE TABLE tampered_migration (id integer);\n");
+    doubles.validateMigrationDirectory.mockReturnValue([firstFile, secondFile]);
+    doubles.query.mockImplementation(async (sql) => ({
+      rows: sql === "SELECT filename, content_hash FROM _migrations"
+        ? [{ filename: firstFile, content_hash: conflictingHash }]
+        : [],
+    }));
+
+    await import("../../../migrations/run-migrations");
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
+
+    expect(doubles.execute).not.toHaveBeenCalled();
+    expect(doubles.query.mock.calls.some(([sql]) => /^(?:INSERT|UPDATE|DELETE)\b/.test(sql.trim()))).toBe(false);
+    expect(console.error).toHaveBeenCalledWith(
+      "Migration error:",
+      expect.objectContaining({
+        message: expect.stringContaining(
+          `Refusing to overwrite conflicting migration hash for already-applied migration ${firstFile}`,
+        ),
+      }),
+    );
+    expectCleanup();
+  });
+
+  it("fails the release without overwriting _migrations when a renamed legacy migration has a conflicting non-null hash (FC-MIG-02)", async () => {
+    const renamedFile = "0121_replen_task_method_and_autoreplen.sql";
+    const legacyFile = "012_replen_task_method_and_autoreplen.sql";
+    const conflictingHash = sqlHash("ALTER TABLE legacy_tampered ADD COLUMN x integer;\n");
+    doubles.validateMigrationDirectory.mockReturnValue([renamedFile]);
+    doubles.readFileSync.mockImplementation((path) => {
+      if (basename(path) === renamedFile) return firstSql;
+      throw new Error(`Unexpected migration read: ${path}`);
+    });
+    doubles.query.mockImplementation(async (sql) => ({
+      rows: sql === "SELECT filename, content_hash FROM _migrations"
+        ? [{ filename: legacyFile, content_hash: conflictingHash }]
+        : [],
+    }));
+
+    await import("../../../migrations/run-migrations");
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
+
+    expect(doubles.execute).not.toHaveBeenCalled();
+    expect(doubles.query.mock.calls.some(([sql]) => /^(?:INSERT|UPDATE|DELETE)\b/.test(sql.trim()))).toBe(false);
+    expect(console.error).toHaveBeenCalledWith(
+      "Migration error:",
+      expect.objectContaining({
+        message: expect.stringContaining(
+          `Refusing to overwrite conflicting migration hash for renamed migration ${legacyFile} -> ${renamedFile}`,
+        ),
+      }),
+    );
+    expectCleanup();
+  });
+
+  it("refuses to run when EXTERNAL_DATABASE_URL and DATABASE_URL target different databases without leaking credentials (FC-MIG-03)", async () => {
+    vi.stubEnv("EXTERNAL_DATABASE_URL", "postgresql://ext_user:super_secret_ext_pw@db-primary.internal:5432/echelon_prod");
+    vi.stubEnv("DATABASE_URL", "postgresql://rel_user:super_secret_rel_pw@db-staging.internal:5432/echelon_staging");
+
+    await import("../../../migrations/run-migrations");
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
+
+    expect(doubles.connect).not.toHaveBeenCalled();
+    expect(doubles.query).not.toHaveBeenCalled();
+    expect(doubles.execute).not.toHaveBeenCalled();
+    const loggedErrors = vi.mocked(console.error).mock.calls.flat().map(String).join(" ");
+    expect(loggedErrors).toContain("target different databases");
+    expect(loggedErrors).toContain("db-primary.internal:5432/echelon_prod");
+    expect(loggedErrors).toContain("db-staging.internal:5432/echelon_staging");
+    expect(loggedErrors).not.toContain("super_secret_ext_pw");
+    expect(loggedErrors).not.toContain("super_secret_rel_pw");
+  });
+
+  it("destroys the pooled client connection if releasing the migration advisory lock fails", async () => {
+    const unlockFailure = new Error("session advisory unlock failed");
+    doubles.releaseLock.mockRejectedValueOnce(unlockFailure);
+
+    await import("../../../migrations/run-migrations");
+    await vi.waitFor(() => expect(doubles.end).toHaveBeenCalledOnce());
+
+    expect(doubles.releaseClient).toHaveBeenCalledWith(unlockFailure);
   });
 
   it("fails the release and stops before later migrations when execution rejects", async () => {

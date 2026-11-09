@@ -10,11 +10,13 @@ const mocks = vi.hoisted(() => ({
     getAllReceivingOrders: vi.fn(),
     getReceivingOrdersByStatus: vi.fn(),
     getAllVendors: vi.fn(),
+    getVendorsByIds: undefined as any,
   },
   notifications: {
     notify: vi.fn(),
   },
   entry: { create: vi.fn(), execute: vi.fn() },
+  requireAnyPermission: vi.fn(),
 }));
 
 vi.mock("../../../../routes/middleware", () => {
@@ -24,6 +26,10 @@ vi.mock("../../../../routes/middleware", () => {
   };
   return {
     requirePermission: () => pass,
+    requireAnyPermission: (...grants: unknown[]) => {
+      mocks.requireAnyPermission(...grants);
+      return pass;
+    },
     requireAuth: pass,
   };
 });
@@ -44,7 +50,7 @@ vi.mock("../../receiving-entry.commands", async original => ({
   createReceivingEntryCommands: mocks.entry.create,
 }));
 
-import { registerReceivingRoutes } from "../../receiving.routes";
+import { registerReceivingRoutes, RECEIVING_READ_GRANTS, MAX_RECEIVING_LIST_LIMIT } from "../../receiving.routes";
 import { hashReceivingEntryCommandIdentity, receivingEntryCommandScope, RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../receiving-entry.commands";
 
 function buildApp(services: Record<string, any> = {}): Express {
@@ -82,6 +88,7 @@ describe("receiving routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.storage.getVendorsByIds = undefined;
     mocks.notifications.notify.mockResolvedValue(undefined);
     mocks.entry.create.mockImplementation(() => ({ execute: mocks.entry.execute }));
     mocks.entry.execute.mockResolvedValue({ replayed: false, terminalState: "succeeded", httpStatus: 201, body: { id: 20 } });
@@ -101,6 +108,7 @@ describe("receiving routes", () => {
     const { status, body } = await requestJson(server.url, "GET", "/api/receiving?status=open");
 
     expect(status).toBe(200);
+    expect(mocks.requireAnyPermission).toHaveBeenCalledWith(...RECEIVING_READ_GRANTS);
     expect(mocks.storage.getReceivingOrdersByStatus).toHaveBeenCalledWith("open");
     expect(body).toEqual([
       {
@@ -108,6 +116,30 @@ describe("receiving routes", () => {
         receiptNumber: "RCV-10",
         vendorId: 3,
         vendor: { id: 3, name: "Acme Supplies" },
+      },
+    ]);
+  });
+
+  it("bounds pagination parameters on GET /api/receiving", async () => {
+    mocks.storage.getAllReceivingOrders.mockResolvedValue([
+      { id: 11, receiptNumber: "RCV-11", vendorId: null },
+    ]);
+    mocks.storage.getAllVendors.mockResolvedValue([]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/receiving?limit=9999&offset=10");
+
+    expect(status).toBe(200);
+    expect(mocks.storage.getAllReceivingOrders).toHaveBeenCalledWith({
+      limit: MAX_RECEIVING_LIST_LIMIT,
+      offset: 10,
+    });
+    expect(body).toEqual([
+      {
+        id: 11,
+        receiptNumber: "RCV-11",
+        vendorId: null,
+        vendor: null,
       },
     ]);
   });

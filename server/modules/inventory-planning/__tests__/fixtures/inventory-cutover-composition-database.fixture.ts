@@ -12,6 +12,7 @@ import { projectCutoverSourceActivation } from "../../domain/inventory-cutover-p
 import { readWarehouseSourceActivationEvidence } from "../../../warehouse/infrastructure/warehouse-source-activation.repository";
 import { cutoverShipmentSchemaFixtureSql } from "./inventory-cutover-shipment-schema.fixture";
 import { cutoverReceiptSchemaFixtureSql } from "./inventory-cutover-receipt-schema.fixture";
+import { SALES_STATUS_MIGRATION } from "./sales-status-migration.fixture";
 
 /** Existing base-owner columns plus the real ATP migrations. No ATP/fence function is substituted. */
 export const cutoverCompositionBaseSql = `
@@ -94,6 +95,8 @@ export async function installCutoverCompositionMigrations(pool: Pool): Promise<v
     "0708_inventory_publication_membership.sql",
     "0718_inventory_model_behavior.sql",
     "900000009000018120002_inventory_publication_quantity_consistency.sql",
+    // The target loader reads sales statuses for every planned product.
+    SALES_STATUS_MIGRATION,
   ]) await pool.query(readFileSync(resolve(process.cwd(), "migrations", file), "utf8"));
 }
 

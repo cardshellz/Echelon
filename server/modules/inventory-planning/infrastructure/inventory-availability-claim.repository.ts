@@ -18,7 +18,7 @@ import { lockClaimPickCorrection } from "../../wms/pick-correction.repository";
 import { costEvidenceTransactionFromPg } from "../../inventory/infrastructure/cost-evidence-pg";
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
-import type { AssemblyWorkOwner } from "../../warehouse/work/application/assembly-work-owner";
+import type { AssemblyWorkOwner } from "../../warehouse/cutover-work.api";
 import { requireAssemblyOrderAuthority } from "../../orders/assembly-handoff-authority";
 
 import { pool } from "../../../db";

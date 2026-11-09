@@ -127,6 +127,9 @@ export interface ListingPushOutcome {
 }
 
 const LIVE_ITEM_STATUSES = new Set(["completed"]);
+/** The server's code for a live listing's push skipped because stock ran out after it was queued (push worker). */
+export const PUSH_SKIPPED_OUT_OF_STOCK_CODE = "DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK";
+export const VENDOR_LIVE_OUT_OF_STOCK_LINE = "Out of stock right now. Your listing stays up at quantity 0 and updates by itself when stock comes back.";
 const FAILED_ITEM_STATUSES = new Set(["failed", "blocked", "cancelled"]);
 
 /** The store's name as the vendor sees it: eBay is a public marketplace, the rest are "your store". */
@@ -153,6 +156,14 @@ export function describeListingPushOutcome(job: DropshipListingPushJob, storeNam
     if (LIVE_ITEM_STATUSES.has(item.status)) {
       return {
         ...base, state: "live", line: sandbox ? `Live on ${store} (eBay sandbox).` : `Live on ${store}.`, nextStep: null,
+        listingUrl: item.listingUrl, listingUrlLabel: item.listingUrl ? linkLabel : null,
+      };
+    }
+    if (item.status === "cancelled" && item.errorCode === PUSH_SKIPPED_OUT_OF_STOCK_CODE) {
+      // Stock ran out after it was queued: the listing stays up and Card Shellz keeps its quantity at 0 until stock is
+      // back (server push worker settleOutOfStock). It is still live, so it is not counted as a failure.
+      return {
+        ...base, state: "live", line: VENDOR_LIVE_OUT_OF_STOCK_LINE, nextStep: null,
         listingUrl: item.listingUrl, listingUrlLabel: item.listingUrl ? linkLabel : null,
       };
     }

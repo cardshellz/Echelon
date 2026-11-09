@@ -173,13 +173,17 @@ interface Storage {
   getProvisionalLotsByShipment(inboundShipmentId: number, executor?: any): Promise<InventoryLot[]>;
   // PO references
   getPurchaseOrderById(id: number, executor?: any): Promise<any>;
+  getPurchaseOrdersByIds?(ids: number[], executor?: any): Promise<any[]>;
   getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<any[]>;
   getPurchaseOrderLineById(id: number, executor?: any): Promise<any>;
+  getPurchaseOrderLinesByIds?(ids: number[], executor?: any): Promise<any[]>;
   // Vendor product dimensions
   getVendorProducts(filters?: any, executor?: any): Promise<any[]>;
   // Product variant + product lookups
   getProductVariantById(id: number, executor?: any): Promise<any>;
+  getProductVariantsByIds?(ids: number[], executor?: any): Promise<any[]>;
   getProductById(id: number): Promise<any>;
+  getProductsByIds?(ids: number[], executor?: any): Promise<any[]>;
 }
 
 interface LotCostRevalueService {
@@ -549,31 +553,69 @@ export function createShipmentTrackingService(
     const poLineMap = new Map<number, any>();
     const purchaseOrderMap = new Map<number, { currency: string | null }>();
 
-    // Fetch variants
-    await Promise.all(variantIds.map(async (id) => {
-      const pv = await storage.getProductVariantById(id);
-      if (pv) variantMap.set(id, pv);
-    }));
+    // Batch-fetch variants
+    if (variantIds.length > 0) {
+      if (typeof storage.getProductVariantsByIds === "function") {
+        const variants = await storage.getProductVariantsByIds(variantIds);
+        for (const pv of variants) {
+          if (pv) variantMap.set(pv.id, pv);
+        }
+      } else {
+        await Promise.all(variantIds.map(async (id) => {
+          const pv = await storage.getProductVariantById(id);
+          if (pv) variantMap.set(id, pv);
+        }));
+      }
+    }
 
-    // Fetch products (for real product title) via variant.productId
+    // Batch-fetch products (for real product title) via variant.productId
     const productIds = Array.from(new Set(
       Array.from(variantMap.values()).map((pv: any) => pv.productId).filter(Boolean)
     )) as number[];
-    await Promise.all(productIds.map(async (id) => {
-      const product = await storage.getProductById(id);
-      if (product) productMap.set(id, product);
-    }));
+    if (productIds.length > 0) {
+      if (typeof storage.getProductsByIds === "function") {
+        const productsList = await storage.getProductsByIds(productIds);
+        for (const product of productsList) {
+          if (product) productMap.set(product.id, product);
+        }
+      } else {
+        await Promise.all(productIds.map(async (id) => {
+          const product = await storage.getProductById(id);
+          if (product) productMap.set(id, product);
+        }));
+      }
+    }
 
-    // Fetch PO lines
-    await Promise.all(poLineIds.map(async (id) => {
-      const pol = await storage.getPurchaseOrderLineById(id);
-      if (pol) poLineMap.set(id, pol);
-    }));
+    // Batch-fetch PO lines
+    if (poLineIds.length > 0) {
+      if (typeof storage.getPurchaseOrderLinesByIds === "function") {
+        const poLines = await storage.getPurchaseOrderLinesByIds(poLineIds);
+        for (const pol of poLines) {
+          if (pol) poLineMap.set(pol.id, pol);
+        }
+      } else {
+        await Promise.all(poLineIds.map(async (id) => {
+          const pol = await storage.getPurchaseOrderLineById(id);
+          if (pol) poLineMap.set(id, pol);
+        }));
+      }
+    }
+
+    // Batch-fetch PO headers
     const purchaseOrderIds = [...new Set(lines.flatMap((line) => line.purchaseOrderId == null ? [] : [line.purchaseOrderId]))];
-    await Promise.all(purchaseOrderIds.map(async (id) => {
-      const purchaseOrder = await storage.getPurchaseOrderById(id);
-      if (purchaseOrder) purchaseOrderMap.set(id, purchaseOrder);
-    }));
+    if (purchaseOrderIds.length > 0) {
+      if (typeof storage.getPurchaseOrdersByIds === "function") {
+        const purchaseOrdersList = await storage.getPurchaseOrdersByIds(purchaseOrderIds);
+        for (const purchaseOrder of purchaseOrdersList) {
+          if (purchaseOrder) purchaseOrderMap.set(purchaseOrder.id, purchaseOrder);
+        }
+      } else {
+        await Promise.all(purchaseOrderIds.map(async (id) => {
+          const purchaseOrder = await storage.getPurchaseOrderById(id);
+          if (purchaseOrder) purchaseOrderMap.set(id, purchaseOrder);
+        }));
+      }
+    }
 
     const shipmentUnitOptions = await readShipmentUnitOptions(db, lines.map((line) => ({ key: line.id,
       ...shipmentReceivingUnitSource(line, line.purchaseOrderLineId ? poLineMap.get(line.purchaseOrderLineId) : undefined),

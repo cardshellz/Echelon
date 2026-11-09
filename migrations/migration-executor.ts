@@ -92,10 +92,17 @@ export async function acquireMigrationAdvisoryLock(
 export async function releaseMigrationAdvisoryLock(
   client: MigrationQueryClient,
 ): Promise<void> {
-  await client.query(
+  const result = await client.query(
     "SELECT pg_advisory_unlock(hashtext($1))",
     [MIGRATION_ADVISORY_LOCK_NAME],
-  );
+  ) as { rows?: Array<{ pg_advisory_unlock?: boolean; unlocked?: boolean }> } | undefined;
+  const row = result?.rows?.[0];
+  const unlocked = row?.pg_advisory_unlock ?? row?.unlocked;
+  if (unlocked === false) {
+    throw new Error(
+      `PostgreSQL reported pg_advisory_unlock=false for migration advisory lock ${MIGRATION_ADVISORY_LOCK_NAME}.`,
+    );
+  }
 }
 
 export async function executeMigrationWithRetry(

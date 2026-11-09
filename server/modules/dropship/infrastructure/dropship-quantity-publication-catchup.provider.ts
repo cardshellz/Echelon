@@ -5,12 +5,15 @@ import { quantityPublicationScopeSchema, QuantityPublicationAdmissionError, type
 import type { DropshipListingPreviewService } from "../application/dropship-listing-preview-service";
 import type { DropshipListingPushWorkerService } from "../application/dropship-listing-push-worker-service";
 import type { DropshipListingPushOpsService } from "../application/dropship-listing-push-ops-service";
+import type { DropshipListingPreviewResult } from "../application/dropship-listing-preview-service";
+import type { DropshipLiveListingZeroQuantityService } from "../application/dropship-live-listing-zero-quantity-service";
 
 const actor = { actorType: "system" as const, actorId: "inventory_publication_catchup" };
 const bigintId = z.string().regex(/^[1-9][0-9]{0,18}$/).refine(value => BigInt(value) <= BigInt("9223372036854775807"));
 const claimIdentitySchema = z.object({ catchupId: bigintId, revision: bigintId });
 interface ListingIdentity {
   listing_id: number; vendor_id: number; product_variant_id: number; product_id: number; sku: string; status: string;
+  external_listing_id: string | null; external_offer_id: string | null;
   /** PR C (PLAN-C v4.1 §6.4): Card Shellz is ending this listing on eBay (an open end request). */
   end_open: boolean;
 }
@@ -22,9 +25,18 @@ export interface DropshipQuantityPublicationCatchupDependencies {
   /** The production worker refreshes the intent from CURRENT preview before every provider call. */
   worker: Pick<DropshipListingPushWorkerService, "processJob">;
   operations: Pick<DropshipListingPushOpsService, "retryJob">;
+  /**
+   * A live listing whose current preview is blocked ONLY for want of stock gets
+   * 0 on eBay instead of a refused catch-up (domain/live-listing-zero-quantity).
+   * Absent: such a catch-up is refused as before.
+   */
+  zeroQuantity?: Pick<DropshipLiveListingZeroQuantityService, "publishZeroIfLive">;
 }
 
-/** Reuses listing owners; it never writes a quantity, listing or job table directly. */
+/**
+ * Reuses listing owners; it never writes a quantity, listing or job table directly.
+ * A live listing at 0 goes through the zero-quantity owner (dropship-live-listing-zero-quantity-service).
+ */
 export class DropshipQuantityPublicationCatchupProvider {
   constructor(private readonly dependencies: DropshipQuantityPublicationCatchupDependencies) {}
 
@@ -67,17 +79,10 @@ export class DropshipQuantityPublicationCatchupProvider {
       jobId = job.id;
       status = job.status;
     } else {
-      const preview = await this.dependencies.preview.generatePreview({
-        vendorId: listing.vendor_id, storeConnectionId: scope.connectionId,
-        productVariantIds: [listing.product_variant_id], actor,
-      });
+      const preview = await this.currentPreview(scope, listing);
+      if (await this.publishZeroIfLive(preview, listing, jobKey)) return;
       const row = preview.rows[0];
-      if (preview.vendorId !== listing.vendor_id || preview.storeConnectionId !== scope.connectionId
-        || preview.platform !== scope.providerKey || preview.rows.length !== 1
-        || row.productVariantId !== listing.product_variant_id || row.productId !== listing.product_id
-        || row.sku !== listing.sku || row.previewStatus === "blocked" || row.listingIntent === null) {
-        throw failure("PUBLICATION_CATCHUP_PREVIEW_BLOCKED", "Current listing preview is blocked or no longer matches the retained destination.");
-      }
+      if (row.previewStatus === "blocked" || row.listingIntent === null) throw previewBlocked();
       const variantKey = String(listing.product_variant_id);
       const created = await this.dependencies.preview.createListingPushJob({
         vendorId: listing.vendor_id, storeConnectionId: scope.connectionId,
@@ -94,6 +99,12 @@ export class DropshipQuantityPublicationCatchupProvider {
       }
       jobId = created.job.jobId;
       status = created.job.status;
+    }
+    if (status === "failed" && jobs.length === 1 && this.dependencies.zeroQuantity) {
+      // A retry of the failed job refreshes from the current preview; blocked only for want of stock, it would fail
+      // again (DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED) and leave the old quantity live. The 0 is the current state.
+      const preview = await this.generatePreview(scope, listing);
+      if (matchesListing(preview, scope, listing) && await this.publishZeroIfLive(preview, listing, jobKey)) return;
     }
     if (status === "failed") {
       await this.dependencies.operations.retryJob({ jobId, idempotencyKey: `${jobKey}:retry`, actor,
@@ -113,6 +124,40 @@ export class DropshipQuantityPublicationCatchupProvider {
     // admission newer than this retained revision's durable attempt boundary.
   }
 
+  /** The current preview of the exact listing, refused when it no longer matches the retained destination. */
+  private async currentPreview(scope: QuantityPublicationScope, listing: ListingIdentity): Promise<DropshipListingPreviewResult> {
+    const preview = await this.generatePreview(scope, listing);
+    if (!matchesListing(preview, scope, listing)) throw previewBlocked();
+    return preview;
+  }
+
+  private generatePreview(scope: QuantityPublicationScope, listing: ListingIdentity): Promise<DropshipListingPreviewResult> {
+    return this.dependencies.preview.generatePreview({
+      vendorId: listing.vendor_id, storeConnectionId: scope.connectionId,
+      productVariantIds: [listing.product_variant_id], actor,
+    });
+  }
+
+  /**
+   * Legacy authority only reaches this owner (quantity-publication-runtime.ts).
+   * True when the listing is live and its preview's only blocker is the
+   * quantity one, and 0 was sent and settled; false leaves the caller's own
+   * path (a job for a publishable preview, the blocked refusal otherwise).
+   */
+  private async publishZeroIfLive(preview: DropshipListingPreviewResult, listing: ListingIdentity, jobKey: string): Promise<boolean> {
+    const row = preview.rows[0];
+    if (!this.dependencies.zeroQuantity || row.previewStatus !== "blocked") return false;
+    const outcome = await this.dependencies.zeroQuantity.publishZeroIfLive({
+      target: { vendorId: listing.vendor_id, storeConnectionId: preview.storeConnectionId, listingId: listing.listing_id,
+        productVariantId: listing.product_variant_id, sku: listing.sku },
+      blockers: row.blockers,
+      listing: { status: listing.status, externalListingId: listing.external_listing_id, externalOfferId: listing.external_offer_id },
+      actorId: actor.actorId,
+      reason: jobKey,
+    });
+    return outcome.outcome === "sent";
+  }
+
   private async resolveListing(scope: QuantityPublicationScope): Promise<ListingIdentity> {
     const offerMatch = /^offer:([^:]+)(?::publish)?$/.exec(scope.externalInventoryItemId);
     if (scope.externalInventoryItemId.startsWith("offer:") && !offerMatch) {
@@ -120,7 +165,7 @@ export class DropshipQuantityPublicationCatchupProvider {
     }
     const rows = (await this.dependencies.database.query<ListingIdentity>(
       `SELECT listing.id AS listing_id,listing.vendor_id,listing.product_variant_id,
-        variant.product_id,variant.sku,listing.status,
+        variant.product_id,variant.sku,listing.status,listing.external_listing_id,listing.external_offer_id,
         EXISTS (SELECT 1 FROM dropship.dropship_listing_end_requests open_end WHERE open_end.listing_id=listing.id
           AND open_end.state IN ('pending','ending','failed')) AS end_open
        FROM dropship.dropship_vendor_listings listing
@@ -145,6 +190,18 @@ export class DropshipQuantityPublicationCatchupProvider {
   }
 }
 
+function matchesListing(preview: DropshipListingPreviewResult, scope: QuantityPublicationScope, listing: ListingIdentity): boolean {
+  const row = preview.rows[0];
+  return preview.vendorId === listing.vendor_id && preview.storeConnectionId === scope.connectionId
+    && preview.platform === scope.providerKey && preview.rows.length === 1
+    && row.productVariantId === listing.product_variant_id && row.productId === listing.product_id
+    && row.sku === listing.sku;
+}
+
+function previewBlocked(): QuantityPublicationAdmissionError {
+  return failure("PUBLICATION_CATCHUP_PREVIEW_BLOCKED", "Current listing preview is blocked or no longer matches the retained destination.");
+}
+
 function failure(code: string, message: string): QuantityPublicationAdmissionError {
   return new QuantityPublicationAdmissionError(code, message);
 }
@@ -152,11 +209,13 @@ function failure(code: string, message: string): QuantityPublicationAdmissionErr
 export async function refreshDropshipQuantityPublicationCatchup(scope: QuantityPublicationScope,
   claim: QuantityPublicationCatchup): Promise<void> {
   const [{ pool }, { createDropshipListingPreviewServiceFromEnv }, { createDropshipListingPushWorkerServiceFromEnv },
-    { createDropshipListingPushOpsServiceFromEnv }] = await Promise.all([
+    { createDropshipListingPushOpsServiceFromEnv }, { createDropshipLiveListingZeroQuantityServiceFromEnv }] = await Promise.all([
     import("../../../db"), import("./dropship-listing-preview.factory"),
     import("./dropship-listing-push-worker.factory"), import("./dropship-listing-push-ops.factory"),
+    import("./dropship-live-listing-zero-quantity.factory"),
   ]);
   await new DropshipQuantityPublicationCatchupProvider({ database: pool,
     preview: createDropshipListingPreviewServiceFromEnv(), worker: createDropshipListingPushWorkerServiceFromEnv(),
-    operations: createDropshipListingPushOpsServiceFromEnv() }).refresh(scope, claim);
+    operations: createDropshipListingPushOpsServiceFromEnv(),
+    zeroQuantity: createDropshipLiveListingZeroQuantityServiceFromEnv() }).refresh(scope, claim);
 }

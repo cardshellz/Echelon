@@ -4,6 +4,7 @@ import type { QuantityPublicationCatchup } from "../../../inventory-planning/app
 import type { QuantityPublicationScope } from "../../../inventory-planning/domain/quantity-publication-admission";
 import { DropshipListingPushWorkerService, type DropshipListingPushWorkerRepository } from "../../application/dropship-listing-push-worker-service";
 import type { DropshipMarketplaceListingIntent } from "../../application/dropship-marketplace-listing-provider";
+import { DropshipLiveListingZeroQuantityService } from "../../application/dropship-live-listing-zero-quantity-service";
 
 const scope: QuantityPublicationScope = { destinationKind: "dropship_store_connection", connectionId: 7,
   providerKey: "ebay", providerScopeType: "account", externalScopeId: "account-one", externalInventoryItemId: "P5",
@@ -164,5 +165,99 @@ describe("Dropship current-quantity catch-up owner", () => {
     const context = setup();
     context.processJob.mockResolvedValue({ job: { ...job, status: "failed" }, items: [{ ...item, status: "failed" }] });
     await expect(context.provider.refresh(scope, claim)).rejects.toMatchObject({ code: "PUBLICATION_CATCHUP_JOB_INCOMPLETE" });
+  });
+});
+
+/**
+ * Legacy authority (the only authority that reaches this owner): a live listing whose current preview is blocked
+ * ONLY for want of stock gets 0 on eBay through the zero-quantity owner instead of a refused catch-up.
+ */
+describe("Dropship current-quantity catch-up owner: live listing at 0", () => {
+  const liveListing = { ...listing, external_listing_id: "110004", external_offer_id: "OFFER-4" };
+  const zeroRow = { ...row, previewStatus: "blocked", blockers: ["marketplace_quantity_unavailable"], listingIntent: null };
+  const failedJob = { id: 9, vendor_id: 5, store_connection_id: 7, status: "failed", item_count: 1, exact_item_count: 1 };
+
+  function zeroSetup(input: { listingRow?: Record<string, unknown>; previewRow?: Record<string, unknown>; jobs?: unknown[] } = {}) {
+    const context = setup();
+    const jobs = input.jobs ?? [];
+    context.query.mockReset().mockImplementation(async (sql: string) =>
+      (String(sql).includes("dropship_listing_push_jobs") ? { rows: jobs } : { rows: [input.listingRow ?? liveListing] }));
+    context.generatePreview.mockResolvedValue({ vendorId: 5, storeConnectionId: 7, platform: "ebay", rows: [input.previewRow ?? zeroRow] });
+    const sendZeroQuantity = vi.fn().mockResolvedValue({ sku: "P5", offerId: "OFFER-4" });
+    const settleZeroQuantity = vi.fn().mockResolvedValue({ pushedQuantityBefore: 6, lastPushedAtBefore: null });
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const zeroQuantity = new DropshipLiveListingZeroQuantityService({ sender: { sendZeroQuantity },
+      repository: { settleZeroQuantity }, clock: { now: () => new Date("2026-11-07T12:00:00Z") }, logger });
+    const provider = new DropshipQuantityPublicationCatchupProvider({ ...context.dependencies, zeroQuantity });
+    return { ...context, provider, sendZeroQuantity, settleZeroQuantity, logger };
+  }
+
+  it("sends 0 to the recorded offer and settles it, with no push job, when the only blocker is the quantity one", async () => {
+    const context = zeroSetup();
+    await context.provider.refresh(scope, claim);
+    expect(context.sendZeroQuantity).toHaveBeenCalledWith({ vendorId: 5, storeConnectionId: 7, listingId: 4, productVariantId: 101,
+      sku: "P5", externalOfferId: "OFFER-4" });
+    expect(context.settleZeroQuantity).toHaveBeenCalledWith(expect.objectContaining({ listingId: 4, externalOfferId: "OFFER-4",
+      actorId: "inventory_publication_catchup", reason: "inventory-publication-catchup:3:2" }));
+    expect(context.createListingPushJob).not.toHaveBeenCalled();
+    expect(context.processJob).not.toHaveBeenCalled();
+    expect(context.logger.info).toHaveBeenCalledWith(expect.objectContaining({
+      context: expect.objectContaining({ action: "dropship.listing_quantity.zero_sent", outcome: "sent" }) }));
+    const sql = String(context.query.mock.calls[0][0]);
+    expect(sql).toContain("listing.external_listing_id,listing.external_offer_id");
+  });
+
+  it.each([
+    ["another blocker", { previewRow: { ...zeroRow, blockers: ["marketplace_quantity_unavailable", "variant_not_selected"] } }],
+    ["tier off", { previewRow: { ...zeroRow, blockers: ["marketplace_quantity_unavailable", "listing_tier_not_on_sale"] } }],
+    ["no quantity blocker", { previewRow: { ...zeroRow, blockers: ["store_connection_not_launch_ready"] } }],
+    ["never published", { listingRow: { ...liveListing, status: "blocked", external_listing_id: null, external_offer_id: null } }],
+    ["no recorded offer", { listingRow: { ...liveListing, external_offer_id: null } }],
+  ])("keeps today's blocked refusal and sends nothing (%s)", async (_name, input) => {
+    const context = zeroSetup(input);
+    await expect(context.provider.refresh(scope, claim)).rejects.toMatchObject({ code: "PUBLICATION_CATCHUP_PREVIEW_BLOCKED" });
+    expect(context.sendZeroQuantity).not.toHaveBeenCalled();
+    expect(context.settleZeroQuantity).not.toHaveBeenCalled();
+    expect(context.createListingPushJob).not.toHaveBeenCalled();
+  });
+
+  it("refuses an ended listing before any preview, as before", async () => {
+    const context = zeroSetup({ listingRow: { ...liveListing, status: "ended" } });
+    await expect(context.provider.refresh(scope, claim)).rejects.toMatchObject({ code: "PUBLICATION_CATCHUP_LISTING_CHANGED" });
+    expect(context.generatePreview).not.toHaveBeenCalled();
+    expect(context.sendZeroQuantity).not.toHaveBeenCalled();
+  });
+
+  it("sends 0 instead of retrying this revision's failed job when stock is now gone", async () => {
+    const context = zeroSetup({ jobs: [failedJob] });
+    await context.provider.refresh(scope, claim);
+    expect(context.sendZeroQuantity).toHaveBeenCalledOnce();
+    expect(context.retryJob).not.toHaveBeenCalled();
+    expect(context.processJob).not.toHaveBeenCalled();
+  });
+
+  it("still retries this revision's failed job when the zero rule does not apply", async () => {
+    const context = zeroSetup({ jobs: [failedJob], previewRow: { ...zeroRow, blockers: ["marketplace_quantity_unavailable", "variant_not_selected"] } });
+    await context.provider.refresh(scope, claim);
+    expect(context.sendZeroQuantity).not.toHaveBeenCalled();
+    expect(context.retryJob).toHaveBeenCalledOnce();
+    expect(context.processJob).toHaveBeenCalledOnce();
+  });
+
+  it("is idempotent on replay: the same 0 is sent again to the same offer, and no job is ever created", async () => {
+    const context = zeroSetup();
+    await context.provider.refresh(scope, claim);
+    await context.provider.refresh(scope, claim);
+    expect(context.sendZeroQuantity).toHaveBeenCalledTimes(2);
+    expect(context.sendZeroQuantity.mock.calls[1]).toEqual(context.sendZeroQuantity.mock.calls[0]);
+    expect(context.createListingPushJob).not.toHaveBeenCalled();
+  });
+
+  it("lets a later ATP above 0 flow through the normal push job path", async () => {
+    const context = zeroSetup({ previewRow: row });
+    await context.provider.refresh(scope, claim);
+    expect(context.sendZeroQuantity).not.toHaveBeenCalled();
+    expect(context.createListingPushJob).toHaveBeenCalledOnce();
+    expect(context.processJob).toHaveBeenCalledOnce();
   });
 });

@@ -10,7 +10,7 @@ import { sql, inArray } from "drizzle-orm";
 import { inventoryLevels } from "@shared/schema";
 import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
 import { interpretInventoryShipmentQuantity } from "@shared/inventory/shipment-quantity";
-import { shipmentQuantityEvidenceProjection } from "../inventory/infrastructure/shipment-quantity-evidence.sql";
+import { shipmentQuantityEvidenceProjection } from "../inventory/shipment-evidence.api";
 
 // ── Minimal DB duck-type ────────────────────────────────────────────
 type DrizzleDb = {

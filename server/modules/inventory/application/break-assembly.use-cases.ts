@@ -54,6 +54,7 @@ export interface BreakResult {
   targetQtyAdded: number;
   baseUnitsConverted: number;
   batchId: string;
+  targetLocationId?: number;
 }
 
 export interface AssembleResult {
@@ -244,7 +245,13 @@ export class BreakAssemblyUseCases {
         },
       }, quantityPosting ?? undefined);
 
-      return { sourceQtyRemoved: sourceQty, targetQtyAdded: targetQty, baseUnitsConverted: baseUnits, batchId };
+      return {
+        sourceQtyRemoved: sourceQty,
+        targetQtyAdded: targetQty,
+        baseUnitsConverted: baseUnits,
+        batchId,
+        targetLocationId: resolvedTargetLocationId,
+      };
     });
   }
 
@@ -809,6 +816,7 @@ const packageConversionResultSchema = z.object({
   sourceQtyRemoved: z.number().int().positive().max(2_147_483_647),
   targetQtyAdded: z.number().int().positive().max(2_147_483_647),
   baseUnitsConverted: z.number().int().positive().safe(), batchId: z.string().min(1).max(50),
+  targetLocationId: z.number().int().positive().max(2_147_483_647).optional(),
 }).strict();
 
 // ============================================================================

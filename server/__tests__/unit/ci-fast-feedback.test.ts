@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { requireSuccessfulJobs } from "../../../scripts/ci/require-success.mjs";
+import { RETURN_ACCEPTANCE_DATABASE_FILES, RETURN_ACCEPTANCE_UNIT_FILES } from "../../../scripts/ci/returns-workflow-acceptance";
 
 const repositoryRoot = new URL("../../../", import.meta.url);
 const source = (file: string) => readFileSync(new URL(file, repositoryRoot), "utf8");
@@ -251,7 +252,7 @@ describe("fast CI preserves coverage and required checks", () => {
 
   it("requires the actual App startup smoke before the core check can pass", () => {
     const bootstrap = job(workflow, "app-bootstrap");
-    expect(bootstrap).toContain("needs: preflight");
+    expect(bootstrap).not.toContain("needs: preflight");
     expect(bootstrap).toContain("playwright test --config playwright.app-bootstrap.config.ts --forbid-only");
     expect(bootstrap).not.toMatch(/if:.*needs\.|--grep|--pass-with-no-tests|continue-on-error/);
     const config = source("playwright.app-bootstrap.config.ts");
@@ -267,7 +268,7 @@ describe("fast CI preserves coverage and required checks", () => {
     }
   });
 
-  it("runs cheap coverage, test-exclusion, migration and writer-ownership guards before expensive core jobs", () => {
+  it("runs preflight in parallel with core jobs while gating PostgreSQL shards and the required check on preflight", () => {
     const preflight = job(workflow, "preflight");
     const manifest = source("scripts/ci/guard-test-manifest.mjs");
     for (const file of [
@@ -277,9 +278,11 @@ describe("fast CI preserves coverage and required checks", () => {
       "writer-ratchet.test.ts",
     ]) expect(manifest).toContain(`server/__tests__/unit/${file}`);
     expect(preflight).toContain("node scripts/ci/run-test-lane.mjs guards");
-    for (const name of ["typecheck", "unit-tests", "contracts", "postgres-hardening-shard"]) {
-      expect(job(workflow, name)).toContain("needs: preflight");
+    for (const name of ["app-bootstrap", "typecheck", "unit-tests", "contracts"]) {
+      expect(job(workflow, name)).not.toContain("needs: preflight");
     }
+    expect(job(workflow, "postgres-hardening-shard")).toContain("needs: preflight");
+    expect(job(workflow, "check-and-unit")).toContain("needs: [preflight, app-bootstrap, typecheck, unit-tests, contracts]");
   });
 
   it("runs only the selected feature matrix, with bounded concurrency and an unfiltered failure fallback", () => {
@@ -347,7 +350,7 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/pages/__tests__/inventory-history-shipment-quantity.test.ts",
       "client/src/features/channel-listing-publication/__tests__/api.test.ts",
       "client/src/features/channel-listing-publication/__tests__/model.test.ts",
-      // PLAN-CH2 v4.1 §11.5: Channel Inventory stock-link controls (presenter, API, components).
+      // PLAN-CH2 v4.1 Â§11.5: Channel Inventory stock-link controls (presenter, API, components).
       "client/src/features/channel-inventory/__tests__/stock-link-presentation.test.ts",
       "client/src/features/channel-inventory/__tests__/stock-link-api.test.ts",
       "client/src/features/channel-inventory/__tests__/stock-link-controls.test.ts",
@@ -361,16 +364,16 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/lib/__tests__/dropship-catalog-choose-requests.test.ts",
       "client/src/lib/__tests__/dropship-catalog-choose-words.test.ts",
       "client/src/pages/dropship/__tests__/DropshipCatalogChoose.test.ts",
-      // PLAN-B v4.1 §15.4, §17 (B3): step 1's new-items notice (model, requests, words).
+      // PLAN-B v4.1 Â§15.4, Â§17 (B3): step 1's new-items notice (model, requests, words).
       "client/src/lib/__tests__/dropship-catalog-new-items.test.ts",
       "client/src/lib/__tests__/dropship-catalog-new-items-requests.test.ts",
       "client/src/lib/__tests__/dropship-catalog-new-items-words.test.ts",
       // PLAN-B v4.1 V31, TESTS-13: the chosen-items words of onboarding and the dashboard (both green at cea5cb027).
       "client/src/lib/__tests__/dropship-onboarding.test.ts",
       "client/src/pages/dropship/__tests__/DropshipPortalDashboard.test.ts",
-      // Step 1 plan S2-5 §4.9 item 3: "site updating" for the requests stages 2-5 add.
+      // Step 1 plan S2-5 Â§4.9 item 3: "site updating" for the requests stages 2-5 add.
       "client/src/lib/__tests__/dropship-api-json.test.ts",
-      // Step 1 plan S2-5 PR A §4.10: Catalog step 3 on publish runs.
+      // Step 1 plan S2-5 PR A Â§4.10: Catalog step 3 on publish runs.
       "client/src/lib/__tests__/dropship-catalog-publish.test.ts",
       "client/src/lib/__tests__/dropship-catalog-publish-requests.test.ts",
       "client/src/lib/__tests__/dropship-catalog-publish-words.test.ts",
@@ -427,7 +430,7 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/pages/__tests__/dropship-portal-cost-changes-page.test.ts",
       // PLAN-B v4.1 V17 (B2b deviation 11; review CLI-7/TST-3): the only pin of the admin "Items chosen" label.
       "client/src/pages/__tests__/dropship-launch-readiness-panels.test.ts",
-      // PLAN-C v4.1 §13.3 (TST-1, DC33): the admin section's client lib and the page's source contract (no browser harness
+      // PLAN-C v4.1 Â§13.3 (TST-1, DC33): the admin section's client lib and the page's source contract (no browser harness
       // mounts the staff page), registered by hand.
       "client/src/lib/__tests__/dropship-listing-end-ops.test.ts",
       "client/src/pages/__tests__/dropship-listing-end-ops.test.ts",
@@ -444,7 +447,7 @@ describe("fast CI preserves coverage and required checks", () => {
       "test/browser/dropship-policy-catalog-steps.spec.ts", "test/browser/dropship-policy-catalog-choose.spec.ts",
       // PLAN-B v4.1 V29: step 1 at scale, on the same stubs.
       "test/browser/dropship-policy-catalog-choose-scale.spec.ts",
-      // PLAN-C v4.1 §13.4: step 1's listing ends, on the same stubs.
+      // PLAN-C v4.1 Â§13.4: step 1's listing ends, on the same stubs.
       "test/browser/dropship-policy-catalog-end.spec.ts",
       "test/browser/dropship-policy-catalog-publish-runs.spec.ts", "test/browser/dropship-policy-listing-access.spec.ts",
       // Review round 2 CT12: every file the step names, the cost changes portal spec too.
@@ -477,6 +480,28 @@ describe("fast CI preserves coverage and required checks", () => {
     ];
     expect(onDisk.length).toBeGreaterThan(0);
     for (const file of onDisk) expect(registered.has(file), "Not run in CI: " + file).toBe(true);
+  });
+
+  it("runs every server infrastructure and observability contract test in the contracts job", () => {
+    const registered = new Set(vitestStepFiles(job(workflow, "contracts"), "Procurement, inventory, channel, and finance UI contracts"));
+    const onDisk = [
+      ...testFilesIn("server/infrastructure/__tests__/", /\.test\.ts$/),
+      ...testFilesIn("server/platform/observability/__tests__/", /\.test\.ts$/),
+    ];
+    expect(onDisk.length).toBeGreaterThan(0);
+    for (const file of onDisk) {
+      expect(existsSync(new URL(file, repositoryRoot)), "Missing test file: " + file).toBe(true);
+      expect(registered.has(file), "Not run in CI: " + file).toBe(true);
+    }
+  });
+
+  it("names only real, distinct files in the Returns connected workflow acceptance runner (FC-CI-02)", () => {
+    const allFiles = [...RETURN_ACCEPTANCE_DATABASE_FILES, ...RETURN_ACCEPTANCE_UNIT_FILES];
+    expect(allFiles.length).toBeGreaterThan(0);
+    expect(new Set(allFiles).size).toBe(allFiles.length);
+    for (const file of allFiles) {
+      expect(existsSync(new URL(file, repositoryRoot)), "Missing returns acceptance test file: " + file).toBe(true);
+    }
   });
 
   it("retains the existing required core check and fails closed on every dependency", () => {
@@ -523,6 +548,7 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(job(procurement, "result")).toContain("name: Procurement browser journeys\n");
     const config = source("playwright.procurement.config.ts");
     expect(config).toContain('testMatch: "procurement-*.spec.ts"');
+    expect(config).toContain("forbidOnly: true");
     expect(config).toContain("timeout: 45_000");
     expect(config).toContain("expect: { timeout: 15_000 }");
     expect(config).not.toMatch(/retries:|maxFailures:|testIgnore:|grep:/);
@@ -554,5 +580,42 @@ describe("fast CI preserves coverage and required checks", () => {
     expect(config).toContain(`workers: ${workers}`);
     expect(config).toContain('name: "desktop"');
     expect(config).toContain('name: "mobile"');
+  });
+
+  it("blocks any hardcoded system-role route or navigation gates", () => {
+    const serverRoot = fileURLToPath(new URL("server", repositoryRoot));
+    const walkServer = (dir: string): string[] => {
+      const out: string[] = [];
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.name === "__tests__" || entry.name === "node_modules") continue;
+        const full = resolve(dir, entry.name);
+        if (entry.isDirectory()) out.push(...walkServer(full));
+        else if (entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts")) out.push(full);
+      }
+      return out;
+    };
+    const rootDir = fileURLToPath(repositoryRoot).replace(/\\/g, "/").replace(/\/$/, "");
+    const foundServerGates: string[] = [];
+    for (const file of walkServer(serverRoot)) {
+      const rel = file.replace(/\\/g, "/").slice(rootDir.length + 1);
+      if (rel === "server/routes/middleware.ts") continue;
+      const text = readFileSync(file, "utf8");
+      for (const line of text.split(/\r?\n/)) {
+        if (!line.includes("requireAssignedSystemRole(")) continue;
+        const match = line.match(/app\.(?:get|post|put|patch|delete)\("[^"]+"/);
+        foundServerGates.push(`${rel}:${match ? match[0] : line.trim()}`);
+      }
+    }
+    expect(foundServerGates).toEqual([]);
+
+    const appSource = source("client/src/App.tsx");
+    const foundAppRoleRoutes = [...appSource.matchAll(/<Route\s+path="([^"]+)">\s*<ProtectedRoute\b[^>]*\ballowedSystemRoles=/g)]
+      .map(match => match[1]);
+    expect(foundAppRoleRoutes).toEqual([]);
+
+    const navSource = source("client/src/components/layout/AppShell.tsx");
+    const foundNavRoleLabels = [...navSource.matchAll(/label:\s*"([^"]+)"[^\n{}]*\broles:\s*\[/g)]
+      .map(match => match[1]);
+    expect(foundNavRoleLabels).toEqual([]);
   });
 });

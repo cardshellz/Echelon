@@ -22,6 +22,7 @@ import type { DropshipMarketplaceListingIntent, DropshipStoreListingConfig } fro
 import type { MarketplacePrePushInput, MarketplacePrePushResult } from "../../application/dropship-marketplace-sync-service";
 import type { MarketplacePushGuard } from "../../domain/marketplace-sync-decision";
 import { marketplaceSyncError, MARKETPLACE_SYNC_CODES } from "../../domain/marketplace-sync-errors";
+import { DropshipLiveListingZeroQuantityService } from "../../application/dropship-live-listing-zero-quantity-service";
 import {
   LISTING_END_FENCE_CODES,
   LISTING_END_FENCE_WORDS,
@@ -1286,6 +1287,19 @@ class FakeListingPushWorkerRepository implements DropshipListingPushWorkerReposi
     return this.items[index];
   }
 
+  zeroInputs: Array<Parameters<DropshipListingPushWorkerRepository["completeItemAtZeroQuantity"]>[0]> = [];
+
+  /** As the real repository: the item completes (only from processing) and the listing settles at 0, in one write. */
+  async completeItemAtZeroQuantity(input: Parameters<DropshipListingPushWorkerRepository["completeItemAtZeroQuantity"]>[0]) {
+    this.zeroInputs.push(input);
+    const index = this.items.findIndex((item) => item.itemId === input.item.itemId);
+    if (this.items[index].status === "processing") {
+      this.items[index] = { ...this.items[index], status: "completed", externalListingId: input.externalListingId, errorCode: null,
+        errorMessage: null };
+    }
+    return { pushedQuantityBefore: 4, lastPushedAtBefore: null };
+  }
+
   pauseInputs: Array<Parameters<DropshipListingPushWorkerRepository["pauseItem"]>[0]> = [];
   tripInputs: Array<Parameters<DropshipListingPushWorkerRepository["tripJobBreaker"]>[0]> = [];
   finalizeCalls = 0;
@@ -1384,3 +1398,137 @@ function makeQueuedItem(): DropshipListingPushWorkerItemRecord {
     },
   };
 }
+
+/**
+ * Stock ran out between queue and push: the push-time refresh refuses ONLY for want of stock
+ * (DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED with marketplace_quantity_unavailable alone). The item is decided at once,
+ * never a retry that fails the same way: 0 to a live listing (legacy), no write (canonical), or "waiting for stock"
+ * for a first publish. Any other refusal keeps today's failure.
+ */
+describe("DropshipListingPushWorkerService: stock gone at push time", () => {
+  const QUANTITY_ONLY = ["marketplace_quantity_unavailable"];
+  const blocked = (blockers: string[]) => new DropshipError("DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED",
+    "Current listing rules do not authorize this queued publication.", { productVariantId: 101, blockers, retryable: true });
+  const liveListing = { listingId: 100, productVariantId: 101, status: "active", externalListingId: "110100", externalOfferId: "OFFER-100",
+    lastPreviewHash: "preview-hash" };
+
+  function setup(input: { authority?: "legacy" | "canonical"; blockers?: string[]; live?: boolean; sendError?: Error } = {}) {
+    const repository = new FakeListingPushWorkerRepository();
+    if (input.live !== false) repository.items[0] = { ...repository.items[0], listing: { ...liveListing } };
+    const marketplacePush = new FakeMarketplacePushProvider();
+    const notificationSender = new FakeNotificationSender();
+    const logs: DropshipLogEvent[] = [];
+    const sends: Array<{ listingId: number; sku: string; externalOfferId: string }> = [];
+    const ownSettlements: unknown[] = [];
+    const zeroQuantity = new DropshipLiveListingZeroQuantityService({
+      sender: { async sendZeroQuantity(target) {
+        sends.push(target);
+        if (input.sendError) throw input.sendError;
+        return { sku: target.sku, offerId: target.externalOfferId };
+      } },
+      // The worker settles through its own repository (one transaction with the item): never this one.
+      repository: { async settleZeroQuantity(settlement) { ownSettlements.push(settlement); return { pushedQuantityBefore: 4, lastPushedAtBefore: null }; } },
+      clock: { now: () => now },
+      logger: { info: (event) => logs.push(event), warn: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+    const service = new DropshipListingPushWorkerService({
+      repository, marketplacePush, notificationSender,
+      refreshListingIntent: async () => { throw blocked(input.blockers ?? QUANTITY_ONLY); },
+      zeroQuantity,
+      ...(input.authority ? { quantityAuthority: async () => input.authority! } : {}),
+      clock: { now: () => now },
+      logger: { info: (event) => logs.push(event), warn: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+    return { service, repository, marketplacePush, notificationSender, logs, sends, ownSettlements };
+  }
+  const run = (context: ReturnType<typeof setup>, key = "process-oos") =>
+    context.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: key });
+
+  it("legacy, live: sends 0 to the recorded offer and completes the item at 0, with no full push", async () => {
+    const context = setup({ authority: "legacy" });
+    const result = await run(context);
+    expect(context.sends).toEqual([{ vendorId: 10, storeConnectionId: 22, listingId: 100, productVariantId: 101, sku: "SKU-101",
+      externalOfferId: "OFFER-100" }]);
+    expect(context.marketplacePush.requests).toEqual([]);
+    expect(context.repository.zeroInputs).toEqual([expect.objectContaining({ externalListingId: "110100",
+      settlement: expect.objectContaining({ listingId: 100, externalOfferId: "OFFER-100", reason: "process-oos:1", now }) })]);
+    expect(context.ownSettlements).toEqual([]);
+    expect(context.repository.failInputs).toEqual([]);
+    expect(result.items[0]).toMatchObject({ status: "completed" });
+    expect(result.job.status).toBe("completed");
+    expect(context.notificationSender.sent).toEqual([]);
+    expect(context.logs).toContainEqual(expect.objectContaining({ code: "DROPSHIP_LISTING_PUSH_COMPLETED_AT_ZERO",
+      context: expect.objectContaining({ action: "dropship.listing_push.out_of_stock", outcome: "completed_at_zero" }) }));
+  });
+
+  it("canonical, live: writes nothing and closes the item quietly as skipped out of stock", async () => {
+    const context = setup({ authority: "canonical" });
+    const result = await run(context);
+    expect(context.sends).toEqual([]);
+    expect(context.marketplacePush.requests).toEqual([]);
+    expect(context.repository.zeroInputs).toEqual([]);
+    expect(context.repository.skipInputs).toEqual([expect.objectContaining({ code: "DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK" })]);
+    expect(result.items[0]).toMatchObject({ status: "cancelled", errorCode: "DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK" });
+    expect(result.job.status).toBe("completed");
+    expect(context.notificationSender.sent).toEqual([]);
+    expect(context.logs).toContainEqual(expect.objectContaining({ code: "DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK",
+      context: expect.objectContaining({ action: "dropship.listing_push.out_of_stock", outcome: "skipped_out_of_stock" }) }));
+  });
+
+  it.each(["legacy", "canonical"] as const)("not live yet (%s): the item and listing end waiting for stock, never retried", async (authority) => {
+    const context = setup({ authority, live: false });
+    const result = await run(context);
+    expect(context.sends).toEqual([]);
+    expect(context.marketplacePush.requests).toEqual([]);
+    expect(context.repository.blockInputs).toEqual([expect.objectContaining({ code: "DROPSHIP_LISTING_PREVIEW_BLOCKED",
+      message: "marketplace_quantity_unavailable", listingBlockers: ["marketplace_quantity_unavailable"] })]);
+    expect(context.repository.failInputs).toEqual([]);
+    expect(result.items[0]).toMatchObject({ status: "blocked", errorCode: "DROPSHIP_LISTING_PREVIEW_BLOCKED" });
+    expect(context.logs).toContainEqual(expect.objectContaining({ code: "DROPSHIP_LISTING_PUSH_WAITING_FOR_STOCK",
+      context: expect.objectContaining({ action: "dropship.listing_push.out_of_stock", outcome: "waiting_for_stock" }) }));
+  });
+
+  it.each([
+    ["another blocker", { authority: "legacy" as const, blockers: ["marketplace_quantity_unavailable", "variant_not_selected"] }],
+    ["another blocker only", { authority: "legacy" as const, blockers: ["listing_tier_not_on_sale"] }],
+    ["unknown authority", {}],
+  ])("keeps today's failure (%s)", async (_name, input) => {
+    const context = setup(input);
+    const result = await run(context);
+    expect(context.sends).toEqual([]);
+    expect(context.repository.zeroInputs).toEqual([]);
+    expect(context.repository.skipInputs).toEqual([]);
+    expect(context.repository.blockInputs).toEqual([]);
+    expect(context.repository.failInputs).toEqual([expect.objectContaining({ code: "DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED" })]);
+    expect(result.items[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("a failed 0 send fails the item through today's classification, settling nothing", async () => {
+    const context = setup({ authority: "legacy", sendError: new DropshipError("DROPSHIP_EBAY_ZERO_QUANTITY_UNCONFIRMED", "unconfirmed",
+      { retryable: true }) });
+    const result = await run(context);
+    expect(context.repository.zeroInputs).toEqual([]);
+    expect(context.repository.failInputs).toEqual([expect.objectContaining({ code: "DROPSHIP_EBAY_ZERO_QUANTITY_UNCONFIRMED" })]);
+    expect(result.items[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("is idempotent on replay: a replay of the processed job sends nothing more", async () => {
+    const context = setup({ authority: "legacy" });
+    await run(context);
+    const replay = await run(context);
+    expect(context.sends).toHaveLength(1);
+    expect(context.repository.zeroInputs).toHaveLength(1);
+    expect(replay.items[0]).toMatchObject({ status: "completed" });
+  });
+
+  it("a requeued item whose 0 already went out sends the same 0 again to the same offer", async () => {
+    const context = setup({ authority: "legacy" });
+    await run(context, "process-first");
+    context.repository.job = { ...context.repository.job, status: "queued" };
+    context.repository.items[0] = { ...context.repository.items[0], status: "queued" };
+    await run(context, "process-first");
+    expect(context.sends).toHaveLength(2);
+    expect(context.sends[1]).toEqual(context.sends[0]);
+    expect(context.repository.zeroInputs[1]!.settlement).toEqual(context.repository.zeroInputs[0]!.settlement);
+  });
+});

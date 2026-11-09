@@ -15,7 +15,7 @@ import { catalogStorage } from "../catalog";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
 const storage = { ...inventoryStorage, ...warehouseStorage, ...catalogStorage, ...ordersStorage, ...channelsStorage };
-import { requirePermission, requireAuth, requireAssignedSystemRole, upload } from "../../routes/middleware";
+import { requirePermission, requireAuth, upload } from "../../routes/middleware";
 import { insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema } from "@shared/schema";
 import Papa from "papaparse";
 import { projectInventoryLevels } from "./application/inventory-levels.query";
@@ -240,10 +240,11 @@ export function registerInventoryRoutes(app: Express) {
   
   app.post("/api/inventory/transfer/:id/undo", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
+      const { inventoryCore } = req.app.locals.services;
       const transactionId = parseInt(req.params.id);
       const userId = req.session.user?.id || "system";
       
-      const transaction = await storage.undoTransfer(transactionId, userId);
+      const transaction = await inventoryCore.undoTransfer(transactionId, userId);
       res.json({ success: true, transaction });
     } catch (error) {
       console.error("Undo transfer error:", error);
@@ -252,7 +253,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // Inventory Transactions History
-  app.get("/api/inventory/transactions", requireAuth, limitPageRead(async (req, res) => {
+  app.get("/api/inventory/transactions", requirePermission("inventory", "audit"), limitPageRead(async (req, res) => {
     try {
       const { batchId, transactionType, startDate, endDate, locationCode } = req.query;
       const pageQuery = offsetPageQuerySchema.safeParse(req.query);
@@ -308,7 +309,7 @@ export function registerInventoryRoutes(app: Express) {
   }));
 
   // CSV Inventory Upload - bulk update inventory levels
-  app.post("/api/inventory/upload-csv", requireAuth, requireAssignedSystemRole("admin", "lead"), requireLegacyQuantityImport, upload.single("file"), async (req, res) => {
+  app.post("/api/inventory/upload-csv", requirePermission("inventory", "upload"), requireLegacyQuantityImport, upload.single("file"), async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -496,7 +497,7 @@ export function registerInventoryRoutes(app: Express) {
     res.send(template);
   });
 
-  app.post("/api/inventory/receive", requireAuth, validateInventoryCommandKey, async (req, res) => {
+  app.post("/api/inventory/receive", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     if (!req.session.user) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -618,24 +619,14 @@ export function registerInventoryRoutes(app: Express) {
   // Delete an orphan inventory_levels row (0 qty, not assigned)
   app.delete("/api/inventory/levels/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
+      const { inventoryCore } = req.app.locals.services;
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
 
-      const level = await storage.getInventoryLevelById(id);
-      if (!level) return res.status(404).json({ error: "Inventory level not found" });
-
-      // Safety: only allow deletion of fully empty rows
-      if (level.variantQty !== 0 || level.reservedQty !== 0) {
-        return res.status(400).json({ error: "Cannot delete — row still has quantity or reservations" });
+      const outcome = await inventoryCore.deleteEmptyUnassignedLevel(id);
+      if (!outcome.deleted) {
+        return res.status(outcome.statusCode ?? 400).json({ error: outcome.error });
       }
-
-      // Safety: don't delete if variant is assigned to this location
-      const hasAssignment = await storage.hasProductLocationAssignment(level.productVariantId, level.warehouseLocationId);
-      if (hasAssignment) {
-        return res.status(400).json({ error: "Cannot delete — variant is assigned to this location" });
-      }
-
-      await storage.deleteInventoryLevel(id);
       res.json({ success: true });
     } catch (error: any) {
       if (isLevelDeleteForbiddenError(error)) {
@@ -835,7 +826,7 @@ export function registerInventoryRoutes(app: Express) {
 
       const { replenishment: breakReplen } = req.app.locals.services;
       if (breakReplen) {
-        const targetLocId = (result as any).targetLocationId || targetLocationId || warehouseLocationId;
+        const targetLocId = result.targetLocationId ?? targetLocationId ?? warehouseLocationId;
         breakReplen.checkReplenForLocation(targetLocId).catch((err: any) =>
           console.warn(`[Replen] Post-break check failed for loc ${targetLocId}:`, err)
         );
@@ -1301,7 +1292,7 @@ export function registerInventoryRoutes(app: Express) {
   // BOOTSTRAP ROUTES
   // ============================================
 
-  app.post("/api/inventory/bootstrap/dry-run", requireAuth, requireAssignedSystemRole("admin"), async (req, res) => {
+  app.post("/api/inventory/bootstrap/dry-run", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const user = req.session?.user;
       if (!user) {
@@ -1435,7 +1426,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/bootstrap", requireAuth, requireAssignedSystemRole("admin"), async (req, res) => {
+  app.post("/api/inventory/bootstrap", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const user = req.session?.user;
       if (!user) {
@@ -1663,7 +1654,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/locations", requireAuth, async (req, res) => {
+  app.post("/api/inventory/locations", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const parsed = insertWarehouseLocationSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1850,7 +1841,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/items", requireAuth, protectEbayPolicyWriteBoundary("create"), async (req, res) => {
+  app.post("/api/inventory/items", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
     try {
       const parsed = insertProductSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1942,7 +1933,7 @@ export function registerInventoryRoutes(app: Express) {
   // MIGRATE LOCATIONS & SYNC/DEBUG ROUTES
   // ============================================
 
-  app.post("/api/inventory/migrate-locations", requireAuth, requireAssignedSystemRole("admin"), async (req, res) => {
+  app.post("/api/inventory/migrate-locations", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       if (!req.session.user) {
         return res.status(403).json({ error: "Admin access required" });

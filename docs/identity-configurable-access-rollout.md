@@ -1,8 +1,9 @@
-# Configurable staff access: first increment and credential reset
+# Configurable staff access: first increment, credential reset and WMS picking
 
 This extends [explicit employee access](identity-explicit-access-rollout.md). It is
-the shared access foundation and a shipment/order-context slice, not a completed
-authorization migration across Echelon. Roles remain explicit configurable bundles.
+the shared access foundation, the shipment/order-context slice and the WMS picking
+access slice (`B1`), not yet a completed authorization migration across all legacy
+Echelon surfaces. Roles remain explicit configurable bundles.
 New definitions never automatically grant access or restore revoked memberships.
 
 ## Behavior and ownership
@@ -13,10 +14,16 @@ New definitions never automatically grant access or restore revoked memberships.
 - Shipping owns shipment reads. Separate capabilities control shipment visibility,
   carrier costs and a bounded linked order summary. Context does not grant Orders
   management, customer address/email, pricing or adjacent WMS access.
-  Picking and non-live Packing retain their existing assigned-membership admission;
-  that separate legacy policy is not migrated by this shipment slice. The next WMS
-  access increment must change page/server admission and navigation together. A role
-  with shipment capabilities is not yet isolated from all legacy WMS functions.
+- WMS Picking (`B1`) migrates sidebar navigation, route admission, `PickingPage`
+  tabs/controls and `/api/picking/*` + picking order endpoints off bare assigned-role
+  membership and `requireAssignedSystemRole("admin", "lead")` onto explicit `/roles`
+  capabilities: `picking:view`, `orders:claim`, `picking:perform`, `picking:complete`,
+  `picking:release_any`, `orders:hold`, `orders:priority`, `orders:resolve_exception`,
+  `picking:view_logs`, `picking:view_metrics` and `picking:manage_settings` (with
+  `picking:view` required as a prerequisite for `picking:view_logs`,
+  `picking:view_metrics` and `picking:manage_settings`). Non-live `/packing` is
+  removed from sidebar navigation and denied at the router boundary until Packing
+  goes live in Phase 10 (`B5`).
 - Profile edits reject password fields. Credential reset requires explicit ordinary
   or privileged reset authority, freshly verified actor credentials, a reviewed access
   revision and expected target generation. Protected targets include control-plane
@@ -31,8 +38,24 @@ New definitions never automatically grant access or restore revoked memberships.
   access. Self-change ends staff sessions and requires sign-in again. Existing login
   strings remain compatible; newly chosen credentials reject bcrypt's 72-byte truncation.
 - HTTP admission, WebSocket delivery and the two eBay SSE observers reject stale
-  generations. Observer refusal does not cancel accepted business work, retract already
+  generations. When role permissions, user role assignments, user activation or staff
+  credentials change, Identity emits an authority-change notification (`authority:updated`)
+  that immediately re-verifies open WebSockets and SSE observers, closing revoked or
+  credential-stale connections (`1008`) and triggering connected browser tabs to refresh
+  their effective authority (`/api/auth/me`) without waiting for a page reload.
+  Observer refusal does not cancel accepted business work, retract already
   delivered/buffered data, or make external provider work atomic.
+- Administrator and staff forgotten-password recovery (`A1b`) provides two audited
+  recovery paths alongside `/users` admin resets:
+  1. **Audited CLI break-glass recovery** (`scripts/identity/recover-admin-password.ts`),
+     delegating to `recoverStaffPasswordBreakGlass` inside `modules/identity` so sole
+     table ownership (`writer-ratchet`) is preserved, rotating `credential_version`,
+     requiring password completion (`must_change_password = true`) on next login and
+     recording an immutable `identity.access.credential_break_glass_recovery` audit row.
+  2. **Self-service verified-email recovery** (`POST /api/auth/forgot-password` and
+     `POST /api/auth/reset-password-token`), issuing a 15-minute single-use HMAC token
+     cryptographically bound to the account's current `credential_version` and password
+     hash so any use or concurrent credential change immediately invalidates replay.
 - Staff login preserves independent customer-return and `.ops` session namespaces and
   secure-cookie requirements. Customer-return regeneration preserves staff generation.
   Pending staff OAuth must restart after staff session rotation.
@@ -45,9 +68,12 @@ New definitions never automatically grant access or restore revoked memberships.
    backfill missing state. Verify full-schema upgrade and actual
    nonowner runtime-role permissions; reduced fixtures and owner test roles are not that
    acceptance. Existing audit ownership and startup-parity gaps remain separate.
-2. Review actual existing assignments, explicit shipment/reset grants and a usable
+2. Review actual existing assignments, explicit shipment/reset/picking grants and a usable
    administrator/recovery path. Do not infer any grants from profile labels or copy
-   existing `users:edit` into reset authority. The application does not create a default
+   existing `users:edit` into reset authority. In `/roles`, review and check
+   `picking:view_logs`, `picking:view_metrics` and `picking:manage_settings` for any
+   role that should retain access to `/picking/logs`, `/picking/metrics`,
+   `/picking/settings` or order combining. The application does not create a default
    administrator or credential. Exact-account production recovery needs explicit approval.
 3. Existing staff sessions lack generation metadata and must reauthenticate. Verify a
    real nonproduction browser with custom/multiple/empty roles and both forced and voluntary
@@ -67,7 +93,8 @@ New definitions never automatically grant access or restore revoked memberships.
 
 Local proof covers current actor denial, profile escalation refusal, protected targets,
 stale/concurrent reset, audit rollback, login/reset races, delayed old-session saves,
-real HTTP/WebSocket/SSE revocation, independent session regeneration and schema backfill
+real HTTP/WebSocket/SSE revocation, independent session regeneration, WMS picking
+route/page/sidebar capability boundaries and schema backfill
 on synthetic disposable data. Desktop/mobile browser journeys exercise the real frontend
 with mocked APIs; they do not replace a connected runtime acceptance.
 

@@ -59,6 +59,18 @@ export interface ShopifyProductsResponse {
   products: ShopifyProduct[];
 }
 
+export const SHOPIFY_REQUEST_TIMEOUT_MS = 30_000;
+export const MAX_SHOPIFY_RATE_LIMIT_RETRIES = 5;
+export const MAX_SHOPIFY_PAGINATION_PAGES = 200;
+
+export interface ShopifyRequestOptions {
+  timeoutMs?: number;
+  maxRetries?: number;
+  retryDelayMs?: number;
+  maxPages?: number;
+  fetchImpl?: typeof fetch;
+}
+
 export function getShopifyConfig() {
   const SHOPIFY_SHOP_DOMAIN = process.env.SHOPIFY_SHOP_DOMAIN;
   const SHOPIFY_ACCESS_TOKEN = process.env.SHOPIFY_ACCESS_TOKEN;
@@ -74,23 +86,58 @@ export function getShopifyConfig() {
   };
 }
 
+export async function fetchShopifyWithRetry(
+  url: string,
+  accessToken: string,
+  options: ShopifyRequestOptions = {},
+): Promise<Response> {
+  const timeoutMs = options.timeoutMs ?? SHOPIFY_REQUEST_TIMEOUT_MS;
+  const maxRetries = options.maxRetries ?? MAX_SHOPIFY_RATE_LIMIT_RETRIES;
+  const retryDelayMs = options.retryDelayMs ?? 2000;
+  const fetchFn = options.fetchImpl ?? fetch;
+
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetchFn(url, {
+      headers: {
+        "X-Shopify-Access-Token": accessToken,
+        "Content-Type": "application/json",
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    if (response.status === 429) {
+      if (attempt >= maxRetries) {
+        throw new Error(`Shopify API rate limit exceeded after ${maxRetries} retries (429)`);
+      }
+      await delay(retryDelayMs);
+      continue;
+    }
+
+    return response;
+  }
+}
+
 // Fetch full product catalog data for PIM sync
-export async function fetchShopifyCatalogProducts(): Promise<ShopifyCatalogProduct[]> {
+export async function fetchShopifyCatalogProducts(
+  options: ShopifyRequestOptions = {},
+): Promise<ShopifyCatalogProduct[]> {
   const config = getShopifyConfig();
   const allProducts: ShopifyCatalogProduct[] = [];
   let pageInfo: string | null = null;
+  let pageCount = 0;
+  const maxPages = options.maxPages ?? MAX_SHOPIFY_PAGINATION_PAGES;
+  const seenCursors = new Set<string>();
   
   do {
+    pageCount++;
+    if (pageCount > maxPages) {
+      throw new Error(`Shopify catalog pagination exceeded maximum page limit (${maxPages})`);
+    }
     const url: string = pageInfo
       ? `https://${config.store}.myshopify.com/admin/api/2024-01/products.json?limit=250&page_info=${pageInfo}`
       : `https://${config.store}.myshopify.com/admin/api/2024-01/products.json?limit=250`;
     
-    const response: Response = await fetch(url, {
-      headers: {
-        "X-Shopify-Access-Token": config.accessToken,
-        "Content-Type": "application/json",
-      },
-    });
+    const response: Response = await fetchShopifyWithRetry(url, config.accessToken, options);
     
     if (!response.ok) {
       const error = await response.text();
@@ -147,7 +194,12 @@ export async function fetchShopifyCatalogProducts(): Promise<ShopifyCatalogProdu
     if (linkHeader) {
       const nextMatch = linkHeader.match(/<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/);
       if (nextMatch) {
-        pageInfo = nextMatch[1];
+        const nextCursor = nextMatch[1];
+        if (seenCursors.has(nextCursor)) {
+          throw new Error(`Shopify catalog pagination cursor cycle detected: ${nextCursor}`);
+        }
+        seenCursors.add(nextCursor);
+        pageInfo = nextCursor;
       }
     }
   } while (pageInfo);
@@ -359,16 +411,23 @@ function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-export async function fetchUnfulfilledOrders(): Promise<ExtractedOrder[]> {
+export async function fetchUnfulfilledOrders(
+  options: ShopifyRequestOptions = {},
+): Promise<ExtractedOrder[]> {
   const config = getShopifyConfig();
   const allOrders: ExtractedOrder[] = [];
   let pageInfo: string | null = null;
   let pageCount = 0;
+  const maxPages = options.maxPages ?? MAX_SHOPIFY_PAGINATION_PAGES;
+  const seenCursors = new Set<string>();
   
   console.log("[SHOPIFY SYNC] Starting to fetch unfulfilled orders...");
   
   do {
     pageCount++;
+    if (pageCount > maxPages) {
+      throw new Error(`Shopify order sync exceeded maximum page limit (${maxPages})`);
+    }
     // Use status=any to catch all orders, then filter client-side
     // The fulfillment_status filter sometimes misses orders with null status (Shopify API quirk)
     const url: string = pageInfo
@@ -377,19 +436,9 @@ export async function fetchUnfulfilledOrders(): Promise<ExtractedOrder[]> {
     
     console.log(`[SHOPIFY SYNC] Fetching page ${pageCount}...`);
     
-    const response: Response = await fetch(url, {
-      headers: {
-        "X-Shopify-Access-Token": config.accessToken,
-        "Content-Type": "application/json",
-      },
-    });
+    const response: Response = await fetchShopifyWithRetry(url, config.accessToken, options);
     
     if (!response.ok) {
-      if (response.status === 429) {
-        console.log("[SHOPIFY SYNC] Rate limited, waiting 2s...");
-        await delay(2000);
-        continue;
-      }
       const error = await response.text();
       throw new Error(`Shopify API error: ${response.status} - ${error}`);
     }
@@ -408,7 +457,12 @@ export async function fetchUnfulfilledOrders(): Promise<ExtractedOrder[]> {
     if (linkHeader) {
       const nextMatch: RegExpMatchArray | null = linkHeader.match(/<[^>]*page_info=([^>&]+)[^>]*>;\s*rel="next"/);
       if (nextMatch) {
-        pageInfo = nextMatch[1];
+        const nextCursor = nextMatch[1];
+        if (seenCursors.has(nextCursor)) {
+          throw new Error(`Shopify order pagination cursor cycle detected: ${nextCursor}`);
+        }
+        seenCursors.add(nextCursor);
+        pageInfo = nextCursor;
         console.log(`[SHOPIFY SYNC] Found next page cursor`);
       }
     }
@@ -506,7 +560,10 @@ export interface OrderFulfillmentStatus {
   cancelledAt: string | null;
 }
 
-export async function fetchOrdersFulfillmentStatus(shopifyOrderIds: string[]): Promise<OrderFulfillmentStatus[]> {
+export async function fetchOrdersFulfillmentStatus(
+  shopifyOrderIds: string[],
+  options: ShopifyRequestOptions = {},
+): Promise<OrderFulfillmentStatus[]> {
   const config = getShopifyConfig();
   const results: OrderFulfillmentStatus[] = [];
   
@@ -518,19 +575,9 @@ export async function fetchOrdersFulfillmentStatus(shopifyOrderIds: string[]): P
     
     const url = `https://${config.store}.myshopify.com/admin/api/2024-01/orders.json?ids=${idsParam}&status=any&fields=id,fulfillment_status,cancelled_at`;
     
-    const response = await fetch(url, {
-      headers: {
-        "X-Shopify-Access-Token": config.accessToken,
-        "Content-Type": "application/json",
-      },
-    });
+    const response = await fetchShopifyWithRetry(url, config.accessToken, options);
     
     if (!response.ok) {
-      if (response.status === 429) {
-        await delay(2000);
-        i -= batchSize; // Retry this batch
-        continue;
-      }
       const error = await response.text();
       throw new Error(`Shopify API error: ${response.status} - ${error}`);
     }

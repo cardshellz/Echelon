@@ -8,13 +8,15 @@ import PickingSettings from "./PickingSettings";
 
 export default function PickingPage() {
   const [location, navigate] = useLocation();
-  const { hasSystemRole } = useAuth();
-  const isAdminLead = hasSystemRole("admin") || hasSystemRole("lead");
+  const { hasPermission } = useAuth();
+  const canViewLogs = hasPermission("picking", "view_logs");
+  const canViewMetrics = hasPermission("picking", "view_metrics");
+  const canManageSettings = hasPermission("picking", "manage_settings");
 
   let activeTab = "queue";
-  if (isAdminLead && location.startsWith("/picking/logs")) activeTab = "logs";
-  else if (isAdminLead && location.startsWith("/picking/metrics")) activeTab = "metrics";
-  else if (isAdminLead && location.startsWith("/picking/settings")) activeTab = "settings";
+  if (canViewLogs && location.startsWith("/picking/logs")) activeTab = "logs";
+  else if (canViewMetrics && location.startsWith("/picking/metrics")) activeTab = "metrics";
+  else if (canManageSettings && location.startsWith("/picking/settings")) activeTab = "settings";
 
   const handleTabChange = (tab: string) => {
     if (tab === "queue") navigate("/picking");
@@ -26,25 +28,25 @@ export default function PickingPage() {
       <div className="border-b px-4 pt-1 bg-card shrink-0">
         <TabsList className="bg-transparent">
           <TabsTrigger value="queue">Queue</TabsTrigger>
-          {isAdminLead && <TabsTrigger value="logs">Logs</TabsTrigger>}
-          {isAdminLead && <TabsTrigger value="metrics">Metrics</TabsTrigger>}
-          {isAdminLead && <TabsTrigger value="settings">Settings</TabsTrigger>}
+          {canViewLogs && <TabsTrigger value="logs">Logs</TabsTrigger>}
+          {canViewMetrics && <TabsTrigger value="metrics">Metrics</TabsTrigger>}
+          {canManageSettings && <TabsTrigger value="settings">Settings</TabsTrigger>}
         </TabsList>
       </div>
       <TabsContent value="queue" className="mt-0 flex-1">
         <PickingQueue />
       </TabsContent>
-      {isAdminLead && (
+      {canViewLogs && (
         <TabsContent value="logs" className="mt-0 flex-1 overflow-auto">
           <PickingLogs />
         </TabsContent>
       )}
-      {isAdminLead && (
+      {canViewMetrics && (
         <TabsContent value="metrics" className="mt-0 flex-1 overflow-auto">
           <PickingMetrics />
         </TabsContent>
       )}
-      {isAdminLead && (
+      {canManageSettings && (
         <TabsContent value="settings" className="mt-0 flex-1 overflow-auto">
           <PickingSettings />
         </TabsContent>

@@ -39,8 +39,13 @@ describe("product inventory strategy UI contract", () => {
 
   it("does not load or render legacy per-product allocation controls under canonical or unknown authority", () => {
     expect(productDetailSource).toContain('inventoryRuntimeAuthorityQuery.data?.authority === "legacy"');
-    expect(productDetailSource).toContain("Legacy product allocation is retired");
+    expect(productDetailSource).not.toContain("Legacy product allocation is retired");
     expect(productDetailSource).toContain("legacy allocation reads and writes remain disabled");
     expect(productDetailSource).toContain('href="/channels/inventory"');
+  });
+
+  it("shows the all-channels sales status where the retired legacy allocation was, only under canonical authority", () => {
+    expect(productDetailSource).toContain('inventoryRuntimeAuthorityQuery.data?.authority === "canonical" ? (');
+    expect(productDetailSource).toContain("<ProductSalesStatusCard productId={product!.productId} />");
   });
 });

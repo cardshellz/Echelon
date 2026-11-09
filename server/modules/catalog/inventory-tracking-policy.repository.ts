@@ -4,7 +4,7 @@ import type { InsertProductVariant, ProductVariant } from "@shared/schema";
 import { parseInventoryTrackingWrite, resolveInventoryTrackingPolicy } from "@shared/catalog/inventory-tracking-policy";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import type { db } from "../../db";
-import { loadTrackingStopSnapshot, retainTrackingStopHistory, trackingStopOperationalBlockers } from "../inventory/infrastructure/tracking-stop.repository";
+import { loadTrackingStopSnapshot, retainTrackingStopHistory, trackingStopOperationalBlockers } from "../inventory/catalog-inventory.api";
 
 import { MAX_TRACKING_HISTORY_RECORDS } from "@shared/catalog/inventory-tracking-history";
 

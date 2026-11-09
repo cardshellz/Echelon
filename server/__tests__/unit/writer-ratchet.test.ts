@@ -29,15 +29,20 @@ describe("writer-ratchet (P2.1)", () => {
   const baseline: Record<string, string[]> = JSON.parse(
     readFileSync(join(repoRoot, "scripts/writer-ratchet/baseline.json"), "utf8"),
   );
-  const { writers: current } = scanWriterTopology(repoRoot);
+  const routeAndScriptBaseline: {
+    routeWriters: Record<string, string[]>;
+    scriptWriters: Record<string, string[]>;
+  } = JSON.parse(
+    readFileSync(join(repoRoot, "scripts/writer-ratchet/route-and-script-baseline.json"), "utf8"),
+  );
+  const { writers: current, routeWriters: currentRouteWriters } = scanWriterTopology(repoRoot);
+  const { writers: currentIncludingScripts, scriptWriters: currentScriptWriters } = scanWriterTopology(repoRoot, {
+    roots: ["server", "scripts", "script"],
+  });
   it("staff credential state has only the Identity owning writer", () => {
     expect(current["identity.staff_credentials"]).toEqual(["modules/identity"]);
-    expect(scanWriterTopology(repoRoot,{roots:["server","scripts","script"]}).writers["identity.staff_credentials"])
-      .toEqual(["modules/identity"]);
+    expect(currentIncludingScripts["identity.staff_credentials"]).toEqual(["modules/identity"]);
     expect(baseline["identity.staff_credentials"]).toEqual(["modules/identity"]);
-  });
-  const { writers: currentIncludingScripts } = scanWriterTopology(repoRoot, {
-    roots: ["server", "scripts"],
   });
 
   it("Catalog owns runtime image writes and the legacy direct import cannot write photos", () => {
@@ -70,6 +75,7 @@ describe("writer-ratchet (P2.1)", () => {
     ["procurement.receiving_quarantine_observations", "modules/procurement"],
     ["procurement.receiving_quarantine_acceptances", "modules/procurement"],
     ["procurement.receiving_quarantine_dispositions", "modules/procurement"],
+    ["inventory.replen_rules", "modules/inventory"],
     ["inventory.replen_followups", "modules/inventory"],
     ["inventory.replen_transfer_credits", "modules/inventory"],
     ["inventory.replen_trigger_receipts", "modules/inventory"],
@@ -345,5 +351,35 @@ describe("writer-ratchet (P2.1)", () => {
     // Existing QA fixture writer is unchanged; the production cleanup does not
     // add a second runtime owner or a new script writer.
     expect(currentIncludingScripts["inventory.cycle_count_items"]).toEqual(["modules/inventory","scripts/create-daily-replen-qa-counts.ts"]);
+  });
+
+  it("blocks any new direct database writes in *.routes.ts files across server/ and server/modules/", () => {
+    const addedRouteWrites: string[] = [];
+    for (const [table, files] of Object.entries(currentRouteWriters)) {
+      const allowed = new Set(routeAndScriptBaseline.routeWriters[table] ?? []);
+      for (const file of files) {
+        if (!allowed.has(file)) addedRouteWrites.push(`${table}  ←  ${file}`);
+      }
+    }
+    expect(
+      addedRouteWrites,
+      `NEW direct DB write(s) detected in *.routes.ts. Route files must delegate writes to application/use-case/repository layers:\n` +
+        addedRouteWrites.join("\n"),
+    ).toEqual([]);
+  });
+
+  it("blocks any new direct database writes in scripts/ or script/ outside the frozen baseline", () => {
+    const addedScriptWrites: string[] = [];
+    for (const [table, files] of Object.entries(currentScriptWriters)) {
+      const allowed = new Set(routeAndScriptBaseline.scriptWriters[table] ?? []);
+      for (const file of files) {
+        if (!allowed.has(file)) addedScriptWrites.push(`${table}  ←  ${file}`);
+      }
+    }
+    expect(
+      addedScriptWrites,
+      `NEW direct DB write(s) detected in scripts/ or script/. Operational scripts must delegate writes to owning module use-cases:\n` +
+        addedScriptWrites.join("\n"),
+    ).toEqual([]);
   });
 });

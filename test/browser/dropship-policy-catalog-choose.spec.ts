@@ -397,13 +397,14 @@ test("J12 on a phone each box is a 44 px target, the item says how it is chosen,
     // A turned-off pick says what to do on a phone too (review DUX9; verify V6).
     await expect(page.getByTestId("catalog-choose-how-line-103")).toContainText("Turned off for you");
     await expect(page.getByTestId("catalog-choose-how-line-103")).toContainText(TURNED_OFF_PICK_HINT);
-    await expect(page.getByTestId("catalog-choose-table").getByRole("columnheader", { name: "How", exact: true })).toBeHidden();
   } else {
-    await expect(howLine).toBeHidden();
-    await expect(page.getByTestId("catalog-choose-table").getByRole("columnheader", { name: "How", exact: true })).toBeVisible();
+    // No How column: an unsaved change says so under the item on every screen (owner report).
+    await expect(howLine).toBeVisible();
+    await expect(howLine).toContainText("Will be added");
     await expect(page.getByTestId("catalog-choose-table").getByRole("columnheader", { name: "Available", exact: true })).toBeVisible();
     await expect(row(page, 103)).toContainText(TURNED_OFF_PICK_HINT);
   }
+  await expect(page.getByTestId("catalog-choose-table").getByRole("columnheader", { name: "How", exact: true })).toHaveCount(0);
   // The box is described by its How words and the hint, on every screen (review DUX9).
   await expect(box(page, "Select Toploader 35pt, Pack of 25")).toHaveAccessibleDescription(`Turned off for you ${TURNED_OFF_PICK_HINT}`);
   const width = page.viewportSize()?.width ?? 1280;
