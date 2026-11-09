@@ -85,6 +85,7 @@ interface InventoryCore {
     purchaseOrderLineId?: number;
     inboundShipmentId?: number;
     costProvisional?: number;
+    deferUntilCommit?: (effect: () => Promise<void>) => void;
   }, tx?: any): Promise<void>;
   adjustInventory(params: {
     productVariantId: number;
@@ -1534,6 +1535,7 @@ export class ReceivingService {
     let linesReceived = 0;
     const receivedVariantIds = new Set<number>();
     const putawayLocationIds = new Set<number>();
+    const postCommitInventoryEffects: Array<() => Promise<void>> = [];
     const receivedPurchaseOrderLineIds = new Set<number>();
 
     const closeResult = await this.db.transaction(async (tx) => {
@@ -1697,6 +1699,7 @@ export class ReceivingService {
           purchaseOrderLineId: line.purchaseOrderLineId || undefined,
           inboundShipmentId,
           costProvisional,
+          deferUntilCommit: (effect) => postCommitInventoryEffects.push(effect),
         }, tx);
         if (line.purchaseOrderLineId) {
           receivedPurchaseOrderLineIds.add(Number(line.purchaseOrderLineId));
@@ -1769,6 +1772,10 @@ export class ReceivingService {
     });
 
     const updated = closeResult.updated;
+
+    for (const effect of postCommitInventoryEffects) {
+      await effect();
+    }
 
     // Queue channel publication only after the inventory/receiving transaction
     // commits. The durable inventory ledger remains authoritative if a channel

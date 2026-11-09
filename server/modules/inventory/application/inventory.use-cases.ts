@@ -314,6 +314,8 @@ export class InventoryUseCases {
     purchaseOrderLineId?: number;
     inboundShipmentId?: number;
     costProvisional?: number;
+    /** Internal transaction orchestration hook; effects run only after the caller commits. */
+    deferUntilCommit?: (effect: () => Promise<void>) => void;
   }, externalTx?: any): Promise<void> {
     if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
 
@@ -466,7 +468,11 @@ export class InventoryUseCases {
       await this.db.transaction(doWork);
     }
 
-    if (!replayed) this.triggerNotifyChange(params.productVariantId, "receive");
+    if (!replayed) {
+      const notifyAfterCommit = async () => this.triggerNotifyChange(params.productVariantId, "receive");
+      if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
+      else this.triggerNotifyChange(params.productVariantId, "receive");
+    }
   }
 
   // ---------------------------------------------------------------------------
