@@ -688,11 +688,15 @@ class ReservationService implements ReservationServiceContract {
 
     for (const item of items) {
       try {
-        // Resolve variant (wms.order_items carries sku, not variant id)
+        // Resolve variant using persisted catalog/variant identity first, falling back to SKU
         const [variant] = await dbh
           .select()
           .from(productVariants)
-          .where(eq(productVariants.sku, item.sku))
+          .where(
+            item.catalogProductId != null && item.productId != null
+              ? eq(productVariants.id, item.productId)
+              : eq(productVariants.sku, item.sku),
+          )
           .limit(1);
 
         if (!variant) {
@@ -1796,9 +1800,9 @@ class ReservationService implements ReservationServiceContract {
       return null;
     }
 
-    // Check if ALL items already have reservations (idempotency).
-    // Only skip if every resolvable SKU has at least one reserve transaction.
-    // This allows retries for partial reservations (e.g., after stock arrives).
+    // Check if ALL items already have open reservations or active build promises covering their demand.
+    // Only skip if every resolvable line has net open reservation + promised build coverage >= item.quantity.
+    // This allows retries when an item was only partially reserved or later released/unreserved.
     const { inventoryTransactions } = await import("@shared/schema");
     let allReserved = true;
 
@@ -1806,7 +1810,11 @@ class ReservationService implements ReservationServiceContract {
       const [variant] = await dbh
         .select()
         .from(productVariants)
-        .where(eq(productVariants.sku, item.sku))
+        .where(
+          item.catalogProductId != null && item.productId != null
+            ? eq(productVariants.id, item.productId)
+            : eq(productVariants.sku, item.sku),
+        )
         .limit(1);
 
       if (!variant) {
@@ -1814,27 +1822,72 @@ class ReservationService implements ReservationServiceContract {
         continue;
       }
 
-      const [existing] = await dbh
+      const existingRows = await dbh
         .select()
         .from(inventoryTransactions)
         .where(
           and(
             eq(inventoryTransactions.orderId, order.id),
-            eq(inventoryTransactions.transactionType, "reserve"),
-            eq(inventoryTransactions.productVariantId, variant.id),
+            sql`${inventoryTransactions.transactionType} IN ('reserve', 'unreserve', 'pick')`,
+            sql`${inventoryTransactions.voidedAt} IS NULL`,
           ),
         )
-        .limit(1);
+        .limit(100);
+
+      const itemRows = existingRows.filter(
+        (r: any) =>
+          r.orderItemId == null
+            ? r.productVariantId == null || Number(r.productVariantId) === Number(variant.id)
+            : Number(r.orderItemId) === Number(item.id),
+      );
+      const hasLegacyStubOnly =
+        itemRows.length > 0 &&
+        itemRows.every(
+          (r: any) => r.transactionType == null && r.reservedQtyDelta == null,
+        );
+      const netReservedQty = hasLegacyStubOnly
+        ? Number(item.quantity ?? 0)
+        : Math.max(
+            0,
+            itemRows.reduce((sum: number, r: any) => {
+              const txType = String(r.transactionType ?? "reserve");
+              const rawDelta = Number(r.reservedQtyDelta ?? 0);
+              if (txType === "reserve") {
+                return (
+                  sum +
+                  (rawDelta > 0
+                    ? rawDelta
+                    : r.reservedQtyDelta === null
+                      ? Number(item.quantity ?? 0)
+                      : 0)
+                );
+              }
+              if (txType === "unreserve" || txType === "pick") {
+                return sum + (rawDelta < 0 ? rawDelta : -Math.abs(rawDelta));
+              }
+              return sum;
+            }, 0),
+          );
 
       const demandResult: any = await dbh.execute(sql`
-        SELECT status
+        SELECT status, promised_qty, short_qty
         FROM wms.order_build_demands
         WHERE order_item_id = ${item.id}
           AND status IN ('planning', 'awaiting_build', 'fulfilled')
         LIMIT 1
       `);
-      const hasBuildPromise = (demandResult?.rows?.length ?? 0) > 0;
-      if (!existing && !hasBuildPromise) {
+      const demandRow = demandResult?.rows?.[0] ?? null;
+      const hasBuildPromise = demandRow != null;
+      const promisedUnits = hasBuildPromise
+        ? Math.max(
+            Number(demandRow.promised_qty ?? 0),
+            Number(demandRow.short_qty ?? 0),
+            demandRow.promised_qty == null && demandRow.short_qty == null
+              ? Number(item.quantity ?? 0)
+              : 0,
+          )
+        : 0;
+      if (netReservedQty + promisedUnits < Number(item.quantity ?? 1)) {
         allReserved = false;
         break;
       }

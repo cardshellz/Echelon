@@ -296,6 +296,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/inventory-planning/__tests__/integration/inventory-sales-status.integration.test.ts",
       // Catalog export: PostgreSQL keyset pagination and historical channel identity evidence.
       "server/modules/catalog-export/__tests__/integration/postgres-catalog-export.repository.integration.test.ts",
+      // Claim lineage: canonical allocation/reservation/pick/shipment/short-claim lineage invariants.
+      "server/modules/inventory-planning/__tests__/integration/inventory-availability-claim-lineage.integration.test.ts",
     );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);

@@ -60,7 +60,44 @@ const AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT = 100;
 const AUTO_FLOW_REMEDIATION_LIMIT = 10;
 const AUTO_RESERVATION_REPAIR_LIMIT = 25;
 /** Short claims re-planned per run; each attempt is one serializable transaction. */
-const SHORT_CLAIM_REFRESH_LIMIT = 25;
+export const SHORT_CLAIM_REFRESH_LIMIT = 25;
+/** Candidate window scanned per sweep so declined oldest prefixes do not starve improvable later orders. */
+export const SHORT_CLAIM_CANDIDATE_WINDOW = 250;
+
+export interface ShortClaimDeclineEntry {
+  orderId: number;
+  seq: number;
+  code: string;
+  attempts: number;
+  lastDeclinedAt: string;
+}
+
+let shortClaimDeclineSequence = 0;
+const declinedShortClaimState = new Map<number, ShortClaimDeclineEntry>();
+
+export function getShortClaimRefreshDiagnostics(): {
+  declinedOrderCount: number;
+  declineCodeCounts: Record<string, number>;
+  declinedOrders: ShortClaimDeclineEntry[];
+} {
+  const declineCodeCounts: Record<string, number> = {};
+  const declinedOrders = Array.from(declinedShortClaimState.values()).sort(
+    (a, b) => a.seq - b.seq,
+  );
+  for (const entry of declinedOrders) {
+    declineCodeCounts[entry.code] = (declineCodeCounts[entry.code] ?? 0) + 1;
+  }
+  return {
+    declinedOrderCount: declinedOrders.length,
+    declineCodeCounts,
+    declinedOrders,
+  };
+}
+
+export function resetShortClaimRefreshStateForTests(): void {
+  shortClaimDeclineSequence = 0;
+  declinedShortClaimState.clear();
+}
 /** Confirmed pick corrections retried per run; each is a few short transactions. */
 const CONFIRMED_PICK_RETRY_LIMIT = 50;
 /** Exception orders re-checked per run; each is a few reads, one write if released. */
@@ -1103,26 +1140,62 @@ export async function refreshShortClaims(
             JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
             WHERE sv.product_id = tv.product_id
               AND il.variant_qty - il.reserved_qty > 0
+              AND wl.warehouse_id IS NOT NULL
+              AND COALESCE(wl.location_type, 'pick') NOT IN ('receiving', 'staging', 'quarantine')
               AND wl.is_active = true
               AND wl.cycle_count_freeze_id IS NULL
               AND (o.warehouse_id IS NULL OR wl.warehouse_id = o.warehouse_id)
           )
       )
     ORDER BY o.created_at, o.id
-    LIMIT ${SHORT_CLAIM_REFRESH_LIMIT}
+    LIMIT ${SHORT_CLAIM_CANDIDATE_WINDOW}
   `);
 
-  for (const row of candidates?.rows ?? []) {
-    const wmsOrderId = Number(row.order_id);
+  const rawRows = (candidates?.rows ?? []) as Array<{ order_id: number | string }>;
+  const candidateIndexById = new Map<number, number>();
+  for (let i = 0; i < rawRows.length; i++) {
+    const orderId = Number(rawRows[i].order_id);
+    if (Number.isFinite(orderId) && orderId > 0 && !candidateIndexById.has(orderId)) {
+      candidateIndexById.set(orderId, i);
+    }
+  }
+  const orderedIds = Array.from(candidateIndexById.keys());
+  // Fair rotation: fresh/non-declined orders (seq = 0) are attempted first in SQL order,
+  // followed by previously declined orders ordered by oldest decline sequence (LRU).
+  // This guarantees a persistently declining prefix of >= 25 orders never starves
+  // later improvable orders in the candidate window.
+  orderedIds.sort((a, b) => {
+    const seqA = declinedShortClaimState.get(a)?.seq ?? 0;
+    const seqB = declinedShortClaimState.get(b)?.seq ?? 0;
+    if (seqA !== seqB) return seqA - seqB;
+    return (candidateIndexById.get(a) ?? 0) - (candidateIndexById.get(b) ?? 0);
+  });
+
+  const sweepDeclineCodes: Record<string, number> = {};
+  for (const wmsOrderId of orderedIds.slice(0, SHORT_CLAIM_REFRESH_LIMIT)) {
     try {
-      const result = await svc.refreshShortClaimSupply(wmsOrderId);
+      const result:
+        | { outcome: "refreshed"; claimId: string; idempotentReplay: boolean }
+        | { outcome: "declined"; code: string; message: string } =
+        await svc.refreshShortClaimSupply(wmsOrderId);
       if (result.outcome === "refreshed") {
         totals.refreshed += 1;
+        declinedShortClaimState.delete(wmsOrderId);
         console.log(JSON.stringify({ level: "info", action: "refresh_short_claim", outcome: "refreshed",
           wms_order_id: wmsOrderId, after: { claimId: result.claimId }, idempotent_replay: result.idempotentReplay }));
       } else {
-        // Expected while stock is still missing or reserved elsewhere.
+        // Expected while stock is still missing, reserved elsewhere, or only case-break / unverified supply exists.
         totals.declined += 1;
+        const code = result.code || "CLAIM_SUPPLY_REFRESH_DECLINED";
+        sweepDeclineCodes[code] = (sweepDeclineCodes[code] ?? 0) + 1;
+        const prev = declinedShortClaimState.get(wmsOrderId);
+        declinedShortClaimState.set(wmsOrderId, {
+          orderId: wmsOrderId,
+          seq: ++shortClaimDeclineSequence,
+          code,
+          attempts: (prev?.attempts ?? 0) + 1,
+          lastDeclinedAt: new Date().toISOString(),
+        });
       }
     } catch (err: any) {
       totals.failed += 1;
@@ -1130,8 +1203,13 @@ export async function refreshShortClaims(
         wms_order_id: wmsOrderId, error_code: err?.code ?? null, error: err?.message ?? String(err) }));
     }
   }
-  if (totals.refreshed + totals.failed > 0) {
-    console.log(`${LOG_PREFIX} short-claim refresh: refreshed=${totals.refreshed} declined=${totals.declined} failed=${totals.failed}`);
+  if (totals.refreshed + totals.declined + totals.failed > 0) {
+    const declineBreakdown = Object.entries(sweepDeclineCodes)
+      .map(([code, count]) => `${code}:${count}`)
+      .join(",");
+    console.log(
+      `${LOG_PREFIX} short-claim refresh: refreshed=${totals.refreshed} declined=${totals.declined} failed=${totals.failed}${declineBreakdown ? ` decline_codes=${declineBreakdown}` : ""}`,
+    );
   }
   if (totals.failed > 0) {
     // Surface on the scheduler heartbeat via the step wrapper.

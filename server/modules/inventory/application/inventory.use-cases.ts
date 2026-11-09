@@ -1519,35 +1519,72 @@ export class InventoryUseCases {
 
     const doWork = async (tx: any) => {
       // One order item may have multiple supply segments (finished stock and
-      // recipe-built shortfall). Each segment remains independently idempotent.
+      // recipe-built shortfall). Each segment remains independently idempotent,
+      // while allowing demand-revision or restock replacements after an unreserve
+      // or partial reserve without violating uq_inventory_transactions_reserve_dedup (A-01/A-02).
       const existingReserve = await tx.execute(sql`
-        SELECT id
+        SELECT
+          id,
+          transaction_type AS "transactionType",
+          reserved_qty_delta AS "reservedQtyDelta",
+          reference_id AS "referenceId"
         FROM inventory.inventory_transactions
-        WHERE transaction_type = 'reserve'
+        WHERE transaction_type IN ('reserve', 'unreserve')
           AND order_id = ${params.orderId}
           AND order_item_id = ${params.orderItemId}
           AND COALESCE(reference_type, 'order') = ${referenceType}
-          AND COALESCE(reference_id, order_id::text) = ${referenceId}
+          AND (
+            COALESCE(reference_id, order_id::text) = ${referenceId}
+            OR COALESCE(reference_id, order_id::text) LIKE ${`${referenceId}:rev:%`}
+          )
           AND voided_at IS NULL
-        LIMIT 1
       `);
-      if (existingReserve.rows.length > 0) {
+      const existingRows: any[] = existingReserve?.rows ?? [];
+      let reserveCount = 0;
+      let netReservedQty = 0;
+      for (const row of existingRows) {
+        const rawType = row.transactionType ?? row.transaction_type;
+        const rawDelta = row.reservedQtyDelta ?? row.reserved_qty_delta;
+        if (rawType === undefined && rawDelta === undefined) {
+          // Synthetic/legacy row stub without type/delta metadata represents an active reserve
+          return true;
+        }
+        const txType = rawType ?? "reserve";
+        if (txType === "reserve") {
+          reserveCount += 1;
+        }
+        if (rawDelta !== undefined && rawDelta !== null) {
+          netReservedQty += Number(rawDelta);
+        } else if (txType === "reserve") {
+          netReservedQty += params.qty;
+        } else if (txType === "unreserve") {
+          netReservedQty -= params.qty;
+        }
+      }
+
+      const openReservedQty = Math.max(0, netReservedQty);
+      if (reserveCount > 0 && openReservedQty >= params.qty) {
         return true;
       }
+
+      const qtyToReserve = params.qty - openReservedQty;
+      const effectiveReferenceId = reserveCount === 0
+        ? referenceId
+        : `${referenceId}:rev:${reserveCount + 1}`.slice(0, 100);
 
       const level = await this.storage.upsertInventoryLevel({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
       }, tx);
 
-      await this.storage.adjustInventoryLevel(level.id, { reservedQty: params.qty }, tx);
+      await this.storage.adjustInventoryLevel(level.id, { reservedQty: qtyToReserve }, tx);
 
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
         await lotSvc.reserveFromLots({
           productVariantId: params.productVariantId,
           warehouseLocationId: params.warehouseLocationId,
-          qty: params.qty,
+          qty: qtyToReserve,
         });
       }
 
@@ -1559,13 +1596,13 @@ export class InventoryUseCases {
           variantQtyDelta: 0,
           variantQtyBefore: level.variantQty,
           variantQtyAfter: level.variantQty,
-          reservedQtyDelta: params.qty,
+          reservedQtyDelta: qtyToReserve,
           sourceState: "on_hand",
           targetState: "committed",
           orderId: params.orderId,
           orderItemId: params.orderItemId,
           referenceType,
-          referenceId,
+          referenceId: effectiveReferenceId,
           userId: params.userId ?? null,
         }, tx);
       } catch (err: any) {
