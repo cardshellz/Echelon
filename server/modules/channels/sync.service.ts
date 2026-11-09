@@ -2,27 +2,16 @@ import { eq, and, sql, inArray } from "drizzle-orm";
 import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
 import {
   channelFeeds,
-  channelConnections,
-  channelReservations,
-  channelProductAllocation,
   channelSyncLog,
   channels,
   productVariants,
-  products,
-  warehouses,
   productLineProducts,
   channelProductLines,
-  warehouseSettings,
 } from "@shared/schema";
 import type {
   ChannelFeed,
-  ChannelConnection,
-  ChannelReservation,
-  ChannelProductAllocation,
   Channel,
   ProductVariant,
-  Product,
-  Warehouse,
 } from "@shared/schema";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
@@ -31,6 +20,8 @@ import { ChannelIdentityError } from "./channel-identity.domain";
 import { describeAllocationFailure } from "./allocation-engine.errors";
 import { logger } from "../../platform/observability/logger";
 import type { InventorySyncResult } from "./echelon-sync-orchestrator.service";
+
+export const DISCOVER_FEEDS_BATCH_SIZE = 500;
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -60,6 +51,11 @@ type InventoryAtpService = {
   }>>;
 };
 
+export type FeedDiscoveryIdentityPort = Pick<
+  ChannelIdentityService,
+  "listingIdentities" | "ensureShopifyFeed"
+>;
+
 export interface SyncResult {
   productId: number;
   synced: number;
@@ -76,18 +72,10 @@ export interface SyncResult {
 /**
  * Channel sync service for the Echelon WMS.
  *
- * Pushes effective ATP to external sales channels. The effective ATP for
- * each variant on each channel is: base ATP → apply product floor →
- * apply variant floor → apply max cap → push result. Always pushes the
- * accurate number on every sync.
- *
- * Shopify is the only live provider. Other configured providers (ebay,
- * amazon, etsy, manual) get stub adapters that log computed ATP and
- * update channel_feeds without calling external APIs.
+ * Delegates all quantity calculation and external channel publication to the
+ * wired allocation orchestrator and authority-aware inventory change publisher.
  */
 class ChannelSyncService {
-  private readonly MAX_RETRIES = 3;
-
   /** Cached kill switch — loaded once, refreshed on demand */
   private _syncEnabled: boolean | null = null;
 
@@ -98,6 +86,8 @@ class ChannelSyncService {
   constructor(
     private readonly db: DrizzleDb,
     private readonly atpService: InventoryAtpService,
+    private readonly identityServiceFactory: (db: DrizzleDb) => FeedDiscoveryIdentityPort = (database) =>
+      new ChannelIdentityService(database as any),
   ) {}
 
   /** Wire the compatibility orchestrator after construction. */
@@ -149,7 +139,6 @@ class ChannelSyncService {
     // ── Orchestrator delegation ──────────────────────────────────────────
     // When the Echelon orchestrator is wired, delegate to it so that
     // channel_allocation_rules (fixed/share/mirror) are respected.
-    // The old allocation logic below is kept as fallback only.
     if (this.orchestrator) {
       try {
         const orchResults = await this.orchestrator.syncInventoryForProduct(
@@ -421,16 +410,22 @@ class ChannelSyncService {
       .from(channelFeeds)
       .where(eq(channelFeeds.isActive, 1));
 
+    if (feeds.length === 0) return [];
+
+    const uniqueVariantIds = Array.from(new Set(feeds.map((feed) => feed.productVariantId)));
+    const variantRows: ProductVariant[] = await this.db
+      .select()
+      .from(productVariants)
+      .where(inArray(productVariants.id, uniqueVariantIds));
+    const variantsById = new Map<number, ProductVariant>(
+      variantRows.map((variant) => [variant.id, variant]),
+    );
+
     const divergent: Array<any> = [];
     const productCache = new Map<number, Array<any>>();
 
     for (const feed of feeds) {
-      // Resolve product for this variant
-      const [variant] = await this.db
-        .select()
-        .from(productVariants)
-        .where(eq(productVariants.id, feed.productVariantId))
-        .limit(1);
+      const variant = variantsById.get(feed.productVariantId);
       if (!variant) continue;
       if (!isInventoryManagedVariant(variant)) continue;
       if (!isCustomerSellableVariant(variant)) continue;
@@ -463,38 +458,92 @@ class ChannelSyncService {
   // ---------------------------------------------------------------------------
 
   /**
-   * For each active channel, ensure every active variant with a shopifyVariantId
-   * has a channelFeed record linking it to that channel. Creates missing feeds
-   * so the sync can push inventory without manual setup.
+   * For each active channel, ensure every active sellable variant with a listing
+   * on that channel has a channelFeed record linking it to that channel.
+   * Pre-filters existing feeds and product-line memberships and queries listing
+   * identities in bounded chunks (COM-04 / C-B5).
    */
   async discoverFeeds(): Promise<{ created: number; channels: number; blocked: string[] }> {
     const activeChannels: Channel[] = await this.db.select().from(channels)
       .where(and(eq(channels.status, "active"), eq(channels.provider, "shopify")));
+    if (activeChannels.length === 0) {
+      return { created: 0, channels: 0, blocked: [] };
+    }
+
     const allVariants: ProductVariant[] = await this.db.select().from(productVariants).where(and(
       eq(productVariants.isActive, true), eq(productVariants.requiresShipping, true),
       sql`COALESCE(${productVariants.trackInventory}, true) = true`,
       eq(productVariants.salesEligibility, "sellable"),
     ));
+    if (allVariants.length === 0) {
+      return { created: 0, channels: activeChannels.length, blocked: [] };
+    }
+
     const existingFeeds: ChannelFeed[] = await this.db.select().from(channelFeeds);
     const existingSet = new Set(existingFeeds.map((feed) => `${feed.channelId}:${feed.productVariantId}`));
     const channelLineRows = await this.db.select().from(channelProductLines).where(eq(channelProductLines.isActive, true));
     const productLineRows = await this.db.select().from(productLineProducts);
-    const identityService = new ChannelIdentityService(this.db);
+
+    const allowedLinesByChannelId = new Map<number, Set<number>>();
+    for (const row of channelLineRows as Array<{ channelId: number; productLineId: number }>) {
+      let set = allowedLinesByChannelId.get(row.channelId);
+      if (!set) {
+        set = new Set<number>();
+        allowedLinesByChannelId.set(row.channelId, set);
+      }
+      set.add(row.productLineId);
+    }
+
+    const lineIdsByProductId = new Map<number, Set<number>>();
+    for (const row of productLineRows as Array<{ productId: number; productLineId: number }>) {
+      let set = lineIdsByProductId.get(row.productId);
+      if (!set) {
+        set = new Set<number>();
+        lineIdsByProductId.set(row.productId, set);
+      }
+      set.add(row.productLineId);
+    }
+
+    const identityService = this.identityServiceFactory(this.db);
     const blocked: string[] = [];
     let created = 0;
+
     for (const channel of activeChannels) {
-      // Discovery repairs missing feed rows from this channel's listings only.
-      // The provider reader verifies each candidate against this exact account.
-      const listings = await identityService.listingIdentities(channel.id, allVariants.map((variant) => variant.id));
-      const listedVariants = new Set(listings.filter((listing) => listing.externalVariantId).map((listing) => listing.productVariantId));
-      const allowedLines = new Set<number>(channelLineRows.filter((row: { channelId: number }) => row.channelId === channel.id)
-        .map((row: { productLineId: number }) => row.productLineId));
-      for (const variant of allVariants) {
-        if (existingSet.has(`${channel.id}:${variant.id}`) || !listedVariants.has(variant.id)) continue;
-        if (allowedLines.size > 0 && !productLineRows.some((row: { productId: number; productLineId: number }) =>
-          row.productId === variant.productId && allowedLines.has(row.productLineId))) continue;
+      const allowedLines = allowedLinesByChannelId.get(channel.id);
+      const candidateVariants = allVariants.filter((variant) => {
+        if (existingSet.has(`${channel.id}:${variant.id}`)) return false;
+        if (!allowedLines || allowedLines.size === 0) return true;
+        const productLines = lineIdsByProductId.get(variant.productId);
+        return productLines ? hasSetIntersection(productLines, allowedLines) : false;
+      });
+
+      if (candidateVariants.length === 0) continue;
+
+      // Discovery repairs missing feed rows from this channel's listings only,
+      // querying candidate variant IDs in bounded batches.
+      const listedVariants = new Set<number>();
+      for (let offset = 0; offset < candidateVariants.length; offset += DISCOVER_FEEDS_BATCH_SIZE) {
+        const batchIds = candidateVariants
+          .slice(offset, offset + DISCOVER_FEEDS_BATCH_SIZE)
+          .map((variant) => variant.id);
+        const listings = await identityService.listingIdentities(channel.id, batchIds);
+        for (const listing of listings) {
+          if (listing.externalVariantId && listing.productVariantId != null) {
+            listedVariants.add(listing.productVariantId);
+          }
+        }
+      }
+
+      for (const variant of candidateVariants) {
+        if (!listedVariants.has(variant.id)) continue;
         try {
-          await identityService.ensureShopifyFeed({ channelId: channel.id, productVariantId: variant.id, sku: variant.sku, actor: "channel-feed-discovery" });
+          await identityService.ensureShopifyFeed({
+            channelId: channel.id,
+            productVariantId: variant.id,
+            sku: variant.sku,
+            actor: "channel-feed-discovery",
+          });
+          existingSet.add(`${channel.id}:${variant.id}`);
           created++;
         } catch (error) {
           const code = error instanceof ChannelIdentityError ? error.code : "CHANNEL_FEED_DISCOVERY_FAILED";
@@ -502,216 +551,24 @@ class ChannelSyncService {
         }
       }
     }
-    if (blocked.length > 0) console.warn(JSON.stringify({ action: "channel_feed.discovery", outcome: "blocked", blocked }));
+
+    if (blocked.length > 0) {
+      console.warn(JSON.stringify({ action: "channel_feed.discovery", outcome: "blocked", blocked }));
+    }
     return { created, channels: activeChannels.length, blocked };
-  }
-
-  // ---------------------------------------------------------------------------
-  // PRIVATE HELPERS
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Push with exponential backoff retry.
-   */
-  private async pushWithRetry(feed: ChannelFeed, atpUnits: number): Promise<void> {
-    for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
-      try {
-        await this.pushToChannel(feed, atpUnits);
-        return;
-      } catch (err) {
-        if (attempt === this.MAX_RETRIES) throw err;
-        const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
-        console.warn(`[ChannelSync] Push attempt ${attempt} failed, retrying in ${delayMs}ms`);
-        await this.delay(delayMs);
-      }
-    }
-  }
-
-  /**
-   * Route push to the appropriate channel adapter.
-   * Shopify: live push. Others: stub (log + update feed state).
-   */
-  private async pushToChannel(feed: ChannelFeed, atpUnits: number): Promise<void> {
-    switch (feed.channelType) {
-      case "shopify":
-        await this.pushToShopify(feed, atpUnits);
-        break;
-
-      case "ebay":
-      case "amazon":
-        // Stub: log computed ATP, don't call external API
-        console.log(
-          `[ChannelSync] STUB ${feed.channelType}: would push ${atpUnits} units ` +
-          `for variant ${feed.productVariantId} (feed ${feed.id})`,
-        );
-        break;
-
-      case "wholesale":
-        // Manual/wholesale channels — no push, just record
-        break;
-
-      default:
-        console.warn(`[ChannelSync] Unknown channel type "${feed.channelType}" for feed ${feed.id}`);
-    }
-  }
-
-  private async pushToShopify(feed: ChannelFeed, atpUnits: number): Promise<void> {
-    if (!feed.channelId) {
-      throw new Error(`Feed ${feed.id} has no channelId — cannot resolve Shopify credentials`);
-    }
-    const [conn] = await this.db
-      .select()
-      .from(channelConnections)
-      .where(eq(channelConnections.channelId, feed.channelId))
-      .limit(1);
-    if (!conn?.shopDomain || !conn?.accessToken) {
-      throw new Error(`Channel ${feed.channelId} has no Shopify credentials configured`);
-    }
-
-    const [variantRow] = await this.db
-      .select({
-        productId: productVariants.productId,
-        shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
-        requiresShipping: productVariants.requiresShipping,
-        trackInventory: productVariants.trackInventory,
-        salesEligibility: productVariants.salesEligibility,
-      })
-      .from(productVariants)
-      .where(eq(productVariants.id, feed.productVariantId))
-      .limit(1);
-
-    if (!variantRow?.shopifyInventoryItemId) {
-      throw new Error(
-        `Variant ${feed.productVariantId} has no shopifyInventoryItemId — run Shopify product sync first`,
-      );
-    }
-    if (!isInventoryManagedVariant(variantRow)) {
-      throw new Error(
-        `Variant ${feed.productVariantId} is digital or inventory-untracked; quantity publication is prohibited`,
-      );
-    }
-    if (!isCustomerSellableVariant(variantRow)) {
-      throw new Error(
-        `Variant ${feed.productVariantId} is internal-only; quantity publication is prohibited`,
-      );
-    }
-
-    const warehouseRows: Warehouse[] = await this.db
-      .select()
-      .from(warehouses)
-      .where(and(
-        eq(warehouses.isActive, 1),
-        sql`${warehouses.shopifyLocationId} IS NOT NULL`,
-        sql`COALESCE(${warehouses.inventorySourceType}, 'internal') = 'internal'`,
-      ));
-
-    if (warehouseRows.length > 0) {
-      for (const wh of warehouseRows) {
-        const warehouseAtp = await this.atpService.getAtpPerVariantByWarehouse(
-          variantRow.productId,
-          wh.id,
-        );
-        const variantAtp = warehouseAtp.find((v) => v.productVariantId === feed.productVariantId);
-        const qty = variantAtp?.atpUnits ?? 0;
-
-        await this.pushToShopifyLocation(
-          conn.shopDomain,
-          conn.accessToken,
-          variantRow.shopifyInventoryItemId,
-          wh.shopifyLocationId!,
-          qty,
-        );
-      }
-    } else {
-      const shopifyLocationId = process.env.SHOPIFY_LOCATION_ID;
-      if (!shopifyLocationId) {
-        throw new Error(
-          "No warehouses with shopify_location_id configured and SHOPIFY_LOCATION_ID env var not set",
-        );
-      }
-      await this.pushToShopifyLocation(
-        conn.shopDomain,
-        conn.accessToken,
-        variantRow.shopifyInventoryItemId,
-        shopifyLocationId,
-        atpUnits,
-      );
-    }
-  }
-
-  private async pushToShopifyLocation(
-    shopifyDomain: string,
-    accessToken: string,
-    inventoryItemId: string,
-    shopifyLocationId: string,
-    available: number,
-  ): Promise<void> {
-    const url = `https://${shopifyDomain}/admin/api/2024-01/inventory_levels/set.json`;
-
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "X-Shopify-Access-Token": accessToken,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        location_id: Number(shopifyLocationId),
-        inventory_item_id: Number(inventoryItemId),
-        available,
-      }),
-    });
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Shopify API error ${response.status} for location ${shopifyLocationId}: ${body}`);
-    }
-
-    console.log(
-      `[ChannelSync] Pushed ${available} to Shopify location=${shopifyLocationId} item=${inventoryItemId}`,
-    );
-  }
-
-  /**
-   * Write a sync log entry.
-   */
-  private async logSync(entry: {
-    productId: number;
-    productVariantId: number;
-    channelId: number | null;
-    channelFeedId: number;
-    atpBase: number;
-    pushedQty: number;
-    previousQty: number | null;
-    status: string;
-    errorMessage?: string;
-    responseCode?: number;
-    durationMs: number;
-    triggeredBy: string | null;
-  }): Promise<void> {
-    try {
-      await this.db.insert(channelSyncLog).values({
-        productId: entry.productId,
-        productVariantId: entry.productVariantId,
-        channelId: entry.channelId,
-        channelFeedId: entry.channelFeedId,
-        atpBase: entry.atpBase,
-        pushedQty: entry.pushedQty,
-        previousQty: entry.previousQty,
-        status: entry.status,
-        errorMessage: entry.errorMessage ?? null,
-        responseCode: entry.responseCode ?? null,
-        durationMs: entry.durationMs,
-        triggeredBy: entry.triggeredBy,
-      });
-    } catch (err: any) {
-      // Don't let logging failures break the sync
-      console.warn(`[ChannelSync] Failed to write sync log: ${err.message}`);
-    }
   }
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+}
+
+function hasSetIntersection(a: ReadonlySet<number>, b: ReadonlySet<number>): boolean {
+  const [smaller, larger] = a.size <= b.size ? [a, b] : [b, a];
+  for (const value of smaller) {
+    if (larger.has(value)) return true;
+  }
+  return false;
 }
 
 function legacyResultFromOrchestrator(productId: number, rows: readonly InventorySyncResult[]): SyncResult {
@@ -733,22 +590,13 @@ function legacyResultFromOrchestrator(productId: number, rows: readonly Inventor
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Check if two sets share at least one element */
-function hasOverlap(a: Set<number>, b: Set<number>): boolean {
-  const [smaller, larger] = a.size <= b.size ? [a, b] : [b, a];
-  for (const v of smaller) {
-    if (larger.has(v)) return true;
-  }
-  return false;
-}
-
-// ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
 
-export function createChannelSyncService(db: any, atpService: any) {
-  return new ChannelSyncService(db, atpService);
+export function createChannelSyncService(
+  db: any,
+  atpService: any,
+  identityServiceFactory?: (db: DrizzleDb) => FeedDiscoveryIdentityPort,
+) {
+  return new ChannelSyncService(db, atpService, identityServiceFactory);
 }
