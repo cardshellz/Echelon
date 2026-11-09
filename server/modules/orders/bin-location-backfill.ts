@@ -35,6 +35,7 @@ export async function backfillOpenOrderItemBinAssignment(params: {
   sku?: string | null;
   locationCode: string | null | undefined;
   zone?: string | null;
+  warehouseId?: number | null;
 }, tx: ExecutorLike = db): Promise<number> {
   try {
     const code = (params.locationCode || "").trim().toUpperCase();
@@ -47,6 +48,7 @@ export async function backfillOpenOrderItemBinAssignment(params: {
       sku,
       locationCode: code,
       zone,
+      ...(params.warehouseId !== undefined ? { warehouseId: params.warehouseId } : {}),
     });
     if (updated > 0) {
       console.log(

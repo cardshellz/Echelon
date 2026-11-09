@@ -23,7 +23,9 @@ import type {
   ProductLocation, InsertProductLocation, UpdateProductLocation, EchelonSetting
 } from "../../../storage/base";
 import {
+  assertPickFaceAssignmentEligible,
   normalizeLocationInput,
+  normalizeLocationPatchInput,
   validateWarehouseLocationIntegrity,
 } from "../location-integrity";
 
@@ -185,10 +187,10 @@ export async function createWarehouseLocation(location: InsertWarehouseLocation 
 }
 
 export async function updateWarehouseLocation(id: number, updates: Partial<Omit<InsertWarehouseLocation, 'code'>>, tx: Tx = db): Promise<WarehouseLocation | null> {
+  const normalizedUpdates = normalizeLocationPatchInput(updates);
   const existing = await getWarehouseLocationById(id, tx);
   if (!existing) return null;
   
-  const normalizedUpdates = normalizeLocationInput(updates);
   const merged = { ...existing, ...normalizedUpdates };
   const newCode = generateLocationCode(merged as any);
   validateWarehouseLocationIntegrity({ ...merged, code: newCode });
@@ -368,6 +370,7 @@ export async function setPrimaryLocation(productLocationId: number, tx: Tx = db)
 }
 
 export async function createProductLocation(location: InsertProductLocation, tx: Tx = db): Promise<ProductLocation> {
+  let targetWarehouseId: number | null = null;
   if (location.warehouseLocationId) {
     const [loc] = await tx.select({
       code: warehouseLocations.code,
@@ -375,22 +378,41 @@ export async function createProductLocation(location: InsertProductLocation, tx:
       locationType: warehouseLocations.locationType,
       isPickable: warehouseLocations.isPickable,
       isActive: warehouseLocations.isActive,
+      cycleCountFreezeId: warehouseLocations.cycleCountFreezeId,
     }).from(warehouseLocations).where(eq(warehouseLocations.id, location.warehouseLocationId)).limit(1);
     if (!loc) throw new Error(`Warehouse location ${location.warehouseLocationId} not found`);
-    if (loc.isActive !== 1) throw new Error(`Location ${loc.code} is inactive - cannot assign products`);
-    if (loc.warehouseId == null) throw new Error(`Location ${loc.code} is not assigned to a warehouse - cannot assign products`);
-    if (loc.locationType !== "pick" || loc.isPickable !== 1) throw new Error(`Location ${loc.code} is not a pick face - cannot assign products`);
+    assertPickFaceAssignmentEligible(loc);
+    targetWarehouseId = loc.warehouseId;
   }
   const result = await tx.insert(productLocations).values({
     ...location, sku: location.sku?.toUpperCase() || null, location: location.location.toUpperCase(), zone: location.zone.toUpperCase(),
   }).returning();
   if (result[0]?.status === "active") {
-    await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
+    await backfillOpenOrderItemBinAssignment({
+      sku: result[0]?.sku,
+      locationCode: result[0]?.location,
+      zone: result[0]?.zone,
+      warehouseId: targetWarehouseId,
+    });
   }
   return result[0];
 }
 
 export async function updateProductLocation(id: number, location: UpdateProductLocation, tx: Tx = db): Promise<ProductLocation | undefined> {
+  let targetWarehouseId: number | null | undefined = undefined;
+  if (location.warehouseLocationId != null) {
+    const [loc] = await tx.select({
+      code: warehouseLocations.code,
+      warehouseId: warehouseLocations.warehouseId,
+      locationType: warehouseLocations.locationType,
+      isPickable: warehouseLocations.isPickable,
+      isActive: warehouseLocations.isActive,
+      cycleCountFreezeId: warehouseLocations.cycleCountFreezeId,
+    }).from(warehouseLocations).where(eq(warehouseLocations.id, location.warehouseLocationId)).limit(1);
+    if (!loc) throw new Error(`Warehouse location ${location.warehouseLocationId} not found`);
+    assertPickFaceAssignmentEligible(loc);
+    targetWarehouseId = loc.warehouseId;
+  }
   const updates: any = { ...location };
   if (updates.sku) updates.sku = updates.sku.toUpperCase();
   if (updates.location) updates.location = updates.location.toUpperCase();
@@ -400,7 +422,12 @@ export async function updateProductLocation(id: number, location: UpdateProductL
   const result = await tx.update(productLocations).set(updates).where(eq(productLocations.id, id)).returning();
   // Bin moved (or row re-activated at a bin): stamp still-unassigned open items.
   if (result[0] && (updates.location || updates.warehouseLocationId || updates.status === "active")) {
-    await backfillOpenOrderItemBinAssignment({ sku: result[0]?.sku, locationCode: result[0]?.location, zone: result[0]?.zone });
+    await backfillOpenOrderItemBinAssignment({
+      sku: result[0]?.sku,
+      locationCode: result[0]?.location,
+      zone: result[0]?.zone,
+      ...(targetWarehouseId !== undefined ? { warehouseId: targetWarehouseId } : {}),
+    });
   }
   return result[0];
 }
@@ -561,8 +588,43 @@ export async function hasProductsAssignedToLocation(warehouseLocationId: number,
 }
 
 export async function bulkReassignProducts(sourceLocationIds: number[], targetLocationId: number, targetCode: string, targetZone: string, tx: Tx = db): Promise<number> {
-  const result = await tx.update(productLocations).set({ warehouseLocationId: targetLocationId, location: targetCode, zone: targetZone }).where(inArray(productLocations.warehouseLocationId, sourceLocationIds));
-  return result.rowCount || 0;
+  if (sourceLocationIds.length === 0) return 0;
+  const targetLocation = await getWarehouseLocationById(targetLocationId, tx);
+  if (!targetLocation) {
+    throw new Error(`Warehouse location ${targetLocationId} not found`);
+  }
+  assertPickFaceAssignmentEligible(targetLocation);
+
+  const normalizedCode = (targetLocation.code || targetCode).toUpperCase();
+  const normalizedZone = (targetLocation.zone || targetZone || "U").toUpperCase();
+  const updatedRows = await tx
+    .update(productLocations)
+    .set({
+      warehouseLocationId: targetLocationId,
+      location: normalizedCode,
+      zone: normalizedZone,
+      updatedAt: new Date(),
+    })
+    .where(inArray(productLocations.warehouseLocationId, sourceLocationIds))
+    .returning();
+
+  const activeSkus: string[] = Array.from(
+    new Set<string>(
+      updatedRows
+        .filter((row: ProductLocation) => row.status === "active" && row.sku)
+        .map((row: ProductLocation) => row.sku!.toUpperCase()),
+    ),
+  );
+  for (const sku of activeSkus) {
+    await backfillOpenOrderItemBinAssignment({
+      sku,
+      locationCode: normalizedCode,
+      zone: normalizedZone,
+      warehouseId: targetLocation.warehouseId,
+    });
+  }
+
+  return updatedRows.length;
 }
 
 export async function getLocationInventoryDetail(warehouseLocationId: number, tx: Tx = db): Promise<any[]> {
