@@ -1596,7 +1596,7 @@ export class InventoryUseCases {
           variantQtyDelta: 0,
           variantQtyBefore: level.variantQty,
           variantQtyAfter: level.variantQty,
-          reservedQtyDelta: qtyToReserve,
+          reservedQtyDelta: params.qty - openReservedQty,
           sourceState: "on_hand",
           targetState: "committed",
           orderId: params.orderId,
