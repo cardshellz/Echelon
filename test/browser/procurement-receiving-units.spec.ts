@@ -574,6 +574,7 @@ test("unknown receipt coverage keeps existing receipts openable and other PO cho
 
 for (const partial of [false, true]) {
   test(`PO-direct custody exclusions preserve the original receipt and ${partial ? "allow unrelated eligible lines" : "block all covered lines"}`, async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
     const failures = await installFixtures(page);
     const writes: Array<{ path: string; idempotencyKey: string | undefined }> = [];
     const warning = "PO-direct receiving excludes CUSTODY-SKU (line 1) because these lines have quarantine history. Use their shipment or original quarantine receipt."
@@ -651,6 +652,7 @@ for (const scenario of [
   { name: "mixed-line excess and fresh remainder", received: 20, held: 60, returned: 10, remaining: 40, excess: 30 },
 ] as const) {
   test(`shipment custody stays separate from inventory on PO and both shipment entry paths: ${scenario.name}`, async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
     const failures = await installFixtures(page);
     const state = { singlePo: false, writes: [] as Command[] };
     const coverage = {

@@ -284,4 +284,5 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/catalog/__tests__/integration/product-category-update.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-sales-status.integration.test.ts",
   "server/modules/catalog-export/__tests__/integration/postgres-catalog-export.repository.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/inventory-availability-claim-lineage.integration.test.ts",
 ]);
