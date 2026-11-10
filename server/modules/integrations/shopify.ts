@@ -61,14 +61,29 @@ export interface ShopifyProductsResponse {
 
 export const SHOPIFY_REQUEST_TIMEOUT_MS = 30_000;
 export const MAX_SHOPIFY_RATE_LIMIT_RETRIES = 5;
+export const MAX_SHOPIFY_RETRY_AFTER_MS = 10_000;
 export const MAX_SHOPIFY_PAGINATION_PAGES = 200;
 
 export interface ShopifyRequestOptions {
   timeoutMs?: number;
   maxRetries?: number;
   retryDelayMs?: number;
+  maxRetryAfterMs?: number;
   maxPages?: number;
   fetchImpl?: typeof fetch;
+}
+
+export function resolveShopifyRetryDelayMs(
+  retryAfterHeader: string | null | undefined,
+  fallbackDelayMs: number,
+  maxRetryAfterMs: number = MAX_SHOPIFY_RETRY_AFTER_MS,
+): number {
+  if (!retryAfterHeader) return fallbackDelayMs;
+  const parsedSeconds = Number(retryAfterHeader.trim());
+  if (Number.isFinite(parsedSeconds) && parsedSeconds > 0) {
+    return Math.min(Math.ceil(parsedSeconds * 1000), maxRetryAfterMs);
+  }
+  return fallbackDelayMs;
 }
 
 export function getShopifyConfig() {
@@ -109,7 +124,12 @@ export async function fetchShopifyWithRetry(
       if (attempt >= maxRetries) {
         throw new Error(`Shopify API rate limit exceeded after ${maxRetries} retries (429)`);
       }
-      await delay(retryDelayMs);
+      const waitMs = resolveShopifyRetryDelayMs(
+        response.headers?.get?.("Retry-After"),
+        retryDelayMs,
+        options.maxRetryAfterMs ?? MAX_SHOPIFY_RETRY_AFTER_MS,
+      );
+      await delay(waitMs);
       continue;
     }
 
