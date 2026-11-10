@@ -862,69 +862,79 @@ class OrderCombiningService {
   // ---- Uncombine ----
 
   async uncombineOrder(orderId: number): Promise<UncombineResult> {
-    const orderResult: Order[] = await this.db
-      .select()
-      .from(orders)
-      .where(eq(orders.id, orderId))
-      .limit(1);
+    const runInTx = typeof (this.db as any).transaction === "function"
+      ? (fn: (tx: any) => Promise<UncombineResult>) => this.db.transaction(fn)
+      : (fn: (tx: any) => Promise<UncombineResult>) => fn(this.db);
 
-    if (!orderResult.length) {
-      throw new CombineError("Order not found", 404);
-    }
+    return runInTx(async (tx: any) => {
+      const orderResult: Order[] = await tx
+        .select()
+        .from(orders)
+        .where(eq(orders.id, orderId))
+        .limit(1);
 
-    if (!orderResult[0].combinedGroupId) {
-      throw new CombineError("Order is not in a combined group", 400);
-    }
-
-    const groupId = orderResult[0].combinedGroupId;
-    const removedRole = orderResult[0].combinedRole;
-
-    // Remove order from group
-    await this.db
-      .update(orders)
-      .set({ combinedGroupId: null, combinedRole: null })
-      .where(eq(orders.id, orderId));
-
-    // Check remaining
-    const remaining: Order[] = await this.db
-      .select()
-      .from(orders)
-      .where(eq(orders.combinedGroupId, groupId));
-
-    if (remaining.length < 2) {
-      // Dissolve the group
-      for (const o of remaining) {
-        await this.db
-          .update(orders)
-          .set({ combinedGroupId: null, combinedRole: null })
-          .where(eq(orders.id, o.id));
+      if (!orderResult.length) {
+        throw new CombineError("Order not found", 404);
       }
-      await this.db
-        .delete(combinedOrderGroups)
-        .where(eq(combinedOrderGroups.id, groupId));
-      return { dissolved: true, orderId };
-    }
 
-    // Update group counts
-    await this.db
-      .update(combinedOrderGroups)
-      .set({
-        orderCount: remaining.length,
-        totalItems: remaining.reduce((sum, o) => sum + (o.itemCount || 0), 0),
-        totalUnits: remaining.reduce((sum, o) => sum + (o.unitCount || 0), 0),
-        updatedAt: new Date(),
-      })
-      .where(eq(combinedOrderGroups.id, groupId));
+      if (orderResult[0].warehouseStatus === "shipped" || orderResult[0].warehouseStatus === "cancelled") {
+        throw new CombineError(`Cannot uncombine order in '${orderResult[0].warehouseStatus}' status`, 400);
+      }
 
-    // If the parent was removed, promote first remaining
-    if (removedRole === "parent") {
-      await this.db
+      if (!orderResult[0].combinedGroupId) {
+        throw new CombineError("Order is not in a combined group", 400);
+      }
+
+      const groupId = orderResult[0].combinedGroupId;
+      const removedRole = orderResult[0].combinedRole;
+
+      // Remove order from group
+      await tx
         .update(orders)
-        .set({ combinedRole: "parent" })
-        .where(eq(orders.id, remaining[0].id));
-    }
+        .set({ combinedGroupId: null, combinedRole: null })
+        .where(eq(orders.id, orderId));
 
-    return { dissolved: false, orderId, remainingCount: remaining.length };
+      // Check remaining
+      const remaining: Order[] = await tx
+        .select()
+        .from(orders)
+        .where(eq(orders.combinedGroupId, groupId));
+
+      if (remaining.length < 2) {
+        // Dissolve the group
+        for (const o of remaining) {
+          await tx
+            .update(orders)
+            .set({ combinedGroupId: null, combinedRole: null })
+            .where(eq(orders.id, o.id));
+        }
+        await tx
+          .delete(combinedOrderGroups)
+          .where(eq(combinedOrderGroups.id, groupId));
+        return { dissolved: true, orderId };
+      }
+
+      // Update group counts
+      await tx
+        .update(combinedOrderGroups)
+        .set({
+          orderCount: remaining.length,
+          totalItems: remaining.reduce((sum, o) => sum + (o.itemCount || 0), 0),
+          totalUnits: remaining.reduce((sum, o) => sum + (o.unitCount || 0), 0),
+          updatedAt: new Date(),
+        })
+        .where(eq(combinedOrderGroups.id, groupId));
+
+      // If the parent was removed, promote first remaining
+      if (removedRole === "parent") {
+        await tx
+          .update(orders)
+          .set({ combinedRole: "parent" })
+          .where(eq(orders.id, remaining[0].id));
+      }
+
+      return { dissolved: false, orderId, remainingCount: remaining.length };
+    });
   }
 
   // ---- Active groups ----

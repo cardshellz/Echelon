@@ -83,10 +83,13 @@ export function createPackageAllocationLabelCommercialWorkflow(dependencies: {
                 const exactLabelId = Number(shippingProviderLabelId);
                 if (!Number.isSafeInteger(exactLabelId) || exactLabelId <= 0
                   || String(exactLabelId) !== String(shippingProviderLabelId)) return null;
-                const locked = await ledger.withSerializableTransaction((transaction) =>
-                  transaction.lockAuthorityReadinessPackages([exactLabelId]));
-                if (locked.length !== 1) return null;
-                const persistedEvidence = locked[0].persistedEvidence;
+                // Read initial contents without taking a single-label lock ahead
+                // of bootstrap's canonical Group -> Source -> Labels(sorted) lock
+                // hierarchy; persistDiscovered locks all selected labels in order
+                // inside this same SERIALIZABLE transaction.
+                const loaded = await ledger.readAuthorityReadinessPackages([exactLabelId]);
+                if (loaded.length !== 1) return null;
+                const persistedEvidence = loaded[0].persistedEvidence;
                 const adapted = adaptPersistedDeclaredPackageLifecycleEvidence(persistedEvidence);
                 const projected = projectPersistedDeclaredPackageLifecycleShadow(persistedEvidence);
                 if (adapted.outcome !== "adapted" || projected.outcome !== "projected") return null;
