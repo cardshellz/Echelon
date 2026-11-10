@@ -16,8 +16,12 @@ export const productDefinitionReviewSchema = z.object({
   /** Destinations whose listing is not safe to publish. They do not block the
    * change; their stock stays frozen until the listing is fixed. */
   skippedDestinations: z.array(z.string()).optional(),
+  /** Non-blocking facts the operator must see, e.g. the current rule no
+   * longer matches the catalog and its figures are unavailable. */
+  notices: z.array(z.string()).optional(),
+  /** current is null when the currently approved rule cannot be evaluated. */
   atp: z.array(z.object({ productId: id, variantId: id, sku: z.string().nullable(),
-    warehouseId: id, warehouseName: z.string(), current: quantity, proposed: quantity,
+    warehouseId: id, warehouseName: z.string(), current: quantity.nullable(), proposed: quantity,
   }).strict()).max(100000),
   channels: z.array(z.object({ productId: id, targetId: id, channelName: z.string(),
     variantId: id, sku: z.string().nullable(), current: quantity.nullable(), proposed: quantity,

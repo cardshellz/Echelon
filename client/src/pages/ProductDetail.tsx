@@ -4,6 +4,7 @@ import { InventoryTrackingHistory } from "@/components/catalog/InventoryTracking
 import { ShopifyProductConnectionActions } from "@/components/catalog/ShopifyProductConnection";
 import { InventoryProductSyncButton } from "@/features/channel-inventory/components/InventoryProductSync";
 import { ProductImageGallery } from "@/components/catalog/ProductImageGallery";
+import { ProductMergeDialog } from "@/components/catalog/ProductMergeDialog";
 import { invalidateCatalogImages } from "@/lib/catalog-image-queries";
 import { saveProductAssetScope, type ProductAssetScopeAttempt } from "@/lib/product-asset-scope";
 import type { CatalogGalleryAsset, ReorderProductAssets } from "@shared/catalog/product-assets";
@@ -54,6 +55,7 @@ import {
   Download,
   ExternalLink,
   Copy,
+  GitMerge,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -1775,6 +1777,9 @@ export default function ProductDetail() {
     },
   });
 
+  // --- Merge this duplicate product into another ---
+  const [mergeOpen, setMergeOpen] = useState(false);
+
   // --- Duplicate product (prefilled draft) ---
   const [duplicateOpen, setDuplicateOpen] = useState(false);
   const [dupName, setDupName] = useState("");
@@ -2681,6 +2686,18 @@ export default function ProductDetail() {
             <Copy className="h-4 w-4 mr-2" />
             Duplicate
           </Button>
+          {product.isActive && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="min-h-[44px]"
+              onClick={() => setMergeOpen(true)}
+              data-testid="btn-merge-product"
+            >
+              <GitMerge className="h-4 w-4 mr-2" />
+              Merge into…
+            </Button>
+          )}
           {product.isActive ? (
             <Button
               variant="outline"
@@ -2737,6 +2754,18 @@ export default function ProductDetail() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {mergeOpen && (
+        <ProductMergeDialog
+          product={{ id: product.id, sku: product.sku ?? null, name: product.name }}
+          onClose={() => setMergeOpen(false)}
+          onMerged={(targetProductId) => {
+            setMergeOpen(false);
+            queryClient.invalidateQueries();
+            setLocation(`/products/${targetProductId}`);
+          }}
+        />
+      )}
 
       {/* Duplicate product dialog */}
       <Dialog open={duplicateOpen} onOpenChange={setDuplicateOpen}>

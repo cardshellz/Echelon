@@ -114,6 +114,7 @@ async function captureSafetyReview(client: PoolClient, selection: SafetyDefiniti
   const content = { selection, authorityRevision: authority.revision, activationRunId: authority.activation_run_id,
     previousPolicy: previous ? { id: previous.id, definitionHash: previous.definition_hash, value: policyValue(previous) } : null,
     proposedPolicy: policyValue(draft), affectedProductIds, ready: impact.blockers.length === 0,
-    blockers: impact.blockers, skippedDestinations: impact.skippedDestinations, atp: impact.atp, channels: impact.channels };
+    blockers: impact.blockers, skippedDestinations: impact.skippedDestinations,
+    ...(impact.notices.length > 0 ? { notices: impact.notices } : {}), atp: impact.atp, channels: impact.channels };
   return safetyDefinitionReviewSchema.parse({ ...content, reviewHash: inventoryCutoverEvidenceHash({ content, fingerprints: impact.fingerprints }) });
 }

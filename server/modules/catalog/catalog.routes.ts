@@ -3,6 +3,7 @@ import type { Express, Response } from "express";
 import { sendInventoryQuantityError, validateInventoryCommandKey } from "../inventory/interfaces/quantity-command.middleware";
 import { CatalogInventoryCommandError } from "./application/catalog-inventory-command.service";
 import { createCatalogInventoryCommandService } from "./infrastructure/catalog-inventory-command.repository";
+import { renameDerivedVariantSkus } from "./application/product-sku-rename";
 import { db, pool } from "../../db";
 import { and, asc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import {
@@ -48,6 +49,7 @@ import {
 } from "./inventory-strategy-policy";
 import { updateProductInventoryTracking, InventoryTrackingPolicyError } from "./inventory-tracking-policy.repository";
 import { registerBulkInventoryTrackingRoutes } from "./bulk-inventory-tracking.routes";
+import { registerProductMergeRoutes } from "./product-merge.routes";
 import { registerInventoryTrackingHistoryRoutes } from "./inventory-tracking-history.routes";
 import { ProductAssetError } from "./product-asset-errors";
 import { registerProductAssetRoutes } from "./product-asset.routes";
@@ -406,6 +408,7 @@ export async function registerProductRoutes(app: Express) {
   registerShopifyProductMappingReconciliationRoutes(app);
   registerShopifyProductConnectionRoutes(app);
   registerBulkInventoryTrackingRoutes(app);
+  registerProductMergeRoutes(app);
   registerInventoryTrackingHistoryRoutes(app);
   registerProductAssetRoutes(app);
   registerCatalogPublicImageRoutes(app, (assetId, hash) => readPublicCatalogImage(pool, assetId, hash));
@@ -1194,44 +1197,10 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           return { product: null, renamedVariants: 0, renamedFrom: null as string | null };
         }
 
-        let renamedVariants = 0;
         const lockedOldSku = currentProduct.sku ?? null;
-        if (newProductSku && lockedOldSku && newProductSku !== lockedOldSku) {
-          const productVariantsList = await storage.getProductVariantsByProductId(id, tx);
-          for (const variant of productVariantsList) {
-            if (!variant.sku) continue;
-
-            let newVariantSku: string;
-            if (variant.sku === lockedOldSku) {
-              newVariantSku = newProductSku;
-            } else if (variant.sku.startsWith(lockedOldSku + "-")) {
-              newVariantSku = newProductSku + variant.sku.slice(lockedOldSku.length);
-            } else {
-              continue;
-            }
-
-            const oldVariantSku = variant.sku;
-            if (newVariantSku === oldVariantSku) continue;
-            if (newVariantSku.length > 100) {
-              throw Object.assign(new Error(`Derived variant SKU exceeds 100 characters: ${newVariantSku}`), {
-                statusCode: 400,
-              });
-            }
-
-            const updatedVariant = await storage.updateProductVariant(variant.id, { sku: newVariantSku }, tx);
-            if (!updatedVariant) {
-              throw new Error(`Variant ${variant.id} disappeared during SKU rename`);
-            }
-            await storage.cascadeOperationalSkuRename(variant.id, oldVariantSku, newVariantSku, tx);
-            await synchronizeProcurementSkuReferences({
-              productVariantId: variant.id,
-              oldSku: oldVariantSku,
-              newSku: newVariantSku,
-              actor,
-            }, { executor: tx });
-            renamedVariants++;
-          }
-        }
+        const renamedVariants = await renameDerivedVariantSkus(tx, storage, {
+          productId: id, oldProductSku: lockedOldSku, newProductSku: newProductSku ?? null, actor,
+        });
 
         if ("shippingGroupId" in normalizedUpdates) {
           const syncResult = await enqueueShippingGroupMetafields(tx, [id]);

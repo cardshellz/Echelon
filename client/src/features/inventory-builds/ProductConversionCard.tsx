@@ -14,7 +14,7 @@ import { ProductRecipeRules } from "./ProductRecipeRules";
 import { INVENTORY_BEHAVIORS } from "@shared/inventory/inventory-behavior";
 import { ProductDefinitionReview } from "./ProductDefinitionReview";
 import {
-  buildPackageLadder, updatePackageLadderDirection, type PackageDirection,
+  buildPackageLadder, STALE_SIZE_ISSUE, staleLadderUnitRefreshes, updatePackageLadderDirection, type PackageDirection,
 } from "./package-conversion-ladder";
 import {
   beginPackageConversionEdit, buildPackageConversionCommand, loadProductConversions,
@@ -158,7 +158,10 @@ function AuthorizedConversionCard({ productId, enabled, canEdit }: Props & { can
   const model = edit ? view?.draftModel ?? (view ? verifiedActiveModel(view) : null)
     : view ? verifiedActiveModel(view) : null;
   const paths = edit?.paths ?? (model ? prefillPathsFromModel(model, 1).paths : []);
-  const ladder = buildPackageLadder(view?.variants ?? [], paths);
+  // Read-only view flags steps whose package size changed after approval;
+  // the edit view has already recalculated them (shown in the notice below).
+  const staleRefreshes = !edit && view && model ? staleLadderUnitRefreshes(view.variants, model) : [];
+  const ladder = buildPackageLadder(view?.variants ?? [], paths, staleRefreshes);
   const issues = view ? packageConversionEditIssues(view) : [];
   const behavior = edit?.inventoryBehavior ?? (model ? modelInventoryBehavior(model) : null);
   const hasUnsavedChanges = edit !== null && packageConversionHasChanges(edit);
@@ -235,7 +238,7 @@ function AuthorizedConversionCard({ productId, enabled, canEdit }: Props & { can
                   <p className="text-xs text-muted-foreground">{row.upper.unitsPerVariant} units / package</p></div>
               </div>
               <p className="my-3 break-words text-sm font-medium">{row.equation}</p>
-              {row.issue ? <p className="text-sm text-amber-800 dark:text-amber-300">{row.issue} Review in Detailed rules.</p>
+              {row.issue ? <p className="text-sm text-amber-800 dark:text-amber-300">{row.issue}{row.issue === STALE_SIZE_ISSUE ? "" : " Review in Detailed rules."}</p>
                 : !canEdit ? <Badge variant="secondary">{DIRECTIONS.find(direction => direction.value === row.direction)?.label}</Badge>
                 : <fieldset disabled={!edit || busy}>
                   <legend className="sr-only">Allowed directions for {row.lower.sku ?? row.lower.name} and {row.upper.sku ?? row.upper.name}</legend>
@@ -287,6 +290,15 @@ function AuthorizedConversionCard({ productId, enabled, canEdit }: Props & { can
             </div>}
         </>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        {edit && edit.unitRefreshes.length > 0 && <div role="status" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm dark:bg-amber-950/30" data-testid="conversion-unit-refreshes">
+          <p className="font-medium">Updated for new package sizes</p>
+          <ul className="mt-1 list-disc space-y-1 pl-5">{edit.unitRefreshes.map(refresh => (
+            <li key={`${refresh.sourceVariantId}:${refresh.destinationVariantId}`}>
+              {refresh.sourceLabel} → {refresh.destinationLabel}: was {refresh.before.inputQty} → {refresh.before.outputQty}
+              {" "}(at {refresh.before.sourceUnitsPerVariant} / {refresh.before.destinationUnitsPerVariant} units), now {refresh.after.inputQty} → {refresh.after.outputQty}
+            </li>))}</ul>
+          <p className="mt-1 text-muted-foreground">Save the draft, then review and apply it to make this live.</p>
+        </div>}
         {message && <p role="status" className="text-sm text-green-700 dark:text-green-300">{message}</p>}
         {view && (!edit || (!hasUnsavedChanges && view.draftModel)) && <ProductDefinitionReview key={productId} view={view}
           onApplyBlockedChange={setApplyBlocked} onApplied={() => setEdit(null)} />}
