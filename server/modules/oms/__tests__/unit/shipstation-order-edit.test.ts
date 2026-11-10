@@ -37,6 +37,7 @@ function setup() {
     provider_order_id: 55 as number | null,
     order_edit_operation_id: OPERATION,
     status: "queued",
+    source: "echelon_sync", order_number: "#100",
     warehouse_status: "ready",
     on_hold: 0,
     held: false,
@@ -66,6 +67,7 @@ function setup() {
     }
     if (query.sql.includes("SELECT provider_order_id,was_held"))
       return { rows: baseline ? [baseline] : [] };
+    if (query.sql.includes("SELECT osi.id,osi.qty,osi.shipment_id")) return { rows: [] };
     if (query.sql.includes("SELECT osi.id,osi.qty"))
       return {
         rows: [
@@ -109,7 +111,7 @@ function setup() {
       else if (path === "/orders")
         result = {
           orders: [
-            live,
+            { ...live, ...(incorrectReadback ? { items: [{lineItemKey:"wms-item-31",quantity:99}] } : {}) },
             ...(split
               ? [
                   {
@@ -210,6 +212,13 @@ afterEach(() => {
 });
 
 describe("ShipStation order-edit ownership and readback", () => {
+  it("verifies an unchanged pre-existing provider hold once without redundant per-ID lookups or writes", async () => {
+    const f=setup();f.alreadyHeld();
+    await f.run("hold");
+    expect(f.calls.map(call=>call.path)).toEqual(["/orders","/shipments"]);
+    expect(f.calls.every(call=>call.body===null)).toBe(true);
+    expect(f.baseline?.was_held).toBe(true);
+  });
   it("verifies a retired provider job after the owned warehouse header resumes without writing to ShipStation", async () => {
     const f = setup();
     await f.run("hold");
@@ -262,7 +271,7 @@ describe("ShipStation order-edit ownership and readback", () => {
     await f.run("verify_cancelled");
     expect(f.baseline).toBeUndefined();
     expect(f.calls.every(call => call.body === null)).toBe(true);
-    expect(f.calls.map(call => call.path)).toEqual(["/orders/55", "/shipments", "/orders"]);
+    expect(f.calls.map(call => call.path)).toEqual(["/orders", "/shipments"]);
   });
   it("does not treat a missing provider identity as proof of cancellation", async () => {
     const f = setup();
@@ -357,9 +366,8 @@ describe("ShipStation order-edit ownership and readback", () => {
     const prior = f.calls.length;
     await f.run("verify_shipped");
     expect(f.calls.slice(prior).map((call) => call.path)).toEqual([
-      "/orders/55",
-      "/shipments",
       "/orders",
+      "/shipments",
     ]);
     expect(f.calls.slice(prior).every((call) => call.body === null)).toBe(true);
     expect(f.live.orderStatus).toBe("shipped");

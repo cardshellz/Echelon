@@ -23,6 +23,8 @@ function ready() {
     cancelled: false,
     has_pick_work: false,
     has_label: false,
+    has_provider_shipment: false,
+    has_unshipped_partition: false,
   };
 }
 function fixture() {
@@ -52,6 +54,7 @@ function fixture() {
   const commands: string[] = [];
   const query = vi.fn(async (text: string, values: unknown[] = []) => {
     commands.push(text);
+    if (text.includes("SELECT DISTINCT shipment.id FROM oms.order_edit_events")) return {rows:[]};
     if (text.includes("UPDATE oms.order_edit_provider_holds SET released_at="))
       return { rows: [], rowCount: 0 };
     if (text.includes("UPDATE wms.orders SET order_edit_operation_id=NULL")) {
