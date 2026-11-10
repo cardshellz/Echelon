@@ -245,6 +245,45 @@ export function isWaitingForStock(listing: Pick<MarketplaceWaitingForStockListin
     && listing.blockers.includes(MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER);
 }
 
+/**
+ * The code a blocked push item carries, with its blockers joined by ", " as its
+ * error message (dropship-listing-preview.repository.ts insertJobItemForPreview,
+ * and the push worker's settleOutOfStock).
+ */
+export const LISTING_PUSH_PREVIEW_BLOCKED_CODE = "DROPSHIP_LISTING_PREVIEW_BLOCKED";
+
+/** A blocked push item's (or its run target's) blocker codes, read back from its error message; blanks dropped, once each. */
+export function listingPushItemBlockers(errorMessage: string | null): string[] {
+  return [...new Set((errorMessage ?? "").split(",").map((code) => code.trim()).filter((code) => code.length > 0))];
+}
+
+/**
+ * Whether a finished push item (or a run target, by its item) is only waiting
+ * for stock: an eBay item blocked by the preview whose ONE blocker is the
+ * quantity one, on a listing never published (isWaitingForStock). The sweep
+ * lists it by itself when stock returns, so it is not a failure to tell the
+ * vendor about. A size blocked for anything else as well is a real failure:
+ * stock alone would not list it. The same rule as the vendor pages
+ * (client/src/lib/dropship-vendor-labels.ts isVendorWaitingForStock), so the
+ * email never counts what the page calls "Waiting for stock".
+ *
+ * `externalListingId` is the vendor listing's eBay item number. An item with no
+ * vendor listing row has nothing for the sweep to list: callers treat it as not
+ * waiting and do not call this.
+ */
+export function isListingPushItemWaitingForStock(item: {
+  platform: string | null;
+  status: string;
+  errorCode: string | null;
+  errorMessage: string | null;
+  externalListingId: string | null;
+}): boolean {
+  if (item.platform !== "ebay" || item.errorCode !== LISTING_PUSH_PREVIEW_BLOCKED_CODE) return false;
+  const blockers = listingPushItemBlockers(item.errorMessage);
+  return blockers.length === 1
+    && isWaitingForStock({ status: item.status, externalListingId: item.externalListingId, blockers });
+}
+
 /** Why a waiting listing is left alone this tick (each is expected: DEBUG). */
 export type WaitingForStockHold = "not_waiting" | "no_preview" | "still_blocked" | "no_quantity";
 

@@ -1437,7 +1437,8 @@ describe("DropshipListingPushWorkerService: stock gone at push time", () => {
       zeroQuantity,
       ...(input.authority ? { quantityAuthority: async () => input.authority! } : {}),
       clock: { now: () => now },
-      logger: { info: (event) => logs.push(event), warn: (event) => logs.push(event), error: (event) => logs.push(event) },
+      logger: { debug: (event) => logs.push(event), info: (event) => logs.push(event), warn: (event) => logs.push(event),
+        error: (event) => logs.push(event) },
     });
     return { service, repository, marketplacePush, notificationSender, logs, sends, ownSettlements };
   }
@@ -1519,6 +1520,55 @@ describe("DropshipListingPushWorkerService: stock gone at push time", () => {
     expect(context.sends).toHaveLength(1);
     expect(context.repository.zeroInputs).toHaveLength(1);
     expect(replay.items[0]).toMatchObject({ status: "completed" });
+  });
+
+  describe("the failure notice leaves out items only waiting for stock", () => {
+    const failedFetch = (itemId: number, productVariantId: number) => ({
+      ...makeQueuedItem(), itemId, productVariantId, listingId: 100 + itemId, status: "failed",
+      errorCode: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", errorMessage: "eBay listing push failed with HTTP 400.",
+      listing: { ...makeQueuedItem().listing!, listingId: 100 + itemId, productVariantId, status: "failed" },
+    });
+
+    const onEbay = (context: ReturnType<typeof setup>) => {
+      context.repository.job = { ...context.repository.job, platform: "ebay" };
+      context.repository.config = { ...context.repository.config, platform: "ebay" };
+      context.repository.items = context.repository.items.map((item) => ({ ...item,
+        result: { ...item.result, listingIntent: { ...(item.result?.listingIntent as object), platform: "ebay" } } }));
+    };
+
+    it("an eBay job whose only not-listed item waits for stock sends no notice, with a DEBUG line; statuses stay", async () => {
+      const context = setup({ authority: "legacy", live: false });
+      onEbay(context);
+      const result = await run(context);
+      expect(result.items[0]).toMatchObject({ status: "blocked", errorCode: "DROPSHIP_LISTING_PREVIEW_BLOCKED",
+        errorMessage: "marketplace_quantity_unavailable" });
+      expect(result.job.status).toBe("failed");
+      expect(context.notificationSender.sent).toEqual([]);
+      expect(context.logs).toContainEqual(expect.objectContaining({ code: "DROPSHIP_LISTING_PUSH_NOTICE_NOT_NEEDED_WAITING_FOR_STOCK",
+        context: expect.objectContaining({ jobId: 30, waitingForStockCount: 1, outcome: "skipped_waiting_for_stock" }) }));
+    });
+
+    it("a mixed eBay job sends the notice counting and naming only the real failure", async () => {
+      const context = setup({ authority: "legacy", live: false });
+      onEbay(context);
+      context.repository.items.push(failedFetch(2, 102));
+      const result = await run(context);
+      expect(result.items.map((item) => item.status)).toEqual(["blocked", "failed"]);
+      expect(context.notificationSender.sent).toHaveLength(1);
+      const notice = context.notificationSender.sent[0]!;
+      expect(notice.message).toBe("1 of 2 listings could not be sent to your store. First reason: eBay listing push failed with HTTP 400.");
+      expect(notice.payload).toMatchObject({ omittedFailureItemCount: 0, waitingForStockCount: 1,
+        summary: { total: 2, failed: 1, blocked: 1 } });
+      expect((notice.payload as { failedItems: Array<{ itemId: number }> }).failedItems.map((item) => item.itemId)).toEqual([2]);
+    });
+
+    it("keeps counting the stock-only block off eBay (the sweep relists eBay only)", async () => {
+      const context = setup({ authority: "legacy", live: false });
+      await run(context);
+      expect(context.notificationSender.sent).toHaveLength(1);
+      expect(context.notificationSender.sent[0]!.message).toBe(
+        "1 of 1 listing could not be sent to your store. First reason: marketplace_quantity_unavailable");
+    });
   });
 
   it("a requeued item whose 0 already went out sends the same 0 again to the same offer", async () => {
