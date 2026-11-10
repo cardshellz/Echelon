@@ -29,12 +29,17 @@ export type PackageLadder = {
 // Matches create/updateTransformationModelDraftRequestSchema's path limit.
 const MAX_MODEL_PATHS = 500;
 const DIRECTIONS: readonly PackageDirection[] = ["none", "break_down", "build_up", "reversible"];
+export const STALE_SIZE_ISSUE =
+  "A package size changed after this rule was approved. Choose Edit inventory behavior to update it to the new sizes, then review and apply.";
 
 /** A ladder is a projection, never a replacement for the complete directed graph. */
 export function buildPackageLadder(
   variants: readonly TransformationAdminVariant[],
   paths: readonly PathDraft[],
+  /** Paths whose package sizes changed after approval (read-only view only). */
+  staleRefreshes: readonly LadderUnitRefresh[] = [],
 ): PackageLadder {
+  const stalePairs = new Set(staleRefreshes.map((refresh) => pairKey(refresh.sourceVariantId, refresh.destinationVariantId)));
   const issues = catalogIssues(variants);
   if (issues.length > 0) return { rows: [], issues, unmanagedPaths: [...paths] };
 
@@ -47,7 +52,10 @@ export function buildPackageLadder(
     const upper = sorted[index + 1]!;
     const buildUp = deriveLosslessPath(1, lower, upper);
     const pairPaths = paths.filter((path) => isPair(path, lower.id, upper.id));
-    const issue = pairIssue(pairPaths, lower, upper);
+    const issue = pairPaths.length > 0
+      && pairPaths.every((path) => stalePairs.has(pairKey(path.sourceVariantId, path.destinationVariantId)))
+      ? STALE_SIZE_ISSUE
+      : pairIssue(pairPaths, lower, upper);
     // Unsupported pairs remain visible in the full graph, not disguised as None.
     if (issue === null) {
       representedPairs.add(pairKey(lower.id, upper.id));
@@ -134,6 +142,8 @@ export function packageLadderModelEditIssues(
   if (issues.length > 0) return issues;
 
   const byId = new Map(variants.map((variant) => [variant.id, variant]));
+  const refreshable = new Set(staleLadderUnitRefreshes(variants, model)
+    .map((refresh) => pairKey(refresh.sourceVariantId, refresh.destinationVariantId)));
   const pairs = new Set<string>();
   for (const path of model.paths) {
     const identity = pairKey(path.sourceVariantId, path.destinationVariantId);
@@ -147,8 +157,8 @@ export function packageLadderModelEditIssues(
       issues.push(`Path ${identity} does not reference two distinct active variants of this product.`);
       continue;
     }
-    if (source.unitsPerVariant !== path.sourceUnitsPerVariant
-      || destination.unitsPerVariant !== path.destinationUnitsPerVariant) {
+    if (!refreshable.has(identity) && (source.unitsPerVariant !== path.sourceUnitsPerVariant
+      || destination.unitsPerVariant !== path.destinationUnitsPerVariant)) {
       issues.push(`Path ${identity} has catalog unit snapshot drift; the ladder cannot silently refresh it.`);
     }
     if ((path.operationType === "break_pack" && source.unitsPerVariant <= destination.unitsPerVariant)
@@ -163,6 +173,74 @@ export function packageLadderModelEditIssues(
     }
   }
   return issues;
+}
+
+export type LadderUnitRefresh = {
+  sourceVariantId: number;
+  destinationVariantId: number;
+  sourceLabel: string;
+  destinationLabel: string;
+  before: { inputQty: string; outputQty: string; sourceUnitsPerVariant: number; destinationUnitsPerVariant: number };
+  after: { inputQty: string; outputQty: string; operationType: PathDraft["operationType"] };
+};
+
+/**
+ * Package-size changes after a rule was approved leave its paths with stale
+ * unit snapshots (e.g. a case that held 1000 now holds 2000, but the sealed
+ * rule still says "1 case = 50 packs of 20"). A path is safely refreshable
+ * only when it was a plain lossless ladder step at its snapshot sizes and is
+ * still one in the same direction at the current sizes: allowed, no recipe,
+ * pack operation, and its stored ratio is exactly the normalized ratio of the
+ * snapshot units. Custom quantities, recipes, blocked authority and direction
+ * flips are never refreshed. The refresh is shown to the operator and saved
+ * only as a draft that must still be reviewed and applied.
+ */
+export function staleLadderUnitRefreshes(
+  variants: readonly TransformationAdminVariant[],
+  model: TransformationAdminModel | null,
+): LadderUnitRefresh[] {
+  if (model === null || catalogIssues(variants).length > 0) return [];
+  const byId = new Map(variants.map((variant) => [variant.id, variant]));
+  const refreshes: LadderUnitRefresh[] = [];
+  for (const path of model.paths) {
+    const source = byId.get(path.sourceVariantId);
+    const destination = byId.get(path.destinationVariantId);
+    if (!source?.isActive || !destination?.isActive || source.id === destination.id
+      || source.productId !== model.productId || destination.productId !== model.productId) continue;
+    if (path.authorityState !== "allowed" || path.transformationRecipeBindingKey !== null
+      || path.operationType === "directed_conversion") continue;
+    if (source.unitsPerVariant === path.sourceUnitsPerVariant
+      && destination.unitsPerVariant === path.destinationUnitsPerVariant) continue;
+    if (path.sourceUnitsPerVariant === path.destinationUnitsPerVariant
+      || source.unitsPerVariant === destination.unitsPerVariant) continue;
+    const atSnapshot = deriveLosslessPath(0,
+      { ...source, unitsPerVariant: path.sourceUnitsPerVariant },
+      { ...destination, unitsPerVariant: path.destinationUnitsPerVariant });
+    if (atSnapshot.operationType !== path.operationType
+      || atSnapshot.inputQty !== String(path.inputQty) || atSnapshot.outputQty !== String(path.outputQty)) continue;
+    const current = deriveLosslessPath(0, source, destination);
+    if (current.operationType !== path.operationType) continue;
+    refreshes.push({
+      sourceVariantId: source.id,
+      destinationVariantId: destination.id,
+      sourceLabel: variantDisplayName(source),
+      destinationLabel: variantDisplayName(destination),
+      before: { inputQty: String(path.inputQty), outputQty: String(path.outputQty),
+        sourceUnitsPerVariant: path.sourceUnitsPerVariant, destinationUnitsPerVariant: path.destinationUnitsPerVariant },
+      after: { inputQty: current.inputQty, outputQty: current.outputQty, operationType: current.operationType },
+    });
+  }
+  return refreshes;
+}
+
+/** Apply refreshes to editable paths, keeping row identities and order. */
+export function applyLadderUnitRefreshes(paths: readonly PathDraft[], refreshes: readonly LadderUnitRefresh[]): PathDraft[] {
+  const byPair = new Map(refreshes.map((refresh) => [pairKey(refresh.sourceVariantId, refresh.destinationVariantId), refresh]));
+  return paths.map((path) => {
+    const refresh = byPair.get(pairKey(path.sourceVariantId, path.destinationVariantId));
+    return refresh ? { ...path, inputQty: refresh.after.inputQty, outputQty: refresh.after.outputQty,
+      operationType: refresh.after.operationType } : path;
+  });
 }
 
 function catalogIssues(variants: readonly TransformationAdminVariant[]): string[] {
