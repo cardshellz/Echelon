@@ -12,6 +12,7 @@ import type { CustomerAccountOrderSummary } from "@shared/customer-account/custo
 import { CustomerOrderDetails } from "./CustomerOrderDetails";
 import { orderDeliveryLabel } from "./customer-order-progress-presentation";
 import { useOrderPanelPayment } from "./use-order-panel-payment";
+import { customerOrderShippingCutoff } from "./order-edit-unavailability";
 
 export interface CustomerOrderPanelState {
   loading: boolean;
@@ -161,9 +162,12 @@ export function CustomerOrderPanel({
   const paymentLabel = payment.failed ? "Try payment again"
     : payment.processing ? "Payment processing…"
       : payment.busy ? "Opening payment…" : "Pay the difference";
+  const shippingCutoff = customerOrderShippingCutoff({ fulfillment: displayedOrder?.fulfillment, progress,
+    nativeFulfillment: row.dataset.fulfillment });
   const canEdit =
     enabled &&
     !cancelled &&
+    !shippingCutoff &&
     order &&
     order.activeOperationKind !== "cancel_order" &&
     (editing || order.eligibility.editable);
@@ -178,6 +182,7 @@ export function CustomerOrderPanel({
     !cancelled && row.dataset.fulfillment !== "fulfilled";
   const canChangeAddress = Boolean(
     enabled &&
+      !shippingCutoff &&
       addressUrl &&
       order &&
       (order.addressEligibility?.editable ??
@@ -379,7 +384,13 @@ export function CustomerOrderPanel({
                 updateLabel,
                 () => onEdit(order!.omsOrderId),
               )}
-            {state.loading && showChangeActions && (
+            {!cancelled && shippingCutoff && (
+              <div>
+                <button type="button" className="csz-panel-option" disabled aria-describedby="csz-edit-shipping-cutoff">Edit order</button>
+                <p id="csz-edit-shipping-cutoff" className="csz-panel-reason">Your order is already being shipped and can no longer be changed online.</p>
+              </div>
+            )}
+            {state.loading && showChangeActions && !shippingCutoff && (
               <button type="button" className="csz-panel-option" disabled>Edit order</button>
             )}
             {showChangeActions &&

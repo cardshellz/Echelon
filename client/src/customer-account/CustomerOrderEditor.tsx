@@ -26,7 +26,7 @@ import {
   orderEditPaymentReturnStorage,
 } from "./order-edit-payment-return";
 import { orderEditPaymentDestination } from "./order-edit-payment-handoff";
-import { customerOrderEditUnavailable } from "./order-edit-unavailability";
+import { customerOrderEditUnavailable, customerOrderShippingCutoff } from "./order-edit-unavailability";
 
 const closed = new Set<OrderEditOperation["status"]>([
   "completed",
@@ -227,6 +227,7 @@ export function CustomerOrderEditor({
           setOrder(current);
           if (
             !active.commandInProgress &&
+            !customerOrderShippingCutoff(current) &&
             !customerOrderEditUnavailable(active) &&
             orderEditNeedsPreparation(active, Date.now())
           )
@@ -408,7 +409,9 @@ export function CustomerOrderEditor({
     if (onDone) onDone();
     else window.location.assign("/account");
   }
-  if (customerOrderEditUnavailable(operation) || closeAfterAbandon.current)
+  const unsentShippingCutoff = Boolean(order && customerOrderShippingCutoff(order) &&
+    (!operation || (operation.canAbandon && !operation.commandInProgress)));
+  if (customerOrderEditUnavailable(operation) || unsentShippingCutoff || closeAfterAbandon.current)
     return (
       <section className="space-y-4" aria-label="Order changes unavailable">
         <h2>Order {operation?.orderNumber ?? order?.orderNumber}</h2>

@@ -45,6 +45,8 @@ const orderSchema = z.object({
   updated_at: z.unknown().nullable().optional(),
   has_pick_work: z.boolean(),
   has_label: z.boolean(),
+  has_provider_shipment: z.boolean().default(false),
+  has_unshipped_partition: z.boolean().default(false),
 });
 type WarehouseOrder = z.infer<typeof orderSchema>;
 const shipmentSchema = z.object({
@@ -81,7 +83,7 @@ export interface OrderEditWarehouseProvider {
       | "verify_cancelled"
       | "verify_retired"
       | "release_unsubmitted";
-  }): Promise<void>;
+  }): Promise<void | { retiredShipmentIds: number[] }>;
 }
 export interface OrderEditWarehouseInspection {
   editable: boolean;
@@ -736,6 +738,8 @@ export function orderEditWarehouseBlockers(
       reasons.add("Picking has already started.");
     if (row.has_label)
       reasons.add("A shipping label or shipment already exists.");
+    if (row.has_provider_shipment)
+      reasons.add("Your order has already shipped and can no longer be changed online.");
     if (row.combined_group_id !== null)
       reasons.add("Combined warehouse orders require staff review.");
     if (
@@ -813,6 +817,19 @@ export class OrderEditWarehouseGateway {
       wo.order_edit_operation_id, wo.assigned_picker_id, wo.started_at, wo.picked_count, wo.combined_group_id,
       wo.cancelled_at,wo.updated_at,
       (wo.cancelled_at IS NOT NULL) AS cancelled,
+      EXISTS(SELECT 1 FROM wms.outbound_shipments linked
+        JOIN wms.shipping_engine_orders engine ON engine.provider='shipstation'
+          AND engine.provider_order_id=COALESCE(linked.shipstation_order_id::text,
+            CASE WHEN linked.shipping_engine='shipstation' THEN linked.engine_order_ref END)
+        WHERE linked.order_id=wo.id AND engine.provider_status='shipped') AS has_provider_shipment,
+      EXISTS(SELECT 1 FROM wms.outbound_shipments pending
+        LEFT JOIN wms.shipping_engine_orders engine ON engine.provider='shipstation'
+          AND engine.provider_order_id=COALESCE(pending.shipstation_order_id::text,
+            CASE WHEN pending.shipping_engine='shipstation' THEN pending.engine_order_ref END)
+        WHERE pending.order_id=wo.id AND pending.status NOT IN ('shipped','delivered','cancelled','voided')
+          AND engine.provider_status IS DISTINCT FROM 'shipped'
+          AND EXISTS(SELECT 1 FROM wms.outbound_shipment_items osi JOIN wms.order_items oi ON oi.id=osi.order_item_id
+            WHERE osi.shipment_id=pending.id AND osi.qty>0 AND oi.status<>'cancelled')) AS has_unshipped_partition,
       EXISTS(SELECT 1 FROM wms.order_items oi WHERE oi.order_id=wo.id
         AND (oi.picked_quantity<>0 OR oi.fulfilled_quantity<>0 OR oi.status NOT IN ('pending','cancelled'))) AS has_pick_work,
       EXISTS(SELECT 1 FROM wms.outbound_shipments os WHERE os.order_id=wo.id
@@ -904,7 +921,9 @@ export class OrderEditWarehouseGateway {
         status: orders.map((order) => order.warehouse_status).join(", "),
         wmsOrderIds: orders.map((order) => order.id),
         fulfillment: presentCustomerOrderFulfillment(
-          orders.map((order) => order.warehouse_status),
+          orders.map((order) => order.has_provider_shipment
+            ? order.has_unshipped_partition ? "partially_shipped" : "shipped"
+            : order.warehouse_status),
           {
             held: orders.some(
               (order) =>
@@ -978,7 +997,11 @@ export class OrderEditWarehouseGateway {
             readDeferredRefundShipmentIds(client, operationId),
           )
         : [];
-    for (const shipment of shipments) {
+    const retired = new Set<number>();
+    // Real jobs are held/reconciled before verifying deferred manual plans.
+    // A whole-held legacy split may be consolidated by that shipping owner.
+    for (const shipment of [...shipments].sort((a, b) => Number(a.provider_order_id === null) - Number(b.provider_order_id === null) || a.id - b.id)) {
+      if (retired.has(shipment.id)) continue;
       if (shipment.provider_order_id === null && deferred.includes(shipment.id))
         continue;
       // Even an unlinked shipment must pass the provider's push lock: a push
@@ -988,18 +1011,21 @@ export class OrderEditWarehouseGateway {
           "ORDER_EDIT_SHIPPING_UNAVAILABLE",
           "Shipping verification is unavailable; the order remains held.",
         );
-      await this.provider.synchronizeOrderEditShipment({
+      const result = await this.provider.synchronizeOrderEditShipment({
         shipmentId: shipment.id,
         operationId,
         mode,
       });
+      result?.retiredShipmentIds.forEach(id => retired.add(id));
     }
   }
 
   async acquire(omsOrderId: number, operationId: string): Promise<void> {
     const shipments = await this.heldEvidence(omsOrderId, operationId, true);
     await this.providerPhase(shipments, operationId, "hold");
-    await this.assertHeld(omsOrderId, operationId);
+    // Each shipping owner just verified its provider readback under the push
+    // fence. Recheck local ownership, without repeating every remote GET.
+    await this.heldEvidence(omsOrderId, operationId);
   }
   private async stoppedRefundEvidence(
     client: PoolClient,
