@@ -131,7 +131,10 @@ function CorrectionAction({ item, onChanged }: { item: PickCorrection; onChanged
       client.setQueryData<PickCorrection[]>(queryKey, current => (current ?? []).flatMap(row =>
         row.id !== updated.id ? [row] : updated.state === "resolved" ? [] : [updated]));
       onChanged(updated);
-      await client.invalidateQueries({ queryKey: ["/api/picking/queue"] });
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ["/api/picking/queue"] }),
+        client.invalidateQueries({ queryKey: ["picking-queue"] }),
+      ]);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Connection lost. Retry the same command.");
     } finally {

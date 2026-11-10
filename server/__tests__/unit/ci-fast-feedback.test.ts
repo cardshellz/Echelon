@@ -440,6 +440,11 @@ describe("fast CI preserves coverage and required checks", () => {
       "shared/dropship/__tests__/program-finance-definitions.test.ts",
       "client/src/pages/__tests__/dropship-finance-model.test.ts",
       "client/src/pages/__tests__/dropship-finance-panel.test.ts",
+      "client/src/lib/__tests__/picking-command.test.ts",
+      "client/src/pages/__tests__/replen-task-retry-model.test.ts",
+      "server/modules/inventory/__tests__/replenishment-source-empty.test.ts",
+      "server/modules/inventory/__tests__/cycle-count-replen-feedback.test.ts",
+      "server/modules/inventory/__tests__/dedicated-replen-bin.test.ts",
     ]) expect(contracts).toContain(file);
     expect(contracts).toContain("--strict --types node scripts/inventory-cutover-records-*.ts");
     // Step 1 plan S2-5 (TESTS17): the Catalog page's browser stubs and specs are type-checked, every spec they serve named.

@@ -2970,158 +2970,182 @@ export class ReplenishmentUseCases {
   }
 
   async recordSourceEmptyBlocker(params: ReplenSourceEmptyReport): Promise<ReplenTask> {
-    const [existing] = await this.db
-      .select()
-      .from(replenTasks)
-      .where(and(
-        eq(replenTasks.orderItemId, params.orderItemId),
-        eq(replenTasks.blocksShipment, true),
-        eq(replenTasks.exceptionReason, "source_empty"),
-        inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"]),
-      ))
-      .limit(1);
+    const runInTx = typeof (this.db as any).transaction === "function"
+      ? (fn: (tx: any) => Promise<ReplenTask>) => this.db.transaction(fn)
+      : (fn: (tx: any) => Promise<ReplenTask>) => fn(this.db);
 
-    if (existing) {
-      if (!existing.linkedCycleCountId) {
-        const cycleCountId = await this.createSourceEmptyCycleCount({
-          taskId: existing.id,
-          sourceLocationId: existing.fromLocationId,
-          sourceVariantId: existing.sourceProductVariantId ?? params.pickVariantId,
-          productId: existing.productId,
-          warehouseId: existing.warehouseId,
-          orderNumber: params.orderNumber ?? null,
-          sourceLabel: params.sourceLocationCode ?? `location #${existing.fromLocationId}`,
-          userId: params.userId,
-        });
-        if (cycleCountId) {
-          await this.db.update(replenTasks).set({
-            linkedCycleCountId: cycleCountId,
-            notes: `${existing.notes || ""}\nLinked source-empty cycle count #${cycleCountId}`,
-          }).where(eq(replenTasks.id, existing.id));
-          return { ...existing, linkedCycleCountId: cycleCountId } as ReplenTask;
+    const completedTask = await runInTx(async (tx: any) => {
+      if (typeof tx.execute === "function" && Number.isSafeInteger(Number(params.orderItemId))) {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(918421, ${Number(params.orderItemId)})`);
+      }
+
+      const [existing] = await tx
+        .select()
+        .from(replenTasks)
+        .where(and(
+          eq(replenTasks.orderItemId, params.orderItemId),
+          eq(replenTasks.blocksShipment, true),
+          eq(replenTasks.exceptionReason, "source_empty"),
+          inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"]),
+        ))
+        .limit(1);
+
+      if (existing) {
+        if (!existing.linkedCycleCountId) {
+          const cycleCountId = await this.createSourceEmptyCycleCount({
+            db: tx,
+            taskId: existing.id,
+            sourceLocationId: existing.fromLocationId,
+            sourceVariantId: existing.sourceProductVariantId ?? params.pickVariantId,
+            productId: existing.productId,
+            warehouseId: existing.warehouseId,
+            orderNumber: params.orderNumber ?? null,
+            sourceLabel: params.sourceLocationCode ?? `location #${existing.fromLocationId}`,
+            userId: params.userId,
+          });
+          if (cycleCountId) {
+            await tx.update(replenTasks).set({
+              linkedCycleCountId: cycleCountId,
+              notes: `${existing.notes || ""}\nLinked source-empty cycle count #${cycleCountId}`,
+            }).where(eq(replenTasks.id, existing.id));
+            return { ...existing, linkedCycleCountId: cycleCountId } as ReplenTask;
+          }
         }
+        return existing as ReplenTask;
       }
-      return existing as ReplenTask;
-    }
 
-    const [variant] = await this.db
-      .select()
-      .from(productVariants)
-      .where(eq(productVariants.id, params.pickVariantId))
-      .limit(1);
-    if (!variant) {
-      throw new Error(`Product variant ${params.pickVariantId} not found`);
-    }
+      const [variant] = await tx
+        .select()
+        .from(productVariants)
+        .where(eq(productVariants.id, params.pickVariantId))
+        .limit(1);
+      if (!variant) {
+        throw new Error(`Product variant ${params.pickVariantId} not found`);
+      }
 
-    const [pickLocation] = await this.db
-      .select()
-      .from(warehouseLocations)
-      .where(eq(warehouseLocations.id, params.pickLocationId))
-      .limit(1);
-    if (!pickLocation) {
-      throw new Error(`Pick location ${params.pickLocationId} not found`);
-    }
+      const [pickLocation] = await tx
+        .select()
+        .from(warehouseLocations)
+        .where(eq(warehouseLocations.id, params.pickLocationId))
+        .limit(1);
+      if (!pickLocation) {
+        throw new Error(`Pick location ${params.pickLocationId} not found`);
+      }
 
-    const locConfig = await this.loadLocationConfig(params.pickLocationId, params.pickVariantId);
-    const resolved = await this.resolveReplenParams(
-      params.pickVariantId,
-      variant,
-      pickLocation.warehouseId ?? undefined,
-      locConfig,
-    );
-    const rule = await this.findRuleForVariant(params.pickVariantId);
+      const locConfig = await this.loadLocationConfig(params.pickLocationId, params.pickVariantId);
+      const resolved = await this.resolveReplenParams(
+        params.pickVariantId,
+        variant,
+        pickLocation.warehouseId ?? undefined,
+        locConfig,
+      );
+      const rule = await this.findRuleForVariant(params.pickVariantId);
 
-    const sourceVariantId = resolved.sourceVariantId ?? params.pickVariantId;
-    const sourceLocationFromReport = params.sourceLocationCode
-      ? (await this.db
-          .select()
-          .from(warehouseLocations)
-          .where(eq(warehouseLocations.code, params.sourceLocationCode))
-          .limit(1))[0] ?? null
-      : null;
-    const sourceLocation = sourceLocationFromReport ?? await this.findSourceLocation(
-      sourceVariantId,
-      pickLocation.warehouseId ?? undefined,
-      resolved.sourceLocationType,
-      pickLocation.parentLocationId,
-      resolved.sourcePriority,
-    );
-
-    const sourceLabel = sourceLocation?.code ?? params.sourceLocationCode ?? "unknown source";
-    const context: ReplenOrderContext = {
-      orderId: params.orderId,
-      orderItemId: params.orderItemId,
-      orderNumber: params.orderNumber ?? null,
-      blocksShipment: true,
-    };
-
-    const [task] = await this.db
-      .insert(replenTasks)
-      .values({
-        replenRuleId: rule?.id ?? null,
-        fromLocationId: sourceLocation?.id ?? params.pickLocationId,
-        toLocationId: params.pickLocationId,
-        productId: rule?.productId ?? variant.productId ?? null,
-        sourceProductVariantId: sourceVariantId,
-        pickProductVariantId: params.pickVariantId,
-        qtySourceUnits: 0,
-        qtyTargetUnits: 0,
-        qtyCompleted: 0,
-        status: "blocked",
-        priority: resolved.priority,
-        triggeredBy: "inline_pick",
-        executionMode: "inline",
-        replenMethod: resolved.replenMethod,
-        autoReplen: resolved.autoReplen,
-        ...this.replenOrderTaskFields(context),
-        warehouseId: pickLocation.warehouseId ?? undefined,
-        createdBy: params.userId ?? undefined,
-        exceptionReason: "source_empty",
-        notes: this.appendOrderContextNote(
-          `Picker reported replen source empty at ${sourceLabel}; target pick bin ${pickLocation.code}`,
-          context,
-        ),
-      } satisfies InsertReplenTask)
-      .returning();
-
-    let linkedCycleCountId: number | null = null;
-    if (sourceLocation) {
-      linkedCycleCountId = await this.createSourceEmptyCycleCount({
-        taskId: task.id,
-        sourceLocationId: sourceLocation.id,
+      const sourceVariantId = resolved.sourceVariantId ?? params.pickVariantId;
+      const normalizedSourceCode = params.sourceLocationCode?.trim().toUpperCase() || null;
+      const sourceLocationWhere = normalizedSourceCode
+        ? pickLocation.warehouseId != null
+          ? and(
+              sql`upper(${warehouseLocations.code}) = ${normalizedSourceCode}`,
+              eq(warehouseLocations.warehouseId, pickLocation.warehouseId),
+            )
+          : sql`upper(${warehouseLocations.code}) = ${normalizedSourceCode}`
+        : null;
+      const sourceLocationFromReport = sourceLocationWhere
+        ? (await tx
+            .select()
+            .from(warehouseLocations)
+            .where(sourceLocationWhere)
+            .limit(1))[0] ?? null
+        : null;
+      const sourceLocation = sourceLocationFromReport ?? await this.findSourceLocation(
         sourceVariantId,
-        productId: rule?.productId ?? variant.productId ?? null,
-        warehouseId: pickLocation.warehouseId ?? undefined,
-        orderNumber: params.orderNumber ?? null,
-        sourceLabel,
-        userId: params.userId,
-      });
-      if (linkedCycleCountId) {
-        await this.db.update(replenTasks).set({
-          linkedCycleCountId,
-          notes: `${task.notes || ""}\nLinked source-empty cycle count #${linkedCycleCountId}`,
-        }).where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])));
-      }
-    }
+        pickLocation.warehouseId ?? undefined,
+        resolved.sourceLocationType,
+        pickLocation.parentLocationId,
+        resolved.sourcePriority,
+      );
 
-    notify("stockout", {
-      title: `Replen source empty: ${params.sku ?? variant.sku ?? `variant #${params.pickVariantId}`}`,
-      message: `Picker reported ${sourceLabel} empty while replenishing ${pickLocation.code}`,
-      data: {
-        taskId: task.id,
+      const sourceLabel = sourceLocation?.code ?? params.sourceLocationCode ?? "unknown source";
+      const context: ReplenOrderContext = {
         orderId: params.orderId,
         orderItemId: params.orderItemId,
-        productVariantId: params.pickVariantId,
-        cycleCountId: linkedCycleCountId,
-        pickLocationCode: pickLocation.code,
-        sourceLocationCode: sourceLocation?.code ?? params.sourceLocationCode ?? null,
-      },
-    }).catch(() => {});
+        orderNumber: params.orderNumber ?? null,
+        blocksShipment: true,
+      };
 
-    return { ...task, linkedCycleCountId } as ReplenTask;
+      const [task] = await tx
+        .insert(replenTasks)
+        .values({
+          replenRuleId: rule?.id ?? null,
+          fromLocationId: sourceLocation?.id ?? params.pickLocationId,
+          toLocationId: params.pickLocationId,
+          productId: rule?.productId ?? variant.productId ?? null,
+          sourceProductVariantId: sourceVariantId,
+          pickProductVariantId: params.pickVariantId,
+          qtySourceUnits: 0,
+          qtyTargetUnits: 0,
+          qtyCompleted: 0,
+          status: "blocked",
+          priority: resolved.priority,
+          triggeredBy: "inline_pick",
+          executionMode: "inline",
+          replenMethod: resolved.replenMethod,
+          autoReplen: resolved.autoReplen,
+          ...this.replenOrderTaskFields(context),
+          warehouseId: pickLocation.warehouseId ?? undefined,
+          createdBy: params.userId ?? undefined,
+          exceptionReason: "source_empty",
+          notes: this.appendOrderContextNote(
+            `Picker reported replen source empty at ${sourceLabel}; target pick bin ${pickLocation.code}`,
+            context,
+          ),
+        } satisfies InsertReplenTask)
+        .returning();
+
+      let linkedCycleCountId: number | null = null;
+      if (sourceLocation) {
+        linkedCycleCountId = await this.createSourceEmptyCycleCount({
+          db: tx,
+          taskId: task.id,
+          sourceLocationId: sourceLocation.id,
+          sourceVariantId,
+          productId: rule?.productId ?? variant.productId ?? null,
+          warehouseId: pickLocation.warehouseId ?? undefined,
+          orderNumber: params.orderNumber ?? null,
+          sourceLabel,
+          userId: params.userId,
+        });
+        if (linkedCycleCountId) {
+          await tx.update(replenTasks).set({
+            linkedCycleCountId,
+            notes: `${task.notes || ""}\nLinked source-empty cycle count #${linkedCycleCountId}`,
+          }).where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])));
+        }
+      }
+
+      notify("stockout", {
+        title: `Replen source empty: ${params.sku ?? variant.sku ?? `variant #${params.pickVariantId}`}`,
+        message: `Picker reported ${sourceLabel} empty while replenishing ${pickLocation.code}`,
+        data: {
+          taskId: task.id,
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+          productVariantId: params.pickVariantId,
+          cycleCountId: linkedCycleCountId,
+          pickLocationCode: pickLocation.code,
+          sourceLocationCode: sourceLocation?.code ?? params.sourceLocationCode ?? null,
+        },
+      }).catch(() => {});
+
+      return { ...task, linkedCycleCountId } as ReplenTask;
+    });
+
+    return completedTask;
   }
 
   private async createSourceEmptyCycleCount(params: {
+    db?: any;
     taskId: number;
     sourceLocationId: number;
     sourceVariantId: number;
@@ -3131,13 +3155,14 @@ export class ReplenishmentUseCases {
     sourceLabel: string;
     userId?: string;
   }): Promise<number | null> {
-    const [sourceVariant] = await this.db
+    const executor = params.db ?? this.db;
+    const [sourceVariant] = await executor
       .select()
       .from(productVariants)
       .where(eq(productVariants.id, params.sourceVariantId))
       .limit(1);
 
-    const [inventoryLevel] = await this.db
+    const [inventoryLevel] = await executor
       .select()
       .from(inventoryLevels)
       .where(and(
@@ -3146,7 +3171,7 @@ export class ReplenishmentUseCases {
       ))
       .limit(1);
 
-    const [cycleCount] = await this.db.insert(cycleCounts).values({
+    const [cycleCount] = await executor.insert(cycleCounts).values({
       name: `Replen Source Empty - Task #${params.taskId}`,
       description: `Picker reported replen source empty at ${params.sourceLabel}${params.orderNumber ? ` for ${params.orderNumber}` : ""}`,
       status: "in_progress",
@@ -3160,7 +3185,7 @@ export class ReplenishmentUseCases {
 
     if (!cycleCount?.id) return null;
 
-    await this.db.insert(cycleCountItems).values({
+    await executor.insert(cycleCountItems).values({
       cycleCountId: cycleCount.id,
       warehouseLocationId: params.sourceLocationId,
       productVariantId: sourceVariant?.id ?? params.sourceVariantId,

@@ -14,7 +14,7 @@ function mockDb(currentStatus: WmsWarehouseStatus | null, updateSucceeds = true)
       const queryStr = typeof query === "string" ? query : JSON.stringify(query);
       if (queryStr.includes("UPDATE")) {
         if (updateSucceeds && currentStatus !== null) {
-          return { rows: [{ new_status: "cancelled" }] };
+          return { rows: [{ previous_status: currentStatus, new_status: "cancelled" }] };
         }
         return { rows: [] };
       }

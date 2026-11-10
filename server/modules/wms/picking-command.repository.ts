@@ -388,7 +388,8 @@ export async function pendingPickingCommandKeys(
   z.number().int().positive().max(100).parse(limit);
   const result =
     await database.execute(sql`SELECT command_key FROM wms.picking_commands
-    WHERE physical_receipt IS NOT NULL AND completed_at IS NULL ORDER BY committed_at,command_key LIMIT ${limit}`);
+    WHERE physical_receipt IS NOT NULL AND completed_at IS NULL
+    ORDER BY attempt_count ASC, committed_at ASC, command_key ASC LIMIT ${limit}`);
   return result.rows.map((row) => keySchema.parse(row.command_key));
 }
 

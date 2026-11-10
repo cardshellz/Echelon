@@ -12,7 +12,7 @@ import {
 } from "@shared/schema";
 import { db } from "../../db";
 import { OrderListRepository, type OrderPage, type OrderPageQuery, type OrderScanQuery, type OrderWithItems } from "./order-list.repository";
-import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
+import { eq, ne, inArray, notInArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { IntegrityError, ValidationError } from "../../../shared/errors";
 import { parseCountryCode } from "@shared/country-code";
 import {
@@ -36,6 +36,7 @@ import {
   incrementWmsOrderItemFulfilledQuantityByShopifyLineId,
   insertWmsOrderItems,
   persistWmsOrderItemPickProgress,
+  reopenShortWmsOrderItemsForRepick,
   setWmsOrderItemHoldState,
   setWmsOrderItemLocation,
   syncWmsOrderItemsFulfilledFromOms,
@@ -886,8 +887,12 @@ export const orderMethods: IOrderStorage = {
     const result = await db
       .update(orders)
       .set(updates)
-      .where(eq(orders.id, orderId))
+      .where(and(eq(orders.id, orderId), notInArray(orders.warehouseStatus, ["shipped", "cancelled"])))
       .returning();
+
+    if (!result[0]) {
+      return null;
+    }
 
     if (status === "completed" || status === "cancelled") {
       await finalizePhysicallyCompleteWmsOrderItems(db, {
@@ -1093,42 +1098,79 @@ export const orderMethods: IOrderStorage = {
     resolvedBy: string, 
     notes?: string
   ): Promise<Order | null> {
-    let newStatus: OrderStatus;
-    switch (resolution) {
-      case "ship_partial":
-        newStatus = "completed";
-        break;
-      case "hold":
-        newStatus = "exception";
-        break;
-      case "resolved":
-        newStatus = "completed";
-        break;
-      case "cancelled":
-        newStatus = "cancelled";
-        break;
-      default:
-        newStatus = "completed";
-    }
-    
-    const updates: any = {
-      exceptionResolution: resolution,
-      exceptionResolvedAt: new Date(),
-      exceptionResolvedBy: resolvedBy,
-      exceptionNotes: notes || null,
-    };
-    
-    if (resolution !== "hold") {
-      updates.warehouseStatus = newStatus;
-    }
-    
-    const result = await db
-      .update(orders)
-      .set(updates)
-      .where(eq(orders.id, orderId))
-      .returning();
-    
-    return result[0] || null;
+    const runInTx = typeof (db as any).transaction === "function"
+      ? (fn: (tx: any) => Promise<Order | null>) => db.transaction(fn)
+      : (fn: (tx: any) => Promise<Order | null>) => fn(db);
+
+    return runInTx(async (tx: any) => {
+      const currentRows = await tx
+        .select()
+        .from(orders)
+        .where(eq(orders.id, orderId))
+        .limit(1);
+      const currentOrder = currentRows[0] as Order | undefined;
+      if (currentOrder && (currentOrder.warehouseStatus === "shipped" || currentOrder.warehouseStatus === "cancelled")) {
+        throw new IntegrityError(
+          `Cannot resolve exception on order ${orderId}: order is already ${currentOrder.warehouseStatus}`,
+          { reason: "order_terminal_status", orderId, warehouseStatus: currentOrder.warehouseStatus },
+        );
+      }
+
+      let newStatus: OrderStatus;
+      switch (resolution) {
+        case "ship_partial":
+          newStatus = "completed";
+          break;
+        case "hold":
+          newStatus = "exception";
+          break;
+        case "resolved": {
+          await reopenShortWmsOrderItemsForRepick(tx as any, { orderId });
+          const itemsAfterReopen: OrderItem[] = typeof tx.select === "function"
+            ? await tx.select().from(orderItems).where(eq(orderItems.orderId, orderId))
+            : [];
+          const activeShippable = itemsAfterReopen.filter(
+            (it) => it.requiresShipping === 1 && !it.onHold && it.status !== "cancelled",
+          );
+          const allCompleted = activeShippable.length > 0 && activeShippable.every(
+            (it) => it.status === "completed" && (it.pickedQuantity ?? 0) >= (it.quantity ?? 0),
+          );
+          const hasProgress = Boolean(currentOrder?.assignedPickerId) || activeShippable.some(
+            (it) => (it.pickedQuantity ?? 0) > 0 || it.status === "in_progress",
+          );
+          newStatus = allCompleted ? "ready_to_ship" : hasProgress ? "in_progress" : "ready";
+          break;
+        }
+        case "cancelled":
+          newStatus = "cancelled";
+          break;
+        default:
+          newStatus = "completed";
+      }
+      
+      const updates: any = {
+        exceptionResolution: resolution,
+        exceptionResolvedAt: new Date(),
+        exceptionResolvedBy: resolvedBy,
+        exceptionNotes: notes || null,
+      };
+      
+      if (resolution !== "hold") {
+        updates.warehouseStatus = newStatus;
+      }
+      if (resolution === "resolved") {
+        updates.onHold = 0;
+        updates.heldAt = null;
+      }
+      
+      const result = await tx
+        .update(orders)
+        .set(updates)
+        .where(and(eq(orders.id, orderId), notInArray(orders.warehouseStatus, ["shipped", "cancelled"])))
+        .returning();
+      
+      return result[0] || null;
+    });
   },
 
   // Shopify raw-table queries (used by sync routes)
