@@ -2373,9 +2373,9 @@ describe("dispatchDelayedTrackingPush :: canonical adoption", () => {
 describe("ship-notify retry :: wiring in server/index.ts", () => {
   const SRC = readFileSync(resolve(__dirname, "../../../../index.ts"), "utf8");
 
-  it("imports enqueueShipStationRetry from the webhook-retry worker", () => {
+  it("imports enqueueShipStationRetry from the webhook-retry API", () => {
     expect(SRC).toMatch(
-      /import\s*\{[^}]*enqueueShipStationRetry[^}]*\}\s*from\s*["']\.\/modules\/oms\/webhook-retry\.worker["']/
+      /import\s*\{[^}]*enqueueShipStationRetry[^}]*\}\s*from\s*["']\.\/modules\/oms\/webhook-retry\.(?:worker|api)["']/
     );
   });
 
