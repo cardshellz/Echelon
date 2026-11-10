@@ -38,3 +38,20 @@ remain in force. Re-reading history adds bounded provider reads until coverage
 completes; it does not edit purchase, payment, inventory or rewards records. Hosted
 production acceptance and historical scan completion require post-release checks;
 local staging acceptance does not establish either.
+
+## Cold historical purchases
+
+`CustomerAccountOrderQueriesService.savedNative` keeps warm reads database-only.
+For missing purchases it uses one bounded native Shopify summary query for only
+the missing IDs. It verifies customer, channel, shop, ID and order reference;
+there is no pricing calculation, warehouse inspection or edit preparation.
+`ShopifyOrderEditProvider.readOrderSummaries` retains validated, source-versioned
+facts through the existing cache owner so subsequent reads need no provider call.
+
+This also recovers purchases without an OMS row. Previously their absence from
+both OMS and the saved cache meant the ownership-gated refresh queue could not
+enqueue them; retrying only reread the same missing facts until the store-wide
+scan reached them. The queue's ownership gate remains unchanged. A failed cold
+lookup preserves every known total, reports a classified error and permits the
+same normal read to recover on retry. Customer API contracts and theme assets
+are unchanged; this correction requires only a backend release.

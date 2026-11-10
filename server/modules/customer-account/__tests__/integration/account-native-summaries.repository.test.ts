@@ -1,3 +1,4 @@
+import { CustomerAccountOrderQueriesService } from "../../application/customer-account-order-queries.service";
 import { AccountNativeSummariesWorker } from "../../application/account-native-summaries.worker";
 import { ShopifyOrderEditProvider } from "../../../order-edits/infrastructure/shopify-order-edit.provider";
 import { readAccountNativeScan, serializeAccountNativeScan } from "../../domain/account-native-pagination";
@@ -265,6 +266,38 @@ integration("native account facts without an OMS dependency", () => {
     await store.completePage(resumed, "delta", { ...page, after: null, observation: { facts: [], startedAt: later, finishedAt: later } }, later);
     expect((await pool.query("SELECT delta_since,delta_covered_until FROM oms.customer_account_native_cursors")).rows[0])
       .toEqual({ delta_since: new Date(now.getTime()-300_000), delta_covered_until: now });
+  });
+  for (const failFirst of [false,true]) it(`cold no-OMS account fills eight missing totals in one lookup, then stays database-only (retry=${failFirst})`, async () => {
+    const identities=Array.from({length:18},(_,i)=>({externalOrderId:String(1000+i),orderReference:`#${1000+i}`}));
+    await store.retain({facts:identities.slice(0,10).map(identity=>({...fact,...identity})),startedAt:now,finishedAt:now});
+    let requests=0;
+    const provider=new ShopifyOrderEditProvider({credentials:{get:async()=>({connectionId:4,channelId:2,shopDomain:fact.shopDomain,accessToken:"synthetic"})},clock:()=>now,accountSummaries:store,
+      fetch:async(_target,options)=>{
+        const body=JSON.parse(options!.body as string);requests++;
+        expect(body.query).toContain("EchelonAccountOrderSummaries");
+        expect(body.query).not.toMatch(/mutation|lineItems|transactions|orderEditBegin/);
+        expect(body.variables.ids).toEqual(identities.slice(10).map(identity=>`gid://shopify/Order/${identity.externalOrderId}`));
+        if(failFirst&&requests===1)throw new Error("Synthetic provider connection failure");
+        const money={amount:"7.41",currencyCode:"USD"};
+        return Response.json({data:{nodes:identities.slice(10).map(identity=>({id:`gid://shopify/Order/${identity.externalOrderId}`,name:identity.orderReference,
+          customer:{id:"gid://shopify/Customer/100"},updatedAt:now.toISOString(),cancelledAt:null,displayFinancialStatus:"PAID",
+          currentTotalPriceSet:{presentmentMoney:money,shopMoney:money}}))}});
+      }});
+    const service=new CustomerAccountOrderQueriesService({principal:{channelId:2,externalCustomerId:"100",shopDomain:fact.shopDomain,sessionKey:"a".repeat(43),authenticatedAt:1,expiresAt:1800001},
+      connection:async()=>({connectionId:4,channelId:2,shopDomain:fact.shopDomain,name:"Shopify",enabled:true,paymentWindowMinutes:30}),native:store,
+      edits:{orderSummaries:(connection,ids)=>provider.readOrderSummaries(connection,ids),customerOrderDetails:async()=>{throw new Error("DETAIL_READ_FORBIDDEN");}},
+      context:{read:async()=>[]},now:()=>now,report:()=>{}});
+    if(failFirst){
+      const failed=await service.summaries({orders:identities},{saved:true});
+      expect(failed.orders).toHaveLength(10);expect(failed.unavailableExternalOrderIds).toEqual(identities.slice(10).map(identity=>identity.externalOrderId));
+    }
+    const recovered=await service.summaries({orders:identities},{saved:true});
+    expect(recovered.orders).toHaveLength(18);expect(recovered.unavailableExternalOrderIds).toEqual([]);
+    expect(recovered.orders.every(order=>order.totalCents===741&&order.omsOrderId===null)).toBe(true);
+    expect(await service.summaries({orders:identities},{saved:true})).toEqual(recovered);
+    expect(requests).toBe(failFirst?2:1);
+    expect((await pool.query("SELECT count(*)::int AS count FROM oms.customer_account_native_summaries")).rows[0].count).toBe(18);
+    expect((await pool.query("SELECT count(*)::int AS count FROM oms.oms_orders")).rows[0].count).toBe(0);
   });
   it("rejects malformed checkpoint objects at the database boundary", async () => {
     await store.claim(now, lease);
