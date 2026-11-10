@@ -279,6 +279,7 @@ jobs:
           client/src/pages/__tests__/dropship-launch-readiness-panels.test.ts
           client/src/lib/__tests__/dropship-listing-end-ops.test.ts
           client/src/pages/__tests__/dropship-listing-end-ops.test.ts
+          client/src/lib/__tests__/dropship-wallet-flow.test.ts
       # test/browser is in no tsconfig, so nothing else type-checks the Catalog page's browser stubs and specs. The publish
       # run answers are typed against the shared contracts (contractAnswer), so a field a run contract adds or renames
       # fails here; other answers are parsed with the server's schemas when a journey runs (step 1 plan S2-5, TESTS17;

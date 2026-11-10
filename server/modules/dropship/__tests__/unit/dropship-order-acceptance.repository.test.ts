@@ -22,11 +22,22 @@ function sourceBlock(source: string, startMarker: string, endMarker: string): st
 const ACCEPTANCE_REPOSITORY_SRC = readSource(
   "../../infrastructure/dropship-order-acceptance.repository.ts",
 );
+const OMS_DROPSHIP_ORDER_COMMAND_SRC = readSource(
+  "../../../oms/dropship-order-command.ts",
+);
 
 describe("PgDropshipOrderAcceptanceRepository", () => {
-  it("stamps accepted OMS order lines as dropship-owned", () => {
+  it("delegates OMS order, line, event, and stage-promotion writes to the OMS dropship-order-authority API (COM-01 / OR-F01)", () => {
+    expect(ACCEPTANCE_REPOSITORY_SRC).toContain("../../oms/dropship-order-authority.api");
+    expect(ACCEPTANCE_REPOSITORY_SRC).toContain("createDropshipOrderInTransaction");
+    expect(ACCEPTANCE_REPOSITORY_SRC).toContain("confirmStagedDropshipOrderPaidInTransaction");
+    expect(ACCEPTANCE_REPOSITORY_SRC).not.toContain("INSERT INTO oms.oms_orders");
+    expect(ACCEPTANCE_REPOSITORY_SRC).not.toContain("INSERT INTO oms.oms_order_lines");
+    expect(ACCEPTANCE_REPOSITORY_SRC).not.toContain("INSERT INTO oms.oms_order_events");
+    expect(ACCEPTANCE_REPOSITORY_SRC).not.toContain("UPDATE oms.oms_orders");
+
     const insertBlock = sourceBlock(
-      ACCEPTANCE_REPOSITORY_SRC,
+      OMS_DROPSHIP_ORDER_COMMAND_SRC,
       "INSERT INTO oms.oms_order_lines",
       "RETURNING id, product_variant_id, quantity",
     );

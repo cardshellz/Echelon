@@ -434,6 +434,7 @@ describe("fast CI preserves coverage and required checks", () => {
       // mounts the staff page), registered by hand.
       "client/src/lib/__tests__/dropship-listing-end-ops.test.ts",
       "client/src/pages/__tests__/dropship-listing-end-ops.test.ts",
+      "client/src/lib/__tests__/dropship-wallet-flow.test.ts",
       "shared/dropship/__tests__/program-finance-money.test.ts",
       "shared/dropship/__tests__/program-finance-contract.test.ts",
       "shared/dropship/__tests__/program-finance-definitions.test.ts",
