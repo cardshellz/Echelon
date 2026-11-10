@@ -378,6 +378,26 @@ describe("private order edit orchestration", () => {
       expect(h.warehouse.releaseUnsubmitted).toHaveBeenCalledTimes(2);
     },
   );
+  it("handles shipping mid-edit and simultaneous Apply clicks without a Shopify command or a retrying submission", async () => {
+    const h=serviceHarness();
+    await h.service.quote(h.input,"staff");
+    let finish!:()=>void;
+    const fence=new Promise<void>(resolve=>{finish=resolve;});
+    h.warehouse.acquire.mockImplementationOnce(async()=>{
+      await fence;
+      throw new OrderEditError("ORDER_EDIT_PROVIDER_NOT_EDITABLE","Shipment crossed cutoff during acquisition");
+    });
+    const first=h.service.commit(OP,OP,"staff");
+    await vi.waitFor(()=>expect(h.warehouse.acquire).toHaveBeenCalledTimes(1));
+    await expect(h.service.commit(OP,OP,"staff")).rejects.toMatchObject({code:"ORDER_EDIT_BUSY"});
+    finish();
+    expect(await first).toMatchObject({status:"review_required",canAbandon:true,error:{code:"ORDER_EDIT_PROVIDER_NOT_EDITABLE"}});
+    await h.service.commit(OP,OP,"staff");
+    expect(h.warehouse.acquire).toHaveBeenCalledTimes(1);
+    expect(h.provider.commit).not.toHaveBeenCalled();
+    expect(h.provider.refund).not.toHaveBeenCalled();
+    expect((await h.service.abandon(OP,"staff")).status).toBe("expired");
+  });
   it("allows safe cancellation only after an explicit not-submitted result", async () => {
     const h = serviceHarness();
     await h.service.quote(h.input, "staff");

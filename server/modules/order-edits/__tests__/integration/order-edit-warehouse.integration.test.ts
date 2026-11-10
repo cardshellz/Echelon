@@ -69,15 +69,18 @@ CREATE TABLE oms.oms_orders(id bigint PRIMARY KEY,channel_id integer,external_or
   currency text DEFAULT 'USD',total_cents integer DEFAULT 1000,cancelled_at timestamptz);
 CREATE TABLE oms.oms_order_lines(id bigint PRIMARY KEY,order_id bigint REFERENCES oms.oms_orders(id),external_line_item_id text,
   quantity integer,paid_quantity integer,authority_fulfillable_quantity integer,product_variant_id integer DEFAULT 100,authority_source_topic text);
-CREATE TABLE wms.orders(id integer PRIMARY KEY,source text,oms_fulfillment_order_id text,source_table_id text,channel_id integer,
+CREATE TABLE wms.shipping_engine_orders(provider text,provider_order_id text,provider_status text);
+CREATE TABLE wms.orders(id integer PRIMARY KEY,order_number text DEFAULT '#1',source text,oms_fulfillment_order_id text,source_table_id text,channel_id integer,
   external_order_id text,warehouse_status text NOT NULL DEFAULT 'ready',on_hold integer NOT NULL DEFAULT 0,
   assigned_picker_id text,started_at timestamptz,picked_count integer NOT NULL DEFAULT 0,combined_group_id integer,cancelled_at timestamptz,updated_at timestamptz);
 CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders(id),oms_order_line_id bigint,
   quantity integer,picked_quantity integer DEFAULT 0,fulfilled_quantity integer DEFAULT 0,status text DEFAULT 'pending',on_hold boolean DEFAULT false,
-  product_id integer DEFAULT 100,catalog_product_id integer DEFAULT 200,sku text DEFAULT 'SKU');
+  product_id integer DEFAULT 100,catalog_product_id integer DEFAULT 200,sku text DEFAULT 'SKU',
+  name text DEFAULT 'Product',paid_price_cents bigint DEFAULT 1000,unit_price_cents bigint DEFAULT 1000);
 CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders(id),status text DEFAULT 'planned',
   held boolean DEFAULT false,requires_review boolean DEFAULT false,review_reason text,shipstation_order_id integer,shipping_engine text,engine_order_ref text,
-  tracking_number text,shipped_at timestamptz);
+  tracking_number text,shipped_at timestamptz,source text DEFAULT 'echelon_sync',held_at timestamptz,
+  on_hold_reason text,cancelled_at timestamptz,voided_reason text,updated_at timestamptz);
 CREATE TABLE wms.outbound_shipment_items(id integer PRIMARY KEY,shipment_id integer REFERENCES wms.outbound_shipments(id),order_item_id integer,qty integer);
 CREATE TABLE inventory.availability_runtime_authority(singleton_key boolean PRIMARY KEY,authority text,activation_run_id bigint,revision bigint);
 CREATE TABLE inventory.availability_claims(id bigint PRIMARY KEY,order_id integer REFERENCES wms.orders(id),status text,revision integer,plan_status text,runtime_authority_revision bigint,activation_run_id bigint,plan_hash text);
@@ -327,7 +330,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
     });
     beforeEach(async context => {
       await database.pool.query(
-        "TRUNCATE oms.order_edit_operations,wms.orders,oms.oms_orders,oms.webhook_retry_queue CASCADE",
+        "TRUNCATE oms.order_edit_operations,wms.orders,oms.oms_orders,oms.webhook_retry_queue,wms.shipping_engine_orders CASCADE",
       );
       await database.pool.query(`TRUNCATE catalog.product_variants;
         TRUNCATE channels.channel_listings;
@@ -345,6 +348,196 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       await database.pool
         .query(`INSERT INTO inventory.availability_claims VALUES(1,10,'active',1,'satisfied',1,1,repeat('f',64));
       INSERT INTO inventory.availability_claim_lines VALUES(1,1,40,100,1,1,0,0,0,0);`);
+    });
+
+    async function heldSplitFixture(partial = false, loseAmendReply = false) {
+      await database.pool.query(`UPDATE wms.order_items SET on_hold=true WHERE id=40;
+        INSERT INTO wms.outbound_shipments(id,order_id,shipstation_order_id,shipping_engine,status) VALUES(51,10,551,'shipstation','queued');
+        INSERT INTO wms.outbound_shipments(id,order_id,status,source,held,held_at,on_hold_reason)
+          VALUES(52,10,'planned','line_item_hold',true,'2026-10-05T00:00:00Z','manual_hold');
+        INSERT INTO wms.outbound_shipment_items VALUES(61,52,40,1);`);
+      if (partial) await database.pool.query(`
+        INSERT INTO oms.oms_order_lines(id,order_id,external_line_item_id,quantity,paid_quantity,authority_fulfillable_quantity) VALUES(31,20,'102',1,1,1);
+        INSERT INTO wms.order_items(id,order_id,oms_order_line_id,quantity) VALUES(41,10,31,1);
+        INSERT INTO wms.outbound_shipment_items VALUES(62,51,41,1);`);
+      const now = new Date("2026-10-05T00:01:00Z");
+      let live = { orderId: 551, orderKey: "echelon-wms-shp-51", orderNumber: "#1", orderStatus: "on_hold",
+        items: [{lineItemKey:"wms-item-61",quantity:1},...(partial ? [{lineItemKey:"wms-item-62",quantity:1}] : [])] };
+      const calls: string[] = [];
+      const previous = globalThis.fetch;
+      vi.stubEnv("SHIPSTATION_API_KEY", "fixture-key");
+      vi.stubEnv("SHIPSTATION_API_SECRET", "fixture-secret");
+      globalThis.fetch = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+        const path = new URL(String(url)).pathname; calls.push(path);
+        let result: unknown;
+        if (path === "/orders/551") result=live;
+        else if (path === "/orders") result={orders:[live],pages:1};
+        else if (path === "/shipments") result={shipments:[],pages:1};
+        else if (path === "/orders/createorder") {
+          live=JSON.parse(String(init?.body));
+          if (loseAmendReply) { loseAmendReply=false; throw new Error("Synthetic response lost after provider success"); }
+          result=live;
+        } else if (path === "/orders/restorefromhold") { live.orderStatus="awaiting_shipment"; result={success:true}; }
+        else if (path === "/orders/holduntil") { live.orderStatus="on_hold"; result={success:true}; }
+        else throw new Error(`Unexpected test request: ${path}`);
+        return new Response(JSON.stringify(result),{status:200,headers:{"Content-Type":"application/json"}});
+      }) as typeof fetch;
+      const shipping=createShipStationService(drizzle(database.pool),undefined,{sessionLock:async (_key,work)=>work(),clock:()=>now});
+      const gateway=new OrderEditWarehouseGateway(database.pool,shipping,async()=>{},()=>now);
+      return {gateway,shipping,calls,get live(){return live;},restore(){globalThis.fetch=previous;vi.unstubAllEnvs();}};
+    }
+
+    it("keeps the original shipping identity and manual hold through a whole-held edit, payment reconciliation and repeated completion", async () => {
+      const f=await heldSplitFixture();
+      try {
+        await f.gateway.acquire(20,OP);
+        await f.gateway.acquire(20,OP);
+        expect((await database.pool.query("SELECT id,status,held,shipstation_order_id,on_hold_reason FROM wms.outbound_shipments ORDER BY id")).rows).toEqual([
+          {id:51,status:"queued",held:true,shipstation_order_id:551,on_hold_reason:"manual_hold"},
+          {id:52,status:"cancelled",held:true,shipstation_order_id:null,on_hold_reason:"manual_hold"},
+        ]);
+        expect((await database.pool.query("SELECT shipment_id FROM wms.outbound_shipment_items WHERE id=61")).rows).toEqual([{shipment_id:51}]);
+        expect((await database.pool.query("SELECT count(*)::int AS n FROM oms.order_edit_events WHERE action='held_partition_membership_restored'")).rows[0].n).toBe(1);
+        // Synthetic paid channel update; the normal gateway synchronizes it to
+        // the existing provider job and verifies inventory before release.
+        await database.pool.query(`UPDATE wms.order_items SET quantity=2 WHERE id=40;
+          UPDATE wms.outbound_shipment_items SET qty=2 WHERE id=61;
+          UPDATE oms.oms_order_lines SET quantity=2,paid_quantity=2,authority_fulfillable_quantity=2 WHERE id=30;
+          UPDATE inventory.availability_claim_lines SET requested_qty=2,planned_qty=2 WHERE id=1;`);
+        const paid=snapshot(); paid.lines[0]={...paid.lines[0],quantity:2,unfulfilledQuantity:2,totalCents:2000};
+        paid.totalCents=2000; paid.subtotalCents=2000; paid.netPaidCents=2000;
+        const proof=await f.gateway.reconcileAndRelease(20,OP,paid);
+        await new PostgresOrderEditStore(database.pool).save({...record(),status:"completed",version:1},0,"staff","completed",proof);
+        expect(f.live).toMatchObject({orderId:551,orderKey:"echelon-wms-shp-51",orderStatus:"on_hold",items:[{lineItemKey:"wms-item-61",quantity:2}]});
+        expect((await database.pool.query("SELECT on_hold,order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0]).toEqual({on_hold:0,order_edit_operation_id:null});
+        expect((await database.pool.query("SELECT on_hold FROM wms.order_items WHERE id=40")).rows[0].on_hold).toBe(true);
+        expect(f.calls).not.toContain("/orders/restorefromhold");
+      } finally {f.restore();}
+    });
+
+    it("keeps a partial manual split deferred while removing its exact keys from the original held job", async () => {
+      const f=await heldSplitFixture(true);
+      try {
+        await f.gateway.acquire(20,OP);
+        await f.gateway.acquire(20,OP);
+        expect(f.live.items).toEqual([{lineItemKey:"wms-item-62",quantity:1}]);
+        expect((await database.pool.query("SELECT shipment_id FROM wms.outbound_shipment_items WHERE id=61")).rows).toEqual([{shipment_id:52}]);
+        const proof=await f.gateway.releaseUnchanged(20,OP);
+        await new PostgresOrderEditStore(database.pool).save({...record(),status:"expired",version:1},0,"staff","abandoned",proof);
+        expect((await database.pool.query("SELECT status,held,shipstation_order_id FROM wms.outbound_shipments WHERE id=52")).rows[0])
+          .toEqual({status:"planned",held:true,shipstation_order_id:null});
+        expect(f.calls.filter(path=>path==="/orders/createorder")).toHaveLength(1);
+      } finally {f.restore();}
+    });
+
+    it("adds a paid item to the original held job without losing either unit or releasing the manual hold", async () => {
+      const f=await heldSplitFixture();
+      try {
+        await f.gateway.acquire(20,OP);
+        await database.pool.query(`
+          INSERT INTO oms.oms_order_lines(id,order_id,external_line_item_id,quantity,paid_quantity,authority_fulfillable_quantity,product_variant_id)
+            VALUES(31,20,'102',1,1,1,101);
+          INSERT INTO wms.order_items(id,order_id,oms_order_line_id,quantity,product_id,sku) VALUES(41,10,31,1,101,'OTHER-PACK');
+          INSERT INTO wms.outbound_shipment_items VALUES(62,51,41,1);
+          INSERT INTO inventory.availability_claim_lines VALUES(2,1,41,101,1,1,0,0,0,0);`);
+        const paid=snapshot(); paid.lines.push({...paid.lines[0],id:'gid://shopify/LineItem/102',variantId:'gid://shopify/ProductVariant/101',sku:'OTHER-PACK'});
+        paid.totalCents=2000;paid.subtotalCents=2000;paid.netPaidCents=2000;
+        const proof=await f.gateway.reconcileAndRelease(20,OP,paid);
+        await new PostgresOrderEditStore(database.pool).save({...record(),status:"completed",version:1},0,"staff","completed",proof);
+        expect(f.live).toMatchObject({orderId:551,orderStatus:"on_hold",items:[{lineItemKey:"wms-item-61",quantity:1},{lineItemKey:"wms-item-62",quantity:1}]});
+        expect((await database.pool.query("SELECT id,on_hold FROM wms.order_items ORDER BY id")).rows).toEqual([{id:40,on_hold:true},{id:41,on_hold:false}]);
+        expect(f.calls).not.toContain('/orders/restorefromhold');
+      } finally {f.restore();}
+    });
+
+    it("recovers a lost partial-split amend reply using the same job and preserves the held units", async () => {
+      const f=await heldSplitFixture(true,true);
+      try {
+        await expect(f.gateway.acquire(20,OP)).rejects.toThrow("Synthetic response lost");
+        await f.gateway.acquire(20,OP);
+        expect(f.live.items).toEqual([{lineItemKey:"wms-item-62",quantity:1}]);
+        expect(f.calls.filter(path=>path==="/orders/createorder")).toHaveLength(1);
+        const proof=await f.gateway.releaseUnsubmitted(20,OP);
+        await new PostgresOrderEditStore(database.pool).save({...record(),status:"review_required",version:1},0,"staff","unsubmitted_hold_released",proof);
+        expect((await database.pool.query("SELECT held FROM wms.outbound_shipments WHERE id=52")).rows[0].held).toBe(true);
+      } finally {f.restore();}
+    });
+
+    it("does not demand a provider job for a held partition whose last unit was removed by the paid channel edit", async () => {
+      const f=await heldSplitFixture(true);
+      try {
+        await f.gateway.acquire(20,OP);
+        await database.pool.query(`UPDATE wms.order_items SET quantity=0,status='cancelled' WHERE id=40;
+          UPDATE wms.outbound_shipment_items SET qty=0 WHERE id=61;
+          UPDATE oms.oms_order_lines SET paid_quantity=0,authority_fulfillable_quantity=0 WHERE id=30;
+          UPDATE inventory.availability_claims SET status='released' WHERE id=1;
+          INSERT INTO inventory.availability_claims VALUES(2,10,'active',2,'satisfied',1,1,repeat('f',64));
+          INSERT INTO inventory.availability_claim_lines VALUES(2,2,41,100,1,1,0,0,0,0);`);
+        const paid=snapshot();paid.lines=[{...paid.lines[0],id:'gid://shopify/LineItem/102'}];
+        const proof=await f.gateway.reconcileAndRelease(20,OP,paid);
+        await new PostgresOrderEditStore(database.pool).save({...record(),status:"completed",version:1},0,"staff","completed",proof);
+        expect(f.live.items).toMatchObject([{lineItemKey:'wms-item-62',quantity:1}]);
+        expect((await database.pool.query("SELECT on_hold FROM wms.order_items WHERE id=40")).rows[0].on_hold).toBe(true);
+      } finally {f.restore();}
+    });
+
+    it("blocks an already shipped shipping-owned job even when warehouse picking still says ready", async () => {
+      await database.pool.query(`INSERT INTO wms.outbound_shipments(id,order_id,status,shipstation_order_id) VALUES(51,10,'queued',551);
+        INSERT INTO wms.shipping_engine_orders VALUES('shipstation','551','shipped');`);
+      expect(await gateway.inspect(20)).toMatchObject({editable:false,fulfillment:{code:"shipped"}});
+      await expect(gateway.acquire(20,OP)).rejects.toMatchObject({code:"ORDER_EDIT_PICKING_CUTOFF"});
+      expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBeNull();
+    });
+
+    it("rejects an ambiguous held split before submission and preserves its membership and manual hold", async () => {
+      const f=await heldSplitFixture();
+      try {
+        f.live.items[0].quantity=2;
+        await expect(f.gateway.acquire(20,OP)).rejects.toMatchObject({code:"ORDER_EDIT_HELD_PARTITION_UNVERIFIED"});
+        const proof=await f.gateway.releaseUnsubmitted(20,OP);
+        await new PostgresOrderEditStore(database.pool).save({...record(),status:"review_required",version:1},0,"staff","unsubmitted_hold_released",proof);
+        expect((await database.pool.query("SELECT shipment_id FROM wms.outbound_shipment_items WHERE id=61")).rows[0].shipment_id).toBe(52);
+        expect(f.calls.filter(path=>path==="/orders/createorder"||path==="/orders/restorefromhold")).toHaveLength(0);
+        expect(f.live.orderStatus).toBe("on_hold");
+      } finally {f.restore();}
+    });
+
+    it("does not call a partly shipped order fully shipped while another held partition still has units", async () => {
+      const f=await heldSplitFixture(true);
+      try {
+        await database.pool.query("INSERT INTO wms.shipping_engine_orders VALUES('shipstation','551','shipped')");
+        expect(await f.gateway.inspect(20)).toMatchObject({editable:false,fulfillment:{code:"partially_shipped"}});
+        expect(f.calls).toEqual([]);
+      } finally {f.restore();}
+    });
+
+    it("stops a shipment that crosses the cutoff after quoting, before any Shopify submission or provider mutation", async () => {
+      const f=await heldSplitFixture();
+      try {
+        f.live.orderStatus="shipped";
+        await expect(f.gateway.acquire(20,OP)).rejects.toMatchObject({code:"ORDER_EDIT_PROVIDER_NOT_EDITABLE"});
+        const proof=await f.gateway.releaseUnsubmitted(20,OP);
+        await new PostgresOrderEditStore(database.pool).save({...record(),status:"review_required",version:1},0,"staff","unsubmitted_hold_released",proof);
+        expect(f.calls.every(path=>path==='/orders'||path==='/shipments')).toBe(true);
+        expect((await database.pool.query("SELECT count(*)::int AS n FROM oms.order_edit_provider_holds")).rows[0].n).toBe(0);
+        expect((await database.pool.query("SELECT order_edit_operation_id FROM wms.orders WHERE id=10")).rows[0].order_edit_operation_id).toBeNull();
+        expect((await database.pool.query("SELECT on_hold FROM wms.order_items WHERE id=40")).rows[0].on_hold).toBe(true);
+      } finally {f.restore();}
+    });
+
+    it("does not clean up a pre-submit hold by dispatching manually held keys after a lost acquisition reply", async () => {
+      const f=await heldSplitFixture(true,true);
+      try {
+        f.live.orderStatus="awaiting_shipment";
+        await expect(f.gateway.acquire(20,OP)).rejects.toThrow();
+        // Simulate an unsuccessful amend, so the old job still contains the
+        // manually held unit. Unsubmitted cleanup must never dispatch it.
+        f.live.items.push({lineItemKey:"wms-item-61",quantity:1});
+        const proof=await f.gateway.releaseUnsubmitted(20,OP);
+        await new PostgresOrderEditStore(database.pool).save({...record(),status:"review_required",version:1},0,"staff","unsubmitted_hold_released",proof);
+        expect(f.calls).not.toContain("/orders/restorefromhold");
+        expect(f.live.orderStatus).toBe("on_hold");
+      } finally {f.restore();}
     });
 
     it("observes a real PostgreSQL command lock without replaying a command or writing an audit event", async () => {
@@ -1543,7 +1736,7 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         const enabledGateway = new OrderEditWarehouseGateway(database.pool, provider, vi.fn(), () => now);
         await enabledGateway.assertHeld(20, OP, snapshot);
         await enabledGateway.assertHeld(20, OP, snapshot);
-        expect(request).toHaveBeenCalledTimes(6);
+        expect(request).toHaveBeenCalledTimes(4);
         expect((await database.pool.query("SELECT warehouse_status FROM wms.orders WHERE id=10")).rows[0].warehouse_status).toBe("ready");
       } finally { vi.unstubAllGlobals(); vi.unstubAllEnvs(); }
     });
