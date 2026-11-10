@@ -11,7 +11,7 @@ import {
 } from "../../marketplace-listings/domain/listing-registration-plan";
 import type { EbayListingConnectorDraft } from "../../channels/listing-connectors/ebay-listing.connector";
 import { resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-token-owner";
-import { ebayProviderAccountNamespace } from "../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
+import { ebayProviderAccountNamespace } from "../../marketplace-listings/ebay-registration.api";
 import {
   EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE,
   EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_MESSAGE,

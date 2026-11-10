@@ -1,4 +1,8 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
+import { canonicalJson } from "@shared/utils/canonical-json";
+
+export const QUANTITY_PUBLICATION_LOCK_NAMESPACE = 918419;
 
 const identifier = z.string().trim().min(1).max(240);
 const databaseInt = z.number().int().positive().max(2147483647);
@@ -15,6 +19,11 @@ export const quantityPublicationScopeSchema = z.object({
   productVariantId: databaseInt.nullable(),
 }).strict();
 export type QuantityPublicationScope = z.infer<typeof quantityPublicationScopeSchema>;
+
+export const quantityPublicationScopeLockKey = (scope: QuantityPublicationScope): string =>
+  createHash("sha256")
+    .update(canonicalJson({ ...scope, productId: null, productVariantId: null }))
+    .digest("hex");
 
 export { quantityPublicationRecoverySchema, type QuantityPublicationRecovery } from "@shared/types/inventory-publication-recovery";
 

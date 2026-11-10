@@ -23,6 +23,7 @@ import {
   decideListingPushRunFinish,
   isLiveListing,
 } from "../domain/listing-push-run";
+import { isListingPushItemWaitingForStock, LISTING_PUSH_PREVIEW_BLOCKED_CODE } from "../domain/marketplace-sync-sweep";
 import { isPushProgressListingOnMarketplace } from "../domain/order-listing-acceptability";
 import {
   LISTING_PUSH_RUN_COLUMNS,
@@ -153,11 +154,7 @@ export class PgDropshipListingPushRunSweepRepository implements DropshipListingP
           severity: status === "completed" || status === "cancelled" ? "info" : "warning",
           payload: { status, stopReason: after.stopReason, counts }, now: input.now,
         });
-        const store = await client.query<{ external_display_name: string | null }>(
-          "SELECT external_display_name FROM dropship.dropship_store_connections WHERE id = $1", [after.storeConnectionId]);
-        finished.push({ run: after, counts, problems: await readProblems(client, after.runId, input.problemLimit),
-          storeName: store.rows[0]?.external_display_name ?? null,
-          stockLinkFailuresNotRequeued: await readStockLinkFailuresNotRequeued(client, after.runId) });
+        finished.push({ run: after, counts, ...await readRunNoticeFacts(client, after, input.problemLimit) });
       }
       return finished;
     });
@@ -464,11 +461,7 @@ export class PgDropshipListingPushRunSweepRepository implements DropshipListingP
     for (const row of runs.rows) {
       const run = mapListingPushRunRow(row);
       const counts = (await readRunCounts(this.dbPool, [run.runId])).get(run.runId) ?? countListingPushRunTargets([]);
-      const store = await this.dbPool.query<{ external_display_name: string | null }>(
-        "SELECT external_display_name FROM dropship.dropship_store_connections WHERE id = $1", [run.storeConnectionId]);
-      awaiting.push({ run, counts, problems: await readProblems(this.dbPool, run.runId, input.problemLimit),
-        storeName: store.rows[0]?.external_display_name ?? null,
-        stockLinkFailuresNotRequeued: await readStockLinkFailuresNotRequeued(this.dbPool, run.runId) });
+      awaiting.push({ run, counts, ...await readRunNoticeFacts(this.dbPool, run, input.problemLimit) });
     }
     return awaiting;
   }
@@ -518,7 +511,47 @@ async function advanceChunkWhenDecided(client: Queryable, input: { runId: number
     [input.runId, input.chunkIndex, input.now]);
 }
 
-async function readProblems(client: Queryable, runId: number, limit: number): Promise<ListingPushRunProblem[]> {
+/**
+ * What a finished run's notice needs beside its counts: the store's name, the sizes only waiting for stock (left out
+ * of the notice: the sweep lists them by itself), the first other problem sizes, and the stock link failures line.
+ */
+async function readRunNoticeFacts(client: Queryable, run: DropshipListingPushRunRecord, problemLimit: number): Promise<
+  Pick<ListingPushRunFinished, "problems" | "storeName" | "stockLinkFailuresNotRequeued" | "waitingForStockCount">
+> {
+  const store = await client.query<{ external_display_name: string | null; platform: string | null }>(
+    "SELECT external_display_name, platform FROM dropship.dropship_store_connections WHERE id = $1", [run.storeConnectionId]);
+  const waiting = await readWaitingForStockVariantIds(client, run.runId, store.rows[0]?.platform ?? null);
+  return {
+    problems: await readProblems(client, run.runId, problemLimit, waiting),
+    storeName: store.rows[0]?.external_display_name ?? null,
+    stockLinkFailuresNotRequeued: await readStockLinkFailuresNotRequeued(client, run.runId),
+    waitingForStockCount: waiting.length,
+  };
+}
+
+/**
+ * The run's blocked sizes only waiting for stock (isListingPushItemWaitingForStock, decided here in code, not in SQL,
+ * so the rule has one home): the target's item and its vendor listing's eBay item number are read, the predicate
+ * applied. A target with no item or no listing row is never waiting. Sorted ids.
+ */
+async function readWaitingForStockVariantIds(client: Queryable, runId: number, platform: string | null): Promise<number[]> {
+  const result = await client.query<{
+    product_variant_id: number; status: string; code: string | null; error_message: string | null; external_listing_id: string | null;
+  }>(
+    `SELECT t.product_variant_id, i.status, t.code, i.error_message, l.external_listing_id
+     FROM dropship.dropship_listing_push_run_targets t
+     JOIN dropship.dropship_listing_push_job_items i ON i.id = t.job_item_id
+     JOIN dropship.dropship_vendor_listings l ON l.id = i.listing_id
+     WHERE t.run_id = $1 AND t.outcome = 'blocked' AND t.code = $2
+     ORDER BY t.product_variant_id`,
+    [runId, LISTING_PUSH_PREVIEW_BLOCKED_CODE]);
+  return result.rows
+    .filter((row) => isListingPushItemWaitingForStock({ platform, status: row.status, errorCode: row.code,
+      errorMessage: row.error_message, externalListingId: row.external_listing_id }))
+    .map((row) => row.product_variant_id);
+}
+
+async function readProblems(client: Queryable, runId: number, limit: number, excludedVariantIds: readonly number[]): Promise<ListingPushRunProblem[]> {
   const result = await client.query<{
     product_variant_id: number; outcome: string; code: string | null; retryable: boolean | null; error_message: string | null;
     product_id: number | null; product_name: string | null; variant_name: string | null; sku: string | null;
@@ -530,9 +563,10 @@ async function readProblems(client: Queryable, runId: number, limit: number): Pr
      LEFT JOIN catalog.product_variants pv ON pv.id = t.product_variant_id
      LEFT JOIN catalog.products p ON p.id = pv.product_id
      WHERE t.run_id = $1 AND t.outcome = ANY($2::text[])
+       AND NOT (t.product_variant_id = ANY($4::int[]))
      ORDER BY t.product_variant_id
      LIMIT $3`,
-    [runId, [...LISTING_PUSH_RUN_PROBLEM_OUTCOMES], limit]);
+    [runId, [...LISTING_PUSH_RUN_PROBLEM_OUTCOMES], limit, [...excludedVariantIds]]);
   return result.rows.map((row) => ({
     productVariantId: row.product_variant_id,
     productId: row.product_id,

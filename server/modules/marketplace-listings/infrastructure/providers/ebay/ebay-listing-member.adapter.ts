@@ -2,7 +2,7 @@ import { z } from "zod";
 import type { ListingMemberIdentity } from "@shared/types/listing-member-lifecycle";
 import type { ListingMemberLifecycleAdapter } from "../../../application/listing-member-lifecycle.port";
 import { ListingMemberLifecycleError } from "../../../domain/listing-member-lifecycle";
-import { EbayApiRequestError } from "../../../../channels/adapters/ebay/ebay-api-error";
+import { EbayApiRequestError } from "../../../../channels/ebay-connector.api";
 
 export interface EbayListingMemberClient {
   getOffer(offerId: string): Promise<unknown | null>;

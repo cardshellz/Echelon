@@ -1,8 +1,8 @@
 import type { OmsOrder } from "@shared/schema";
 import { sql } from "drizzle-orm";
 import type { FulfillmentReconciler, ReconciliationStatus } from "./reconciler.interface";
-import { createEbayApiClient } from "../../channels/adapters/ebay/ebay-api.client";
-import { EbayAuthService } from "../../channels/adapters/ebay/ebay-auth.service";
+import { createEbayApiClient } from "../../channels/ebay-connector.api";
+import { EbayAuthService } from "../../channels/ebay-connector.api";
 import type { ChannelFulfillmentIngressService } from "../channel-fulfillment-ingress.service";
 import { processEbayFulfillmentIngress } from "../ebay-fulfillment-ingress.adapter";
 import {
