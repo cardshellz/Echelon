@@ -15,7 +15,7 @@ import { matchesOrderCancellationSettlement } from "../domain/order-edit-financi
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import type { OrderEditReleaseProof } from "../application/order-edit-store";
-import { restoreStoppedRefundEditOrder } from "../../orders/order-status-core";
+import { restoreStoppedRefundEditOrder } from "../../orders/order-lifecycle-and-cancellation.api";
 import { proveStoppedRefundEditRecovery } from "./order-edit-refund-warehouse-evidence";
 import { appendOrderEditAudit } from "./order-edit-audit.writer";
 import { readDeferredRefundShipmentIds } from "./order-edit-deferred-shipment";
@@ -26,7 +26,7 @@ import {
 import {
   acquireOrderEditWarehouseHold,
   releaseOrderEditWarehouseHold,
-} from "../../wms/order-edit-hold.commands";
+} from "../../wms/pick-corrections-and-holds.api";
 
 const positiveId = z.number().int().positive().safe();
 const operationIdSchema = z.string().uuid();

@@ -16,7 +16,7 @@ import {
 } from "../../../storage/base";
 import { ne } from "drizzle-orm";
 // wms.order_items belongs to modules/orders (writer-ratchet P2.1) — write via its public API.
-import { backfillOpenOrderItemBinAssignment } from "../../orders/bin-location-backfill";
+import { backfillOpenOrderItemBinAssignment } from "../../orders/bin-location-backfill.api";
 import type {
   Warehouse, InsertWarehouse, WarehouseZone, InsertWarehouseZone,
   WarehouseLocation, InsertWarehouseLocation, FulfillmentRoutingRule, InsertFulfillmentRoutingRule,

@@ -59,21 +59,21 @@ import {
 import {
   createRecipeBuildPromiseService,
   type RecipeBuildPromiseService,
-} from "../modules/wms/application/recipe-build-promise.service";
+} from "../modules/wms/assembly-and-packing.api";
 import { createChannelSyncService } from "../modules/channels/sync.service";
-import { createReturnsService } from "../modules/orders/returns.service";
-import { createFulfillmentRouterService } from "../modules/orders/fulfillment-router.service";
-import { createSLAMonitorService } from "../modules/orders/sla-monitor.service";
+import { createReturnsService } from "../modules/orders/runtime-services.api";
+import { createFulfillmentRouterService } from "../modules/orders/runtime-services.api";
+import { createSLAMonitorService } from "../modules/orders/runtime-services.api";
 import { ManualInventoryTransferService } from "../modules/inventory/application/manual-inventory-transfer.service";
 import { SupplierReturnFollowupService } from "../modules/inventory/application/supplier-return-followup.service";
-import { createPickingService } from "../modules/orders/picking.use-cases";
-import { createPickCorrectionService } from "../modules/orders/pick-correction.service";
+import { createPickingService } from "../modules/orders/runtime-services.api";
+import { createPickCorrectionService } from "../modules/orders/runtime-services.api";
 import { AssemblyExecutionService } from "../modules/warehouse/work/application/assembly-execution.service";
 import { AssemblyPackingService } from "../modules/warehouse/work/application/assembly-packing.service";
 import { AssemblyPackageReviewService } from "../modules/warehouse/work/application/assembly-package-review.service";
 import { AssemblyPackingRepository } from "../modules/warehouse/work/infrastructure/assembly-packing.repository";
-import { createOrderCombiningService } from "../modules/orders/combining.service";
-import { createOperationsDashboardService } from "../modules/orders/operations-dashboard.service";
+import { createOrderCombiningService } from "../modules/orders/runtime-services.api";
+import { createOperationsDashboardService } from "../modules/orders/runtime-services.api";
 import { createReceivingService } from "../modules/procurement/receiving.service";
 import { createReceiptReversalService } from "../modules/procurement/receipt-reversal.service";
 import { createReceiveValidationService } from "../modules/procurement/receive-validation.service";
@@ -111,7 +111,7 @@ import {
   createChannelFulfillmentIngressRepository,
   createChannelFulfillmentIngressService,
 } from "../modules/oms/channel-fulfillment-authority.api";
-import { markShipmentCancelled } from "../modules/orders/shipment-rollup";
+import { markShipmentCancelled } from "../modules/orders/shipment-rollup-and-context.api";
 import { withAdvisoryLock } from "../infrastructure/scheduler-lock";
 import { envFlagEnabled, getSchedulerDisableReason } from "../infrastructure/scheduler-config";
 import type { Pool } from "pg";
@@ -219,17 +219,17 @@ import { AssemblyWorkRepository } from "../modules/warehouse/work/infrastructure
 import { WorkConfigurationRepository } from "../modules/warehouse/work/infrastructure/work-configuration.repository";
 import { PostgresCanonicalClaimInventoryRepository } from "../modules/inventory/infrastructure/canonical-claim-inventory.repository";
 import { PostgresCanonicalClaimBuildRepository } from "../modules/inventory/infrastructure/canonical-claim-build.repository";
-import { PostgresCanonicalClaimPickerObservationReviewRepository } from "../modules/orders/canonical-claim-picker-observation-review.repository";
+import { PostgresCanonicalClaimPickerObservationReviewRepository } from "../modules/orders/runtime-services.api";
 import { createAuthorityAwareInventoryAtpService, PostgresInventoryAvailabilityRuntimeAtpExecutor } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import { PostgresInventorySupplyDependencyReader } from "../modules/inventory-planning/infrastructure/inventory-supply-dependency-read.repository";
 import { createAuthorityAwareReservationRuntime } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-claim.repository";
 import { PostgresCanonicalClaimDispatchRepository } from "../modules/inventory-planning/infrastructure/inventory-availability-dispatch.repository";
 import { PostgresCanonicalClaimDispatchSourceCommandResolver } from "../modules/inventory-planning/infrastructure/inventory-availability-dispatch-source-command.repository";
-import { WmsCanonicalClaimDispatchSourceOwner } from "../modules/wms/canonical-claim-dispatch-source";
+import { WmsCanonicalClaimDispatchSourceOwner } from "../modules/wms/cutover-and-dispatch.api";
 import { createAuthorityAwareInventoryShipmentRecorder } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-shipment.repository";
 import { publishCanonicalDispatchInsideTransaction, publishOperationalShipmentInsideTransaction } from "../modules/inventory-planning/infrastructure/inventory-availability-dispatch-publication";
 import { PostgresOperationalShipmentDispatchRepository } from "../modules/inventory/infrastructure/operational-shipment-dispatch.repository";
-import { WmsOperationalShipmentSourceOwner } from "../modules/wms/operational-shipment-source";
+import { WmsOperationalShipmentSourceOwner } from "../modules/wms/cutover-and-dispatch.api";
 import { createAuthorityAwareInventoryPublicationService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import { createTransformationExecutionAuthorityRepository } from "../modules/inventory-planning/infrastructure/transformation-execution-authority.repository";
 import { PostgresInventoryConversionReader } from "../modules/inventory-planning/infrastructure/inventory-conversion-read.repository";
@@ -881,12 +881,12 @@ export type ServiceRegistry = ReturnType<typeof createServices>;
 export { createBreakAssemblyService, createReplenishmentService, createCycleCountService, createInventoryAlertService } from "../modules/inventory";
 export { createReservationService } from "../modules/channels/reservation.service";
 export { createChannelSyncService } from "../modules/channels/sync.service";
-export { createReturnsService } from "../modules/orders/returns.service";
-export { createFulfillmentRouterService } from "../modules/orders/fulfillment-router.service";
-export { createSLAMonitorService } from "../modules/orders/sla-monitor.service";
-export { createPickingService } from "../modules/orders/picking.use-cases";
-export { createOrderCombiningService } from "../modules/orders/combining.service";
-export { createOperationsDashboardService } from "../modules/orders/operations-dashboard.service";
+export { createReturnsService } from "../modules/orders/runtime-services.api";
+export { createFulfillmentRouterService } from "../modules/orders/runtime-services.api";
+export { createSLAMonitorService } from "../modules/orders/runtime-services.api";
+export { createPickingService } from "../modules/orders/runtime-services.api";
+export { createOrderCombiningService } from "../modules/orders/runtime-services.api";
+export { createOperationsDashboardService } from "../modules/orders/runtime-services.api";
 export { createReceivingService } from "../modules/procurement/receiving.service";
 export { createProductImportService } from "../modules/catalog/product-import.service";
 export { createChannelProductPushService } from "../modules/channels/product-push.service";
@@ -895,13 +895,13 @@ export { createChannelProductPushService } from "../modules/channels/product-pus
 export type { BaseUnitTotals, VariantAtp, ChannelVariantAtp, ProductAtpSummary, BreakResult, AssembleResult, ConversionPreview } from "../modules/inventory";
 export type { SyncResult } from "../modules/channels/sync.service";
 export type { ReservationResult } from "../modules/channels/reservation.service";
-export type { ReturnResult, ReturnItemParams, ProcessReturnParams } from "../modules/orders/returns.service";
-export type { OrderRoutingContext, RoutingResult } from "../modules/orders/fulfillment-router.service";
-export type { SLAAlert, SLASummary } from "../modules/orders/sla-monitor.service";
-export type { PickingService, PickItemResult, PickInventoryContext, BinCountResult } from "../modules/orders/picking.use-cases";
-export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "../modules/orders/combining.service";
+export type { ReturnResult, ReturnItemParams, ProcessReturnParams } from "../modules/orders/runtime-services.api";
+export type { OrderRoutingContext, RoutingResult } from "../modules/orders/runtime-services.api";
+export type { SLAAlert, SLASummary } from "../modules/orders/runtime-services.api";
+export type { PickingService, PickItemResult, PickInventoryContext, BinCountResult } from "../modules/orders/runtime-services.api";
+export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "../modules/orders/runtime-services.api";
 export type { CycleCountUseCases as CycleCountService, CycleCountError, ApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "../modules/inventory";
-export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "../modules/orders/operations-dashboard.service";
+export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "../modules/orders/runtime-services.api";
 export type { ReceivingService, ReceivingError } from "../modules/procurement/receiving.service";
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "../modules/catalog/product-import.service";
 export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "../modules/channels/product-push.service";

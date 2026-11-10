@@ -10,7 +10,7 @@ import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import {
   acquireOrderEditWarehouseHold,
   releaseOrderEditWarehouseHold,
-} from "../../wms/order-edit-hold.commands";
+} from "../../wms/pick-corrections-and-holds.api";
 import { OrderEditError } from "../domain/order-edit-error";
 
 interface Transaction {

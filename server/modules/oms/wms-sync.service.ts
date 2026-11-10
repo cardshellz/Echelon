@@ -61,7 +61,7 @@ import {
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import { omsOrderEvents } from "@shared/schema/oms.schema";
 import type { ServiceRegistry } from "../../services";
-import { computeSortRank, getShippingBase, resolveSlaDueAt, type ShippingServiceLevel } from "../orders/sort-rank";
+import { computeSortRank, getShippingBase, resolveSlaDueAt, type ShippingServiceLevel } from "../orders/sort-rank-and-priority.api";
 import { getSlaCutoffConfig } from "../warehouse/settings.resolver";
 import { selectPickBinCandidate } from "../warehouse/pick-bin-candidate";
 import {
@@ -77,22 +77,22 @@ import {
   PROVIDER_MEMBERSHIP_PENDING_APPEND,
   linkChildToParentShipment,
   ChildWithoutParentShipmentError,
-} from "../wms/create-shipment";
-import { WMS_ORDER_SHIPMENT_LOCK_NAMESPACE } from "../wms/shipment-lock-namespaces";
+} from "../wms/shipment-execution-and-projection.api";
+import { WMS_ORDER_SHIPMENT_LOCK_NAMESPACE } from "../wms/shipment-execution-and-projection.api";
 import {
   appendUncoveredItemsToShipment,
   createLateEditResidualShipment,
-} from "../wms/late-order-shipment-coverage";
+} from "../wms/shipment-execution-and-projection.api";
 import {
   selectLateOrderShipmentTarget,
-} from "../wms/late-order-shipment-selection";
+} from "../wms/shipment-execution-and-projection.api";
 import {
   insertWmsOrderItems,
   reconcileWmsOrderItemAuthority,
   refreshWmsOrderItemFinancialSnapshotsFromOms,
   replaceUnstartedWmsOrderItemsForRepair,
   updateWmsOrderItemCatalogSnapshot,
-} from "../wms/order-item-commands";
+} from "../wms/order-intake-and-items.api";
 import {
   enqueueShippingEngineShipmentAmendRetry,
   enqueueShipStationShipmentPushRetry,
@@ -2261,7 +2261,7 @@ export class WmsSyncService {
   }
 
   private async cancelExistingWmsOrderForFinalOmsOrder(omsOrderId: number): Promise<void> {
-    const { cancelWmsOrderAndRelease } = await import("../orders/cancel-wms-order");
+    const { cancelWmsOrderAndRelease } = await import("../orders/order-lifecycle-and-cancellation.api");
     const rows: any = await db.execute(sql`
       SELECT id FROM wms.orders
        WHERE (
