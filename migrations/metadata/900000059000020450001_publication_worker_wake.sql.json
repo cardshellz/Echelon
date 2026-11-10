@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000059000020450001_publication_worker_wake.sql",
+  "generation": 59,
+  "pr": 2045,
+  "ordinal": 1,
+  "after": [
+    "900000058000020390001_product_merge_runs.sql"
+  ]
+}
