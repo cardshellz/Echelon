@@ -7,7 +7,7 @@ import { productDefinitionProgressSchema, productDefinitionReceiptSchema, produc
 } from "@shared/types/inventory-product-definition";
 import { ProductDefinitionError, type ProductDefinitionStore } from "../application/inventory-product-definition.service";
 import { inventoryCutoverEvidenceHash } from "../domain/inventory-cutover-manifest";
-import { projectCanonicalAtp } from "../domain/inventory-availability-planner";
+import { InventoryAvailabilityPlannerError, projectCanonicalAtp } from "../domain/inventory-availability-planner";
 import { captureActiveSupplySnapshotInsideTransaction, captureProductDraftReviewSnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 import { createTransactionScopedInventoryPublicationService, previewProductDefinitionPublicationInsideTransaction } from "./inventory-availability-runtime-publication.repository";
 import { markPublicationProductChanged } from "./publication-product-change";
@@ -118,7 +118,7 @@ async function captureReview(client: PoolClient, selection: ProductDefinitionSel
   const blockers: string[] = head.validation_state === "valid" ? [] : ["The saved model has validation errors."];
   const archivedVariantIds = await lockDraftVariantLifecycle(client, selection.draftModelId);
   const impact = archivedVariantIds.length > 0
-    ? { atp: [], channels: [], fingerprints: [], skippedDestinations: [], blockers: archivedVariantIds.map(id =>
+    ? { atp: [], channels: [], fingerprints: [], skippedDestinations: [], notices: [] as string[], blockers: archivedVariantIds.map(id =>
         `Variant #${id} was archived after this draft was saved. Edit and save the draft to exclude its rules before applying.`) }
     : await captureDefinitionImpact(client, affectedProductIds,
         productId => captureProductDraftReviewSnapshotInsideTransaction(client, productId, selection.productId));
@@ -126,7 +126,8 @@ async function captureReview(client: PoolClient, selection: ProductDefinitionSel
   const content = { selection, ready: blockers.length === 0, authorityRevision: authority.revision,
     previousModel: head.active_model_id === null ? null : { id: head.active_model_id, definitionHash: head.active_definition_hash },
     activationRunId: authority.activation_run_id, affectedProductIds, blockers: [...new Set(blockers)],
-    skippedDestinations: impact.skippedDestinations, atp: impact.atp, channels: impact.channels };
+    skippedDestinations: impact.skippedDestinations, ...(impact.notices.length > 0 ? { notices: impact.notices } : {}),
+    atp: impact.atp, channels: impact.channels };
   return productDefinitionReviewSchema.parse({ ...content, reviewHash: inventoryCutoverEvidenceHash({ content, fingerprints: impact.fingerprints }) });
 }
 
@@ -154,8 +155,25 @@ async function lockDraftVariantLifecycle(client: PoolClient, modelId: number): P
 
 /** Shared routine-definition impact evaluation. It never writes or recomputes
  * ATP outside the canonical planner; caller selects the single proposed draft. */
+/**
+ * The CURRENT (active) rule can be internally inconsistent with the catalog:
+ * a package size changed after the rule was approved, so its path unit
+ * snapshots no longer match. That is exactly the situation a new draft
+ * repairs, so it must not abort the review. Only this one, precisely
+ * classified planner error is tolerated, and only for the current side; the
+ * proposed draft is always fully validated. Current figures are reported as
+ * unavailable (null) and the review carries an explicit notice.
+ */
+function isStaleActiveRuleError(error: unknown): boolean {
+  return error instanceof InventoryAvailabilityPlannerError && error.code === "SUPPLY_SNAPSHOT_REFERENCE_INVALID";
+}
+
+export const STALE_ACTIVE_RULE_NOTICE =
+  "The currently approved rules no longer match this product's package sizes, so current stock figures are unavailable. Applying this draft replaces them.";
+
 export async function captureDefinitionImpact(client: PoolClient, affectedProductIds: number[], proposedSnapshot: (productId: number) => Promise<SupplySnapshotDto>) {
   const blockers: string[] = [];
+  const notices: string[] = [];
   // A broken listing on one destination must not block a product's inventory
   // rules (#64414-class coupling): it stays frozen and is shown, not enforced.
   const skippedDestinations: string[] = [];
@@ -166,23 +184,39 @@ export async function captureDefinitionImpact(client: PoolClient, affectedProduc
     const current = await captureActiveSupplySnapshotInsideTransaction(client, productId);
     const proposed = await proposedSnapshot(productId);
     fingerprints.push(current.snapshotFingerprint, proposed.snapshotFingerprint);
+    let currentStale = false;
     for (const variant of proposed.variants.filter(v => v.productId === productId && v.isActive && isCustomerSellableVariant(v))) {
       for (const warehouse of proposed.warehouses.filter(w => w.isActive)) {
         const request = { targetVariantId: variant.id, scope: { kind: "warehouse" as const, warehouseId: warehouse.id } };
-        const before = projectCanonicalAtp(current, request);
+        let beforeUnits: string | null = null;
+        if (!currentStale) {
+          try { beforeUnits = projectCanonicalAtp(current, request).atpUnits; }
+          catch (error) { if (!isStaleActiveRuleError(error)) throw error; currentStale = true; }
+        }
         const after = projectCanonicalAtp(proposed, request);
         blockers.push(...after.blockers.map(item => `${variant.sku ?? variant.id} / ${warehouse.code}: ${item.message}`));
         atp.push({ productId, variantId: variant.id, sku: variant.sku, warehouseId: warehouse.id,
-          warehouseName: warehouse.code, current: before.atpUnits, proposed: after.atpUnits });
+          warehouseName: warehouse.code, current: beforeUnits, proposed: after.atpUnits });
       }
     }
-    const before = await previewProductDefinitionPublicationInsideTransaction(client, productId, current, undefined, "isolate");
+    let before: Awaited<ReturnType<typeof previewProductDefinitionPublicationInsideTransaction>> | null = null;
+    try {
+      before = await previewProductDefinitionPublicationInsideTransaction(client, productId, current, undefined, "isolate");
+    } catch (error) {
+      if (!isStaleActiveRuleError(error)) throw error;
+      currentStale = true;
+    }
+    if (currentStale) {
+      notices.push(STALE_ACTIVE_RULE_NOTICE);
+      // The rows above may hold figures computed before the failure surfaced.
+      for (const row of atp) if (row.productId === productId) row.current = null;
+    }
     const after = await previewProductDefinitionPublicationInsideTransaction(client, productId, proposed, undefined, "isolate");
     // Includes destination identity, policies' effects and target revisions, not
     // merely totals. Changed publication scope must invalidate a previous review,
     // including a destination becoming blocked or unblocked.
-    fingerprints.push(inventoryCutoverEvidenceHash({ before: before.rows, after: after.rows,
-      beforeBlocked: before.blockedTargets ?? [], afterBlocked: after.blockedTargets ?? [] }));
+    fingerprints.push(inventoryCutoverEvidenceHash({ before: before?.rows ?? [], after: after.rows,
+      beforeBlocked: before?.blockedTargets ?? [], afterBlocked: after.blockedTargets ?? [], currentStale }));
     for (const target of after.blockedTargets ?? []) {
       // A row isolation still updates the destination's linked listings: Dropship eBay and
       // channel Shopify, Walmart and eBay (isRowIsolableDestination in
@@ -194,11 +228,11 @@ export async function captureDefinitionImpact(client: PoolClient, affectedProduc
       blockers.push(...row.blockerCodes.map(code => `${row.channelName} / ${row.sku ?? row.productVariantId}: ${code}`));
       channels.push({ productId, targetId: row.publicationTargetId, channelName: row.channelName,
         variantId: row.productVariantId, sku: row.sku,
-        current: before.rows.find(item => item.publicationTargetId === row.publicationTargetId && item.productVariantId === row.productVariantId)?.desiredQuantity ?? null,
+        current: before?.rows.find(item => item.publicationTargetId === row.publicationTargetId && item.productVariantId === row.productVariantId)?.desiredQuantity ?? null,
         proposed: row.desiredQuantity });
     }
   }
-  return { blockers: [...new Set(blockers)], skippedDestinations: [...new Set(skippedDestinations)], atp, channels, fingerprints };
+  return { blockers: [...new Set(blockers)], notices: [...new Set(notices)], skippedDestinations: [...new Set(skippedDestinations)], atp, channels, fingerprints };
 }
 
 export async function enqueueReviewedDefinitionPublication(client: PoolClient,

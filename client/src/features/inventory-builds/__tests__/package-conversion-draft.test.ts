@@ -105,7 +105,10 @@ describe("package conversion draft commands", () => {
   it("keeps active unit drift and missing references as blockers when retired paths are excluded", () => {
     const baseline = view({ activeModel: model({ lifecycleStatus: "sealed" }), head: { revision: "4", activeModelId: 501, draftModelId: null } });
     baseline.variants[1]!.isActive = false;
-    baseline.variants[0]!.unitsPerVariant = 2;
+    // The 1-unit source now holds 30 (> the 25-unit destination): an assembly
+    // would become a break. Direction flips are never refreshed automatically
+    // (see package-conversion-stale-units.test.ts for the refreshable kind).
+    baseline.variants[0]!.unitsPerVariant = 30;
     expect(() => buildPackageConversionCommand({ ...beginPackageConversionEdit(baseline), inventoryBehavior: "package_hierarchy" }, "drift"))
       .toThrow("Change the inventory behavior");
     // Force a real edit while leaving the retained baseline snapshot unchanged.

@@ -9,7 +9,7 @@ import {
 } from "@shared/types/inventory-availability-admin";
 import { deriveRecipePath, isCompatibleConversionRecipe, prefillPathsFromModel, type PathDraft } from "@/pages/supply-transformations-model";
 import { archivedTransformationVariantIds, prepareTransformationDraft, recipeHasArchivedVariant } from "@shared/inventory/transformation-draft-lifecycle";
-import { packageLadderModelEditIssues } from "./package-conversion-ladder";
+import { applyLadderUnitRefreshes, packageLadderModelEditIssues, staleLadderUnitRefreshes, type LadderUnitRefresh } from "./package-conversion-ladder";
 import { describeInventoryBehavior, inventoryBehaviorDefinitionIssues, type InventoryBehavior } from "@shared/inventory/inventory-behavior";
 import { fetchJson } from "@/pages/inventory-planning-http";
 export { HttpResponseError as PackageConversionHttpError } from "@/pages/inventory-planning-http";
@@ -27,6 +27,9 @@ export type PackageConversionEdit = {
   inventoryBehavior: InventoryBehavior;
   buildToPromiseEnabled: boolean;
   recipeBindings: CreateTransformationModelDraftRequest["recipeBindings"];
+  /** Ladder steps recalculated because a package size changed after approval.
+   * Shown to the operator; saved only as a draft that still needs Apply. */
+  unitRefreshes: LadderUnitRefresh[];
 };
 
 export type PackageConversionCommand =
@@ -60,10 +63,15 @@ export function beginPackageConversionEdit(view: SupplyTransformationsAdminView)
   if (issues.length) throw new Error(issues.join(" "));
   const model = baseline.draftModel ?? baseline.activeModel;
   const lifecycle = model ? prepareTransformationDraft(model, archivedTransformationVariantIds(baseline)) : null;
-  return { baseline, ...(model && lifecycle ? prefillPathsFromModel({ ...model, ...lifecycle.definition }, 1) : { paths: [], nextRowId: 1 }),
-    inventoryBehavior: modelInventoryBehavior(model), buildToPromiseEnabled: lifecycle?.definition.buildToPromiseEnabled ?? false,
+  const prefilled = model && lifecycle ? prefillPathsFromModel({ ...model, ...lifecycle.definition }, 1) : { paths: [], nextRowId: 1 };
+  const inventoryBehavior = modelInventoryBehavior(model);
+  const unitRefreshes = model && lifecycle && inventoryBehavior === "package_hierarchy"
+    ? staleLadderUnitRefreshes(baseline.variants, { ...model, ...lifecycle.definition }) : [];
+  return { baseline, paths: applyLadderUnitRefreshes(prefilled.paths, unitRefreshes), nextRowId: prefilled.nextRowId,
+    inventoryBehavior, buildToPromiseEnabled: lifecycle?.definition.buildToPromiseEnabled ?? false,
     recipeBindings: (lifecycle?.definition.bindings ?? []).map(binding => ({ bindingKey: binding.bindingKey,
       recipeId: binding.recipeId, relationshipRole: binding.relationshipRole, warehouseId: binding.warehouseId })),
+    unitRefreshes,
   };
 }
 
@@ -71,7 +79,7 @@ export function changeInventoryBehavior(edit: PackageConversionEdit, inventoryBe
   if (edit.inventoryBehavior === inventoryBehavior) return edit;
   // This is an explicit draft reset, displayed before Save/Review/Apply. Never
   // create directions or recipes merely because package quantities divide.
-  return { ...edit, inventoryBehavior, paths: [], recipeBindings: [], buildToPromiseEnabled: false };
+  return { ...edit, inventoryBehavior, paths: [], recipeBindings: [], buildToPromiseEnabled: false, unitRefreshes: [] };
 }
 
 export function selectBuildRecipe(edit: PackageConversionEdit, recipeId: number, selected: boolean): PackageConversionEdit {

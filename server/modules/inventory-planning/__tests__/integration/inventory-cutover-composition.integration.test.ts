@@ -205,7 +205,8 @@ async function proveRoutineSafetyApply(database: InventoryCutoverTestDatabase) {
     if (scopeType === "warehouse_variant") {
       expect(scoped.atp.find(row => row.warehouseId === 2)?.proposed).toBe(scoped.atp.find(row => row.warehouseId === 2)?.current);
       const main = scoped.atp.find(row => row.warehouseId === 1)!;
-      expect(BigInt(main.current)-BigInt(main.proposed)).toBe(BigInt(2));
+      expect(main.current).not.toBeNull();
+      expect(BigInt(main.current!)-BigInt(main.proposed)).toBe(BigInt(2));
     }
     await service.apply({ ...scopedSelection, expectedReviewHash: scoped.reviewHash, idempotencyKey: `apply:${scopeKey}` },"operator");
   }
