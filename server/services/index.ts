@@ -196,6 +196,8 @@ import { InventoryPublicationOutboxService } from "../modules/inventory-planning
 import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
 import { PostgresPublicationSelectionWork } from "../modules/inventory-planning/infrastructure/publication-selection-work.repository";
 import { markPublicationProductsChanged } from "../modules/inventory-planning/infrastructure/publication-product-change";
+import { withChannelQuantityUpdates } from "../modules/inventory-planning/application/order-claim-channel-quantity";
+import { PostgresOrderClaimVariantReader } from "../modules/inventory-planning/infrastructure/order-claim-variant.reader";
 import { quantityPublicationAdmission, createQuantityPublicationCatchupService } from "../modules/inventory-planning/infrastructure/quantity-publication-runtime";
 import { EbayPublicationReconciliationService, ebayPublicationReconciliationRepository } from "../modules/inventory-planning/quantity-publication";
 import { refreshRecoveredEbayListing } from "../modules/channels/ebay-listing-sync";
@@ -274,13 +276,27 @@ export function createServices(
   const canonicalClaimObservationReview = new PostgresCanonicalClaimPickerObservationReviewRepository();
   const assemblyWorkOwner = new AssemblyWorkOwner(new WorkConfigurationRepository(databasePool), new AssemblyWorkRepository());
   const inventoryAvailabilityClaims = new InventoryAvailabilityClaimService(
-    new PostgresInventoryAvailabilityClaimRepository(
-      canonicalClaimInventory,
-      databasePool,
-      systemCanonicalClaimClock,
-      canonicalClaimBuild,
-      canonicalClaimObservationReview,
-      assemblyWorkOwner,
+    // An order claiming or releasing stock changes what the channels may sell.
+    // Only the channel quantity is marked: a claim moves no stock, so it does
+    // not re-evaluate replenishment the way a warehouse stock change does.
+    // inventoryPublicationWork is wired further down; the closure is only
+    // called at runtime, after this synchronous composition has finished.
+    withChannelQuantityUpdates(
+      new PostgresInventoryAvailabilityClaimRepository(
+        canonicalClaimInventory,
+        databasePool,
+        systemCanonicalClaimClock,
+        canonicalClaimBuild,
+        canonicalClaimObservationReview,
+        assemblyWorkOwner,
+      ),
+      {
+        variants: new PostgresOrderClaimVariantReader(databasePool),
+        announce: async (variantId, triggeredBy) => {
+          const productIds = await inventorySupplyDependencies.getAffectedProductIds(variantId);
+          await inventoryPublicationWork.recordInventoryChange(productIds, `inventory_change:${triggeredBy}`);
+        },
+      },
     ),
   );
 

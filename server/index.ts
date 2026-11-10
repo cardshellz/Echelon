@@ -90,7 +90,8 @@ import {
   startInventoryPublicationSweepScheduler,
   type InventoryPublicationSweepSchedulerHandle,
 } from "./modules/channels/inventory-publication-sweep.scheduler";
-import { startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
+import { requestInventoryPublicationWorkerRun, startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
+import { startPublicationWakeListener } from "./modules/inventory-planning/infrastructure/publication-wake-listener";
 import { startQuantityPublicationCatchupWorker } from "./modules/inventory-planning/application/quantity-publication-catchup.worker";
 import { startStockLinkRunner } from "./modules/inventory-planning/infrastructure/stock-link-runner";
 import { startProductSyncWorkflowRunner } from "./modules/inventory-planning/infrastructure/product-sync-workflow.runner";
@@ -957,6 +958,13 @@ function startEchelonSyncScheduler(
 
       if (!schedulersDisabled("INVENTORY_PUBLICATION_WORKER_DISABLED")) {
         startInventoryPublicationOutboxWorker(services.inventoryPublicationOutbox, services.inventoryPublicationSelectionWork);
+        // Committed work wakes the worker at once; its timer is only the backstop.
+        const wakeListener = startPublicationWakeListener(dbPool, requestInventoryPublicationWorkerRun);
+        httpServer.once("close", () => {
+          void wakeListener.stop().catch(() => {
+            console.error(JSON.stringify({ event: "publication_wake_listener_shutdown_failed", code: "PUBLICATION_WAKE_LISTENER_SHUTDOWN_FAILED" }));
+          });
+        });
         const catchupWorker = startQuantityPublicationCatchupWorker(services.quantityPublicationCatchup, {
           reconcile: () => services.ebayPublicationReconciliation.processDue(),
         });
