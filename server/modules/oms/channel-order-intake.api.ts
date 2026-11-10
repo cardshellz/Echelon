@@ -4,7 +4,11 @@ export {
   type OmsService,
   type OrderData,
 } from "./oms.service";
-export { WmsSyncService } from "./wms-sync.service";
+export { WmsSyncService, resolveAssignedBinLocation } from "./wms-sync.service";
+export {
+  reassignOrderLineVariant,
+  OrderLineVariantReassignmentError,
+} from "./order-line-variant-reassignment";
 export {
   ChannelOrderObservationError,
   channelOrderObservationSchema,

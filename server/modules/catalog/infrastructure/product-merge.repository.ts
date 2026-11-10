@@ -16,8 +16,10 @@ import {
   openOperationalQuantityPosting,
   type InventoryUseCases,
 } from "../../inventory/catalog-inventory.api";
-import { reassignOrderLineVariant } from "../../oms/order-line-variant-reassignment";
-import { resolveAssignedBinLocation } from "../../oms/wms-sync.service";
+import {
+  reassignOrderLineVariant,
+  resolveAssignedBinLocation,
+} from "../../oms/channel-order-intake.api";
 import { reassignWmsOrderItemVariant } from "../../wms/order-item-commands";
 import { mergePurchasingProductIdentity, readPurchasingMergeEvidence } from "../../procurement/purchasing-product-merge";
 import { productMethods as catalogStorage } from "../catalog.storage";
