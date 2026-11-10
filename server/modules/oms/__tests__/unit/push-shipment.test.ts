@@ -1699,7 +1699,7 @@ describe("pushShipment :: error cases", () => {
       { rows: [okItem()] },
       { rows: [] }, // UPDATE
     ]);
-    globalThis.fetch = mockFetchOnceOk({
+    globalThis.fetch = mockFetchForPush({
       orderId: 42,
       orderStatus: "awaiting_shipment",
     }) as any;
@@ -1749,7 +1749,7 @@ describe("pushShipment :: error cases", () => {
       { rows: [okItem()] },
       { rows: [] }, // UPDATE
     ]);
-    globalThis.fetch = mockFetchOnceOk({
+    globalThis.fetch = mockFetchForPush({
       orderId: 42,
       orderNumber: shipmentRow.id,
       orderKey: `echelon-wms-shp-${shipmentRow.id}`,

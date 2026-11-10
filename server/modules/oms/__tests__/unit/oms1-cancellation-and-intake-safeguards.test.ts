@@ -213,7 +213,7 @@ describe("OMS-1: cancellation terminal-truth guards, intake idempotency, and loo
 
       const authority: any = {
         recordPhysicalPackage: vi.fn().mockResolvedValue({
-          shipmentId: 600,
+          materialized: { physicalShipmentId: 600 },
           created: true,
         }),
         projectPhysicalPackage: vi.fn().mockResolvedValue(undefined),
