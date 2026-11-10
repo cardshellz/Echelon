@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000058000020390001_product_merge_runs.sql",
+  "generation": 58,
+  "pr": 2039,
+  "ordinal": 1,
+  "after": [
+    "900000057000020130001_inventory_sales_statuses.sql"
+  ]
+}
