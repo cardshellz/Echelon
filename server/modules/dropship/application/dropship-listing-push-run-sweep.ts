@@ -65,6 +65,12 @@ export interface ListingPushRunFinished {
    * re-queues outside a run, never for a run), by code; empty when none (merge review ADV-RB2-1).
    */
   stockLinkFailuresNotRequeued: ListingPushRunCodeCount[];
+  /**
+   * The run's blocked sizes only waiting for stock (isListingPushItemWaitingForStock): counted in `counts.blocked`
+   * and the run's status as stored, but left out of the notice and of `problems`, since the sync sweep lists them by
+   * itself when stock returns.
+   */
+  waitingForStockCount: number;
 }
 
 /** How many of a run's sizes ended with one code. */
@@ -433,8 +439,17 @@ export class DropshipListingPushRunSweepService {
   }
 
   private async notifyFinishedRun(result: ListingPushRunFinished): Promise<void> {
-    const problemCount = listingPushRunProblemCount(result.counts);
+    const problemCount = listingPushRunNoticeProblemCount(result);
     if (problemCount > 0) await this.sendRunNotice(result, problemCount);
+    else if (result.waitingForStockCount > 0) {
+      // DEBUG: an expected state, not an anomaly (CLAUDE.md section 10): every size that did not publish waits for stock.
+      this.deps.logger.debug?.({
+        code: "DROPSHIP_LISTING_PUSH_RUN_NOTICE_NOT_NEEDED_WAITING_FOR_STOCK",
+        message: "Every size of a finished publish run that did not publish is waiting for stock; no notice is sent.",
+        context: { action: "notify_publish_run_finished", outcome: "skipped_waiting_for_stock", runId: result.run.runId,
+          vendorId: result.run.vendorId, storeConnectionId: result.run.storeConnectionId, waitingForStockCount: result.waitingForStockCount },
+      });
+    }
     await this.deps.repository.markRunNotified({ runId: result.run.runId, now: this.deps.clock.now() });
   }
 
@@ -458,14 +473,24 @@ export class DropshipListingPushRunSweepService {
           variantName: problem.variantName, outcome: problem.outcome, code: problem.code, message: problem.message,
         })),
         omittedProblemCount: Math.max(0, problemCount - Math.min(result.problems.length, MAX_RUN_NOTIFICATION_ITEMS)),
+        waitingForStockCount: result.waitingForStockCount,
       },
       idempotencyKey: `listing-push-run:${result.run.runId}:finished`,
     }, {
       code: "DROPSHIP_LISTING_PUSH_RUN_NOTIFICATION_FAILED",
       message: "A publish run's finish notification failed after the run finished.",
-      context: { runId: result.run.runId, vendorId: result.run.vendorId, storeConnectionId: result.run.storeConnectionId, problemCount },
+      context: { runId: result.run.runId, vendorId: result.run.vendorId, storeConnectionId: result.run.storeConnectionId, problemCount,
+        waitingForStockCount: result.waitingForStockCount },
     });
   }
+}
+
+/**
+ * How many sizes a finished run's notice counts: its problems (listingPushRunProblemCount) less those only waiting
+ * for stock, never below 0.
+ */
+export function listingPushRunNoticeProblemCount(result: Pick<ListingPushRunFinished, "counts" | "waitingForStockCount">): number {
+  return Math.max(0, listingPushRunProblemCount(result.counts) - result.waitingForStockCount);
 }
 
 function chunkFailure(classified: ChunkExpansionErrorClass): ListingPushRunChunkFailure {
