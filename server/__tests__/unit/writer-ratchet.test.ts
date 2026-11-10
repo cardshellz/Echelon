@@ -287,7 +287,12 @@ describe("writer-ratchet (P2.1)", () => {
     for (const table of ["oms.oms_orders", "oms.oms_order_lines", "oms.oms_order_events"]) {
       expect(current[table]).toContain("modules/oms");
       expect(current[table]).not.toContain("modules/channels");
+      expect(current[table]).not.toContain("modules/dropship");
+      expect(currentIncludingScripts[table]).not.toContain("modules/dropship");
+      expect(baseline[table]).not.toContain("modules/dropship");
     }
+    expect(current["oms.oms_order_lines"]).toEqual(["modules/oms"]);
+    expect(baseline["oms.oms_order_lines"]).toEqual(["modules/oms"]);
   });
 
   it("keeps selective listing publication and inventory membership with their owning modules", () => {

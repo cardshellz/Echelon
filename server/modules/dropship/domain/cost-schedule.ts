@@ -160,6 +160,13 @@ export function reconcileCostSchedule(input: {
   }
 
   if (live < inForce) {
+    if (
+      timing.decreaseTiming === "after_notice"
+      && future.length === 1
+      && future[0].unitCostCents === live
+    ) {
+      return { operations: [], inForceBeforeCents: inForce, inForceAfterCents: inForce };
+    }
     withdrawAll();
     const effectiveAt = timing.decreaseTiming === "immediate" ? now : announcedEffectiveAt(now, timing.increaseNoticeDays);
     operations.push({ kind: "add", direction: "decrease", fromCents: inForce, unitCostCents: live, effectiveAt });

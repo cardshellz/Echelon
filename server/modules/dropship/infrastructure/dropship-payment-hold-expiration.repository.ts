@@ -56,6 +56,12 @@ export class PgDropshipPaymentHoldExpirationRepository implements DropshipPaymen
            WHERE status = 'payment_hold'
              AND payment_hold_expires_at IS NOT NULL
              AND payment_hold_expires_at <= $1
+             AND NOT EXISTS (
+               SELECT 1
+               FROM dropship.dropship_order_acceptance_stages AS stage
+               WHERE stage.intake_id = dropship.dropship_order_intake.id
+                 AND stage.state IN ('inventory_claimed', 'compensation_pending')
+             )
            ORDER BY payment_hold_expires_at ASC, id ASC
            LIMIT $2
            FOR UPDATE SKIP LOCKED

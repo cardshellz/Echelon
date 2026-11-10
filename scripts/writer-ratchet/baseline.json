@@ -1171,7 +1171,6 @@
     "modules/oms"
   ],
   "oms.oms_order_events": [
-    "modules/dropship",
     "modules/oms",
     "server/index.ts"
   ],
@@ -1179,11 +1178,9 @@
     "modules/oms"
   ],
   "oms.oms_order_lines": [
-    "modules/dropship",
     "modules/oms"
   ],
   "oms.oms_orders": [
-    "modules/dropship",
     "modules/oms",
     "modules/orders"
   ],
