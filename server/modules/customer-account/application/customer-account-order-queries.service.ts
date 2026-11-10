@@ -1,6 +1,7 @@
 import type { AccountNativeReader } from "./account-native-summaries.ports";
 import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
 import type { OrderEditService } from "../../order-edits/application/order-edit.service";
+import { OrderEditProviderError } from "../../order-edits/application/order-edit-provider";
 import type { OrderEditConnection } from "@shared/order-edits/order-edit.contract";
 import { orderEditConnectionSchema } from "@shared/order-edits/order-edit.contract";
 import { customerAccountOrderIdentityInputSchema } from "@shared/customer-account/customer-account.contract";
@@ -145,6 +146,31 @@ export class CustomerAccountOrderQueriesService {
       (order) =>
         !facts.some((fact) => fact.externalOrderId === order.externalOrderId),
     );
+    const orders = facts.map(
+      ({ externalCustomerId, connectionId: _connection, sourceUpdatedAt: _version,
+        freshThrough: _freshThrough, ...fact }) => ({ ...fact,
+        customerId: externalCustomerId ? `gid://shopify/Customer/${externalCustomerId}` : null }),
+    );
+    if (missing.length) {
+      try {
+        // A historical purchase may have neither an OMS row nor a saved fact,
+        // so the refresh queue cannot prove its owner yet. Resolve this bounded
+        // cold batch directly from Shopify; its reader retains versioned facts.
+        // Warm requests perform no provider read, pricing or edit calculation.
+        const recovered = await this.dependencies.edits.orderSummaries(
+          connection.connectionId, missing.map(order => order.externalOrderId),
+        );
+        orders.push(...recovered.filter(order =>
+          order.channelId === principal.channelId && order.shopDomain === principal.shopDomain &&
+          order.customerId === `gid://shopify/Customer/${principal.externalCustomerId}` &&
+          missing.some(expected => expected.externalOrderId === order.externalOrderId && expected.orderReference === order.orderReference),
+        ));
+      } catch (cause) {
+        // A failed cold lookup must not discard unrelated, verified totals.
+        this.dependencies.report({ code: "CUSTOMER_ACCOUNT_NATIVE_LOOKUP_FAILED",
+          ...(cause instanceof OrderEditError || cause instanceof OrderEditProviderError ? { causeCode: cause.code } : {}) });
+      }
+    }
     const now = this.dependencies.now();
     const stale = facts.filter(
       (fact) =>
@@ -153,12 +179,13 @@ export class CustomerAccountOrderQueriesService {
     );
     const refresh = [
       ...new Set([
-        ...missing.map((order) => order.externalOrderId),
+        ...missing.filter(expected => !orders.some(order => order.externalOrderId === expected.externalOrderId))
+          .map((order) => order.externalOrderId),
         ...stale.map((fact) => fact.externalOrderId),
       ]),
     ];
     if (refresh.length) {
-      // Queue only; never put a Shopify read on the page's critical path.
+      // Stale saved facts stay available while the normal worker refreshes.
       try {
         await this.dependencies.native.request(
           {
@@ -177,20 +204,7 @@ export class CustomerAccountOrderQueriesService {
     }
     return {
       stale: stale.length > 0,
-      orders: facts.map(
-        ({
-          externalCustomerId,
-          connectionId: _connection,
-          sourceUpdatedAt: _version,
-          freshThrough: _freshThrough,
-          ...fact
-        }) => ({
-          ...fact,
-          customerId: externalCustomerId
-            ? `gid://shopify/Customer/${externalCustomerId}`
-            : null,
-        }),
-      ),
+      orders,
     };
   }
 
