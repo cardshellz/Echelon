@@ -3,8 +3,10 @@ import * as schema from "@shared/schema";
 import { pool } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import type { PoolClient } from "pg";
-import type { DropshipReturnWalletSettlementPort } from "../../dropship/application/return-wallet-settlement.port";
-import { PostgresDropshipReturnWalletSettlementPort } from "../../dropship/infrastructure/dropship-return-wallet-settlement.repository";
+import {
+  PostgresDropshipReturnWalletSettlementPort,
+  type DropshipReturnWalletSettlementPort,
+} from "../../dropship/return-settlement.api";
 import {
   ReturnCaseFinancialError,
   type CustomerRefundQuote,

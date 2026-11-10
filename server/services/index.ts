@@ -199,12 +199,13 @@ import { InventoryPublicationReadbackService } from "../modules/inventory-planni
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
 import { InventoryPublicationTransportRegistry } from "../modules/inventory-planning/application/inventory-publication-transport";
 import {
-  createEbayDropshipInventoryPublicationTransportAdapterFromEnv, PgDropshipInventoryPublicationDestinationReader,
-} from "../modules/dropship/infrastructure/dropship-ebay-inventory-publication.adapter";
-import { createDropshipEbayStockLinkAdapter } from "../modules/dropship/infrastructure/dropship-ebay-stock-link.adapter";
-import { createDropshipEbayStockLinkSource } from "../modules/dropship/infrastructure/dropship-ebay-stock-link-source";
-import { createDropshipEbayRegistrationCredentialProviderFromEnv } from "../modules/dropship/infrastructure/dropship-ebay-registration-credentials";
-import { createDropshipOmsChannelResolver } from "../modules/dropship/infrastructure/dropship-oms-warehouse-assignments.reader";
+  PgDropshipInventoryPublicationDestinationReader,
+  createDropshipEbayStockLinkAdapter,
+  createDropshipEbayStockLinkSource,
+  createEbayDropshipInventoryPublicationTransportAdapterFromEnv,
+} from "../modules/dropship/ebay-inventory-publication.api";
+import { createDropshipEbayRegistrationCredentialProviderFromEnv } from "../modules/dropship/ebay-registration-credentials.api";
+import { createDropshipOmsChannelResolver } from "../modules/dropship/oms-channel-resolver.api";
 import { createMemberResolver } from "../modules/membership";
 import { InventoryAvailabilityClaimService } from "../modules/inventory-planning/application/inventory-availability-claim.service";
 import { PostgresInventoryAvailabilityClaimRepository } from "../modules/inventory-planning/infrastructure/inventory-availability-claim.repository";

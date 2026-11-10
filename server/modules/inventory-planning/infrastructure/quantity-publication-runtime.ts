@@ -113,7 +113,7 @@ export function createQuantityPublicationCatchupService(input: {
     if (authority === "canonical") return planCurrentCanonicalListingQuantity(scope);
     if (authority !== "legacy") throw new QuantityPublicationAdmissionError("PUBLICATION_AUTHORITY_MISSING", "Runtime publication authority is unavailable.");
     if (scope.destinationKind === "dropship_store_connection") {
-      const { refreshDropshipQuantityPublicationCatchup } = await import("../../dropship/infrastructure/dropship-quantity-publication-catchup.provider");
+      const { refreshDropshipQuantityPublicationCatchup } = await import("../../dropship/quantity-publication-catchup.api");
       await refreshDropshipQuantityPublicationCatchup(scope, claim);
       return;
     }

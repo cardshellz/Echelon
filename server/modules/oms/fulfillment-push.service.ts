@@ -25,8 +25,10 @@ import {
 import type { EbayApiClient } from "../channels/ebay-connector.api";
 import type { ChannelFulfillmentProviderClients, ShopifyFulfillmentAccount } from "../channels/channel-fulfillment-provider-clients.service";
 import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
-import { DropshipError } from "../dropship/domain/errors";
-import { buildChannelFulfillmentTrackingIdempotencyKey } from "../dropship/application/dropship-marketplace-tracking-service";
+import {
+  DropshipError,
+  buildChannelFulfillmentTrackingIdempotencyKey,
+} from "../dropship/fulfillment-tracking.api";
 import {
   DROPSHIP_LINE_FULFILLMENT_PROVIDER,
   DROPSHIP_ORDER_CHANNEL_PROVIDER,
@@ -1255,7 +1257,7 @@ export function createFulfillmentPushService(
       }
       return _dropshipMarketplaceTrackingService;
     }
-    const mod = await import("../dropship/infrastructure/dropship-marketplace-tracking.factory");
+    const mod = await import("../dropship/fulfillment-tracking.api");
     _dropshipMarketplaceTrackingService = mod.createDropshipMarketplaceTrackingServiceFromEnv();
     return _dropshipMarketplaceTrackingService;
   }

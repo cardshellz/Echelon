@@ -3,7 +3,7 @@ import { db, pool } from "../db";
 import { sql } from "drizzle-orm";
 import { backfillMemberTiers } from "../modules/oms/member-tier-enrichment";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
-import { createDropshipOmsChannelResolver } from "../modules/dropship/infrastructure/dropship-oms-warehouse-assignments.reader";
+import { createDropshipOmsChannelResolver } from "../modules/dropship/oms-channel-resolver.api";
 import { requireAuth, requireInternalApiKey, requirePermission } from "./middleware";
 
 export function registerDiagnosticsRoutes(app: Express) {
