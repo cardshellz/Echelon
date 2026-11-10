@@ -22,7 +22,7 @@ import {
   type VerifiedShopifyVariantIdentity,
 } from "./shopify-product-mapping.domain";
 import { enqueueShippingGroupMetafieldWrite } from "./shipping-group-sync";
-import { upsertChannelProductIdentity } from "../channels/channel-product-identity.repository";
+import { upsertChannelProductIdentity } from "../channels/product-identity.api";
 import { retryPublicationSelectionWrite } from "../inventory-planning/publication-selection-retry";
 
 const DEFAULT_SHOPIFY_API_VERSION = "2024-01";

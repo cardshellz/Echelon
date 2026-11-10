@@ -8,7 +8,7 @@ import {
   ebayProviderAccountNamespace,
   type EbayRegistrationCredentialProvider,
   type EbayRegistrationReadCredential,
-} from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
+} from "../../../marketplace-listings/ebay-registration.api";
 import {
   MARKETPLACE_PROVIDER_IDENTITY_SCHEME,
 } from "../../../marketplace-listings/domain/listing-registration-plan";

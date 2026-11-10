@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ShopifyIdentityConnection } from "../../channels/adapters/shopify-identity.reader";
+import type { ShopifyIdentityConnection } from "../../channels/shopify-identity.api";
 import {
   CUSTOMER_RETURN_SHOPIFY_API_VERSION, CUSTOMER_RETURN_SHOPIFY_COLLECTION_LIMIT,
   CustomerReturnShopifySnapshotError, customerReturnShopifyDomainSchema, customerReturnShopifyGidSchema,

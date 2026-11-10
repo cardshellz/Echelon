@@ -20,7 +20,7 @@ import {
 } from "@shared/schema";
 import { db } from "../../db";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
-import { removeChannelProductIdentities } from "../channels/channel-product-identity.repository";
+import { removeChannelProductIdentities } from "../channels/product-identity.api";
 import {
   buildShopifyProductMappingSummary,
   normalizeShopifyId,

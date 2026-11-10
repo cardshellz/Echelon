@@ -22,7 +22,7 @@ import {
   sqlBigintArray,
   sqlTextArray,
 } from "../../infrastructure/postgres-array";
-import type { EbayApiClient } from "../channels/adapters/ebay/ebay-api.client";
+import type { EbayApiClient } from "../channels/ebay-connector.api";
 import type { ChannelFulfillmentProviderClients, ShopifyFulfillmentAccount } from "../channels/channel-fulfillment-provider-clients.service";
 import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
 import { DropshipError } from "../dropship/domain/errors";
@@ -35,12 +35,12 @@ import {
 import { resolveChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
 import { shopifyOrderFulfillmentLockId } from "./shopify-fulfillment-lock";
 import { assertShopifyCommandLabelActive } from "./shopify-label-command-guard.repository";
-import type { EbayShippingFulfillmentRequest } from "../channels/adapters/ebay/ebay-types";
+import type { EbayShippingFulfillmentRequest } from "../channels/ebay-connector.api";
 import type {
   ShopifyAdminGraphQLClient,
   ShopifyUserError,
 } from "../shopify/admin-gql-client";
-import { normalizeEbayTrackingNumber } from "../channels/adapters/ebay/ebay-fulfillment.util";
+import { normalizeEbayTrackingNumber } from "../channels/ebay-connector.api";
 import {
   EbayTrackingConflictError,
   recordEbayTrackingConflict,

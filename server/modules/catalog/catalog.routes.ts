@@ -2946,7 +2946,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       let ebayAccessToken: string;
       let ebayEnvironment: "production" | "sandbox";
       try {
-        const { EbayAuthService, createEbayAuthConfig } = await import("../channels/adapters/ebay/ebay-auth.service");
+        const { EbayAuthService, createEbayAuthConfig } = await import("../channels/ebay-connector.api");
         const config = createEbayAuthConfig();
         const authService = new EbayAuthService(db as any, config);
         ebayAccessToken = await authService.getAccessToken(67);

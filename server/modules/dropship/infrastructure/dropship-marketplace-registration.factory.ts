@@ -7,12 +7,12 @@ import type {
 } from "../../marketplace-listings/application/registration-ports";
 import {
   EbayMarketplaceRegistrationObserver,
-} from "../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
+} from "../../marketplace-listings/ebay-registration.api";
 import {
   FetchEbayRegistrationReadTransport,
   type EbayRegistrationCredentialProvider,
   type EbayRegistrationReadTransport,
-} from "../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
+} from "../../marketplace-listings/ebay-registration.api";
 import {
   createAuthorityAwareInventoryAtpService,
   createInventoryChannelQuantityRuntimeService,

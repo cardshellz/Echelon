@@ -2,7 +2,7 @@ import { abortable, readCustomerReturnShopifyJson } from "./customer-return-shop
 import { CUSTOMER_RETURN_SHOPIFY_API_VERSION } from "../application/customer-return-shopify-snapshot.ports";
 import type { Pool } from "pg";
 import { z } from "zod";
-import type { ShopifyIdentityConnection } from "../../channels/adapters/shopify-identity.reader";
+import type { ShopifyIdentityConnection } from "../../channels/shopify-identity.api";
 import { buildCustomerReturnOrderNumberAliases } from "../domain/customer-return-order-reference";
 import { CustomerReturnCustomerAccessError } from "../application/customer-return-customer-auth.service";
 import { guestAccessError } from "../application/customer-return-guest.service";
