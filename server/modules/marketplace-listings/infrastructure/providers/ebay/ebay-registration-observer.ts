@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { providerReadDiagnosticFromError } from "@shared/channel-provider-read";
 import { ebayReadDiagnostic, ebayReadFailureKind } from "./ebay-read-diagnostic";
-import { isMissingEbayOfferCollection } from "../../../../channels/adapters/ebay/ebay-api-error";
+import { isMissingEbayOfferCollection } from "../../../../channels/ebay-connector.api";
 
 import { listingRegistrationOwnerSnapshotSchema } from "../../../application/registration-dtos";
 import type {

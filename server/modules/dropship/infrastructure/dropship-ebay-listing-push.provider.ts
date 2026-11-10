@@ -12,9 +12,9 @@ import {
 import { describeEbayErrors, parseEbayErrorBody } from "./ebay-error-body";
 import { ebaySellRequestHeaders } from "./ebay-sell-headers";
 import { createProviderRequestDeadline } from "../../channels/provider-request-limits";
-import { executeEbayQuantityHttp } from "../../channels/adapters/ebay/ebay-quantity-http";
-import { discoverEbayInventoryOffers, ebayInventoryMarketplace, ebayInventoryOffersPath } from "../../channels/adapters/ebay/ebay-inventory-quantity";
-import { sendEbayQuantityUpdates } from "../../channels/adapters/ebay/ebay-quantity-update";
+import { executeEbayQuantityHttp } from "../../channels/ebay-connector.api";
+import { discoverEbayInventoryOffers, ebayInventoryMarketplace, ebayInventoryOffersPath } from "../../channels/ebay-connector.api";
+import { sendEbayQuantityUpdates } from "../../channels/ebay-connector.api";
 import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
 import type {
   DropshipMarketplaceListingPushProvider,
@@ -37,7 +37,7 @@ import {
 import {
   EbayListingBuilder,
   type EbayListingConfig as SharedEbayListingConfig,
-} from "../../channels/adapters/ebay/ebay-listing-builder";
+} from "../../channels/ebay-connector.api";
 import type {
   EbayBulkPriceQuantityRequest,
   EbayBulkPriceQuantityResponse,
@@ -45,12 +45,12 @@ import type {
   EbayInventoryItemGroup,
   EbayListingPolicies,
   EbayOffer,
-} from "../../channels/adapters/ebay/ebay-types";
-import { readEbayNativePackage } from "../../channels/adapters/ebay/ebay-native-package.reader";
-import { readEbayPublishedContent } from "../../channels/adapters/ebay/ebay-published-content.reader";
+} from "../../channels/ebay-connector.api";
+import { readEbayNativePackage } from "../../channels/ebay-connector.api";
+import { readEbayPublishedContent } from "../../channels/ebay-connector.api";
 import type { CatalogImageInspector } from "../../catalog/catalog-image-inspection";
-import { EbayApiRequestError, isMissingEbayOfferCollection } from "../../channels/adapters/ebay/ebay-api-error";
-import { normalizeEbayObservedOffers } from "../../channels/adapters/ebay/ebay-offer-observation";
+import { EbayApiRequestError, isMissingEbayOfferCollection } from "../../channels/ebay-connector.api";
+import { normalizeEbayObservedOffers } from "../../channels/ebay-connector.api";
 import { ebayListingImagesFromUrls } from "../../channels/ebay-listing-photos.domain";
 import type { ChannelListingPayload } from "../../channels/channel-adapter.interface";
 import {

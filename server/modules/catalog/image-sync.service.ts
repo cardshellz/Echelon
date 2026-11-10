@@ -12,7 +12,7 @@
 import { db, pool } from "../../db";
 import { sql, eq, and } from "drizzle-orm";
 import { productAssets, productVariants, products, channelListings } from "@shared/schema";
-import { readEbayPublishedContent } from "../channels/adapters/ebay/ebay-published-content.reader";
+import { readEbayPublishedContent } from "../channels/ebay-connector.api";
 import { createSharedProductPhotoImporter, type SharedImportedPhoto } from "./shared-product-photos.service";
 import { PgCatalogVariantPublicationPhotoReader, readCatalogPublicationImageIds, readCatalogPublicationImages,
   resolveCatalogPublicationPhotos } from "./catalog-publication-images.reader";

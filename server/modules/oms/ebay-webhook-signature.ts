@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import type { Request } from "express";
 import { z } from "zod";
-import { EbayApiRequestError } from "../channels/adapters/ebay/ebay-api-error";
+import { EbayApiRequestError } from "../channels/ebay-connector.api";
 import { logger } from "../../platform/observability/logger";
 
 /**
