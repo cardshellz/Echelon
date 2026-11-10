@@ -355,7 +355,7 @@ function advancedSummary(form: PolicyForm): string {
     : form.maxMode === "unlimited" ? "No maximum"
     : !form.maxUnits.trim() ? "Maximum needs a value" : `Maximum: ${form.maxUnits} units`;
   const cutoff = form.minMode === "inherit" || !form.minUnits.trim()
-    ? "Cutoff needs a value" : form.minUnits.trim() === "0" ? "No cutoff" : `Cutoff: ${form.minUnits} units`;
+    ? "Hide when below needs a value" : form.minUnits.trim() === "0" ? "Never hidden" : `Hide when below: ${form.minUnits} units`;
   const sharing = form.semantics === "inherit" ? "Choose stock sharing"
     : form.semantics === "exposure" ? "Shared stock" : "Combined percentages limited";
   return [buffer, maximum, cutoff, sharing].join(" · ");

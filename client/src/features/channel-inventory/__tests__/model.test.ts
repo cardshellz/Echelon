@@ -346,16 +346,16 @@ describe("quantity explanation", () => {
       ["Stock percentage 80%", "80"],
       ["Stock buffer 5", "75"],
       ["Maximum 60", "60"],
-      ["Out-of-stock cutoff 0", "60"],
+      ["Hide when below 0", "60"],
     ]);
     expect(explanation.proposedUnits).toBe("60");
     expect(explanation.zeroReason).toBeNull();
   });
 
-  it("explains zero from ineligibility, the out-of-stock cutoff, or empty availability", () => {
+  it("explains zero from ineligibility, hide when below, or empty availability", () => {
     const row = previewRow();
     expect(explainQuantity({ ...row, policy: { ...row.policy!, eligible: false }, publishedUnits: "0" }).zeroReason).toMatch(/not eligible/);
-    expect(explainQuantity({ ...row, policy: { ...row.policy!, minPublishSellableUnits: "70" }, publishedUnits: "0" }).zeroReason).toMatch(/below the out-of-stock cutoff of 70/);
+    expect(explainQuantity({ ...row, policy: { ...row.policy!, minPublishSellableUnits: "70" }, publishedUnits: "0" }).zeroReason).toMatch(/below the hide-when-below level of 70/);
     expect(explainQuantity({ ...row, canonicalAtpUnits: "0", sharedUnits: "0", afterHoldbackUnits: "0", cappedUnits: "0", publishedUnits: "0", sourceWarehouseBreakdown: [] }).zeroReason).toMatch(/No availability/);
   });
 

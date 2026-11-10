@@ -67,6 +67,7 @@ export const BROWSER_FEATURES = Object.freeze({
       "shards": 1,
       "tests": [
         "test/browser/channel-inventory-workspace.spec.ts",
+        "test/browser/product-stock-rules.spec.ts",
         "test/browser/walmart-channel-workspace.spec.ts"
       ],
       "roots": []
