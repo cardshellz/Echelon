@@ -59,6 +59,7 @@ const OP = "00000000-0000-4000-8000-000000000001";
 // Minimal prerequisite tables; the new 0723 migration is executed verbatim.
 const prerequisites = `
 CREATE SCHEMA identity; CREATE SCHEMA channels; CREATE SCHEMA oms; CREATE SCHEMA wms; CREATE SCHEMA inventory; CREATE SCHEMA catalog;
+CREATE TYPE wms.shipment_status AS ENUM ('planned','queued','labeled','shipped','on_hold','voided','cancelled','returned','lost');
 CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer NOT NULL,sku text,is_active boolean NOT NULL DEFAULT true);
 INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(100,200,'SKU'),(101,200,'OTHER-PACK'),(999,999,'OTHER');
 CREATE TABLE identity.users(id varchar(255) PRIMARY KEY);
@@ -77,7 +78,7 @@ CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer REFERENCES 
   quantity integer,picked_quantity integer DEFAULT 0,fulfilled_quantity integer DEFAULT 0,status text DEFAULT 'pending',on_hold boolean DEFAULT false,
   product_id integer DEFAULT 100,catalog_product_id integer DEFAULT 200,sku text DEFAULT 'SKU',
   name text DEFAULT 'Product',paid_price_cents bigint DEFAULT 1000,unit_price_cents bigint DEFAULT 1000);
-CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders(id),status text DEFAULT 'planned',
+CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders(id),status wms.shipment_status DEFAULT 'planned',
   held boolean DEFAULT false,requires_review boolean DEFAULT false,review_reason text,shipstation_order_id integer,shipping_engine text,engine_order_ref text,
   tracking_number text,shipped_at timestamptz,source text DEFAULT 'echelon_sync',held_at timestamptz,
   on_hold_reason text,cancelled_at timestamptz,voided_reason text,updated_at timestamptz);
@@ -538,6 +539,13 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
         expect(f.calls).not.toContain("/orders/restorefromhold");
         expect(f.live.orderStatus).toBe("on_hold");
       } finally {f.restore();}
+    });
+
+    it("loads readiness using the production shipment enum and rejects delivery statuses at that boundary", async () => {
+      await database.pool.query("INSERT INTO wms.outbound_shipments(id,order_id,status) VALUES(51,10,'planned')");
+      await expect(gateway.inspect(20)).resolves.toMatchObject({editable:true,fulfillment:{code:'awaiting_picking'}});
+      await expect(database.pool.query("SELECT id FROM wms.outbound_shipments WHERE status='delivered'")).rejects.toMatchObject({code:'22P02'});
+      await expect(gateway.inspect(20)).resolves.toMatchObject({editable:true});
     });
 
     it("observes a real PostgreSQL command lock without replaying a command or writing an audit event", async () => {

@@ -826,7 +826,7 @@ export class OrderEditWarehouseGateway {
         LEFT JOIN wms.shipping_engine_orders engine ON engine.provider='shipstation'
           AND engine.provider_order_id=COALESCE(pending.shipstation_order_id::text,
             CASE WHEN pending.shipping_engine='shipstation' THEN pending.engine_order_ref END)
-        WHERE pending.order_id=wo.id AND pending.status NOT IN ('shipped','delivered','cancelled','voided')
+        WHERE pending.order_id=wo.id AND pending.status NOT IN ('shipped','cancelled','voided')
           AND engine.provider_status IS DISTINCT FROM 'shipped'
           AND EXISTS(SELECT 1 FROM wms.outbound_shipment_items osi JOIN wms.order_items oi ON oi.id=osi.order_item_id
             WHERE osi.shipment_id=pending.id AND osi.qty>0 AND oi.status<>'cancelled')) AS has_unshipped_partition,
