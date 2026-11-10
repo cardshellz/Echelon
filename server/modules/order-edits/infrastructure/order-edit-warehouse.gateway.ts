@@ -5,14 +5,16 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import { presentCustomerOrderFulfillment, type CustomerOrderFulfillment } from "@shared/customer-account/order-fulfillment";
 import { createHash } from "node:crypto";
-import { wmsOmsOrderIdSql } from "../../oms/oms-wms-order-link.sql";
+import {
+  getOmsLineMaterializableQuantity,
+  retireOrderEditProviderHolds,
+  wmsOmsOrderIdSql,
+} from "../../oms/order-edit-coordination.api";
 import { OrderEditError } from "../domain/order-edit-error";
 import { matchesOrderCancellationSettlement } from "../domain/order-edit-financials";
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import type { OrderEditReleaseProof } from "../application/order-edit-store";
-import { getOmsLineMaterializableQuantity } from "../../oms/oms-line-authority";
-import { retireOrderEditProviderHolds } from "../../oms/order-edit-provider-hold.commands";
 import { restoreStoppedRefundEditOrder } from "../../orders/order-status-core";
 import { proveStoppedRefundEditRecovery } from "./order-edit-refund-warehouse-evidence";
 import { appendOrderEditAudit } from "./order-edit-audit.writer";
@@ -706,7 +708,7 @@ export async function finalizeOrderEditWarehouseRelease(
       "Warehouse hold ownership changed.",
     );
   if (deferredShipments.length > 0) {
-    const { enqueueShipStationShipmentPushRetry } = await import("../../oms/webhook-retry.worker");
+    const { enqueueShipStationShipmentPushRetry } = await import("../../oms/webhook-retry.api");
     for (const shipmentId of deferredShipments)
       await enqueueShipStationShipmentPushRetry(drizzle(client), shipmentId, "settled refund edit released for ordinary provider dispatch");
   }

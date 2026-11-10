@@ -6,7 +6,7 @@ import { proveStoppedRefundEditRecovery } from "./order-edit-refund-warehouse-ev
 import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import { OrderEditError } from "../domain/order-edit-error";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { wmsOmsOrderIdSql } from "../../oms/oms-wms-order-link.sql";
+import { wmsOmsOrderIdSql } from "../../oms/order-edit-coordination.api";
 
 export const DEFERRED_REFUND_SHIPMENT_ACTION =
   "stopped_refund_new_shipment_deferred";

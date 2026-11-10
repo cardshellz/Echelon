@@ -3,4 +3,4 @@
  * import ordering weirdness. The underlying logic lives in
  * ../oms/shopify-bridge.ts.
  */
-export { backfillShopifyOrders } from "../oms/shopify-bridge";
+export { backfillShopifyOrders } from "../oms/shopify-intake.api";

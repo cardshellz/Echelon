@@ -9,23 +9,19 @@ import {
   type CustomerOrderCancellationInput,
   type CustomerOrderCancellationReview,
 } from "@shared/customer-account/order-cancellation";
-import type {
-  OrderEditRecord,
-  OrderEditReleaseProof,
-  OrderEditStore,
-  OrderEditWarehouse,
-} from "../../order-edits/application/order-edit-store";
 import {
-  OrderEditProviderError,
-  type OrderEditProvider,
-} from "../../order-edits/application/order-edit-provider";
-import { assertOrderEditIdentity } from "../../order-edits/application/order-edit-identity";
-import {
+  assertOrderEditIdentity,
+  matchesOrderCancellationSettlement,
   orderCancellationEligibilityReasons,
   orderCancellationLineEvidence,
-} from "../../order-edits/domain/order-cancellation-eligibility";
-import { OrderEditError } from "../../order-edits/domain/order-edit-error";
-import { matchesOrderCancellationSettlement } from "../../order-edits/domain/order-edit-financials";
+  OrderEditError,
+  OrderEditProviderError,
+  type OrderEditProvider,
+  type OrderEditRecord,
+  type OrderEditReleaseProof,
+  type OrderEditStore,
+  type OrderEditWarehouse,
+} from "../../order-edits/customer-account.api";
 import {
   cancellationPaymentsSettled,
   type OrderCancellationProvider,

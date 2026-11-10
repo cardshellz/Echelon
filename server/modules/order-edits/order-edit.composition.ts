@@ -8,7 +8,7 @@ import { PostgresOrderEditStore } from "./infrastructure/postgres-order-edit.sto
 import { ShopifyOrderEditProvider } from "./infrastructure/shopify-order-edit.provider";
 import { OrderEditWarehouseGateway } from "./infrastructure/order-edit-warehouse.gateway";
 import { OrderEditOmsSynchronizer } from "./infrastructure/order-edit-oms-synchronizer";
-import { OrderEditPaidProjection } from "../oms/order-edit-paid-projection";
+import { OrderEditPaidProjection } from "../oms/order-edit-coordination.api";
 import { OrderEditPreviewService } from "./application/order-edit-preview.service";
 import { createMemberPlanPresentationReader } from "../membership";
 import { ClubOrderEditCodeRedemptions } from "./infrastructure/club-order-edit-code-redemptions";

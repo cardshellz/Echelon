@@ -1180,8 +1180,7 @@
     "modules/oms"
   ],
   "oms.oms_orders": [
-    "modules/oms",
-    "modules/orders"
+    "modules/oms"
   ],
   "oms.order_country_repair_operations": [
     "modules/orders"

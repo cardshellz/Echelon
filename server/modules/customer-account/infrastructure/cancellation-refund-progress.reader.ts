@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { z } from "zod";
 import { orderEditStatusSchema } from "@shared/order-edits/order-edit.contract";
 import { orderCancellationDocumentSchema } from "@shared/customer-account/order-cancellation";
-import { orderEditSnapshotSchema } from "../../order-edits/application/order-edit-provider.schema";
+import { orderEditSnapshotSchema } from "../../order-edits/customer-account.api";
 import { customerAccountProgressScopeSchema, type CustomerAccountCancellationRefundReader } from "../application/customer-account-progress.ports";
 import { presentCancellationRefundProgress } from "../domain/cancellation-refund-progress";
 import type { CustomerOrderProgress } from "@shared/customer-account/order-progress";

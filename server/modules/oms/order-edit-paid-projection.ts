@@ -3,19 +3,17 @@ import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { sql } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
-import type { OrderEditSnapshot } from "../order-edits/application/order-edit-provider";
 import {
-  orderEditSnapshotSchema,
-  orderEditQuoteSchema,
-} from "../order-edits/application/order-edit-provider.schema";
-import {
-  matchesOrderEditQuote,
+  appendOrderEditAudit,
   isUnpaidRecoveryRestored,
-} from "../order-edits/application/order-edit-evidence";
-import { OrderEditError } from "../order-edits/domain/order-edit-error";
+  matchesOrderEditQuote,
+  OrderEditError,
+  orderEditQuoteSchema,
+  orderEditSnapshotSchema,
+  type OrderEditSnapshot,
+} from "../order-edits/oms-coordination.api";
 import { wmsOmsOrderIdSql } from "./oms-wms-order-link.sql";
 import { buildOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
-import { appendOrderEditAudit } from "../order-edits/infrastructure/order-edit-audit.writer";
 import { buildOrderEditPaidPricing } from "./order-edit-paid-pricing";
 
 const integer = z.coerce.number().int().nonnegative().safe();

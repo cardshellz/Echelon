@@ -13,7 +13,7 @@ import {
   enqueueShipStationHoldSyncRetry,
   enqueueShipStationSortRankSyncRetry,
   enqueueShipStationShipmentPushRetry,
-} from "../oms/webhook-retry.worker";
+} from "../oms/webhook-retry.api";
 import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
 import { reserveAndPushAfterHoldRelease } from "./release-hold-push";
 import { sql } from "drizzle-orm";

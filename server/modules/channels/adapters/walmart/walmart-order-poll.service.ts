@@ -1,7 +1,10 @@
 import { z } from "zod";
 import { observeRuntimeWork } from "../../../../platform/observability/runtime-memory";
-import type { OmsService } from "../../../oms/oms.service";
-import { ChannelOrderObservationError, type ChannelOrderObservationWriter } from "../../../oms/channel-order-observation";
+import {
+  ChannelOrderObservationError,
+  type ChannelOrderObservationWriter,
+  type OmsService,
+} from "../../../oms/channel-order-intake.api";
 import { WalmartApiError } from "./walmart-client";
 import { WalmartChannelService } from "./walmart-channel.service";
 import { parseWalmartOrder } from "./walmart-us-api";

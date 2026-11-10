@@ -1,8 +1,7 @@
 import type { Express } from "express";
 import { db, pool } from "../db";
 import { sql } from "drizzle-orm";
-import { backfillMemberTiers } from "../modules/oms/member-tier-enrichment";
-import { WmsSyncService } from "../modules/oms/wms-sync.service";
+import { backfillMemberTiers, WmsSyncService } from "../modules/oms/channel-order-intake.api";
 import { createDropshipOmsChannelResolver } from "../modules/dropship/oms-channel-resolver.api";
 import { requireAuth, requireInternalApiKey, requirePermission } from "./middleware";
 

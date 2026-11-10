@@ -30,7 +30,7 @@ import {
   deriveOmsLineAuthority,
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
-import { guardOrderEditShopifyIngress } from "../order-edits/infrastructure/order-edit-ingress-guard";
+import { guardOrderEditShopifyIngress } from "../order-edits/oms-coordination.api";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 import {
   applyShopifyRefundCascade,

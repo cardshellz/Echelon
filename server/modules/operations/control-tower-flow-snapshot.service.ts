@@ -1,5 +1,7 @@
-import type { FlowWaterfall } from "../oms/flow-waterfall.service";
-import { getFlowWaterfall } from "../oms/flow-waterfall.service";
+import {
+  getFlowWaterfall,
+  type FlowWaterfall,
+} from "../oms/operations-observability.api";
 import type { QueryClient } from "./control-tower-v2.domain";
 
 const SNAPSHOT_KEY = "order-flow-30d";

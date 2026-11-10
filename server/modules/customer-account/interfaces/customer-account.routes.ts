@@ -33,8 +33,12 @@ import {
   returnCustomerError,
   returnCustomerPrivateResponse,
 } from "../../returns/interfaces/http/customer-return-customer-auth.routes";
-import { OrderEditError } from "../../order-edits/domain/order-edit-error";
-import { OrderEditProviderError } from "../../order-edits/application/order-edit-provider";
+import {
+  OrderEditError,
+  orderEditOrderManagementPresentation,
+  OrderEditProviderError,
+  orderEditResponsePresentation,
+} from "../../order-edits/customer-account.api";
 import {
   CustomerAccountOriginAccessError,
   readCustomerAccountStagingConfig,
@@ -44,7 +48,6 @@ import {
 } from "../domain/customer-account-staging";
 import type { customerAccountServices } from "../infrastructure/customer-account.composition";
 import { orderEditPricingDisplayVersionSchema } from "@shared/order-edits/order-edit-financials";
-import { orderEditResponsePresentation, orderEditOrderManagementPresentation } from "../../order-edits/application/order-edit-response-presentation";
 import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
 import { customerOrderCancellationReviewSchema, customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
 import { CUSTOMER_ORDER_PROGRESS_VERSION } from "@shared/customer-account/order-progress";

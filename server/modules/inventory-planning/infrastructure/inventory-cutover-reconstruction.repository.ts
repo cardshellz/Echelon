@@ -8,7 +8,7 @@ import { PostgresCanonicalClaimInventoryRepository } from "../../inventory/infra
 import { readInventoryCutoverReconstruction } from "../../inventory/infrastructure/inventory-cutover-reconstruction.reader";
 import { readWmsCutoverReconstruction, readWmsCutoverShipmentReviews } from "../../wms/inventory-cutover-reconstruction.reader";
 import { readCutoverOriginalCosts } from "../../orders/inventory-cutover-reconstruction-cost.reader";
-import { readOmsCutoverReconstruction } from "../../oms/inventory-cutover-reconstruction.reader";
+import { readOmsCutoverReconstruction } from "../../oms/channel-order-intake.api";
 import { planCutoverReconstruction, reconstructionEvidenceHash, reconstructionHash } from "../domain/inventory-cutover-reconstruction";
 import { loadLatestCutoverOpening } from "./inventory-cutover-opening.reader";
 import { planFreshCutoverClaims } from "../domain/inventory-cutover-reconstruction-planning";

@@ -91,30 +91,37 @@ import { createDrizzleRecommendationPoHandoffRepository } from "../modules/procu
 import { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
 import { recordReceivingReconciliationFailure, recordReceiveValidationWarnings } from "../modules/procurement/po-exceptions.service";
 import { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } from "../modules/procurement/ap-ledger.service";
-import { createOmsService } from "../modules/oms/oms.service";
-import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
-import { createShopifyLabelLifecycleRepository } from "../modules/oms/shopify-label-lifecycle.repository";
-import { createShopifyLabelLifecycleService } from "../modules/oms/shopify-label-lifecycle.service";
-import { createChannelFulfillmentAuthorityRepository } from "../modules/oms/channel-fulfillment-authority.repository";
-import { createChannelFulfillmentReviewRetryRepository } from "../modules/oms/channel-fulfillment-review-retry.repository";
-import { createChannelFulfillmentReviewRetryService } from "../modules/oms/channel-fulfillment-review-retry.service";
-import { createChannelFulfillmentReceiptRetryRepository } from "../modules/oms/channel-fulfillment-receipt-retry.repository";
-import { createChannelFulfillmentReceiptRetryService } from "../modules/oms/channel-fulfillment-receipt-retry.service";
-import { createChannelFulfillmentProjector } from "../modules/oms/channel-fulfillment-projection.repository";
 import {
+  createOmsService,
+  WmsSyncService,
+  PostgresChannelOrderObservationWriter,
+} from "../modules/oms/channel-order-intake.api";
+import {
+  createFulfillmentPushService,
+  createShopifyLabelLifecycleRepository,
+  createShopifyLabelLifecycleService,
+  createChannelFulfillmentAuthorityRepository,
+  createChannelFulfillmentReviewRetryRepository,
+  createChannelFulfillmentReviewRetryService,
+  createChannelFulfillmentReceiptRetryRepository,
+  createChannelFulfillmentReceiptRetryService,
+  createChannelFulfillmentProjector,
   createChannelFulfillmentAuthorityService,
   createCompatibilityChannelFulfillmentProviderExecutor,
-} from "../modules/oms/channel-fulfillment-authority.service";
-import { createChannelFulfillmentIngressRepository } from "../modules/oms/channel-fulfillment-ingress.repository";
-import { createChannelFulfillmentIngressService } from "../modules/oms/channel-fulfillment-ingress.service";
+  createChannelFulfillmentIngressRepository,
+  createChannelFulfillmentIngressService,
+} from "../modules/oms/channel-fulfillment-authority.api";
 import { markShipmentCancelled } from "../modules/orders/shipment-rollup";
 import { withAdvisoryLock } from "../infrastructure/scheduler-lock";
 import { envFlagEnabled, getSchedulerDisableReason } from "../infrastructure/scheduler-config";
 import type { Pool } from "pg";
-import { createShipStationService } from "../modules/oms/shipstation.service";
+import {
+  createShipStationService,
+  createShipStationLabelReconciliationService,
+  createShipStationLabelReconciliationRepository,
+  createShipStationPhysicalRecoveryService,
+} from "../modules/oms/shipstation-execution.api";
 import { createShipStationRelatedLabelReader } from "../modules/shipping/shipstation-related-labels.reader";
-import { createShipStationLabelReconciliationService } from "../modules/oms/shipstation-label-reconciliation.service";
-import { createShipStationLabelReconciliationRepository } from "../modules/oms/shipstation-label-reconciliation.repository";
 import { createShipStationEngine } from "../modules/shipping";
 import { createDrizzleCarrierTrackingRepository } from "../modules/shipping/carrier-tracking.repository";
 import {
@@ -135,7 +142,6 @@ import {
 } from "../modules/shipping/carrier-dispatch-authority";
 import { createShipStationTrackingEventsClient } from "../modules/shipping/shipstation-tracking-events.client";
 import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shipstation-physical-recovery.client";
-import { createShipStationPhysicalRecoveryService } from "../modules/oms/shipstation-physical-recovery.service";
 import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client";
 import { ChannelIdentityService } from "../modules/channels/channel-identity.service";
 import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../modules/channels/shopify-stock-link-source";
@@ -147,8 +153,7 @@ import { InventoryProductSyncService } from "../modules/inventory-planning/appli
 import { PostgresInventoryProductSyncStore } from "../modules/inventory-planning/infrastructure/inventory-product-sync.repository";
 import { stockLinkRunnerDisableReason } from "../modules/inventory-planning/infrastructure/stock-link-runner-switch";
 import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../modules/channels/channel-fulfillment-provider-clients.service";
-import { WmsSyncService } from "../modules/oms/wms-sync.service";
-import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
+import { SyncRecoveryService } from "../modules/sync/sync-recovery.api";
 import { catalogStorage } from "../modules/catalog";
 import { warehouseStorage } from "../modules/warehouse";
 import { inventoryStorage } from "../modules/inventory";
@@ -172,7 +177,6 @@ import { ChannelIdentityError } from "../modules/channels/channel-identity.domai
 import { WalmartConnectionRepository } from "../modules/channels/adapters/walmart/walmart-connection.repository";
 import { WalmartAdapter } from "../modules/channels/adapters/walmart/walmart.adapter";
 import { WalmartOrderPollService } from "../modules/channels/adapters/walmart/walmart-order-poll.service";
-import { PostgresChannelOrderObservationWriter } from "../modules/oms/channel-order-observation.repository";
 import { PostgresInventoryPublicationSupplyReader } from "../modules/inventory-planning/infrastructure/inventory-publication-supply-read.repository";
 import { createWalmartFulfillmentExecutor } from "../modules/channels/adapters/walmart/walmart-fulfillment";
 import { AesGcmFulfillmentProviderCredentialCipher } from "../modules/shipping-engine/infrastructure/fulfillment-provider-credential-cipher";
@@ -917,5 +921,5 @@ export { createInventoryLotService } from "../modules/inventory/lots.service";
 export type { InventoryLotService } from "../modules/inventory/lots.service";
 export { createCOGSService } from "../modules/inventory/cogs.service";
 export type { COGSService, OrderCOGSResult, InventoryValuationResult, CostAdjustmentLog } from "../modules/inventory/cogs.service";
-export { createShipStationService } from "../modules/oms/shipstation.service";
-export type { ShipStationService } from "../modules/oms/shipstation.service";
+export { createShipStationService } from "../modules/oms/shipstation-execution.api";
+export type { ShipStationService } from "../modules/oms/shipstation-execution.api";

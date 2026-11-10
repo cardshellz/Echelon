@@ -281,7 +281,7 @@ export function createShipStationEngine(
       const apiSecret = process.env.SHIPSTATION_API_SECRET;
       if (!apiKey || !apiSecret) return;
       const { sweepShipStationQueue } = await import(
-        "../../oms/shipstation-sweeper"
+        "../../oms/shipstation-execution.api"
       );
       await sweepShipStationQueue(apiKey, apiSecret);
     },

@@ -15,7 +15,7 @@ import {
   presentCarrierPackageStatus,
   presentCustomerDelivery,
 } from "./customer-delivery-progress";
-import { wmsOmsOrderIdSql } from "../oms/oms-wms-order-link.sql";
+import { wmsOmsOrderIdSql } from "../oms/order-linkage-sql.api";
 import {
   customerAccountProgressScopeSchema,
   type CustomerAccountDeliveryProgressReader,

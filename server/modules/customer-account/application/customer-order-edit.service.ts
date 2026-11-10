@@ -2,10 +2,12 @@ import { z } from "zod";
 import type { CustomerRewards } from "./customer-rewards";
 import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
 import type { CustomerReturnOrderAccessService } from "../../returns/application/customer-return-order-access.service";
-import type { OrderEditService } from "../../order-edits/application/order-edit.service";
-import type { OrderEditStore } from "../../order-edits/application/order-edit-store";
-import { customerOrderEditActorId } from "../../order-edits/domain/order-edit-actor";
-import { OrderEditError } from "../../order-edits/domain/order-edit-error";
+import {
+  customerOrderEditActorId,
+  OrderEditError,
+  type OrderEditService,
+  type OrderEditStore,
+} from "../../order-edits/customer-account.api";
 import { orderEditQuoteInputSchema } from "@shared/order-edits/order-edit.contract";
 import {
   orderEditPreviewInputSchema,

@@ -2,7 +2,12 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { readBoundedResponseText } from "./shipstation-tracking-http";
-import { PackageReconciliationError, packageProviderProofSchema, type PackageProviderProof, type PackageReconciliationSnapshot } from "../oms/package-reconciliation.repository";
+import {
+  PackageReconciliationError,
+  packageProviderProofSchema,
+  type PackageProviderProof,
+  type PackageReconciliationSnapshot,
+} from "../oms/channel-fulfillment-authority.api";
 
 const positiveId = z.number().int().positive().safe();
 const itemSchema = z.object({ lineItemKey: z.string(), sku: z.string().nullable().optional(), quantity: z.number().int().positive().max(2_147_483_647) }).passthrough();

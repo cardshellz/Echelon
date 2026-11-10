@@ -1,7 +1,7 @@
 import type { Express, Request, Response } from "express";
 
 import { db, pool } from "../../db";
-import { enqueueShipStationRetry } from "../oms/webhook-retry.worker";
+import { enqueueShipStationRetry } from "../oms/webhook-retry.api";
 import { hasPermission } from "../identity";
 import { requireAuth, requirePermission } from "../../routes/middleware";
 import {
