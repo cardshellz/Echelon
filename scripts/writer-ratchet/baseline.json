@@ -1171,8 +1171,7 @@
     "modules/oms"
   ],
   "oms.oms_order_events": [
-    "modules/oms",
-    "server/index.ts"
+    "modules/oms"
   ],
   "oms.oms_order_line_authority_events": [
     "modules/oms"

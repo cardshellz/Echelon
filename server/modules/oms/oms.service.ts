@@ -689,10 +689,22 @@ export function createOmsService(db: any, reservationService?: any, options: { c
    * For now: assigns warehouse_id=1 (LEON) by default.
    */
   async function assignWarehouse(orderId: number, warehouseId: number = 1): Promise<void> {
-    await db
+    const whereChain = db
       .update(omsOrders)
       .set({ warehouseId, status: "confirmed", updatedAt: new Date() })
-      .where(eq(omsOrders.id, orderId));
+      .where(
+        and(
+          eq(omsOrders.id, orderId),
+          sql`${omsOrders.status} NOT IN ('cancelled', 'shipped', 'partially_shipped', 'refunded')`,
+        ),
+      );
+    const updated =
+      typeof whereChain?.returning === "function"
+        ? await whereChain.returning({ id: omsOrders.id })
+        : await whereChain;
+    if (Array.isArray(updated) && updated.length === 0) {
+      return;
+    }
 
     await db.insert(omsOrderEvents).values({
       orderId,
@@ -721,8 +733,25 @@ export function createOmsService(db: any, reservationService?: any, options: { c
         shippedAt: now,
         updatedAt: now,
       })
-      .where(eq(omsOrders.id, orderId))
+      .where(
+        and(
+          eq(omsOrders.id, orderId),
+          sql`${omsOrders.status} <> 'cancelled'`,
+        ),
+      )
       .returning();
+
+    if (!updated) {
+      const [existing] = await db
+        .select()
+        .from(omsOrders)
+        .where(eq(omsOrders.id, orderId))
+        .limit(1);
+      if (existing) {
+        return existing;
+      }
+      throw new Error(`OMS order ${orderId} not found`);
+    }
 
     // Update all line items to fulfilled
     await db
@@ -1057,11 +1086,19 @@ export function createOmsService(db: any, reservationService?: any, options: { c
     externalOrderId: string,
     trackingNumber: string,
     carrier: string,
+    channelId?: number,
   ): Promise<OmsOrder | null> {
     const [order] = await db
       .select()
       .from(omsOrders)
-      .where(eq(omsOrders.externalOrderId, externalOrderId))
+      .where(
+        channelId != null
+          ? and(
+              eq(omsOrders.channelId, channelId),
+              eq(omsOrders.externalOrderId, externalOrderId),
+            )
+          : eq(omsOrders.externalOrderId, externalOrderId),
+      )
       .limit(1);
 
     if (!order) {
@@ -1262,3 +1299,25 @@ export function createOmsService(db: any, reservationService?: any, options: { c
 }
 
 export type OmsService = ReturnType<typeof createOmsService>;
+
+export async function recordOmsReconcileReviewEvent(
+  db: any,
+  orderId: number,
+  eventType:
+    | "engine_order_not_found"
+    | "engine_cancel_flagged_for_review"
+    | "shipped_via_shipstation"
+    | "cancelled_via_shipstation"
+    | "voided_via_shipstation",
+  details: Record<string, unknown>,
+): Promise<void> {
+  await db.execute(sql`
+    INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
+    VALUES (
+      ${orderId},
+      ${eventType},
+      ${JSON.stringify(details)}::jsonb,
+      NOW()
+    )
+  `);
+}

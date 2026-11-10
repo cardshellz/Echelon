@@ -745,19 +745,29 @@ export function createServices(
           { code: "SHIPPING_ENGINE_NOT_REGISTERED" },
         );
       }
-      await shippingEngine.cancel({
+      const cancelResult = await shippingEngine.cancel({
         engine: candidate.engine,
         engineOrderRef: candidate.engineOrderRef,
         ...(candidate.engineShipmentRef
           ? { engineShipmentRef: candidate.engineShipmentRef }
           : {}),
       });
-      await markShipmentCancelled(
+      if (cancelResult.state === "already_shipped" || cancelResult.state === "not_found") {
+        return cancelResult;
+      }
+      const cancelled = await markShipmentCancelled(
         db,
         candidate.wmsShipmentId,
         "superseded_external_fulfillment",
         { now: occurredAt, skipEngineCancel: true },
       );
+      if (
+        cancelled.localOutcome === "refused_already_shipped" ||
+        cancelled.localOutcome === "refused_terminal"
+      ) {
+        return { state: "already_shipped", alreadyInState: true };
+      }
+      return cancelResult;
     },
   });
 
