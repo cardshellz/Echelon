@@ -17,7 +17,8 @@ async function setup(page: Page, canEdit = true) {
     scopeCalls: [] as { assetId:number; command:ProductAssetScopeCommand; key:string }[], scopeWrites:0,
     rejectScope:false, loseScopeResponse:false, editAfterCommit:false,
     receipts:new Map<string,{ productId:number; assetId:number; productVariantId:number|null; changed:boolean }>(),
-    additions: [] as { path:string; body:unknown }[], publicationWarning: null as null | {code:string;message:string} };
+    additions: [] as { path:string; body:unknown }[], archiveScans: [] as {path:string; body:unknown}[],
+    publicationWarning: null as null | {code:string;message:string} };
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("https://cdn.example.com/**", route => route.fulfill({ contentType:"image/png",body:photoBytes }));
   await page.route("**/api/**", async route => {
@@ -31,6 +32,14 @@ async function setup(page: Page, canEdit = true) {
         { id:11,sku:"ESS-TOP-55PT-SLV-CLR-C500",name:"Case of 500",isActive:true,unitsPerVariant:500,hierarchyLevel:2 },
       ], assets: state.assets,
     } });
+    if (request.method() === "POST" && (path === "/api/products/1/archive" || path === "/api/product-variants/10/archive")) {
+      const body = request.postDataJSON(); state.archiveScans.push({ path, body });
+      if (body.force !== false) return route.fulfill({ status: 409, json: { error: "Unexpected archive mutation" } });
+      return route.fulfill({ json: { blocked: false, dependencies: {
+        inventory: { totalQty:0,bins:0,hasReserved:false,variants:[],inventoryDetails:[] },
+        shipments:{pending:0},channelFeeds:{active:1,details:[]},variants:{active:2},
+      } } });
+    }
     if (request.method() === "POST" && ["/api/products/1/assets","/api/product-assets/upload"].includes(path)) {
       const uploaded = path === "/api/product-assets/upload";
       const body = uploaded ? request.postDataBuffer()?.toString() : request.postDataJSON();
@@ -99,6 +108,26 @@ async function setup(page: Page, canEdit = true) {
 }
 
 async function imageOrder(page: Page) { return page.locator("[data-catalog-image]").evaluateAll(elements => elements.map(element => Number((element as HTMLElement).dataset.catalogImage))); }
+
+test("product and variant archive reviews explain that listings can stay on sale", async ({ page }) => {
+  const state = await setup(page);
+  await page.getByRole("button",{name:"Archive",exact:true}).click();
+  let dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("Existing sales-channel listings may remain available for sale.");
+  await expect.poll(() => state.archiveScans.length).toBe(1);
+  await dialog.getByRole("button",{name:"Cancel",exact:true}).click();
+  await page.getByRole("tab",{name:/Variants/}).click();
+  await page.getByRole("button",{name:"Archive ESS-TOP-55PT-SLV-CLR-P50",exact:true}).filter({visible:true}).click();
+  dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("Existing sales-channel listings may remain available for sale.");
+  await expect.poll(() => state.archiveScans.length).toBe(2);
+  await dialog.getByRole("button",{name:"Cancel",exact:true}).click();
+  expect(state.archiveScans).toEqual([
+    {path:"/api/products/1/archive",body:{force:false}},
+    {path:"/api/product-variants/10/archive",body:{force:false}},
+  ]);
+  expect(state.errors).toEqual([]);
+});
 
 test("new URL and uploaded photos default to all variants and can later be assigned to a specific SKU", async ({ page },info) => {
   const state = await setup(page);

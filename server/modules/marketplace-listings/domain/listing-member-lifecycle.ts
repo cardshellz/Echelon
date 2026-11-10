@@ -2,6 +2,15 @@ import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { listingMemberObservationSchema, type ListingMemberIdentity, type ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 import type { StockPublicationSelection } from "@shared/types/stock-publication-selection";
+import { hasUnconfirmedMemberDispatch } from "@shared/listing-member-dispatch";
+export { hasUnconfirmedMemberDispatch };
+
+/** A current provider observation cannot settle an earlier unknown dispatch.
+ * The persisted history reader supplies unconfirmedPriorDispatch for legacy
+ * markers and for unresolved dispatch keys from earlier recovery attempts. */
+export function hasUnconfirmedPriorMemberDispatch(record: ListingMemberRetirement): boolean {
+  return record.unconfirmedPriorDispatch === true || record.dispatchStatus === "unknown";
+}
 
 export function listingMemberIdentityKey(identity: ListingMemberIdentity): string {
   return createHash("sha256").update(canonicalJson(identity)).digest("hex");
@@ -17,8 +26,19 @@ export function isArchivedCatalogMember(input: { productActive: boolean | null; 
   return input.productActive === false || input.variantActive === false || input.productStatus === "archived";
 }
 
-/** Catalog owns archival. Listings owns remote retirement. Stock must never
- * recreate a mapping or publish quantities for an archived catalog member. */
+/** Archival is not an instruction to change a channel listing. Existing
+ * internal-only stock repairs remain distinct from that catalog decision. */
+export function shouldRepairInternalOnlyChannelStock(input: {
+  productActive: boolean | null; variantActive: boolean | null; productStatus: string | null;
+  salesEligibility: string | null; availableQuantity: number | null;
+}): boolean {
+  return input.productActive === true && input.variantActive === true && !isArchivedCatalogMember(input)
+    && input.salesEligibility === "internal_only"
+    && input.availableQuantity !== null && Number.isFinite(input.availableQuantity) && input.availableQuantity > 0;
+}
+
+/** Catalog owns archival. A separate channel action owns remote removal.
+ * Stock must not recreate a mapping for an archived catalog member. */
 export function archivedListingMemberSelection(input: {
   productVariantId: number;
   archived: boolean;
@@ -28,10 +48,11 @@ export function archivedListingMemberSelection(input: {
   const retirement = input.retirement;
   return {
     productVariantId: input.productVariantId, action: "none", blockers: [], catalogArchived: true, listingSelected: false,
-    reason: retirement?.state === "retired"
+    reason: retirement?.state === "retired" && !hasUnconfirmedMemberDispatch(retirement)
       ? "This archived variant's exact external listing was verified unpublished."
-      : "This variant is archived. The listing lifecycle owns its external removal separately from active stock updates.",
-    ...(retirement?.state === "retired" && retirement.verifiedAt && retirement.identity.accountId && retirement.identity.externalSku ? { retirementEvidence: {
+      : "This variant is archived and excluded from updates. Its channel listing may still be live until explicitly unpublished.",
+    ...(retirement?.state === "retired" && !hasUnconfirmedMemberDispatch(retirement)
+      && retirement.verifiedAt && retirement.identity.accountId && retirement.identity.externalSku ? { retirementEvidence: {
       operationId: retirement.operationId, externalAccountId: retirement.identity.accountId,
       externalSku: retirement.identity.externalSku, externalOfferId: retirement.identity.externalVariantId,
       externalListingId: retirement.identity.externalProductId,

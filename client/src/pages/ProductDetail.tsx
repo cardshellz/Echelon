@@ -2817,7 +2817,7 @@ export default function ProductDetail() {
                 <span className="hidden sm:inline">Images</span>
                 <span className="ml-1">({product.assets?.length || 0})</span>
               </TabsTrigger>
-              <TabsTrigger value="variants" className="min-h-[44px]" data-testid="tab-variants">
+              <TabsTrigger value="variants" className="min-h-[44px]" data-testid="tab-variants" aria-label="Variants">
                 <Layers className="h-4 w-4 mr-2" />
                 <span className="hidden sm:inline">Variants</span>
                 <span className="ml-1">({sortedVariants.length})</span>
@@ -3630,6 +3630,7 @@ export default function ProductDetail() {
                               <Button
                                 variant="ghost"
                                 size="sm"
+                                aria-label={`Archive ${variant.sku}`}
                                 onClick={() => { setArchiveVariant(variant); scanVariantArchiveDeps(variant.id); }}
                                 className="min-h-[44px] text-muted-foreground hover:text-foreground"
                               >
@@ -3706,6 +3707,7 @@ export default function ProductDetail() {
                                       variant="ghost"
                                       size="icon"
                                       className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                                      aria-label={`Archive ${variant.sku}`}
                                       onClick={() => { setArchiveVariant(variant); scanVariantArchiveDeps(variant.id); }}
                                     >
                                       <Archive className="h-3.5 w-3.5" />
@@ -4313,6 +4315,7 @@ export default function ProductDetail() {
             <p className="text-sm text-muted-foreground">
               Archiving <span className="font-mono font-medium text-foreground">{product?.sku}</span> will deactivate the product, its variants, channel feeds, and replenishment rules. Inventory, bin assignments, and channel listing identities are preserved.
             </p>
+            <p className="text-sm">Existing sales-channel listings may remain available for sale. Unpublish them separately if you want to stop sales.</p>
 
             {archiveScanning ? (
               <div className="flex items-center gap-2 text-sm text-muted-foreground py-4 justify-center">
@@ -4528,7 +4531,7 @@ export default function ProductDetail() {
                       </div>
                     ) : (
                       <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-400 p-2 rounded">
-                        Inventory and bin assignments will remain on this SKU. Its marketplace availability will be set to zero until the SKU is reactivated.
+                        Inventory and bin assignments will remain on this SKU. Existing listings can remain on sale until they are unpublished separately.
                       </p>
                     )}
                   </div>
@@ -4590,6 +4593,7 @@ export default function ProductDetail() {
             <p className="text-sm text-muted-foreground">
               Archiving <span className="font-mono font-medium text-foreground">{archiveVariant?.sku}</span> will deactivate the variant and its channel feeds. Inventory, bin assignments, and channel listing identities are preserved.
             </p>
+            <p className="text-sm">Existing sales-channel listings may remain available for sale. Unpublish them separately if you want to stop sales.</p>
 
             {variantArchiveScanning ? (
               <div className="flex items-center gap-2 text-sm text-muted-foreground py-4 justify-center">
@@ -4789,7 +4793,7 @@ export default function ProductDetail() {
                       </div>
                     ) : (
                       <p className="text-xs text-amber-600 bg-amber-50 dark:bg-amber-900/20 dark:text-amber-400 p-2 rounded">
-                        Inventory and bin assignments will remain on this SKU. Its marketplace availability will be set to zero until the SKU is reactivated.
+                        Inventory and bin assignments will remain on this SKU. Existing listings can remain on sale until they are unpublished separately.
                       </p>
                     )}
                   </div>

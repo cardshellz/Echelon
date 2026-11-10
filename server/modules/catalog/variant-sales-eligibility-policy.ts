@@ -140,10 +140,7 @@ export async function assertVariantSalesEligibilityTransitionAllowed(
           WHERE r.product_variant_id = ${existing.id}
         )
       ) AS channel_allocation_configuration,
-      EXISTS (
-        SELECT 1 FROM channels.channel_variant_availability_sync a
-        WHERE a.product_variant_id = ${existing.id} AND a.desired_active = true
-      ) AS active_channel_availability,
+      channels.has_active_variant_availability(${existing.id}) AS active_channel_availability,
       EXISTS (
         SELECT 1 FROM dropship.dropship_vendor_listings l
         WHERE l.product_variant_id = ${existing.id}

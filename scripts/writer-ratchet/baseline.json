@@ -103,6 +103,15 @@
   "channels.channel_sync_log": [
     "modules/channels"
   ],
+  "channels.channel_variant_availability_attempts": [
+    "modules/channels"
+  ],
+  "channels.channel_variant_availability_claims": [
+    "modules/channels"
+  ],
+  "channels.channel_variant_availability_decisions": [
+    "modules/channels"
+  ],
   "channels.channel_variant_availability_sync": [
     "modules/channels"
   ],

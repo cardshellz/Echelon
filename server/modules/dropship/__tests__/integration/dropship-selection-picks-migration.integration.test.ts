@@ -130,19 +130,24 @@ describeDatabase.sequential("picks migration: the stock selection reader after t
     expect(selectionOracleSeedSha256()).toBe(MAIN_SELECTION_GOLDEN_SEED_SHA256);
   });
 
-  it("reads the converted picks to the golden's action for every (time, store, product, size); only the retired keep-out reason changes", () => {
+  it("preserves the golden actions and limits while reporting explicit archive semantics", () => {
     expect(Object.keys(snapshot)).toHaveLength(Object.keys(MAIN_SELECTION_GOLDEN).length);
-    // §4.2: only the keep-out reason changes (to the retained not-picked name), and with it the fingerprint of
-    // exactly the (time, store, product) reads that hold such a size; action, listingSelected and limit stay.
+    // The picks conversion changes the old rule exclusion reason. Phase 2 also
+    // changes the archive explanation because archive no longer requests a
+    // provider removal. The reader hashes its decisions, including reason text,
+    // so only reads containing either of these changes may change fingerprint.
+    const oldArchiveReason = "This variant is archived. The listing lifecycle owns its external removal separately from active stock updates.";
+    const archiveReason = "This variant is archived and excluded from updates. Its channel listing may still be live until explicitly unpublished.";
     const changedReads = new Set<string>();
     for (const [key, golden] of Object.entries(MAIN_SELECTION_GOLDEN)) {
-      if (golden.reason === "excluded_by_vendor_rule") changedReads.add(readKey(key));
+      if (golden.reason === "excluded_by_vendor_rule" || golden.reason === oldArchiveReason) changedReads.add(readKey(key));
     }
     const expected: Record<string, SelectionGoldenEntry> = {};
     for (const [key, golden] of Object.entries(MAIN_SELECTION_GOLDEN)) {
       expected[key] = {
         ...golden,
-        reason: golden.reason === "excluded_by_vendor_rule" ? "missing_vendor_include_rule" : golden.reason,
+        reason: golden.reason === "excluded_by_vendor_rule" ? "missing_vendor_include_rule"
+          : golden.reason === oldArchiveReason ? archiveReason : golden.reason,
         fingerprint: changedReads.has(readKey(key)) ? snapshot[key]?.fingerprint ?? "missing" : golden.fingerprint,
       };
     }
@@ -159,6 +164,7 @@ describeDatabase.sequential("picks migration: the stock selection reader after t
     // The fixture reaches every action, so the golden is not one shape repeated, and the change is not vacuous.
     expect(new Set(Object.values(snapshot).map((entry) => entry.action))).toEqual(new Set(["publish", "zero", "read_only", "none"]));
     expect(Object.values(snapshot).some((entry) => entry.reason === "excluded_by_vendor_rule")).toBe(false);
+    expect(Object.values(snapshot).some((entry) => entry.reason === archiveReason)).toBe(true);
     expect(changedReads.size).toBeGreaterThan(0);
     expect(changedReads.size).toBeLessThan(fingerprintsByRead.size);
     expect(Object.values(snapshot).some((entry) => entry.publishLimitUnits === 0)).toBe(true);

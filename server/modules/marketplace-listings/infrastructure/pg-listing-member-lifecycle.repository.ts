@@ -1,61 +1,96 @@
-import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { listingMemberConflictListSchema, listingMemberIdentitySchema, listingMemberRetirementSchema, type ListingMemberIdentity, type ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
-import { canonicalJson } from "@shared/utils/canonical-json";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
 import { listingMemberRemoteKey } from "../domain/listing-member-lifecycle";
+import { ListingMemberDispatchHistoryAssessment } from "../domain/listing-member-dispatch-evidence";
+import { hasUnconfirmedMemberDispatch } from "@shared/listing-member-dispatch";
 import type { ListingMemberLifecycleSession, ListingMemberLifecycleStore, ListingMemberProgress, ListingMemberRecoveryAuthorization } from "../application/listing-member-lifecycle.port";
 import type { ListingAccount } from "@shared/types/channel-listing-publication";
 import { ListingPublicationError } from "../domain/listing-publication";
+import { shopifyListingIdentityAliases } from "./providers/shopify-listing-member-identity";
 
 const RETRY_MS = 60_000;
 const LOCK_NAMESPACE = 2591013;
+// Bound the evidence loaded per database round trip, even for long retry histories.
+const DISPATCH_HISTORY_PAGE_SIZE = 500;
 const positiveId = z.number().int().positive().max(2_147_483_647);
 const batchLimit = z.number().int().min(1).max(250);
-interface Row { id: string; identity: unknown; source_identity: unknown; source_revision: string; state: string; code: string | null; message: string | null; verified_at: Date | null; version: number; dispatch_status: string; dispatch_key: string | null; verification_attempts: number; recovery_required: boolean; next_attempt_at?: Date | number | null }
+// Old rows predate dispatch_status. A count alone cannot prove no send: every
+// retained event must have a valid identity, version and pre-dispatch state,
+// and the last event must match the current state. The SQL alias is internal.
+const provenNoDispatchSql = `r.dispatch_status='none' AND r.dispatch_key IS NULL
+  AND r.verification_attempts=0 AND NOT r.recovery_required
+  AND r.state IN ('pending','failed') AND COALESCE((SELECT
+    count(*)=r.version AND min(e.version)=1 AND max(e.version)=r.version
+    AND bool_and((e.after_state->>'id'=r.id::text AND e.after_state->>'version'=e.version::text
+      AND e.after_state->>'identity_key'=r.identity_key AND e.after_state->>'source_revision'=r.source_revision
+      AND e.after_state->>'product_id'=r.product_id::text AND e.after_state->>'product_variant_id'=r.product_variant_id::text
+      AND e.after_state->'identity'=r.identity AND e.after_state->'source_identity'=r.source_identity
+      AND e.after_state->>'state' IN ('pending','failed')
+      AND COALESCE(e.after_state->>'dispatch_status','none')='none'
+      AND COALESCE(e.after_state->>'dispatch_key','')=''
+      AND COALESCE(e.after_state->>'verification_attempts','0')='0'
+      AND COALESCE(e.after_state->>'recovery_required','false')='false') IS TRUE)
+    AND bool_or(e.version=r.version AND e.after_state->>'state'=r.state
+      AND (e.after_state->>'code' IS NOT DISTINCT FROM r.code))
+    FROM marketplace.listing_member_retirement_events e WHERE e.operation_id=r.id),false)`;
+interface Row { id: string; identity_key: string; identity: unknown; source_identity: unknown; source_revision: string;
+  product_id: number; product_variant_id: number; state: string; code: string | null; message: string | null; verified_at: Date | null;
+  version: number; dispatch_status: string; dispatch_key: string | null; dispatch_finality: string | null;
+  verification_attempts: number; recovery_required: boolean;
+  source_current?: boolean; next_attempt_at?: Date | number | null }
 
-const localIdentitySchema = listingMemberIdentitySchema.pick({
-  destinationKind: true, connectionId: true, channelId: true, vendorId: true, productId: true, productVariantId: true,
-}).passthrough();
+type DispatchEvidence = ReturnType<ListingMemberDispatchHistoryAssessment["result"]>;
+type DispatchHistoryRow = { operation_id: string; version: number; after_state: unknown };
 
-function discoveredIdentity(source: unknown): { identity: ListingMemberIdentity; invalidMessage: string | null } {
-  const parsed = listingMemberIdentitySchema.safeParse(source);
-  if (parsed.success) return { identity: parsed.data, invalidMessage: null };
-
-  // The view supplies exact local IDs from its catalog/destination joins. Never
-  // invent those IDs. Invalid retained provider fields are diagnostic-only;
-  // source_identity preserves their original values for audit and correction.
-  const local = localIdentitySchema.parse(source);
-  const field = <T>(schema: z.ZodType<T>, value: unknown, fallback: T): T => {
-    const result = schema.safeParse(value);
-    return result.success ? result.data : fallback;
-  };
-  const shape = listingMemberIdentitySchema.shape;
-  const identity = listingMemberIdentitySchema.parse({
-    destinationKind: local.destinationKind, connectionId: local.connectionId,
-    channelId: local.channelId, vendorId: local.vendorId,
-    productId: local.productId, productVariantId: local.productVariantId,
-    provider: field(shape.provider, local.provider, "invalid"),
-    accountId: field(shape.accountId, local.accountId, null),
-    // This placeholder cannot authorize dispatch: invalid diagnostics are
-    // immutable, unscheduled, and rejected by the shared processing owner.
-    environment: field(shape.environment, local.environment, "production"),
-    market: field(shape.market, local.market, "invalid"),
-    externalSku: field(shape.externalSku, local.externalSku, null),
-    externalProductId: field(shape.externalProductId, local.externalProductId, null),
-    externalVariantId: field(shape.externalVariantId, local.externalVariantId, null),
-    externalInventoryItemId: field(shape.externalInventoryItemId, local.externalInventoryItemId, null),
-    identityConflict: true,
-  });
-  const invalidFields = [...new Set(parsed.error.issues.map(issue => String(issue.path[0] ?? "identity")))].slice(0, 16);
-  return { identity, invalidMessage: `The saved listing identity has invalid fields: ${invalidFields.join(", ")}. `
-    + "Correct the saved listing connection or mapping before removal. This archived variant remains excluded; no provider request was sent." };
+function assessment(row: Row): ListingMemberDispatchHistoryAssessment {
+  return new ListingMemberDispatchHistoryAssessment({ id: row.id, version: row.version, identityKey: row.identity_key,
+    identity: row.identity, sourceIdentity: row.source_identity, sourceRevision: row.source_revision,
+    productId: row.product_id, productVariantId: row.product_variant_id, state: row.state, code: row.code,
+    dispatchStatus: row.dispatch_status, dispatchKey: row.dispatch_key, dispatchFinality: row.dispatch_finality ?? null });
 }
+
+async function readDispatchEvidence(client: StockSelectionQueryClient, rows: readonly Row[]): Promise<Map<string, DispatchEvidence>> {
+  const assessments = new Map(rows.map(row => [row.id, assessment(row)]));
+  if (!rows.length) return new Map();
+  const operationIds = rows.map(row => row.id);
+  let afterOperation: string | null = null;
+  let afterVersion = 0;
+  for (;;) {
+    const events: DispatchHistoryRow[] = (await client.query<DispatchHistoryRow>(`
+      SELECT e.operation_id::text,e.version,jsonb_build_object(
+        'id',e.after_state->'id','version',e.after_state->'version','identity_key',e.after_state->'identity_key',
+        'identity',e.after_state->'identity','source_identity',e.after_state->'source_identity',
+        'source_revision',e.after_state->'source_revision','product_id',e.after_state->'product_id',
+        'product_variant_id',e.after_state->'product_variant_id','state',e.after_state->'state','code',e.after_state->'code',
+        'dispatch_status',e.after_state->'dispatch_status','dispatch_key',e.after_state->'dispatch_key',
+        'dispatch_finality',e.after_state->'dispatch_finality',
+        'verification_attempts',e.after_state->'verification_attempts','recovery_required',e.after_state->'recovery_required'
+      ) AS after_state FROM marketplace.listing_member_retirement_events e
+      WHERE e.operation_id=ANY($1::uuid[]) AND ($2::uuid IS NULL OR (e.operation_id,e.version)>($2::uuid,$3::integer))
+      ORDER BY e.operation_id,e.version LIMIT $4`, [operationIds, afterOperation, afterVersion, DISPATCH_HISTORY_PAGE_SIZE])).rows;
+    for (const event of events) assessments.get(event.operation_id)?.append({ version: event.version, afterState: event.after_state });
+    if (events.length < DISPATCH_HISTORY_PAGE_SIZE) break;
+    const last: DispatchHistoryRow = events[events.length - 1];
+    afterOperation = last.operation_id;
+    afterVersion = last.version;
+  }
+  return new Map([...assessments].map(([id, value]) => [id, value.result()]));
+}
+
 function record(row: Row): ListingMemberRetirement {
+  return recordWithHistory(row, null);
+}
+
+function recordWithHistory(row: Row, evidence: DispatchEvidence | null): ListingMemberRetirement {
   return listingMemberRetirementSchema.parse({ operationId: row.id, identity: row.identity, sourceRevision: row.source_revision,
-    version: row.version, dispatchStatus: row.dispatch_status === "none" && row.state === "retiring" ? "unknown" : row.dispatch_status,
+    // Project legacy/incomplete audit evidence without rewriting the immutable
+    // original row; current observation and old dispatch finality are separate.
+    version: row.version, dispatchStatus: row.dispatch_status === "none" && (row.state === "retiring" || (row.state === "superseded" && evidence?.unconfirmed))
+      ? "unknown" : row.dispatch_status,
     dispatchKey: row.dispatch_key, verificationAttempts: row.verification_attempts, recoveryRequired: row.recovery_required,
+    ...(evidence?.unconfirmed ? { unconfirmedPriorDispatch: true } : {}),
     state: row.state, code: row.code, message: row.message, verifiedAt: row.verified_at?.toISOString() ?? null });
 }
 
@@ -67,9 +102,31 @@ function record(row: Row): ListingMemberRetirement {
  * the namespace stays private to this file. False: another remover holds it, nothing was locked.
  */
 export async function tryLockListingMemberRemote(client: Pick<PoolClient, "query">, identity: ListingMemberIdentity): Promise<boolean> {
-  const locked = (await client.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS locked",
-    [LOCK_NAMESPACE, listingMemberRemoteKey(listingMemberIdentitySchema.parse(identity))])).rows[0]?.locked;
-  return locked === true;
+  const parsed = listingMemberIdentitySchema.parse(identity);
+  // During rolling deployment old workers still lock their literal stored ID.
+  // Lock both supported Shopify representations so either old worker conflicts
+  // with a new worker. Other providers retain their existing exact key.
+  const aliases = parsed.provider === "shopify"
+    ? shopifyListingIdentityAliases("ProductVariant", parsed.externalVariantId) : null;
+  const keys = aliases
+    ? [...new Set(aliases.map(externalVariantId => listingMemberRemoteKey({ ...parsed, externalVariantId })))].sort()
+    : [listingMemberRemoteKey(parsed)];
+  // A failed multi-key acquisition must not leave its earlier keys held by a
+  // caller that continues the transaction after receiving false.
+  if (keys.length > 1) await client.query("SAVEPOINT listing_member_remote_lock");
+  for (const key of keys) {
+    const locked = (await client.query<{ locked: boolean }>("SELECT pg_try_advisory_xact_lock($1,hashtext($2)) AS locked",
+      [LOCK_NAMESPACE, key])).rows[0]?.locked;
+    if (locked !== true) {
+      if (keys.length > 1) {
+        await client.query("ROLLBACK TO SAVEPOINT listing_member_remote_lock");
+        await client.query("RELEASE SAVEPOINT listing_member_remote_lock");
+      }
+      return false;
+    }
+  }
+  if (keys.length > 1) await client.query("RELEASE SAVEPOINT listing_member_remote_lock");
+  return true;
 }
 
 /** Invoked under the existing account/SKU publication lock. The current catalog
@@ -87,24 +144,33 @@ export async function assertArchivedMemberPublicationAllowed(
     "Publication is stopped because this catalog variant is archived. Restore it in the catalog before publishing again.");
 }
 
-/** Consumers only see evidence matching today's archived catalog generation and
- * exact retained destination. A completed sync job cannot erase this receipt. */
+/** Include the current archived generation and unresolved older dispatches.
+ * A changed catalog mapping must not make a possibly sent operation disappear. */
 export async function readListingMemberRetirements(client: StockSelectionQueryClient, input: {
   destinationKind: "channel_connection" | "dropship_store_connection"; connectionId: number; productVariantIds: readonly number[];
 }): Promise<ListingMemberRetirement[]> {
   z.object({ destinationKind: z.enum(["channel_connection", "dropship_store_connection"]), connectionId: positiveId,
     productVariantIds: z.array(positiveId).max(250) }).strict().parse(input);
   if (!input.productVariantIds.length) return [];
-  const rows = (await client.query<Row>(`SELECT DISTINCT r.* FROM marketplace.listing_member_retirements r
-    JOIN marketplace.listing_member_retirement_sources s ON s.product_variant_id=r.product_variant_id
-      AND s.source_revision=r.source_revision AND s.identity=r.source_identity
-    WHERE r.identity->>'destinationKind'=$1 AND r.identity->>'connectionId'=$2 AND r.product_variant_id=ANY($3::integer[])`,
+  const rows = (await client.query<Row>(`SELECT r.*,
+      EXISTS (SELECT 1 FROM marketplace.listing_member_retirement_sources s
+        WHERE s.product_variant_id=r.product_variant_id AND s.source_revision=r.source_revision AND s.identity=r.source_identity) AS source_current
+    FROM marketplace.listing_member_retirements r
+    WHERE r.identity->>'destinationKind'=$1 AND r.identity->>'connectionId'=$2 AND r.product_variant_id=ANY($3::integer[])
+      ORDER BY r.created_at,r.id`,
   [input.destinationKind, String(input.connectionId), input.productVariantIds])).rows;
-  return rows.map(record);
+  const evidenceById = await readDispatchEvidence(client, rows);
+  return rows.flatMap(row => {
+    const evidence = evidenceById.get(row.id) ?? null;
+    const current = recordWithHistory(row, evidence);
+    const unresolved = hasUnconfirmedMemberDispatch(current);
+    const pendingWithHistory = row.state !== "retired" && row.state !== "superseded" && evidence?.hadRetiringEvent === true;
+    return row.source_current || unresolved || pendingWithHistory ? [current] : [];
+  });
 }
 
 export class PostgresListingMemberLifecycleRepository implements ListingMemberLifecycleStore {
-  constructor(private readonly pool: Pick<Pool, "connect">, private readonly uuid: () => string = randomUUID) {}
+  constructor(private readonly pool: Pick<Pool, "connect">) {}
   async listConflictsForChannel(channelId: number, offset: number) {
     positiveId.parse(channelId); z.number().int().nonnegative().safe().parse(offset);
     const client = await this.pool.connect();
@@ -126,51 +192,34 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
   async listForChannel(channelId: number, productId: number, limit: number): Promise<ListingMemberRetirement[]> {
     positiveId.parse(channelId); positiveId.parse(productId); batchLimit.parse(limit);
     const client = await this.pool.connect();
-    try { return (await client.query<Row>(`SELECT * FROM marketplace.listing_member_retirements
-      WHERE identity->>'destinationKind'='channel_connection' AND identity->>'channelId'=$1 AND product_id=$2
-      ORDER BY created_at DESC,id DESC LIMIT $3`, [String(channelId), productId, limit])).rows.map(record); }
+    try {
+      const rows = (await client.query<Row>(`SELECT r.* FROM marketplace.listing_member_retirements r
+      WHERE r.identity->>'destinationKind'='channel_connection' AND r.identity->>'channelId'=$1 AND r.product_id=$2
+      ORDER BY r.created_at DESC,r.id DESC LIMIT $3`, [String(channelId), productId, limit])).rows;
+      const evidence = await readDispatchEvidence(client, rows);
+      return rows.map(row => recordWithHistory(row, evidence.get(row.id) ?? null));
+    }
     finally { client.release(); }
   }
   async listForDropship(connectionId:number,vendorId:number,productId:number,limit:number):Promise<ListingMemberRetirement[]> {
     positiveId.parse(connectionId); positiveId.parse(vendorId); positiveId.parse(productId); batchLimit.parse(limit);
     const client = await this.pool.connect();
-    try { return (await client.query<Row>(`SELECT * FROM marketplace.listing_member_retirements
-      WHERE identity->>'destinationKind'='dropship_store_connection' AND identity->>'connectionId'=$1 AND identity->>'vendorId'=$2 AND product_id=$3
-      ORDER BY created_at DESC,id DESC LIMIT $4`,[String(connectionId),String(vendorId),productId,limit])).rows.map(record); }
-    finally { client.release(); }
-  }
-  async discover(now: Date, limit: number): Promise<void> {
-    z.date().parse(now); batchLimit.parse(limit);
-    const client = await this.pool.connect();
     try {
-      const rows = (await client.query<{ identity: unknown; source_revision: string }>(`SELECT s.identity,s.source_revision
-        FROM marketplace.listing_member_retirement_sources s
-        WHERE NOT EXISTS(SELECT 1 FROM marketplace.listing_member_retirements r
-          WHERE md5(r.source_identity::text)=md5(s.identity::text) AND r.source_identity=s.identity AND r.source_revision=s.source_revision)
-        ORDER BY s.product_variant_id,s.identity::text LIMIT $1`, [limit])).rows;
-      for (const source of rows) {
-        const { identity, invalidMessage } = discoveredIdentity(source.identity);
-        const identityKey = createHash("sha256").update(canonicalJson(source.identity)).digest("hex");
-        await client.query("BEGIN");
-        try {
-          // One transaction commits the desired removal and its first audit event.
-          const inserted = (await client.query<Row>(`INSERT INTO marketplace.listing_member_retirements
-            (id,identity_key,identity,source_identity,source_revision,product_id,product_variant_id,state,code,message,next_attempt_at,created_at,updated_at)
-            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12) ON CONFLICT(identity_key,source_revision) DO NOTHING RETURNING *`,
-          [z.string().uuid().parse(this.uuid()), identityKey, identity, source.identity, source.source_revision, identity.productId, identity.productVariantId,
-            invalidMessage ? "failed" : "pending", invalidMessage ? "LISTING_MEMBER_IDENTITY_INVALID" : null, invalidMessage,
-            invalidMessage ? null : now, now])).rows[0];
-          if (inserted) await audit(client, inserted.id, null, now);
-          await client.query("COMMIT");
-        } catch (error) { await client.query("ROLLBACK"); throw error; }
-      }
-    } finally { client.release(); }
+      const rows = (await client.query<Row>(`SELECT r.* FROM marketplace.listing_member_retirements r
+      WHERE r.identity->>'destinationKind'='dropship_store_connection' AND r.identity->>'connectionId'=$1 AND r.identity->>'vendorId'=$2 AND r.product_id=$3
+      ORDER BY r.created_at DESC,r.id DESC LIMIT $4`,[String(connectionId),String(vendorId),productId,limit])).rows;
+      const evidence = await readDispatchEvidence(client, rows);
+      return rows.map(row => recordWithHistory(row, evidence.get(row.id) ?? null));
+    }
+    finally { client.release(); }
   }
   async due(now: Date, limit: number): Promise<string[]> {
     z.date().parse(now); batchLimit.parse(limit);
     const client = await this.pool.connect();
-    try { return (await client.query<{ id: string }>(`SELECT id::text FROM marketplace.listing_member_retirements
-      WHERE next_attempt_at<=$1 ORDER BY next_attempt_at,id LIMIT $2`, [now, limit])).rows.map(row => row.id); }
+    try { return (await client.query<{ id: string }>(`SELECT r.id::text FROM marketplace.listing_member_retirements r
+      WHERE r.next_attempt_at<=$1 OR (r.next_attempt_at='infinity'::timestamptz
+        AND r.state='failed' AND r.code='LISTING_MEMBER_IDENTITY_CONFLICT' AND (${provenNoDispatchSql}))
+      ORDER BY r.next_attempt_at,r.id LIMIT $2`, [now, limit])).rows.map(row => row.id); }
     finally { client.release(); }
   }
   async withMember<T>(id: string, work: (session: ListingMemberLifecycleSession) => Promise<T>): Promise<T | null> {
@@ -179,15 +228,15 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
       await client.query("BEGIN");
       await client.query("SET LOCAL lock_timeout='2s'");
       await client.query("SET LOCAL statement_timeout='10s'");
-      let row = (await client.query<Row>(`SELECT * FROM marketplace.listing_member_retirements WHERE id=$1`,
+      let row = (await client.query<Row>(`SELECT r.* FROM marketplace.listing_member_retirements r WHERE r.id=$1`,
         [z.string().uuid().parse(id)])).rows[0];
       if (!row) { await client.query("ROLLBACK"); return null; }
       let current = record(row);
       // Two generations/destinations addressing the same remote member cannot race.
       if (!(await tryLockListingMemberRemote(client, current.identity))) { await client.query("ROLLBACK"); return null; }
       // The prior worker may have committed between the first read and lock.
-      row = (await client.query<Row>("SELECT * FROM marketplace.listing_member_retirements WHERE id=$1", [id])).rows[0];
-      current = record(row);
+      row = (await client.query<Row>(`SELECT r.* FROM marketplace.listing_member_retirements r WHERE r.id=$1`, [id])).rows[0];
+      current = recordWithHistory(row, (await readDispatchEvidence(client, [row])).get(row.id) ?? null);
       // Catalog owns archive/reactivation. Hold only this product/member while a
       // remote removal is in flight, so reactivation cannot race a destructive call.
       await client.query("SELECT id FROM catalog.products WHERE id=$1 FOR SHARE", [current.identity.productId]);
@@ -208,6 +257,11 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
         retryDeferred: row.next_attempt_at === Infinity,
         isCurrent: async () => (await client.query(`SELECT 1 FROM marketplace.listing_member_retirement_sources
           WHERE identity=$1 AND source_revision=$2`, [row.source_identity, current.sourceRevision])).rowCount === 1,
+        hasProvenNoDispatch: async () => {
+          const evidence = (await client.query<{ proven: boolean }>(`SELECT (${provenNoDispatchSql}) AS proven
+            FROM marketplace.listing_member_retirements r WHERE r.id=$1`, [id])).rows[0];
+          return evidence?.proven === true;
+        },
         save: (state, code, message, now, progress) => this.saveProgress(id, state, code, message, now, progress),
         recoveryCommand: async commandKey => {
           const saved = (await client.query("SELECT operation_id,actor,review_hash FROM marketplace.listing_member_recovery_commands WHERE command_key=$1", [commandKey])).rows[0];
@@ -230,18 +284,23 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
     try {
       await client.query("BEGIN");
       const before = (await client.query<Row & {snapshot:unknown}>("SELECT r.*,to_jsonb(r) snapshot FROM marketplace.listing_member_retirements r WHERE id=$1 FOR UPDATE", [id])).rows[0];
-      const saved = (await client.query<Row>(`UPDATE marketplace.listing_member_retirements SET state=$2,code=$3,message=$4,
+      const retryAfterMs = progress.retryAfterMs === undefined ? RETRY_MS
+        : z.number().int().min(RETRY_MS).max(24 * 60 * 60_000).parse(progress.retryAfterMs);
+      await client.query(`UPDATE marketplace.listing_member_retirements SET state=$2,code=$3,message=$4,
         verified_at=$5,next_attempt_at=$6,updated_at=$7,version=version+1,
         dispatch_status=COALESCE($8,dispatch_status),dispatch_key=COALESCE($9,dispatch_key),
+        dispatch_finality=CASE WHEN $8 IN ('none','unknown','authorized') THEN NULL
+          WHEN $8='accepted' THEN $12 ELSE dispatch_finality END,
         verification_attempts=COALESCE($10,verification_attempts),recovery_required=CASE WHEN $2 IN ('retired','superseded') THEN false ELSE COALESCE($11,recovery_required) END WHERE id=$1 RETURNING *`,
       [id, state, code, message, state === "retired" ? now : null,
         state === "retired" || state === "superseded" ? null
           : state === "failed" && code === "LISTING_MEMBER_IDENTITY_CONFLICT" ? "infinity"
-          : new Date(now.getTime() + RETRY_MS), now, progress.dispatchStatus ?? null, progress.dispatchKey ?? null,
-        progress.verificationAttempts ?? null, progress.recoveryRequired ?? null])).rows[0];
+          : new Date(now.getTime() + retryAfterMs), now, progress.dispatchStatus ?? null, progress.dispatchKey ?? null,
+        progress.verificationAttempts ?? null, progress.recoveryRequired ?? null, progress.dispatchFinality ?? null]);
       await audit(client, id, record(before), now);
+      const saved = await readRecordedMember(client, id);
       await client.query("COMMIT");
-      return record(saved);
+      return saved;
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
   }
@@ -254,16 +313,24 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
       const before = (await client.query<Row & {snapshot:unknown}>("SELECT r.*,to_jsonb(r) snapshot FROM marketplace.listing_member_retirements r WHERE id=$1 FOR UPDATE", [id])).rows[0];
       await client.query(`INSERT INTO marketplace.listing_member_recovery_commands(command_key,operation_id,actor,review_hash,before_record,observation,authorized_at)
         VALUES($1,$2,$3,$4,$5,$6,$7)`, [input.commandKey,id,input.actor,input.reviewHash,JSON.stringify(before.snapshot),JSON.stringify(input.observation),now]);
-      const saved = (await client.query<Row>(`UPDATE marketplace.listing_member_retirements SET state='pending',code=NULL,
+      await client.query(`UPDATE marketplace.listing_member_retirements SET state='pending',code=NULL,
         message='Removal recovery authorized. The exact saved member will be checked before dispatch.',
-        dispatch_status='authorized',dispatch_key=$2,verification_attempts=0,recovery_required=false,
-        next_attempt_at=$3,updated_at=$3,version=version+1 WHERE id=$1 RETURNING *`, [id,input.commandKey,now])).rows[0];
+        dispatch_status='authorized',dispatch_key=$2,dispatch_finality=NULL,verification_attempts=0,recovery_required=false,
+        next_attempt_at=$3,updated_at=$3,version=version+1 WHERE id=$1 RETURNING *`, [id,input.commandKey,now]);
       await audit(client,id,record(before),now,input.actor);
+      const saved = await readRecordedMember(client, id);
       await client.query("COMMIT");
-      return record(saved);
+      return saved;
     } catch (error) { await client.query("ROLLBACK"); throw error; }
     finally { client.release(); }
   }
+}
+
+async function readRecordedMember(client: PoolClient, id: string): Promise<ListingMemberRetirement> {
+  const row = (await client.query<Row>(`SELECT r.*
+    FROM marketplace.listing_member_retirements r WHERE r.id=$1`, [id])).rows[0];
+  if (!row) throw new Error("Saved listing-member retirement is missing");
+  return recordWithHistory(row, (await readDispatchEvidence(client, [row])).get(id) ?? null);
 }
 
 async function audit(client: PoolClient, id: string, before: ListingMemberRetirement | null, now: Date, actor = "system:listing-lifecycle") {

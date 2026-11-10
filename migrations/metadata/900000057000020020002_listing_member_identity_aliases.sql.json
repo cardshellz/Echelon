@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000057000020020002_listing_member_identity_aliases.sql",
+  "generation": 57,
+  "pr": 2002,
+  "ordinal": 2,
+  "after": [
+    "900000056000020020001_channel_availability_archive_separation.sql"
+  ]
+}

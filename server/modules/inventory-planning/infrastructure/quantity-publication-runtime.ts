@@ -13,6 +13,7 @@ import { PostgresEbayAutomaticPublicationRecoveryRepository } from "./ebay-autom
 import { PostgresEbayPublicationReconciliationRepository } from "./ebay-publication-reconciliation.repository";
 import { PostgresEbayPublicationRejectionReader } from "./ebay-publication-rejection.reader";
 import { PostgresEbayLegacyMaintenanceEvidenceReader } from "../../channels/infrastructure/ebay-legacy-maintenance-evidence";
+import type { PublicationTransactionGuard } from "../application/publication-transaction-guard";
 
 /** Shared production instance bounds nested provider connections across the known quantity owners. */
 export const quantityPublicationAdmission = new PostgresQuantityPublicationAdmission(pool);
@@ -23,18 +24,20 @@ export const automaticEbayPublicationRecovery = new EbayAutomaticPublicationReco
 export const ebayPublicationReconciliationRepository = new PostgresEbayPublicationReconciliationRepository(pool);
 
 function ebayRequestAdmission(base: Omit<QuantityPublicationScope, "externalInventoryItemId">,
-  environment?: "production" | "sandbox"): EbayQuantityRequestAdmission {
+  environment?: "production" | "sandbox", guard?: PublicationTransactionGuard): EbayQuantityRequestAdmission {
   const scope = (identity: string): QuantityPublicationScope => ({ ...base, externalInventoryItemId: identity });
   return {
-    item: (sku, work) => quantityPublicationAdmission.runListing(scope(sku), () => planCurrentCanonicalListingQuantity(scope(sku)), work),
+    item: (sku, work) => quantityPublicationAdmission.runListing(scope(sku), (owner,ownerEnvironment) =>
+      planCurrentCanonicalListingQuantity(scope(sku),owner,ownerEnvironment), work,guard,environment ?? null),
     group: (groupKey, skus, work, maintenance) => quantityPublicationAdmission.runListingGroup(scope(`group:${groupKey}`), skus.map(scope),
-      planCurrentCanonicalListingQuantity, work, maintenance && environment ? { environment, market: maintenance.marketplaceId } : undefined),
-    reducing: (identity, work, memberSkus) => quantityPublicationAdmission.runQuantityReducingLifecycle(scope(identity), work, memberSkus?.map(scope)),
+      planCurrentCanonicalListingQuantity, work, maintenance && environment ? { environment, market: maintenance.marketplaceId } : undefined,guard,environment ?? null),
+    reducing: (identity, work, memberSkus) => quantityPublicationAdmission.runQuantityReducingLifecycle(scope(identity), work, memberSkus?.map(scope),guard,environment ?? null),
   };
 }
 
 export async function createChannelEbayQuantityRequestAdmission(input: {
   channelId: number; externalAccountId: string; expectedConnectionId?: number; environment?: "production" | "sandbox";
+  publicationGuard?: PublicationTransactionGuard;
 }): Promise<EbayQuantityRequestAdmission> {
   const connections = (await pool.query<{ id: number }>(
     "SELECT id FROM channels.channel_connections WHERE channel_id=$1 ORDER BY id LIMIT 2", [input.channelId],
@@ -44,7 +47,8 @@ export async function createChannelEbayQuantityRequestAdmission(input: {
   if(input.expectedConnectionId!==undefined && connections[0].id!==input.expectedConnectionId) throw new QuantityPublicationAdmissionError(
     "EBAY_SYNC_IDENTITY_CHANGED","The listing sync credential connection changed before publication.");
   return ebayRequestAdmission({ destinationKind: "channel_connection", connectionId: connections[0].id,
-    providerKey: "ebay", providerScopeType: "account", externalScopeId: input.externalAccountId, productId: null, productVariantId: null }, input.environment);
+    providerKey: "ebay", providerScopeType: "account", externalScopeId: input.externalAccountId, productId: null, productVariantId: null },
+  input.environment,input.publicationGuard);
 }
 
 export function createDropshipEbayQuantityRequestAdmission(input: {
@@ -57,13 +61,14 @@ export function createDropshipEbayQuantityRequestAdmission(input: {
     input.providerEnvironment === "production" || input.providerEnvironment === "sandbox" ? input.providerEnvironment : undefined);
 }
 
-export async function planCurrentCanonicalListingQuantity(raw: QuantityPublicationScope): Promise<{ outboxId: string; quantity: number }> {
+export async function planCurrentCanonicalListingQuantity(raw: QuantityPublicationScope,
+  guard?: PublicationTransactionGuard, environment: "production" | "sandbox" | null = null): Promise<{ outboxId: string; quantity: number }> {
   const scope = quantityPublicationScopeSchema.parse(raw);
   // The existing executor owns capacity, SERIALIZABLE isolation and authority
   // locks. Exact mapping resolution, desired state and handoff commit together;
   // provider I/O remains outside under admission's retained session scope locks.
   return new PostgresInventoryAvailabilityRuntimePublicationExecutor(pool).executeWithClient((client, context) =>
-    planCanonicalListingQuantityInsideTransaction(client, context, scope));
+    planCanonicalListingQuantityInsideTransaction(client, context, scope),guard,{ scopes: [scope],environment });
 }
 
 async function planCanonicalListingQuantityInsideTransaction(client: PoolClient,

@@ -548,6 +548,33 @@ describe("eBay Listing Builder", () => {
       expect((adapter as any).delay).not.toHaveBeenCalled();
     });
 
+    it("preserves an admission failure in the single-item path", async () => {
+      const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(),groupImageUrls: [] })) });
+      const blocked = new QuantityPublicationAdmissionError("TEST_OWNER_CHANGED","The saved work changed.");
+      const client = { getInventoryItem: vi.fn().mockResolvedValue({ availability: { shipToLocationAvailability: { quantity: 1 } } }),
+        createOrReplaceInventoryItem: vi.fn().mockRejectedValue(blocked) };
+      (adapter as any).getApiClient = vi.fn().mockResolvedValue(client);
+      (adapter as any).delay = vi.fn();
+      await expect(adapter.pushInventory(2,[{ variantId: 101,sku: "P5",externalVariantId: null,
+        externalInventoryItemId: null,allocatedQty: 5 }])).rejects.toBe(blocked);
+      expect(client.createOrReplaceInventoryItem).toHaveBeenCalledOnce();
+    });
+
+    it.each(["database admission failure", "uncertain provider response", "provider rejection"])(
+      "preserves a %s without looking up or writing another offer", async (failureKind) => {
+      const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(),groupImageUrls: [] })) });
+      const failure = Object.assign(new Error(failureKind), { code: `TEST_${failureKind}` });
+      const client = { bulkUpdatePriceQuantity: vi.fn().mockRejectedValue(failure),
+        getOffers: vi.fn(),updateOffer: vi.fn() };
+      (adapter as any).getApiClient = vi.fn().mockResolvedValue(client);
+      (adapter as any).delay = vi.fn();
+      await expect(adapter.pushInventory(2,[{ variantId: 101,sku: "P5",externalVariantId: "offer-101",
+        externalInventoryItemId: null,allocatedQty: 5 }])).rejects.toBe(failure);
+      expect(client.bulkUpdatePriceQuantity).toHaveBeenCalledOnce();
+      expect(client.getOffers).not.toHaveBeenCalled();
+      expect(client.updateOffer).not.toHaveBeenCalled();
+    });
+
     it.each([
       { format: "nested", responses: [{ sku: "CS-TL35-P25", offers: [{ offerId: "offer-101", statusCode: 200 }] }] },
       { format: "combined", responses: [{ sku: "CS-TL35-P25", offerId: "offer-101", statusCode: 200 }] },
@@ -592,176 +619,63 @@ describe("eBay Listing Builder", () => {
       expect(client.updateOffer).not.toHaveBeenCalled();
     });
 
-    // A withdrawn+relisted offer gets a NEW offerId; the stored one then
-    // fails as a per-offer error INSIDE a 200 bulk response. The adapter
-    // must re-resolve by SKU, push to the live offer, and report the fresh
-    // id so the orchestrator heals the mapping.
-    it("recovers a stale offerId by re-resolving the live offer by SKU", async () => {
+    it("does not invent a provider SKU from the local variant ID", async () => {
       const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
-      const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
-        responses: [
-          {
-            sku: "SHLZ-TOP-180PT-BLU",
-            statusCode: 404,
-            offers: [
-              {
-                offerId: "offer-stale",
-                statusCode: 404,
-                errors: [
-                  {
-                    errorId: 25710,
-                    domain: "API_INVENTORY",
-                    category: "REQUEST",
-                    message: "We didn't find the entity you are requesting.",
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      });
-      const getOffers = vi.fn().mockResolvedValue({
-        offers: [{ offerId: "offer-fresh", sku: "SHLZ-TOP-180PT-BLU", availableQuantity: 3 }],
-      });
-      const updateOffer = vi.fn().mockResolvedValue(undefined);
-      (adapter as any).getApiClient = vi
-        .fn()
-        .mockResolvedValue({ bulkUpdatePriceQuantity, getOffers, updateOffer });
-      (adapter as any).delay = vi.fn().mockResolvedValue(undefined);
-
-      const result = await adapter.pushInventory(2, [
-        {
-          variantId: 180,
-          sku: "SHLZ-TOP-180PT-BLU",
-          externalVariantId: "offer-stale",
-          externalInventoryItemId: null,
-          allocatedQty: 12,
-        },
-      ]);
-
-      expect(getOffers).toHaveBeenCalledWith("SHLZ-TOP-180PT-BLU");
-      expect(updateOffer).toHaveBeenCalledWith(
-        "offer-fresh",
-        expect.objectContaining({ offerId: "offer-fresh", availableQuantity: 12 }),
-      );
-      expect(result).toEqual([
-        {
-          variantId: 180,
-          pushedQty: 12,
-          status: "success",
-          refreshedExternalVariantId: "offer-fresh",
-        },
-      ]);
+      const client = { bulkUpdatePriceQuantity: vi.fn() };
+      (adapter as any).getApiClient = vi.fn().mockResolvedValue(client);
+      await expect(adapter.pushInventory(2, [{ variantId: 101, sku: null,
+        externalVariantId: "offer-101", externalInventoryItemId: null, allocatedQty: 5 }]))
+        .rejects.toMatchObject({ code: "EBAY_QUANTITY_UPDATE_INPUT_INVALID" });
+      expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
     });
 
-    it("keeps the original error when re-resolution finds no fresher offer", async () => {
+    it("preserves earlier successes and the exact later failure in a multi-item request", async () => {
       const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
-      const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
-        responses: [
-          {
-            sku: "SHLZ-TOP-180PT-BLU",
-            offers: [
-              {
-                offerId: "offer-stale",
-                statusCode: 404,
-                errors: [
-                  {
-                    errorId: 25713,
-                    domain: "API_INVENTORY",
-                    category: "REQUEST",
-                    message: "This offerId is invalid.",
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      });
-      // SKU lookup returns the SAME dead offerId — nothing to heal with
-      const getOffers = vi.fn().mockResolvedValue({
-        offers: [{ offerId: "offer-stale", sku: "SHLZ-TOP-180PT-BLU" }],
-      });
-      const updateOffer = vi.fn();
-      (adapter as any).getApiClient = vi
-        .fn()
-        .mockResolvedValue({ bulkUpdatePriceQuantity, getOffers, updateOffer });
-      (adapter as any).delay = vi.fn().mockResolvedValue(undefined);
-
-      const result = await adapter.pushInventory(2, [
-        {
-          variantId: 180,
-          sku: "SHLZ-TOP-180PT-BLU",
-          externalVariantId: "offer-stale",
-          externalInventoryItemId: null,
-          allocatedQty: 12,
-        },
+      const failure = Object.assign(new Error("Provider response was not confirmed"),{ code: "PROVIDER_OUTCOME_UNCERTAIN" });
+      const client = { bulkUpdatePriceQuantity: vi.fn()
+        .mockResolvedValueOnce({ responses: [{ sku: "PACK-A",offerId: "offer-a",statusCode: 200 }] })
+        .mockRejectedValueOnce(failure),getOffers: vi.fn(),updateOffer: vi.fn() };
+      (adapter as any).getApiClient = vi.fn().mockResolvedValue(client);
+      (adapter as any).delay = vi.fn();
+      const result = await adapter.pushInventory(2,[
+        { variantId: 101,sku: "PACK-A",externalVariantId: "offer-a",externalInventoryItemId: null,allocatedQty: 4 },
+        { variantId: 102,sku: "PACK-B",externalVariantId: "offer-b",externalInventoryItemId: null,allocatedQty: 8 },
       ]);
-
-      expect(updateOffer).not.toHaveBeenCalled();
-      expect(result).toEqual([
-        {
-          variantId: 180,
-          pushedQty: 0,
-          status: "error",
-          // errorId is preserved so logs + the permanent-error classifier see it
-          error: "[25713] This offerId is invalid.",
-        },
-      ]);
+      expect(result).toEqual([{ variantId: 101,pushedQty: 4,status: "success" },
+        { variantId: 102,pushedQty: 0,status: "error",error: failure.message,errorCode: failure.code }]);
+      expect(client.bulkUpdatePriceQuantity).toHaveBeenCalledTimes(2);
+      expect(client.getOffers).not.toHaveBeenCalled();
+      expect(client.updateOffer).not.toHaveBeenCalled();
     });
 
-    // Prod 2026-07-05: some bulk responses signal a dead offer with a generic
-    // user error whose MESSAGE says "Please enter a valid offerId." and a
-    // different errorId — recovery must key off the message too.
-    it("recovers when the stale offer signature is message-only", async () => {
+    it("validates all item quantities before sending any item", async () => {
       const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
-      const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({
-        responses: [
-          {
-            sku: "SHLZ-TOP-180PT-BLU",
-            offers: [
-              {
-                offerId: "offer-stale",
-                statusCode: 400,
-                errors: [
-                  {
-                    errorId: 25002,
-                    domain: "API_INVENTORY",
-                    category: "REQUEST",
-                    message: "A user error has occurred. Please enter a valid offerId.",
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-      });
-      const getOffers = vi.fn().mockResolvedValue({
-        offers: [{ offerId: "offer-fresh", sku: "SHLZ-TOP-180PT-BLU" }],
-      });
-      const updateOffer = vi.fn().mockResolvedValue(undefined);
-      (adapter as any).getApiClient = vi
-        .fn()
-        .mockResolvedValue({ bulkUpdatePriceQuantity, getOffers, updateOffer });
-      (adapter as any).delay = vi.fn().mockResolvedValue(undefined);
+      const client = { bulkUpdatePriceQuantity: vi.fn() };
+      (adapter as any).getApiClient = vi.fn().mockResolvedValue(client);
+      await expect(adapter.pushInventory(2,[
+        { variantId: 101,sku: "PACK-A",externalVariantId: "offer-a",externalInventoryItemId: null,allocatedQty: 4 },
+        { variantId: 102,sku: "PACK-B",externalVariantId: "offer-b",externalInventoryItemId: null,allocatedQty: -1 },
+      ])).rejects.toMatchObject({ code: "EBAY_QUANTITY_UPDATE_INPUT_INVALID" });
+      expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+    });
 
-      const result = await adapter.pushInventory(2, [
-        {
-          variantId: 180,
-          sku: "SHLZ-TOP-180PT-BLU",
-          externalVariantId: "offer-stale",
-          externalInventoryItemId: null,
-          allocatedQty: 8,
-        },
-      ]);
-
-      expect(updateOffer).toHaveBeenCalledWith(
-        "offer-fresh",
-        expect.objectContaining({ availableQuantity: 8 }),
-      );
-      expect(result[0]).toMatchObject({
-        status: "success",
-        refreshedExternalVariantId: "offer-fresh",
-      });
+    it.each([
+      { status: 404, code: 25713, message: "This offerId is invalid." },
+      { status: 400, code: 25002, message: "Please enter a valid offerId." },
+    ])("preserves a rejected offer without guessing a replacement", async ({ status, code, message }) => {
+      const adapter = new EbayAdapter(createMockDb(), { resolve: vi.fn(async () => ({ byVariantId: new Map(), groupImageUrls: [] })) });
+      const client = {
+        bulkUpdatePriceQuantity: vi.fn().mockResolvedValue({ responses: [{ sku: "TEST-PACK",
+          offers: [{ offerId: "offer-old", statusCode: status, errors: [{ errorId: code, message }] }] }] }),
+        getOffers: vi.fn(), updateOffer: vi.fn(),
+      };
+      (adapter as any).getApiClient = vi.fn().mockResolvedValue(client);
+      (adapter as any).delay = vi.fn();
+      const result = await adapter.pushInventory(2, [{ variantId: 101, sku: "TEST-PACK",
+        externalVariantId: "offer-old", externalInventoryItemId: null, allocatedQty: 5 }]);
+      expect(result).toEqual([{ variantId: 101, pushedQty: 0, status: "error", error: `[${code}] ${message}` }]);
+      expect(client.getOffers).not.toHaveBeenCalled();
+      expect(client.updateOffer).not.toHaveBeenCalled();
     });
 
     it("does not attempt re-resolution on non-stale per-offer errors", async () => {

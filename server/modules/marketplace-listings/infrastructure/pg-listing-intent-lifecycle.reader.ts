@@ -12,6 +12,7 @@ import {
   fenceStockClearingEvidence,
 } from "../../inventory-planning/stock-clearing-evidence";
 import { readListingMemberRetirements } from "./pg-listing-member-lifecycle.repository";
+import { hasUnconfirmedMemberDispatch } from "../domain/listing-member-lifecycle";
 import { managedTargets } from "./pg-listing-intent-propagation.repository";
 import type { ListingIntentLifecycleReader } from "../application/listing-intent-lifecycle.service";
 import type { IntentDelivery } from "../domain/listing-intent-propagation";
@@ -175,9 +176,11 @@ export class PostgresListingIntentLifecycleReader implements ListingIntentLifecy
         })
       ).filter(
         (row) =>
-          row.identity.accountId === d.accountId &&
-          row.identity.environment === d.environment &&
-          (d.marketplaceId === null || row.identity.market === d.marketplaceId),
+          (row.identity.accountId === d.accountId &&
+            row.identity.environment === d.environment &&
+            (d.marketplaceId === null || row.identity.market === d.marketplaceId)) ||
+          ((row.state !== "retired" || hasUnconfirmedMemberDispatch(row))
+            && (row.state !== "superseded" || hasUnconfirmedMemberDispatch(row))),
       );
       const members = selection.variants.map((row) => row.productVariantId);
       const stock = members.length

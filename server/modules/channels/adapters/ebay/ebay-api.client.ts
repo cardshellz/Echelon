@@ -83,7 +83,8 @@ export interface EbayApiClientOptions {
   request?: typeof fetch;
   now?: () => Date;
   strictFulfillmentReadback?: boolean;
-  quantityAdmission?: () => Promise<EbayQuantityRequestAdmission>;
+  quantityAdmission?: (guard?: import("../../../inventory-planning/publication-transaction-guard").PublicationTransactionGuard) => Promise<EbayQuantityRequestAdmission>;
+  publicationGuard?: import("../../../inventory-planning/publication-transaction-guard").PublicationTransactionGuard;
 }
 
 interface RequestOptions {
@@ -144,6 +145,13 @@ export class EbayApiClient {
   ) {
     this.baseUrl = API_BASE_URLS[environment];
     this.isDryRun = process.env.DRY_RUN === "true";
+  }
+
+  /** Bind one work owner to a new client; the cached client stays unchanged. */
+  withPublicationGuard(guard: import("../../../inventory-planning/publication-transaction-guard").PublicationTransactionGuard): EbayApiClient {
+    if (this.options.publicationGuard && this.options.publicationGuard !== guard)
+      throw new Error("A provider client cannot replace its publication owner.");
+    return new EbayApiClient(this.authService,this.channelId,this.environment,{ ...this.options,publicationGuard: guard });
   }
 
   // -------------------------------------------------------------------------
@@ -979,7 +987,7 @@ export class EbayApiClient {
     const identity = ebayQuantityMutationIdentity(options.method, options.path, options.body);
     if (identity && !this.isDryRun) {
       if (!this.options.quantityAdmission) throw new Error("QUANTITY_PUBLICATION_ADMISSION_REQUIRED: eBay quantity writes require an admitted owner.");
-      return executeAdmittedEbayQuantityRequest<T>(options, await this.options.quantityAdmission(),
+      return executeAdmittedEbayQuantityRequest<T>(options, await this.options.quantityAdmission(this.options.publicationGuard),
         request => this.requestUnadmitted({ ...options, ...request, method: request.method as HttpMethod,
           expectNoContent: request.expectNoContent }));
     }
@@ -1141,12 +1149,12 @@ export function createEbayApiClient(
     authService,
     channelId,
     providerEnvironment,
-    { quantityAdmission: async () => {
+    { quantityAdmission: async guard => {
       const account = await authService.getVerifiedProviderAccount(channelId);
       if (!account) throw new Error("Provider-verified eBay account identity is required for quantity publication.");
       const { createChannelEbayQuantityRequestAdmission } = await import("../../../inventory-planning/quantity-publication-admission.api");
       return createChannelEbayQuantityRequestAdmission({ channelId, externalAccountId: account.externalAccountId,
-        environment: providerEnvironment });
+        environment: providerEnvironment, publicationGuard: guard });
     } },
   );
 }
