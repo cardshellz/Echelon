@@ -797,10 +797,28 @@ export class PickingUseCases {
     if (item.requiresShipping !== 1) {
       throw new ValidationError(`Order item ${orderItemId} does not require picking`);
     }
+    if (order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled") {
+      throw new ValidationError(`Cannot assign bin on ${order.warehouseStatus} order ${order.orderNumber}`);
+    }
+    if (order.onHold === 1 || order.orderEditOperationId != null || item.onHold) {
+      throw new ValidationError(`Cannot assign bin while order or line ${item.id} is on hold`);
+    }
 
     const typedCode = (params.locationCode || "").trim().toUpperCase();
     if (!typedCode && !params.warehouseLocationId) {
       throw new ValidationError("locationCode or warehouseLocationId is required");
+    }
+    const existingLocationCode = (item.location || "").trim().toUpperCase();
+    if (
+      Number(item.pickedQuantity ?? 0) > 0 &&
+      existingLocationCode &&
+      !["U", "UNASSIGNED"].includes(existingLocationCode) &&
+      typedCode &&
+      typedCode !== existingLocationCode
+    ) {
+      throw new ValidationError(
+        `Cannot reassign bin for item ${item.id} after partial pick (${item.pickedQuantity}/${item.quantity} picked from ${item.location}); unpick first before changing bins`,
+      );
     }
 
     const variant = await this.storage.getProductVariantBySku(item.sku);
@@ -874,6 +892,17 @@ export class PickingUseCases {
       return { success: false, error: "unknown_location", message, exception };
     }
 
+    if (
+      Number(item.pickedQuantity ?? 0) > 0 &&
+      existingLocationCode &&
+      !["U", "UNASSIGNED"].includes(existingLocationCode) &&
+      location.code.trim().toUpperCase() !== existingLocationCode
+    ) {
+      throw new ValidationError(
+        `Cannot reassign bin for item ${item.id} after partial pick (${item.pickedQuantity}/${item.quantity} picked from ${item.location}); unpick first before changing bins`,
+      );
+    }
+
     if (order.warehouseId && location.warehouseId && Number(location.warehouseId) !== Number(order.warehouseId)) {
       const message = `Bin ${location.code} belongs to warehouse ${location.warehouseId}, not order warehouse ${order.warehouseId}`;
       const exception = await createBlockedException("wrong_warehouse", message, {
@@ -934,6 +963,31 @@ export class PickingUseCases {
     const zone = location.zone || location.code.split("-")[0] || "U";
 
     const result = await this.db.transaction(async (tx) => {
+      if (typeof (tx as any).execute === "function") {
+        const lockedItemRes = await (tx as any).execute(sql`
+          SELECT picked_quantity, location, COALESCE(on_hold, false) AS on_hold
+          FROM wms.order_items
+          WHERE id = ${item.id}
+          FOR UPDATE
+        `);
+        const lockedItem = lockedItemRes?.rows?.[0];
+        if (lockedItem) {
+          if (Boolean(lockedItem.on_hold)) {
+            throw new ValidationError(`Cannot assign bin while line ${item.id} is on hold`);
+          }
+          const lockedLoc = String(lockedItem.location ?? "").trim().toUpperCase();
+          if (
+            Number(lockedItem.picked_quantity ?? 0) > 0 &&
+            lockedLoc &&
+            !["U", "UNASSIGNED"].includes(lockedLoc) &&
+            lockedLoc !== location.code.trim().toUpperCase()
+          ) {
+            throw new ValidationError(
+              `Cannot reassign bin for item ${item.id} after partial pick (${lockedItem.picked_quantity}/${item.quantity} picked from ${lockedItem.location}); unpick first before changing bins`,
+            );
+          }
+        }
+      }
       if (autoFixedSetup) {
         const [existingAtBin] = await tx
           .select()
@@ -1097,16 +1151,24 @@ export class PickingUseCases {
       throw new ValidationError(`No variant found for SKU ${item.sku}`);
     }
 
+    const order = await this.storage.getOrderById(item.orderId);
+    const normalizedItemLocation = item.location.trim().toUpperCase();
+    const pickLocationWhere = order?.warehouseId
+      ? and(
+          sql`upper(${warehouseLocations.code}) = ${normalizedItemLocation}`,
+          eq(warehouseLocations.warehouseId, order.warehouseId),
+        )
+      : sql`upper(${warehouseLocations.code}) = ${normalizedItemLocation}`;
+
     const [pickLocation] = await this.db
       .select()
       .from(warehouseLocations)
-      .where(eq(warehouseLocations.code, item.location))
+      .where(pickLocationWhere)
       .limit(1);
     if (!pickLocation) {
       throw new ValidationError(`Pick bin ${item.location} was not found`);
     }
 
-    const order = await this.storage.getOrderById(item.orderId);
     const pickerId = order?.assignedPickerId || params.userId;
     const picker = pickerId ? await this.storage.getUser(pickerId) : null;
 
@@ -1251,7 +1313,8 @@ export class PickingUseCases {
     }
 
     const locked = await tx.execute(sql`
-      SELECT status, picked_quantity, fulfilled_quantity, quantity, short_reason, picked_at
+      SELECT status, picked_quantity, fulfilled_quantity, quantity, short_reason, picked_at,
+             COALESCE(on_hold, false) AS on_hold
       FROM wms.order_items
       WHERE id = ${input.itemId}
       FOR UPDATE
@@ -1259,6 +1322,12 @@ export class PickingUseCases {
     if (!locked.rows?.length) throw new IntegrityError(`Item ${input.itemId} not found`);
     const lockedStatus = locked.rows[0].status as ItemStatus;
     const lockedPickedQuantity = Number(locked.rows[0].picked_quantity ?? 0);
+    if (Boolean(locked.rows[0].on_hold) && input.status !== "pending" && !recordsConfirmedShipment(input)) {
+      throw new IntegrityError(
+        `Cannot pick item ${input.itemId}: line is on hold for an order edit`,
+        { reason: "order_item_on_hold", orderId: input.beforeItem.orderId, orderItemId: input.itemId },
+      );
+    }
     let shipmentPlan: ConfirmedPickShipmentPlan = { kind: "ordinary_pick" };
     let correctionActor: string | undefined;
     if (!input.pickCorrectionId && Number(locked.rows[0].fulfilled_quantity ?? 0) > lockedPickedQuantity)
@@ -1415,7 +1484,8 @@ export class PickingUseCases {
       }
 
       const locked = await tx.execute(sql`
-        SELECT status, picked_quantity, fulfilled_quantity, quantity, short_reason, picked_at
+        SELECT status, picked_quantity, fulfilled_quantity, quantity, short_reason, picked_at,
+               COALESCE(on_hold, false) AS on_hold
         FROM wms.order_items
         WHERE id = ${input.itemId}
         FOR UPDATE
@@ -1423,6 +1493,12 @@ export class PickingUseCases {
       if (!locked.rows?.length) throw new IntegrityError(`Item ${input.itemId} not found`);
       const lockedStatus = locked.rows[0].status as ItemStatus;
       const lockedPickedQuantity = Number(locked.rows[0].picked_quantity ?? 0);
+      if (Boolean(locked.rows[0].on_hold) && input.status !== "pending" && !recordsConfirmedShipment(input)) {
+        throw new IntegrityError(
+          `Cannot pick item ${input.itemId}: line is on hold for an order edit`,
+          { reason: "order_item_on_hold", orderId: input.beforeItem.orderId, orderItemId: input.itemId },
+        );
+      }
       if (!input.pickCorrectionId && Number(locked.rows[0].fulfilled_quantity ?? 0) > lockedPickedQuantity)
         throw new PickCorrectionError("PICK_CORRECTION_REQUIRED", "Answer the missing-pick confirmation before recording this pick.");
       if (input.pickCorrectionId) {

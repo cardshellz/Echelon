@@ -2256,15 +2256,25 @@ class PgPackageAllocationLedgerTransaction
   }
 }
 
+export interface TransactionBoundPackageAllocationLedgerRepository
+  extends PackageAllocationLedgerRepository {
+  readAuthorityReadinessPackages(
+    shippingProviderLabelIds: readonly number[],
+  ): Promise<readonly LockedPackageAllocationAuthorityEvidence[]>;
+}
+
 /** Join a SERIALIZABLE unit of work already owned by the service composition.
  * This adapter never commits, rolls back, releases, or retries its caller's
  * connection. A failed transaction must be retried as a whole by that owner. */
 export function createTransactionBoundPackageAllocationLedgerRepository(
   client: QueryClient,
-): PackageAllocationLedgerRepository {
+): TransactionBoundPackageAllocationLedgerRepository {
   return {
     withSerializableTransaction: async (work) =>
       work(new PgPackageAllocationLedgerTransaction(client)),
+    readAuthorityReadinessPackages: async (shippingProviderLabelIds) =>
+      new PgPackageAllocationLedgerTransaction(client)
+        .readAuthorityReadinessPackages(shippingProviderLabelIds),
   };
 }
 

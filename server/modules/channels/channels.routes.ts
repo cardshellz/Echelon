@@ -588,6 +588,12 @@ export function registerChannelRoutes(app: Express) {
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
+      if (order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled") {
+        return res.status(409).json({
+          error: `Cannot modify order in terminal '${order.warehouseStatus}' status`,
+          reason: "order_terminal_status",
+        });
+      }
 
       const { priority, notes, status, onHold } = req.body;
 

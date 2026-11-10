@@ -195,28 +195,27 @@ export async function transitionOrderStatus(
     };
   }
 
-  // Build the UPDATE with guarded WHERE
+  // Build the UPDATE with guarded WHERE and atomic prior-status capture
   const now = clock();
   const fromList = legalFrom.map((s) => `'${s}'`).join(", ");
 
-  let setClauses = `warehouse_status = '${to}', updated_at = '${now.toISOString()}'`;
-  if (setCompletedAt) {
-    setClauses += `, completed_at = '${now.toISOString()}'`;
-  }
-  if (setCancelledAt) {
-    setClauses += `, cancelled_at = COALESCE(cancelled_at, '${now.toISOString()}')`;
-  }
-
   const result: any = await db.execute(sql`
-    UPDATE wms.orders
+    WITH prior AS (
+      SELECT id, warehouse_status
+      FROM wms.orders
+      WHERE id = ${orderId}
+        AND warehouse_status IN (${sql.raw(fromList)})
+        ${requireNoOrderEdit ? sql`AND order_edit_operation_id IS NULL` : sql``}
+      FOR UPDATE
+    )
+    UPDATE wms.orders AS o
     SET warehouse_status = ${to},
         updated_at = ${now}
         ${setCompletedAt ? sql`, completed_at = ${now}` : sql``}
-        ${setCancelledAt ? sql`, cancelled_at = COALESCE(cancelled_at, ${now})` : sql``}
-    WHERE id = ${orderId}
-      AND warehouse_status IN (${sql.raw(fromList)})
-      ${requireNoOrderEdit ? sql`AND order_edit_operation_id IS NULL` : sql``}
-    RETURNING warehouse_status AS new_status
+        ${setCancelledAt ? sql`, cancelled_at = COALESCE(o.cancelled_at, ${now})` : sql``}
+    FROM prior
+    WHERE o.id = prior.id
+    RETURNING prior.warehouse_status AS previous_status, o.warehouse_status AS new_status
   `);
 
   const updated = result?.rows?.[0];
@@ -235,7 +234,7 @@ export async function transitionOrderStatus(
 
   return {
     transitioned: true,
-    previousStatus: legalFrom[0],
+    previousStatus: (updated.previous_status as WmsWarehouseStatus | undefined) ?? legalFrom[0],
     newStatus: to,
     orderId,
     reason,

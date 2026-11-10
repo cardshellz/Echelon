@@ -147,6 +147,26 @@ async function releaseOrder(orderId: number, expectedAssignment: PickingAssignme
   return res.json();
 }
 
+const PRE_EFFECT_CONFLICT_REASONS = new Set([
+  "pick_progress_conflict",
+  "pick_quantity_conflict",
+  "order_on_hold",
+  "order_item_on_hold",
+  "line_on_hold",
+  "pick_progress_delta_invalid",
+  "unpick_progress_conflict",
+  "unpick_identity_changed",
+  "order_not_unpickable",
+]);
+
+function isDefiniteCommandRejection(status: number, body: any): boolean {
+  if (status < 500 && status !== 409) return true;
+  if (status === 409 && (body?.commandRejected === true || PRE_EFFECT_CONFLICT_REASONS.has(String(body?.reason ?? "")))) {
+    return true;
+  }
+  return false;
+}
+
 async function unpickItem(itemId: number, qty: number, reason: string = "Picker unpick"): Promise<PickResponse> {
   return sendPickingCommand("unpick", itemId, { qty, reason }, async ({ commandId, payload }) => {
   const res = await fetch(`/api/picking/items/${itemId}/unpick`, {
@@ -157,13 +177,14 @@ async function unpickItem(itemId: number, qty: number, reason: string = "Picker 
   });
   if (!res.ok) {
     let message = "Failed to unpick item";
+    let body: any = null;
     try {
-      const body = await res.json();
+      body = await res.json();
       if (body?.error || body?.message) message = body.error || body.message;
     } catch {
       // Non-JSON error body.
     }
-    throw res.status < 500 && res.status !== 409 ? new PickingCommandRejectedError(message) : new Error(message);
+    throw isDefiniteCommandRejection(res.status, body) ? new PickingCommandRejectedError(message) : new Error(message);
   }
   return res.json();
   });
@@ -279,7 +300,7 @@ async function updateOrderItem(
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: "Unknown error" }));
     const message = err.message || err.error || `Failed to update item (${res.status})`;
-    throw res.status < 500 && res.status !== 409 ? new PickingCommandRejectedError(message) : new Error(message);
+    throw isDefiniteCommandRejection(res.status, err) ? new PickingCommandRejectedError(message) : new Error(message);
   }
   return res.json();
   });
@@ -1013,14 +1034,35 @@ function PickingWorkspace() {
     const localOrdersById = new Map(localSingleQueue.map(order => [order.id, order]));
     const apiOrderIds = new Set(ordersFromApi.map(order => order.id));
 
-    // Start with API orders, preferring local state for in-progress orders only.
+    // Start with API orders, preferring local state for in-progress orders only,
+    // while merging fresh server-owned item metadata (bin location, sourcePlan, hold state).
     const merged = ordersFromApi.map(apiOrder => {
       const localOrder = localOrdersById.get(apiOrder.id);
       // For completed orders, prefer API data which has picker metadata.
       if (apiOrder.status === "completed") {
         return apiOrder;
       }
-      return localOrder || apiOrder;
+      if (!localOrder) {
+        return apiOrder;
+      }
+      const apiItemsById = new Map(apiOrder.items.map(item => [item.id, item]));
+      return {
+        ...localOrder,
+        onHold: apiOrder.onHold,
+        items: localOrder.items.map(localItem => {
+          const apiItem = apiItemsById.get(localItem.id);
+          if (!apiItem) return localItem;
+          return {
+            ...localItem,
+            location: apiItem.location || localItem.location,
+            sourcePlan: apiItem.sourcePlan ?? localItem.sourcePlan,
+            onHold: apiItem.onHold,
+            barcode: apiItem.barcode || localItem.barcode,
+            image: apiItem.image || localItem.image,
+            replenPrediction: apiItem.replenPrediction ?? localItem.replenPrediction,
+          };
+        }),
+      };
     });
 
     // Add completed orders from local state that aren't in API anymore (recently completed).
@@ -1451,7 +1493,7 @@ function PickingWorkspace() {
       resolveAllocationBin(itemId, locationCode),
     onSuccess: (data) => {
       if (data.item) {
-        applyResolvedAllocation(data.item);
+        applyResolvedAllocation(data.item, data.selectedLocation);
       }
       setAllocationDialogOpen(false);
       setAllocationTargetIndex(null);
@@ -1679,11 +1721,30 @@ function PickingWorkspace() {
   });
   const replenBins = replenBinsData?.replenBins ?? {};
 
-  function applyResolvedAllocation(updatedItem: OrderItem) {
-    const patchPickItem = (item: PickItem): PickItem =>
-      item.id === updatedItem.id
-        ? { ...item, location: updatedItem.location }
-        : item;
+  function applyResolvedAllocation(
+    updatedItem: OrderItem,
+    selectedLocation?: { id: number; code: string; zone: string | null },
+  ) {
+    const patchPickItem = (item: PickItem): PickItem => {
+      if (item.id !== updatedItem.id) return item;
+      const nextSourcePlan =
+        item.sourcePlan?.status === "blocked" && updatedItem.location && updatedItem.location !== "UNASSIGNED"
+          ? selectedLocation && updatedItem.productId
+            ? {
+                status: "ready" as const,
+                productVariantId: updatedItem.productId,
+                warehouseLocationId: selectedLocation.id,
+                warehouseId: null,
+                locationCode: selectedLocation.code,
+              }
+            : undefined
+          : item.sourcePlan;
+      return {
+        ...item,
+        location: updatedItem.location,
+        sourcePlan: nextSourcePlan,
+      };
+    };
 
     setQueue(prev => prev.map(batch => ({
       ...batch,
@@ -1700,7 +1761,22 @@ function PickingWorkspace() {
       return oldData.map(order => ({
         ...order,
         items: order.items.map(item =>
-          item.id === updatedItem.id ? { ...item, ...updatedItem } : item
+          item.id === updatedItem.id
+            ? {
+                ...item,
+                ...updatedItem,
+                sourcePlan:
+                  (item as any).sourcePlan?.status === "blocked" && selectedLocation && updatedItem.productId
+                    ? {
+                        status: "ready" as const,
+                        productVariantId: updatedItem.productId,
+                        warehouseLocationId: selectedLocation.id,
+                        warehouseId: order.warehouseId ?? null,
+                        locationCode: selectedLocation.code,
+                      }
+                    : (item as any).sourcePlan,
+              }
+            : item
         ),
       }));
     });
@@ -2039,19 +2115,22 @@ function PickingWorkspace() {
   
   // Grab next available batch or order
   const handleGrabNext = async () => {
-    // Refresh data first to avoid claiming stale orders
-    if (pickingMode === "single") {
-      await refetch();
-    }
-    
     if (pickingMode === "batch") {
       const nextBatch = queue.find(b => b.status === "ready");
       if (nextBatch) {
         handleStartPicking(nextBatch.id);
       }
     } else {
-      // Use fresh data from API, filtering out orders we just completed locally
-      const freshQueue = ordersFromApi.filter(o =>
+      // Refresh data first and use the freshly fetched payload to avoid claiming stale orders
+      const refreshed = await refetch();
+      const sourceOrders = refreshed.data
+        ? refreshed.data.map(mapPickerOrder).filter(o => !(o.combinedGroupId && o.combinedRole === "child")).map(o =>
+            o.combinedGroupId && o.combinedRole === "parent"
+              ? { ...o, id: `combined-${o.combinedGroupId}`, isCombinedGroup: true }
+              : o
+          )
+        : ordersFromApi;
+      const freshQueue = sourceOrders.filter(o =>
         o.status === "ready" && !o.onHold && !shouldShowReleasedPickProgress(o)
       );
       // Apply the same sorting as the displayed queue
@@ -2059,7 +2138,7 @@ function PickingWorkspace() {
       const nextOrder = sortedQueue[0];
       if (nextOrder) {
         handleStartPicking(nextOrder.id, { claimSource: "grab_next" });
-      } else if (ordersFromApi.some(o => o.status === "ready" && !o.onHold && shouldShowReleasedPickProgress(o))) {
+      } else if (sourceOrders.some(o => o.status === "ready" && !o.onHold && shouldShowReleasedPickProgress(o))) {
         toast({
           title: "Only preserved-progress orders are ready",
           description: "Use Resume on a partially picked order to continue it.",
@@ -2245,6 +2324,10 @@ function PickingWorkspace() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ orderItemId: item.id }),
       });
+      if (!resp.ok) {
+        const errBody = await resp.json().catch(() => null);
+        throw new Error(errBody?.error || `Replenishment guidance check failed (${resp.status})`);
+      }
       const guidance = await resp.json();
 
       if (guidance.action === "replen_inline" && guidance.source) {
@@ -2260,8 +2343,13 @@ function PickingWorkspace() {
         setShortPickOpen(true);
       }
     } catch (err) {
-      // On error, fall back to short pick dialog
+      // On error, warn the picker explicitly before falling back to short pick dialog
       console.warn("[ReplenGuidance] Failed:", err);
+      toast({
+        title: "Replenishment check failed",
+        description: "Could not verify reserve stock — retry or confirm shortage manually.",
+        variant: "destructive",
+      });
       setShortPickQty(String(item.picked || 0));
       setShortPickReason("");
       setShortPickListIndex(listIndex);
@@ -3203,6 +3291,8 @@ function PickingWorkspace() {
                 <Button
                   variant={pickingMode === "batch" ? "default" : "ghost"}
                   size="sm"
+                  disabled={queue.length === 0}
+                  title={queue.length === 0 ? "No active pick batches" : "Batch picking mode"}
                   onClick={() => setPickingMode("batch")}
                   className={cn(
                     "h-7 px-2 text-xs",
@@ -4824,6 +4914,7 @@ function PickingWorkspace() {
             <div className="pt-3">
               <Button 
                 className="w-full h-14 bg-emerald-600 hover:bg-emerald-700 text-lg"
+                disabled={updateItemMutation.isPending || unpickItemMutation.isPending}
                 onClick={() => {
                   // Mark the work as completed in state
                   if (pickingMode === "batch") {
@@ -4835,6 +4926,7 @@ function PickingWorkspace() {
                       o.id === activeOrderId ? { ...o, status: "completed" as const } : o
                     ));
                   }
+                  void refetch();
                   playSound("complete");
                   triggerHaptic("heavy");
                   setView("queue");

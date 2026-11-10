@@ -1079,3 +1079,24 @@ export async function repointCanonicalTransferPickLines(
   if (count !== input.orderItemIds.length) throw new WmsOrderItemCommandError("WMS_TRANSFER_PICK_PROGRESS_CHANGED", "A reserved transfer pick line changed before its location was updated", { orderItemIds: input.orderItemIds });
   return count;
 }
+
+export async function reopenShortWmsOrderItemsForRepick(
+  executor: WmsOrderItemExecutor,
+  args: { orderId: number },
+): Promise<number> {
+  assertPositiveInteger(args.orderId, "orderId");
+  const result = await executor.execute(sql`
+    UPDATE wms.order_items
+    SET status = CASE
+      WHEN COALESCE(picked_quantity, 0) >= quantity THEN 'completed'
+      WHEN COALESCE(picked_quantity, 0) > 0 THEN 'in_progress'
+      ELSE 'pending'
+    END,
+    short_reason = NULL
+    WHERE order_id = ${args.orderId}
+      AND status = 'short'
+    RETURNING id
+  `);
+  return affectedRowCount(result);
+}
+
