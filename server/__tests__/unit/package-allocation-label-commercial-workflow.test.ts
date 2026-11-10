@@ -7,7 +7,8 @@ vi.mock("drizzle-orm/node-postgres", () => ({ drizzle: () => database }));
 
 function fixture() {
   const release = vi.fn();
-  const client = { release, query: vi.fn() } as unknown as PoolClient;
+  const query = vi.fn().mockResolvedValue({ rows: [] });
+  const client = { release, query } as unknown as PoolClient;
   const connect = vi.fn().mockResolvedValue(client);
   const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
   const waitForRetry = vi.fn<(delayMs: number) => Promise<void>>().mockResolvedValue(undefined);
@@ -17,7 +18,7 @@ function fixture() {
     logger,
     waitForRetry,
   });
-  return { workflow, connect, release, logger, waitForRetry };
+  return { workflow, connect, release, query, logger, waitForRetry };
 }
 
 describe("atomic label commercial workflow transaction ownership", () => {
@@ -115,5 +116,18 @@ describe("atomic label commercial workflow transaction ownership", () => {
     expect(database.transaction).not.toHaveBeenCalled();
     expect(f.release).not.toHaveBeenCalled();
     expect(f.waitForRetry).not.toHaveBeenCalled();
+  });
+
+  it("reads initial label contents without taking an out-of-order single-label lock before bootstrap", async () => {
+    const f = fixture();
+    f.query.mockResolvedValue({ rows: [] });
+    await expect(f.workflow.run((context) => context.loadLabelContents(42)))
+      .rejects.toMatchObject({ code: "INVALID_DATABASE_EVIDENCE" });
+    const issuedSql = f.query.mock.calls.map(([statement]) => String(statement));
+    expect(issuedSql.length).toBeGreaterThan(0);
+    for (const statement of issuedSql) {
+      expect(statement).not.toContain("pg_advisory_xact_lock");
+      expect(statement).not.toContain("FOR UPDATE");
+    }
   });
 });
