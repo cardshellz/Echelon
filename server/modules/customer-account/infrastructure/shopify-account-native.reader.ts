@@ -1,6 +1,8 @@
 import { z } from "zod";
-import { shopifyMoneyBagCents } from "../../order-edits/infrastructure/shopify-order-edit-money";
-import type { OrderEditCredentials } from "../../order-edits/application/order-edit-provider";
+import {
+  shopifyMoneyBagCents,
+  type OrderEditCredentials,
+} from "../../order-edits/customer-account.api";
 import {
   accountNativeFactSchema,
   accountNativeSourceFailureSchema,

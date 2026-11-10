@@ -1,5 +1,5 @@
 import type { CancellationRewards } from "@shared/customer-account/order-cancellation";
-export { cancellationPaymentsSettled } from "../../order-edits/domain/order-edit-financials";
+export { cancellationPaymentsSettled } from "../../order-edits/customer-account.api";
 
 export interface OrderCancellationProvider {
   cancelOrder(

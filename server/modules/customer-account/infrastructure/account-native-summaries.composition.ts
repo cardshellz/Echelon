@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
-import { ShopifyOrderEditProvider } from "../../order-edits/infrastructure/shopify-order-edit.provider";
-import { createOrderEditCredentialStore } from "../../order-edits/infrastructure/order-edit-credential-store";
+import {
+  createOrderEditCredentialStore,
+  ShopifyOrderEditProvider,
+} from "../../order-edits/customer-account.api";
 import { readCustomerAccountStagingConfig } from "../domain/customer-account-staging";
 import { AccountNativeSummariesWorker } from "../application/account-native-summaries.worker";
 import { PostgresAccountNativeSummaries } from "./account-native-summaries.repository";

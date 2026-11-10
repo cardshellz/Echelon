@@ -11,7 +11,7 @@ import {
   type SalesChannelDeliveryEvidence,
 } from "./sales-channel-delivery.domain";
 import { returnLabelRecordSchema } from "../shipping-engine/application/return-label-provider.port";
-import { createShipStationLabelReconciliationClient } from "../oms/shipstation-label-reconciliation.client";
+import { createShipStationLabelReconciliationClient } from "../oms/shipstation-execution.api";
 import { createPackageHistoryShipStationRequester } from "./package-history.source";
 import { PostgresPackageHistoryStore } from "./package-history.repository";
 import { readBoundedResponseText } from "./shipstation-tracking-http";

@@ -18,7 +18,7 @@ import { registerInventoryRoutes } from "./modules/inventory/inventory.routes";
 import { registerReplenishmentRoutes } from "./modules/inventory";
 import { registerBuildRoutes } from "./modules/inventory/build.routes";
 import { registerNotificationRoutes } from "./modules/notifications";
-import { registerFinanceAnalyticsRoutes } from "./modules/oms/finance-analytics.routes";
+import { registerFinanceAnalyticsRoutes } from "./modules/oms/channel-order-intake.api";
 import { registerWalmartChannelRoutes } from "./modules/channels/adapters/walmart/walmart.routes";
 import { registerChannelCatalogRoutes } from "./modules/channels/channel-catalog.routes";
 import { registerListingPublicationRoutes } from "./modules/marketplace-listings/interfaces/http/listing-publication.routes";

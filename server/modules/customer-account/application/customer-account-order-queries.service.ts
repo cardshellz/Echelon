@@ -1,7 +1,10 @@
 import type { AccountNativeReader } from "./account-native-summaries.ports";
 import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
-import type { OrderEditService } from "../../order-edits/application/order-edit.service";
-import { OrderEditProviderError } from "../../order-edits/application/order-edit-provider";
+import {
+  OrderEditError,
+  OrderEditProviderError,
+  type OrderEditService,
+} from "../../order-edits/customer-account.api";
 import type { OrderEditConnection } from "@shared/order-edits/order-edit.contract";
 import { orderEditConnectionSchema } from "@shared/order-edits/order-edit.contract";
 import { customerAccountOrderIdentityInputSchema } from "@shared/customer-account/customer-account.contract";
@@ -14,7 +17,6 @@ import {
   presentCustomerOrderFulfillment,
   presentCustomerOrderLifecycle,
 } from "@shared/customer-account/order-fulfillment";
-import { OrderEditError } from "../../order-edits/domain/order-edit-error";
 import type {
   CustomerAccountOrderSummary,
   CustomerAccountOrderSummaries,

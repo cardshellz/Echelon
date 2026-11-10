@@ -18,7 +18,7 @@ import {
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
-import { guardOrderEditShopifyIngress } from "../order-edits/infrastructure/order-edit-ingress-guard";
+import { guardOrderEditShopifyIngress } from "../order-edits/oms-coordination.api";
 import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity, orderLineInventoryIdentitySnapshot } from "./order-line-catalog-identity.service";
 import { isShopifyOrderSource, normalizeShopifyCustomerId, ShopifyCustomerIdentityError, validateShopifyCustomerIdentityCopy } from "./shopify-customer-identity";
 

@@ -2,7 +2,7 @@ import type { PoolClient } from "pg";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { wmsOmsOrderIdSql } from "../../oms/oms-wms-order-link.sql";
+import { wmsOmsOrderIdSql } from "../../oms/order-edit-coordination.api";
 import { OrderEditError } from "../domain/order-edit-error";
 
 const integer = z.coerce.number().int().nonnegative().safe();

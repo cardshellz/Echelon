@@ -13,13 +13,13 @@ import {
   adaptPersistedDeclaredPackageLifecycleEvidence,
   projectPersistedDeclaredPackageLifecycleShadow,
 } from "../modules/shipping/declared-package-lifecycle-shadow.domain";
-import { createChannelFulfillmentAuthorityRepository } from "../modules/oms/channel-fulfillment-authority.repository";
 import {
+  createChannelFulfillmentAuthorityRepository,
   createChannelFulfillmentAuthorityService,
+  createChannelFulfillmentProjector,
   type ChannelFulfillmentAuthorityClock,
   type ChannelFulfillmentAuthorityLogger,
-} from "../modules/oms/channel-fulfillment-authority.service";
-import { createChannelFulfillmentProjector } from "../modules/oms/channel-fulfillment-projection.repository";
+} from "../modules/oms/channel-fulfillment-authority.api";
 
 // Preserve three total attempts, with at most 150ms of backoff. Immediate
 // retries can exhaust the budget while a competing label transaction commits.

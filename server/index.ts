@@ -10,11 +10,13 @@ import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/wa
 import { startWalmartStockConnectionWorker } from "./modules/channels/adapters/walmart/walmart-stock-connection.service";
 import { startShopifyProductConnectionWorker } from "./modules/catalog/shopify-product-connection.worker";
 import { createDefaultShopifyProductConnectionService } from "./services/shopify-product-connection";
-import { createOrderEditService } from "./modules/order-edits/order-edit.composition";
-import { registerOrderEditRoutes } from "./modules/order-edits/interfaces/order-edit.routes";
+import {
+  createOrderEditService,
+  registerOrderEditRoutes,
+  startOrderEditScheduler,
+} from "./modules/order-edits/runtime.api";
 import { registerCustomerAccountRoutes } from "./modules/customer-account/interfaces/customer-account.routes";
 import { customerAccountServices } from "./modules/customer-account/infrastructure/customer-account.composition";
-import { startOrderEditScheduler } from "./modules/order-edits/infrastructure/order-edit-scheduler";
 import { createOrderActionProjectionWorker, startOrderActionProjectionScheduler } from "./modules/customer-account/infrastructure/order-action-projection.composition";
 import { createPackageHistoryWorker, startPackageHistoryScheduler } from "./modules/shipping/package-history.composition";
 import type { OrderActionProjectionReport } from "./modules/customer-account/infrastructure/order-action-projection.composition";
@@ -22,7 +24,11 @@ import { logger } from "./platform/observability/logger";
 import { reportBackgroundWork } from "./platform/observability/background-work-report";
 import { hasPermission } from "./modules/identity";
 import { startListingPublicationWorker } from "./modules/marketplace-listings/application/listing-publication-worker";
-import { startArchonOrderDelivery } from "./modules/oms/archon-order-delivery.worker";
+import {
+  startArchonOrderDelivery,
+  startFulfillmentSweeper,
+  startChannelFulfillmentCommandWorker,
+} from "./modules/oms/channel-fulfillment-authority.api";
 import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
 import { createStaffSessionGate } from "./modules/identity/staff-session";
@@ -39,7 +45,15 @@ import { setupWebSocket } from "./websocket";
 import { initReconciliation, startShopifyReconciliation } from "./modules/orders/shopify-order-reconciliation";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
-import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyncService } from "./modules/oms/ebay-order-ingestion";
+import {
+  startEbayOrderPolling,
+  setShipStationService,
+  setWmsServices,
+  setWmsSyncService,
+  createEbayOrderWebhookHandler,
+  reingestEbayOrder,
+  recordOmsReconcileReviewEvent,
+} from "./modules/oms/channel-order-intake.api";
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
 import {
   setDropshipFulfillmentSync,
@@ -59,12 +73,12 @@ import {
   startDropshipRulesConversionWorker,
   startDropshipUsdcWatcherWorker,
 } from "./modules/dropship/runtime-workers.api";
-import { createDropshipMarketplaceCancelStop } from "./modules/oms/dropship-marketplace-cancel";
-import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
-import { startChannelFulfillmentCommandWorker } from "./modules/oms/channel-fulfillment-command.worker";
+import { createDropshipMarketplaceCancelStop } from "./modules/oms/dropship-order-authority.api";
 import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-freeze-guard.scheduler";
-import { startOmsFlowReconciliationScheduler } from "./modules/oms/oms-flow-reconciliation.service";
-import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
+import {
+  startOmsFlowReconciliationScheduler,
+  startOmsOpsAlertScheduler,
+} from "./modules/oms/operations-observability.api";
 import { startControlTowerProjectionScheduler } from "./modules/operations/control-tower-v2.scheduler";
 import { startPoEmailOutboxWorker } from "./modules/procurement/po-email-outbox.worker";
 import { startReceiptCostRecoveryWorker } from "./modules/procurement/receipt-cost-recovery.worker";
@@ -86,20 +100,18 @@ import {
   startWebhookRetryWorker,
   enqueueShipStationRetry,
   enqueueShipStationSortRankSyncRetry,
-} from "./modules/oms/webhook-retry.worker";
-import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
-import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
-import { recordOmsReconcileReviewEvent } from "./modules/oms/oms.service";
-import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
+  registerOmsWebhooks,
+} from "./modules/oms/webhook-retry.api";
+import { startShopifyBridgeListener } from "./modules/oms/shopify-intake.api";
 import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
 import { cancelWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
 import { runStartupZombieOrderRepair } from "./modules/orders/zombie-order-repair";
-import { omsWarehouseCancellationSql } from "./modules/oms/order-merchandise-state.sql";
+import { omsWarehouseCancellationSql } from "./modules/oms/order-linkage-sql.api";
 import { startPickingFollowupWorker } from "./modules/wms/picking-followup.worker";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
 import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-reconciliation.scheduler";
-import { startShipStationLabelReconciliationScheduler } from "./modules/oms/shipstation-label-reconciliation.scheduler";
+import { startShipStationLabelReconciliationScheduler } from "./modules/oms/shipstation-execution.api";
 import {
   installShipStationTrackingRawBodyCapture,
   registerShipStationTrackingWebhook,

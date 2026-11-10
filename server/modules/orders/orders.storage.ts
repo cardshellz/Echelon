@@ -15,8 +15,14 @@ import { OrderListRepository, type OrderPage, type OrderPageQuery, type OrderSca
 import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { IntegrityError, ValidationError } from "../../../shared/errors";
 import { parseCountryCode } from "@shared/country-code";
-import { wmsOmsOrderLinkSql } from "../oms/oms-wms-order-link.sql";
-import { omsWarehouseFinancialStopSql } from "../oms/order-merchandise-state.sql";
+import {
+  omsWarehouseFinancialStopSql,
+  wmsOmsOrderLinkSql,
+} from "../oms/order-linkage-sql.api";
+import {
+  countOmsOrdersMissingCustomerName,
+  repairShopifyOmsOrderCustomer,
+} from "../oms/shopify-intake.api";
 import { normalizeShopifyRepairOrderId, normalizeShopifyRepairShopDomain, type ShopifyCustomerRepairScope } from "./shopify-customer-repair";
 import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
 import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.resolver";
@@ -1305,56 +1311,15 @@ export const orderMethods: IOrderStorage = {
     const shopDomain = normalizeShopifyRepairShopDomain(scope?.shopDomain);
     const externalOrderId = normalizeShopifyRepairOrderId(scope?.externalOrderId);
     const numericOrderId = externalOrderId.slice("gid://shopify/Order/".length);
-    return db.transaction(async tx => {
-      // Hold the resolved channel and connection through the write. A default
-      // channel or display number can never establish provider ownership.
-      const connections = await tx.execute<{ channel_id: number }>(sql`
-        SELECT c.id AS channel_id
-        FROM channels.channels c
-        JOIN channels.channel_connections cc ON cc.channel_id = c.id
-        WHERE c.provider = 'shopify' AND c.status = 'active'
-          AND LOWER(BTRIM(cc.shop_domain)) = ${shopDomain}
-        ORDER BY c.id, cc.id
-        LIMIT 2
-        FOR SHARE OF c, cc
-      `);
-      if (connections.rows.length !== 1) {
-        throw new IntegrityError("Customer repair requires one active Shopify channel connection for the configured shop.");
-      }
-      const channelId = connections.rows[0].channel_id;
-      const matches = await tx.execute<{ id: number }>(sql`
-        SELECT id FROM oms.oms_orders
-        WHERE channel_id = ${channelId}
-          AND external_order_id IN (${numericOrderId}, ${externalOrderId})
-        ORDER BY id LIMIT 2 FOR UPDATE
-      `);
-      if (matches.rows.length === 0) return 0;
-      if (matches.rows.length !== 1) {
-        throw new IntegrityError("Customer repair requires one OMS order for the exact Shopify order and channel.");
-      }
-      const result = await tx.execute(sql`
-      UPDATE oms.oms_orders SET
-        customer_name = ${data.customerName},
-        customer_email = ${data.customerEmail},
-        ship_to_name = ${data.shippingName},
-        ship_to_address1 = ${data.shippingAddress1},
-        ship_to_address2 = ${data.shippingAddress2},
-        ship_to_city = ${data.shippingCity},
-        ship_to_state = ${data.shippingState},
-        ship_to_zip = ${data.shippingPostalCode},
-        ship_to_country = ${shippingCountry}
-      WHERE id = ${matches.rows[0].id} AND channel_id = ${channelId}
-        AND external_order_id IN (${numericOrderId}, ${externalOrderId})
-    `);
-      return result.rowCount || 0;
-    });
+    return repairShopifyOmsOrderCustomer(
+      db,
+      { shopDomain, externalOrderId, numericOrderId },
+      { ...data, shippingCountry },
+    );
   },
 
   async countOmsRawOrdersMissingCustomerName(): Promise<number> {
-    const result = await db.execute<{ count: string }>(sql`
-      SELECT COUNT(*) as count FROM oms.oms_orders WHERE customer_name IS NULL
-    `);
-    return parseInt(result.rows[0]?.count || '0', 10);
+    return countOmsOrdersMissingCustomerName(db);
   },
 
   // Diagnostic/admin queries

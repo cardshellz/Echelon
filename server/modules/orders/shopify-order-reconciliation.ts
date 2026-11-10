@@ -1,6 +1,16 @@
-import { loadShopifyReadinessCandidates } from "../oms/infrastructure/shopify-readiness-candidates.repository";
-import { queueOmsPaidEventReplay } from "../oms/shopify-paid-event-replay";
-import { automaticPaidReplayEvidenceSchema } from "../oms/domain/shopify-paid-replay-policy";
+import {
+  automaticPaidReplayEvidenceSchema,
+  bridgeShopifyOrderToOms,
+  loadShopifyReadinessCandidates,
+  normalizeShopifyCustomerId,
+  queueOmsPaidEventReplay,
+  readShopifyLineCurrentQuantity,
+  reconcileShopifyLineReadiness,
+} from "../oms/shopify-intake.api";
+import type {
+  OmsService,
+  WmsSyncService,
+} from "../oms/channel-order-intake.api";
 import { parseDecimalCents, sumCents } from "@shared/money-read";
 /**
  * Shopify Order Reconciliation Job
@@ -27,13 +37,6 @@ import { sql } from "drizzle-orm";
 import { channelConnections } from "@shared/schema";
 import { resolveProviderCountryCode } from "@shared/country-code";
 import { eq } from "drizzle-orm";
-
-import type { OmsService } from "../oms/oms.service";
-import type { WmsSyncService } from "../oms/wms-sync.service";
-import { bridgeShopifyOrderToOms } from "../oms/shopify-bridge";
-import { normalizeShopifyCustomerId } from "../oms/shopify-customer-identity";
-import { reconcileShopifyLineReadiness } from "../oms/shopify-line-readiness.service";
-import { readShopifyLineCurrentQuantity } from "../oms/shopify-line-item-normalizer";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
 import { normalizeShopifyOrderGid } from "./shopify-order-id";
 

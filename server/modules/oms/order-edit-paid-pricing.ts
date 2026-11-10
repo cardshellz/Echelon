@@ -2,7 +2,7 @@ import {
   orderEditFinancialsSchema,
   type OrderEditFinancials,
 } from "@shared/order-edits/order-edit-financials";
-import { OrderEditError } from "../order-edits/domain/order-edit-error";
+import { OrderEditError } from "../order-edits/oms-coordination.api";
 
 interface PaidSourceLine {
   id: string;

@@ -6,7 +6,7 @@ import {
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
-import { guardOrderEditShopifyIngress } from "../order-edits/infrastructure/order-edit-ingress-guard";
+import { guardOrderEditShopifyIngress } from "../order-edits/oms-coordination.api";
 
 export interface ShopifyLineReadinessSnapshot {
   externalLineItemId: string | number;

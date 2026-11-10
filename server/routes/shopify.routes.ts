@@ -14,15 +14,15 @@ import { parseCountryCode, resolveProviderCountryCode } from "@shared/country-co
 import { normalizeShopifyRepairOrderId, normalizeShopifyRepairShopDomain, type ShopifyCustomerRepairScope } from "../modules/orders/shopify-customer-repair";
 import { runReconciliationNow } from "../modules/orders/shopify-order-reconciliation";
 import { sql } from "drizzle-orm";
-import { processShopifyFulfillmentIngress } from "../modules/oms/shopify-fulfillment-ingress.adapter";
 import {
+  processShopifyFulfillmentIngress,
   buildShopifyFulfillmentRetryEnvelope,
   enqueueShopifyFulfillmentWebhookRetry,
   receiptRecoveryOwnedStatus,
   sourceChannelIdFromRetryPayload,
   sourceEventIdFromRetryPayload,
   type ShopifyFulfillmentWebhookTopic,
-} from "../modules/oms/shopify-fulfillment-webhook-retry";
+} from "../modules/oms/shopify-intake.api";
 import { retireDeletedShopifyProduct } from "../modules/catalog/shopify-product-retirement.service";
 import { sendShopifyProductSyncFailure } from "./shopify-product-sync.response";
 

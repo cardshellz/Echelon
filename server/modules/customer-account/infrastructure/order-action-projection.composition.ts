@@ -1,15 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { customerReturnCustomerOrderSchema } from "@shared/returns/customer-return-access.contract";
-import type { OrderEditService } from "../../order-edits/application/order-edit.service";
+import {
+  OrderEditError,
+  PostgresOrderEditStore,
+  type OrderEditService,
+} from "../../order-edits/customer-account.api";
 import { CustomerOrderEditService } from "../application/customer-order-edit.service";
 import { CustomerReturnOrderAccessService } from "../../returns/application/customer-return-order-access.service";
 import { PostgresCustomerReturnOrderAccessRepository } from "../../returns/infrastructure/customer-return-order-access.repository";
-import { PostgresOrderEditStore } from "../../order-edits/infrastructure/postgres-order-edit.store";
 import { createCustomerReturnLiveService } from "../../returns/infrastructure/customer-return-live.composition";
 import { PostgresCustomerReturnBoxMeasurements } from "../../returns/infrastructure/customer-return-box-measurements.repository";
 import { PostgresCustomerReturnSettingsStore } from "../../returns/infrastructure/customer-return-label-settings.repository";
-import { OrderEditError } from "../../order-edits/domain/order-edit-error";
 import { OrderActionProjectionWorker } from "../application/order-action-projection.worker";
 import { OrderActionProjectionInspectorService } from "../application/order-action-projection.inspector";
 import type { OrderActionScope } from "../application/order-action-projection.ports";

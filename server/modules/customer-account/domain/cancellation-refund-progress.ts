@@ -1,5 +1,9 @@
-import type { OrderEditSnapshot } from "../../order-edits/application/order-edit-provider";
-import { presentOrderEditSettlement, matchesOrderCancellationSettlement, cancellationPaymentsSettled } from "../../order-edits/domain/order-edit-financials";
+import {
+  cancellationPaymentsSettled,
+  matchesOrderCancellationSettlement,
+  presentOrderEditSettlement,
+  type OrderEditSnapshot,
+} from "../../order-edits/customer-account.api";
 import type { CustomerReturnRefundStatus } from "@shared/customer-account/order-progress";
 
 /** Uses the cancellation owner's saved native payment evidence. Neither a zero

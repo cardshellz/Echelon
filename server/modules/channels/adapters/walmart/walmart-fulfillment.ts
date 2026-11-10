@@ -1,6 +1,9 @@
 import { z } from "zod";
-import type { ChannelFulfillmentProviderCommandInput } from "../../../oms/fulfillment-push.service";
-import { providerCommandInput, type ChannelFulfillmentProviderExecutor } from "../../../oms/channel-fulfillment-authority.service";
+import {
+  providerCommandInput,
+  type ChannelFulfillmentProviderCommandInput,
+  type ChannelFulfillmentProviderExecutor,
+} from "../../../oms/channel-fulfillment-authority.api";
 import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
 import { WalmartChannelService } from "./walmart-channel.service";
 import { WalmartApiError } from "./walmart-client";

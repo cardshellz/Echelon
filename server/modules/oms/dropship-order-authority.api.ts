@@ -19,3 +19,4 @@ export {
   type OmsLineAuthorityGrantClient,
   type OmsLineAuthorityGrantErrorCode,
 } from "./oms-line-authority-grant.repository";
+export { createDropshipMarketplaceCancelStop } from "./dropship-marketplace-cancel";

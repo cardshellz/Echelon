@@ -21,7 +21,7 @@ import { db } from "../db";
 import { requireAuth, requirePermission } from "./middleware";
 import { invalidatePickPrioritySettingsCache } from "../modules/orders/sort-rank";
 import { recomputeAllActiveSortRanksDetailed } from "../modules/orders/orders.storage";
-import { enqueueShipStationSortRankSyncRetry } from "../modules/oms/webhook-retry.worker";
+import { enqueueShipStationSortRankSyncRetry } from "../modules/oms/webhook-retry.api";
 
 // ---------------------------------------------------------------------------
 // Shape

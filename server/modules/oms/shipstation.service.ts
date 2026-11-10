@@ -13,7 +13,7 @@ import { readIntegerCents, centsToJsonDollars } from "@shared/money-read";
 
 import { eq, and, sql } from "drizzle-orm";
 import { z } from "zod";
-import { OrderEditError } from "../order-edits/domain/order-edit-error";
+import { OrderEditError } from "../order-edits/oms-coordination.api";
 import type { ChannelMerchandiseCapabilityReader } from "./infrastructure/channel-merchandise-policy";
 import { verifyRefundedChannelMerchandise } from "./channel-merchandise-dispatch.service";
 import type { ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";

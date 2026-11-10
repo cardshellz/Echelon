@@ -1,14 +1,16 @@
 import { sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
-import { wmsOmsOrderIdSql } from "../../oms/oms-wms-order-link.sql";
+import {
+  enqueueShipStationHoldSyncInTransaction,
+  transferOrderEditProviderHolds,
+  wmsOmsOrderIdSql,
+} from "../../oms/order-edit-coordination.api";
 import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import {
   acquireOrderEditWarehouseHold,
   releaseOrderEditWarehouseHold,
 } from "../../wms/order-edit-hold.commands";
-import { enqueueShipStationHoldSyncInTransaction } from "../../oms/shipstation-hold-retry.command";
-import { transferOrderEditProviderHolds } from "../../oms/order-edit-provider-hold.commands";
 import { OrderEditError } from "../domain/order-edit-error";
 
 interface Transaction {

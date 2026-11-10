@@ -1,5 +1,5 @@
 import { db as defaultDb } from "../../../db";
-import { enqueueOmsWmsSyncRetry } from "../../oms/webhook-retry.worker";
+import { enqueueOmsWmsSyncRetry } from "../../oms/webhook-retry.api";
 import type { DropshipOmsFulfillmentSyncRetryQueue } from "../application/dropship-ports";
 
 export class WebhookRetryDropshipFulfillmentSyncRetryQueue implements DropshipOmsFulfillmentSyncRetryQueue {

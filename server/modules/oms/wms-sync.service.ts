@@ -30,7 +30,7 @@ import { readChannelMerchandiseCapability, type ChannelMerchandiseCapabilityRead
 import { isMerchandiseOrderCancelled } from "./domain/order-merchandise-state";
 import { assertChannelMerchandiseDispatchQuantities } from "./domain/channel-merchandise-dispatch";
 import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
-import { registerStoppedRefundDeferredShipment } from "../order-edits/infrastructure/order-edit-deferred-shipment";
+import { registerStoppedRefundDeferredShipment } from "../order-edits/oms-coordination.api";
 import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
 import { shopifyMerchandiseSnapshotSchema, type ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
 import {
