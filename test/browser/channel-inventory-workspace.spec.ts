@@ -495,7 +495,7 @@ test("new channels show editable suggestions and save them only after the operat
   await page.locator("summary").filter({ hasText: "Advanced stock rules" }).click();
   await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("0");
   await expect(page.getByRole("radio", { name: "No maximum", exact: true })).toBeChecked();
-  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("0");
+  await expect(page.getByLabel("Hide when below", { exact: true })).toHaveValue("0");
   await expect(page.getByRole("radio", { name: "Share available stock", exact: true })).toBeChecked();
   expect(state.writes).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -528,7 +528,7 @@ test("saved out-of-stock, zero and partitioned settings survive an unrelated edi
   await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("0");
   await expect(page.getByRole("radio", { name: "Limit quantity", exact: true })).toBeChecked();
   await expect(page.getByRole("textbox", { name: "Maximum displayed quantity", exact: true })).toHaveValue("0");
-  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("0");
+  await expect(page.getByLabel("Hide when below", { exact: true })).toHaveValue("0");
   await expect(page.getByRole("radio", { name: "Limit combined channel percentages", exact: true })).toBeChecked();
   expect(state.writes).toEqual([]);
 
@@ -548,7 +548,7 @@ test("partial saved drafts retain missing values instead of silently adopting su
   await expect(page.getByRole("radio", { name: "Show as out of stock", exact: true })).toBeChecked();
   await expect(page.getByLabel("Stock percentage", { exact: true })).toHaveValue("25");
   await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Hide when below", { exact: true })).toHaveValue("");
   await expect(page.getByRole("radio", { name: "No maximum", exact: true })).not.toBeChecked();
   await expect(page.getByRole("radio", { name: "Limit quantity", exact: true })).not.toBeChecked();
   await expect(page.getByRole("radio", { name: "Share available stock", exact: true })).not.toBeChecked();
@@ -563,16 +563,16 @@ test("partial saved drafts retain missing values instead of silently adopting su
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("advanced stock rules edit the buffer and cutoff independently without enable-field controls", async ({ page }) => {
+test("advanced stock rules edit the buffer and hide-when-below independently without enable-field controls", async ({ page }) => {
   const state = await setup(page);
   await page.locator("summary").filter({ hasText: "Advanced stock rules" }).click();
   await page.getByLabel("Stock buffer", { exact: true }).fill("5");
-  await page.getByLabel("Out-of-stock cutoff", { exact: true }).fill("3");
+  await page.getByLabel("Hide when below", { exact: true }).fill("3");
   await page.getByRole("radio", { name: "Limit quantity", exact: true }).click();
   await page.getByRole("textbox", { name: "Maximum displayed quantity", exact: true }).fill("20");
   await page.getByRole("radio", { name: "Limit combined channel percentages", exact: true }).click();
   await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("5");
-  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("3");
+  await expect(page.getByLabel("Hide when below", { exact: true })).toHaveValue("3");
   await expect(page.getByRole("radio", { name: "Set", exact: true })).toHaveCount(0);
   await expect(page.getByText("20 units shown", { exact: true })).toBeVisible();
   await page.getByLabel("Example available stock", { exact: true }).fill("30");
@@ -654,7 +654,7 @@ test("view-only access has no draft save controls", async ({ page }) => {
   await expect(page.getByRole("radio", { name: "Available to sell", exact: true })).toBeDisabled();
   await page.locator("summary").filter({ hasText: "Advanced stock rules" }).click();
   await expect(page.getByLabel("Stock buffer", { exact: true })).toBeDisabled();
-  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toBeDisabled();
+  await expect(page.getByLabel("Hide when below", { exact: true })).toBeDisabled();
   await expect(page.getByRole("radio", { name: "No maximum", exact: true })).toBeDisabled();
   await expect(page.getByRole("radio", { name: "Share available stock", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Save draft", exact: true })).toHaveCount(0);
