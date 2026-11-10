@@ -20,12 +20,14 @@ import {
 } from "./modules/marketplace-listings";
 import {
   EbayDropshipListingPushProvider,
+  PgDropshipEbayManagedLocationProvider,
+  createDropshipEbayFulfillmentPolicyGuardFromEnv,
   type DropshipEbayListingLifecycleClient,
-} from "./modules/dropship/infrastructure/dropship-ebay-listing-push.provider";
-import { PgDropshipMarketplaceCredentialRepository } from "./modules/dropship/infrastructure/dropship-marketplace-credentials";
-import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./modules/dropship/infrastructure/dropship-ebay-fulfillment-policy-guard.factory";
-import { createDropshipEbayRegistrationCredentialProviderFromEnv } from "./modules/dropship/infrastructure/dropship-ebay-registration-credentials";
-import { PgDropshipEbayManagedLocationProvider } from "./modules/dropship/infrastructure/dropship-ebay-managed-location.provider";
+} from "./modules/dropship/ebay-listing-replacement.api";
+import {
+  PgDropshipMarketplaceCredentialRepository,
+  createDropshipEbayRegistrationCredentialProviderFromEnv,
+} from "./modules/dropship/ebay-registration-credentials.api";
 import type { EbayInventoryItemGroup } from "./modules/channels/adapters/ebay/ebay-types";
 import {
   createEbayRouteListingLifecycleClient,

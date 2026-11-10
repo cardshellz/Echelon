@@ -11,8 +11,10 @@ import { requireAuth, requirePermission } from "./middleware";
 import type { Express, Request, Response } from "express";
 import { db } from "../db";
 import { EbayAuthService, createEbayAuthConfig, type EbayAuthConfig } from "../modules/channels/adapters/ebay/ebay-auth.service";
-import { createDropshipStoreConnectionServiceFromEnv } from "../modules/dropship/infrastructure/dropship-store-connection.factory";
-import { DropshipError } from "../modules/dropship/domain/errors";
+import {
+  DropshipError,
+  createDropshipStoreConnectionServiceFromEnv,
+} from "../modules/dropship/store-connection.api";
 import { parseDropshipOAuthCallbackQuery } from "../modules/dropship/interfaces/http/dropship-store-connection.routes";
 import { buildDropshipPortalOAuthRedirect } from "../modules/dropship/interfaces/http/dropship-oauth-redirect";
 

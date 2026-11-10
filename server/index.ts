@@ -41,24 +41,24 @@ import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
 import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyncService } from "./modules/oms/ebay-order-ingestion";
 import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
-import { startDropshipListingPushWorker } from "./modules/dropship/infrastructure/dropship-listing-push-job-runner";
-import { startDropshipOrderProcessingWorker } from "./modules/dropship/infrastructure/dropship-order-processing-runner";
-import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastructure/dropship-ebay-order-intake-runner";
-import { startDropshipReturnsMaintenanceWorker } from "./modules/dropship/infrastructure/dropship-returns-maintenance-runner";
-import { startDropshipReturnIntakeWorker } from "./modules/dropship/infrastructure/dropship-return-intake-runner";
-import { startDropshipUsdcWatcherWorker } from "./modules/dropship/infrastructure/dropship-usdc-watcher-runner";
-import { startDropshipCostDetectionWorker } from "./modules/dropship/infrastructure/dropship-cost-detection-runner";
-import { startDropshipCatalogArrivalsWorker } from "./modules/dropship/infrastructure/dropship-catalog-arrivals-runner";
-import { startDropshipListingEndWorker } from "./modules/dropship/infrastructure/dropship-listing-end-runner";
-import { startDropshipCategoryMarksWorker } from "./modules/dropship/infrastructure/dropship-category-marks-runner";
-import { startDropshipRulesConversionWorker } from "./modules/dropship/infrastructure/dropship-rules-conversion-runner";
-import { startDropshipMarketplaceSyncBackWorker } from "./modules/dropship/infrastructure/dropship-marketplace-sync-runner";
-import { startDropshipProcessHeartbeatFromEnv } from "./modules/dropship/infrastructure/dropship-process-heartbeat";
 import {
   setDropshipFulfillmentSync,
   setDropshipInventoryRuntimeAuthorityGate,
   setDropshipMarketplaceCancelStop,
-} from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
+  startDropshipCatalogArrivalsWorker,
+  startDropshipCategoryMarksWorker,
+  startDropshipCostDetectionWorker,
+  startDropshipEbayOrderIntakeWorker,
+  startDropshipListingEndWorker,
+  startDropshipListingPushWorker,
+  startDropshipMarketplaceSyncBackWorker,
+  startDropshipOrderProcessingWorker,
+  startDropshipProcessHeartbeatFromEnv,
+  startDropshipReturnIntakeWorker,
+  startDropshipReturnsMaintenanceWorker,
+  startDropshipRulesConversionWorker,
+  startDropshipUsdcWatcherWorker,
+} from "./modules/dropship/runtime-workers.api";
 import { createDropshipMarketplaceCancelStop } from "./modules/oms/dropship-marketplace-cancel";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startChannelFulfillmentCommandWorker } from "./modules/oms/channel-fulfillment-command.worker";

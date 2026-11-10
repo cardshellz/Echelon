@@ -12,8 +12,10 @@ import type {
 } from "../domain/listing-intent-propagation";
 import type { EbayListingSyncService } from "../../channels/ebay-listing-sync.service";
 import type { syncActiveListings } from "../../channels/ebay-listing-sync";
-import { PgDropshipListingPreviewRepository } from "../../dropship/infrastructure/dropship-listing-preview.repository";
-import type { DropshipListingPreviewService } from "../../dropship/application/dropship-listing-preview-service";
+import {
+  PgDropshipListingPreviewRepository,
+  type DropshipListingPreviewService,
+} from "../../dropship/listing-preview.api";
 
 const ACTOR = "system:listing-intent-propagation";
 const blocked = (code: string, message: string): IntentHandoff => ({
