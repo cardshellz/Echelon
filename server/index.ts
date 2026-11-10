@@ -89,6 +89,7 @@ import {
 } from "./modules/oms/webhook-retry.worker";
 import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
 import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
+import { recordOmsReconcileReviewEvent } from "./modules/oms/oms.service";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
@@ -1567,19 +1568,16 @@ function startEchelonSyncScheduler(
                   String(row.oms_id).match(/^[0-9]+$/)
                 ) {
                   try {
-                    await db.execute(sql`
-                      INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-                      VALUES (
-                        ${Number(row.oms_id)},
-                        'engine_order_not_found',
-                        ${JSON.stringify({
-                          wmsShipmentId: shipmentId,
-                          engineOrderRef: ref.engineOrderRef,
-                          wmsShipmentStatus: row.wms_shipment_status,
-                        })}::jsonb,
-                        NOW()
-                      )
-                    `);
+                    await recordOmsReconcileReviewEvent(
+                      db,
+                      Number(row.oms_id),
+                      "engine_order_not_found",
+                      {
+                        wmsShipmentId: shipmentId,
+                        engineOrderRef: ref.engineOrderRef,
+                        wmsShipmentStatus: row.wms_shipment_status,
+                      },
+                    );
                   } catch (auditErr: any) {
                     console.warn(
                       `[Reconcile V2] not-found audit insert failed for shipment ${shipmentId}:`,
@@ -1731,15 +1729,16 @@ function startEchelonSyncScheduler(
               `);
               if (row.oms_id && String(row.oms_id).match(/^[0-9]+$/)) {
                 try {
-                  await db.execute(sql`
-                    INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-                    VALUES (
-                      ${Number(row.oms_id)},
-                      'engine_cancel_flagged_for_review',
-                      ${JSON.stringify({ wmsShipmentId: shipmentId, engineOrderRef: ref.engineOrderRef, reason: event.reason })}::jsonb,
-                      NOW()
-                    )
-                  `);
+                  await recordOmsReconcileReviewEvent(
+                    db,
+                    Number(row.oms_id),
+                    "engine_cancel_flagged_for_review",
+                    {
+                      wmsShipmentId: shipmentId,
+                      engineOrderRef: ref.engineOrderRef,
+                      reason: event.reason,
+                    },
+                  );
                 } catch (auditErr: any) {
                   console.warn(`[Reconcile V2] review audit insert failed for shipment ${shipmentId}:`, auditErr?.message);
                 }
@@ -1778,25 +1777,22 @@ function startEchelonSyncScheduler(
               if (row.oms_id && row.oms_id.match(/^[0-9]+$/)) {
                 const omsId = Number(row.oms_id);
                 try {
-                  await db.execute(sql`
-                    INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-                    VALUES (
-                      ${omsId},
-                      ${event.kind === "shipped"
-                        ? "shipped_via_shipstation"
-                        : event.kind === "cancelled"
-                          ? "cancelled_via_shipstation"
-                          : "voided_via_shipstation"},
-                      ${JSON.stringify({
-                        wmsShipmentId: shipmentId,
-                        engineOrderRef: ref.engineOrderRef,
-                        ...(event.kind === "shipped"
-                          ? { trackingNumber: event.trackingNumber, carrier: event.carrier }
-                          : { reason: (event as any).reason }),
-                      })}::jsonb,
-                      NOW()
-                    )
-                  `);
+                  await recordOmsReconcileReviewEvent(
+                    db,
+                    omsId,
+                    event.kind === "shipped"
+                      ? "shipped_via_shipstation"
+                      : event.kind === "cancelled"
+                        ? "cancelled_via_shipstation"
+                        : "voided_via_shipstation",
+                    {
+                      wmsShipmentId: shipmentId,
+                      engineOrderRef: ref.engineOrderRef,
+                      ...(event.kind === "shipped"
+                        ? { trackingNumber: event.trackingNumber, carrier: event.carrier }
+                        : { reason: (event as any).reason }),
+                    },
+                  );
                 } catch (auditErr: any) {
                   console.warn(
                     `[ShipStation Reconcile V2] audit insert failed for order ${omsId}:`,

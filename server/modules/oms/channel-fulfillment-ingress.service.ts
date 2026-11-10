@@ -17,6 +17,7 @@ import {
   type ChannelFulfillmentIngressInput,
   type NormalizedChannelFulfillmentIngress,
 } from "./channel-fulfillment-ingress";
+import type { EngineCancelResult } from "../shipping/types";
 
 const DEFAULT_RECEIPT_LEASE_DURATION_MS = 120_000;
 const MAX_TRANSIENT_RECEIPT_FAILURES = 5;
@@ -68,7 +69,7 @@ export interface ChannelFulfillmentIngressDependencies {
   readonly cancelEngineShipment: (
     candidate: IngressEngineCancellationCandidate,
     occurredAt: Date,
-  ) => Promise<void>;
+  ) => Promise<EngineCancelResult | { state: EngineCancelResult["state"]; alreadyInState?: boolean } | void>;
   readonly clock?: ChannelFulfillmentIngressClock;
   readonly logger?: ChannelFulfillmentIngressLogger;
   readonly createLeaseToken?: () => string;
@@ -205,7 +206,24 @@ async function cancelSupersededEngineShipments(
   for (const candidate of candidates) {
     await beforeEach();
     try {
-      await dependencies.cancelEngineShipment(candidate, occurredAt);
+      const outcome = await dependencies.cancelEngineShipment(candidate, occurredAt);
+      if (
+        outcome &&
+        typeof outcome === "object" &&
+        (outcome.state === "already_shipped" || outcome.state === "not_found")
+      ) {
+        failures.push(
+          cancellationFailure(
+            candidate,
+            Object.assign(
+              new Error(
+                `Superseded shipping-engine shipment ${candidate.wmsShipmentId} cancellation returned ${outcome.state}`,
+              ),
+              { code: `ENGINE_CANCEL_${outcome.state.toUpperCase()}` },
+            ),
+          ),
+        );
+      }
     } catch (error) {
       failures.push(cancellationFailure(candidate, error));
     }

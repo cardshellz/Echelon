@@ -48,6 +48,7 @@ import type {
 } from "./channel-fulfillment-ingress.service";
 import rateLimit from "express-rate-limit";
 import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
+import type { EngineCancelResult } from "../shipping/types";
 import {
   buildShopifyWebhookInboxInput,
   enqueueWebhookInboxRetry,
@@ -153,7 +154,9 @@ interface ShipStationService {
     carrierCode?: string | null;
     notifyCustomer?: boolean;
   }) => Promise<{ alreadyInState: boolean } | void>;
-  cancelOrder: (shipstationOrderId: number) => Promise<{ alreadyInState: boolean } | void>;
+  cancelOrder: (
+    shipstationOrderId: number,
+  ) => Promise<EngineCancelResult | { state: EngineCancelResult["state"]; alreadyInState?: boolean } | void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +340,11 @@ export async function cascadeShopifyCancelToShipments(
   },
   opts: {
     now?: Date;
-    shipstation?: { removeFromList?: (id: number) => Promise<void> };
+    shipstation?: {
+      removeFromList?: (
+        id: number,
+      ) => Promise<EngineCancelResult | { state: EngineCancelResult["state"]; alreadyInState?: boolean } | void>;
+    };
     logPrefix?: string;
   } = {},
 ): Promise<{
@@ -432,7 +439,7 @@ export async function cancelOrderCascade(
     ? {
         removeFromList: async (ssOrderId: number) => {
           try {
-            await opts.shipStationService!.cancelOrder(ssOrderId);
+            return await opts.shipStationService!.cancelOrder(ssOrderId);
           } catch (e: any) {
             console.error(`${LOG} SS cancel failed for ssOrderId=${ssOrderId}: ${e.message}`);
             throw e;
@@ -441,6 +448,7 @@ export async function cancelOrderCascade(
       }
     : undefined;
 
+  let hadShipmentCancelError = false;
   for (const wmsRow of wmsOrderRows) {
     if (opts.wmsServices) {
       try {
@@ -478,6 +486,9 @@ export async function cancelOrderCascade(
     );
 
     if (cascade.hadShipments) {
+      if (cascade.cascadeResults.some((r) => r.mode === "error")) {
+        hadShipmentCancelError = true;
+      }
       cancelCascadeDetails = {
         wmsOrderId: wmsRow.id,
         shipmentOutcomes: cascade.cascadeResults,
@@ -490,16 +501,29 @@ export async function cancelOrderCascade(
     }
   }
 
-  await db.insert(omsOrderEvents).values({
-    orderId: omsOrderId,
-    eventType: "cancelled",
-    details: {
-      source: opts.source,
-      reason: opts.reason,
-      cancelledAt: now.toISOString(),
-      ...cancelCascadeDetails,
-    },
-  });
+  if (hadShipmentCancelError) {
+    await db.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "cancel_cascade_incomplete",
+      details: {
+        source: opts.source,
+        reason: opts.reason,
+        cancelledAt: now.toISOString(),
+        ...cancelCascadeDetails,
+      },
+    });
+  } else {
+    await db.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "cancelled",
+      details: {
+        source: opts.source,
+        reason: opts.reason,
+        cancelledAt: now.toISOString(),
+        ...cancelCascadeDetails,
+      },
+    });
+  }
 
   return { cascadeDetails: cancelCascadeDetails };
 }
@@ -1619,6 +1643,11 @@ export function registerOmsWebhooks(
               console.error(
                 `${LOG_PREFIX} WMS edit propagation failed for order ${shopifyOrder.name || externalOrderId}: ${propErr.message}`,
               );
+              await enqueueOmsWmsSyncRetry(
+                db,
+                existing.id,
+                propErr instanceof Error ? propErr : new Error(propErr?.message ?? String(propErr)),
+              );
             }
           } else {
             await enqueueOmsWmsSyncRetry(
@@ -1890,7 +1919,7 @@ export function registerOmsWebhooks(
   // =========================================================================
   // 5. POST /api/oms/webhooks/refunds/create
   // =========================================================================
-  app.post("/api/oms/webhooks/refunds/create", async (req: Request, res: Response) => {
+  app.post("/api/oms/webhooks/refunds/create", webhookLimiter, async (req: Request, res: Response) => {
     const refundPayload = verifyAndParse(req, res);
     if (!refundPayload) return;
 
@@ -2058,9 +2087,8 @@ export function registerOmsWebhooks(
             : undefined,
           shipstation: shipStationService
             ? {
-                cancelOrder: async (shipstationOrderId: number) => {
-                  await shipStationService.cancelOrder(shipstationOrderId);
-                },
+                cancelOrder: async (shipstationOrderId: number) =>
+                  shipStationService.cancelOrder(shipstationOrderId),
               }
             : undefined,
           shippingEngine: shippingEngine ?? undefined,

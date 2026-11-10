@@ -19,6 +19,7 @@ import { createExpectedWmsReturn } from "../wms/expected-return-commands";
 import { observeChannelMerchandiseQuantity } from "./domain/channel-merchandise-quantity";
 import { channelMerchandiseDemandReduction } from "./domain/channel-merchandise-demand";
 import { shopifyMerchandiseSnapshotSchema, type ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
+import type { EngineCancelResult } from "../shipping/types";
 
 const REFUND_LOCK_NAMESPACE = 918413;
 
@@ -67,13 +68,13 @@ export interface ShopifyRefundCascadeHelpers {
     reason: string;
     userId?: string;
   }) => Promise<RefundDemandReconciliationResult>;
-  shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
+  shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<EngineCancelResult | unknown> };
   shippingEngine?: {
     cancel: (ref: {
       engine: string;
       engineOrderRef: string;
       engineShipmentRef?: string;
-    }) => Promise<unknown>;
+    }) => Promise<EngineCancelResult | unknown>;
   };
   pushShipment?: (shipmentId: number) => Promise<unknown>;
   recordReturnCase?: (args: {
@@ -1435,13 +1436,13 @@ export async function applyShopifyRefundCascade(
           now,
           skipEngineCancel: plan.skipEngineCancel,
           engineCancel: helpers.shippingEngine
-            ? async (ref) => { await helpers.shippingEngine!.cancel(ref); }
+            ? async (ref) =>
+                (await helpers.shippingEngine!.cancel(ref)) as EngineCancelResult | void
             : undefined,
           shipstation: helpers.shipstation
             ? {
-                removeFromList: async (shipstationOrderId: number) => {
-                  await helpers.shipstation!.cancelOrder(shipstationOrderId);
-                },
+                removeFromList: async (shipstationOrderId: number) =>
+                  (await helpers.shipstation!.cancelOrder(shipstationOrderId)) as EngineCancelResult | void,
               }
             : undefined,
         },

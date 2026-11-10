@@ -974,17 +974,72 @@ export function createShipStationService(
   // Get order by orderKey
   // -------------------------------------------------------------------------
 
+  const MAX_ORDER_KEY_LOOKUP_PAGES = 10;
+
   async function getOrderByKey(
     orderKey: string,
     orderNumber: string,
   ): Promise<any> {
-    const result = await apiRequest<{ orders: any[] }>(
-      "GET",
-      `/orders?orderNumber=${encodeURIComponent(orderNumber)}`,
-    );
-    const exactMatches = (result.orders ?? []).filter(
-      (order) => String(order?.orderKey ?? "") === orderKey,
-    );
+    const exactMatches: any[] = [];
+    let page = 1;
+    let totalPages = 1;
+
+    while (page <= totalPages) {
+      const endpoint =
+        page === 1
+          ? `/orders?orderNumber=${encodeURIComponent(orderNumber)}`
+          : `/orders?orderNumber=${encodeURIComponent(orderNumber)}&page=${page}`;
+      const result = await apiRequest<{
+        orders?: any[];
+        page?: number;
+        pages?: number;
+      }>("GET", endpoint);
+
+      if (!result || !Array.isArray(result.orders)) {
+        throw new ShipStationPushError(
+          `ShipStation order lookup for ${orderNumber} returned a malformed orders response on page ${page}`,
+          {
+            code: SS_PUSH_INVALID_SHIPMENT,
+            field: "provider.orders",
+            value: result,
+          },
+        );
+      }
+
+      if (page === 1 && result.pages !== undefined && result.pages !== null) {
+        const parsedPages = Number(result.pages);
+        if (!Number.isInteger(parsedPages) || parsedPages < 0) {
+          throw new ShipStationPushError(
+            `ShipStation order lookup for ${orderNumber} returned an invalid page count (${String(result.pages)})`,
+            {
+              code: SS_PUSH_INVALID_SHIPMENT,
+              field: "provider.pages",
+              value: result.pages,
+            },
+          );
+        }
+        if (parsedPages > MAX_ORDER_KEY_LOOKUP_PAGES) {
+          throw new ShipStationPushError(
+            `ShipStation order lookup for ${orderNumber} spans ${parsedPages} pages (exceeds safe lookup bound ${MAX_ORDER_KEY_LOOKUP_PAGES})`,
+            {
+              code: SS_PUSH_INVALID_SHIPMENT,
+              field: "provider.pages",
+              value: parsedPages,
+            },
+          );
+        }
+        totalPages = Math.max(1, parsedPages);
+      }
+
+      for (const order of result.orders) {
+        if (String(order?.orderKey ?? "") === orderKey) {
+          exactMatches.push(order);
+        }
+      }
+
+      page += 1;
+    }
+
     if (exactMatches.length > 1) {
       throw new ShipStationPushError(
         `ShipStation returned ${exactMatches.length} orders for exact key ${orderKey}`,
