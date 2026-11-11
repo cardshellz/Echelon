@@ -38,7 +38,7 @@ export function buildPolicyQuantityExample(form: PolicyForm, availableStock: str
       steps.push({ label: `After a maximum of ${formatUnits(policy.maxPublish.units)}`, units: calculation.cappedUnits.toString() });
     }
     if (policy.minPublishSellableUnits !== "0") {
-      steps.push({ label: `After an out-of-stock cutoff of ${formatUnits(policy.minPublishSellableUnits)}`, units: calculation.publishedUnits.toString() });
+      steps.push({ label: `After hide when below ${formatUnits(policy.minPublishSellableUnits)}`, units: calculation.publishedUnits.toString() });
     }
   }
   return { ok: true, publishedUnits: calculation.publishedUnits.toString(), steps };
