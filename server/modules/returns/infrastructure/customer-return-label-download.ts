@@ -1,4 +1,4 @@
-import { returnLabelDownloadUrlSchema } from "../../shipping-engine/application/return-label-provider.port";
+import { returnLabelDownloadUrlSchema } from "../../shipping-engine/return-shipping-and-labels.api";
 import { CustomerReturnIntakeError } from "../application/customer-return-intake.ports";
 
 const MAX_LABEL_BYTES = 10 * 1024 * 1024;

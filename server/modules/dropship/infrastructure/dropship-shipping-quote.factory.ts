@@ -15,7 +15,7 @@ import {
 } from "../application/dropship-shipping-shadow-rollout";
 import {
   PostgresShippingQuoteEvidenceWriter,
-} from "../../shipping-engine/infrastructure/postgres-shipping-quote-evidence.writer";
+} from "../../shipping-engine/rate-quoting-and-policy.api";
 import {
   createSharedEngineDropshipShippingQuoteProviderFromEnv,
 } from "./shared-engine-dropship-shipping.provider";

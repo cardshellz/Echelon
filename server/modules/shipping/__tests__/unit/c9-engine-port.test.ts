@@ -300,7 +300,7 @@ describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
   });
 
   it("imports deriveReconcileEvent from shipping module", () => {
-    expect(indexSrc).toContain('from "./modules/shipping/reconcile-derive"');
+    expect(indexSrc).toContain('from "./modules/shipping/engine-and-reconcile.api"');
   });
 });
 

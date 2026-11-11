@@ -15,7 +15,7 @@ import {
   enqueueShipStationShipmentPushRetry,
   enqueueShipStationShipmentCancelRetry,
 } from "../oms/webhook-retry.api";
-import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
+import { engineRefFromRow } from "../shipping/engine-and-reconcile.api";
 import { reserveAndPushAfterHoldRelease } from "./release-hold-push";
 import { sql } from "drizzle-orm";
 import Papa from "papaparse";

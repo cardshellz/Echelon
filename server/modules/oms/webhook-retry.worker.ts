@@ -1630,7 +1630,7 @@ export async function dispatchShipStationHoldSyncRetry(
   try {
     let touched = 0;
     if (eng) {
-      const { engineRefFromRow } = await import("../shipping/adapters/shipstation.adapter");
+      const { engineRefFromRow } = await import("../shipping/engine-and-reconcile.api");
       const shipments = await dbArg.execute(sql`
         SELECT shipping_engine, engine_order_ref, engine_shipment_ref,
                shipstation_order_id, shipstation_order_key
@@ -1752,7 +1752,7 @@ export async function dispatchShipStationSortRankSyncRetry(
   try {
     let touched2 = 0;
     if (eng2) {
-      const { engineRefFromRow } = await import("../shipping/adapters/shipstation.adapter");
+      const { engineRefFromRow } = await import("../shipping/engine-and-reconcile.api");
       const shipments = await dbArg.execute(sql`
         SELECT shipping_engine, engine_order_ref, engine_shipment_ref,
                shipstation_order_id, shipstation_order_key

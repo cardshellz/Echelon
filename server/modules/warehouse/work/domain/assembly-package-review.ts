@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { assemblyPackageReviewSchema, type AssemblyPackageReview } from "@shared/assembly-package-review";
-import { projectPersistedDeclaredPackageLifecycleShadow } from "../../../shipping/declared-package-lifecycle-shadow.domain";
-import type { LockedPackageAllocationAuthorityEvidence } from "../../../shipping/package-allocation-ledger.repository";
+import { projectPersistedDeclaredPackageLifecycleShadow } from "../../../shipping/declared-package-lifecycle.api";
+import type { LockedPackageAllocationAuthorityEvidence } from "../../../shipping/package-allocation-authority.api";
 import type { PackingSource } from "../../../wms/assembly-and-packing.api";
 
 /** Display persisted provider evidence. This does not upgrade shadow allocation authority. */

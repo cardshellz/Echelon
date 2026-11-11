@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { walmartConnectSchema, walmartControlSchema, walmartKeyInputSchema } from "@shared/types/walmart-channel";
-import type { FulfillmentProviderCredentialCipher } from "../../../shipping-engine/application/connected-fulfillment-method-catalog.service";
+import type { FulfillmentProviderCredentialCipher } from "../../../shipping-engine/fulfillment-routing-and-connections.api";
 import { WalmartApiError, WalmartClient, walmartCredentialsSchema } from "./walmart-client";
 import { WalmartUsApi, type WalmartShipNode, type WalmartUsApiPort } from "./walmart-us-api";
 import { WalmartConnectionRepository, type WalmartConnectionRecord } from "./walmart-connection.repository";

@@ -19,7 +19,7 @@ import { createExpectedWmsReturn } from "../wms/returns-receipt.api";
 import { observeChannelMerchandiseQuantity } from "./domain/channel-merchandise-quantity";
 import { channelMerchandiseDemandReduction } from "./domain/channel-merchandise-demand";
 import { shopifyMerchandiseSnapshotSchema, type ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
-import type { EngineCancelResult } from "../shipping/types";
+import type { EngineCancelResult } from "../shipping/engine-and-reconcile.api";
 
 const REFUND_LOCK_NAMESPACE = 918413;
 

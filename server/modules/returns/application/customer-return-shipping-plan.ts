@@ -3,7 +3,7 @@ import { customerReturnLabelAddressSchema, customerReturnWarehouseAddressTypeSch
   DEFAULT_RETURN_WAREHOUSE_ADDRESS_TYPE, type CustomerReturnLabelSettings } from "@shared/returns/customer-return-label.contract";
 import type { CustomerReturnDimensions } from "@shared/returns/customer-return-parcel";
 import { MILLIMETERS_PER_INCH, DIMENSION_INCH_DECIMAL_PLACES } from "@shared/shipping/dimensions";
-import { returnRateShipmentSchema } from "../../shipping-engine/application/return-rate-provider.port";
+import { returnRateShipmentSchema } from "../../shipping-engine/return-shipping-and-labels.api";
 import type { CustomerReturnShopifySnapshot } from "./customer-return-shopify-snapshot.ports";
 import { CustomerReturnIntakeError } from "./customer-return-intake.ports";
 

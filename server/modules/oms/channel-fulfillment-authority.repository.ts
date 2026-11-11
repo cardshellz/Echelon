@@ -7,7 +7,7 @@ import { applyPackageReconciliation, loadPackageReconciliationSnapshot, packageR
 import { planPackageReconciliation } from "./package-reconciliation.domain";
 import { createHash } from "node:crypto";
 import { enqueueShopifyLabelReplacementRecovery } from "./shopify-label-void-intake.repository";
-import { PackageAllocationSourceIdentityError } from "../shipping/package-allocation-source-identity.domain";
+import { PackageAllocationSourceIdentityError } from "../shipping/package-allocation-authority.api";
 
 import { sql } from "drizzle-orm";
 import { z } from "zod";

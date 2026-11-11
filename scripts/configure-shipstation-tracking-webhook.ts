@@ -1,8 +1,8 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { configureShipStationTrackingWebhook } from "../server/modules/shipping/shipstation-tracking-webhook-registration";
-import { createShipStationTrackingWebhooksClient } from "../server/modules/shipping/shipstation-tracking-webhooks.client";
-import { resolveShipStationTrackingWebhookSecret } from "../server/modules/shipping/shipstation-tracking-api-config";
+import { configureShipStationTrackingWebhook } from "../server/modules/shipping/shipstation-tracking-transport.api";
+import { createShipStationTrackingWebhooksClient } from "../server/modules/shipping/shipstation-tracking-transport.api";
+import { resolveShipStationTrackingWebhookSecret } from "../server/modules/shipping/shipstation-tracking-transport.api";
 
 interface Flags {
   help: boolean;

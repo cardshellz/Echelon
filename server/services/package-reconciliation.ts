@@ -6,7 +6,7 @@ import {
   createFulfillmentPushService,
   PackageReconciliationService,
 } from "../modules/oms/channel-fulfillment-authority.api";
-import { createShipStationPackageReconciliationClient, type ShipStationPackageReconciliationClient } from "../modules/shipping/shipstation-package-reconciliation.client";
+import { createShipStationPackageReconciliationClient, type ShipStationPackageReconciliationClient } from "../modules/shipping/shipstation-provider-reconciliation.api";
 
 export function createPackageReconciliationService(dependencies: {
   database: Pick<typeof applicationDb,"execute"|"transaction">;

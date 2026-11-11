@@ -17,7 +17,7 @@ import {
   type ChannelFulfillmentIngressInput,
   type NormalizedChannelFulfillmentIngress,
 } from "./channel-fulfillment-ingress";
-import type { EngineCancelResult } from "../shipping/types";
+import type { EngineCancelResult } from "../shipping/engine-and-reconcile.api";
 
 const DEFAULT_RECEIPT_LEASE_DURATION_MS = 120_000;
 const MAX_TRANSIENT_RECEIPT_FAILURES = 5;

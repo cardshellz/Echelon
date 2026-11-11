@@ -1,8 +1,8 @@
 import { z } from "zod";
 import { shipStationV1Instant } from "@shared/utils/shipstation-date";
-import { normalizeTrackingNumber } from "../shipping/carrier-tracking.domain";
-import { parseExactPositiveWmsShipmentItems } from "../shipping/shipstation-provider-contents.domain";
-import type { ShipStationRelatedLabelIdentity, ShipStationRelatedLabelReader } from "../shipping/shipstation-related-labels.reader";
+import { normalizeTrackingNumber } from "../shipping/carrier-tracking-and-dispatch.api";
+import { parseExactPositiveWmsShipmentItems } from "../shipping/shipstation-provider-reconciliation.api";
+import type { ShipStationRelatedLabelIdentity, ShipStationRelatedLabelReader } from "../shipping/shipstation-provider-reconciliation.api";
 import { LabelReconciliationError, type LabelScanSource, type ShipStationLabelPage,
   type ShipStationLabelSnapshot } from "./shipstation-label-reconciliation.service";
 

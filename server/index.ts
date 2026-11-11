@@ -18,7 +18,7 @@ import {
 import { registerCustomerAccountRoutes } from "./modules/customer-account/interfaces/customer-account.routes";
 import { customerAccountServices } from "./modules/customer-account/infrastructure/customer-account.composition";
 import { createOrderActionProjectionWorker, startOrderActionProjectionScheduler } from "./modules/customer-account/infrastructure/order-action-projection.composition";
-import { createPackageHistoryWorker, startPackageHistoryScheduler } from "./modules/shipping/package-history.composition";
+import { createPackageHistoryWorker, startPackageHistoryScheduler } from "./modules/shipping/package-history-and-delivery.api";
 import type { OrderActionProjectionReport } from "./modules/customer-account/infrastructure/order-action-projection.composition";
 import { logger } from "./platform/observability/logger";
 import { reportBackgroundWork } from "./platform/observability/background-work-report";
@@ -114,17 +114,17 @@ import { cancelWmsOrderAndRelease } from "./modules/orders/order-lifecycle-and-c
 import { omsWarehouseCancellationSql } from "./modules/oms/order-linkage-sql.api";
 import { startPickingFollowupWorker } from "./modules/wms/picking-execution.api";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
-import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-reconciliation.scheduler";
+import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-and-dispatch.api";
 import { startShipStationLabelReconciliationScheduler } from "./modules/oms/shipstation-execution.api";
 import {
   installShipStationTrackingRawBodyCapture,
   registerShipStationTrackingWebhook,
-} from "./modules/shipping/shipstation-tracking-webhook.routes";
-import { installGlobalJsonBodyParser } from "./modules/shipping-engine/interfaces/http/rate-table-admin-body.middleware";
-import { createDefaultShipStationV2WebhookVerifier } from "./modules/shipping/shipstation-webhook-auth";
-import { createCarrierTrackingProjectionReader } from "./modules/shipping/carrier-tracking-projection.repository";
-import { registerCarrierTrackingProjectionRoutes } from "./modules/shipping/carrier-tracking-projection.routes";
-import { deriveReconcileEvent } from "./modules/shipping/reconcile-derive";
+} from "./modules/shipping/shipstation-tracking-transport.api";
+import { installGlobalJsonBodyParser } from "./modules/shipping-engine/routes.api";
+import { createDefaultShipStationV2WebhookVerifier } from "./modules/shipping/shipstation-tracking-transport.api";
+import { createCarrierTrackingProjectionReader } from "./modules/shipping/carrier-tracking-and-dispatch.api";
+import { registerCarrierTrackingProjectionRoutes } from "./modules/shipping/carrier-tracking-and-dispatch.api";
+import { deriveReconcileEvent } from "./modules/shipping/engine-and-reconcile.api";
 import type { SafeUser } from "@shared/schema";
 import {
   channels as channelsTable,
