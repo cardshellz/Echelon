@@ -12,8 +12,8 @@ import type { AssemblyWorkService } from "../application/assembly-work.service";
 import type { AssemblyExecutionService } from "../application/assembly-execution.service";
 import { assemblyExecutionContextsSchema, assemblyOrderInstructionsSchema, assemblyTaskViewSchema, assemblyOutputPickCommandSchema } from "@shared/warehouse-assembly-execution";
 import { InventoryAvailabilityClaimRepositoryError } from "../../../inventory-planning/claim-execution.api";
-import { AssemblyOrderAuthorityError } from "../../../orders/assembly-handoff-authority";
-import { WmsOrderItemCommandError } from "../../../wms/order-item-commands";
+import { AssemblyOrderAuthorityError } from "../../../orders/assembly-order-authority.api";
+import { WmsOrderItemCommandError } from "../../../wms/order-intake-and-items.api";
 import { WarehouseWorkError } from "../domain/work-configuration";
 import {
   BuildDomainError,

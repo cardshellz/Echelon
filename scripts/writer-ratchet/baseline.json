@@ -1913,8 +1913,7 @@
     "modules/oms",
     "modules/orders",
     "modules/wms",
-    "server/db.ts",
-    "server/index.ts"
+    "server/db.ts"
   ],
   "wms.outbound_shipment_items": [
     "modules/oms",
@@ -1976,7 +1975,6 @@
     "modules/wms"
   ],
   "wms.picking_logs": [
-    "modules/catalog",
     "modules/orders",
     "modules/wms"
   ],

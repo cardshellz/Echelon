@@ -1,4 +1,4 @@
-import { reconcileWmsPickingProgress } from "../wms/picking-progress.repository";
+import { reconcileWmsPickingProgress } from "../wms/picking-execution.api";
 import {
   type WmsOrder as Order,
   type InsertWmsOrder as InsertOrder,
@@ -26,7 +26,7 @@ import {
 import { normalizeShopifyRepairOrderId, normalizeShopifyRepairShopDomain, type ShopifyCustomerRepairScope } from "./shopify-customer-repair";
 import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
 import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.resolver";
-import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
+import { insertWmsOrder, type WmsOrderInsert } from "../wms/order-intake-and-items.api";
 import { recomputeOrderStatusFromShipments } from "./shipment-rollup";
 import { transitionOrderStatus, completeOrder } from "./order-status-core";
 import { completeWmsOrderAndRelease } from "./cancel-wms-order";
@@ -40,7 +40,7 @@ import {
   setWmsOrderItemHoldState,
   setWmsOrderItemLocation,
   syncWmsOrderItemsFulfilledFromOms,
-} from "../wms/order-item-commands";
+} from "../wms/order-intake-and-items.api";
 
 /**
  * Order statuses that are DERIVED from the underlying shipments via

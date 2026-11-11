@@ -2,11 +2,11 @@ import { webhookRetryQueue } from "@shared/schema";
 import { observeRuntimeWork } from "../../platform/observability/runtime-memory";
 import { eq, lte, and, sql } from "drizzle-orm";
 import { incr } from "../../instrumentation/metrics";
-import { createShipmentForOrder } from "../wms/create-shipment";
+import { createShipmentForOrder } from "../wms/shipment-execution-and-projection.api";
 import { describeWmsSyncFailure } from "./domain/wms-sync-failure";
 import {
   movePendingShipmentItemsToLateEditResidual,
-} from "../wms/late-order-shipment-coverage";
+} from "../wms/shipment-execution-and-projection.api";
 // Stable error code for a deterministic, non-retryable ShipStation push
 // rejection (bad address/total/country, not-pushable status, finalized order).
 // Imported (not string-literal'd) so a rename stays in sync. shipstation.service

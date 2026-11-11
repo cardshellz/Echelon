@@ -20,7 +20,7 @@ import {
   reassignOrderLineVariant,
   resolveAssignedBinLocation,
 } from "../../oms/channel-order-intake.api";
-import { reassignWmsOrderItemVariant } from "../../wms/order-item-commands";
+import { reassignWmsOrderItemVariant } from "../../wms/order-intake-and-items.api";
 import { mergePurchasingProductIdentity, readPurchasingMergeEvidence } from "../../procurement/purchasing-product-merge";
 import { productMethods as catalogStorage } from "../catalog.storage";
 import { renameDerivedVariantSkus } from "../application/product-sku-rename";

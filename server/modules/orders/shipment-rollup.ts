@@ -40,7 +40,7 @@ import {
 import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
 import type { EngineCancelResult, EngineRef } from "../shipping/types";
 import { deriveWmsShippingProgress } from "@shared/wms-shipping-progress";
-import { shippingProgressLine, wmsShippingProgressQuery, type WmsShippingProgressRow } from "../wms/shipping-progress.query";
+import { shippingProgressLine, wmsShippingProgressQuery, type WmsShippingProgressRow } from "../wms/shipment-execution-and-projection.api";
 
 // ─── Public types ────────────────────────────────────────────────────
 
