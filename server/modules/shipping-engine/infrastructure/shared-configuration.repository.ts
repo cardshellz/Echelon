@@ -23,7 +23,7 @@ import {
   type resetDropshipProgramSchema,
 } from "@shared/shipping/configuration";
 import { resolvePackagingAssignment } from "../domain/packaging-assignment";
-import type { CartonizeBox } from "../../cartonization/domain/cartonize";
+import type { CartonizeBox } from "../../cartonization/cartonize-engine.api";
 import type { SharedShippingConfigurationStore } from "../application/shared-configuration.port";
 import { isPackagingPolicyRequired } from "../application/packaging-policy-requirement";
 import { logger } from "../../../platform/observability/logger";

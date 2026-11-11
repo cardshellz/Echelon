@@ -10,7 +10,7 @@ import {
   wmsOrderItems,
   wmsOrders,
 } from "@shared/schema";
-import { updateWmsOrderItemCatalogSnapshot } from "../../wms/order-item-commands";
+import { updateWmsOrderItemCatalogSnapshot } from "../../wms/order-intake-and-items.api";
 import {
   HistoricalIdentityRepairError,
   type HistoricalIdentityRepairCommandRecord,

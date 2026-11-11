@@ -4,8 +4,8 @@ import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons } from "./modules/
 
 import { registerAuthRoutes } from "./modules/identity/identity.routes";
 import { registerLocationRoutes } from "./modules/warehouse/locations.routes";
-import { registerPickingRoutes } from "./modules/orders/picking.routes";
-import { registerOperationsDashboardRoutes } from "./modules/orders/operations-dashboard.routes";
+import { registerPickingRoutes } from "./modules/orders/routes.api";
+import { registerOperationsDashboardRoutes } from "./modules/orders/routes.api";
 import { registerOperationsControlTowerRoutes } from "./modules/operations/control-tower.routes";
 import { registerFinancialCommandOperationsRoutes } from "./platform/commands/financial-command-operations.routes";
 import { registerShopifyRoutes } from "./routes/shopify.routes";

@@ -77,7 +77,8 @@ CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer REFERENCES 
   quantity integer,picked_quantity integer DEFAULT 0,fulfilled_quantity integer DEFAULT 0,status text DEFAULT 'pending',on_hold boolean DEFAULT false,
   product_id integer DEFAULT 100,catalog_product_id integer DEFAULT 200,sku text DEFAULT 'SKU',
   name text DEFAULT 'Product',paid_price_cents bigint DEFAULT 1000,unit_price_cents bigint DEFAULT 1000);
-CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders(id),status text DEFAULT 'planned',
+CREATE TYPE wms.shipment_status AS ENUM ('planned','queued','labeled','shipped','on_hold','voided','cancelled','returned','lost');
+CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders(id),status wms.shipment_status DEFAULT 'planned',
   held boolean DEFAULT false,requires_review boolean DEFAULT false,review_reason text,shipstation_order_id integer,shipping_engine text,engine_order_ref text,
   tracking_number text,shipped_at timestamptz,source text DEFAULT 'echelon_sync',held_at timestamptz,
   on_hold_reason text,cancelled_at timestamptz,voided_reason text,updated_at timestamptz);

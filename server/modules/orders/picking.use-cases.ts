@@ -1,9 +1,9 @@
 import { preparePickingCommand, pickingCommandKey, pickingCommandBeforeItem, readPickingCommand,
   freezeCanonicalPickingRequest, commitPickingReceipt, deliverPickingFollowup, pendingPickingCommandKeys,
-  type PickingCommandRecord, pickingReceiptItemSchema, executePickingCommand } from "../wms/picking-command.repository";
-import { createPickingCommandLog } from "../wms/picking-command-log.repository";
+  type PickingCommandRecord, pickingReceiptItemSchema, executePickingCommand } from "../wms/picking-execution.api";
+import { createPickingCommandLog } from "../wms/picking-execution.api";
 import { selectPickingSource, PickingSourcePlanError, type PickingSourcePlan } from "@shared/picking-source-plan";
-import { reconcileWmsPickingProgress, UNMAPPED_LINE_MISSING_VARIANT } from "../wms/picking-progress.repository";
+import { reconcileWmsPickingProgress, UNMAPPED_LINE_MISSING_VARIANT } from "../wms/picking-execution.api";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { validatePickerOrder } from "@shared/types/picker-order";
 import { pickingInventoryContextSchema, type PickingInventoryContext } from "@shared/types/picking-inventory-context";
@@ -41,7 +41,7 @@ import {
 import {
   persistWmsOrderItemPickProgress,
   setWmsOrderItemLocation,
-} from "../wms/order-item-commands";
+} from "../wms/order-intake-and-items.api";
 import type {
   CanonicalClaimCursor,
   InventoryAvailabilityRuntimeClaimContext,
@@ -54,7 +54,7 @@ import {
   refreshCanonicalClaimSupply,
 } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { requireCorrectivePick, PickCorrectionError, recordCorrectionEvent, correctionHash } from "../wms/pick-correction.repository";
+import { requireCorrectivePick, PickCorrectionError, recordCorrectionEvent, correctionHash } from "../wms/pick-corrections-and-holds.api";
 import { planConfirmedPickShipment, type ConfirmedPickShipmentPlan } from "./confirmed-pick-shipment";
 import type { PickingAssignmentSnapshot } from "@shared/types/picking-assignment-release";
 import { releasePickingAssignment } from "./picking-assignment-release.service";

@@ -11,11 +11,11 @@ import {
 import {
   markShipmentCancelled,
   recomputeOrderStatusFromShipments,
-} from "../orders/shipment-rollup";
+} from "../orders/shipment-rollup-and-context.api";
 import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
-import { recordOmsWmsAuthorityCleanupAudit } from "../wms/oms-wms-authority-cleanup-audit.repository";
-import { applyRefundAuthorityToWmsOrderItem } from "../wms/order-item-commands";
-import { createExpectedWmsReturn } from "../wms/expected-return-commands";
+import { recordOmsWmsAuthorityCleanupAudit } from "../wms/shipment-execution-and-projection.api";
+import { applyRefundAuthorityToWmsOrderItem } from "../wms/order-intake-and-items.api";
+import { createExpectedWmsReturn } from "../wms/returns-receipt.api";
 import { observeChannelMerchandiseQuantity } from "./domain/channel-merchandise-quantity";
 import { channelMerchandiseDemandReduction } from "./domain/channel-merchandise-demand";
 import { shopifyMerchandiseSnapshotSchema, type ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";

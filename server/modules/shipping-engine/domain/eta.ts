@@ -34,7 +34,7 @@ import {
   DEFAULT_BUSINESS_TZ,
   effectiveFulfillmentDate,
   parseCutoffMinutes,
-} from "../../orders/sort-rank";
+} from "../../orders/sort-rank-and-priority.api";
 
 const DAY_MS = 86_400_000;
 

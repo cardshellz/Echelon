@@ -10,7 +10,6 @@ import {
   outboundShipments,
   outboundShipmentItems,
   warehouseLocations,
-  pickingLogs,
   orderItemFinancials,
   inventoryTransactions,
   eq,
@@ -22,7 +21,8 @@ import {
 } from "../../storage/base";
 import { OPEN_SHIPMENT_STATUSES } from "@shared/enums/order-status";
 import { prepareVariantInventoryTracking, updateProductInventoryTracking, InventoryTrackingPolicyError } from "./inventory-tracking-policy.repository";
-import { renameWmsOrderItemSku } from "../wms/order-item-commands";
+import { renameWmsOrderItemSku } from "../wms/order-intake-and-items.api";
+import { renameWmsPickingLogSku } from "../wms/picking-logs.api";
 import { reorderCatalogAssets } from "./product-asset-order.repository";
 import { ProductAssetError } from "./product-asset-errors";
 import {
@@ -530,7 +530,7 @@ export const productMethods: IProductStorage = {
 
     // Tables without productVariantId FK — match by old SKU string
     await renameWmsOrderItemSku(executor, { oldSku, newSku });
-    await executor.update(pickingLogs).set({ sku: newSku }).where(eq(pickingLogs.sku, oldSku));
+    await renameWmsPickingLogSku(executor, { oldSku, newSku });
     await executor.update(orderItemFinancials).set({ sku: newSku }).where(eq(orderItemFinancials.sku, oldSku));
   },
 

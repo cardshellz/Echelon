@@ -1,9 +1,9 @@
 import { readIntegerMills } from "@shared/money-read";
 import type { ReservedInventoryTransferOwner, ReservedTransferPlan } from "../../inventory-planning/application/reserved-inventory-transfer.port";
-import { repointCanonicalTransferPickLines } from "../../wms/order-item-commands";
+import { repointCanonicalTransferPickLines } from "../../wms/order-intake-and-items.api";
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
 import { assertShipmentNotRetired } from "../../inventory-planning/cutover-retired-work.api";
-import { assertNoOpenPickCorrection } from "../../wms/pick-correction.repository";
+import { assertNoOpenPickCorrection } from "../../wms/pick-corrections-and-holds.api";
 import { openOperationalQuantityPosting, quantityTransactionFromDrizzle, type OperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
 import { assertLegacyQuantityImportAllowed } from "./legacy-quantity-import";
 import { assertReceivingCustodyCountable } from "./receiving-custody-count-guard";
@@ -22,7 +22,7 @@ import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { AppError, IntegrityError, ValidationError } from "../../../../shared/errors";
 import { resolveCost } from "../cost-resolver";
 import { centsToMills, millsToCents } from "../../../../shared/utils/money";
-import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-item-commands";
+import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-intake-and-items.api";
 import { allocateBuildCostLayers } from "../domain/build.domain";
 import {
   planReplenishmentExecution,

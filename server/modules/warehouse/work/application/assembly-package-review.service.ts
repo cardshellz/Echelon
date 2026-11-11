@@ -1,6 +1,6 @@
 import type { Pool } from "pg";
 import type { AssemblyWorkService } from "./assembly-work.service";
-import { readOrderPackingSources } from "../../../wms/packing-source-reader";
+import { readOrderPackingSources } from "../../../wms/assembly-and-packing.api";
 import { readObservedPackagesForSources } from "../../../shipping/package-allocation-ledger.repository";
 import { buildAssemblyPackageReview } from "../domain/assembly-package-review";
 import { WarehouseWorkError } from "../domain/work-configuration";
