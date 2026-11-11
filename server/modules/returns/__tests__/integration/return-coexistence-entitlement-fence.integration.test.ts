@@ -82,11 +82,13 @@ const VENDOR_ID = 11;
 const STORE_CONNECTION_ID = 21;
 const PRODUCT_VARIANT_ID = 501;
 
+const CI_RUNNER_DATABASE_PATTERN = /^\/echelon_ci_s[1-8]_[0-9a-f]{32}$/;
+
 describe.skipIf(!enabled).sequential(
   "Canonical ReturnCase and legacy dropship RMA coexistence entitlement & settlement fence (CF-F09 / CF-B8)",
   () => {
     const databaseName = `returns_coexistence_${process.pid}_${randomUUID().replaceAll("-", "")}`;
-    let adminPool: Pool;
+    let adminPool: Pool | null = null;
     let testPool: Pool;
     let openService: OpenReturnCaseService;
     let openStore: PostgresOpenReturnCaseStore;
@@ -96,17 +98,25 @@ describe.skipIf(!enabled).sequential(
 
     beforeAll(async () => {
       const adminUrl = assertLoopbackDisposableUrl(process.env.ECHELON_TEST_DATABASE_URL);
-      adminPool = new Pool({ connectionString: adminUrl.toString(), max: 2 });
-      await adminPool.query(`CREATE DATABASE "${databaseName}"`);
+      const ciRunnerOwned = CI_RUNNER_DATABASE_PATTERN.test(adminUrl.pathname);
+      let targetConnectionString = adminUrl.toString();
 
-      const testUrl = new URL(adminUrl.toString());
-      testUrl.pathname = `/${databaseName}`;
+      if (!ciRunnerOwned) {
+        adminPool = new Pool({ connectionString: adminUrl.toString(), max: 2 });
+        adminPool.on("error", () => {});
+        await adminPool.query(`CREATE DATABASE "${databaseName}"`);
+        const testUrl = new URL(adminUrl.toString());
+        testUrl.pathname = `/${databaseName}`;
+        targetConnectionString = testUrl.toString();
+      }
+
       testPool = new Pool({
-        connectionString: testUrl.toString(),
+        connectionString: targetConnectionString,
         max: 8,
         connectionTimeoutMillis: 5_000,
         statement_timeout: 15_000,
       });
+      testPool.on("error", () => {});
 
       dbHoisted.state.pool = testPool;
 
