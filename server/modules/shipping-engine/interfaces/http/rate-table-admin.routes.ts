@@ -1,5 +1,6 @@
 /** Draft-first administration for direct-geography shipping rate tables. */
 
+import { createHash } from "node:crypto";
 import type { Express, Request, Response } from "express";
 import { and, asc, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -113,6 +114,7 @@ const importSchema = z.object({
   // activation stays strictly gated on a clean analysis.
   allowIncomplete: z.boolean().default(false),
   draftLayout: draftLayoutSchema.nullish(),
+  expectedDraftRevision: z.string().trim().min(1).max(128).optional(),
 }).superRefine((input, context) => {
   if (!input.allowIncomplete && input.rows.length === 0) {
     context.addIssue({
@@ -125,7 +127,10 @@ const importSchema = z.object({
 
 const parseCsvSchema = z.object({ csv: z.string().min(1).max(2_000_000) });
 const tableIdSchema = z.coerce.number().int().positive();
-const activateSchema = z.object({ confirmWarnings: z.boolean().default(false) });
+const activateSchema = z.object({
+  confirmWarnings: z.boolean().default(false),
+  expectedDraftRevision: z.string().trim().min(1).max(128).optional(),
+});
 const INSERT_CHUNK_SIZE = 1000;
 
 type RateRowInput = z.infer<typeof rateRowSchema>;
@@ -175,6 +180,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
             status: shippingRateBooks.status,
             zoneSetId: shippingRateBooks.zoneSetId,
             metadata: shippingRateBooks.metadata,
+            updatedAt: shippingRateBooks.updatedAt,
           }).from(shippingRateBooks),
           db.select({
             id: shippingRateBookAssignments.id,
@@ -330,7 +336,12 @@ export function registerRateTableAdminRoutes(app: Express): void {
               after: rateTableAuditState(savedTable, prepared.rows.length),
             },
           }, { timestamp: now });
-          return { rateTable: savedTable, ...manifest };
+          const createdDetail = await loadRateTableDetail(table.id, tx);
+          return {
+            rateTable: savedTable,
+            ...manifest,
+            draftRevision: createdDetail?.draftRevision ?? null,
+          };
         });
         return res.status(201).json({
           ...result,
@@ -357,9 +368,21 @@ export function registerRateTableAdminRoutes(app: Express): void {
         const prepared = await prepareRateTableImport(parsed.data);
         const now = new Date();
         const result = await db.transaction(async (tx) => {
-          const [before] = await tx.select().from(shippingRateTables)
-            .where(eq(shippingRateTables.id, id))
-            .limit(1);
+          await tx.execute(sql`SELECT id FROM shipping.rate_tables WHERE id = ${id} FOR UPDATE`);
+          const beforeDetail = await loadRateTableDetail(id, tx);
+          if (!beforeDetail) throw notFoundError();
+          const before = beforeDetail.rateTable;
+          if (before.status !== "draft") {
+            throw draftRequiredError("Only a draft rate table can be replaced.");
+          }
+          if (
+            parsed.data.expectedDraftRevision !== undefined &&
+            beforeDetail.draftRevision !== parsed.data.expectedDraftRevision
+          ) {
+            throw staleDraftError(
+              "This draft was modified by another session. Refresh and review the latest changes before saving.",
+            );
+          }
           const [updated] = await tx.update(shippingRateTables)
             .set({
               rateBookId: prepared.rateBook.id,
@@ -398,12 +421,17 @@ export function registerRateTableAdminRoutes(app: Express): void {
             target: `shipping.rate_tables:${id}`,
             changes: {
               before: before
-                ? rateTableAuditState(before, null)
+                ? rateTableAuditState(before, beforeDetail.rows.length)
                 : null,
               after: rateTableAuditState(savedTable, prepared.rows.length),
             },
           }, { timestamp: now });
-          return { rateTable: savedTable, ...manifest };
+          const afterDetail = await loadRateTableDetail(id, tx);
+          return {
+            rateTable: savedTable,
+            ...manifest,
+            draftRevision: afterDetail?.draftRevision ?? null,
+          };
         });
         return res.json({
           ...result,
@@ -575,7 +603,13 @@ export function registerRateTableAdminRoutes(app: Express): void {
             },
             context: { sourceRateTableId: id },
           }, { timestamp: now });
-          return { rateTable: savedDraft, coverages, draftLayout };
+          const clonedDetail = await loadRateTableDetail(draft.id, tx);
+          return {
+            rateTable: savedDraft,
+            coverages,
+            draftLayout,
+            draftRevision: clonedDetail?.draftRevision ?? null,
+          };
         });
         return res.status(201).json({
           ...result,
@@ -620,6 +654,14 @@ export function registerRateTableAdminRoutes(app: Express): void {
           if (!detail) throw notFoundError();
           if (!canActivateRateTable(detail.rateTable.status)) {
             throw draftRequiredError("Only a draft rate table can be activated.");
+          }
+          if (
+            parsed.data.expectedDraftRevision !== undefined &&
+            detail.draftRevision !== parsed.data.expectedDraftRevision
+          ) {
+            throw staleDraftError(
+              "This draft changed since it was last reviewed. Refresh and review the latest rates, coverages, and product rules before activating.",
+            );
           }
           if (!detail.rateBook || detail.rateBook.status !== "active") {
             throw new RateTableAdminError(
@@ -711,18 +753,33 @@ export function registerRateTableAdminRoutes(app: Express): void {
     requirePermission("settings", "edit"),
     async (req, res) => {
       try {
+        const actor = auditActor(req);
         const id = parseTableId(req.params.id);
-        const [current] = await db.select({ status: shippingRateTables.status })
-          .from(shippingRateTables).where(eq(shippingRateTables.id, id)).limit(1);
-        if (!current) throw notFoundError();
-        if (!canRetireRateTable(current.status)) {
-          throw new RateTableAdminError(409, "SHIPPING_ADMIN_RATE_TABLE_NOT_RETIRABLE", "Only an active or superseded rate table can be retired.");
-        }
-        const [retired] = await db.update(shippingRateTables)
-          .set({ status: "retired", effectiveTo: new Date() })
-          .where(and(eq(shippingRateTables.id, id), inArray(shippingRateTables.status, ["active", "superseded"])))
-          .returning();
-        if (!retired) throw changedError();
+        const now = new Date();
+        const retired = await db.transaction(async (tx) => {
+          await tx.execute(sql`SELECT id FROM shipping.rate_tables WHERE id = ${id} FOR UPDATE`);
+          const [current] = await tx.select().from(shippingRateTables)
+            .where(eq(shippingRateTables.id, id)).limit(1);
+          if (!current) throw notFoundError();
+          if (!canRetireRateTable(current.status)) {
+            throw new RateTableAdminError(409, "SHIPPING_ADMIN_RATE_TABLE_NOT_RETIRABLE", "Only an active or superseded rate table can be retired.");
+          }
+          const [updated] = await tx.update(shippingRateTables)
+            .set({ status: "retired", effectiveTo: now })
+            .where(and(eq(shippingRateTables.id, id), inArray(shippingRateTables.status, ["active", "superseded"])))
+            .returning();
+          if (!updated) throw changedError();
+          await persistAuditEvent(tx, {
+            actor,
+            action: "shipping.rate_table.retired",
+            target: `shipping.rate_tables:${id}`,
+            changes: {
+              before: rateTableAuditState(current, null),
+              after: rateTableAuditState(updated, null),
+            },
+          }, { timestamp: now });
+          return updated;
+        });
         return res.json({ rateTable: retired });
       } catch (error) {
         return sendRateTableAdminError(res, error, "retire rate table");
@@ -738,6 +795,7 @@ export function registerRateTableAdminRoutes(app: Express): void {
         const actor = auditActor(req);
         const id = parseTableId(req.params.id);
         await db.transaction(async (tx) => {
+          await tx.execute(sql`SELECT id FROM shipping.rate_tables WHERE id = ${id} FOR UPDATE`);
           const [current] = await tx.select().from(shippingRateTables)
             .where(eq(shippingRateTables.id, id)).limit(1);
           if (!current) return;
@@ -924,6 +982,7 @@ async function loadRateTableDetail(
     rows,
     coverages,
     destinationGroups,
+    productRules,
   ] = await Promise.all([
     executor.select().from(shippingRateBooks)
       .where(eq(shippingRateBooks.id, rateTable.rateBookId)).limit(1)
@@ -957,6 +1016,21 @@ async function loadRateTableDetail(
       ),
     loadRateTableCoverages(executor, [id]),
     loadRateBookDestinationGroups(executor, [rateTable.rateBookId]),
+    executor.select({
+      id: shippingRateRules.id,
+      kind: shippingRateRules.kind,
+      action: shippingRateRules.action,
+      measurementScope: shippingRateRules.measurementScope,
+      rateCents: shippingRateRules.rateCents,
+      perStartedPoundCents: shippingRateRules.perStartedPoundCents,
+      perAdditionalUnitCents: shippingRateRules.perAdditionalUnitCents,
+      thresholdCents: shippingRateRules.thresholdCents,
+      isActive: shippingRateRules.isActive,
+      updatedAt: shippingRateRules.updatedAt,
+    })
+      .from(shippingRateRules)
+      .where(eq(shippingRateRules.rateTableId, id))
+      .orderBy(asc(shippingRateRules.id)),
   ]);
 
   const [zoneSet, assignments] = rateBook === null
@@ -998,6 +1072,20 @@ async function loadRateTableDetail(
     ? findStaleDraftCoverageErrors(coverages, destinationGroups)
     : [];
 
+  const draftRevision = computeRateTableDraftRevision({
+    rateTable: {
+      id: rateTable.id,
+      rateBookId: rateTable.rateBookId,
+      serviceLevelId: rateTable.serviceLevelId,
+      pricingBasis: rateTable.pricingBasis,
+      currency: rateTable.currency,
+      status: rateTable.status,
+    },
+    rows: normalizedRows,
+    coverages,
+    productRules,
+  });
+
   return {
     rateTable,
     serviceLevel,
@@ -1005,6 +1093,7 @@ async function loadRateTableDetail(
     pricingMode: "state_zip" as const,
     rows: normalizedRows,
     coverages,
+    draftRevision,
     analysis: staleCoverageErrors.length === 0
       ? analysis
       : {
@@ -1016,6 +1105,91 @@ async function loadRateTableDetail(
           ])],
         },
   };
+}
+
+export function computeRateTableDraftRevision(input: {
+  rateTable: {
+    id: number;
+    rateBookId: number | null;
+    serviceLevelId: number;
+    pricingBasis: string;
+    currency: string;
+    status: string;
+  };
+  rows: ReadonlyArray<{
+    originWarehouseId: number | null;
+    destinationCountry: string;
+    destinationRegion: string;
+    postalPrefix: string | null;
+    minMeasure: number;
+    maxMeasure: number | null;
+    maxShipmentWeightGrams: number | null;
+    chargeModel: string;
+    rateCents: number;
+    perStartedPoundCents: number | null;
+  }>;
+  coverages: ReadonlyArray<{
+    destinationGroupId: number;
+    originWarehouseId: number | null;
+    availability: string;
+    destinationGroupLockVersion: number;
+    sortOrder: number;
+  }>;
+  productRules: ReadonlyArray<{
+    id: number;
+    kind: string;
+    action: string;
+    measurementScope: string;
+    rateCents: number | null;
+    perStartedPoundCents: number | null;
+    perAdditionalUnitCents: number | null;
+    thresholdCents: number | null;
+    isActive: boolean;
+    updatedAt: Date | string;
+  }>;
+}): string {
+  const canonical = {
+    table: {
+      id: input.rateTable.id,
+      rateBookId: input.rateTable.rateBookId,
+      serviceLevelId: input.rateTable.serviceLevelId,
+      pricingBasis: input.rateTable.pricingBasis,
+      currency: input.rateTable.currency,
+      status: input.rateTable.status,
+    },
+    rows: input.rows.map((row) => ({
+      w: row.originWarehouseId,
+      c: row.destinationCountry,
+      r: row.destinationRegion,
+      p: row.postalPrefix,
+      min: row.minMeasure,
+      max: row.maxMeasure,
+      ceil: row.maxShipmentWeightGrams,
+      m: row.chargeModel,
+      cents: row.rateCents,
+      lb: row.perStartedPoundCents,
+    })),
+    coverages: input.coverages.map((cov) => ({
+      g: cov.destinationGroupId,
+      w: cov.originWarehouseId,
+      a: cov.availability,
+      v: cov.destinationGroupLockVersion,
+      s: cov.sortOrder,
+    })),
+    productRules: input.productRules.map((rule) => ({
+      id: rule.id,
+      k: rule.kind,
+      a: rule.action,
+      ms: rule.measurementScope,
+      rc: rule.rateCents,
+      lb: rule.perStartedPoundCents,
+      au: rule.perAdditionalUnitCents,
+      th: rule.thresholdCents,
+      act: rule.isActive,
+      u: rule.updatedAt instanceof Date ? rule.updatedAt.toISOString() : String(rule.updatedAt),
+    })),
+  };
+  return "rt-rev-1:" + createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, 32);
 }
 
 function normalizeImportRows(inputRows: readonly RateRowInput[]): RateTableImportRow[] {
@@ -1064,6 +1238,7 @@ async function validateWarehouseIds(
 }
 
 async function assertDraftTable(tx: RateTableTransaction, id: number) {
+  await tx.execute(sql`SELECT id FROM shipping.rate_tables WHERE id = ${id} FOR UPDATE`);
   const [table] = await tx.select({
     status: shippingRateTables.status,
     pricingBasis: shippingRateTables.pricingBasis,
@@ -1238,6 +1413,10 @@ function draftRequiredError(message: string): RateTableAdminError {
 
 function changedError(): RateTableAdminError {
   return new RateTableAdminError(409, "SHIPPING_ADMIN_RATE_TABLE_CHANGED", "Refresh and try again.");
+}
+
+function staleDraftError(message: string): RateTableAdminError {
+  return new RateTableAdminError(409, "SHIPPING_ADMIN_RATE_TABLE_STALE", message);
 }
 
 class RateTableAdminError extends Error {

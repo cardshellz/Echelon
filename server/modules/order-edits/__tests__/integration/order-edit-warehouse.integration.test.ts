@@ -541,6 +541,13 @@ function inventoryProjection(): CanonicalAvailabilityReservationStatusProjection
       } finally {f.restore();}
     });
 
+    it("loads readiness using the production shipment enum and rejects delivery statuses at that boundary", async () => {
+      await database.pool.query("INSERT INTO wms.outbound_shipments(id,order_id,status) VALUES(51,10,'planned')");
+      await expect(gateway.inspect(20)).resolves.toMatchObject({editable:true,fulfillment:{code:'awaiting_picking'}});
+      await expect(database.pool.query("SELECT id FROM wms.outbound_shipments WHERE status='delivered'")).rejects.toMatchObject({code:'22P02'});
+      await expect(gateway.inspect(20)).resolves.toMatchObject({editable:true});
+    });
+
     it("observes a real PostgreSQL command lock without replaying a command or writing an audit event", async () => {
       const store = new PostgresOrderEditStore(database.pool);
       const h = serviceHarness();

@@ -74,7 +74,11 @@ export type CounterName =
   // WMS sync + shipment lifecycle
   | "wms_sync_validation_failed"
   | "wms_shipment_created"
-  | "wms_shipment_void_history_insert_failed";
+  | "wms_shipment_void_history_insert_failed"
+  // Shipping checkout carrier callback
+  | "shipping_checkout_callback_completed"
+  | "shipping_checkout_callback_deadline_exceeded"
+  | "shipping_checkout_callback_snapshot_failed";
 
 export type MetricLabels = Record<string, string | number | boolean>;
 
