@@ -5,6 +5,7 @@ export {
   enqueueShipStationHoldSyncRetry,
   enqueueShipStationSortRankSyncRetry,
   enqueueShipStationShipmentPushRetry,
+  enqueueShipStationShipmentCancelRetry,
   requeueDeadWebhookRetry,
 } from "./webhook-retry.worker";
 export { enqueueWebhookInboxReplay } from "./webhook-inbox.service";

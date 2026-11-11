@@ -301,6 +301,11 @@ describe("PostgreSQL CI coverage and isolation", () => {
       // Channels eBay auth refresh & first-publication push boundary over disposable PostgreSQL.
       "server/modules/channels/__tests__/integration/ebay-auth-refresh.integration.test.ts",
       "server/modules/channels/__tests__/integration/ebay-listing-push.integration.test.ts",
+      // Shipping engine configuration, packaging, and charge migration guards over disposable PostgreSQL (SHP-1).
+      "server/modules/shipping-engine/__tests__/integration/program-charge-migration-guards.integration.test.ts",
+      "server/modules/shipping-engine/__tests__/integration/shared-configuration.integration.test.ts",
+      "server/modules/shipping-engine/__tests__/integration/channel-packaging.integration.test.ts",
+      "server/modules/shipping-engine/__tests__/integration/warehouse-packaging.integration.test.ts",
     );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);

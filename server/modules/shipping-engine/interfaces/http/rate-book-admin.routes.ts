@@ -9,8 +9,8 @@
  * resolving rates immediately and deliberately.
  */
 
-import type { Express, Response } from "express";
-import { and, asc, eq, inArray } from "drizzle-orm";
+import type { Express, Request, Response } from "express";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   shippingRateBookAssignments,
@@ -20,6 +20,7 @@ import {
   warehouses,
 } from "@shared/schema";
 import { db } from "../../../../db";
+import { persistAuditEvent } from "../../../../infrastructure/auditLogger";
 import { requirePermission } from "../../../../routes/middleware";
 import {
   findDuplicateAssignments,
@@ -41,18 +42,35 @@ const updateRateBookSchema = z.object({
   name: z.string().trim().min(1).max(160).optional(),
   // Omitted = leave assignments unchanged; [] = deliberately clear them.
   assignments: z.array(assignmentSchema).max(20).optional(),
+  expectedUpdatedAt: z.string().datetime().optional(),
+});
+
+const retireRateBookSchema = z.object({
+  expectedUpdatedAt: z.string().datetime().optional(),
 });
 
 const bookIdSchema = z.coerce.number().int().positive();
 
 type AssignmentInput = z.infer<typeof assignmentSchema>;
 
-export function registerRateBookAdminRoutes(app: Express): void {
+export interface RateBookAdminDependencies {
+  database?: typeof db;
+  audit?: typeof persistAuditEvent;
+}
+
+export function registerRateBookAdminRoutes(
+  app: Express,
+  dependencies: RateBookAdminDependencies = {},
+): void {
+  const database = dependencies.database ?? db;
+  const recordAudit = dependencies.audit ?? persistAuditEvent;
+
   app.post(
     "/api/shipping/admin/rate-books",
     requirePermission("settings", "edit"),
     async (req, res) => {
       try {
+        const actor = rateBookAuditActor(req);
         const parsed = createRateBookSchema.safeParse(req.body);
         if (!parsed.success) return sendInvalidInput(res, parsed.error.issues);
         const code = slugifyRateBookCode(parsed.data.name);
@@ -64,9 +82,9 @@ export function registerRateBookAdminRoutes(app: Express): void {
           );
         }
         assertNoDuplicateAssignments(parsed.data.assignments);
-        await validateAssignmentWarehouses(parsed.data.assignments);
+        await validateAssignmentWarehouses(database, parsed.data.assignments);
 
-        const [existing] = await db.select({ id: shippingRateBooks.id })
+        const [existing] = await database.select({ id: shippingRateBooks.id })
           .from(shippingRateBooks)
           .where(eq(shippingRateBooks.code, code))
           .limit(1);
@@ -81,7 +99,7 @@ export function registerRateBookAdminRoutes(app: Express): void {
         // Rate books still carry a zone-set reference for transit
         // observability; operators never manage zones (migration 139), so a
         // new program silently reuses the active default zone set.
-        const [zoneSet] = await db.select({ id: shippingZoneSets.id })
+        const [zoneSet] = await database.select({ id: shippingZoneSets.id })
           .from(shippingZoneSets)
           .where(eq(shippingZoneSets.status, "active"))
           .orderBy(asc(shippingZoneSets.id))
@@ -94,7 +112,8 @@ export function registerRateBookAdminRoutes(app: Express): void {
           );
         }
 
-        const created = await db.transaction(async (tx) => {
+        const now = new Date();
+        const created = await database.transaction(async (tx) => {
           const [book] = await tx.insert(shippingRateBooks).values({
             code,
             name: parsed.data.name,
@@ -113,6 +132,15 @@ export function registerRateBookAdminRoutes(app: Express): void {
               })),
             );
           }
+          await recordAudit(tx, {
+            actor,
+            action: "shipping.rate_book.created",
+            target: `shipping.rate_books:${book.id}`,
+            changes: {
+              before: null,
+              after: rateBookAuditState(book, parsed.data.assignments),
+            },
+          }, { timestamp: now });
           return book;
         });
         return res.status(201).json({ rateBook: created });
@@ -127,32 +155,78 @@ export function registerRateBookAdminRoutes(app: Express): void {
     requirePermission("settings", "edit"),
     async (req, res) => {
       try {
+        const actor = rateBookAuditActor(req);
         const id = parseBookId(req.params.id);
         const parsed = updateRateBookSchema.safeParse(req.body);
         if (!parsed.success) return sendInvalidInput(res, parsed.error.issues);
         if (parsed.data.assignments) {
           assertNoDuplicateAssignments(parsed.data.assignments);
-          await validateAssignmentWarehouses(parsed.data.assignments);
+          await validateAssignmentWarehouses(database, parsed.data.assignments);
         }
 
-        const [current] = await db.select().from(shippingRateBooks)
-          .where(eq(shippingRateBooks.id, id)).limit(1);
-        if (!current) throw notFoundError();
-        if (current.status === "retired") {
-          throw new RateBookAdminError(
-            409,
-            "SHIPPING_ADMIN_RATE_BOOK_RETIRED",
-            "A retired pricing program cannot be edited.",
-          );
-        }
+        const now = new Date();
+        const updated = await database.transaction(async (tx) => {
+          await tx.execute(sql`SELECT id FROM shipping.rate_books WHERE id = ${id} FOR UPDATE`);
+          const [current] = await tx.select().from(shippingRateBooks)
+            .where(eq(shippingRateBooks.id, id)).limit(1);
+          if (!current) throw notFoundError();
+          if (current.status === "retired") {
+            throw new RateBookAdminError(
+              409,
+              "SHIPPING_ADMIN_RATE_BOOK_RETIRED",
+              "A retired pricing program cannot be edited.",
+            );
+          }
+          if (
+            parsed.data.expectedUpdatedAt !== undefined &&
+            current.updatedAt instanceof Date &&
+            current.updatedAt.toISOString() !== parsed.data.expectedUpdatedAt
+          ) {
+            throw new RateBookAdminError(
+              409,
+              "SHIPPING_ADMIN_RATE_BOOK_STALE",
+              "This pricing program was modified by another session. Refresh and try again.",
+            );
+          }
 
-        const updated = await db.transaction(async (tx) => {
-          const [book] = parsed.data.name === undefined
+          const beforeAssignments = await tx.select({
+            pricingChannel: shippingRateBookAssignments.pricingChannel,
+            ratePurpose: shippingRateBookAssignments.ratePurpose,
+            originWarehouseId: shippingRateBookAssignments.originWarehouseId,
+          })
+            .from(shippingRateBookAssignments)
+            .where(and(
+              eq(shippingRateBookAssignments.rateBookId, id),
+              eq(shippingRateBookAssignments.isActive, true),
+            ))
+            .orderBy(
+              asc(shippingRateBookAssignments.pricingChannel),
+              asc(shippingRateBookAssignments.ratePurpose),
+            );
+
+          const shouldTouchBook =
+            parsed.data.name !== undefined || parsed.data.assignments !== undefined;
+          const [book] = !shouldTouchBook
             ? [current]
             : await tx.update(shippingRateBooks)
-                .set({ name: parsed.data.name, updatedAt: new Date() })
-                .where(eq(shippingRateBooks.id, id))
+                .set({
+                  ...(parsed.data.name === undefined ? {} : { name: parsed.data.name }),
+                  updatedAt: now,
+                })
+                .where(and(
+                  eq(shippingRateBooks.id, id),
+                  eq(shippingRateBooks.status, current.status),
+                ))
                 .returning();
+          if (!book) {
+            throw new RateBookAdminError(
+              409,
+              "SHIPPING_ADMIN_RATE_BOOK_CHANGED",
+              "The pricing program changed while saving. Refresh and try again.",
+            );
+          }
+
+          const afterAssignments = parsed.data.assignments ?? beforeAssignments;
           if (parsed.data.assignments) {
             await tx.delete(shippingRateBookAssignments)
               .where(eq(shippingRateBookAssignments.rateBookId, id));
@@ -168,6 +242,15 @@ export function registerRateBookAdminRoutes(app: Express): void {
               );
             }
           }
+          await recordAudit(tx, {
+            actor,
+            action: "shipping.rate_book.updated",
+            target: `shipping.rate_books:${id}`,
+            changes: {
+              before: rateBookAuditState(current, beforeAssignments),
+              after: rateBookAuditState(book, afterAssignments),
+            },
+          }, { timestamp: now });
           return book;
         });
         return res.json({ rateBook: updated });
@@ -182,21 +265,53 @@ export function registerRateBookAdminRoutes(app: Express): void {
     requirePermission("settings", "edit"),
     async (req, res) => {
       try {
+        const actor = rateBookAuditActor(req);
         const id = parseBookId(req.params.id);
-        const [current] = await db.select({ status: shippingRateBooks.status })
-          .from(shippingRateBooks).where(eq(shippingRateBooks.id, id)).limit(1);
-        if (!current) throw notFoundError();
-        if (current.status === "retired") {
-          throw new RateBookAdminError(
-            409,
-            "SHIPPING_ADMIN_RATE_BOOK_RETIRED",
-            "This pricing program is already retired.",
-          );
-        }
+        const parsed = retireRateBookSchema.safeParse(req.body ?? {});
+        if (!parsed.success) return sendInvalidInput(res, parsed.error.issues);
 
-        const retired = await db.transaction(async (tx) => {
+        const now = new Date();
+        const retired = await database.transaction(async (tx) => {
+          await tx.execute(sql`SELECT id FROM shipping.rate_books WHERE id = ${id} FOR UPDATE`);
+          const [current] = await tx.select().from(shippingRateBooks)
+            .where(eq(shippingRateBooks.id, id)).limit(1);
+          if (!current) throw notFoundError();
+          if (current.status === "retired") {
+            throw new RateBookAdminError(
+              409,
+              "SHIPPING_ADMIN_RATE_BOOK_RETIRED",
+              "This pricing program is already retired.",
+            );
+          }
+          if (
+            parsed.data.expectedUpdatedAt !== undefined &&
+            current.updatedAt instanceof Date &&
+            current.updatedAt.toISOString() !== parsed.data.expectedUpdatedAt
+          ) {
+            throw new RateBookAdminError(
+              409,
+              "SHIPPING_ADMIN_RATE_BOOK_STALE",
+              "This pricing program was modified before retirement. Refresh and try again.",
+            );
+          }
+
+          const beforeAssignments = await tx.select({
+            pricingChannel: shippingRateBookAssignments.pricingChannel,
+            ratePurpose: shippingRateBookAssignments.ratePurpose,
+            originWarehouseId: shippingRateBookAssignments.originWarehouseId,
+          })
+            .from(shippingRateBookAssignments)
+            .where(and(
+              eq(shippingRateBookAssignments.rateBookId, id),
+              eq(shippingRateBookAssignments.isActive, true),
+            ))
+            .orderBy(
+              asc(shippingRateBookAssignments.pricingChannel),
+              asc(shippingRateBookAssignments.ratePurpose),
+            );
+
           const [book] = await tx.update(shippingRateBooks)
-            .set({ status: "retired", updatedAt: new Date() })
+            .set({ status: "retired", updatedAt: now })
             .where(and(eq(shippingRateBooks.id, id), eq(shippingRateBooks.status, current.status)))
             .returning();
           if (!book) return null;
@@ -204,14 +319,23 @@ export function registerRateBookAdminRoutes(app: Express): void {
           // active rate tables stay readable for history but are retired so
           // they cannot be resurrected by a later assignment.
           await tx.update(shippingRateBookAssignments)
-            .set({ isActive: false, updatedAt: new Date() })
+            .set({ isActive: false, updatedAt: now })
             .where(eq(shippingRateBookAssignments.rateBookId, id));
           await tx.update(shippingRateTables)
-            .set({ status: "retired", effectiveTo: new Date() })
+            .set({ status: "retired", effectiveTo: now })
             .where(and(
               eq(shippingRateTables.rateBookId, id),
               inArray(shippingRateTables.status, ["active", "superseded"]),
             ));
+          await recordAudit(tx, {
+            actor,
+            action: "shipping.rate_book.retired",
+            target: `shipping.rate_books:${id}`,
+            changes: {
+              before: rateBookAuditState(current, beforeAssignments),
+              after: rateBookAuditState(book, []),
+            },
+          }, { timestamp: now });
           return book;
         });
         if (!retired) {
@@ -241,7 +365,44 @@ function assertNoDuplicateAssignments(assignments: readonly AssignmentInput[]): 
   }
 }
 
+function rateBookAuditActor(req: Request): string {
+  const actor = req.session?.user?.id;
+  if (!actor) {
+    throw new RateBookAdminError(
+      401,
+      "SHIPPING_ADMIN_ACTOR_REQUIRED",
+      "An authenticated operator is required to change pricing programs.",
+    );
+  }
+  return actor;
+}
+
+function rateBookAuditState(
+  book: {
+    id: number;
+    code: string;
+    name: string;
+    status: string;
+    zoneSetId: number | null;
+  },
+  assignments: readonly AssignmentInput[],
+): Record<string, unknown> {
+  return {
+    id: book.id,
+    code: book.code,
+    name: book.name,
+    status: book.status,
+    zoneSetId: book.zoneSetId,
+    assignments: assignments.map((assignment) => ({
+      pricingChannel: assignment.pricingChannel,
+      ratePurpose: assignment.ratePurpose,
+      originWarehouseId: assignment.originWarehouseId,
+    })),
+  };
+}
+
 async function validateAssignmentWarehouses(
+  database: Pick<typeof db, "select">,
   assignments: readonly AssignmentInput[],
 ): Promise<void> {
   const requested = new Set(
@@ -249,7 +410,7 @@ async function validateAssignmentWarehouses(
       assignment.originWarehouseId === null ? [] : [assignment.originWarehouseId]),
   );
   if (requested.size === 0) return;
-  const activeWarehouses = await db.select({ id: warehouses.id })
+  const activeWarehouses = await database.select({ id: warehouses.id })
     .from(warehouses).where(eq(warehouses.isActive, 1));
   const activeIds = new Set(activeWarehouses.map((warehouse) => warehouse.id));
   const invalid = [...requested].find((id) => !activeIds.has(id));

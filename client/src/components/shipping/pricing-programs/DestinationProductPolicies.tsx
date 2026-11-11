@@ -62,6 +62,7 @@ interface DestinationProductPoliciesProps {
   warehouses: WarehouseOption[];
   onSaveDraft: () => void;
   savingDraft: boolean;
+  onProductRulesMutated?: () => void;
 }
 
 export function DestinationProductPolicies({
@@ -72,6 +73,7 @@ export function DestinationProductPolicies({
   warehouses,
   onSaveDraft,
   savingDraft,
+  onProductRulesMutated,
 }: DestinationProductPoliciesProps) {
   if (draftId === null) {
     return (
@@ -96,6 +98,7 @@ export function DestinationProductPolicies({
       group={group}
       groupIndex={groupIndex}
       kind={view === "restrictions" ? "restriction" : "exception"}
+      onProductRulesMutated={onProductRulesMutated}
     />
   );
 }
@@ -105,11 +108,13 @@ function PolicyRuleList({
   group,
   groupIndex,
   kind,
+  onProductRulesMutated,
 }: {
   draftId: number;
   group: RateGroup;
   groupIndex: number;
   kind: "restriction" | "exception";
+  onProductRulesMutated?: () => void;
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -126,6 +131,7 @@ function PolicyRuleList({
     mutationFn: (ruleId: number) => deleteJson(`${queryKey}/${ruleId}`),
     onSuccess: () => {
       invalidateShippingAdmin(queryClient);
+      onProductRulesMutated?.();
       toast({ title: "Shipping rule removed" });
     },
     onError: (error: Error) => toast({
@@ -213,6 +219,7 @@ function PolicyRuleList({
         groupName={groupDisplayName(group, groupIndex)}
         ruleKind={kind}
         editingRule={editing === "new" ? null : editing}
+        onProductRulesMutated={onProductRulesMutated}
       />
     </div>
   );
@@ -236,6 +243,7 @@ function RuleDialog({
   groupName,
   ruleKind,
   editingRule,
+  onProductRulesMutated,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -244,6 +252,7 @@ function RuleDialog({
   groupName: string;
   ruleKind: "restriction" | "exception";
   editingRule: ProductPolicyRule | null;
+  onProductRulesMutated?: () => void;
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -325,6 +334,7 @@ function RuleDialog({
       : postJson(productPolicyRulesKey(draftId), payload),
     onSuccess: () => {
       invalidateShippingAdmin(queryClient);
+      onProductRulesMutated?.();
       onOpenChange(false);
       toast({ title: editingRule ? "Shipping rule updated" : "Shipping rule added" });
     },

@@ -16,6 +16,7 @@
  *   engineShipmentRef = orderKey (e.g. "echelon-wms-shp-123")
  */
 
+import { createHash } from "node:crypto";
 import type { ShippingEngine } from "../engine";
 import { normalizeShipStationV1Date } from "@shared/utils/shipstation-date";
 import type {
@@ -33,6 +34,78 @@ import { normalizeCarrier, parseProviderAmountCents } from "../types";
 
 const ENGINE_NAME = "shipstation";
 const SHIPSTATION_SHIPMENTS_API_COST_SOURCE = "shipstation_shipments_api";
+const UNSUPPORTED_MULTI_ACCOUNT_ENV_KEYS = [
+  "SHIPSTATION_SECONDARY_API_KEY",
+  "SHIPSTATION_SECONDARY_API_SECRET",
+  "SHIPSTATION_API_KEYS",
+  "SHIPSTATION_ACCOUNTS",
+] as const;
+
+export class ShipStationAccountConfigurationError extends Error {
+  constructor(
+    readonly code:
+      | "SHIPSTATION_PARTIAL_CREDENTIALS"
+      | "SHIPSTATION_MULTI_ACCOUNT_UNSUPPORTED",
+    message: string,
+  ) {
+    super(message);
+    this.name = "ShipStationAccountConfigurationError";
+  }
+}
+
+export type SingleShipStationRuntimeAccount =
+  | {
+      configured: false;
+      accountFingerprint: null;
+    }
+  | {
+      configured: true;
+      apiKey: string;
+      apiSecret: string;
+      accountFingerprint: string;
+    };
+
+/**
+ * Enforces the FW-05 single-account ShipStation v1 runtime invariant.
+ * Multi-account credentials or half-configured key/secret pairs fail closed
+ * until first-class account-scoped EngineRef routing is explicitly ratified.
+ */
+export function resolveSingleShipStationRuntimeAccount(
+  env: NodeJS.ProcessEnv = process.env,
+): SingleShipStationRuntimeAccount {
+  for (const forbiddenKey of UNSUPPORTED_MULTI_ACCOUNT_ENV_KEYS) {
+    const raw = env[forbiddenKey];
+    if (typeof raw === "string" && raw.trim().length > 0) {
+      throw new ShipStationAccountConfigurationError(
+        "SHIPSTATION_MULTI_ACCOUNT_UNSUPPORTED",
+        `Unsupported multi-account ShipStation configuration (${forbiddenKey}): Echelon ShipStation v1 runtime supports a single account per deployment.`,
+      );
+    }
+  }
+
+  const apiKey = (env.SHIPSTATION_API_KEY ?? "").trim();
+  const apiSecret = (env.SHIPSTATION_API_SECRET ?? "").trim();
+  if (apiKey.length === 0 && apiSecret.length === 0) {
+    return { configured: false, accountFingerprint: null };
+  }
+  if (apiKey.length === 0 || apiSecret.length === 0) {
+    throw new ShipStationAccountConfigurationError(
+      "SHIPSTATION_PARTIAL_CREDENTIALS",
+      "Both SHIPSTATION_API_KEY and SHIPSTATION_API_SECRET must be set together.",
+    );
+  }
+
+  const accountFingerprint = `ss-v1:${createHash("sha256")
+    .update(apiKey)
+    .digest("hex")
+    .slice(0, 12)}`;
+  return {
+    configured: true,
+    apiKey,
+    apiSecret,
+    accountFingerprint,
+  };
+}
 
 export function toEngineRef(
   shipstationOrderId: number,
@@ -277,13 +350,12 @@ export function createShipStationEngine(
     },
 
     async sweepQueue(): Promise<void> {
-      const apiKey = process.env.SHIPSTATION_API_KEY;
-      const apiSecret = process.env.SHIPSTATION_API_SECRET;
-      if (!apiKey || !apiSecret) return;
+      const account = resolveSingleShipStationRuntimeAccount();
+      if (!account.configured) return;
       const { sweepShipStationQueue } = await import(
         "../../oms/shipstation-execution.api"
       );
-      await sweepShipStationQueue(apiKey, apiSecret);
+      await sweepShipStationQueue(account.apiKey, account.apiSecret);
     },
   };
 }

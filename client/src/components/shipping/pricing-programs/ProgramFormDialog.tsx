@@ -98,6 +98,9 @@ export function ProgramFormDialog({
           ratePurpose: assignment.ratePurpose,
           originWarehouseId: assignment.originWarehouseId,
         })),
+        ...(program !== null && program.updatedAt
+          ? { expectedUpdatedAt: program.updatedAt }
+          : {}),
       };
       return program === null
         ? postJson<{ rateBook: { id: number } }>("/api/shipping/admin/rate-books", payload)

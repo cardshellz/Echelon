@@ -165,6 +165,7 @@ export function PricingProgramsTab() {
         returnTo,
         launch: {
           draftId,
+          draftRevision: detail.draftRevision ?? null,
           rateBookCode: detail.rateBook?.code ?? null,
           serviceLevelCode: detail.serviceLevel?.code ?? null,
           groups,
@@ -301,6 +302,7 @@ export function PricingProgramsTab() {
             returnTo: here,
             launch: {
               draftId: null,
+              draftRevision: null,
               rateBookCode: program.book.code,
               serviceLevelCode,
               groups: initialGroups,
