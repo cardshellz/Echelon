@@ -1557,7 +1557,7 @@ function harness(
     },
   );
   const reports =
-    vi.fn<(event: { operationId: string; code: string }) => void>();
+    vi.fn<(event: { operationId?: string; code: string }) => void>();
   const provider = new ShopifyOrderEditProvider({
     ...codeOptions,
     shippingCalculator,

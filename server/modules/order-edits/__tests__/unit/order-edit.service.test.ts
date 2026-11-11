@@ -56,7 +56,7 @@ describe("private order edit orchestration", () => {
       editable: false,
       reasons: ["Online changes are temporarily unavailable. Please try again shortly."],
     });
-    expect(result.cancellation.canReview).toBe(false);
+    expect(result.cancellation?.canReview).toBe(false);
     expect(result.addressEligibility?.editable).toBe(false);
     expect(result.warehouseStatus).toBe("Status unavailable");
     expect(result.lines).toHaveLength(h.snapshot().lines.length);
