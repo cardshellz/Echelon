@@ -39,12 +39,17 @@ export interface ChannelStockRuleRow {
   head: ChannelExposurePolicyHead | null;
   /** False when the channel has no default rule yet: nothing is sent there, so there is nothing to except. */
   managed: boolean;
-  /** This subject has its own rule on the channel (rather than only inheriting). */
+  /** This subject has its own saved rule on the channel, applied or not (so there is something to edit or clear). */
   hasException: boolean;
-  /** A saved change on this exact rule has not been applied yet. */
+  /** This subject's own rule is in effect on the channel right now. */
+  liveException: boolean;
+  /** A saved change on this exact rule has not been applied yet. It has no effect until it is. */
   pending: boolean;
-  /** The effective max is 0: the channel shows this item as out of stock. */
+  /** What the unapplied change would do, e.g. "Max 0" or "Clear exception"; null when nothing is pending. */
+  pendingChange: string | null;
+  /** The max in effect right now is 0: the channel shows this item as out of stock. */
   outOfStock: boolean;
+  /** The values in effect right now. An unapplied change never appears here. */
   cells: Record<StockRuleFieldKey, StockRuleCell>;
 }
 
@@ -67,10 +72,22 @@ function displayField(key: StockRuleFieldKey, value: ChannelExposurePolicyValue)
   }
 }
 
+/** What a saved, unapplied rule would set, in the operator's words. */
+function describePendingChange(value: ChannelExposurePolicyValue): string {
+  if (value.inheritAll) return "Clear exception";
+  const parts = STOCK_RULE_FIELDS.flatMap(field => {
+    const display = displayField(field.key, value);
+    return display === null ? [] : [`${field.label} ${display}`];
+  });
+  return parts.length === 0 ? "Other settings" : parts.join(", ");
+}
+
 /**
- * One row per channel for a subject. Each field shows the value that wins
- * (SKU rule → product rule → channel default, saved draft preferred, exactly
- * as the editor in Channel Inventory reads them) and where it comes from.
+ * One row per channel for a subject. Each field shows the value in effect
+ * right now (SKU rule → product rule → channel default, applied rules only)
+ * and where it comes from. A saved change that was never applied changes
+ * nothing a channel shows, so it is reported separately (`pending`,
+ * `pendingChange`) and never as the current value.
  */
 export function listChannelStockRules(view: Pick<View, "channels" | "policyHeads">, subject: StockRuleSubject): ChannelStockRuleRow[] {
   return view.channels.filter(channel => channel.status === "active").map(channel => {
@@ -83,14 +100,14 @@ export function listChannelStockRules(view: Pick<View, "channels" | "policyHeads
       chain.push({ source: "product", scope });
     }
     chain.push({ source: "channel", scope: { scopeType: "channel", channelId: channel.id } });
-    const saved = chain.flatMap(link => {
-      const policy = savedPolicy(findPolicyHead(view.policyHeads, link.scope));
-      return policy && !policy.value.inheritAll ? [{ source: link.source, value: policy.value }] : [];
+    const live = chain.flatMap(link => {
+      const value = findPolicyHead(view.policyHeads, link.scope)?.activePolicy?.value ?? null;
+      return value && !value.inheritAll ? [{ source: link.source, value }] : [];
     });
     const cells = {} as Record<StockRuleFieldKey, StockRuleCell>;
     for (const field of STOCK_RULE_FIELDS) {
       let cell: StockRuleCell = { display: "Not set", source: "unset" };
-      for (const link of saved) {
+      for (const link of live) {
         const display = displayField(field.key, link.value);
         if (display !== null) { cell = { display, source: link.source }; break; }
       }
@@ -99,11 +116,14 @@ export function listChannelStockRules(view: Pick<View, "channels" | "policyHeads
     const head = findPolicyHead(view.policyHeads, scope);
     const own = savedPolicy(head);
     const ownSource: StockRuleSource = scope.scopeType === "variant" ? "sku" : "product";
+    const draft = head?.draftPolicy?.value ?? null;
     return {
       channel, scope, head,
-      managed: saved.some(link => link.source === "channel"),
-      hasException: own !== null && !own.value.inheritAll && saved.some(link => link.source === ownSource),
-      pending: Boolean(head?.draftPolicy),
+      managed: live.some(link => link.source === "channel"),
+      hasException: own !== null && !own.value.inheritAll,
+      liveException: live.some(link => link.source === ownSource),
+      pending: draft !== null,
+      pendingChange: draft === null ? null : describePendingChange(draft),
       outOfStock: cells.maxPublish.display === "0" && cells.maxPublish.source !== "unset",
       cells,
     };
