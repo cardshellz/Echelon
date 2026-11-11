@@ -144,7 +144,7 @@ function describeDefinition(value: Record<string, unknown> | null, view: View): 
   if (typeof value.share_bps === "number") parts.push(`Stock percentage ${formatPercent(value.share_bps)}`);
   if (value.holdback_sellable_units != null) parts.push(`Stock buffer ${value.holdback_sellable_units} SKU units`);
   if (value.max_publish_mode != null) parts.push(value.max_publish_mode === "unlimited" ? "No maximum" : `Maximum ${value.max_publish_sellable_units} SKU units`);
-  if (value.min_publish_sellable_units != null) parts.push(`Out-of-stock cutoff ${value.min_publish_sellable_units}`);
+  if (value.min_publish_sellable_units != null) parts.push(`Hide when below ${value.min_publish_sellable_units}`);
   if (value.allocation_semantics != null) parts.push(value.allocation_semantics === "exposure" ? "Share available stock" : "Limit combined channel percentages");
   if (value.external_inventory_item_id != null) parts.push(`Marketplace item ${value.external_inventory_item_id}${value.external_sku ? ` · ${value.external_sku}` : ""}`);
   return parts.join(" · ") || "Inherit broader settings";

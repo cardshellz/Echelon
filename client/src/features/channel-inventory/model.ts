@@ -296,8 +296,8 @@ export const POLICY_FIELDS: readonly PolicyFieldMeta[] = [
   },
   {
     key: "minPublishSellableUnits",
-    label: "Out-of-stock cutoff",
-    help: "After the other adjustments, show zero below this quantity. A cutoff of 3 changes 2 to zero; 3 stays 3. Use 0 to disable.",
+    label: "Hide when below",
+    help: "After the other adjustments, show zero when fewer than this are left. Hide when below 3 changes 2 to zero; 3 stays 3. Use 0 to disable.",
     sourceKey: "minPublishSellableUnits",
   },
   {
@@ -405,7 +405,7 @@ export function policyFormToValue(form: PolicyForm, options: {
   }
   let min: string | null = null;
   if (form.minMode === "set") {
-    const parsed = parseWholeUnits(form.minUnits, "Out-of-stock cutoff");
+    const parsed = parseWholeUnits(form.minUnits, "Hide when below");
     if (parsed.ok) min = parsed.value;
     else errors.push({ field: "minPublishSellableUnits", message: parsed.message });
   }
@@ -702,7 +702,7 @@ export function explainQuantity(row: PreviewRow): QuantityExplanation {
       detail: "Cap on the quantity shown.",
     },
     {
-      label: `Out-of-stock cutoff ${formatUnits(policy.minPublishSellableUnits)}`,
+      label: `Hide when below ${formatUnits(policy.minPublishSellableUnits)}`,
       units: row.publishedUnits,
       detail: "Quantities under the threshold are shown as zero.",
     },
@@ -710,7 +710,7 @@ export function explainQuantity(row: PreviewRow): QuantityExplanation {
   let zeroReason: string | null = null;
   if (!policy.eligible) zeroReason = "This SKU is not eligible for the channel, so zero is proposed.";
   else if (row.publishedUnits === "0" && row.cappedUnits !== "0") {
-    zeroReason = `Remaining ${formatUnits(row.cappedUnits)} is below the out-of-stock cutoff of `
+    zeroReason = `Remaining ${formatUnits(row.cappedUnits)} is below the hide-when-below level of `
       + `${formatUnits(policy.minPublishSellableUnits)}.`;
   } else if (row.publishedUnits === "0" && row.canonicalAtpUnits === "0") {
     zeroReason = "No availability in the eligible warehouses.";
