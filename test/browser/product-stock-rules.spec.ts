@@ -13,12 +13,15 @@ const channelDefault = (channelId: number, overrides: Partial<ChannelExposurePol
 const skuScope = (channelId: number) => ({ scopeType: "variant" as const, channelId, productId: 10, productVariantId: 101 });
 
 /** Shopify US (3) and eBay (4) are managed; Amazon (6) and Dropship OMS (7) have no channel default. */
-async function setup(page: Page, options: { permissions?: string[]; blockOn?: number; legacy?: boolean } = {}) {
+async function setup(page: Page, options: {
+  permissions?: string[]; blockOn?: number; legacy?: boolean; extraHeads?: InventoryChannelExposureAdminView["policyHeads"];
+} = {}) {
   const data: InventoryChannelExposureAdminView = view({
     runtimeAuthority: options.legacy ? "legacy" : "canonical",
     policyHeads: [
       channelDefault(3), channelDefault(4, { shareBps: 9000, maxPublish: { mode: "units", units: "100" } }),
       policyHead({ scopeKey: "channel:4:variant:101", channelId: 4, scope: skuScope(4), active: policyValue({ holdbackSellableUnits: "5" }), revision: "3" }),
+      ...(options.extraHeads ?? []),
     ],
   });
   const state = { data, saves: [] as Array<Record<string, any>>, reviews: [] as Array<Record<string, any>>, applies: [] as Array<Record<string, any>>,
@@ -131,6 +134,27 @@ test("Set on all channels writes only the typed field and keeps each channel's o
   expect(state.applies).toHaveLength(2);
   await expect(page.getByTestId("stock-rule-row-3")).toContainText("Out of stock");
   await expect(page.getByTestId("stock-rule-row-4")).toContainText("Out of stock");
+});
+
+test("an old unapplied Show as out of stock rule is shown as Max 0 and saved as Max 0, never applied as the old flag", async ({ page }) => {
+  const state = await setup(page, { extraHeads: [policyHead({ scopeKey: "channel:3:variant:101", channelId: 3, scope: skuScope(3),
+    draft: policyValue({ eligible: false }), revision: "2" })] });
+  await page.getByRole("radio", { name: "CARD-P5" }).click();
+  await expect(page.getByTestId("stock-rule-row-3")).toContainText("Out of stock");
+  await page.getByRole("button", { name: "Set on all channels" }).click();
+  const dialog = page.getByRole("dialog", { name: "Set on all channels" });
+  await dialog.getByLabel("Max", { exact: true }).click();
+  await page.getByRole("option", { name: "Set a number" }).click();
+  await dialog.getByLabel("Max units").fill("0");
+  await dialog.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByTestId("stock-rule-results")).toContainText("eBay: Applied.");
+  // Shopify already read as Max 0, so nothing typed differs there; it is still re-saved without the flag.
+  expect(state.saves.map(save => save.scope.channelId)).toEqual([3, 4]);
+  expect(state.saves[0]).toMatchObject({ expectedHeadRevision: "2", value: { eligible: null, maxPublish: { mode: "units", units: "0" } } });
+  expect(state.applies).toHaveLength(2);
+  expect(state.applies[0].draftPolicyId).toBe(state.reviews[0].draftPolicyId);
+  expect(state.reviews[0].draftPolicyId).toBe(51);
+  expect(state.unexpected).toEqual([]);
 });
 
 test("a channel whose check fails is reported and the others still apply", async ({ page }) => {

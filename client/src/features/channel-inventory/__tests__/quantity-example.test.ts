@@ -31,12 +31,11 @@ describe("hypothetical inventory settings example", () => {
     expect(example("0")).toMatchObject({ ok: true, publishedUnits: "0" });
   });
 
-  it("distinguishes zero cap from unlimited and respects explicit unavailable and zero percentage", () => {
-    expect(example("100", { maxMode: "units", maxUnits: "0" })).toMatchObject({ ok: true, publishedUnits: "0" });
-    expect(example("100", { maxMode: "unlimited" })).toMatchObject({ ok: true, publishedUnits: "100" });
-    expect(example("100", { eligible: "no" })).toMatchObject({
-      ok: true, publishedUnits: "0", steps: [{ label: "Marked as out of stock", units: "0" }],
+  it("distinguishes zero cap from unlimited and respects a zero percentage", () => {
+    expect(example("100", { maxMode: "units", maxUnits: "0" })).toMatchObject({
+      ok: true, publishedUnits: "0", steps: [{ units: "100" }, { label: "After a maximum of 0", units: "0" }],
     });
+    expect(example("100", { maxMode: "unlimited" })).toMatchObject({ ok: true, publishedUnits: "100" });
     expect(example("100", { sharePercent: "0" })).toMatchObject({ ok: true, publishedUnits: "0" });
   });
 

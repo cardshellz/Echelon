@@ -10,13 +10,16 @@ import {
   describePublishing,
   describeSupply,
   destinationOptionsFor,
+  effectiveMaxPublish,
   explainQuantity,
   explicitFieldLabels,
+  formatFieldValue,
   listExceptions,
   missingChannelDefaultFields,
   policyFormToValue,
   policyValueToForm,
   reconcileSelection,
+  retiredOutOfStock,
   resolveSavedFields,
   resolveInheritedPolicyForm,
   summarizePendingChanges,
@@ -33,7 +36,7 @@ describe("policy form ↔ value", () => {
       holdbackUnits: "5",
       maxMode: "units",
       maxUnits: "60",
-    });
+    }, { allowInheritAll: true });
     expect(result).toEqual({
       ok: true,
       value: {
@@ -83,7 +86,7 @@ describe("policy form ↔ value", () => {
   it("round-trips a saved value through the form", () => {
     const value = policyValue({
       allocationSemantics: "partitioned",
-      eligible: false,
+      eligible: true,
       shareBps: 1_250,
       holdbackSellableUnits: "2",
       maxPublish: { mode: "unlimited" },
@@ -94,13 +97,41 @@ describe("policy form ↔ value", () => {
     expect(policyValueToForm(null)).toEqual(EMPTY_POLICY_FORM);
   });
 
+  it("never lets the operator choose availability: a channel default sends stock, an exception does not override it", () => {
+    const form = { ...EMPTY_POLICY_FORM, shareMode: "set" as const, sharePercent: "50" };
+    expect(policyFormToValue(form)).toMatchObject({ ok: true, value: { eligible: true } });
+    expect(policyFormToValue(form, { allowInheritAll: true })).toMatchObject({ ok: true, value: { eligible: null } });
+  });
+
+  it("reads a retired Show as out of stock as a maximum of 0 and saves it that way", () => {
+    const stored = policyValue({ eligible: false, holdbackSellableUnits: "2", maxPublish: { mode: "unlimited" } });
+    expect(retiredOutOfStock(stored)).toBe(true);
+    expect(effectiveMaxPublish(stored)).toEqual({ mode: "units", units: "0" });
+    expect(formatFieldValue("maxPublish", stored)).toBe("0 units");
+    expect(policyValueToForm(stored)).toMatchObject({ maxMode: "units", maxUnits: "0", holdbackUnits: "2" });
+    // Exception: the flag is replaced by Max 0, so the item stays at zero.
+    expect(policyFormToValue(policyValueToForm(stored), { allowInheritAll: true })).toEqual({
+      ok: true, value: policyValue({ holdbackSellableUnits: "2", maxPublish: { mode: "units", units: "0" } }),
+    });
+    // Channel default: same zero, with availability back to its fixed value.
+    expect(policyFormToValue(policyValueToForm(stored))).toEqual({
+      ok: true, value: policyValue({ eligible: true, holdbackSellableUnits: "2", maxPublish: { mode: "units", units: "0" } }),
+    });
+    // A rule that sends stock is read unchanged.
+    const selling = policyValue({ eligible: true, maxPublish: { mode: "units", units: "40" } });
+    expect(retiredOutOfStock(selling)).toBe(false);
+    expect(effectiveMaxPublish(selling)).toEqual({ mode: "units", units: "40" });
+    expect(effectiveMaxPublish(policyValue())).toBeNull();
+  });
+
   it("lists which fields a saved rule sets explicitly", () => {
     expect(explicitFieldLabels(policyValue({ shareBps: 5_000, maxPublish: { mode: "unlimited" } })))
       .toEqual(["Stock percentage", "Maximum displayed quantity"]);
   });
 
   it("names every field a channel default still needs before activation", () => {
-    expect(missingChannelDefaultFields(null)).toHaveLength(6);
+    expect(missingChannelDefaultFields(null)).toHaveLength(5);
+    expect(missingChannelDefaultFields(null)).not.toContain("Default availability");
     expect(missingChannelDefaultFields(policyValue({
       allocationSemantics: "exposure", eligible: true, shareBps: 5_000,
       holdbackSellableUnits: "0", maxPublish: { mode: "unlimited" }, minPublishSellableUnits: "0",
@@ -117,7 +148,7 @@ describe("policy form ↔ value", () => {
       }),
     });
     expect(policyValueToForm(null)).toEqual(EMPTY_POLICY_FORM);
-    const partial = policyValue({ eligible: false, shareBps: 0, allocationSemantics: "partitioned" });
+    const partial = policyValue({ eligible: true, shareBps: 0, allocationSemantics: "partitioned" });
     expect(channelDefaultValueToForm(partial)).toEqual(policyValueToForm(partial));
     expect(policyFormToValue(channelDefaultValueToForm(partial))).toEqual({ ok: true, value: partial });
     expect(channelDefaultValueToForm(policyValue())).toEqual(EMPTY_POLICY_FORM);
@@ -129,7 +160,7 @@ describe("policy form ↔ value", () => {
     const example = policyFormToValue(partial, { requireComplete: true });
     expect(example.ok).toBe(false);
     if (!example.ok) expect(example.errors.map(error => error.field)).toEqual([
-      "eligible", "holdbackSellableUnits", "maxPublish", "minPublishSellableUnits", "allocationSemantics",
+      "holdbackSellableUnits", "maxPublish", "minPublishSellableUnits", "allocationSemantics",
     ]);
     expect(policyFormToValue(channelDefaultValueToForm(null), { requireComplete: true }).ok).toBe(true);
   });
@@ -194,7 +225,7 @@ describe("inheritance readout (display only)", () => {
     ];
     const before = structuredClone(inherited);
     expect(resolveInheritedPolicyForm(inherited, scope)).toMatchObject({
-      eligible: "no", shareMode: "set", sharePercent: "0", holdbackMode: "set", holdbackUnits: "0",
+      shareMode: "set", sharePercent: "0", holdbackMode: "set", holdbackUnits: "0",
       maxMode: "units", maxUnits: "0", minMode: "inherit", minUnits: "", semantics: "inherit",
     });
     expect(resolveInheritedPolicyForm([], scope)).toEqual(EMPTY_POLICY_FORM);
