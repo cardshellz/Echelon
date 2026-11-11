@@ -13,3 +13,4 @@ export * from "./shipstation-provider-reconciliation.api";
 export * from "./historical-shipstation-contents.api";
 export * from "./package-history-and-delivery.api";
 export * from "./outbound-shipment-queries.api";
+export * from "./shipment-facts.api";
