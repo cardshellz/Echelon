@@ -268,14 +268,12 @@ export interface PolicyFieldMeta {
   sourceKey: keyof NonNullable<PreviewRow["policy"]>["sources"];
 }
 
-/** Presentation order follows the calculation order the server documents. */
+/**
+ * Presentation order follows the calculation order the server documents.
+ * `eligible` ("Show as out of stock") is not listed: it is retired as an
+ * operator setting. Zero is expressed as a maximum of 0 (see retiredOutOfStock).
+ */
 export const POLICY_FIELDS: readonly PolicyFieldMeta[] = [
-  {
-    key: "eligible",
-    label: "Default availability",
-    help: "Choose whether this rule sends available stock or marks items as out of stock.",
-    sourceKey: "eligible",
-  },
   {
     key: "shareBps",
     label: "Stock percentage",
@@ -315,7 +313,6 @@ export const SEMANTICS_LABELS = {
 
 /** One editable field: inherit (null) or an explicit value in text form. */
 export interface PolicyForm {
-  eligible: "inherit" | "yes" | "no";
   shareMode: "inherit" | "set";
   sharePercent: string;
   holdbackMode: "inherit" | "set";
@@ -328,7 +325,6 @@ export interface PolicyForm {
 }
 
 export const EMPTY_POLICY_FORM: PolicyForm = {
-  eligible: "inherit",
   shareMode: "inherit",
   sharePercent: "",
   holdbackMode: "inherit",
@@ -340,16 +336,32 @@ export const EMPTY_POLICY_FORM: PolicyForm = {
   semantics: "inherit",
 };
 
+/**
+ * True when a stored rule still says "Show as out of stock". That setting is
+ * retired: the same result is a maximum of 0, which is how every editor now
+ * reads and re-saves such a rule.
+ */
+export function retiredOutOfStock(value: Pick<ChannelExposurePolicyValue, "eligible">): boolean {
+  return value.eligible === false;
+}
+
+/** The maximum a stored rule means, with a retired "Show as out of stock" read as a maximum of 0. */
+export function effectiveMaxPublish(
+  value: Pick<ChannelExposurePolicyValue, "eligible" | "maxPublish">,
+): ChannelExposurePolicyValue["maxPublish"] {
+  return retiredOutOfStock(value) ? { mode: "units", units: "0" } : value.maxPublish;
+}
+
 export function policyValueToForm(value: ChannelExposurePolicyValue | null): PolicyForm {
   if (!value) return EMPTY_POLICY_FORM;
+  const maxPublish = effectiveMaxPublish(value);
   return {
-    eligible: value.eligible === null ? "inherit" : value.eligible ? "yes" : "no",
     shareMode: value.shareBps === null ? "inherit" : "set",
     sharePercent: value.shareBps === null ? "" : bpsToPercentText(value.shareBps),
     holdbackMode: value.holdbackSellableUnits === null ? "inherit" : "set",
     holdbackUnits: value.holdbackSellableUnits ?? "",
-    maxMode: value.maxPublish === null ? "inherit" : value.maxPublish.mode,
-    maxUnits: value.maxPublish?.mode === "units" ? value.maxPublish.units : "",
+    maxMode: maxPublish === null ? "inherit" : maxPublish.mode,
+    maxUnits: maxPublish?.mode === "units" ? maxPublish.units : "",
     minMode: value.minPublishSellableUnits === null ? "inherit" : "set",
     minUnits: value.minPublishSellableUnits ?? "",
     semantics: value.allocationSemantics ?? "inherit",
@@ -360,7 +372,7 @@ export function policyValueToForm(value: ChannelExposurePolicyValue | null): Pol
 export function channelDefaultValueToForm(value: ChannelExposurePolicyValue | null): PolicyForm {
   if (value !== null) return policyValueToForm(value);
   return {
-    eligible: "yes", shareMode: "set", sharePercent: "100",
+    shareMode: "set", sharePercent: "100",
     holdbackMode: "set", holdbackUnits: "0", maxMode: "unlimited", maxUnits: "",
     minMode: "set", minUnits: "0", semantics: "exposure",
   };
@@ -379,6 +391,11 @@ export type PolicyFormResult =
  * Validates operator input into the exact server value. Inherit → null.
  * Channel defaults require explicit fields. Product/SKU editors may restore
  * all inheritance with a versioned tombstone instead of deleting the rule.
+ *
+ * `eligible` is no longer an operator choice. A channel default always sends
+ * stock (true) and a product or SKU exception never overrides that (null), so
+ * saving a rule that carried "Show as out of stock" replaces the flag with the
+ * maximum of 0 the form showed for it.
  */
 export function policyFormToValue(form: PolicyForm, options: {
   allowInheritAll?: boolean; requireComplete?: boolean; sourceFulfillmentNodeIds?: number[] | null;
@@ -409,9 +426,11 @@ export function policyFormToValue(form: PolicyForm, options: {
     if (parsed.ok) min = parsed.value;
     else errors.push({ field: "minPublishSellableUnits", message: parsed.message });
   }
+  // allowInheritAll is passed only by product and SKU exception editors.
+  const isException = options.allowInheritAll === true;
   const value: ChannelExposurePolicyValue = {
     allocationSemantics: form.semantics === "inherit" ? null : form.semantics,
-    eligible: form.eligible === "inherit" ? null : form.eligible === "yes",
+    eligible: isException ? null : true,
     shareBps,
     holdbackSellableUnits: holdback,
     maxPublish,
@@ -426,7 +445,8 @@ export function policyFormToValue(form: PolicyForm, options: {
       }
     }
   }
-  if (errors.length === 0 && Object.values(value).every((field) => field === null)) {
+  const { eligible: _fixedAvailability, ...operatorFields } = value;
+  if (errors.length === 0 && Object.values(operatorFields).every((field) => field === null)) {
     if (options.allowInheritAll) value.inheritAll = true;
     else errors.push({
       field: "form",
@@ -449,9 +469,11 @@ export function formatFieldValue(field: PolicyFieldKey, value: ChannelExposurePo
       return value.shareBps === null ? null : formatPercent(value.shareBps);
     case "holdbackSellableUnits":
       return value.holdbackSellableUnits === null ? null : `${formatUnits(value.holdbackSellableUnits)} units`;
-    case "maxPublish":
-      if (value.maxPublish === null) return null;
-      return value.maxPublish.mode === "unlimited" ? "No limit" : `${formatUnits(value.maxPublish.units)} units`;
+    case "maxPublish": {
+      const maxPublish = effectiveMaxPublish(value);
+      if (maxPublish === null) return null;
+      return maxPublish.mode === "unlimited" ? "No limit" : `${formatUnits(maxPublish.units)} units`;
+    }
     case "minPublishSellableUnits":
       return value.minPublishSellableUnits === null ? null : `${formatUnits(value.minPublishSellableUnits)} units`;
     case "allocationSemantics":

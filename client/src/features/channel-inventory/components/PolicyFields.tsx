@@ -71,26 +71,6 @@ export function PolicyFields({ form, onChange, scopeType, inherited, inheritedFo
   return (
     <div className="space-y-6">
       <div className="grid min-w-0 gap-6 lg:grid-cols-2">
-        <FieldRow {...fieldProps("eligible", form.eligible === "inherit", () => onChange({ eligible: "inherit" }))}>
-          <RadioGroup
-            {...controlProps("eligible")}
-            value={displayed.eligible === "inherit" ? "" : displayed.eligible}
-            disabled={disabled}
-            onValueChange={(value) => {
-              if (value === "yes" || value === "no") onChange({ eligible: value });
-            }}
-          >
-            <RadioChoice id={`${idPrefix}-eligible-yes`} value="yes" selected={displayed.eligible === "yes"} disabled={disabled}
-              onSelectCurrent={form.eligible === "inherit" ? () => onChange({ eligible: "yes" }) : undefined}>
-              Available to sell
-            </RadioChoice>
-            <RadioChoice id={`${idPrefix}-eligible-no`} value="no" selected={displayed.eligible === "no"} disabled={disabled}
-              onSelectCurrent={form.eligible === "inherit" ? () => onChange({ eligible: "no" }) : undefined}>
-              Show as out of stock
-            </RadioChoice>
-          </RadioGroup>
-        </FieldRow>
-
         <FieldRow {...fieldProps("shareBps", form.shareMode === "inherit", () => onChange({ shareMode: "inherit", sharePercent: "" }))}>
           <UnitInput
             {...controlProps("shareBps")}
@@ -328,7 +308,6 @@ function UnitInput({ id, value, suffix, placeholder, disabled, inputMode = "nume
 function displayPolicyForm(form: PolicyForm, inherited?: PolicyForm): PolicyForm {
   if (!inherited) return form;
   return {
-    eligible: form.eligible === "inherit" ? inherited.eligible : form.eligible,
     shareMode: form.shareMode === "inherit" ? inherited.shareMode : form.shareMode,
     sharePercent: form.shareMode === "inherit" ? inherited.sharePercent : form.sharePercent,
     holdbackMode: form.holdbackMode === "inherit" ? inherited.holdbackMode : form.holdbackMode,

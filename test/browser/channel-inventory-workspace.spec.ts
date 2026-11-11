@@ -482,7 +482,9 @@ test("channel default saves without a written reason or any activation call", as
 
 test("new channels show editable suggestions and save them only after the operator chooses Save", async ({ page }, testInfo) => {
   const state = await setup(page, { viewOverrides: { policyHeads: [] } });
-  await expect(page.getByRole("radio", { name: "Available to sell", exact: true })).toBeChecked();
+  // Availability is not an operator choice any more: zero is a maximum of 0.
+  await expect(page.getByRole("radio", { name: "Available to sell", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: "Show as out of stock", exact: true })).toHaveCount(0);
   await expect(page.getByLabel("Stock percentage", { exact: true })).toHaveValue("100");
   await expect(page.getByRole("radio", { name: "Not set", exact: true })).toHaveCount(0);
   await expect(page.getByRole("radio", { name: "Set", exact: true })).toHaveCount(0);
@@ -515,7 +517,7 @@ test("new channels show editable suggestions and save them only after the operat
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("saved out-of-stock, zero and partitioned settings survive an unrelated edit", async ({ page }) => {
+test("saved zero and partitioned settings survive an unrelated edit, and a retired out-of-stock flag is saved as the maximum of 0", async ({ page }) => {
   const existing = policyValue({
     eligible: false, shareBps: 0, holdbackSellableUnits: "0", maxPublish: { mode: "units", units: "0" },
     minPublishSellableUnits: "0", allocationSemantics: "partitioned",
@@ -523,7 +525,7 @@ test("saved out-of-stock, zero and partitioned settings survive an unrelated edi
   const state = await setup(page, { viewOverrides: { policyHeads: [policyHead({
     scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: existing,
   })] } });
-  await expect(page.getByRole("radio", { name: "Show as out of stock", exact: true })).toBeChecked();
+  await expect(page.getByRole("radio", { name: "Show as out of stock", exact: true })).toHaveCount(0);
   await expect(page.getByLabel("Stock percentage", { exact: true })).toHaveValue("0");
   await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("0");
   await expect(page.getByRole("radio", { name: "Limit quantity", exact: true })).toBeChecked();
@@ -535,17 +537,16 @@ test("saved out-of-stock, zero and partitioned settings survive an unrelated edi
   await page.getByLabel("Stock buffer", { exact: true }).fill("2");
   await page.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect.poll(() => state.writes.length).toBe(1);
-  expect(state.writes[0].body.value).toEqual({ ...existing, holdbackSellableUnits: "2" });
+  expect(state.writes[0].body.value).toEqual({ ...existing, eligible: true, holdbackSellableUnits: "2" });
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
 test("partial saved drafts retain missing values instead of silently adopting suggested defaults", async ({ page }) => {
-  const partial = policyValue({ eligible: false, shareBps: 2500 });
+  const partial = policyValue({ shareBps: 2500 });
   const state = await setup(page, { viewOverrides: { policyHeads: [policyHead({
     scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 },
     active: defaults, draft: partial, revision: "2",
   })] } });
-  await expect(page.getByRole("radio", { name: "Show as out of stock", exact: true })).toBeChecked();
   await expect(page.getByLabel("Stock percentage", { exact: true })).toHaveValue("25");
   await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("");
   await expect(page.getByLabel("Hide when below", { exact: true })).toHaveValue("");
@@ -559,7 +560,8 @@ test("partial saved drafts retain missing values instead of silently adopting su
   await page.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect.poll(() => state.writes.length).toBe(1);
   expect(state.writes[0].body).toMatchObject({ expectedHeadRevision: "2", expectedDraftPolicyId: 2 });
-  expect(state.writes[0].body.value).toEqual({ ...partial, shareBps: 3500 });
+  // A channel default always sends stock; only the fields the operator sets are filled in.
+  expect(state.writes[0].body.value).toEqual({ ...partial, eligible: true, shareBps: 3500 });
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
@@ -651,7 +653,6 @@ test("no view permission means no inventory query or cached settings", async ({ 
 test("view-only access has no draft save controls", async ({ page }) => {
   const state = await setup(page, { permission: "view" });
   await expect(page.getByLabel("Stock percentage", { exact: true })).toBeDisabled();
-  await expect(page.getByRole("radio", { name: "Available to sell", exact: true })).toBeDisabled();
   await page.locator("summary").filter({ hasText: "Advanced stock rules" }).click();
   await expect(page.getByLabel("Stock buffer", { exact: true })).toBeDisabled();
   await expect(page.getByLabel("Hide when below", { exact: true })).toBeDisabled();

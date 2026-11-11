@@ -8,7 +8,7 @@ import { ChannelInventoryApiError, buildPolicyDraftRequest, describeError, saveP
 import { isDefinitiveDraftRejection } from "./draft-session";
 import { formatPercent, formatUnits } from "./format";
 import {
-  findPolicyHead, policyFormToValue, policyValueToForm, savedPolicy,
+  effectiveMaxPublish, findPolicyHead, policyFormToValue, policyValueToForm, savedPolicy,
   type Channel, type PolicyForm, type PolicyFormError, type View,
 } from "./model";
 import { applyChannelRule, buildApplyRuleCommand, reviewChannelRule } from "./rule-apply";
@@ -58,9 +58,11 @@ function displayField(key: StockRuleFieldKey, value: ChannelExposurePolicyValue)
   switch (key) {
     case "shareBps": return value.shareBps === null ? null : formatPercent(value.shareBps);
     case "holdbackSellableUnits": return value.holdbackSellableUnits === null ? null : formatUnits(value.holdbackSellableUnits);
-    case "maxPublish":
-      if (value.maxPublish === null) return null;
-      return value.maxPublish.mode === "unlimited" ? "No max" : formatUnits(value.maxPublish.units);
+    case "maxPublish": {
+      const maxPublish = effectiveMaxPublish(value);
+      if (maxPublish === null) return null;
+      return maxPublish.mode === "unlimited" ? "No max" : formatUnits(maxPublish.units);
+    }
     case "minPublishSellableUnits": return value.minPublishSellableUnits === null ? null : formatUnits(value.minPublishSellableUnits);
   }
 }
@@ -132,6 +134,16 @@ export function stockRuleInputFor(head: ChannelExposurePolicyHead | null): Stock
   };
 }
 
+/**
+ * True when the saved rule still carries the retired "Show as out of stock"
+ * setting. The form already shows it as Max 0, so it must be saved again even
+ * when the operator typed nothing new; otherwise the old flag would be applied.
+ */
+export function needsStockRuleRewrite(head: ChannelExposurePolicyHead | null): boolean {
+  const saved = savedPolicy(head)?.value ?? null;
+  return saved !== null && saved.eligible !== null;
+}
+
 export function sameStockRuleInput(left: StockRuleInput, right: StockRuleInput): boolean {
   return left.sharePercent.trim() === right.sharePercent.trim() && left.bufferUnits.trim() === right.bufferUnits.trim()
     && left.maxMode === right.maxMode && (left.maxMode !== "units" || left.maxUnits.trim() === right.maxUnits.trim())
@@ -144,9 +156,10 @@ export type StockRuleValueResult =
 
 /**
  * The exact rule value to save on one channel. Only the four stock numbers
- * change; anything else already saved on that rule (availability, sharing,
- * supply warehouses) is carried over untouched, so this view can never
- * silently drop a setting it does not show.
+ * change; the sharing mode and supply warehouses already saved on that rule
+ * are carried over untouched, so this view never silently drops a setting it
+ * does not show. A retired "Show as out of stock" is not carried: it is saved
+ * as the Max 0 the form shows for it.
  */
 export function stockRuleValue(input: StockRuleInput, head: ChannelExposurePolicyHead | null): StockRuleValueResult {
   const existing = savedPolicy(head)?.value ?? null;
