@@ -199,6 +199,7 @@ jobs:
           server/infrastructure/__tests__/scheduler-failure-context.test.ts
           server/infrastructure/__tests__/scheduler-lock.test.ts
           server/infrastructure/__tests__/session-advisory-lock.test.ts
+          server/infrastructure/__tests__/startup-migration-guard.test.ts
           server/platform/observability/__tests__/background-work-report.test.ts
           server/platform/observability/__tests__/runtime-memory-observer.test.ts
           server/platform/observability/__tests__/runtime-memory-wiring.test.ts
