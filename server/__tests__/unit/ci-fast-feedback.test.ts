@@ -445,6 +445,21 @@ describe("fast CI preserves coverage and required checks", () => {
       "server/modules/inventory/__tests__/replenishment-source-empty.test.ts",
       "server/modules/inventory/__tests__/cycle-count-replen-feedback.test.ts",
       "server/modules/inventory/__tests__/dedicated-replen-bin.test.ts",
+      "client/src/components/shipping/service-levels/__tests__/fulfillment-catalog-display.test.ts",
+      "client/src/components/shipping/service-levels/__tests__/fulfillment-routing-api.test.ts",
+      "client/src/components/shipping/__tests__/channel-routing-api.test.ts",
+      "client/src/components/shipping/__tests__/configuration-invalidation.test.ts",
+      "client/src/components/shipping/__tests__/pricing-program-coverage-cell.test.ts",
+      "client/src/components/shipping/__tests__/pricing-program-draft-api.test.ts",
+      "client/src/components/shipping/__tests__/pricing-program-draft-state.test.ts",
+      "client/src/components/shipping/__tests__/pricing-programs-api.test.ts",
+      "client/src/components/shipping/__tests__/product-rule-form.test.ts",
+      "client/src/components/shipping/__tests__/rate-program-copy-api.test.ts",
+      "client/src/components/shipping/__tests__/rate-table-model.test.ts",
+      "client/src/components/shipping/__tests__/rate-test-region-select.test.ts",
+      "client/src/components/shipping/__tests__/rate-test-sku-search.test.ts",
+      "client/src/components/shipping/__tests__/rate-test-weight.test.ts",
+      "client/src/pages/__tests__/shipping-fulfillment-routing-ui.test.ts",
     ]) expect(contracts).toContain(file);
     expect(contracts).toContain("--strict --types node scripts/inventory-cutover-records-*.ts");
     // Step 1 plan S2-5 (TESTS17): the Catalog page's browser stubs and specs are type-checked, every spec they serve named.
@@ -493,6 +508,26 @@ describe("fast CI preserves coverage and required checks", () => {
     const onDisk = [
       ...testFilesIn("server/infrastructure/__tests__/", /\.test\.ts$/),
       ...testFilesIn("server/platform/observability/__tests__/", /\.test\.ts$/),
+    ];
+    expect(onDisk.length).toBeGreaterThan(0);
+    for (const file of onDisk) {
+      expect(existsSync(new URL(file, repositoryRoot)), "Missing test file: " + file).toBe(true);
+      expect(registered.has(file), "Not run in CI: " + file).toBe(true);
+    }
+  });
+
+  it("names only real, distinct files and runs every shipping configuration client test in the contracts job (SHP-1)", () => {
+    const files = vitestStepFiles(job(workflow, "contracts"), "Shipping configuration UI contracts");
+    expect(files.length).toBeGreaterThan(0);
+    expect(new Set(files).size).toBe(files.length);
+    for (const file of files) {
+      expect(existsSync(new URL(file, repositoryRoot)), "Missing test file: " + file).toBe(true);
+    }
+    const registered = new Set(files);
+    const onDisk = [
+      ...testFilesIn("client/src/components/shipping/__tests__/", /\.test\.ts$/),
+      ...testFilesIn("client/src/components/shipping/service-levels/__tests__/", /\.test\.ts$/),
+      "client/src/pages/__tests__/shipping-fulfillment-routing-ui.test.ts",
     ];
     expect(onDisk.length).toBeGreaterThan(0);
     for (const file of onDisk) {
