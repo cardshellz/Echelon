@@ -25,7 +25,7 @@
 import { createHash } from "crypto";
 import { resolvePackingFulfillmentChannel } from "../domain/fulfillment-channel";
 import { and, desc, eq, sql } from "drizzle-orm";
-import { SharedShippingConfigurationRepository } from "../../shipping-engine/infrastructure/shared-configuration.repository";
+import { SharedShippingConfigurationRepository } from "../../shipping-engine/shared-packaging-configuration.api";
 import type { FulfillmentChannel } from "@shared/shipping/configuration";
 import {
   orderItems,

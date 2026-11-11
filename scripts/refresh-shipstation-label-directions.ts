@@ -101,8 +101,8 @@ async function main(argv: readonly string[] = process.argv.slice(2)): Promise<vo
   ] = await Promise.all([
     import("../server/db"),
     import("../server/modules/oms/shipstation.service"),
-    import("../server/modules/shipping/carrier-tracking.repository"),
-    import("../server/modules/shipping/carrier-tracking.service"),
+    import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
+    import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
     import("../server/modules/oms/shipstation-unmapped-physical"),
   ]);
 

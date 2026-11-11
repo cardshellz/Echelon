@@ -10,7 +10,7 @@ import { MILLIMETERS_PER_INCH } from "@shared/shipping/dimensions";
 import {
   returnRateInputSchema, returnRateResultSchema,
   type ReturnRateInput, type ReturnRateCandidate,
-} from "../../shipping-engine/application/return-rate-provider.port";
+} from "../../shipping-engine/return-shipping-and-labels.api";
 
 const Exact = Decimal.clone({ precision: 40 });
 export const customerReturnCostReferenceSchema = z.object({

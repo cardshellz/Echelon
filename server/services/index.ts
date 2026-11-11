@@ -1,9 +1,9 @@
 import { randomUUID as newShippingStatusToken } from "node:crypto";
-import { createSavedLabelStatusSource } from "../modules/shipping/saved-label-status.source";
-import { PostgresSalesChannelDeliveryEvidenceStore } from "../modules/shipping/sales-channel-delivery.repository";
+import { createSavedLabelStatusSource } from "../modules/shipping/package-history-and-delivery.api";
+import { PostgresSalesChannelDeliveryEvidenceStore } from "../modules/shipping/package-history-and-delivery.api";
 import { ShopifyCustomerReturnSnapshotReader } from "../modules/returns/infrastructure/customer-return-shopify-snapshot.reader";
-import { PostgresSavedLabelStatusStore } from "../modules/shipping/saved-label-status.repository";
-import { SavedLabelStatusWorker } from "../modules/shipping/saved-label-status.worker";
+import { PostgresSavedLabelStatusStore } from "../modules/shipping/package-history-and-delivery.api";
+import { SavedLabelStatusWorker } from "../modules/shipping/package-history-and-delivery.api";
 import { createReservedInventoryTransferOwner } from "../modules/inventory-planning/infrastructure/reserved-inventory-transfer.repository";
 import { createPackageReconciliationService } from "./package-reconciliation";
 /**
@@ -121,27 +121,27 @@ import {
   createShipStationLabelReconciliationRepository,
   createShipStationPhysicalRecoveryService,
 } from "../modules/oms/shipstation-execution.api";
-import { createShipStationRelatedLabelReader } from "../modules/shipping/shipstation-related-labels.reader";
+import { createShipStationRelatedLabelReader } from "../modules/shipping/shipstation-provider-reconciliation.api";
 import { createShipStationEngine } from "../modules/shipping";
-import { createDrizzleCarrierTrackingRepository } from "../modules/shipping/carrier-tracking.repository";
+import { createDrizzleCarrierTrackingRepository } from "../modules/shipping/carrier-tracking-and-dispatch.api";
 import {
   CarrierTrackingService,
   makeCarrierTrackingLogger,
   systemCarrierTrackingClock,
-} from "../modules/shipping/carrier-tracking.service";
+} from "../modules/shipping/carrier-tracking-and-dispatch.api";
 import { createPackageAllocationLabelCommercialWorkflow } from "./package-allocation-label-commercial-workflow";
 import {
   PackageAllocationLabelCommercialFulfillmentService,
-} from "../modules/shipping/package-allocation-label-commercial-fulfillment.service";
+} from "../modules/shipping/package-allocation-authority.api";
 import {
   createPackageAllocationLabelCommercialReviewRepository,
-} from "../modules/shipping/package-allocation-label-commercial-review.repository";
+} from "../modules/shipping/package-allocation-authority.api";
 import {
   CarrierDispatchAuthorityError,
   type CarrierDispatchAuthority,
-} from "../modules/shipping/carrier-dispatch-authority";
-import { createShipStationTrackingEventsClient } from "../modules/shipping/shipstation-tracking-events.client";
-import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shipstation-physical-recovery.client";
+} from "../modules/shipping/carrier-tracking-and-dispatch.api";
+import { createShipStationTrackingEventsClient } from "../modules/shipping/shipstation-tracking-transport.api";
+import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shipstation-provider-reconciliation.api";
 import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client";
 import { ChannelIdentityService } from "../modules/channels/channel-identity.service";
 import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../modules/channels/shopify-stock-link-source";
@@ -179,7 +179,7 @@ import { WalmartAdapter } from "../modules/channels/adapters/walmart/walmart.ada
 import { WalmartOrderPollService } from "../modules/channels/adapters/walmart/walmart-order-poll.service";
 import { PostgresInventoryPublicationSupplyReader } from "../modules/inventory-planning/infrastructure/inventory-publication-supply-read.repository";
 import { createWalmartFulfillmentExecutor } from "../modules/channels/adapters/walmart/walmart-fulfillment";
-import { AesGcmFulfillmentProviderCredentialCipher } from "../modules/shipping-engine/infrastructure/fulfillment-provider-credential-cipher";
+import { AesGcmFulfillmentProviderCredentialCipher } from "../modules/shipping-engine/fulfillment-routing-and-connections.api";
 import { createEbayAdapter } from "../modules/channels/adapters/ebay.adapter";
 import { ChannelEbayListingPhotoResolver } from "../modules/channels/ebay-listing-photos.service";
 import { createCatalogPublicImageUrl } from "../modules/catalog/catalog-public-image";

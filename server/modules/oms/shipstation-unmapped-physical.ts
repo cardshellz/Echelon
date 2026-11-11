@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { shipStationV1Instant, ShipStationDateError } from "@shared/utils/shipstation-date";
-import { normalizeTrackingNumber } from "../shipping/carrier-tracking.domain";
+import { normalizeTrackingNumber } from "../shipping/carrier-tracking-and-dispatch.api";
 
 export const SHIPSTATION_UNMAPPED_PHYSICAL_RULE =
   "shipstation_unmapped_physical_shipment";

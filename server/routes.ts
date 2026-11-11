@@ -100,20 +100,20 @@ import { registerCustomerReturnPreviewRoutes } from "./modules/returns/interface
 import { registerCustomerReturnCustomerRoutes } from "./modules/returns/interfaces/http/customer-return-customer.routes";
 import { registerDropshipOpsSurfaceRoutes } from "./modules/dropship/interfaces/http/dropship-ops-surface.routes";
 import { registerDropshipMarketplaceOrderIntakeRoutes } from "./modules/dropship/interfaces/http/dropship-marketplace-order-intake.routes";
-import { registerShippingAdminRoutes } from "./modules/shipping-engine/shipping-admin.routes";
-import { registerOutboundShipmentRoutes } from "./modules/shipping-engine/outbound-shipments.routes";
-import { registerCarrierCallbackRoutes } from "./modules/shipping-engine/interfaces/http/carrier-callback.routes";
-import { registerShadowAdminRoutes } from "./modules/shipping-engine/interfaces/http/shadow-admin.routes";
-import { registerPackingRoutes } from "./modules/shipping-engine/interfaces/http/packing.routes";
-import { registerRateTableAdminRoutes } from "./modules/shipping-engine/interfaces/http/rate-table-admin.routes";
-import { registerRateBookAdminRoutes } from "./modules/shipping-engine/interfaces/http/rate-book-admin.routes";
-import { registerSharedConfigurationAdminRoutes } from "./modules/shipping-engine/interfaces/http/shared-configuration-admin.routes";
-import { registerRateProgramCloneRoutes } from "./modules/shipping-engine/interfaces/http/rate-program-clone.routes";
-import { registerProductRatePolicyAdminRoutes } from "./modules/shipping-engine/interfaces/http/product-rate-policy-admin.routes";
-import { registerManualRateQuoteRoutes } from "./modules/shipping-engine/interfaces/http/manual-rate-quote.routes";
-import { registerChannelShippingPolicyAdminRoutes } from "./modules/shipping-engine/interfaces/http/channel-shipping-policy-admin.routes";
-import { registerStorefrontRatePreviewRoutes } from "./modules/shipping-engine/interfaces/http/storefront-rate-preview.routes";
-import { registerDestinationScopeReaderRoutes } from "./modules/shipping-engine/interfaces/http/destination-scope-reader.routes";
+import { registerShippingAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerOutboundShipmentRoutes } from "./modules/shipping-engine/routes.api";
+import { registerCarrierCallbackRoutes } from "./modules/shipping-engine/routes.api";
+import { registerShadowAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerPackingRoutes } from "./modules/shipping-engine/routes.api";
+import { registerRateTableAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerRateBookAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerSharedConfigurationAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerRateProgramCloneRoutes } from "./modules/shipping-engine/routes.api";
+import { registerProductRatePolicyAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerManualRateQuoteRoutes } from "./modules/shipping-engine/routes.api";
+import { registerChannelShippingPolicyAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerStorefrontRatePreviewRoutes } from "./modules/shipping-engine/routes.api";
+import { registerDestinationScopeReaderRoutes } from "./modules/shipping-engine/routes.api";
 import { registerInventoryAvailabilityMasterDataRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-master-data.routes";
 import { registerInventoryAvailabilityShadowRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-shadow.routes";
 import { registerInventoryAvailabilityBackfillRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-backfill.routes";
@@ -135,9 +135,9 @@ import { registerInventoryChannelExposureRoutes } from "./modules/inventory-plan
 import { registerInventoryStockSendRoutes } from "./modules/inventory-planning/interfaces/http/inventory-stock-send.routes";
 import { registerInventoryProductSyncRoutes } from "./modules/inventory-planning/interfaces/http/inventory-product-sync.routes";
 import { registerInventoryPublicationGlobalControlRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-global-control.routes";
-import { registerShippingDestinationNormalizationRoutes } from "./modules/shipping-engine/interfaces/http/shipping-destination-normalization.routes";
-import { registerFulfillmentRoutingAdminRoutes } from "./modules/shipping-engine/interfaces/http/fulfillment-routing-admin.routes";
-import { registerFulfillmentProviderConnectionAdminRoutes } from "./modules/shipping-engine/interfaces/http/fulfillment-provider-connections-admin.routes";
+import { registerShippingDestinationNormalizationRoutes } from "./modules/shipping-engine/routes.api";
+import { registerFulfillmentRoutingAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerFulfillmentProviderConnectionAdminRoutes } from "./modules/shipping-engine/routes.api";
 
 export async function registerRoutes(
   httpServer: Server,

@@ -9,7 +9,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { CarrierTrackingSubscriptionSweepResult } from "../server/modules/shipping/carrier-tracking.service";
+import type { CarrierTrackingSubscriptionSweepResult } from "../server/modules/shipping/carrier-tracking-and-dispatch.api";
 
 type Mode = "dry-run" | "execute";
 
@@ -364,9 +364,9 @@ async function main(): Promise<void> {
 
   const [databaseModule, repositoryModule, serviceModule, clientModule] = await Promise.all([
     import("../server/db"),
-    import("../server/modules/shipping/carrier-tracking.repository"),
-    import("../server/modules/shipping/carrier-tracking.service"),
-    import("../server/modules/shipping/shipstation-tracking-subscriptions.client"),
+    import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
+    import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
+    import("../server/modules/shipping/shipstation-tracking-transport.api"),
   ]);
   const client = clientModule.createShipStationTrackingSubscriptionsClient();
   const service = new serviceModule.CarrierTrackingService({

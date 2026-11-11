@@ -1,8 +1,8 @@
 import type { Express, Response } from "express";
 import { limitPageRead } from "../../platform/http/page-read-limit";
 import { requirePermission } from "../../routes/middleware";
-import { queryShipmentOrderContext, ShipmentAccessError } from "../shipping/outbound-shipment-access.query";
-import { queryOutboundShipments } from "../shipping/outbound-shipment-list.query";
+import { queryShipmentOrderContext, ShipmentAccessError } from "../shipping/outbound-shipment-queries.api";
+import { queryOutboundShipments } from "../shipping/outbound-shipment-queries.api";
 import { logger } from "../../platform/observability/logger";
 
 export function registerOutboundShipmentRoutes(app: Express): void {

@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   isPositivePostgresInteger,
   parseExactPositiveWmsShipmentItems,
-} from "../shipping/shipstation-provider-contents.domain";
+} from "../shipping/shipstation-provider-reconciliation.api";
 
 export interface ExpectedShipStationOrderIdentity {
   shipmentId: number;

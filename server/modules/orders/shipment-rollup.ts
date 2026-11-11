@@ -37,8 +37,8 @@ import {
   type ShipmentStatus,
   type WmsWarehouseStatus,
 } from "@shared/enums/order-status";
-import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
-import type { EngineCancelResult, EngineRef } from "../shipping/types";
+import { engineRefFromRow } from "../shipping/engine-and-reconcile.api";
+import type { EngineCancelResult, EngineRef } from "../shipping/engine-and-reconcile.api";
 import { deriveWmsShippingProgress } from "@shared/wms-shipping-progress";
 import { shippingProgressLine, wmsShippingProgressQuery, type WmsShippingProgressRow } from "../wms/shipment-execution-and-projection.api";
 

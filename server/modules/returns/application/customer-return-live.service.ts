@@ -16,7 +16,7 @@ import { CustomerReturnLiveError } from "./customer-return-live-error";
 import { CustomerReturnIntakeError } from "./customer-return-intake.ports";
 import { assertCustomerReturnShippingReady, customerReturnOriginAddress, customerReturnPreflightShipments } from "./customer-return-shipping-plan";
 import { quoteCustomerReturnShipment, customerReturnShippingQuoteError } from "./customer-return-shipping-quote";
-import type { ReturnRateProvider } from "../../shipping-engine/application/return-rate-provider.port";
+import type { ReturnRateProvider } from "../../shipping-engine/return-shipping-and-labels.api";
 import type { CustomerReturnLabelSettings } from "@shared/returns/customer-return-label.contract";
 import { resolveCustomerReturnPortalPolicy, type CustomerReturnPortalPolicyReader } from "./customer-return-policy";
 import { snapshotReturnPolicy } from "../domain/return-case";

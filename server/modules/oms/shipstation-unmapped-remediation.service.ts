@@ -25,11 +25,11 @@ import {
   inspectShipStationProviderPackageEcho,
   reconcileShipStationProviderPackageEcho,
   type ProviderPackageEchoResult,
-} from "../shipping/provider-package-echo.service";
+} from "../shipping/shipstation-provider-reconciliation.api";
 import {
   isPositivePostgresInteger,
   parseExactPositiveWmsShipmentItems,
-} from "../shipping/shipstation-provider-contents.domain";
+} from "../shipping/shipstation-provider-reconciliation.api";
 
 export interface ShipStationUnmappedLocator {
   exceptionId?: number;

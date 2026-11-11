@@ -553,7 +553,7 @@ interface WmsSyncServices {
    */
   memberResolver?: Pick<MemberResolver, "resolve">;
   slaMonitor?: any;
-  shippingEngine?: import("../shipping/engine").ShippingEngine;
+  shippingEngine?: import("../shipping/engine-and-reconcile.api").ShippingEngine;
   shipStation?: any;
   omsService?: any;
 }

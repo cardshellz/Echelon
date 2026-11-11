@@ -1,7 +1,7 @@
 import type { InboundTrackingConfig, InboundTrackingSnapshot } from "@shared/procurement/inbound-tracking";
-import { resolveShipStationTrackingApiKey } from "../shipping/shipstation-tracking-api-config";
-import { createShipStationTrackingEventsClient, createShipStationTrackingHydrationRequest, ShipStationTrackingEventsError, isRetryableTrackingEventsError } from "../shipping/shipstation-tracking-events.client";
-import { readBoundedResponseText } from "../shipping/shipstation-tracking-http";
+import { resolveShipStationTrackingApiKey } from "../shipping/shipstation-tracking-transport.api";
+import { createShipStationTrackingEventsClient, createShipStationTrackingHydrationRequest, ShipStationTrackingEventsError, isRetryableTrackingEventsError } from "../shipping/shipstation-tracking-transport.api";
+import { readBoundedResponseText } from "../shipping/shipstation-tracking-transport.api";
 import { InboundTrackingProviderError, parseSeaRatesTracking, parseShipStationInboundTracking } from "./inbound-tracking.domain";
 
 export interface InboundTrackingProvider {

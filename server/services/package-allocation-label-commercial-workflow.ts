@@ -3,16 +3,16 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool } from "pg";
 import * as schema from "@shared/schema";
-import { PackageAllocationBootstrapPersistenceService } from "../modules/shipping/package-allocation-bootstrap.service";
+import { PackageAllocationBootstrapPersistenceService } from "../modules/shipping/package-allocation-authority.api";
 import {
   createTransactionBoundPackageAllocationLedgerRepository,
   PackageAllocationLedgerRepositoryError,
-} from "../modules/shipping/package-allocation-ledger.repository";
-import type { PackageAllocationLabelCommercialWorkflow } from "../modules/shipping/package-allocation-label-commercial-fulfillment.service";
+} from "../modules/shipping/package-allocation-authority.api";
+import type { PackageAllocationLabelCommercialWorkflow } from "../modules/shipping/package-allocation-authority.api";
 import {
   adaptPersistedDeclaredPackageLifecycleEvidence,
   projectPersistedDeclaredPackageLifecycleShadow,
-} from "../modules/shipping/declared-package-lifecycle-shadow.domain";
+} from "../modules/shipping/declared-package-lifecycle.api";
 import {
   createChannelFulfillmentAuthorityRepository,
   createChannelFulfillmentAuthorityService,

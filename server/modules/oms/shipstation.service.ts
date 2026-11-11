@@ -27,7 +27,7 @@ import { buildTrackingUrl } from "./tracking-url.util";
 import { createShipStationLabelReconciliationClient } from "./shipstation-label-reconciliation.client";
 import type { ShipStationLabelSnapshot } from "./shipstation-label-reconciliation.service";
 import { createShipStationReplacementLabelRefresh } from "./shipstation-replacement-label-refresh.service";
-import type { ShipStationRelatedLabelReader } from "../shipping/shipstation-related-labels.reader";
+import type { ShipStationRelatedLabelReader } from "../shipping/shipstation-provider-reconciliation.api";
 import {
   dispatchShipmentEvent,
   recomputeOrderStatusFromShipments,
@@ -35,10 +35,10 @@ import {
 } from "../orders/shipment-rollup-and-context.api";
 import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
 import { partitionCommercialRequestedQuantity } from "./shipstation-commercial-quantity.domain";
-import type { EngineShipmentItemAppendResult } from "../shipping/types";
+import type { EngineShipmentItemAppendResult } from "../shipping/engine-and-reconcile.api";
 import { maybeGetPackInstruction } from "../cartonization/pack-plan.api";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
-import { parseProviderAmountCents } from "../shipping/types";
+import { parseProviderAmountCents } from "../shipping/engine-and-reconcile.api";
 import {
   SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON,
   isExactShipStationPhysicalShipmentReplay,
@@ -48,19 +48,19 @@ import {
   resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "./shipstation-unmapped-physical";
-import type { ShippingProviderLabelObserver } from "../shipping/carrier-tracking.service";
-import type { StoredShippingProviderLabelObservation } from "../shipping/carrier-tracking.repository";
+import type { ShippingProviderLabelObserver } from "../shipping/carrier-tracking-and-dispatch.api";
+import type { StoredShippingProviderLabelObservation } from "../shipping/carrier-tracking-and-dispatch.api";
 import type {
   PackageAllocationLabelCommercialFulfillmentService,
-} from "../shipping/package-allocation-label-commercial-fulfillment.service";
+} from "../shipping/package-allocation-authority.api";
 import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
-import { normalizeTrackingNumber } from "../shipping/carrier-tracking.domain";
+import { normalizeTrackingNumber } from "../shipping/carrier-tracking-and-dispatch.api";
 import {
   CarrierDispatchAuthorityError,
   type ConfirmCarrierDispatchInput,
   type ConfirmCarrierDispatchResult,
   type ReviewedCarrierDispatchRepairAuthorization,
-} from "../shipping/carrier-dispatch-authority";
+} from "../shipping/carrier-tracking-and-dispatch.api";
 import {
   adoptProvenShipStationOrder,
   proveShipStationOrderAdoption,
@@ -76,7 +76,7 @@ import {
   type ExactWmsShipmentItem,
   isPositivePostgresInteger,
   parseExactPositiveWmsShipmentItems,
-} from "../shipping/shipstation-provider-contents.domain";
+} from "../shipping/shipstation-provider-reconciliation.api";
 import {
   createShipStationApiRequester,
   ShipStationRateLimitError,

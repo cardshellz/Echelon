@@ -13,10 +13,10 @@ import {
   aggregateCustomerReturnCases,
   customerReturnCaseProgressFactsSchema,
 } from "../domain/customer-return-progress";
-import { returnLabelRecordSchema } from "../../shipping-engine/application/return-label-provider.port";
-import { createCarrierTrackingProjectionReader } from "../../shipping/carrier-tracking-projection.repository";
-import { presentCarrierPackageStatus } from "../../shipping/customer-delivery-progress";
-import type { CanonicalCarrierTrackingStatus } from "../../shipping/carrier-tracking.domain";
+import { returnLabelRecordSchema } from "../../shipping-engine/return-shipping-and-labels.api";
+import { createCarrierTrackingProjectionReader } from "../../shipping/carrier-tracking-and-dispatch.api";
+import { presentCarrierPackageStatus } from "../../shipping/package-history-and-delivery.api";
+import type { CanonicalCarrierTrackingStatus } from "../../shipping/carrier-tracking-and-dispatch.api";
 import { customerReturnCustomerPrincipalSchema, type CustomerReturnCustomerPrincipal } from "../application/customer-return-customer-operations.service";
 import { returnOwnerPredicate } from "./customer-return-owner-predicate";
 import type { CustomerReturnProgress } from "@shared/customer-account/order-progress";

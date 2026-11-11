@@ -2,7 +2,7 @@ import { z } from "zod";
 import { customerReturnDimensionsSchema, customerReturnParcelWeightSchema } from "@shared/returns/customer-return-parcel";
 import type { CustomerReturnAuthorizationAllocation, ReturnAuthorizationSnapshot } from "./customer-return-authorization.ports";
 import type { ReturnPolicySnapshot } from "../domain/return-case";
-import { returnLabelAddressSchema } from "../../shipping-engine/application/return-label-provider.port";
+import { returnLabelAddressSchema } from "../../shipping-engine/return-shipping-and-labels.api";
 
 const id = z.number().int().positive().safe();
 const text = (length: number) => z.string().trim().min(1).max(length);
