@@ -266,8 +266,13 @@ export function registerCarrierCallbackRoutes(
       wireDisposition: "delivered",
       timedOut: false,
     };
+    // Only the response side says whether the caller is still there. Do NOT
+    // consult req.destroyed: Node marks an incoming request destroyed as soon
+    // as its body has been fully read, which is always the case by the time a
+    // quote is computed, so it reported every connected checkout as gone and
+    // no rates were ever sent (2026-11-11 checkout-rates outage).
     const isConnectionClosed = (): boolean =>
-      Boolean(req.destroyed || res.destroyed || res.writableEnded);
+      Boolean(res.destroyed || res.writableEnded);
 
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const respond = (
