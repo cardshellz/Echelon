@@ -5,11 +5,18 @@ import { describe, expect, it } from "vitest";
 import {
   CustomerRefundReview,
   VendorSettlementReview,
+  clearStoredPendingCustomerRefund,
   formatMoney,
+  hydrateCustomerRefundCommandState,
+  isVerifiedTerminalCustomerRefundRejection,
+  readStoredPendingCustomerRefund,
+  writeStoredPendingCustomerRefund,
+  type StorageLike,
 } from "../ReturnCaseFinancialDialogs";
-import type {
-  CustomerRefundPreview,
-  VendorSettlementPreview,
+import {
+  ReturnCaseAdminApiError,
+  type CustomerRefundPreview,
+  type VendorSettlementPreview,
 } from "../return-case-admin-api";
 
 describe("return case financial reviews", () => {
@@ -48,7 +55,141 @@ describe("return case financial reviews", () => {
     expect(formatMoney(123_456, "USD")).toBe("USD 1,234.56");
     expect(formatMoney(-300, "USD")).toBe("-USD 3.00");
   });
+
+  it("persists and hydrates pending customer refund command identity across dialog reloads (CDEP-04)", () => {
+    const storage = memoryStorage();
+    const preview = customerRefundPreview();
+
+    writeStoredPendingCustomerRefund(
+      42,
+      {
+        idempotencyKey: "refund-browser-key-42",
+        quoteHash: preview.quoteHash,
+        notifyCustomer: false,
+        notes: "Hold email notification",
+      },
+      storage,
+    );
+
+    const fromStorage = hydrateCustomerRefundCommandState({
+      returnCaseId: 42,
+      nextPreview: preview,
+      currentPreview: null,
+      currentNotifyCustomer: true,
+      currentNotes: "",
+      currentIdentity: null,
+      storage,
+    });
+    expect(fromStorage).toEqual({
+      notifyCustomer: false,
+      notes: "Hold email notification",
+      commandIdentity: {
+        signature: JSON.stringify({
+          quoteHash: preview.quoteHash,
+          notifyCustomer: false,
+          notes: "Hold email notification",
+        }),
+        idempotencyKey: "refund-browser-key-42",
+        lockedByPendingReservation: false,
+      },
+    });
+
+    const serverHydrated = hydrateCustomerRefundCommandState({
+      returnCaseId: 42,
+      nextPreview: {
+        ...preview,
+        pendingCommand: {
+          customerRefundId: 401,
+          idempotencyKey: "refund-server-key-42",
+          quoteHash: preview.quoteHash,
+          notifyCustomer: true,
+          notes: "Server reserved note",
+          requestedAt: "2026-08-23T20:00:00.000Z",
+          reconciliationRequired: false,
+        },
+      },
+      currentPreview: null,
+      currentNotifyCustomer: false,
+      currentNotes: "",
+      currentIdentity: null,
+      storage,
+    });
+    expect(serverHydrated).toMatchObject({
+      notifyCustomer: true,
+      notes: "Server reserved note",
+      commandIdentity: {
+        idempotencyKey: "refund-server-key-42",
+        lockedByPendingReservation: true,
+      },
+    });
+    expect(readStoredPendingCustomerRefund(42, storage)?.idempotencyKey).toBe("refund-server-key-42");
+
+    clearStoredPendingCustomerRefund(42, storage);
+    expect(readStoredPendingCustomerRefund(42, storage)).toBeNull();
+  });
+
+  it("clears stored refund command identity only on verified terminal rejections (CDEP-04)", () => {
+    expect(isVerifiedTerminalCustomerRefundRejection(new Error("network drop"))).toBe(false);
+    expect(
+      isVerifiedTerminalCustomerRefundRejection(
+        new ReturnCaseAdminApiError({
+          message: "Unconfirmed",
+          status: 503,
+          code: "RETURN_CUSTOMER_REFUND_RESULT_UNCONFIRMED",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isVerifiedTerminalCustomerRefundRejection(
+        new ReturnCaseAdminApiError({
+          message: "Pending exists",
+          status: 409,
+          code: "RETURN_CUSTOMER_REFUND_PENDING_EXISTS",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isVerifiedTerminalCustomerRefundRejection(
+        new ReturnCaseAdminApiError({
+          message: "Reconcile first",
+          status: 409,
+          code: "RETURN_CUSTOMER_REFUND_RECONCILIATION_REQUIRED",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isVerifiedTerminalCustomerRefundRejection(
+        new ReturnCaseAdminApiError({
+          message: "Rejected",
+          status: 409,
+          code: "RETURN_CUSTOMER_REFUND_REJECTED",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isVerifiedTerminalCustomerRefundRejection(
+        new ReturnCaseAdminApiError({
+          message: "Invalid input",
+          status: 400,
+          code: "RETURN_FINANCIAL_INPUT_INVALID",
+        }),
+      ),
+    ).toBe(true);
+  });
 });
+
+function memoryStorage(): StorageLike {
+  const store = new Map<string, string>();
+  return {
+    getItem: (key) => store.get(key) ?? null,
+    setItem: (key, value) => {
+      store.set(key, value);
+    },
+    removeItem: (key) => {
+      store.delete(key);
+    },
+  };
+}
 
 function customerRefundPreview(): CustomerRefundPreview {
   return {

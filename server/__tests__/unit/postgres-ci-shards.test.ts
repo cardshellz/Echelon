@@ -307,6 +307,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/shipping-engine/__tests__/integration/shared-configuration.integration.test.ts",
       "server/modules/shipping-engine/__tests__/integration/channel-packaging.integration.test.ts",
       "server/modules/shipping-engine/__tests__/integration/warehouse-packaging.integration.test.ts",
+      // Returns coexistence: cross-model entitlement & settlement fence over disposable PostgreSQL (RET-1).
+      "server/modules/returns/__tests__/integration/return-coexistence-entitlement-fence.integration.test.ts",
     );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);

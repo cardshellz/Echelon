@@ -10,6 +10,13 @@ import {
 
 const SHOPIFY_RETURNS_API_VERSION = "2026-07";
 const REQUEST_TIMEOUT_MS = 20_000;
+const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
+const PRE_EXECUTION_GRAPHQL_CODES = new Set([
+  "GRAPHQL_PARSE_FAILED",
+  "GRAPHQL_VALIDATION_FAILED",
+  "VARIABLE_NOT_DEFINED",
+  "BAD_USER_INPUT",
+]);
 
 interface ShopifyCredentials {
   shopDomain: string;
@@ -103,7 +110,7 @@ export class ShopifyCustomerRefundProvider implements CustomerRefundProvider {
         restockType: "NO_RESTOCK",
       })),
     };
-    const data = await this.graphql<SuggestedRefundData>(shopifyChannelId(input.source), {
+    const data = await this.graphql<SuggestedRefundData>(shopifyChannelId(input.source), "query", {
       query: `query ReturnCaseSuggestedRefund($id: ID!, $refundLineItems: [RefundLineItemInput!]) {
         order(id: $id) {
           id
@@ -217,7 +224,7 @@ export class ShopifyCustomerRefundProvider implements CustomerRefundProvider {
       kind: "REFUND",
       amount: centsToMoney(transaction.amountCents),
     }));
-    const data = await this.graphql<RefundCreateData>(shopifyChannelId(input.source), {
+    const data = await this.graphql<RefundCreateData>(shopifyChannelId(input.source), "mutation", {
       query: `mutation IssueReturnCaseCustomerRefund($input: RefundInput!, $idempotencyKey: String!) {
         refundCreate(input: $input) @idempotent(key: $idempotencyKey) {
           refund {
@@ -248,6 +255,14 @@ export class ShopifyCustomerRefundProvider implements CustomerRefundProvider {
         },
       },
     });
+    if (!data.refundCreate || typeof data.refundCreate !== "object") {
+      throw providerError(
+        "RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID",
+        "Shopify returned no refundCreate payload.",
+        true,
+        { reconciliationRequired: true },
+      );
+    }
     const refund = data.refundCreate.refund;
     const userErrors = data.refundCreate.userErrors ?? [];
     if (refund) {
@@ -278,10 +293,16 @@ export class ShopifyCustomerRefundProvider implements CustomerRefundProvider {
         { fields: userErrors.map((error) => error.field ?? null) },
       );
     }
-    throw providerError("RETURN_CUSTOMER_REFUND_RESULT_UNCONFIRMED", "Shopify did not return the created refund.", true);
+    throw providerError("RETURN_CUSTOMER_REFUND_RESULT_UNCONFIRMED", "Shopify did not return the created refund.", true, {
+      reconciliationRequired: true,
+    });
   }
 
-  private async graphql<T>(channelId: number, payload: { query: string; variables: Record<string, unknown> }): Promise<T> {
+  private async graphql<T>(
+    channelId: number,
+    operationKind: "query" | "mutation",
+    payload: { query: string; variables: Record<string, unknown> },
+  ): Promise<T> {
     const credentials = await this.credentials.load(channelId);
     if (!credentials) {
       throw providerError("RETURN_CUSTOMER_REFUND_CREDENTIALS_MISSING", "Shopify credentials are not configured for this return case channel.", false, { channelId });
@@ -289,49 +310,93 @@ export class ShopifyCustomerRefundProvider implements CustomerRefundProvider {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let response: Response;
+    let rawBody: string;
     try {
-      response = await this.fetchImpl(
-        `https://${credentials.shopDomain}/admin/api/${SHOPIFY_RETURNS_API_VERSION}/graphql.json`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": credentials.accessToken,
+      try {
+        response = await this.fetchImpl(
+          `https://${credentials.shopDomain}/admin/api/${SHOPIFY_RETURNS_API_VERSION}/graphql.json`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Shopify-Access-Token": credentials.accessToken,
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal,
           },
-          body: JSON.stringify(payload),
-          signal: controller.signal,
-        },
-      );
-    } catch (error) {
-      throw providerError(
-        "RETURN_CUSTOMER_REFUND_PROVIDER_UNAVAILABLE",
-        "Shopify could not be reached.",
-        true,
-        { error: error instanceof Error ? error.message : String(error) },
-      );
+        );
+      } catch (error) {
+        throw providerError(
+          "RETURN_CUSTOMER_REFUND_PROVIDER_UNAVAILABLE",
+          "Shopify could not be reached.",
+          true,
+          {
+            error: error instanceof Error ? error.message : String(error),
+            ...(operationKind === "mutation" ? { reconciliationRequired: true } : {}),
+          },
+        );
+      }
+      rawBody = await readResponseText(response, controller.signal, operationKind);
     } finally {
       clearTimeout(timer);
     }
-    const body = await readJson(response);
     if (!response.ok) {
+      const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
       throw providerError(
         "RETURN_CUSTOMER_REFUND_PROVIDER_HTTP_ERROR",
         `Shopify returned HTTP ${response.status}.`,
-        response.status >= 429 || response.status >= 500,
-        { status: response.status },
+        retryable,
+        {
+          status: response.status,
+          ...(operationKind === "mutation" && retryable ? { reconciliationRequired: true } : {}),
+        },
+      );
+    }
+    const body = parseJsonBody(rawBody, response.status, operationKind);
+    if (!body || typeof body !== "object") {
+      throw providerError(
+        "RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID",
+        "Shopify returned an unreadable response.",
+        operationKind === "mutation",
+        {
+          status: response.status,
+          ...(operationKind === "mutation" ? { reconciliationRequired: true } : {}),
+        },
       );
     }
     const graph = body as { data?: T; errors?: Array<{ message?: unknown; extensions?: unknown }> };
     if (graph.errors?.length) {
-      const messages = graph.errors.map((error) => requiredText(error.message, "Shopify GraphQL error"));
-      const retryable = messages.some((message) => /concurrent|thrott|temporar|try again/i.test(message));
+      const messages = graph.errors.map((error) =>
+        typeof error?.message === "string" && error.message.trim() !== ""
+          ? error.message.trim()
+          : "Unknown Shopify GraphQL error",
+      );
+      const transientMessage = messages.some((message) =>
+        /concurrent|thrott|temporar|try again|timeout|unavailable|internal/i.test(message),
+      );
+      const allPreExecutionValidation = graph.errors.every((error) => {
+        if (!error?.extensions || typeof error.extensions !== "object") return false;
+        const code = (error.extensions as Record<string, unknown>).code;
+        return typeof code === "string" && PRE_EXECUTION_GRAPHQL_CODES.has(code);
+      });
+      const retryable = operationKind === "mutation"
+        ? !allPreExecutionValidation
+        : transientMessage;
       throw providerError(
-        retryable ? "RETURN_CUSTOMER_REFUND_PROVIDER_BUSY" : "RETURN_CUSTOMER_REFUND_PROVIDER_GRAPHQL_ERROR",
+        transientMessage ? "RETURN_CUSTOMER_REFUND_PROVIDER_BUSY" : "RETURN_CUSTOMER_REFUND_PROVIDER_GRAPHQL_ERROR",
         messages.join("; "),
         retryable,
+        operationKind === "mutation" && retryable ? { reconciliationRequired: true } : undefined,
       );
     }
-    if (!graph.data) throw providerError("RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID", "Shopify returned no GraphQL data.", true);
+    if (!graph.data || typeof graph.data !== "object") {
+      throw providerError(
+        "RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID",
+        "Shopify returned no GraphQL data.",
+        true,
+        operationKind === "mutation" ? { reconciliationRequired: true } : undefined,
+      );
+    }
     return graph.data;
   }
 }
@@ -400,11 +465,158 @@ function readCreatedRefundExecution(
   };
 }
 
-async function readJson(response: Response): Promise<unknown> {
+async function readResponseText(
+  response: Response,
+  signal: AbortSignal,
+  operationKind: "query" | "mutation",
+): Promise<string> {
+  if (signal.aborted) {
+    throw providerError(
+      "RETURN_CUSTOMER_REFUND_PROVIDER_UNAVAILABLE",
+      "Shopify response timed out before completion.",
+      true,
+      operationKind === "mutation" ? { status: response.status, reconciliationRequired: true } : { status: response.status },
+    );
+  }
+  if (response.body && typeof response.body.getReader === "function") {
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8", { fatal: false });
+    const chunks: string[] = [];
+    let totalBytes = 0;
+    const onAbort = () => {
+      void reader.cancel().catch(() => undefined);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      while (true) {
+        const readResult = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => {
+            if (signal.aborted) {
+              reject(new Error("Shopify response body timed out."));
+              return;
+            }
+            signal.addEventListener(
+              "abort",
+              () => reject(new Error("Shopify response body timed out.")),
+              { once: true },
+            );
+          }),
+        ]);
+        if (readResult.done) break;
+        const value = readResult.value;
+        if (value) {
+          totalBytes += value.byteLength;
+          if (totalBytes > MAX_RESPONSE_BYTES) {
+            void reader.cancel().catch(() => undefined);
+            throw providerError(
+              "RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID",
+              "Shopify response exceeded the maximum allowed size.",
+              operationKind === "mutation" || response.status >= 500,
+              {
+                status: response.status,
+                maxBytes: MAX_RESPONSE_BYTES,
+                ...(operationKind === "mutation" ? { reconciliationRequired: true } : {}),
+              },
+            );
+          }
+          chunks.push(decoder.decode(value, { stream: true }));
+        }
+      }
+      chunks.push(decoder.decode());
+      return chunks.join("");
+    } catch (error) {
+      if (error instanceof CustomerRefundProviderError) throw error;
+      throw providerError(
+        "RETURN_CUSTOMER_REFUND_PROVIDER_UNAVAILABLE",
+        signal.aborted
+          ? "Shopify response timed out before completion."
+          : "Shopify response stream failed before completion.",
+        true,
+        {
+          status: response.status,
+          error: error instanceof Error ? error.message : String(error),
+          ...(operationKind === "mutation" ? { reconciliationRequired: true } : {}),
+        },
+      );
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+      try {
+        reader.releaseLock();
+      } catch {
+        // Ignore if reader is already closed or cancelled.
+      }
+    }
+  }
   try {
-    return await response.json();
+    const fallbackPromise = typeof response.text === "function"
+      ? response.text()
+      : response.json().then((parsed) => JSON.stringify(parsed));
+    const text = await Promise.race([
+      fallbackPromise,
+      new Promise<never>((_, reject) => {
+        if (signal.aborted) {
+          reject(new Error("Shopify response timed out."));
+          return;
+        }
+        signal.addEventListener("abort", () => reject(new Error("Shopify response timed out.")), { once: true });
+      }),
+    ]);
+    if (Buffer.byteLength(text, "utf8") > MAX_RESPONSE_BYTES) {
+      throw providerError(
+        "RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID",
+        "Shopify response exceeded the maximum allowed size.",
+        operationKind === "mutation" || response.status >= 500,
+        {
+          status: response.status,
+          maxBytes: MAX_RESPONSE_BYTES,
+          ...(operationKind === "mutation" ? { reconciliationRequired: true } : {}),
+        },
+      );
+    }
+    return text;
+  } catch (error) {
+    if (error instanceof CustomerRefundProviderError) throw error;
+    if (signal.aborted) {
+      throw providerError(
+        "RETURN_CUSTOMER_REFUND_PROVIDER_UNAVAILABLE",
+        "Shopify response timed out before completion.",
+        true,
+        {
+          status: response.status,
+          ...(operationKind === "mutation" ? { reconciliationRequired: true } : {}),
+        },
+      );
+    }
+    throw providerError(
+      "RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID",
+      "Shopify returned an unreadable response.",
+      operationKind === "mutation" || response.status >= 500,
+      {
+        status: response.status,
+        ...(operationKind === "mutation" ? { reconciliationRequired: true } : {}),
+      },
+    );
+  }
+}
+
+function parseJsonBody(
+  rawBody: string,
+  status: number,
+  operationKind: "query" | "mutation",
+): unknown {
+  try {
+    return JSON.parse(rawBody);
   } catch {
-    throw providerError("RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID", "Shopify returned an unreadable response.", response.status >= 500);
+    throw providerError(
+      "RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID",
+      "Shopify returned an unreadable response.",
+      operationKind === "mutation" || status >= 500,
+      {
+        status,
+        ...(operationKind === "mutation" ? { reconciliationRequired: true } : {}),
+      },
+    );
   }
 }
 

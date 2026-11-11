@@ -6,6 +6,7 @@ import type {
   DropshipNoInspectionReviewRepository,
 } from "../application/dropship-no-inspection-review-service";
 import { DropshipError } from "../domain/errors";
+import { assertNoCanonicalSettlementOvercreditForRma } from "./dropship-return.repository";
 
 interface RmaReviewRow {
   id: number;
@@ -131,8 +132,13 @@ export class PgDropshipNoInspectionReviewRepository implements DropshipNoInspect
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
-      const locked = await client.query<{ id: number; status: string }>(
-        `SELECT id, status FROM dropship.dropship_rmas WHERE id = $1 LIMIT 1 FOR UPDATE`,
+      const locked = await client.query<{
+        id: number;
+        intake_id: number | null;
+        oms_order_id: string | number | null;
+        status: string;
+      }>(
+        `SELECT id, intake_id, oms_order_id, status FROM dropship.dropship_rmas WHERE id = $1 LIMIT 1 FOR UPDATE`,
         [input.rmaId],
       );
       const rma = locked.rows[0];
@@ -174,6 +180,12 @@ export class PgDropshipNoInspectionReviewRepository implements DropshipNoInspect
           { rmaId: input.rmaId, status: rma.status },
         );
       }
+
+      await assertNoCanonicalSettlementOvercreditForRma(client, {
+        rmaId: input.rmaId,
+        intakeId: rma.intake_id,
+        omsOrderId: rma.oms_order_id === null ? null : Number(rma.oms_order_id),
+      });
 
       // 1. Vendor wallet credit from the pool (insurance_pool_credit).
       const account = await getOrCreateWalletAccountForUpdate(client, {

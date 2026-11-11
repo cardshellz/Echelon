@@ -118,7 +118,19 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
+      - name: Install Chromium and OS dependencies with mirror retry
+        run: |
+          echo 'APT::Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/80-retries >/dev/null
+          for attempt in 1 2 3; do
+            if npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 5
+            sudo apt-get update --fix-missing || true
+          done
       - name: Require the complete durable customer journey
         run: node --import tsx scripts/ci/returns-workflow-acceptance.ts
       - name: Upload connected acceptance evidence

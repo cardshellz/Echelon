@@ -761,6 +761,15 @@ export const customerRefundQuoteSchema = z.object({
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Refund quote transactions are duplicated.", path: ["transactions"] });
   }
 });
+export const customerRefundPendingCommandSchema = z.object({
+  customerRefundId: positiveSafeIntegerSchema,
+  idempotencyKey: idempotencyKeySchema,
+  quoteHash: sha256Schema,
+  notifyCustomer: z.boolean(),
+  notes: notesSchema,
+  requestedAt: dateTimeSchema,
+  reconciliationRequired: z.boolean(),
+}).strict();
 export const customerRefundPreviewSchema = z.object({
   commandType: z.literal("issue_customer_refund"),
   caseId: positiveSafeIntegerSchema,
@@ -769,6 +778,7 @@ export const customerRefundPreviewSchema = z.object({
   externalOrderNumber: nullableRequiredTextSchema,
   quoteHash: sha256Schema,
   quote: customerRefundQuoteSchema,
+  pendingCommand: customerRefundPendingCommandSchema.nullable().optional(),
 }).strict();
 export const issueCustomerRefundInputSchema = z.object({
   idempotencyKey: idempotencyKeySchema,
@@ -880,6 +890,7 @@ export type RecordReturnDispositionInput = z.input<typeof recordReturnDispositio
 export type RecordReturnDispositionResult = z.infer<typeof recordReturnDispositionResultSchema>;
 export type ApplyReturnInventoryTreatmentInput = z.input<typeof applyReturnInventoryTreatmentInputSchema>;
 export type ApplyReturnInventoryTreatmentResult = z.infer<typeof applyReturnInventoryTreatmentResultSchema>;
+export type CustomerRefundPendingCommand = z.infer<typeof customerRefundPendingCommandSchema>;
 export type CustomerRefundPreview = z.infer<typeof customerRefundPreviewSchema>;
 export type IssueCustomerRefundInput = z.input<typeof issueCustomerRefundInputSchema>;
 export type IssueCustomerRefundResult = z.infer<typeof issueCustomerRefundResultSchema>;

@@ -71,6 +71,16 @@ export interface CustomerRefundQuote {
   transactions: CustomerRefundQuoteTransaction[];
 }
 
+export interface CustomerRefundPendingCommand {
+  customerRefundId: number;
+  idempotencyKey: string;
+  quoteHash: string;
+  notifyCustomer: boolean;
+  notes: string | null;
+  requestedAt: string;
+  reconciliationRequired: boolean;
+}
+
 export interface CustomerRefundPreview {
   commandType: "issue_customer_refund";
   caseId: number;
@@ -79,6 +89,7 @@ export interface CustomerRefundPreview {
   externalOrderNumber: string | null;
   quoteHash: string;
   quote: CustomerRefundQuote;
+  pendingCommand?: CustomerRefundPendingCommand | null;
 }
 
 export interface ShopifyRefundExecution {
@@ -159,6 +170,7 @@ export interface ReserveCustomerRefundInput {
 
 export interface ReturnCaseCustomerRefundStore {
   findByIdempotencyKey(idempotencyKey: string): Promise<StoredCustomerRefund | null>;
+  findPendingByCaseId?(caseId: number): Promise<StoredCustomerRefund | null>;
   reserve(input: ReserveCustomerRefundInput): Promise<StoredCustomerRefund>;
   complete(input: {
     customerRefundId: number;
@@ -283,6 +295,30 @@ export class ReturnCaseFinancialService {
 
   async previewCustomerRefund(rawCaseId: number): Promise<CustomerRefundPreview> {
     const caseId = positiveSafeInteger(rawCaseId, "caseId");
+    const pending = await this.customerRefundStore.findPendingByCaseId?.(caseId) ?? null;
+    if (pending) {
+      const source = await this.loadCase(caseId);
+      requireActionAvailable(source, "issue_customer_refund");
+      const ageMs = checkedClock(this.clock).getTime() - pending.requestedAt.getTime();
+      return {
+        commandType: "issue_customer_refund",
+        caseId,
+        caseNumber: source.caseNumber,
+        externalOrderId: source.externalOrderId,
+        externalOrderNumber: source.externalOrderNumber,
+        quoteHash: pending.quoteHash,
+        quote: pending.quote,
+        pendingCommand: {
+          customerRefundId: pending.customerRefundId,
+          idempotencyKey: pending.idempotencyKey,
+          quoteHash: pending.quoteHash,
+          notifyCustomer: pending.notifyCustomer,
+          notes: pending.notes,
+          requestedAt: pending.requestedAt.toISOString(),
+          reconciliationRequired: ageMs < 0 || ageMs >= SHOPIFY_IDEMPOTENCY_RETRY_WINDOW_MS,
+        },
+      };
+    }
     return (await this.quoteCustomerRefund(caseId)).preview;
   }
 
@@ -336,6 +372,20 @@ export class ReturnCaseFinancialService {
     const requestHash = hashRequest("issue_customer_refund", input);
     const stored = await this.customerRefundStore.findByIdempotencyKey(input.idempotencyKey);
     if (stored) return this.resumeCustomerRefund(stored, input, requestHash);
+
+    const pendingForCase = await this.customerRefundStore.findPendingByCaseId?.(input.caseId) ?? null;
+    if (pendingForCase && pendingForCase.idempotencyKey !== input.idempotencyKey) {
+      throw new ReturnCaseFinancialError(
+        "RETURN_CUSTOMER_REFUND_PENDING_EXISTS",
+        "A customer refund attempt is already pending for this return case. Reload the refund preview to resume the pending command.",
+        409,
+        {
+          caseId: input.caseId,
+          customerRefundId: pendingForCase.customerRefundId,
+          pendingIdempotencyKey: pendingForCase.idempotencyKey,
+        },
+      );
+    }
 
     const quoted = await this.quoteCustomerRefund(input.caseId);
     const { preview, source } = quoted;
@@ -518,8 +568,10 @@ export class ReturnCaseFinancialService {
         "The Shopify refund result is not yet confirmed. Retrying with the same idempotency key is safe.",
         503,
         {
+          ...(error instanceof CustomerRefundProviderError && error.context ? error.context : {}),
           caseId: input.caseId,
           customerRefundId: stored.customerRefundId,
+          idempotencyKey: stored.idempotencyKey,
           providerMessage: error instanceof Error ? error.message : String(error),
         },
       );

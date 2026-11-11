@@ -139,6 +139,14 @@ export class PostgresReturnCaseCustomerRefundStore implements ReturnCaseCustomer
     return result.rows[0] ? mapStoredCustomerRefund(result.rows[0]) : null;
   }
 
+  async findPendingByCaseId(caseId: number): Promise<StoredCustomerRefund | null> {
+    const result = await pool.query<CustomerRefundRow>(
+      customerRefundSelect("refund.return_case_id = $1 AND refund.status = 'pending'"),
+      [caseId],
+    );
+    return result.rows[0] ? mapStoredCustomerRefund(result.rows[0]) : null;
+  }
+
   async reserve(input: ReserveCustomerRefundInput): Promise<StoredCustomerRefund> {
     const client = await pool.connect();
     try {
@@ -204,6 +212,20 @@ export class PostgresReturnCaseCustomerRefundStore implements ReturnCaseCustomer
       if (isUniqueViolation(error)) {
         const replay = await this.findByIdempotencyKey(input.idempotencyKey);
         if (replay) return replay;
+        const pending = await this.findPendingByCaseId(input.source.caseId);
+        if (pending) {
+          throw financialError(
+            "RETURN_CUSTOMER_REFUND_PENDING_EXISTS",
+            "A customer refund attempt is already pending for this return case. Reload the refund preview to resume the pending command.",
+            409,
+            {
+              caseId: input.source.caseId,
+              customerRefundId: pending.customerRefundId,
+              pendingIdempotencyKey: pending.idempotencyKey,
+            },
+          );
+        }
+        throw stale("A customer refund was already recorded for this return case.");
       }
       throw classifyDatabaseError(error, "RETURN_CUSTOMER_REFUND_RESERVE_FAILED", "Customer refund intent could not be reserved.");
     } finally {
@@ -375,6 +397,7 @@ export class PostgresReturnCaseVendorSettlementStore implements ReturnCaseVendor
       }
       const lockedCase = await lockCase(client, input.source.caseId);
       requireFreshSource(lockedCase, input.source);
+      await assertNoLegacyDropshipSettlementOvercredit(client, input.source);
       const vendorId = input.source.vendorId;
       if (vendorId === null) throw evidenceInvalid("Vendor settlement source has no vendor identity.");
       const settlement = input.quote.settlement;
@@ -481,6 +504,120 @@ export class PostgresReturnCaseVendorSettlementStore implements ReturnCaseVendor
       client.release();
     }
   }
+}
+
+const RETURN_QUANTITY_LOCK_NAMESPACE = 918_413;
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
+
+async function assertNoLegacyDropshipSettlementOvercredit(
+  client: PoolClient,
+  source: ReturnFinancialCaseSource,
+): Promise<void> {
+  const omsOrderId = source.omsOrderId;
+  if (omsOrderId === null) return;
+
+  if (omsOrderId > 0 && omsOrderId <= POSTGRES_INTEGER_MAX) {
+    await client.query(
+      `SELECT pg_advisory_xact_lock($1, $2)`,
+      [RETURN_QUANTITY_LOCK_NAMESPACE, omsOrderId],
+    );
+  }
+
+  const legacyCredited = await client.query<{ credited_qty: unknown }>(
+    `SELECT COALESCE(SUM(ri.quantity), 0)::int AS credited_qty
+     FROM dropship.dropship_rma_items ri
+     JOIN dropship.dropship_rmas r ON r.id = ri.rma_id
+     LEFT JOIN dropship.dropship_order_intake doi ON doi.id = r.intake_id
+     WHERE (r.oms_order_id = $1 OR doi.oms_order_id = $1)
+       AND r.credited_at IS NOT NULL
+       AND ri.status <> 'rejected'
+       AND ri.source = 'order'
+       AND NOT EXISTS (
+         SELECT 1
+         FROM returns.return_cases rc
+         WHERE rc.source_provider = 'dropship'
+           AND rc.source_event_type = 'legacy_rma'
+           AND rc.source_event_id = r.id::text
+       )`,
+    [omsOrderId],
+  );
+  const legacyCreditedQty = nonNegativeInteger(
+    legacyCredited.rows[0]?.credited_qty ?? 0,
+    "legacy credited dropship return quantity",
+  );
+  if (legacyCreditedQty === 0) return;
+
+  const thisCaseQty = source.items.reduce((sum, item) => sum + item.quantity, 0);
+  if (thisCaseQty <= 0) return;
+
+  const intakeResult = await client.query<{ normalized_payload: unknown }>(
+    `SELECT normalized_payload
+     FROM dropship.dropship_order_intake
+     WHERE oms_order_id = $1
+     ORDER BY id ASC
+     LIMIT 1`,
+    [omsOrderId],
+  );
+  let totalOrderedQty = sumIntakeOrderedQuantity(intakeResult.rows[0]?.normalized_payload);
+  if (totalOrderedQty === 0) {
+    const economicsResult = await client.query<{ pricing_snapshot: unknown }>(
+      `SELECT pricing_snapshot
+       FROM dropship.dropship_order_economics_snapshots
+       WHERE oms_order_id = $1
+       ORDER BY id ASC
+       LIMIT 1`,
+      [omsOrderId],
+    );
+    totalOrderedQty = sumEconomicsOrderedQuantity(economicsResult.rows[0]?.pricing_snapshot);
+  }
+
+  const existingCanonicalSettled = await client.query<{ settled_qty: unknown }>(
+    `SELECT COALESCE(SUM(rci.quantity), 0)::int AS settled_qty
+     FROM returns.return_case_vendor_settlements rcvs
+     JOIN returns.return_cases rc ON rc.id = rcvs.return_case_id
+     JOIN returns.return_case_items rci ON rci.return_case_id = rc.id
+     WHERE rc.oms_order_id = $1
+       AND rc.id <> $2`,
+    [omsOrderId, source.caseId],
+  );
+  const existingCanonicalSettledQty = nonNegativeInteger(
+    existingCanonicalSettled.rows[0]?.settled_qty ?? 0,
+    "existing canonical settled quantity",
+  );
+
+  if (totalOrderedQty === 0 || legacyCreditedQty + existingCanonicalSettledQty + thisCaseQty > totalOrderedQty) {
+    throw financialError(
+      "RETURN_VENDOR_SETTLEMENT_LEGACY_CONFLICT",
+      "A legacy dropship RMA has already credited overlapping units for this order.",
+      409,
+      {
+        caseId: source.caseId,
+        omsOrderId,
+        legacyCreditedQuantity: legacyCreditedQty,
+        existingCanonicalSettledQuantity: existingCanonicalSettledQty,
+        settlingQuantity: thisCaseQty,
+        orderedQuantity: totalOrderedQty,
+      },
+    );
+  }
+}
+
+function sumIntakeOrderedQuantity(payload: unknown): number {
+  if (!isObject(payload) || !Array.isArray(payload.lines)) return 0;
+  return payload.lines.reduce((sum: number, line: unknown) => {
+    if (!isObject(line)) return sum;
+    const qty = typeof line.quantity === "number" ? line.quantity : Number(line.quantity);
+    return Number.isSafeInteger(qty) && qty > 0 ? sum + qty : sum;
+  }, 0);
+}
+
+function sumEconomicsOrderedQuantity(snapshot: unknown): number {
+  if (!isObject(snapshot) || !isObject(snapshot.wholesale) || !Array.isArray(snapshot.wholesale.lines)) return 0;
+  return snapshot.wholesale.lines.reduce((sum: number, line: unknown) => {
+    if (!isObject(line)) return sum;
+    const qty = typeof line.quantity === "number" ? line.quantity : Number(line.quantity);
+    return Number.isSafeInteger(qty) && qty > 0 ? sum + qty : sum;
+  }, 0);
 }
 
 function customerRefundSelect(predicate: string): string {
