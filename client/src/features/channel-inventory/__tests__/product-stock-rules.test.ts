@@ -55,13 +55,38 @@ describe("one SKU's stock rules across channels", () => {
     expect(rows.find(row => row.channel.id === 3)).toMatchObject({ hasException: false, outOfStock: false });
   });
 
-  it("flags a saved change that was never applied, and ignores a cleared rule", () => {
-    const pending = listChannelStockRules(view({ policyHeads: [channelDefault(3), skuRule(3, policyValue({ shareBps: 5000 }), true)] }), sku)[0];
-    expect(pending).toMatchObject({ pending: true, hasException: true });
-    expect(pending.cells.shareBps).toEqual({ display: "50%", source: "sku" });
+  it("shows what is in effect, and reports a saved change that was never applied separately", () => {
+    const pending = listChannelStockRules(view({ policyHeads: [channelDefault(3),
+      skuRule(3, policyValue({ shareBps: 5000, maxPublish: { mode: "units", units: "0" } }), true)] }), sku)[0];
+    // Nothing was applied: the channel still uses its default and the item is still selling.
+    expect(pending.cells.shareBps).toEqual({ display: "100%", source: "channel" });
+    expect(pending.cells.maxPublish).toEqual({ display: "No max", source: "channel" });
+    expect(pending).toMatchObject({ pending: true, pendingChange: "Stock % 50%, Max 0", hasException: true, liveException: false, outOfStock: false });
+  });
+
+  it("keeps showing the applied rule while a newer change to it waits", () => {
+    const head = policyHead({ scopeKey: "channel:3:variant:101", channelId: 3, scope: stockRuleScope(3, sku),
+      active: policyValue({ maxPublish: { mode: "units", units: "0" } }), draft: policyValue({ inheritAll: true }), revision: "5" });
+    const row = listChannelStockRules(view({ policyHeads: [channelDefault(3), head] }), sku)[0];
+    expect(row.cells.maxPublish).toEqual({ display: "0", source: "sku" });
+    expect(row).toMatchObject({ outOfStock: true, liveException: true, pending: true, pendingChange: "Clear exception" });
+  });
+
+  it("does not show an unapplied whole-product rule as in effect on a SKU", () => {
+    const productDraft = policyHead({ scopeKey: "channel:3:product:10", channelId: 3, scope: stockRuleScope(3, product),
+      draft: policyValue({ maxPublish: { mode: "units", units: "0" } }) });
+    const onSku = listChannelStockRules(view({ policyHeads: [channelDefault(3), productDraft] }), sku)[0];
+    expect(onSku).toMatchObject({ outOfStock: false, pending: false, pendingChange: null, liveException: false });
+    const onProduct = listChannelStockRules(view({ policyHeads: [channelDefault(3), productDraft] }), product)[0];
+    expect(onProduct).toMatchObject({ outOfStock: false, pending: true, pendingChange: "Max 0" });
+  });
+
+  it("ignores a cleared rule and names an old out-of-stock draft as Max 0", () => {
     const cleared = listChannelStockRules(view({ policyHeads: [channelDefault(3), skuRule(3, policyValue({ inheritAll: true }))] }), sku)[0];
-    expect(cleared).toMatchObject({ hasException: false });
+    expect(cleared).toMatchObject({ hasException: false, liveException: false, pending: false });
     expect(cleared.cells.shareBps.source).toBe("channel");
+    const retired = listChannelStockRules(view({ policyHeads: [channelDefault(3), skuRule(3, policyValue({ eligible: false }), true)] }), sku)[0];
+    expect(retired).toMatchObject({ pendingChange: "Max 0", outOfStock: false });
   });
 });
 
