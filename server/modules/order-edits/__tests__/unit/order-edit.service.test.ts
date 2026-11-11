@@ -46,6 +46,39 @@ describe("private order edit orchestration", () => {
     expect(h.provider.quote).not.toHaveBeenCalled();
     expect(h.provider.commit).not.toHaveBeenCalled();
   });
+  it("opens the order with every change closed when warehouse inspection fails unexpectedly", async () => {
+    const h = serviceHarness();
+    h.warehouse.inspect.mockRejectedValueOnce(
+      Object.assign(new Error('invalid input value for enum wms.shipment_status: "delivered"'), { code: "22P02" }),
+    );
+    const result = await h.service.order(4, 1, undefined, "customer:1");
+    expect(result.eligibility).toEqual({
+      editable: false,
+      reasons: ["Online changes are temporarily unavailable. Please try again shortly."],
+    });
+    expect(result.cancellation?.canReview).toBe(false);
+    expect(result.addressEligibility?.editable).toBe(false);
+    expect(result.warehouseStatus).toBe("Status unavailable");
+    expect(result.lines).toHaveLength(h.snapshot().lines.length);
+    expect(h.report).toHaveBeenCalledTimes(1);
+    expect(h.report.mock.calls[0][0]).toMatchObject({
+      code: "ORDER_EDIT_WAREHOUSE_INSPECTION_UNAVAILABLE",
+      phase: "order_read_warehouse_inspection",
+      omsOrderId: 1,
+      connectionId: 4,
+      occurredAt: expect.any(String),
+    });
+    expect(h.report.mock.calls[0][0]).not.toHaveProperty("operationId");
+    expect(h.events).toEqual([]);
+  });
+  it("still refuses to open the order when warehouse inspection reports a business refusal", async () => {
+    const h = serviceHarness();
+    h.warehouse.inspect.mockRejectedValueOnce(
+      new OrderEditError("ORDER_EDIT_CHANNEL_MISMATCH", "Warehouse and source channel identities differ."),
+    );
+    await expect(h.service.order(4, 1)).rejects.toMatchObject({ code: "ORDER_EDIT_CHANNEL_MISMATCH" });
+    expect(h.report).not.toHaveBeenCalled();
+  });
   it("rejects a stale request targeting a removed line before saving or preparing an edit", async () => {
     const h = serviceHarness();
     const removed = { ...h.snapshot().lines[0], id: "gid://shopify/LineItem/2",
