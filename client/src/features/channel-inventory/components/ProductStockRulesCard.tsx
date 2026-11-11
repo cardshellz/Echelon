@@ -18,6 +18,7 @@ import { invalidateChannelInventory, useChannelInventoryView } from "../hooks";
 import { sellableVariants, type PolicyFormError, type View } from "../model";
 import {
   EMPTY_STOCK_RULE_INPUT, STOCK_RULE_FIELDS, describeStockRuleOutcome, listChannelStockRules, mergeStockRuleInput,
+  needsStockRuleRewrite,
   sameStockRuleInput, saveAndApplyStockRule, stockRuleInputFor, stockRuleValue,
   type ChannelStockRuleRow, type StockRuleCell, type StockRuleInput, type StockRuleSaveOutcome, type StockRuleSubject,
 } from "../product-stock-rules";
@@ -234,7 +235,7 @@ function StockRuleEditor({ view, rows, allChannels, subjectName, onClose, onDone
       const next = inputFor(row);
       const parsed = stockRuleValue(next, row.head);
       if (!parsed.ok) { setErrors(parsed.errors); return; }
-      planned.push({ row, value: parsed.value, changed: !sameStockRuleInput(next, stockRuleInputFor(row.head)) });
+      planned.push({ row, value: parsed.value, changed: !sameStockRuleInput(next, stockRuleInputFor(row.head)) || needsStockRuleRewrite(row.head) });
     }
     setErrors([]);
     inFlight.current = true; setBusy(true);

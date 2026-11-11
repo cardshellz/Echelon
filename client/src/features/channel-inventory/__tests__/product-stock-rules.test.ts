@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ChannelInventoryApiError } from "../api";
 import {
-  EMPTY_STOCK_RULE_INPUT, describeStockRuleOutcome, listChannelStockRules, mergeStockRuleInput, sameStockRuleInput,
+  EMPTY_STOCK_RULE_INPUT, describeStockRuleOutcome, listChannelStockRules, mergeStockRuleInput,
+  needsStockRuleRewrite, sameStockRuleInput,
   saveAndApplyStockRule, stockRuleInputFor, stockRuleScope, stockRuleValue, type StockRuleSaveSteps,
 } from "../product-stock-rules";
 import { HASH_A, HASH_B, policyHead, policyValue, view } from "./fixtures";
@@ -78,10 +79,25 @@ describe("turning what was typed into the saved rule", () => {
   });
 
   it("keeps settings this view does not show", () => {
-    const head = skuRule(3, policyValue({ eligible: false, allocationSemantics: "partitioned", sourceFulfillmentNodeIds: [7], shareBps: 5000 }));
+    const head = skuRule(3, policyValue({ allocationSemantics: "partitioned", sourceFulfillmentNodeIds: [7], shareBps: 5000 }));
     const result = stockRuleValue({ ...EMPTY_STOCK_RULE_INPUT, bufferUnits: "4" }, head);
-    expect(result).toEqual({ ok: true, value: policyValue({ eligible: false, allocationSemantics: "partitioned",
+    expect(result).toEqual({ ok: true, value: policyValue({ allocationSemantics: "partitioned",
       sourceFulfillmentNodeIds: [7], holdbackSellableUnits: "4" }) });
+  });
+
+  it("shows a retired Show as out of stock rule as Max 0 and rewrites it as Max 0", () => {
+    const head = skuRule(3, policyValue({ eligible: false }));
+    const row = listChannelStockRules(view({ policyHeads: [channelDefault(3), head] }), sku)
+      .find(candidate => candidate.channel.id === 3)!;
+    expect(row.cells.maxPublish).toEqual({ display: "0", source: "sku" });
+    expect(row.outOfStock).toBe(true);
+    const input = stockRuleInputFor(head);
+    expect(input).toMatchObject({ maxMode: "units", maxUnits: "0" });
+    // Nothing typed, yet the rule must be saved again or the old flag would be applied.
+    expect(needsStockRuleRewrite(head)).toBe(true);
+    expect(stockRuleValue(input, head)).toEqual({ ok: true, value: policyValue({ maxPublish: { mode: "units", units: "0" } }) });
+    expect(needsStockRuleRewrite(skuRule(3, policyValue({ maxPublish: { mode: "units", units: "0" } })))).toBe(false);
+    expect(needsStockRuleRewrite(null)).toBe(false);
   });
 
   it("clears to 'follow the defaults' when every field is blank", () => {
