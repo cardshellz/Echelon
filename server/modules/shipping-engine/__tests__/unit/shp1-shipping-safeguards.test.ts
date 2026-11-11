@@ -1,4 +1,6 @@
 import express from "express";
+import { request as httpRequest, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 const { requirePermissionMock } = vi.hoisted(() => ({
@@ -378,6 +380,127 @@ describe("SHP-1 checkout callback deadline & snapshot truthfulness (SHIP-W02 / S
       ratesReturned: 0,
       computedRatesCount: 1,
     });
+  });
+});
+
+/**
+ * The cases above drive the handler with hand-built request/response objects,
+ * which cannot show how a real Node request behaves. These run the route on a
+ * real socket, the way Shopify calls it.
+ */
+describe("checkout callback over a real HTTP connection", () => {
+  const TOKEN = "secret-callback-token";
+
+  async function listen(dependencies: CheckoutRateDependencies): Promise<{ port: number; close: () => Promise<void> }> {
+    process.env.SHIPPING_CALLBACK_TOKEN = TOKEN;
+    const app = express();
+    app.use(express.json());
+    registerCarrierCallbackRoutes(app, dependencies);
+    const server = await new Promise<Server>((resolve) => {
+      const started = app.listen(0, "127.0.0.1", () => resolve(started));
+    });
+    return {
+      port: (server.address() as AddressInfo).port,
+      close: () => new Promise<void>((resolve) => {
+        server.closeAllConnections();
+        server.close(() => resolve());
+      }),
+    };
+  }
+
+  it("sends the computed rates to a caller that is still connected", async () => {
+    let snapshot: PersistCheckoutSnapshotInput | null = null;
+    const server = await listen(makeCheckoutDependencies({
+      // An await before the quote guarantees the request body has been fully
+      // read (and the request object retired by Node) before rates are sent.
+      quoteShipment: async (...args) => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return makeCheckoutDependencies().quoteShipment(...args);
+      },
+      persistSnapshot: async (input) => { snapshot = input; },
+    }));
+    try {
+      const response = await fetch(`http://127.0.0.1:${server.port}/api/shipping/rates-callback/${TOKEN}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(SAMPLE_SHOPIFY_BODY),
+        signal: AbortSignal.timeout(5_000),
+      });
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as { rates: unknown[] }).rates).toHaveLength(1);
+      await vi.waitFor(() => expect(snapshot).not.toBeNull());
+      expect(buildCheckoutSnapshotMetadata(snapshot!)).toMatchObject({
+        wireDisposition: "delivered", timedOut: false, ratesReturned: 1, computedRatesCount: 1,
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("answers with empty rates at the deadline when the quote is slow", async () => {
+    let releaseQuote!: () => void;
+    const quoteGate = new Promise<void>((resolve) => { releaseQuote = resolve; });
+    const server = await listen(makeCheckoutDependencies({
+      quoteShipment: async (...args) => {
+        await quoteGate;
+        return makeCheckoutDependencies().quoteShipment(...args);
+      },
+    }));
+    try {
+      const started = Date.now();
+      const response = await fetch(`http://127.0.0.1:${server.port}/api/shipping/rates-callback/${TOKEN}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(SAMPLE_SHOPIFY_BODY),
+        signal: AbortSignal.timeout(RESPONSE_DEADLINE_MS + 3_000),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ rates: [] });
+      expect(Date.now() - started).toBeGreaterThanOrEqual(RESPONSE_DEADLINE_MS - 50);
+    } finally {
+      releaseQuote();
+      await server.close();
+    }
+  });
+
+  it("records client_disconnected when the caller hangs up before the quote is ready", async () => {
+    let snapshot: PersistCheckoutSnapshotInput | null = null;
+    let quoteStarted!: () => void;
+    const started = new Promise<void>((resolve) => { quoteStarted = resolve; });
+    let releaseQuote!: () => void;
+    const quoteGate = new Promise<void>((resolve) => { releaseQuote = resolve; });
+    const server = await listen(makeCheckoutDependencies({
+      quoteShipment: async (...args) => {
+        quoteStarted();
+        await quoteGate;
+        return makeCheckoutDependencies().quoteShipment(...args);
+      },
+      persistSnapshot: async (input) => { snapshot = input; },
+    }));
+    try {
+      const body = JSON.stringify(SAMPLE_SHOPIFY_BODY);
+      const request = httpRequest({
+        host: "127.0.0.1", port: server.port, method: "POST",
+        path: `/api/shipping/rates-callback/${TOKEN}`,
+        headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) },
+      });
+      request.on("error", () => { /* expected: this test aborts its own request */ });
+      request.end(body);
+      await started;
+      const hungUp = new Promise<void>((resolve) => request.once("close", () => resolve()));
+      request.destroy();
+      await hungUp;
+      // Give the server a turn to observe the closed socket before quoting.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      releaseQuote();
+      await vi.waitFor(() => expect(snapshot).not.toBeNull());
+      expect(buildCheckoutSnapshotMetadata(snapshot!)).toMatchObject({
+        wireDisposition: "client_disconnected", ratesReturned: 0, computedRatesCount: 1,
+      });
+    } finally {
+      releaseQuote();
+      await server.close();
+    }
   });
 });
 

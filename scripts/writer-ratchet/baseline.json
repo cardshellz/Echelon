@@ -1782,6 +1782,15 @@
   "shipping.service_levels": [
     "modules/shipping-engine"
   ],
+  "shipping.shipment_items": [
+    "modules/shipping"
+  ],
+  "shipping.shipment_voids": [
+    "modules/shipping"
+  ],
+  "shipping.shipments": [
+    "modules/shipping"
+  ],
   "shipping.variant_shipping_attrs": [
     "modules/shipping-engine"
   ],

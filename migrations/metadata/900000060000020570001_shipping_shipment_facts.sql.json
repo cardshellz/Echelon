@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000060000020570001_shipping_shipment_facts.sql",
+  "generation": 60,
+  "pr": 2057,
+  "ordinal": 1,
+  "after": [
+    "900000059000020450001_publication_worker_wake.sql"
+  ]
+}

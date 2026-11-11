@@ -3,6 +3,7 @@ import pkg from "pg";
 const { Pool } = pkg;
 import * as schema from "@shared/schema";
 import { createDatabasePoolConfig } from "./database-pool-config";
+import { boundStartupMigrationClient } from "./startup-migration-guard";
 import { CHANNEL_PRICING_RULES_DDL } from "./modules/channels/infrastructure/channel-pricing-schema";
 import {
   getPostgresPoolSnapshot,
@@ -92,8 +93,12 @@ export async function runStartupMigrations(): Promise<void> {
     idleTimeoutMillis: 10000,
     connectionTimeoutMillis: 15000,
   }));
-  const client = await migrationsPool.connect();
+  const connection = await migrationsPool.connect();
   try {
+    // Boot must not wait on these fallbacks: bound every statement and the
+    // routine as a whole (see startup-migration-guard.ts). A limit that trips
+    // lands in the catch below, which skips the remainder and logs loudly.
+    const client = await boundStartupMigrationClient(connection);
     // Both pools receive the same search_path in the PostgreSQL startup packet.
     // Unqualified names therefore resolve consistently before any query can run.
 
@@ -1196,7 +1201,7 @@ export async function runStartupMigrations(): Promise<void> {
       error,
     );
   } finally {
-    client.release();
+    connection.release();
     await migrationsPool.end().catch(() => {}); // Close the separate pool
   }
 }

@@ -140,7 +140,10 @@ test("an old unapplied Show as out of stock rule is shown as Max 0 and saved as 
   const state = await setup(page, { extraHeads: [policyHead({ scopeKey: "channel:3:variant:101", channelId: 3, scope: skuScope(3),
     draft: policyValue({ eligible: false }), revision: "2" })] });
   await page.getByRole("radio", { name: "CARD-P5" }).click();
-  await expect(page.getByTestId("stock-rule-row-3")).toContainText("Out of stock");
+  // The old draft was never applied, so the SKU is not shown as out of stock; the waiting change is named.
+  await expect(page.getByTestId("stock-rule-row-3")).toContainText("Not applied: Max 0");
+  await expect(page.getByTestId("stock-rule-row-3")).not.toContainText("Out of stock");
+  await expect(page.getByTestId("stock-rule-row-3")).toContainText("No maxdefault");
   await page.getByRole("button", { name: "Set on all channels" }).click();
   const dialog = page.getByRole("dialog", { name: "Set on all channels" });
   await dialog.getByLabel("Max", { exact: true }).click();
@@ -168,7 +171,23 @@ test("a channel whose check fails is reported and the others still apply", async
   await expect(results).toContainText("Shopify US: Applied.");
   await expect(results).toContainText("eBay: Saved but not applied: eBay listing CARD-P5 has no stock link yet.");
   expect(state.applies.map(command => command.scope.channelId)).toEqual([3]);
-  await expect(page.getByTestId("stock-rule-row-4")).toContainText("Saved, not applied");
+  // eBay keeps showing what it uses now (the applied Buffer 5 rule), with the unapplied change named beside it.
+  const ebay = page.getByTestId("stock-rule-row-4");
+  await expect(ebay).toContainText("Not applied: Buffer 5, Hide when below 3");
+  await expect(ebay).toContainText("0default");
+  await expect(page.getByTestId("stock-rule-row-3")).toContainText("3SKU rule");
+});
+
+test("a whole-product rule names every SKU it reaches before it is saved", async ({ page }) => {
+  const state = await setup(page);
+  await expect(page.getByTestId("product-stock-rules")).toContainText("applies to all 2 SKUs (CARD-P5, CARD-EA)");
+  await page.getByRole("button", { name: "Set on all channels" }).click();
+  await expect(page.getByRole("dialog", { name: "Set on all channels" })).toContainText("For the whole product, all 2 SKUs (CARD-P5, CARD-EA).");
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await page.getByRole("radio", { name: "CARD-P5" }).click();
+  await page.getByRole("button", { name: "Set on all channels" }).click();
+  await expect(page.getByRole("dialog", { name: "Set on all channels" })).toContainText("For CARD-P5.");
+  expect(state.saves).toEqual([]);
 });
 
 test("a bad number changes nothing on any channel", async ({ page }) => {

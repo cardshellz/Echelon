@@ -82,7 +82,10 @@ function StockRules({ productId, canChange }: { productId: number; canChange: bo
   }
   const variants = view.data.selectedProduct?.id === productId ? sellableVariants(view.data.selectedProduct.variants) : [];
   const variant = variants.find(item => item.id === variantId) ?? null;
-  const subjectName = variant ? (variant.sku ?? variant.name) : "the whole product";
+  const skuNames = variants.map(item => item.sku ?? item.name);
+  // Name every SKU a whole-product rule reaches, so it is never mistaken for a one-SKU rule.
+  const subjectName = variant ? (variant.sku ?? variant.name)
+    : skuNames.length > 1 ? `the whole product, all ${skuNames.length} SKUs (${skuNames.join(", ")})` : "the whole product";
   const managedRows = rows.filter(row => row.managed);
 
   return (
@@ -102,7 +105,9 @@ function StockRules({ productId, canChange }: { productId: number; canChange: bo
         <p className="text-xs text-muted-foreground">
           {variant
             ? `A SKU rule wins over a whole-product rule, which wins over the channel default. Numbers count this SKU (${describePackUnit(variant.unitsPerVariant)}).`
-            : "A whole-product rule applies to every SKU that has no rule of its own."}
+            : skuNames.length > 1
+              ? `A whole-product rule applies to all ${skuNames.length} SKUs (${skuNames.join(", ")}) unless a SKU has a rule of its own. To change one SKU, pick it above.`
+              : "A whole-product rule applies to every SKU that has no rule of its own."}
         </p>
       </div>
 
@@ -196,9 +201,9 @@ function RowStatus({ row }: { row: ChannelStockRuleRow }) {
   return (
     <div className="flex flex-wrap items-center gap-1">
       {row.outOfStock ? <StatePill tone="held">Out of stock</StatePill>
-        : row.hasException ? <StatePill tone="neutral">Exception</StatePill>
+        : row.liveException ? <StatePill tone="neutral">Exception</StatePill>
         : <span className="text-xs text-muted-foreground">Channel default</span>}
-      {row.pending && <PendingPill>Saved, not applied</PendingPill>}
+      {row.pending && <PendingPill>Not applied: {row.pendingChange}</PendingPill>}
     </div>
   );
 }
@@ -297,7 +302,11 @@ function StockRuleEditor({ view, rows, allChannels, subjectName, onClose, onDone
             error={fieldError("minPublishSellableUnits")} disabled={busy} />
         </div>
         {fieldError("form") && <Callout tone="warning">{fieldError("form")}</Callout>}
-        {hasUnapplied && !allChannels && <Callout tone="warning">A saved change on this rule was never applied. Saving applies it.</Callout>}
+        {hasUnapplied && !allChannels && (
+          <Callout tone="warning">
+            A saved change on this rule was never applied ({single?.pendingChange}). The fields show that saved change, not what the channel uses now. Saving applies it.
+          </Callout>
+        )}
         <NoteField id="stock-rule-note" value={note} onChange={setNote} disabled={busy} />
         <DialogFooter className="gap-2 sm:justify-between">
           <Button type="button" variant="outline" className="min-h-[44px]" disabled={busy || rows.every(row => !row.hasException)}
