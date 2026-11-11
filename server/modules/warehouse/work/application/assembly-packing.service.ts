@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { assemblyPackingCommandSchema, assemblyPackingReceiptSchema, assemblyPackingResultSchema } from "@shared/warehouse-assembly-packing";
 import { workEvidenceIdSchema } from "@shared/warehouse-assembly-work";
-import { lockPackingReadiness, packingReadinessBlockers, recordAssemblyPackingReady } from "../../../wms/assembly-packing-readiness";
+import { lockPackingReadiness, packingReadinessBlockers, recordAssemblyPackingReady } from "../../../wms/assembly-and-packing.api";
 import { lockPackingReplenishmentBlockers } from "../../../inventory/work-execution.api";
 import { lockAssemblyClaimForWork } from "../../../inventory-planning/application/assembly-work-claim-access";
 import { lockAssemblyPackingPickEvidence } from "../../../inventory-planning/application/assembly-packing-claim-reader";

@@ -59,7 +59,6 @@ const OP = "00000000-0000-4000-8000-000000000001";
 // Minimal prerequisite tables; the new 0723 migration is executed verbatim.
 const prerequisites = `
 CREATE SCHEMA identity; CREATE SCHEMA channels; CREATE SCHEMA oms; CREATE SCHEMA wms; CREATE SCHEMA inventory; CREATE SCHEMA catalog;
-CREATE TYPE wms.shipment_status AS ENUM ('planned','queued','labeled','shipped','on_hold','voided','cancelled','returned','lost');
 CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer NOT NULL,sku text,is_active boolean NOT NULL DEFAULT true);
 INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(100,200,'SKU'),(101,200,'OTHER-PACK'),(999,999,'OTHER');
 CREATE TABLE identity.users(id varchar(255) PRIMARY KEY);
@@ -78,6 +77,7 @@ CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer REFERENCES 
   quantity integer,picked_quantity integer DEFAULT 0,fulfilled_quantity integer DEFAULT 0,status text DEFAULT 'pending',on_hold boolean DEFAULT false,
   product_id integer DEFAULT 100,catalog_product_id integer DEFAULT 200,sku text DEFAULT 'SKU',
   name text DEFAULT 'Product',paid_price_cents bigint DEFAULT 1000,unit_price_cents bigint DEFAULT 1000);
+CREATE TYPE wms.shipment_status AS ENUM ('planned','queued','labeled','shipped','on_hold','voided','cancelled','returned','lost');
 CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY,order_id integer REFERENCES wms.orders(id),status wms.shipment_status DEFAULT 'planned',
   held boolean DEFAULT false,requires_review boolean DEFAULT false,review_reason text,shipstation_order_id integer,shipping_engine text,engine_order_ref text,
   tracking_number text,shipped_at timestamptz,source text DEFAULT 'echelon_sync',held_at timestamptz,

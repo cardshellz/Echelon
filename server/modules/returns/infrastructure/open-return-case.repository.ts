@@ -9,7 +9,7 @@ import {
 } from "@shared/schema";
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
-import { createExpectedWmsReturn } from "../../wms/expected-return-commands";
+import { createExpectedWmsReturn } from "../../wms/returns-receipt.api";
 import {
   OpenReturnCaseError,
   type LockedReturnSourceContext,

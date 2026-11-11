@@ -64,6 +64,11 @@ import { orderAddressEligibility } from "../domain/order-address-eligibility";
 import { canObserveOrderEditRefundReview } from "../domain/order-edit-refund-recovery";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
+// Reported when opening an order cannot read warehouse availability.
+const ORDER_EDIT_INSPECTION_UNAVAILABLE_CODE =
+  "ORDER_EDIT_WAREHOUSE_INSPECTION_UNAVAILABLE";
+const ORDER_EDIT_INSPECTION_UNAVAILABLE_REASON =
+  "Online changes are temporarily unavailable. Please try again shortly.";
 // Bound each scheduler pass so one store cannot monopolize the worker.
 const RECONCILIATION_BATCH_SIZE = 25;
 const MILLISECONDS_PER_MINUTE = 60_000;
@@ -274,9 +279,11 @@ export class OrderEditService {
         ? active.id
         : undefined;
     if (ownedOperationId) assertOrderEditIdentity(reference, active!.baseline);
-    const warehouse = await this.warehouse.inspect(
+    const warehouse = await this.inspectForDisplay(
+      connectionId,
       omsOrderId,
       ownedOperationId,
+      actorId,
     );
     const reasons = [
       ...warehouse.reasons,
@@ -339,6 +346,40 @@ export class OrderEditService {
       warehouseStatus: fulfillment?.label ?? "Status unavailable",
       ...(fulfillment ? { fulfillment } : {}),
     });
+  }
+  /** Opening an order must not fail because warehouse availability could not be
+   * read. An unexpected inspection fault presents the order with every change
+   * closed and is reported for staff. Business refusals (OrderEditError) still
+   * propagate, and every command re-inspects under row locks, so this can only
+   * narrow what a customer may change, never widen it. */
+  private async inspectForDisplay(
+    connectionId: number,
+    omsOrderId: number,
+    ownedOperationId: string | undefined,
+    actorId: string | undefined,
+  ): Promise<Awaited<ReturnType<OrderEditWarehouse["inspect"]>>> {
+    try {
+      return await this.warehouse.inspect(omsOrderId, ownedOperationId);
+    } catch (error) {
+      if (error instanceof OrderEditError) throw error;
+      this.report({
+        ...(ownedOperationId ? { operationId: ownedOperationId } : {}),
+        code: ORDER_EDIT_INSPECTION_UNAVAILABLE_CODE,
+        phase: "order_read_warehouse_inspection",
+        omsOrderId,
+        connectionId,
+        ...(actorId
+          ? { actorFingerprint: orderEditActorFingerprint(actorId) }
+          : {}),
+        occurredAt: this.clock().toISOString(),
+        error: orderEditDiagnosticError(error),
+      });
+      return {
+        editable: false,
+        reasons: [ORDER_EDIT_INSPECTION_UNAVAILABLE_REASON],
+        wmsOrderIds: [],
+      };
+    }
   }
   /** Query-only account reads deliberately do not resolve OMS, inspect warehouse
    * eligibility, prepare calculated orders, or create an operation/hold. */

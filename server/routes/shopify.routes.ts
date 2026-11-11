@@ -11,8 +11,8 @@ import { broadcastOrdersUpdated } from "../websocket";
 import type { InsertOrderItem } from "@shared/schema";
 import { registerShopifyOAuthRoutes } from "./shopify-oauth.routes";
 import { parseCountryCode, resolveProviderCountryCode } from "@shared/country-code";
-import { normalizeShopifyRepairOrderId, normalizeShopifyRepairShopDomain, type ShopifyCustomerRepairScope } from "../modules/orders/shopify-customer-repair";
-import { runReconciliationNow } from "../modules/orders/shopify-order-reconciliation";
+import { normalizeShopifyRepairOrderId, normalizeShopifyRepairShopDomain, type ShopifyCustomerRepairScope } from "../modules/orders/reconciliation-and-repair.api";
+import { runReconciliationNow } from "../modules/orders/reconciliation-and-repair.api";
 import { sql } from "drizzle-orm";
 import {
   processShopifyFulfillmentIngress,

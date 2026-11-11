@@ -42,7 +42,11 @@ import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
 // REMOVED: order-sync-listener deleted (Phase 3 - duplicate path eliminated)
 // REMOVED: reconciliation rebuilt without syncSingleOrder for OMS decoupling
-import { initReconciliation, startShopifyReconciliation } from "./modules/orders/shopify-order-reconciliation";
+import {
+  initReconciliation,
+  runStartupZombieOrderRepair,
+  startShopifyReconciliation,
+} from "./modules/orders/reconciliation-and-repair.api";
 import { runStartupMigrations, db } from "./db";
 import { createServices } from "./services";
 import {
@@ -90,7 +94,8 @@ import {
   startInventoryPublicationSweepScheduler,
   type InventoryPublicationSweepSchedulerHandle,
 } from "./modules/channels/inventory-publication-sweep.scheduler";
-import { startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
+import { requestInventoryPublicationWorkerRun, startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
+import { startPublicationWakeListener } from "./modules/inventory-planning/infrastructure/publication-wake-listener";
 import { startQuantityPublicationCatchupWorker } from "./modules/inventory-planning/application/quantity-publication-catchup.worker";
 import { startStockLinkRunner } from "./modules/inventory-planning/infrastructure/stock-link-runner";
 import { startProductSyncWorkflowRunner } from "./modules/inventory-planning/infrastructure/product-sync-workflow.runner";
@@ -104,11 +109,10 @@ import {
 } from "./modules/oms/webhook-retry.api";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-intake.api";
 import { eq, and, sql } from "drizzle-orm";
-import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
-import { cancelWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
-import { runStartupZombieOrderRepair } from "./modules/orders/zombie-order-repair";
+import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup-and-context.api";
+import { cancelWmsOrderAndRelease } from "./modules/orders/order-lifecycle-and-cancellation.api";
 import { omsWarehouseCancellationSql } from "./modules/oms/order-linkage-sql.api";
-import { startPickingFollowupWorker } from "./modules/wms/picking-followup.worker";
+import { startPickingFollowupWorker } from "./modules/wms/picking-execution.api";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
 import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-reconciliation.scheduler";
 import { startShipStationLabelReconciliationScheduler } from "./modules/oms/shipstation-execution.api";
@@ -957,6 +961,13 @@ function startEchelonSyncScheduler(
 
       if (!schedulersDisabled("INVENTORY_PUBLICATION_WORKER_DISABLED")) {
         startInventoryPublicationOutboxWorker(services.inventoryPublicationOutbox, services.inventoryPublicationSelectionWork);
+        // Committed work wakes the worker at once; its timer is only the backstop.
+        const wakeListener = startPublicationWakeListener(dbPool, requestInventoryPublicationWorkerRun);
+        httpServer.once("close", () => {
+          void wakeListener.stop().catch(() => {
+            console.error(JSON.stringify({ event: "publication_wake_listener_shutdown_failed", code: "PUBLICATION_WAKE_LISTENER_SHUTDOWN_FAILED" }));
+          });
+        });
         const catchupWorker = startQuantityPublicationCatchupWorker(services.quantityPublicationCatchup, {
           reconcile: () => services.ebayPublicationReconciliation.processDue(),
         });
@@ -1231,7 +1242,7 @@ function startEchelonSyncScheduler(
             "oms_wms_reconcile",
           );
           if (transResult.transitioned) {
-            await db.execute(sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${row.id}`);
+            // cancelWmsOrderAndRelease already clears assigned_picker_id inside orders/cancel-wms-order.
             corrected.push(row);
           }
         }
@@ -1428,7 +1439,7 @@ function startEchelonSyncScheduler(
   // relative-to-sync-time SLA to absolute-deadline encoding).
   setTimeout(async () => {
     try {
-      const { recomputeAllActiveSortRanksDetailed } = await import("./modules/orders/orders.storage");
+      const { recomputeAllActiveSortRanksDetailed } = await import("./modules/orders/sort-rank-and-priority.api");
       const { updated, orderIds } = await recomputeAllActiveSortRanksDetailed();
       if (updated > 0) {
         console.log(`[Sort-Rank] Recomputed sort_rank for ${updated} active order(s)`);

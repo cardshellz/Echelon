@@ -1752,13 +1752,14 @@ export default function Replenishment() {
                                 <span className="hidden sm:inline">Retry</span>
                               </Button>
                             )}
-                            {task.status === "in_progress" && !noSourceReviewTask && (
+                            {["pending", "assigned", "in_progress"].includes(task.status) && !noSourceReviewTask && (
                               <>
                                 <Button
                                   size="sm"
                                   variant="destructive"
                                   className="min-h-[36px] text-xs"
                                   onClick={() => { setExceptionTaskId(task.id); setExceptionForm({ reason: "", notes: "" }); setShowExceptionDialog(true); }}
+                                  data-testid={`button-exception-task-${task.id}`}
                                 >
                                   <AlertCircle className="w-3 h-3 sm:mr-1" />
                                   <span className="hidden sm:inline">Exception</span>

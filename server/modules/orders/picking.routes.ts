@@ -260,7 +260,21 @@ export function registerPickingRoutes(app: Express) {
       const status = error?.isOperational && typeof error.statusCode === "number"
         ? error.statusCode
         : error?.name === "ValidationError" ? 400 : 500;
-      res.status(status).json({ error: error.message || "Failed to update item", code: error.code });
+      const reason = error?.context?.reason ?? error?.details?.reason ?? error?.reason ?? null;
+      const commandRejected = status === 409 && [
+        "pick_progress_conflict",
+        "pick_quantity_conflict",
+        "order_on_hold",
+        "order_item_on_hold",
+        "line_on_hold",
+        "pick_progress_delta_invalid",
+      ].includes(String(reason));
+      res.status(status).json({
+        error: error.message || "Failed to update item",
+        code: error.code,
+        ...(reason ? { reason } : {}),
+        ...(commandRejected ? { commandRejected: true } : {}),
+      });
     }
   });
 
@@ -277,7 +291,11 @@ export function registerPickingRoutes(app: Express) {
       });
 
       if (!result.success) {
-        return res.status(409).json(result);
+        return res.status(409).json({
+          ...result,
+          reason: result.error,
+          commandRejected: true,
+        });
       }
 
       res.json(result);
@@ -286,7 +304,19 @@ export function registerPickingRoutes(app: Express) {
       const status = error?.isOperational && typeof error.statusCode === "number"
         ? error.statusCode
         : error?.name === "ValidationError" ? 400 : 500;
-      res.status(status).json({ error: error.message || "Failed to unpick item", code: error.code });
+      const reason = error?.context?.reason ?? error?.details?.reason ?? error?.reason ?? null;
+      const commandRejected = status === 409 && [
+        "unpick_progress_conflict",
+        "unpick_identity_changed",
+        "order_on_hold",
+        "order_not_unpickable",
+      ].includes(String(reason));
+      res.status(status).json({
+        error: error.message || "Failed to unpick item",
+        code: error.code,
+        ...(reason ? { reason } : {}),
+        ...(commandRejected ? { commandRejected: true } : {}),
+      });
     }
   });
 
@@ -543,7 +573,7 @@ export function registerPickingRoutes(app: Express) {
         // P2a (LINE-ITEM-HOLD-DESIGN.md): mark held + split the line into its own
         // held shipment in one transaction, then re-push the main shipment WITHOUT
         // the held line if it was already in ShipStation.
-        const { holdLineItemWithSplit } = await import("../wms/line-item-hold");
+        const { holdLineItemWithSplit } = await import("../wms/pick-corrections-and-holds.api");
         const split = await holdLineItemWithSplit(db, {
           wmsOrderId: orderId,
           orderItemId: itemId,
@@ -602,7 +632,7 @@ export function registerPickingRoutes(app: Express) {
         // push that shipment so the released line ships on its own. A line that
         // already shipped gets heldShipmentId = null: its held shipment is closed
         // (or sent to review) so ShipStation never receives a second order for it.
-        const { releaseLineItemFromHold } = await import("../wms/line-item-hold");
+        const { releaseLineItemFromHold } = await import("../wms/pick-corrections-and-holds.api");
         const released = await releaseLineItemFromHold(db, {
           wmsOrderId: orderId,
           orderItemId: itemId,
@@ -889,6 +919,12 @@ export function registerPickingRoutes(app: Express) {
       res.json({ ...order, closedBlockers });
     } catch (error: any) {
       console.error("Error resolving exception:", error);
+      if (error?.isOperational && typeof error.statusCode === "number") {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          reason: error.context?.reason,
+        });
+      }
       res.status(500).json({ error: "Failed to resolve exception" });
     }
   });

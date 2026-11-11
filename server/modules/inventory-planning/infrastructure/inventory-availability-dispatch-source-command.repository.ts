@@ -139,4 +139,4 @@ async function loadPickedOwnership(client: CanonicalClaimTransactionClient, requ
     ORDER BY pick.id LIMIT $2 FOR UPDATE OF pick`, [resourceIds, MAX_ROWS + 1])).rows);
   return { claims, lines, resources, lots, picks };
 }
-import { assertNoOpenPickCorrectionPg } from "../../wms/pick-correction.repository";
+import { assertNoOpenPickCorrectionPg } from "../../wms/pick-corrections-and-holds.api";

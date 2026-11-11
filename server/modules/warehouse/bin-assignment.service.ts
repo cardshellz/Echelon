@@ -1,5 +1,5 @@
 import { eq, and, sql } from "drizzle-orm";
-import { backfillOpenOrderItemBinAssignment } from "../orders/bin-location-backfill";
+import { backfillOpenOrderItemBinAssignment } from "../orders/bin-location-backfill.api";
 import {
   productLocations,
   productVariants,

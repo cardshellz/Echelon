@@ -1,16 +1,16 @@
 /**
- * @echelon/orders — Order lifecycle, picking, fulfillment, returns, combining, SLA
+ * @echelon/orders — Order lifecycle, picking, fulfillment, returns, combining, SLA (`CI-03`)
  *
  * Tables owned: orders, orderItems, pickingLogs, shipments, shipmentItems,
  *               combinedOrderGroups, fulfillmentRoutingRules, orderItemCosts, orderItemFinancials
- * Depends on: catalog, warehouse, inventory, channels
+ * Depends on: catalog, warehouse, inventory, channels, wms
  */
 
-// Storage
-export { type IOrderStorage, orderMethods } from "./orders.storage";
+// Storage (encapsulated: raw method objects are module-private)
+export type { IOrderStorage } from "./orders.storage";
 export { orderPageQuerySchema } from "./order-list.repository";
-export { type IPickingLogStorage, pickingLogMethods } from "./picking-logs.storage";
-export { type IOrderHistoryStorage, orderHistoryMethods } from "./order-history.storage";
+export type { IPickingLogStorage } from "./picking-logs.storage";
+export type { IOrderHistoryStorage } from "./order-history.storage";
 
 import { type IOrderStorage, orderMethods } from "./orders.storage";
 import { type IPickingLogStorage, pickingLogMethods } from "./picking-logs.storage";
@@ -22,7 +22,6 @@ export const ordersStorage: OrdersModuleStorage = {
   ...pickingLogMethods,
   ...orderHistoryMethods,
 };
-
 
 // Service types
 export type { PickingService, PickItemResult, PickInventoryContext, BinCountResult } from "./picking.use-cases";

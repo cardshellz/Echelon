@@ -10,7 +10,7 @@ import {
   resolvePackageProfilesForSuite,
   type DropshipPackageProfile,
 } from "../domain/shipping-quote";
-import { CARTONIZE_ENGINE } from "../../cartonization/domain/cartonize";
+import { CARTONIZE_ENGINE } from "../../cartonization/cartonize-engine.api";
 import { SharedShippingConfigurationRepository } from "../../shipping-engine/infrastructure/shared-configuration.repository";
 import { resolveDropshipPackagingChannel } from "./dropship-packaging-channel";
 

@@ -203,6 +203,11 @@ jobs:
           server/platform/observability/__tests__/runtime-memory-observer.test.ts
           server/platform/observability/__tests__/runtime-memory-wiring.test.ts
           server/platform/observability/__tests__/runtime-memory.test.ts
+          client/src/lib/__tests__/picking-command.test.ts
+          client/src/pages/__tests__/replen-task-retry-model.test.ts
+          server/modules/inventory/__tests__/replenishment-source-empty.test.ts
+          server/modules/inventory/__tests__/cycle-count-replen-feedback.test.ts
+          server/modules/inventory/__tests__/dedicated-replen-bin.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run

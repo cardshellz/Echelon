@@ -15,7 +15,7 @@ import { matchesOrderCancellationSettlement } from "../domain/order-edit-financi
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import { orderEditSnapshotSchema } from "../application/order-edit-provider.schema";
 import type { OrderEditReleaseProof } from "../application/order-edit-store";
-import { restoreStoppedRefundEditOrder } from "../../orders/order-status-core";
+import { restoreStoppedRefundEditOrder } from "../../orders/order-lifecycle-and-cancellation.api";
 import { proveStoppedRefundEditRecovery } from "./order-edit-refund-warehouse-evidence";
 import { appendOrderEditAudit } from "./order-edit-audit.writer";
 import { readDeferredRefundShipmentIds } from "./order-edit-deferred-shipment";
@@ -26,7 +26,7 @@ import {
 import {
   acquireOrderEditWarehouseHold,
   releaseOrderEditWarehouseHold,
-} from "../../wms/order-edit-hold.commands";
+} from "../../wms/pick-corrections-and-holds.api";
 
 const positiveId = z.number().int().positive().safe();
 const operationIdSchema = z.string().uuid();
@@ -826,7 +826,7 @@ export class OrderEditWarehouseGateway {
         LEFT JOIN wms.shipping_engine_orders engine ON engine.provider='shipstation'
           AND engine.provider_order_id=COALESCE(pending.shipstation_order_id::text,
             CASE WHEN pending.shipping_engine='shipstation' THEN pending.engine_order_ref END)
-        WHERE pending.order_id=wo.id AND pending.status NOT IN ('shipped','cancelled','voided')
+        WHERE pending.order_id=wo.id AND pending.status NOT IN ('shipped','returned','lost','cancelled','voided')
           AND engine.provider_status IS DISTINCT FROM 'shipped'
           AND EXISTS(SELECT 1 FROM wms.outbound_shipment_items osi JOIN wms.order_items oi ON oi.id=osi.order_item_id
             WHERE osi.shipment_id=pending.id AND osi.qty>0 AND oi.status<>'cancelled')) AS has_unshipped_partition,

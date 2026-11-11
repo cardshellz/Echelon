@@ -2,7 +2,7 @@ import { queueOmsPaidEventReplay } from "./shopify-paid-event-replay";
 import { sql } from "drizzle-orm";
 import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
 import { channelMerchandiseCapabilitySql } from "./infrastructure/channel-merchandise-policy";
-import { cancelOrder } from "../orders/order-status-core";
+import { cancelOrder } from "../orders/order-lifecycle-and-cancellation.api";
 import type { OmsOpsIssue } from "./ops-health.service";
 import {
   enqueueShipStationShipmentPushRetry,

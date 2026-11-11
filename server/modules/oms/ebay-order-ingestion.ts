@@ -554,7 +554,7 @@ async function runEbayOrderPoll(
                   LIMIT 1
                 `);
                 if (wmsOrder.rows.length > 0) {
-                  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+                  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-lifecycle-and-cancellation.api");
                   await cancelWmsOrder(database, Number(wmsOrder.rows[0].id), "ebay_cancel");
                 }
               } catch (e: any) {

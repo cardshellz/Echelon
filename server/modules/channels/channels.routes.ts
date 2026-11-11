@@ -34,8 +34,8 @@ import { rowToListingDto } from "./channel-listings.transform";
 import { toPublicChannelConnection } from "./channel-connection.transform";
 import { createOmsService } from "../oms/channel-order-intake.api";
 import { enqueueShipStationHoldSyncRetry } from "../oms/webhook-retry.api";
-import { reserveAndPushAfterHoldRelease } from "../orders/release-hold-push";
-import { WmsOrderInvariantError } from "../wms/insert-order";
+import { reserveAndPushAfterHoldRelease } from "../orders/hold-release-push.api";
+import { WmsOrderInvariantError } from "../wms/order-intake-and-items.api";
 import { randomBytes } from "crypto";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
@@ -587,6 +587,12 @@ export function registerChannelRoutes(app: Express) {
       const order = await storage.getOrderById(id);
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
+      }
+      if (order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled") {
+        return res.status(409).json({
+          error: `Cannot modify order in terminal '${order.warehouseStatus}' status`,
+          reason: "order_terminal_status",
+        });
       }
 
       const { priority, notes, status, onHold } = req.body;
