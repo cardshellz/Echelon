@@ -8,6 +8,7 @@ import {
   getPostgresPoolSnapshot,
   type PostgresPoolSnapshot,
 } from "./infrastructure/postgres-pool-observability";
+import { guardStartupMigrationClient } from "./infrastructure/startup-migration-guard";
 
 const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
 
@@ -92,8 +93,12 @@ export async function runStartupMigrations(): Promise<void> {
     idleTimeoutMillis: 10000,
     connectionTimeoutMillis: 15000,
   }));
-  const client = await migrationsPool.connect();
+  const connection = await migrationsPool.connect();
   try {
+    // Never wait indefinitely for a table lock during boot: an abandoned
+    // transaction on any table below would otherwise hang every dyno start
+    // (2026-11-11 outage). See startup-migration-guard.ts.
+    const client = await guardStartupMigrationClient(connection);
     // Both pools receive the same search_path in the PostgreSQL startup packet.
     // Unqualified names therefore resolve consistently before any query can run.
 
@@ -1196,7 +1201,7 @@ export async function runStartupMigrations(): Promise<void> {
       error,
     );
   } finally {
-    client.release();
+    connection.release();
     await migrationsPool.end().catch(() => {}); // Close the separate pool
   }
 }
