@@ -8,7 +8,7 @@ import {
   inventoryLevels, inventoryTransactions, adjustmentReasons,
   channelFeeds, productVariants, warehouseLocations, productLocations,
 } from "../../../storage/base";
-import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-item-commands";
+import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-intake-and-items.api";
 import { getTableColumns } from "drizzle-orm";
 import { interpretInventoryShipmentQuantity, type InventoryShipmentQuantityEvidence } from "@shared/inventory/shipment-quantity";
 import { shipmentQuantityEvidenceProjection } from "./shipment-quantity-evidence.sql";

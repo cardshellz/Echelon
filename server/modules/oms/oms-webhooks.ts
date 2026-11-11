@@ -432,8 +432,8 @@ export async function cancelOrderCascade(
     return { cascadeDetails: { noWmsOrder: true } };
   }
 
-  const rollupModule = await import("../orders/shipment-rollup");
-  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+  const rollupModule = await import("../orders/shipment-rollup-and-context.api");
+  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-lifecycle-and-cancellation.api");
 
   const ssAdapter = opts.shipStationService
     ? {
@@ -925,7 +925,7 @@ export function registerOmsWebhooks(
     const shipments: Array<{ id: number }> = shipmentResult?.rows ?? [];
     if (shipments.length === 0) return;
 
-    const rollupModule = await import("../orders/shipment-rollup");
+    const rollupModule = await import("../orders/shipment-rollup-and-context.api");
     let anyRequiresReview = false;
     for (const shipment of shipments) {
       const result = await rollupModule.handleAddressChangeOnShipment(db, shipment.id, { now });

@@ -1,6 +1,6 @@
 import { InventoryQuantityError } from "../../inventory/domain/quantity-ledger";
 import type { CanonicalClaimTransactionClient } from "../application/canonical-claim-inventory.port";
-import { commitCanonicalPickingReceipt } from "../../wms/picking-command.repository";
+import { commitCanonicalPickingReceipt } from "../../wms/picking-execution.api";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
 import { isClaimPackageConversionInline } from "../../inventory/infrastructure/replenishment-policy.reader";
@@ -14,12 +14,12 @@ import {
 import {
   displacementEvidence, selectDisplacementDonors, type DisplacementDonor,
 } from "../domain/claim-displacement";
-import { lockClaimPickCorrection } from "../../wms/pick-correction.repository";
+import { lockClaimPickCorrection } from "../../wms/pick-corrections-and-holds.api";
 import { costEvidenceTransactionFromPg } from "../../inventory/infrastructure/cost-evidence-pg";
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { AssemblyWorkOwner } from "../../warehouse/cutover-work.api";
-import { requireAssemblyOrderAuthority } from "../../orders/assembly-handoff-authority";
+import { requireAssemblyOrderAuthority } from "../../orders/assembly-order-authority.api";
 
 import { pool } from "../../../db";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -86,8 +86,8 @@ import {
   planCanonicalClaim,
 } from "../domain/inventory-availability-planner";
 import { captureActiveClaimSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
-import { persistCanonicalWmsPickProgress } from "../../wms/order-item-commands";
-import { recordAssemblyOutputPickLocation } from "../../wms/assembly-output-pick-command";
+import { persistCanonicalWmsPickProgress } from "../../wms/order-intake-and-items.api";
+import { recordAssemblyOutputPickLocation } from "../../wms/assembly-and-packing.api";
 
 type ClientPool = Pick<Pool, "connect">;
 type QueryResult = { rows: any[]; rowCount?: number | null };

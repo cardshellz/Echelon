@@ -573,7 +573,7 @@ export function registerPickingRoutes(app: Express) {
         // P2a (LINE-ITEM-HOLD-DESIGN.md): mark held + split the line into its own
         // held shipment in one transaction, then re-push the main shipment WITHOUT
         // the held line if it was already in ShipStation.
-        const { holdLineItemWithSplit } = await import("../wms/line-item-hold");
+        const { holdLineItemWithSplit } = await import("../wms/pick-corrections-and-holds.api");
         const split = await holdLineItemWithSplit(db, {
           wmsOrderId: orderId,
           orderItemId: itemId,
@@ -632,7 +632,7 @@ export function registerPickingRoutes(app: Express) {
         // push that shipment so the released line ships on its own. A line that
         // already shipped gets heldShipmentId = null: its held shipment is closed
         // (or sent to review) so ShipStation never receives a second order for it.
-        const { releaseLineItemFromHold } = await import("../wms/line-item-hold");
+        const { releaseLineItemFromHold } = await import("../wms/pick-corrections-and-holds.api");
         const released = await releaseLineItemFromHold(db, {
           wmsOrderId: orderId,
           orderItemId: itemId,

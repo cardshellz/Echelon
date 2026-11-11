@@ -1,7 +1,7 @@
 import type { Pool } from "pg";
 import { z } from "zod";
 import { pool } from "../../../db";
-import { readWmsCutoverDemand } from "../../wms/inventory-cutover-demand-reader";
+import { readWmsCutoverDemand } from "../../wms/cutover-and-dispatch.api";
 import { captureInventoryCutoverEncumbranceInsideTransaction } from "../../inventory/infrastructure/inventory-cutover-encumbrance.repository";
 import { inventoryCutoverVariantSchema } from "@shared/types/inventory-cutover-preflight";
 import { plannerPositiveQuantitySchema } from "@shared/types/inventory-availability-planner";

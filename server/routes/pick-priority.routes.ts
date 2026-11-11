@@ -19,8 +19,8 @@ import type { Express, Request, Response } from "express";
 import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { requireAuth, requirePermission } from "./middleware";
-import { invalidatePickPrioritySettingsCache } from "../modules/orders/sort-rank";
-import { recomputeAllActiveSortRanksDetailed } from "../modules/orders/orders.storage";
+import { invalidatePickPrioritySettingsCache } from "../modules/orders/sort-rank-and-priority.api";
+import { recomputeAllActiveSortRanksDetailed } from "../modules/orders/sort-rank-and-priority.api";
 import { enqueueShipStationSortRankSyncRetry } from "../modules/oms/webhook-retry.api";
 
 // ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@
  * `runAll()`.
  */
 
-import { runReconciliationNow as shopifyReconcile } from "../orders/shopify-order-reconciliation";
+import { runReconciliationNow as shopifyReconcile } from "../orders/reconciliation-and-repair.api";
 import { backfillShopifyOrders } from "./shopify-bridge-wrapper";
 import { sql } from "drizzle-orm";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";

@@ -32,11 +32,11 @@ import {
   dispatchShipmentEvent,
   recomputeOrderStatusFromShipments,
   type ShipmentEvent,
-} from "../orders/shipment-rollup";
+} from "../orders/shipment-rollup-and-context.api";
 import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
 import { partitionCommercialRequestedQuantity } from "./shipstation-commercial-quantity.domain";
 import type { EngineShipmentItemAppendResult } from "../shipping/types";
-import { maybeGetPackInstruction } from "../cartonization/application/wms-pack-plan.service";
+import { maybeGetPackInstruction } from "../cartonization/pack-plan.api";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
 import { parseProviderAmountCents } from "../shipping/types";
 import {
@@ -93,7 +93,7 @@ import {
 import {
   WMS_ORDER_SHIPMENT_LOCK_NAMESPACE,
   WMS_SHIPMENT_PUSH_LOCK_NAMESPACE,
-} from "../wms/shipment-lock-namespaces";
+} from "../wms/shipment-execution-and-projection.api";
 
 export {
   ShipStationRateLimitError,

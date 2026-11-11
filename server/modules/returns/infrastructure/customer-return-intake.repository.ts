@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { createExpectedWmsReturn } from "../../wms/expected-return-commands";
+import { createExpectedWmsReturn } from "../../wms/returns-receipt.api";
 import { parseReturnPolicySnapshot } from "../domain/return-case-actions";
 import {
   CustomerReturnIntakeError, customerReturnIntakeResultSchema, type CustomerReturnIntakeResult,

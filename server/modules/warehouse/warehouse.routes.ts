@@ -14,7 +14,7 @@ import { inventoryStorage } from "../inventory";
 import { db } from "../../storage/base";
 const storage = { ...warehouseStorage, ...catalogStorage, ...inventoryStorage };
 import { requirePermission } from "../../routes/middleware";
-import { coerceTimeZone, parseCutoffMinutes } from "../orders/sort-rank";
+import { coerceTimeZone, parseCutoffMinutes } from "../orders/sort-rank-and-priority.api";
 import { getWarehouseById } from "./infrastructure/warehouse.repository";
 import { getSlaCutoffConfig } from "./settings.resolver";
 import {
