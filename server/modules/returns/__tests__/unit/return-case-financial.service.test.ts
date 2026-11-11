@@ -245,6 +245,114 @@ describe("ReturnCaseFinancialService", () => {
     await expect(dropship.service.previewCustomerRefund(42))
       .rejects.toMatchObject({ code: "RETURN_CUSTOMER_REFUND_NOT_OWNED", status: 409 });
   });
+
+  it("keeps a pending refund lock intact when Shopify returns a malformed HTTP 200 mutation body (CUST-01)", async () => {
+    const harness = financialHarness(retailSource());
+    const preview = await harness.service.previewCustomerRefund(42);
+    vi.mocked(harness.customerProvider.execute).mockRejectedValueOnce(
+      new CustomerRefundProviderError(
+        "RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID",
+        "Shopify returned a non-JSON GraphQL response.",
+        true,
+        { status: 200, reconciliationRequired: true },
+      ),
+    );
+
+    await expect(harness.service.issueCustomerRefund({
+      caseId: 42,
+      quoteHash: preview.quoteHash,
+      idempotencyKey: "refund-command-truncated-200",
+      notifyCustomer: false,
+      notes: null,
+      actor: "user:7",
+    })).rejects.toMatchObject({
+      code: "RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID",
+      status: 503,
+      context: {
+        caseId: 42,
+        idempotencyKey: "refund-command-truncated-200",
+        status: 200,
+        reconciliationRequired: true,
+      },
+    });
+
+    expect(harness.customerStore.fail).not.toHaveBeenCalled();
+  });
+
+  it("hydrates an active pending refund command on preview without requoting Shopify and blocks competing idempotency keys (CDEP-04)", async () => {
+    const harness = financialHarness(retailSource());
+    const initialPreview = await harness.service.previewCustomerRefund(42);
+    vi.mocked(harness.customerProvider.execute).mockRejectedValueOnce(
+      new CustomerRefundProviderError(
+        "RETURN_CUSTOMER_REFUND_PROVIDER_UNAVAILABLE",
+        "Shopify refund request failed before a response was received.",
+        true,
+        { reconciliationRequired: true },
+      ),
+    );
+
+    await expect(harness.service.issueCustomerRefund({
+      caseId: 42,
+      quoteHash: initialPreview.quoteHash,
+      idempotencyKey: "refund-command-reload-42",
+      notifyCustomer: true,
+      notes: "Reload-safe refund",
+      actor: "user:7",
+    })).rejects.toMatchObject({ status: 503 });
+
+    const pendingRecord = storedRefund(
+      "refund-command-reload-42",
+      harness.getReservedRequestHash(),
+      initialPreview.quoteHash,
+      customerQuote(),
+      true,
+      "Reload-safe refund",
+    );
+    vi.mocked(harness.customerStore.findPendingByCaseId!).mockResolvedValue(pendingRecord);
+    vi.mocked(harness.customerStore.findByIdempotencyKey).mockImplementation(async (key) =>
+      key === "refund-command-reload-42" ? pendingRecord : null,
+    );
+    vi.mocked(harness.customerProvider.quote).mockClear();
+
+    const reloadedPreview = await harness.service.previewCustomerRefund(42);
+    expect(harness.customerProvider.quote).not.toHaveBeenCalled();
+    expect(reloadedPreview).toMatchObject({
+      caseId: 42,
+      quoteHash: initialPreview.quoteHash,
+      pendingCommand: {
+        idempotencyKey: "refund-command-reload-42",
+        quoteHash: initialPreview.quoteHash,
+        notifyCustomer: true,
+        notes: "Reload-safe refund",
+        reconciliationRequired: false,
+      },
+    });
+
+    await expect(harness.service.issueCustomerRefund({
+      caseId: 42,
+      quoteHash: reloadedPreview.quoteHash,
+      idempotencyKey: "refund-command-competing-new-key",
+      notifyCustomer: true,
+      notes: "Reload-safe refund",
+      actor: "user:7",
+    })).rejects.toMatchObject({
+      code: "RETURN_CUSTOMER_REFUND_PENDING_EXISTS",
+      status: 409,
+    });
+
+    const resumed = await harness.service.issueCustomerRefund({
+      caseId: 42,
+      quoteHash: reloadedPreview.quoteHash,
+      idempotencyKey: reloadedPreview.pendingCommand!.idempotencyKey,
+      notifyCustomer: reloadedPreview.pendingCommand!.notifyCustomer,
+      notes: reloadedPreview.pendingCommand!.notes,
+      actor: "user:7",
+    });
+    expect(resumed).toMatchObject({
+      commandType: "issue_customer_refund",
+      amountCents: 525,
+    });
+  });
 });
 
 function financialHarness(source: ReturnFinancialCaseSource) {
@@ -262,6 +370,7 @@ function financialHarness(source: ReturnFinancialCaseSource) {
   let reservedRequestHash = "";
   const customerStore: ReturnCaseCustomerRefundStore = {
     findByIdempotencyKey: vi.fn().mockResolvedValue(null),
+    findPendingByCaseId: vi.fn().mockResolvedValue(null),
     reserve: vi.fn(async (input) => {
       reservedRequestHash = input.requestHash;
       return storedRefund(input.idempotencyKey, input.requestHash, input.quoteHash, input.quote, input.notifyCustomer, input.notes);

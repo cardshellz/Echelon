@@ -16,6 +16,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/procurement/__tests__/integration/shipment-cost-read-batching.integration.test.ts",
   "server/modules/shipping/__tests__/integration/package-dimensions.integration.test.ts",
   "server/modules/shipping/__tests__/integration/package-history.integration.test.ts",
+  "server/modules/shipping/__tests__/integration/shipment-fact.repository.integration.test.ts",
   "server/modules/customer-account/__tests__/integration/order-action-projection.repository.test.ts",
   "server/modules/customer-account/__tests__/integration/account-native-summaries.repository.test.ts",
   "server/modules/inventory/__tests__/integration/quantity-ledger-supplier-return.integration.test.ts",
@@ -291,4 +292,5 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/shipping-engine/__tests__/integration/shared-configuration.integration.test.ts",
   "server/modules/shipping-engine/__tests__/integration/channel-packaging.integration.test.ts",
   "server/modules/shipping-engine/__tests__/integration/warehouse-packaging.integration.test.ts",
+  "server/modules/returns/__tests__/integration/return-coexistence-entitlement-fence.integration.test.ts",
 ]);

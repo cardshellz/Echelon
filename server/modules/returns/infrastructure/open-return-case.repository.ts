@@ -55,6 +55,7 @@ interface SourceItemRow {
   fulfillment_partition_key: unknown;
   warehouse_status: unknown;
   wms_order_item_id: unknown;
+  product_variant_id: unknown;
   oms_order_line_id: unknown;
   wms_external_line_item_id: unknown;
   matched_oms_order_line_id: unknown;
@@ -65,6 +66,15 @@ interface SourceItemRow {
   already_expected_quantity: unknown;
   returnable_quantity: unknown;
   unit_paid_price_cents: unknown;
+}
+
+interface LegacyDropshipClaimRow {
+  rma_item_id: unknown;
+  quantity: unknown;
+  external_line_item_id: unknown;
+  product_variant_id: unknown;
+  order_line_index: unknown;
+  normalized_payload: unknown;
 }
 
 interface DropshipContextRow {
@@ -93,13 +103,40 @@ export class PostgresOpenReturnCaseStore implements OpenReturnCaseStore {
   }> {
     const pattern = `%${escapeLike(query.search.trim())}%`;
     const offset = (query.page - 1) * query.limit;
-    const [result, countResult, channelResult] = await Promise.all([
-      db.execute(sql`
+    const eligibleOrdersCte = sql`
       WITH expected AS (
-        SELECT ri.order_item_id, SUM(ri.expected_qty)::int AS expected_qty
-        FROM wms.return_items ri
-        WHERE ri.order_item_id IS NOT NULL
-        GROUP BY ri.order_item_id
+        SELECT wms_order_item_id AS order_item_id, claimed_quantity::int AS expected_qty
+        FROM returns.customer_return_claimed_quantities
+      ), legacy_dropship_claims AS (
+        SELECT
+          COALESCE(r.oms_order_id, doi.oms_order_id) AS oms_order_id,
+          SUM(ri.quantity)::int AS claimed_qty
+        FROM dropship.dropship_rma_items ri
+        JOIN dropship.dropship_rmas r ON r.id = ri.rma_id
+        LEFT JOIN dropship.dropship_order_intake doi ON doi.id = r.intake_id
+        WHERE COALESCE(r.oms_order_id, doi.oms_order_id) IS NOT NULL
+          AND (r.status NOT IN ('rejected', 'closed') OR r.credited_at IS NOT NULL)
+          AND ri.status <> 'rejected'
+          AND ri.source = 'order'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM returns.return_cases rc
+            WHERE rc.source_provider = 'dropship'
+              AND rc.source_event_type = 'legacy_rma'
+              AND rc.source_event_id = r.id::text
+          )
+        GROUP BY COALESCE(r.oms_order_id, doi.oms_order_id)
+      ), order_totals AS (
+        SELECT
+          wo.oms_fulfillment_order_id::bigint AS oms_order_id,
+          SUM(oi.fulfilled_quantity)::int AS fulfilled_qty,
+          SUM(COALESCE(e.expected_qty, 0))::int AS canonical_claimed_qty
+        FROM wms.orders wo
+        JOIN wms.order_items oi ON oi.order_id = wo.id
+        LEFT JOIN expected e ON e.order_item_id = oi.id
+        WHERE wo.oms_fulfillment_order_id ~ '^[0-9]+$'
+          AND oi.requires_shipping <> 0
+        GROUP BY wo.oms_fulfillment_order_id::bigint
       ), eligible_orders AS (
         SELECT DISTINCT
           wo.oms_fulfillment_order_id::bigint AS oms_order_id,
@@ -107,10 +144,17 @@ export class PostgresOpenReturnCaseStore implements OpenReturnCaseStore {
         FROM wms.orders wo
         JOIN wms.order_items oi ON oi.order_id = wo.id
         LEFT JOIN expected e ON e.order_item_id = oi.id
+        JOIN order_totals ot ON ot.oms_order_id = wo.oms_fulfillment_order_id::bigint
+        LEFT JOIN legacy_dropship_claims ldc ON ldc.oms_order_id = ot.oms_order_id
         WHERE wo.oms_fulfillment_order_id ~ '^[0-9]+$'
           AND oi.requires_shipping <> 0
           AND oi.fulfilled_quantity > COALESCE(e.expected_qty, 0)
+          AND ot.fulfilled_qty > ot.canonical_claimed_qty + COALESCE(ldc.claimed_qty, 0)
       )
+    `;
+    const [result, countResult, channelResult] = await Promise.all([
+      db.execute(sql`
+      ${eligibleOrdersCte}
       SELECT
         oo.id AS oms_order_id,
         oo.external_order_number,
@@ -140,20 +184,7 @@ export class PostgresOpenReturnCaseStore implements OpenReturnCaseStore {
       OFFSET ${offset}
     `),
       db.execute(sql`
-        WITH expected AS (
-          SELECT ri.order_item_id, SUM(ri.expected_qty)::int AS expected_qty
-          FROM wms.return_items ri
-          WHERE ri.order_item_id IS NOT NULL
-          GROUP BY ri.order_item_id
-        ), eligible_orders AS (
-          SELECT DISTINCT wo.oms_fulfillment_order_id::bigint AS oms_order_id
-          FROM wms.orders wo
-          JOIN wms.order_items oi ON oi.order_id = wo.id
-          LEFT JOIN expected e ON e.order_item_id = oi.id
-          WHERE wo.oms_fulfillment_order_id ~ '^[0-9]+$'
-            AND oi.requires_shipping <> 0
-            AND oi.fulfilled_quantity > COALESCE(e.expected_qty, 0)
-        )
+        ${eligibleOrdersCte}
         SELECT COUNT(DISTINCT oo.id)::int AS total
         FROM oms.oms_orders oo
         JOIN eligible_orders eo ON eo.oms_order_id = oo.id
@@ -167,20 +198,7 @@ export class PostgresOpenReturnCaseStore implements OpenReturnCaseStore {
           ))
       `),
       db.execute(sql`
-        WITH expected AS (
-          SELECT ri.order_item_id, SUM(ri.expected_qty)::int AS expected_qty
-          FROM wms.return_items ri
-          WHERE ri.order_item_id IS NOT NULL
-          GROUP BY ri.order_item_id
-        ), eligible_orders AS (
-          SELECT DISTINCT wo.oms_fulfillment_order_id::bigint AS oms_order_id
-          FROM wms.orders wo
-          JOIN wms.order_items oi ON oi.order_id = wo.id
-          LEFT JOIN expected e ON e.order_item_id = oi.id
-          WHERE wo.oms_fulfillment_order_id ~ '^[0-9]+$'
-            AND oi.requires_shipping <> 0
-            AND oi.fulfilled_quantity > COALESCE(e.expected_qty, 0)
-        )
+        ${eligibleOrdersCte}
         SELECT c.id, c.name, COUNT(DISTINCT oo.id)::int AS order_count
         FROM oms.oms_orders oo
         JOIN eligible_orders eo ON eo.oms_order_id = oo.id
@@ -268,9 +286,11 @@ class PostgresOpenReturnCaseTransaction implements OpenReturnCaseTransaction {
   }): Promise<LockedReturnSourceContext | null> {
     // Hold policy resolution stable until the case's immutable snapshot commits.
     await acquireReturnPolicyCatalogLock(this.tx, "shared");
-    await this.tx.execute(sql`
-      SELECT pg_advisory_xact_lock(${RETURN_QUANTITY_LOCK_NAMESPACE}, ${input.omsOrderId})
-    `);
+    if (input.omsOrderId <= 2_147_483_647) {
+      await this.tx.execute(sql`
+        SELECT pg_advisory_xact_lock(${RETURN_QUANTITY_LOCK_NAMESPACE}, ${input.omsOrderId})
+      `);
+    }
     const sourceResult = await this.tx.execute(sql`
       SELECT oo.id, oo.channel_id
       FROM oms.oms_orders oo
@@ -284,11 +304,18 @@ class PostgresOpenReturnCaseTransaction implements OpenReturnCaseTransaction {
     if (!sourceRow) return null;
 
     const channelId = readPositiveInteger(sourceRow.channel_id, "channel id");
-    const [context, itemRows, policies] = await Promise.all([
-      inferDropshipContext(this.tx, input.omsOrderId, channelId),
-      loadSourceItems(this.tx, input.omsOrderId, input.wmsOrderId, true, input.wmsOrderItemIds),
-      this.tx.select().from(returnPolicies).where(eq(returnPolicies.status, "active")),
-    ]);
+    const context = await inferDropshipContext(this.tx, input.omsOrderId, channelId);
+    const itemRows = await loadSourceItems(
+      this.tx,
+      input.omsOrderId,
+      input.wmsOrderId,
+      true,
+      input.wmsOrderItemIds,
+    );
+    const policies = await this.tx
+      .select()
+      .from(returnPolicies)
+      .where(eq(returnPolicies.status, "active"));
     return {
       omsOrderId: input.omsOrderId,
       wmsOrderId: input.wmsOrderId,
@@ -486,6 +513,7 @@ async function loadSourceItems(
       wo.fulfillment_partition_key,
       wo.warehouse_status AS warehouse_status,
       oi.id AS wms_order_item_id,
+      ol.product_variant_id,
       oi.oms_order_line_id,
       oi.source_item_id AS wms_external_line_item_id,
       ol.id AS matched_oms_order_line_id,
@@ -503,14 +531,144 @@ async function loadSourceItems(
       ON ol.id = oi.oms_order_line_id
      AND ol.order_id = ${omsOrderId}
     WHERE wo.oms_fulfillment_order_id = ${String(omsOrderId)}
-      AND (${wmsOrderId}::int IS NULL OR wo.id = ${wmsOrderId})
-      AND (${itemIds.length === 0} OR oi.id = ANY(ARRAY[${sql.join(itemIds.length === 0 ? [0] : itemIds, sql`, `)}]::int[]))
       AND oi.requires_shipping <> 0
-      AND oi.fulfilled_quantity > COALESCE(e.expected_qty, 0)
     ORDER BY wo.id, oi.id
     ${forUpdate ? sql`FOR UPDATE OF wo, oi` : sql``}
   `);
-  return rowsOf<SourceItemRow>(result);
+  const allRows = rowsOf<SourceItemRow>(result);
+  if (allRows.length === 0) return [];
+
+  const legacyResult = await executor.execute(sql`
+    SELECT
+      ri.id AS rma_item_id,
+      ri.quantity,
+      ri.external_line_item_id,
+      ri.product_variant_id,
+      ri.order_line_index,
+      doi.normalized_payload
+    FROM dropship.dropship_rma_items ri
+    JOIN dropship.dropship_rmas r ON r.id = ri.rma_id
+    LEFT JOIN dropship.dropship_order_intake doi ON doi.id = r.intake_id
+    WHERE (r.oms_order_id = ${omsOrderId} OR doi.oms_order_id = ${omsOrderId})
+      AND (r.status NOT IN ('rejected', 'closed') OR r.credited_at IS NOT NULL)
+      AND ri.status <> 'rejected'
+      AND ri.source = 'order'
+      AND NOT EXISTS (
+        SELECT 1
+        FROM returns.return_cases rc
+        WHERE rc.source_provider = 'dropship'
+          AND rc.source_event_type = 'legacy_rma'
+          AND rc.source_event_id = r.id::text
+      )
+    ORDER BY r.id ASC, ri.id ASC
+  `);
+  const legacyClaims = rowsOf<LegacyDropshipClaimRow>(legacyResult);
+  const adjustedRows = applyLegacyDropshipClaims(allRows, legacyClaims);
+  const itemIdFilter = itemIds.length > 0 ? new Set(itemIds) : null;
+  return adjustedRows.filter((row) => {
+    const rowWmsOrderId = readPositiveInteger(row.wms_order_id, "WMS order id");
+    const rowItemId = readPositiveInteger(row.wms_order_item_id, "WMS order item id");
+    const returnable = readNonNegativeInteger(row.returnable_quantity, "returnable quantity");
+    if (wmsOrderId !== null && rowWmsOrderId !== wmsOrderId) return false;
+    if (itemIdFilter !== null && !itemIdFilter.has(rowItemId)) return false;
+    return returnable > 0;
+  });
+}
+
+function normalizeExternalLineIdentity(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.replace(/^gid:\/\/shopify\/LineItem\//i, "");
+}
+
+function resolveLegacyClaimLineIdentity(claim: LegacyDropshipClaimRow): {
+  externalLineId: string | null;
+  productVariantId: number | null;
+} {
+  let externalLineId = normalizeExternalLineIdentity(claim.external_line_item_id);
+  let productVariantId = readNullablePositiveInteger(claim.product_variant_id, "legacy RMA variant id");
+  const lineIndex =
+    claim.order_line_index === null || claim.order_line_index === undefined
+      ? null
+      : Number(claim.order_line_index);
+  if (
+    lineIndex !== null &&
+    Number.isInteger(lineIndex) &&
+    lineIndex >= 0 &&
+    claim.normalized_payload &&
+    typeof claim.normalized_payload === "object"
+  ) {
+    const payload = claim.normalized_payload as Record<string, unknown>;
+    const lines = Array.isArray(payload.lines) ? payload.lines : [];
+    const candidate = lines[lineIndex];
+    if (candidate && typeof candidate === "object") {
+      const record = candidate as Record<string, unknown>;
+      if (!externalLineId) {
+        externalLineId = normalizeExternalLineIdentity(record.externalLineItemId);
+      }
+      if (productVariantId === null) {
+        const parsedVariant = Number(record.productVariantId);
+        if (Number.isSafeInteger(parsedVariant) && parsedVariant > 0) {
+          productVariantId = parsedVariant;
+        }
+      }
+    }
+  }
+  return { externalLineId, productVariantId };
+}
+
+function applyLegacyDropshipClaims(
+  rows: SourceItemRow[],
+  legacyClaims: LegacyDropshipClaimRow[],
+): SourceItemRow[] {
+  if (legacyClaims.length === 0) return rows;
+  const mutable = rows.map((row) => {
+    const fulfilled = readNonNegativeInteger(row.fulfilled_quantity, "fulfilled quantity");
+    const expected = readNonNegativeInteger(row.already_expected_quantity, "already expected quantity");
+    return {
+      raw: row,
+      fulfilled,
+      expected,
+      externalLineId: normalizeExternalLineIdentity(
+        row.oms_external_line_item_id ?? row.wms_external_line_item_id,
+      ),
+      productVariantId: readNullablePositiveInteger(row.product_variant_id, "WMS order item variant id"),
+    };
+  });
+
+  for (const claim of legacyClaims) {
+    let remainingClaim = readPositiveInteger(claim.quantity, "legacy RMA claim quantity");
+    const { externalLineId, productVariantId } = resolveLegacyClaimLineIdentity(claim);
+
+    const candidatePasses: Array<(entry: (typeof mutable)[number]) => boolean> = [];
+    if (externalLineId !== null) {
+      candidatePasses.push((entry) => entry.externalLineId === externalLineId);
+    }
+    if (productVariantId !== null) {
+      candidatePasses.push((entry) => entry.productVariantId === productVariantId);
+    }
+    candidatePasses.push(() => true);
+
+    for (const matches of candidatePasses) {
+      if (remainingClaim <= 0) break;
+      for (const entry of mutable) {
+        if (remainingClaim <= 0) break;
+        if (!matches(entry)) continue;
+        const available = Math.max(entry.fulfilled - entry.expected, 0);
+        if (available <= 0) continue;
+        const consumed = Math.min(available, remainingClaim);
+        entry.expected += consumed;
+        remainingClaim -= consumed;
+      }
+    }
+  }
+
+  return mutable.map((entry) => ({
+    ...entry.raw,
+    already_expected_quantity: entry.expected,
+    returnable_quantity: Math.max(entry.fulfilled - entry.expected, 0),
+  }));
 }
 
 function groupPartitions(rows: SourceItemRow[]): ReturnSourceOrderPartition[] {
