@@ -287,4 +287,8 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/inventory-planning/__tests__/integration/inventory-availability-claim-lineage.integration.test.ts",
   "server/modules/channels/__tests__/integration/ebay-auth-refresh.integration.test.ts",
   "server/modules/channels/__tests__/integration/ebay-listing-push.integration.test.ts",
+  "server/modules/shipping-engine/__tests__/integration/program-charge-migration-guards.integration.test.ts",
+  "server/modules/shipping-engine/__tests__/integration/shared-configuration.integration.test.ts",
+  "server/modules/shipping-engine/__tests__/integration/channel-packaging.integration.test.ts",
+  "server/modules/shipping-engine/__tests__/integration/warehouse-packaging.integration.test.ts",
 ]);

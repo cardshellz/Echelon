@@ -208,6 +208,24 @@ jobs:
           server/modules/inventory/__tests__/replenishment-source-empty.test.ts
           server/modules/inventory/__tests__/cycle-count-replen-feedback.test.ts
           server/modules/inventory/__tests__/dedicated-replen-bin.test.ts
+      - name: Shipping configuration UI contracts
+        run: >-
+          npx vitest run
+          client/src/components/shipping/service-levels/__tests__/fulfillment-catalog-display.test.ts
+          client/src/components/shipping/service-levels/__tests__/fulfillment-routing-api.test.ts
+          client/src/components/shipping/__tests__/channel-routing-api.test.ts
+          client/src/components/shipping/__tests__/configuration-invalidation.test.ts
+          client/src/components/shipping/__tests__/pricing-program-coverage-cell.test.ts
+          client/src/components/shipping/__tests__/pricing-program-draft-api.test.ts
+          client/src/components/shipping/__tests__/pricing-program-draft-state.test.ts
+          client/src/components/shipping/__tests__/pricing-programs-api.test.ts
+          client/src/components/shipping/__tests__/product-rule-form.test.ts
+          client/src/components/shipping/__tests__/rate-program-copy-api.test.ts
+          client/src/components/shipping/__tests__/rate-table-model.test.ts
+          client/src/components/shipping/__tests__/rate-test-region-select.test.ts
+          client/src/components/shipping/__tests__/rate-test-sku-search.test.ts
+          client/src/components/shipping/__tests__/rate-test-weight.test.ts
+          client/src/pages/__tests__/shipping-fulfillment-routing-ui.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run

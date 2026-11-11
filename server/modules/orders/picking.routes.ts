@@ -13,6 +13,7 @@ import {
   enqueueShipStationHoldSyncRetry,
   enqueueShipStationSortRankSyncRetry,
   enqueueShipStationShipmentPushRetry,
+  enqueueShipStationShipmentCancelRetry,
 } from "../oms/webhook-retry.api";
 import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
 import { reserveAndPushAfterHoldRelease } from "./release-hold-push";
@@ -571,18 +572,55 @@ export function registerPickingRoutes(app: Express) {
         }
 
         // P2a (LINE-ITEM-HOLD-DESIGN.md): mark held + split the line into its own
-        // held shipment in one transaction, then re-push the main shipment WITHOUT
-        // the held line if it was already in ShipStation.
-        const { holdLineItemWithSplit } = await import("../wms/pick-corrections-and-holds.api");
-        const split = await holdLineItemWithSplit(db, {
-          wmsOrderId: orderId,
-          orderItemId: itemId,
-          reason,
-          now: new Date(),
-        });
+        // held shipment in one transaction, then re-push or cancel the main shipment
+        // in ShipStation via durable retry rows committed atomically with the split.
+        const {
+          holdLineItemWithSplit,
+          LineItemHoldEligibilityError,
+          LineItemHoldNotFoundError,
+        } = await import("../wms/pick-corrections-and-holds.api");
+        let split;
+        try {
+          split = await holdLineItemWithSplit(db, {
+            wmsOrderId: orderId,
+            orderItemId: itemId,
+            reason,
+            now: new Date(),
+            afterSplitInTransaction: async (tx, splitResult) => {
+              if (!splitResult.mainShipmentId) return;
+              if (splitResult.providerSyncStatus === "queued_repush") {
+                await enqueueShipStationShipmentPushRetry(
+                  tx,
+                  splitResult.mainShipmentId,
+                  "LineItemHeldRepushMain",
+                );
+              } else if (splitResult.providerSyncStatus === "queued_cancel") {
+                await enqueueShipStationShipmentCancelRetry(
+                  tx,
+                  splitResult.mainShipmentId,
+                  "LineItemHeldCancelEmptyMain",
+                );
+              }
+            },
+          });
+        } catch (holdErr) {
+          if (holdErr instanceof LineItemHoldNotFoundError) {
+            return res.status(404).json({ error: "Line item not found on this order" });
+          }
+          if (holdErr instanceof LineItemHoldEligibilityError) {
+            return res.status(409).json({
+              error: "Line has already started picking or fulfillment and cannot be held",
+              status: holdErr.status,
+            });
+          }
+          throw holdErr;
+        }
         if (split.mainShipmentPushed && split.mainStillHasItems && split.mainShipmentId) {
           await enqueueShipStationShipmentPushRetry(db, split.mainShipmentId, "LineItemHeldRepushMain")
             .catch((e: any) => console.warn("[line-item-hold] main re-push enqueue failed:", e?.message));
+        } else if (split.providerSyncStatus === "queued_cancel" && split.mainShipmentId) {
+          await enqueueShipStationShipmentCancelRetry(db, split.mainShipmentId, "LineItemHeldCancelEmptyMain")
+            .catch((e: any) => console.warn("[line-item-hold] main cancel enqueue failed:", e?.message));
         }
 
         const order = await storage.getOrderById(orderId);
@@ -595,14 +633,22 @@ export function registerPickingRoutes(app: Express) {
             orderId,
             orderNumber: order?.orderNumber,
             reason,
-            notes: `SKU ${item.sku} -> held shipment ${split.heldShipmentId ?? "?"}`,
+            notes: `SKU ${item.sku} -> held shipment ${split.heldShipmentId ?? "?"} (sync=${split.providerSyncStatus})`,
             deviceType: (req.headers["x-device-type"] as string) || "desktop",
             sessionId: req.sessionID,
           })
           .catch((err) => console.warn("[PickingLog] Failed to log line_item_held:", err.message));
 
         broadcastOrdersUpdated();
-        res.json({ ok: true, heldShipmentId: split.heldShipmentId });
+        res.json({
+          ok: true,
+          heldShipmentId: split.heldShipmentId,
+          providerSyncStatus: split.providerSyncStatus,
+          providerStopPending:
+            split.providerSyncStatus === "queued_repush" ||
+            split.providerSyncStatus === "queued_cancel",
+          requiresReview: split.providerSyncStatus === "review_required_labeled",
+        });
       } catch (error: any) {
         console.error("Error holding line item:", error);
         res.status(500).json({ error: "Failed to hold line item" });
