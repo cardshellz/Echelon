@@ -7,8 +7,7 @@
       "server/modules/catalog/catalog.routes.ts"
     ],
     "catalog.product_variants": [
-      "server/modules/catalog/catalog.routes.ts",
-      "server/modules/shipping-engine/shipping-admin.routes.ts"
+      "server/modules/catalog/catalog.routes.ts"
     ],
     "catalog.products": [
       "server/modules/catalog/catalog.routes.ts",
@@ -70,12 +69,6 @@
     "shipping.rate_tables": [
       "server/modules/shipping-engine/interfaces/http/rate-book-admin.routes.ts",
       "server/modules/shipping-engine/interfaces/http/rate-table-admin.routes.ts"
-    ],
-    "shipping.service_levels": [
-      "server/modules/shipping-engine/shipping-admin.routes.ts"
-    ],
-    "shipping.variant_shipping_attrs": [
-      "server/modules/shipping-engine/shipping-admin.routes.ts"
     ],
     "warehouse.echelon_settings": [
       "server/routes/pick-priority.routes.ts"

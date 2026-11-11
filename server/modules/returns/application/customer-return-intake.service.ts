@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { customerReturnDimensionsSchema, customerReturnParcelWeightSchema } from "@shared/returns/customer-return-parcel";
-import { returnLabelProviderIdSchema } from "../../shipping-engine/application/return-label-provider.port";
+import { returnLabelProviderIdSchema } from "../../shipping-engine/return-shipping-and-labels.api";
 import { parseReturnPolicySnapshot } from "../domain/return-case-actions";
 import {
   CustomerReturnIntakeError, customerReturnIntakeAddressSchema, customerReturnIntakeResultSchema,

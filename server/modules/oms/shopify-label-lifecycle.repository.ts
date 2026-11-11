@@ -3,7 +3,7 @@ import { z } from "zod";
 import { readLabelEvidence } from "./ebay-label-replacement.repository";
 import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
 import { enqueueShopifyLabelReplacementRecovery, enqueueShopifyLabelVoids } from "./shopify-label-void-intake.repository";
-import { createPackageAllocationLabelCommercialReviewRepository } from "../shipping/package-allocation-label-commercial-review.repository";
+import { createPackageAllocationLabelCommercialReviewRepository } from "../shipping/package-allocation-authority.api";
 
 export interface LabelLifecycleDatabase {
   execute(query: SQL): Promise<unknown>;

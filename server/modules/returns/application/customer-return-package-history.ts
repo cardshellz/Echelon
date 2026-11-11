@@ -5,7 +5,7 @@ import {
   packageHistoryNativeFromShopify,
   packageHistoryNativeRevision,
   verifyPackageHistoryDocument,
-} from "../../shipping/package-history.domain";
+} from "../../shipping/package-history-and-delivery.api";
 import type { CustomerReturnLocalInspectionSnapshot } from "./customer-return-local-inspection.ports";
 import type { CustomerReturnShopifySnapshot } from "./customer-return-shopify-snapshot.ports";
 import { customerReturnProviderGid as gid } from "./customer-return-live-identity";

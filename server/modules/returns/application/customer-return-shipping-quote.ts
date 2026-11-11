@@ -4,7 +4,7 @@ import type { CustomerReturnLabelSettings } from "@shared/returns/customer-retur
 import {
   returnRateResultSchema, type ReturnRateProvider, type ReturnRateInput, ReturnRateProviderError,
   type ReturnRateResult, type ReturnRateCandidate,
-} from "../../shipping-engine/application/return-rate-provider.port";
+} from "../../shipping-engine/return-shipping-and-labels.api";
 import { buildCustomerReturnCostReferenceInputs, returnShipmentDimensionsMm,
   type CustomerReturnCostReference } from "../domain/customer-return-cost-guard";
 import { CustomerReturnRateSelectionError, selectCustomerReturnRate } from "../domain/customer-return-rate-selection";

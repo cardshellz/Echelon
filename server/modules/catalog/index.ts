@@ -16,3 +16,9 @@ export { createSharedProductPhotoImporter, type SharedImportedPhoto } from "./sh
 
 // Service types
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "./product-import.service";
+
+export {
+  confirmProductVariantShipsInOwnContainer,
+  type CatalogVariantShippingFlagsWriteExecutor,
+} from "./variant-shipping-flags.api";
+

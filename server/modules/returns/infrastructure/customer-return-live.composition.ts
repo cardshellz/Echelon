@@ -6,9 +6,9 @@ import { ShopifyCustomerReturnSnapshotReader } from "./customer-return-shopify-s
 import { createCustomerReturnShipStationDimensionsReader } from "./customer-return-shipstation-dimensions.reader";
 import { PostgresCustomerReturnPortalPolicyReader } from "./customer-return-policy.reader";
 import { PostgresCustomerReturnBoxMeasurements } from "./customer-return-box-measurements.repository";
-import { createShipStationReturnRateAdapter } from "../../shipping-engine/infrastructure/shipstation-return-rate.adapter";
-import { ShippingPackageDimensionsReader } from "../../shipping/package-dimensions.reader";
-import { PostgresPackageHistoryStore } from "../../shipping/package-history.repository";
+import { createShipStationReturnRateAdapter } from "../../shipping-engine/return-shipping-and-labels.api";
+import { ShippingPackageDimensionsReader } from "../../shipping/package-history-and-delivery.api";
+import { PostgresPackageHistoryStore } from "../../shipping/package-history-and-delivery.api";
 
 /** Explicit scope: neither the default channel nor a shop name/currency establishes the approved store. */
 export function parseCustomerReturnShopDomains(raw: string | undefined): readonly string[] {

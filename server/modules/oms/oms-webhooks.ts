@@ -48,7 +48,7 @@ import type {
 } from "./channel-fulfillment-ingress.service";
 import rateLimit from "express-rate-limit";
 import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
-import type { EngineCancelResult } from "../shipping/types";
+import type { EngineCancelResult } from "../shipping/engine-and-reconcile.api";
 import {
   buildShopifyWebhookInboxInput,
   enqueueWebhookInboxRetry,
@@ -62,7 +62,7 @@ import {
   enqueueOmsWmsSyncRetry,
   enqueueShipStationShipmentPushRetry,
 } from "./webhook-retry.worker";
-import type { ShippingEngine } from "../shipping/engine";
+import type { ShippingEngine } from "../shipping/engine-and-reconcile.api";
 import { recordShopifyRefundReturnCase } from "../returns/application/shopify-return-case.service";
 import { deriveShopifyRefundFinancialStatus } from "./domain/shopify-refund-financial-status";
 import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";

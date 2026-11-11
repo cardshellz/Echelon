@@ -1,7 +1,7 @@
 import { PostgresAccountNativeSummaries } from "./account-native-summaries.repository";
 import type { Pool } from "pg";
 import { CustomerAccountProgressService } from "../application/customer-account-progress.service";
-import { PostgresCustomerOrderDeliveryReader } from "../../shipping/customer-order-delivery.reader";
+import { PostgresCustomerOrderDeliveryReader } from "../../shipping/package-history-and-delivery.api";
 import { PostgresCustomerReturnProgressReader } from "../../returns/infrastructure/customer-return-progress.reader";
 import {
   ClubOrderEditCodeRedemptions,

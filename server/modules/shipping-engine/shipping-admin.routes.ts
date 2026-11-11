@@ -5,6 +5,11 @@ import { db } from "../../db";
 import { requirePermission } from "../../routes/middleware";
 import { ChannelPackagingService } from "./application/channel-packaging.service";
 import { ChannelPackagingRepository } from "./infrastructure/channel-packaging.repository";
+import {
+  recordShippingVariantSiocDecision,
+  updateShippingServiceLevelRow,
+  upsertShippingVariantAttrs,
+} from "./infrastructure/shipping-admin.repository";
 import { ShippingConfigurationError } from "./domain/configuration-error";
 import {
   insertShippingVariantAttrsSchema,
@@ -222,30 +227,12 @@ export function registerShippingAdminRoutes(app: Express): void {
               },
             });
         }
-        const variant = await db
-          .select({ id: productVariants.id })
-          .from(productVariants)
-          .where(eq(productVariants.id, parsed.data.productVariantId))
-          .limit(1);
-        if (variant.length === 0) {
+        const attrs = await upsertShippingVariantAttrs(parsed.data);
+        if (!attrs) {
           return res
             .status(404)
             .json({ error: { code: "SHIPPING_ADMIN_VARIANT_NOT_FOUND" } });
         }
-
-        const [attrs] = await db
-          .insert(shippingVariantAttrs)
-          .values({ ...parsed.data, siocSuggested: false })
-          .onConflictDoUpdate({
-            target: shippingVariantAttrs.productVariantId,
-            // A manual save resolves any pending suggestion.
-            set: {
-              ...parsed.data,
-              siocSuggested: false,
-              updatedAt: new Date(),
-            },
-          })
-          .returning();
         return res.json({ attrs });
       } catch (error) {
         return sendShippingAdminError(res, error, "upsert variant attrs");
@@ -280,31 +267,7 @@ export function registerShippingAdminRoutes(app: Express): void {
               },
             });
         }
-        const { productVariantId, confirmed } = parsed.data;
-        const result = await db.transaction(async (tx) => {
-          const variant = await tx
-            .select({ id: productVariants.id })
-            .from(productVariants)
-            .where(eq(productVariants.id, productVariantId))
-            .limit(1);
-          if (variant.length === 0) return null;
-
-          if (confirmed) {
-            await tx
-              .update(productVariants)
-              .set({ shipsInOwnContainer: true, updatedAt: new Date() })
-              .where(eq(productVariants.id, productVariantId));
-          }
-          // Either way the suggestion is resolved for this variant.
-          await tx
-            .insert(shippingVariantAttrs)
-            .values({ productVariantId, siocSuggested: false })
-            .onConflictDoUpdate({
-              target: shippingVariantAttrs.productVariantId,
-              set: { siocSuggested: false, updatedAt: new Date() },
-            });
-          return { productVariantId, confirmed };
-        });
+        const result = await recordShippingVariantSiocDecision(parsed.data);
         if (!result) {
           return res
             .status(404)
@@ -435,19 +398,15 @@ export function registerShippingAdminRoutes(app: Express): void {
             },
           });
         }
-        const updated = await db
-          .update(shippingServiceLevels)
-          .set({ ...parsed.data, updatedAt: new Date() })
-          .where(eq(shippingServiceLevels.id, id))
-          .returning();
-        if (updated.length === 0) {
+        const updated = await updateShippingServiceLevelRow(id, parsed.data);
+        if (!updated) {
           return res
             .status(404)
             .json({
               error: { code: "SHIPPING_ADMIN_SERVICE_LEVEL_NOT_FOUND" },
             });
         }
-        return res.json({ serviceLevel: updated[0] });
+        return res.json({ serviceLevel: updated });
       } catch (error) {
         return sendShippingAdminError(res, error, "update service level");
       }
