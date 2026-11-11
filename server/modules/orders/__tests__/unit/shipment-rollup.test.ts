@@ -55,19 +55,24 @@ function makeDb(scripted: ScriptedResponse[]) {
     // fragments on `queryChunks`. Each chunk is either a string (the
     // static SQL text) or a nested sql object / param placeholder.
     // For test assertions we only care about the static text, so we
-    // stringify only the primitive chunks.
-    const chunks: unknown[] = query?.queryChunks ?? [];
-    const text = chunks
-      .map((c) => {
-        if (typeof c === "string") return c;
-        // Drizzle StringChunk exposes its value via a `value` array
-        // of strings in recent versions.
-        if (c && typeof c === "object" && Array.isArray((c as any).value)) {
-          return (c as any).value.join("");
-        }
-        return "";
-      })
-      .join("");
+    // stringify the primitive chunks and descend into nested sql
+    // fragments (shared subqueries are composed that way).
+    const staticText = (chunks: unknown[]): string =>
+      chunks
+        .map((c) => {
+          if (typeof c === "string") return c;
+          // Drizzle StringChunk exposes its value via a `value` array
+          // of strings in recent versions.
+          if (c && typeof c === "object" && Array.isArray((c as any).value)) {
+            return (c as any).value.join("");
+          }
+          if (c && typeof c === "object" && Array.isArray((c as any).queryChunks)) {
+            return staticText((c as any).queryChunks);
+          }
+          return "";
+        })
+        .join("");
+    const text = staticText(query?.queryChunks ?? []);
     calls.push({ sqlText: text });
     if (remaining.length === 0) return { rows: [] };
     return remaining.shift()!;
