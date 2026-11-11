@@ -291,4 +291,5 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/shipping-engine/__tests__/integration/shared-configuration.integration.test.ts",
   "server/modules/shipping-engine/__tests__/integration/channel-packaging.integration.test.ts",
   "server/modules/shipping-engine/__tests__/integration/warehouse-packaging.integration.test.ts",
+  "server/modules/returns/__tests__/integration/return-coexistence-entitlement-fence.integration.test.ts",
 ]);

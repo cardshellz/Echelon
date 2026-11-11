@@ -226,6 +226,21 @@ jobs:
           client/src/components/shipping/__tests__/rate-test-sku-search.test.ts
           client/src/components/shipping/__tests__/rate-test-weight.test.ts
           client/src/pages/__tests__/shipping-fulfillment-routing-ui.test.ts
+      - name: Returns and customer account UI contracts
+        run: >-
+          npx vitest run
+          client/src/components/returns/__tests__/apply-return-inventory-treatment-dialog.test.ts
+          client/src/components/returns/__tests__/return-case-admin-api.test.ts
+          client/src/components/returns/__tests__/return-case-financial-dialogs.test.ts
+          client/src/components/returns/__tests__/return-case-operational-panel.contract.test.ts
+          client/src/components/returns/__tests__/return-case-operations-card.test.ts
+          client/src/components/returns/__tests__/return-cases-create-entry.contract.test.ts
+          client/src/customer-account/__tests__/account-display-money.test.ts
+          client/src/customer-account/__tests__/account-overview-client.test.ts
+          client/src/customer-account/__tests__/customer-account-access.test.ts
+          client/src/customer-account/__tests__/customer-account.transport.test.ts
+          client/src/customer-account/__tests__/customer-return-guest.transport.test.ts
+          client/src/customer-account/__tests__/return-portal-config.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run

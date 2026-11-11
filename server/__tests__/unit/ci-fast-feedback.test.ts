@@ -460,6 +460,18 @@ describe("fast CI preserves coverage and required checks", () => {
       "client/src/components/shipping/__tests__/rate-test-sku-search.test.ts",
       "client/src/components/shipping/__tests__/rate-test-weight.test.ts",
       "client/src/pages/__tests__/shipping-fulfillment-routing-ui.test.ts",
+      "client/src/components/returns/__tests__/apply-return-inventory-treatment-dialog.test.ts",
+      "client/src/components/returns/__tests__/return-case-admin-api.test.ts",
+      "client/src/components/returns/__tests__/return-case-financial-dialogs.test.ts",
+      "client/src/components/returns/__tests__/return-case-operational-panel.contract.test.ts",
+      "client/src/components/returns/__tests__/return-case-operations-card.test.ts",
+      "client/src/components/returns/__tests__/return-cases-create-entry.contract.test.ts",
+      "client/src/customer-account/__tests__/account-display-money.test.ts",
+      "client/src/customer-account/__tests__/account-overview-client.test.ts",
+      "client/src/customer-account/__tests__/customer-account-access.test.ts",
+      "client/src/customer-account/__tests__/customer-account.transport.test.ts",
+      "client/src/customer-account/__tests__/customer-return-guest.transport.test.ts",
+      "client/src/customer-account/__tests__/return-portal-config.test.ts",
     ]) expect(contracts).toContain(file);
     expect(contracts).toContain("--strict --types node scripts/inventory-cutover-records-*.ts");
     // Step 1 plan S2-5 (TESTS17): the Catalog page's browser stubs and specs are type-checked, every spec they serve named.
@@ -534,6 +546,32 @@ describe("fast CI preserves coverage and required checks", () => {
       expect(existsSync(new URL(file, repositoryRoot)), "Missing test file: " + file).toBe(true);
       expect(registered.has(file), "Not run in CI: " + file).toBe(true);
     }
+  });
+
+  it("names only real, distinct files and runs every returns and customer-account client contract test in the contracts job (CUST-11)", () => {
+    const contractsJob = job(workflow, "contracts");
+    const returnsStepFiles = vitestStepFiles(contractsJob, "Returns and customer account UI contracts");
+    expect(returnsStepFiles.length).toBeGreaterThan(0);
+    expect(new Set(returnsStepFiles).size).toBe(returnsStepFiles.length);
+    for (const file of returnsStepFiles) {
+      expect(existsSync(new URL(file, repositoryRoot)), "Missing test file: " + file).toBe(true);
+    }
+    const registered = new Set([
+      ...returnsStepFiles,
+      ...vitestStepFiles(contractsJob, "Procurement, inventory, channel, and finance UI contracts"),
+    ]);
+    const onDisk = [
+      ...testFilesIn("client/src/components/returns/__tests__/", /\.test\.ts$/),
+      ...testFilesIn("client/src/customer-account/__tests__/", /\.test\.ts$/),
+    ];
+    expect(onDisk.length).toBeGreaterThan(0);
+    for (const file of onDisk) {
+      expect(existsSync(new URL(file, repositoryRoot)), "Missing test file: " + file).toBe(true);
+      expect(registered.has(file), "Not run in CI: " + file).toBe(true);
+    }
+    expect(RETURN_ACCEPTANCE_UNIT_FILES).toContain(
+      "client/src/customer-account/__tests__/customer-return-guest.transport.test.ts",
+    );
   });
 
   it("names only real, distinct files in the Returns connected workflow acceptance runner (FC-CI-02)", () => {

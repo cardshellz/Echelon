@@ -16,6 +16,7 @@ export const RETURN_ACCEPTANCE_UNIT_FILES = [
   "client/src/customer-account/__tests__/unit/customer-order-progress-presentation.test.ts",
   "server/modules/shipping/__tests__/unit/saved-label-status.source.test.ts",
   "client/src/customer-account/__tests__/customer-account.transport.test.ts",
+  "client/src/customer-account/__tests__/customer-return-guest.transport.test.ts",
   "server/modules/customer-account/__tests__/unit/customer-order-progress.test.ts",
   "server/modules/customer-account/__tests__/unit/customer-account-order-queries.test.ts",
   "server/modules/shipping/__tests__/unit/saved-label-status.test.ts",
