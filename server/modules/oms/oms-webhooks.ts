@@ -63,7 +63,7 @@ import {
   enqueueShipStationShipmentPushRetry,
 } from "./webhook-retry.worker";
 import type { ShippingEngine } from "../shipping/engine-and-reconcile.api";
-import { recordShopifyRefundReturnCase } from "../returns/application/shopify-return-case.service";
+import { recordShopifyRefundReturnCase } from "../returns/shopify-return-intake.api";
 import { deriveShopifyRefundFinancialStatus } from "./domain/shopify-refund-financial-status";
 import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
 

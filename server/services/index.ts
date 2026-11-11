@@ -1,7 +1,7 @@
 import { randomUUID as newShippingStatusToken } from "node:crypto";
 import { createSavedLabelStatusSource } from "../modules/shipping/package-history-and-delivery.api";
 import { PostgresSalesChannelDeliveryEvidenceStore } from "../modules/shipping/package-history-and-delivery.api";
-import { ShopifyCustomerReturnSnapshotReader } from "../modules/returns/infrastructure/customer-return-shopify-snapshot.reader";
+import { ShopifyCustomerReturnSnapshotReader } from "../modules/returns/shopify-snapshot-reader.api";
 import { PostgresSavedLabelStatusStore } from "../modules/shipping/package-history-and-delivery.api";
 import { SavedLabelStatusWorker } from "../modules/shipping/package-history-and-delivery.api";
 import { createReservedInventoryTransferOwner } from "../modules/inventory-planning/infrastructure/reserved-inventory-transfer.repository";
