@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 
-import { projectPhysicalShipmentToWms } from "../wms/channel-fulfillment-projection.repository";
-import { projectReconciledLegacyHeaders } from "../wms/package-reconciliation-projection.repository";
+import { projectPhysicalShipmentToWms } from "../wms/shipment-execution-and-projection.api";
+import { projectReconciledLegacyHeaders } from "../wms/shipment-execution-and-projection.api";
 import { FulfillmentAuthorityError } from "./channel-fulfillment-authority.repository";
 import { omsWarehouseFinancialStopSql } from "./order-merchandise-state.sql";
 

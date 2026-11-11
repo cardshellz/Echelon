@@ -27,7 +27,7 @@
  * commit — the picker's bin scan then auto-heals setup via resolve-allocation.)
  */
 import { db } from "../../storage/base";
-import { backfillUnassignedWmsOrderItemBin } from "../wms/order-item-commands";
+import { backfillUnassignedWmsOrderItemBin } from "../wms/order-intake-and-items.api";
 
 type ExecutorLike = Pick<typeof db, "execute">;
 

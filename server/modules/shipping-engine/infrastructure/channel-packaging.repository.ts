@@ -16,8 +16,8 @@ import {
   type PackagingBulkResult,
 } from "@shared/shipping/packaging-policy";
 import type { ChannelPackagingStore } from "../application/channel-packaging.service";
-import type { CartonizeBox } from "../../cartonization/domain/cartonize";
-import { resolvePackingFulfillmentChannel } from "../../cartonization/domain/fulfillment-channel";
+import type { CartonizeBox } from "../../cartonization/cartonize-engine.api";
+import { resolvePackingFulfillmentChannel } from "../../cartonization/cartonize-engine.api";
 import {
   assertSuiteBranding,
   eligiblePackagingBoxes,

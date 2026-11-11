@@ -8,10 +8,10 @@ import {
   recordCorrectionEvent, resolveCorrectivePick, savePickCorrectionAnswer, savePickCorrectionReview,
   saveCorrectivePickIntent, hasNewerPickDeclaration, readConfirmedCorrectionsDueForRetry,
   touchPickCorrectionRetry, reassignPickCorrection, readCorrectionScanCodes, type CorrectionExecutor,
-} from "../wms/pick-correction.repository";
+} from "../wms/pick-corrections-and-holds.api";
 import type { PickingUseCases } from "./picking.use-cases";
-import { confirmedShipmentHoldRelease } from "../wms/confirmed-shipment-holds";
-import { releaseLineHoldInTransaction } from "../wms/line-item-hold";
+import { confirmedShipmentHoldRelease } from "../wms/pick-corrections-and-holds.api";
+import { releaseLineHoldInTransaction } from "../wms/pick-corrections-and-holds.api";
 
 /**
  * Recording what already shipped is never blocked by a hold; a hold only
