@@ -25,9 +25,7 @@ import {
   channelExposurePolicyScopeKey,
   type ChannelExposurePolicyCandidate,
 } from "../domain/inventory-channel-exposure";
-import { salesStatusStopsForChannel } from "../domain/inventory-sales-status";
 import { loadAndLockRuntimeAuthority } from "./inventory-availability-runtime-atp.repository";
-import { loadSalesStatusEntriesForProduct } from "./inventory-sales-status.reader";
 import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 
 type ClientPool = Pick<Pool, "connect">;
@@ -434,13 +432,6 @@ async function loadSelectedPublicationTargets(
         [targetIds, productVariantIds],
       );
 
-  // The operator's sales status is read once per product and resolved per
-  // channel below; it applies in every mode (live, review and proposal),
-  // because it is a current stop, not a draft.
-  const salesStatusEntries = productVariantIds.length === 0
-    ? []
-    : await loadSalesStatusEntriesForProduct(client, productId);
-
   const bindings = mapBindings(bindingResult.rows);
   const policies = groupPoliciesByChannel(policyResult.rows, productId);
   const overrideNodeIds = [...new Set(policyResult.rows.flatMap(row => row.source_fulfillment_node_ids ?? []))];
@@ -503,9 +494,6 @@ async function loadSelectedPublicationTargets(
       policies: policies.get(channelId) ?? [],
       mappings: mappings.get(publicationTargetId) ?? [],
       variantHolds: variantHolds.get(publicationTargetId) ?? [],
-      salesStatusHolds: salesStatusStopsForChannel({
-        channelId, productId, productVariantIds, entries: salesStatusEntries,
-      }),
       selection,
       ...(includeDeferredDropshipQuantities && targetDestinationKind === "dropship_store_connection"
         ? { deferredDropshipQuantityVariantIds: selection.variants

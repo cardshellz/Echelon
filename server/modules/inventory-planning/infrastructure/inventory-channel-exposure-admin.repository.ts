@@ -67,8 +67,6 @@ import type {
   SetUpChannelDestinationsCommand,
 } from "../application/inventory-channel-exposure-admin.service";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
-import { salesStatusStopsForChannel } from "../domain/inventory-sales-status";
-import { loadSalesStatusEntriesForProduct } from "./inventory-sales-status.reader";
 import {
   deriveChannelDestinations,
   type DerivableChannelConnection,
@@ -1285,14 +1283,6 @@ implements InventoryChannelExposureAdminStore {
         positiveInteger(row.product_variant_id, "variantHold.variantId"),
         publicationHold(row),
       ]));
-      // The operator's sales status stops a SKU on this channel the same way;
-      // the preview mirrors the runtime planner's hold order.
-      const salesStatusHolds = new Map(salesStatusStopsForChannel({
-        channelId,
-        productId,
-        productVariantIds: [...previewVariantIds],
-        entries: await loadSalesStatusEntriesForProduct(selectionQueryClient(tx), productId),
-      }).map((stop) => [stop.productVariantId, stop.hold] as const));
       const selectedModelRows = rows(await tx.execute(sql`
         SELECT model.id AS model_id, model.version, model.definition_hash
         FROM inventory.transformation_model_heads AS head
@@ -1393,8 +1383,7 @@ implements InventoryChannelExposureAdminStore {
             || rowWarehouses.some(id => !shadowWarehouseIds.has(id)))) {
             blockers.push({ code: "CHANNEL_SOURCE_OVERRIDE_UNAVAILABLE", message: "A selected warehouse is missing or unavailable in this ATP snapshot.", context: { productVariantId } });
           }
-          const hold = publicationHold(target) ?? variantHolds.get(productVariantId)
-            ?? salesStatusHolds.get(productVariantId) ?? null;
+          const hold = publicationHold(target) ?? variantHolds.get(productVariantId) ?? null;
           const sourceWarehouseBreakdown = sourceBindingId === null ? [] : results
             .filter((row) => row.warehouseId !== null && rowWarehouses.includes(row.warehouseId))
             .map((row) => ({

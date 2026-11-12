@@ -293,8 +293,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/identity/__tests__/integration/identity-access-audit-migration.integration.test.ts",
       // Startup registers definitions only; it must not resurrect employee authority.
       "server/modules/identity/__tests__/integration/startup-authority.integration.test.ts",
-      // Sales status: all-channels stop/resume with channel exceptions through real ATP, holds and the durable outbox.
-      "server/modules/inventory-planning/__tests__/integration/inventory-sales-status.integration.test.ts",
+      // Sales status retirement: the release is refused while a stop remains; afterwards the table is frozen.
+      "server/modules/inventory-planning/__tests__/integration/sales-status-retirement-migration.integration.test.ts",
       // Catalog export: PostgreSQL keyset pagination and historical channel identity evidence.
       "server/modules/catalog-export/__tests__/integration/postgres-catalog-export.repository.integration.test.ts",
       // Claim lineage: canonical allocation/reservation/pick/shipment/short-claim lineage invariants.

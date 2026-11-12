@@ -44,8 +44,10 @@ describe("product inventory strategy UI contract", () => {
     expect(productDetailSource).toContain('href="/channels/inventory"');
   });
 
-  it("shows the all-channels sales status where the retired legacy allocation was, only under canonical authority", () => {
+  it("shows stock rules by channel where the retired legacy allocation was, only under canonical authority", () => {
     expect(productDetailSource).toContain('inventoryRuntimeAuthorityQuery.data?.authority === "canonical" ? (');
-    expect(productDetailSource).toContain("<ProductSalesStatusCard productId={product!.productId} />");
+    expect(productDetailSource).toContain("<ProductStockRulesCard productId={product!.productId} />");
+    // Sales status is retired: a SKU is stopped on a channel with Max 0 in its stock rule.
+    expect(productDetailSource).not.toContain("SalesStatus");
   });
 });

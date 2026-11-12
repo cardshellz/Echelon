@@ -75,7 +75,6 @@ import {
 } from "@/features/supplier-catalog/VendorCatalogQuoteEditor";
 import { ProductConversionCard, ProductConversionSummary } from "@/features/inventory-builds/ProductConversionCard";
 import { ProductSafetySummary } from "@/features/inventory-builds/ProductSafetySummary";
-import { ProductSalesStatusCard } from "@/features/channel-inventory/components/ProductSalesStatusCard";
 import { ProductStockRulesCard } from "@/features/channel-inventory/components/ProductStockRulesCard";
 import { transformationQueryKey } from "@/features/inventory-builds/package-conversion-draft";
 import { createProductVariant } from "@/features/catalog/create-product-variant";
@@ -3357,11 +3356,8 @@ export default function ProductDetail() {
 
               {inventoryRuntimeAuthorityQuery.data?.authority === "canonical" ? (
                 // The retired legacy allocation's place: this product's stock rules on
-                // every channel, then the all-channels sales status.
-                <>
-                  <ProductStockRulesCard productId={product!.productId} />
-                  <ProductSalesStatusCard productId={product!.productId} />
-                </>
+                // every channel. Max 0 there is how a SKU is stopped on a channel.
+                <ProductStockRulesCard productId={product!.productId} />
               ) : inventoryRuntimeAuthorityQuery.data?.authority !== "legacy" ? (
                 <Card data-testid="product-legacy-channel-allocation-unavailable">
                   <CardHeader className="p-3 md:p-6">
