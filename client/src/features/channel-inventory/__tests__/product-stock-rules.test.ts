@@ -2,9 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ChannelInventoryApiError } from "../api";
 import {
-  EMPTY_STOCK_RULE_INPUT, describeStockRuleOutcome, listChannelStockRules, mergeStockRuleInput,
-  needsStockRuleRewrite, sameStockRuleInput,
-  saveAndApplyStockRule, stockRuleInputFor, stockRuleScope, stockRuleValue, type StockRuleSaveSteps,
+  EMPTY_STOCK_RULE_INPUT, describeLastSent, describeStockRuleOutcome, discardPendingStockRule, hasPendingChange,
+  listChannelStockRules, mergeStockRuleInput, needsStockRuleRewrite, sameRuleValue, sameStockRuleInput,
+  saveAndApplyStockRule, stockRuleConflict, stockRuleInputFor, stockRuleScope, stockRuleValue, stopsSelling,
+  type LastSentRow, type StockRuleSaveSteps,
 } from "../product-stock-rules";
 import { HASH_A, HASH_B, policyHead, policyValue, view } from "./fixtures";
 
@@ -34,25 +35,25 @@ describe("one SKU's stock rules across channels", () => {
     expect(shopify.cells.shareBps).toEqual({ display: "100%", source: "channel" });
     expect(shopify.cells.holdbackSellableUnits).toEqual({ display: "5", source: "product" });
     expect(shopify.cells.maxPublish).toEqual({ display: "0", source: "sku" });
-    expect(shopify).toMatchObject({ managed: true, hasException: true, outOfStock: true, pending: false });
+    expect(shopify).toMatchObject({ managed: true, hasException: true, ruleSource: "sku", pending: false });
     const ebay = rows.find(row => row.channel.id === 4)!;
     expect(ebay.cells.shareBps).toEqual({ display: "90%", source: "channel" });
     expect(ebay.cells.maxPublish).toEqual({ display: "100", source: "channel" });
-    expect(ebay).toMatchObject({ managed: true, hasException: false, outOfStock: false });
+    expect(ebay).toMatchObject({ managed: true, hasException: false, ruleSource: "channel" });
   });
 
   it("marks a channel with no default as not managed instead of inventing values", () => {
     const amazon = listChannelStockRules(view({ policyHeads: [channelDefault(3)] }), sku).find(row => row.channel.id === 6)!;
     expect(amazon.managed).toBe(false);
     expect(amazon.cells.maxPublish).toEqual({ display: "Not set", source: "unset" });
-    expect(amazon.outOfStock).toBe(false);
+    expect(amazon.ruleSource).toBe("unset");
   });
 
   it("reads the whole product without picking up a SKU rule, and skips inactive channels", () => {
     const base = view({ policyHeads: [channelDefault(3), skuRule(3, policyValue({ maxPublish: { mode: "units", units: "0" } }))] });
     const rows = listChannelStockRules({ ...base, channels: base.channels.map(channel => channel.id === 4 ? { ...channel, status: "inactive" } : channel) }, product);
     expect(rows.some(row => row.channel.id === 4)).toBe(false);
-    expect(rows.find(row => row.channel.id === 3)).toMatchObject({ hasException: false, outOfStock: false });
+    expect(rows.find(row => row.channel.id === 3)).toMatchObject({ hasException: false, ruleSource: "channel" });
   });
 
   it("shows what is in effect, and reports a saved change that was never applied separately", () => {
@@ -61,7 +62,7 @@ describe("one SKU's stock rules across channels", () => {
     // Nothing was applied: the channel still uses its default and the item is still selling.
     expect(pending.cells.shareBps).toEqual({ display: "100%", source: "channel" });
     expect(pending.cells.maxPublish).toEqual({ display: "No max", source: "channel" });
-    expect(pending).toMatchObject({ pending: true, pendingChange: "Stock % 50%, Max 0", hasException: true, liveException: false, outOfStock: false });
+    expect(pending).toMatchObject({ pending: true, pendingChange: "Stock % 50%, Max 0", hasException: true, ruleSource: "channel" });
   });
 
   it("keeps showing the applied rule while a newer change to it waits", () => {
@@ -69,24 +70,63 @@ describe("one SKU's stock rules across channels", () => {
       active: policyValue({ maxPublish: { mode: "units", units: "0" } }), draft: policyValue({ inheritAll: true }), revision: "5" });
     const row = listChannelStockRules(view({ policyHeads: [channelDefault(3), head] }), sku)[0];
     expect(row.cells.maxPublish).toEqual({ display: "0", source: "sku" });
-    expect(row).toMatchObject({ outOfStock: true, liveException: true, pending: true, pendingChange: "Clear exception" });
+    expect(row).toMatchObject({ ruleSource: "sku", pending: true, pendingChange: "Clear exception" });
   });
 
   it("does not show an unapplied whole-product rule as in effect on a SKU", () => {
     const productDraft = policyHead({ scopeKey: "channel:3:product:10", channelId: 3, scope: stockRuleScope(3, product),
       draft: policyValue({ maxPublish: { mode: "units", units: "0" } }) });
     const onSku = listChannelStockRules(view({ policyHeads: [channelDefault(3), productDraft] }), sku)[0];
-    expect(onSku).toMatchObject({ outOfStock: false, pending: false, pendingChange: null, liveException: false });
+    expect(onSku).toMatchObject({ ruleSource: "channel", pending: false, pendingChange: null });
     const onProduct = listChannelStockRules(view({ policyHeads: [channelDefault(3), productDraft] }), product)[0];
-    expect(onProduct).toMatchObject({ outOfStock: false, pending: true, pendingChange: "Max 0" });
+    expect(onProduct).toMatchObject({ ruleSource: "channel", pending: true, pendingChange: "Max 0" });
   });
 
   it("ignores a cleared rule and names an old out-of-stock draft as Max 0", () => {
     const cleared = listChannelStockRules(view({ policyHeads: [channelDefault(3), skuRule(3, policyValue({ inheritAll: true }))] }), sku)[0];
-    expect(cleared).toMatchObject({ hasException: false, liveException: false, pending: false });
+    expect(cleared).toMatchObject({ hasException: false, ruleSource: "channel", pending: false });
     expect(cleared.cells.shareBps.source).toBe("channel");
     const retired = listChannelStockRules(view({ policyHeads: [channelDefault(3), skuRule(3, policyValue({ eligible: false }), true)] }), sku)[0];
-    expect(retired).toMatchObject({ pendingChange: "Max 0", outOfStock: false });
+    expect(retired).toMatchObject({ pendingChange: "Max 0", ruleSource: "channel" });
+  });
+
+  it("names the product rule when it is the most specific one in use on a SKU", () => {
+    const row = listChannelStockRules(view({ policyHeads: [channelDefault(3), productRule(3, policyValue({ holdbackSellableUnits: "5" }))] }), sku)[0];
+    expect(row).toMatchObject({ ruleSource: "product", hasException: false });
+  });
+
+  it("does not report a saved version that changes nothing as a pending change", () => {
+    const max0 = policyValue({ maxPublish: { mode: "units", units: "0" } });
+    const applied = skuRule(3, max0);
+    // The same rule saved again over the applied one. Its hash differs (the fixture gives
+    // every saved version its own), which must not matter: the values are what count.
+    const sameAgain = { ...applied, draftPolicy: skuRule(3, { ...max0, sourceFulfillmentNodeIds: null }, true).draftPolicy };
+    expect(sameAgain.draftPolicy!.definitionHash).not.toBe(applied.activePolicy!.definitionHash);
+    expect(hasPendingChange(sameAgain)).toBe(false);
+    expect(listChannelStockRules(view({ policyHeads: [channelDefault(3), sameAgain] }), sku)[0])
+      .toMatchObject({ pending: false, pendingChange: null, ruleSource: "sku", hasException: true });
+    // "Use the default" saved where no rule is applied: also nothing.
+    const nothing = skuRule(3, policyValue({ inheritAll: true }), true);
+    expect(hasPendingChange(nothing)).toBe(false);
+    expect(listChannelStockRules(view({ policyHeads: [channelDefault(3), nothing] }), sku)[0])
+      .toMatchObject({ pending: false, hasException: false, ruleSource: "channel" });
+    expect(hasPendingChange(skuRule(3, max0, true))).toBe(true);
+    expect(hasPendingChange(applied)).toBe(false);
+    expect(hasPendingChange(null)).toBe(false);
+  });
+
+  it("compares rule values by meaning, not by how they were written", () => {
+    const base = policyValue({ shareBps: 5000, maxPublish: { mode: "units", units: "10" }, sourceFulfillmentNodeIds: [8, 7] });
+    expect(sameRuleValue(base, { ...base, sourceFulfillmentNodeIds: [7, 8] })).toBe(true);
+    expect(sameRuleValue(policyValue({ shareBps: 5000 }), { ...policyValue({ shareBps: 5000 }), sourceFulfillmentNodeIds: null })).toBe(true);
+    expect(sameRuleValue(policyValue({ inheritAll: true }), policyValue({ inheritAll: true }))).toBe(true);
+    for (const other of [
+      policyValue({ shareBps: 4000, maxPublish: { mode: "units", units: "10" }, sourceFulfillmentNodeIds: [8, 7] }),
+      { ...base, maxPublish: { mode: "units" as const, units: "11" } }, { ...base, maxPublish: { mode: "unlimited" as const } },
+      { ...base, maxPublish: null }, { ...base, holdbackSellableUnits: "1" }, { ...base, minPublishSellableUnits: "1" },
+      { ...base, eligible: false }, { ...base, allocationSemantics: "partitioned" as const }, { ...base, sourceFulfillmentNodeIds: [7] },
+      policyValue({ inheritAll: true }),
+    ]) expect(sameRuleValue(base, other)).toBe(false);
   });
 });
 
@@ -115,7 +155,6 @@ describe("turning what was typed into the saved rule", () => {
     const row = listChannelStockRules(view({ policyHeads: [channelDefault(3), head] }), sku)
       .find(candidate => candidate.channel.id === 3)!;
     expect(row.cells.maxPublish).toEqual({ display: "0", source: "sku" });
-    expect(row.outOfStock).toBe(true);
     const input = stockRuleInputFor(head);
     expect(input).toMatchObject({ maxMode: "units", maxUnits: "0" });
     // Nothing typed, yet the rule must be saved again or the old flag would be applied.
@@ -144,6 +183,27 @@ describe("turning what was typed into the saved rule", () => {
       .toEqual({ sharePercent: "50", bufferUnits: "2", maxMode: "units", maxUnits: "0", hideBelowUnits: "" });
     expect(mergeStockRuleInput(current, EMPTY_STOCK_RULE_INPUT)).toEqual(current);
     expect(mergeStockRuleInput(current, { ...EMPTY_STOCK_RULE_INPUT, hideBelowUnits: "5", sharePercent: " " }).sharePercent).toBe("50");
+  });
+
+  it("rejects a Hide when below that a non-zero Max can never reach", () => {
+    const result = stockRuleValue({ ...EMPTY_STOCK_RULE_INPUT, maxMode: "units", maxUnits: "5", hideBelowUnits: "10" }, null);
+    expect(result).toEqual({ ok: false, errors: [{ field: "minPublishSellableUnits",
+      message: "Hide when below (10) is more than Max (5), so this channel would always be sent 0. Lower it, or set Max to 0 to stop selling here." }] });
+    // Equal is reachable; Max 0, no max and an inherited max or cutoff are not conflicts on this rule.
+    expect(stockRuleValue({ ...EMPTY_STOCK_RULE_INPUT, maxMode: "units", maxUnits: "10", hideBelowUnits: "10" }, null).ok).toBe(true);
+    expect(stockRuleConflict({ maxPublish: { mode: "units", units: "0" }, minPublishSellableUnits: "10" })).toBeNull();
+    expect(stockRuleConflict({ maxPublish: { mode: "unlimited" }, minPublishSellableUnits: "10" })).toBeNull();
+    expect(stockRuleConflict({ maxPublish: null, minPublishSellableUnits: "10" })).toBeNull();
+    expect(stockRuleConflict({ maxPublish: { mode: "units", units: "5" }, minPublishSellableUnits: null })).toBeNull();
+    // Compared as whole numbers, not text: 100 is not below 9.
+    expect(stockRuleConflict({ maxPublish: { mode: "units", units: "100" }, minPublishSellableUnits: "9" })).toBeNull();
+  });
+
+  it("knows when the typed Max stops selling", () => {
+    expect(stopsSelling({ maxMode: "units", maxUnits: " 0 " })).toBe(true);
+    expect(stopsSelling({ maxMode: "units", maxUnits: "10" })).toBe(false);
+    expect(stopsSelling({ maxMode: "units", maxUnits: "" })).toBe(false);
+    expect(stopsSelling({ maxMode: "inherit", maxUnits: "0" })).toBe(false);
   });
 
   it("compares inputs ignoring spaces and a hidden max number", () => {
@@ -201,24 +261,70 @@ describe("saving a rule so it takes effect", () => {
     expect(h.calls).toEqual([]);
   });
 
-  it("does not apply a rule the check says would cause a problem", async () => {
+  it("ignores a saved version that changes nothing instead of applying it", async () => {
+    const h = steps();
+    const head = skuRule(3, policyValue({ inheritAll: true }), true);
+    await expect(saveAndApplyStockRule({ row: { scope, head }, value, changed: false, note: "" }, h.steps)).resolves.toEqual({ status: "unchanged" });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("puts the rule back when the check says it would cause a problem, so nothing waits", async () => {
     const h = steps({ review: vi.fn(async () => review(false)) });
     await expect(saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps))
-      .resolves.toEqual({ status: "blocked", blockers: ["Listing would be oversold."] });
+      .resolves.toEqual({ status: "blocked", blockers: ["Listing would be oversold."], leftover: false });
     expect(h.steps.apply).not.toHaveBeenCalled();
+    // Second save overwrites exactly the version the first one wrote, with "use the default".
+    expect(h.steps.save).toHaveBeenCalledTimes(2);
+    expect(h.steps.save).toHaveBeenLastCalledWith(expect.objectContaining({ scope, value: policyValue({ inheritAll: true }),
+      expectedHeadRevision: "5", expectedDraftPolicyId: 9, expectedDraftDefinitionHash: HASH_B }));
+  });
+
+  it("puts back a copy of the applied rule when one exists", async () => {
+    const h = steps({ review: vi.fn(async () => review(false)) });
+    const applied = skuRule(3, policyValue({ shareBps: 5000 }));
+    const outcome = await saveAndApplyStockRule({ row: { scope, head: applied }, value, changed: true, note: "" }, h.steps);
+    expect(outcome).toMatchObject({ status: "blocked", leftover: false });
+    expect(h.steps.save).toHaveBeenLastCalledWith(expect.objectContaining({ value: policyValue({ shareBps: 5000 }), expectedDraftPolicyId: 9 }));
+  });
+
+  it("restores an earlier saved change it overwrote, and says it is still waiting", async () => {
+    const h = steps({ review: vi.fn(async () => review(false)) });
+    const earlier = skuRule(3, policyValue({ shareBps: 2500 }), true);
+    const outcome = await saveAndApplyStockRule({ row: { scope, head: earlier }, value, changed: true, note: "" }, h.steps);
+    expect(outcome).toMatchObject({ status: "blocked", leftover: true });
+    expect(h.steps.save).toHaveBeenLastCalledWith(expect.objectContaining({ value: policyValue({ shareBps: 2500 }) }));
+  });
+
+  it("reports a leftover when putting the rule back fails", async () => {
+    let saves = 0;
+    const h = steps({
+      save: vi.fn(async () => { saves += 1; if (saves === 2) throw new TypeError("Failed to fetch"); return saved; }),
+      review: vi.fn(async () => review(false)),
+    });
+    await expect(saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps))
+      .resolves.toEqual({ status: "blocked", blockers: ["Listing would be oversold."], leftover: true });
+  });
+
+  it("does not touch a leftover it did not write when that leftover cannot be applied", async () => {
+    const h = steps({ review: vi.fn(async () => review(false)) });
+    const head = skuRule(3, value, true);
+    await expect(saveAndApplyStockRule({ row: { scope, head }, value, changed: false, note: "" }, h.steps))
+      .resolves.toMatchObject({ status: "blocked", leftover: true });
+    expect(h.steps.save).not.toHaveBeenCalled();
   });
 
   it("reports a rejected save as not saved and stops", async () => {
     const h = steps({ save: vi.fn(async () => { throw new ChannelInventoryApiError(409, "CONFLICT", "This rule changed."); }) });
     await expect(saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps))
-      .resolves.toEqual({ status: "rejected", message: "This rule changed.", saved: false });
+      .resolves.toEqual({ status: "rejected", message: "This rule changed.", leftover: false });
     expect(h.steps.review).not.toHaveBeenCalled();
   });
 
-  it("reports a rejected apply as saved but not applied", async () => {
+  it("puts the rule back after a rejected apply", async () => {
     const h = steps({ apply: vi.fn(async () => { throw new ChannelInventoryApiError(409, "CHANNEL_RULE_REVIEW_STALE", "Check the change again."); }) });
     await expect(saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps))
-      .resolves.toEqual({ status: "rejected", message: "Check the change again.", saved: true });
+      .resolves.toEqual({ status: "rejected", message: "Check the change again.", leftover: false });
+    expect(h.steps.save).toHaveBeenCalledTimes(2);
   });
 
   it("never claims success or failure when the network drops mid-request", async () => {
@@ -229,13 +335,42 @@ describe("saving a rule so it takes effect", () => {
     }
     const timeout = steps({ apply: vi.fn(async () => { throw new ChannelInventoryApiError(504, "GATEWAY_TIMEOUT", "Gateway timeout"); }) });
     expect((await saveAndApplyStockRule({ row, value, changed: true, note: "" }, timeout.steps)).status).toBe("unknown");
+    // The apply may have landed: putting the rule back would overwrite nothing useful and could mislead.
+    expect(timeout.steps.save).toHaveBeenCalledTimes(1);
   });
 
-  it("treats a failed check as saved-not-applied, since a read changes nothing", async () => {
+  it("puts the rule back after a failed check, since a read applies nothing", async () => {
     const h = steps({ review: vi.fn(async () => { throw new TypeError("Failed to fetch"); }) });
     const outcome = await saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps);
-    expect(outcome).toMatchObject({ status: "rejected", saved: true });
+    expect(outcome).toMatchObject({ status: "rejected", leftover: false });
     expect(h.steps.apply).not.toHaveBeenCalled();
+    expect(h.steps.save).toHaveBeenCalledTimes(2);
+  });
+
+  it("discards a leftover saved change without applying anything", async () => {
+    const h = steps();
+    const applied = skuRule(3, policyValue({ shareBps: 5000 }));
+    const head = { ...applied, draftPolicy: skuRule(3, value, true).draftPolicy };
+    await expect(discardPendingStockRule({ scope, head }, h.steps)).resolves.toEqual({ status: "undone" });
+    expect(h.calls).toEqual(["save"]);
+    expect(h.steps.save).toHaveBeenCalledWith(expect.objectContaining({ value: policyValue({ shareBps: 5000 }),
+      expectedHeadRevision: "4", expectedDraftPolicyId: 2, expectedDraftDefinitionHash: HASH_B }));
+    // No applied rule: the leftover is overwritten with "use the default".
+    const alone = steps();
+    await discardPendingStockRule({ scope, head: skuRule(3, value, true) }, alone.steps);
+    expect(alone.steps.save).toHaveBeenCalledWith(expect.objectContaining({ value: policyValue({ inheritAll: true }) }));
+  });
+
+  it("has nothing to discard when nothing waits, and reports a failed discard", async () => {
+    const h = steps();
+    await expect(discardPendingStockRule({ scope, head: skuRule(3, value) }, h.steps)).resolves.toEqual({ status: "unchanged" });
+    await expect(discardPendingStockRule({ scope, head: null }, h.steps)).resolves.toEqual({ status: "unchanged" });
+    expect(h.calls).toEqual([]);
+    const refused = steps({ save: vi.fn(async () => { throw new ChannelInventoryApiError(409, "CONFLICT", "This rule changed."); }) });
+    await expect(discardPendingStockRule({ scope, head: skuRule(3, value, true) }, refused.steps))
+      .resolves.toEqual({ status: "rejected", message: "This rule changed.", leftover: true });
+    const dropped = steps({ save: vi.fn(async () => { throw new TypeError("Failed to fetch"); }) });
+    expect((await discardPendingStockRule({ scope, head: skuRule(3, value, true) }, dropped.steps)).status).toBe("unknown");
   });
 
   it("refuses to edit a channel default from this view", async () => {
@@ -244,12 +379,55 @@ describe("saving a rule so it takes effect", () => {
   });
 
   it("describes each outcome in one plain line", () => {
-    expect(describeStockRuleOutcome({ status: "applied", quantities, skipped: [] }, 101)).toBe("Applied. Shopify US 12 → 0.");
-    expect(describeStockRuleOutcome({ status: "applied", quantities, skipped: [] }, 102)).toBe("Applied. No quantity changes right now.");
-    expect(describeStockRuleOutcome({ status: "applied", quantities: [{ ...quantities[0], current: null }], skipped: [] }, null)).toBe("Applied. Shopify US ? → 0.");
+    expect(describeStockRuleOutcome({ status: "applied", quantities, skipped: [] }, 101)).toBe("Saved. Shopify US 12 → 0.");
+    expect(describeStockRuleOutcome({ status: "applied", quantities, skipped: [] }, 102)).toBe("Saved. The quantity sent does not change right now.");
+    expect(describeStockRuleOutcome({ status: "applied", quantities: [{ ...quantities[0], current: null }], skipped: [] }, null)).toBe("Saved. Shopify US ? → 0.");
     expect(describeStockRuleOutcome({ status: "unchanged" }, null)).toBe("No change.");
-    expect(describeStockRuleOutcome({ status: "blocked", blockers: ["Reason."] }, null)).toBe("Saved but not applied: Reason.");
-    expect(describeStockRuleOutcome({ status: "rejected", message: "Changed.", saved: false }, null)).toBe("Not saved: Changed.");
-    expect(describeStockRuleOutcome({ status: "rejected", message: "Stale.", saved: true }, null)).toBe("Saved but not applied: Stale.");
+    expect(describeStockRuleOutcome({ status: "undone" }, null)).toBe("Saved change discarded. Nothing changed on the channel.");
+    expect(describeStockRuleOutcome({ status: "blocked", blockers: ["Reason."], leftover: false }, null)).toBe("Not saved. Reason.");
+    expect(describeStockRuleOutcome({ status: "rejected", message: "Changed.", leftover: false }, null)).toBe("Not saved. Changed.");
+    expect(describeStockRuleOutcome({ status: "rejected", message: "Stale.", leftover: true }, null))
+      .toBe("Not saved. Stale. An earlier saved change is still waiting on this rule; open Edit to apply or discard it.");
+  });
+});
+
+describe("the quantity a channel was last sent", () => {
+  const at = "2026-10-28T14:00:00.000Z";
+  const desired = (outboxId: string, quantity: string, state: NonNullable<LastSentRow["desired"]>["state"]) =>
+    ({ outboxId, revision: outboxId, quantity, targetRevision: "1", state, createdAt: at });
+  const listed = (overrides: Partial<LastSentRow> = {}): LastSentRow => ({
+    productVariantId: 101, activeInventoryItemId: "item-1", desired: desired("7", "100", "verified"),
+    acknowledged: { outboxId: "7", quantity: "100", acknowledgedAt: at }, observed: null, ...overrides,
+  });
+
+  it("shows the accepted quantity and when it was accepted", () => {
+    expect(describeLastSent(listed())).toEqual({ primary: "100", detail: null, at, tone: "normal" });
+    expect(describeLastSent(listed({ acknowledged: { outboxId: "7", quantity: "6059", acknowledgedAt: at } })).primary).toBe("6,059");
+    expect(describeLastSent(listed({ acknowledged: { outboxId: "7", quantity: "0", acknowledgedAt: at } })).primary).toBe("0");
+  });
+
+  it("says not listed when the SKU has no listing on the destination", () => {
+    expect(describeLastSent(undefined)).toEqual({ primary: "Not listed", detail: null, at: null, tone: "muted" });
+    expect(describeLastSent(listed({ activeInventoryItemId: null }))).toMatchObject({ primary: "Not listed" });
+  });
+
+  it("says never sent when a listed SKU has no accepted send", () => {
+    expect(describeLastSent(listed({ desired: null, acknowledged: null }))).toEqual({ primary: "Never sent", detail: null, at: null, tone: "muted" });
+  });
+
+  it("keeps the accepted quantity while a newer one is on its way", () => {
+    expect(describeLastSent(listed({ desired: desired("8", "95", "queued") })))
+      .toEqual({ primary: "100", detail: "Sending 95 now", at, tone: "normal" });
+    expect(describeLastSent(listed({ desired: desired("8", "95", "queued"), acknowledged: null })))
+      .toEqual({ primary: "Never sent", detail: "Sending 95 now", at: null, tone: "normal" });
+  });
+
+  it("flags a newer send that failed, without hiding what the channel last accepted", () => {
+    expect(describeLastSent(listed({ desired: desired("8", "95", "dead_letter") })))
+      .toEqual({ primary: "100", detail: "Sending 95 failed", at, tone: "problem" });
+  });
+
+  it("does not report a replaced or cancelled newer request as in progress", () => {
+    expect(describeLastSent(listed({ desired: desired("8", "95", "cancelled") }))).toEqual({ primary: "100", detail: null, at, tone: "normal" });
   });
 });
