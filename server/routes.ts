@@ -94,10 +94,12 @@ import { registerDropshipOrderRoutes } from "./modules/dropship/interfaces/http/
 import { registerDropshipNotificationRoutes } from "./modules/dropship/interfaces/http/dropship-notification.routes";
 import { registerDropshipCostChangeRoutes } from "./modules/dropship/interfaces/http/dropship-cost-change.routes";
 import { registerDropshipReturnRoutes } from "./modules/dropship/interfaces/http/dropship-return.routes";
-import { registerReturnPolicyAdminRoutes } from "./modules/returns/interfaces/http/return-policy-admin.routes";
-import { registerReturnCaseAdminRoutes } from "./modules/returns/interfaces/http/return-case-admin.routes";
-import { registerCustomerReturnPreviewRoutes } from "./modules/returns/interfaces/http/customer-return-preview.routes";
-import { registerCustomerReturnCustomerRoutes } from "./modules/returns/interfaces/http/customer-return-customer.routes";
+import {
+  registerReturnPolicyAdminRoutes,
+  registerReturnCaseAdminRoutes,
+  registerCustomerReturnPreviewRoutes,
+  registerCustomerReturnCustomerRoutes,
+} from "./modules/returns/routes.api";
 import { registerDropshipOpsSurfaceRoutes } from "./modules/dropship/interfaces/http/dropship-ops-surface.routes";
 import { registerDropshipMarketplaceOrderIntakeRoutes } from "./modules/dropship/interfaces/http/dropship-marketplace-order-intake.routes";
 import { registerShippingAdminRoutes } from "./modules/shipping-engine/routes.api";

@@ -1,7 +1,9 @@
 import { z } from "zod";
 import type { CustomerRewards } from "./customer-rewards";
-import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
-import type { CustomerReturnOrderAccessService } from "../../returns/application/customer-return-order-access.service";
+import type {
+  CustomerReturnCustomerSession,
+  CustomerReturnOrderAccessService,
+} from "../../returns/customer-return-access-contracts.api";
 import {
   customerOrderEditActorId,
   OrderEditError,

@@ -1,5 +1,5 @@
 import type { AccountNativeReader } from "./account-native-summaries.ports";
-import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
+import type { CustomerReturnCustomerSession } from "../../returns/customer-return-access-contracts.api";
 import {
   OrderEditError,
   OrderEditProviderError,

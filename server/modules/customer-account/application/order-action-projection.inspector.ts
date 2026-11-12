@@ -1,7 +1,7 @@
 import { orderEditOrderSchema, type OrderEditOrder } from "@shared/order-edits/order-edit.contract";
 import { customerReturnCustomerOrderSchema, type CustomerReturnCustomerOrder } from "@shared/returns/customer-return-access.contract";
 import { OrderEditError } from "../../order-edits/customer-account.api";
-import { CustomerReturnLiveError } from "../../returns/application/customer-return-live-error";
+import { CustomerReturnLiveError } from "../../returns/customer-return-access-contracts.api";
 import type { OrderActionScope, OrderActionProjectionInspector } from "./order-action-projection.ports";
 import { customerOrderActionReferenceKey } from "@shared/customer-account/order-actions";
 

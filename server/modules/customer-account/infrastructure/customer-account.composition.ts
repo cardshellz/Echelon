@@ -2,16 +2,20 @@ import { PostgresAccountNativeSummaries } from "./account-native-summaries.repos
 import type { Pool } from "pg";
 import { CustomerAccountProgressService } from "../application/customer-account-progress.service";
 import { PostgresCustomerOrderDeliveryReader } from "../../shipping/package-history-and-delivery.api";
-import { PostgresCustomerReturnProgressReader } from "../../returns/infrastructure/customer-return-progress.reader";
+import {
+  PostgresCustomerReturnProgressReader,
+  PostgresCustomerReturnOrderAccessRepository,
+  createCustomerReturnCustomerServices,
+} from "../../returns/customer-account-composition.api";
 import {
   ClubOrderEditCodeRedemptions,
   PostgresOrderEditStore,
   type OrderEditService,
 } from "../../order-edits/customer-account.api";
-import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
-import { CustomerReturnOrderAccessService } from "../../returns/application/customer-return-order-access.service";
-import { PostgresCustomerReturnOrderAccessRepository } from "../../returns/infrastructure/customer-return-order-access.repository";
-import { createCustomerReturnCustomerServices } from "../../returns/infrastructure/customer-return-customer.composition";
+import {
+  CustomerReturnOrderAccessService,
+  type CustomerReturnCustomerSession,
+} from "../../returns/customer-return-access-contracts.api";
 import { CustomerOrderEditService } from "../application/customer-order-edit.service";
 import { CustomerAccountOrderQueriesService } from "../application/customer-account-order-queries.service";
 import { PostgresCustomerAccountOrderContextReader } from "./customer-account-order-context.repository";
