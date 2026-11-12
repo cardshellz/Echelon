@@ -78,5 +78,5 @@ export function registerSubscriptionWebhookRoutes(app: Express): void {
   });
   */
 
-  console.log("[SubWebhook] Subscription webhook routes registered");
+  console.info("[SubWebhook] Subscription webhook listener disabled in Echelon (owned by shellz-club-app)");
 }

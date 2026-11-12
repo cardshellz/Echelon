@@ -4,8 +4,8 @@ import {
   finalizeOrderEditWarehouseRelease,
   OrderEditWarehouseGateway,
   orderEditWarehouseBlockers,
-} from "../infrastructure/order-edit-warehouse.gateway";
-import type { OrderEditWarehouseItem } from "../infrastructure/order-edit-warehouse-items";
+} from "../../infrastructure/order-edit-warehouse.gateway";
+import type { OrderEditWarehouseItem } from "../../infrastructure/order-edit-warehouse-items";
 
 const OPERATION = "00000000-0000-4000-8000-000000000001";
 const OTHER = "00000000-0000-4000-8000-000000000002";

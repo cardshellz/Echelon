@@ -26,7 +26,7 @@ export const BROWSER_SUITES = {
     tests: /^test\/browser\/(order-edits|customer-order-edit-(?:resume|rewards|payment)|customer-order-cancellation)\.spec\.ts$/,
     roots: ["client/src/customer-account/entry.tsx", "test/browser/fixtures/customer-order-edit-harness.tsx"],
     appRoutes: ["/order-edits", "/oms/orders"],
-    ownedPrefixes: ["server/modules/order-edits/", "client/src/pages/OrderEdits.tsx"],
+    ownedPrefixes: ["server/modules/order-edits/", "client/src/pages/OrderEdits.tsx", "client/src/components/order-edits/"],
   },
   procurement: {
     config: "playwright.procurement.config.ts",

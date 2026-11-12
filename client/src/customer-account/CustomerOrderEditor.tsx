@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { OrderDraft, OrderEditOperationView } from "@/pages/OrderEdits";
+import { OrderDraft, OrderEditOperationView } from "@/components/order-edits/OrderEditWorkspace";
+import type { OrderEditCodeMessageCatalog } from "@shared/order-edits/order-edit-code-errors";
 import {
   loadPendingOrderEditQuote,
   clearPendingOrderEditQuote,
@@ -47,6 +48,7 @@ export function CustomerOrderEditor({
   onBusy,
   paymentOwner,
   returnOperationId,
+  codeMessages,
   onDone,
 }: {
   api: CustomerAccountTransport;
@@ -57,6 +59,7 @@ export function CustomerOrderEditor({
   onBusy: (busy: boolean) => void;
   paymentOwner?: string;
   returnOperationId?: string;
+  codeMessages?: OrderEditCodeMessageCatalog;
   onDone?: () => void;
 }) {
   const [order, setOrder] = useState<OrderEditOrder | null>(null);
@@ -509,6 +512,7 @@ export function CustomerOrderEditor({
             closedOperationId={closedOperationId}
             discountCodes={discountCodes}
             onDiscountCodesChange={setDiscountCodes}
+            codeMessages={codeMessages}
             renderRewards={
               order.codeEntryAvailable
                 ? (props) => (
@@ -572,6 +576,7 @@ export function CustomerOrderEditor({
           busyAction={busyAction}
           isUncertain={uncertain}
           recoveringCommand={observingCommand}
+          codeMessages={codeMessages}
           error={error ?? status.error}
           onCommit={() => void progress("commit")}
           onRefresh={() => {
