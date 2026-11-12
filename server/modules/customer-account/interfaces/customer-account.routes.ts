@@ -15,6 +15,7 @@ import {
   orderEditOrderSchema,
   orderEditOperationSchema,
 } from "@shared/order-edits/order-edit.contract";
+import { extractPublicOrderEditCodeErrorParams } from "@shared/order-edits/order-edit-code-errors";
 import {
   orderEditPreviewSchema,
   orderEditPreviewWarmSchema,
@@ -133,11 +134,21 @@ export function registerCustomerAccountRoutes(
         ? { context: error.context }
         : {}),
     });
-    if (known)
+    if (known) {
+      const publicParams = extractPublicOrderEditCodeErrorParams(
+        error.code,
+        error instanceof OrderEditError ? error.params : error.context,
+      );
       res
         .status(error instanceof OrderEditError ? error.status : 409)
-        .json({ error: { code: error.code, message: error.message } });
-    else returnCustomerError(res, error);
+        .json({
+          error: {
+            code: error.code,
+            message: error.message,
+            ...(publicParams ? { params: publicParams } : {}),
+          },
+        });
+    } else returnCustomerError(res, error);
   };
   app.post(
     CUSTOMER_ACCOUNT_PROXY_API,

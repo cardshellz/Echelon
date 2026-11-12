@@ -4,6 +4,11 @@ import {
   MAX_ORDER_EDIT_CODES,
   type OrderEditCodeApplication,
 } from "@shared/order-edits/order-edit-codes";
+import {
+  OrderEditCodeInputError,
+  resolveOrderEditCodeErrorMessage,
+  type OrderEditCodeMessageCatalog,
+} from "@shared/order-edits/order-edit-code-errors";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatOrderEditMoney } from "@/lib/order-edits";
@@ -13,6 +18,7 @@ export function OrderEditCodeEntry({
   applications,
   disabled = false,
   available,
+  codeMessages,
   onApply,
   onRemove,
   onEditing,
@@ -21,8 +27,9 @@ export function OrderEditCodeEntry({
   applications: OrderEditCodeApplication[];
   disabled?: boolean;
   available: boolean;
+  codeMessages?: OrderEditCodeMessageCatalog;
   onApply(code: string): Promise<void>;
-  onRemove(code: string): Promise<void> | void;
+  onRemove(code: string): Promise<void | unknown> | void;
   onEditing?: (editing: boolean) => void;
 }) {
   const id = useId();
@@ -33,7 +40,7 @@ export function OrderEditCodeEntry({
   useEffect(() => {
     onEditing?.(pending || value.trim().length > 0);
   }, [pending, value, onEditing]);
-  async function run(action: () => Promise<void> | void) {
+  async function run(action: () => Promise<void | unknown> | void) {
     if (inFlight.current || disabled || !available) return;
     inFlight.current = true;
     setPending(true);
@@ -41,11 +48,7 @@ export function OrderEditCodeEntry({
     try {
       await action();
     } catch (cause) {
-      setError(
-        cause instanceof Error
-          ? cause.message
-          : "This code could not be verified. Please try again.",
-      );
+      setError(resolveOrderEditCodeErrorMessage(cause, codeMessages));
     } finally {
       inFlight.current = false;
       setPending(false);
@@ -54,12 +57,15 @@ export function OrderEditCodeEntry({
   async function apply() {
     await run(async () => {
       const parsed = orderEditCodeSchema.safeParse(value);
-      if (!parsed.success) throw new Error("Enter a discount code.");
+      if (!parsed.success)
+        throw new OrderEditCodeInputError("ORDER_EDIT_CODE_EMPTY");
       const code = parsed.data.toUpperCase();
       if (codes.some((existing) => existing.toUpperCase() === code))
-        throw new Error("This code has already been added.");
+        throw new OrderEditCodeInputError("ORDER_EDIT_CODE_DUPLICATE_INPUT");
       if (codes.length >= MAX_ORDER_EDIT_CODES)
-        throw new Error(`You can add up to ${MAX_ORDER_EDIT_CODES} codes.`);
+        throw new OrderEditCodeInputError("ORDER_EDIT_CODES_LIMIT", {
+          maxCodes: MAX_ORDER_EDIT_CODES,
+        });
       await onApply(code);
       setValue("");
     });
