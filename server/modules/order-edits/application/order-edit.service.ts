@@ -56,7 +56,7 @@ import {
   orderEditDiagnosticError,
   type OrderEditDiagnosticEvent,
 } from "./order-edit-diagnostics";
-import type { OrderCancellationService } from "../../customer-account/application/order-cancellation.service";
+import type { OrderCancellationService } from "../../customer-account/order-cancellation-contracts.api";
 import { orderCancellationEligibilityReasons } from "../domain/order-cancellation-eligibility";
 import { presentCustomerOrderLifecycle } from "@shared/customer-account/order-fulfillment";
 import { customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";

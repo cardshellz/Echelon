@@ -4,7 +4,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { freightInvoiceContextSchema, freightInvoiceApprovalHistorySchema, type FreightInvoicePreview } from "@shared/procurement/freight-invoice-costs";
 import { costFingerprint, costInteger, lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
-import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { hasQuantityAmendmentAuthority } from "./po-quantity-amendment.policy";
 import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";

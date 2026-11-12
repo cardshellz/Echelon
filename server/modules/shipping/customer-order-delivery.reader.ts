@@ -20,7 +20,7 @@ import {
   customerAccountProgressScopeSchema,
   type CustomerAccountDeliveryProgressReader,
   type CustomerOrderDeliveryProgress,
-} from "../customer-account/application/customer-account-progress.ports";
+} from "../customer-account/progress-contracts.api";
 
 const id = z.coerce.number().int().positive().safe();
 const orderRow = z

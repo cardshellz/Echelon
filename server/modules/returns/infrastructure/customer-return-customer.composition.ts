@@ -10,7 +10,7 @@ import { createCustomerReturnLiveService } from "./customer-return-live.composit
 import { createCustomerReturnLabelServices } from "./customer-return-label.composition";
 import { PostgresCustomerReturnSettingsStore } from "./customer-return-label-settings.repository";
 import { CachedCustomerReturnOrderChoicesReader } from "./customer-return-order-choices.reader";
-import { PostgresOrderActionProjectionStore } from "../../customer-account/infrastructure/order-action-projection.repository";
+import { PostgresOrderActionProjectionStore } from "../../customer-account/order-action-projection.api";
 
 /** Call only after verifying the request's customer session. The private label
  * services stay behind the exact order/RMA/command ownership boundary. */

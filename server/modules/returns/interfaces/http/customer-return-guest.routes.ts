@@ -5,7 +5,7 @@ import { RETURN_GUEST_PROXY_API, returnGuestProofSchema } from "@shared/returns/
 import { CUSTOMER_ACCOUNT_COMMAND_HEADER } from "@shared/customer-account/customer-account.contract";
 import { createCustomerReturnCustomerAuth } from "../../infrastructure/customer-return-customer-auth.composition";
 import { createCustomerReturnGuestService, createGuestReturnServices } from "../../infrastructure/customer-return-guest.composition";
-import { readCustomerAccountStagingConfig, requireCustomerAccountStorefront } from "../../../customer-account/domain/customer-account-staging";
+import { readCustomerAccountStagingConfig, requireCustomerAccountStorefront } from "../../../customer-account/staging-config.api";
 import { CustomerReturnCustomerAccessError } from "../../application/customer-return-customer-auth.service";
 import { dispatchCustomerReturn } from "./customer-return-dispatch";
 import { returnCustomerPrivateResponse, returnCustomerError } from "./customer-return-customer-auth.routes";

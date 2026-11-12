@@ -1,4 +1,7 @@
-import { createAccountNativeSummariesWorker } from "./modules/customer-account/infrastructure/account-native-summaries.composition";
+import {
+  createAccountNativeSummariesWorker,
+  customerAccountServices,
+} from "./modules/customer-account/runtime.api";
 import {
   createCustomerReturnWorkflowWorker,
   startCustomerReturnWorkflowScheduler,
@@ -18,11 +21,13 @@ import {
   registerOrderEditRoutes,
   startOrderEditScheduler,
 } from "./modules/order-edits/runtime.api";
-import { registerCustomerAccountRoutes } from "./modules/customer-account/interfaces/customer-account.routes";
-import { customerAccountServices } from "./modules/customer-account/infrastructure/customer-account.composition";
-import { createOrderActionProjectionWorker, startOrderActionProjectionScheduler } from "./modules/customer-account/infrastructure/order-action-projection.composition";
+import { registerCustomerAccountRoutes } from "./modules/customer-account/routes.api";
+import {
+  createOrderActionProjectionWorker,
+  startOrderActionProjectionScheduler,
+  type OrderActionProjectionReport,
+} from "./modules/customer-account/order-action-projection.api";
 import { createPackageHistoryWorker, startPackageHistoryScheduler } from "./modules/shipping/package-history-and-delivery.api";
-import type { OrderActionProjectionReport } from "./modules/customer-account/infrastructure/order-action-projection.composition";
 import { logger } from "./platform/observability/logger";
 import { reportBackgroundWork } from "./platform/observability/background-work-report";
 import { hasPermission } from "./modules/identity";
@@ -34,7 +39,7 @@ import {
 } from "./modules/oms/channel-fulfillment-authority.api";
 import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
-import { createStaffSessionGate } from "./modules/identity/staff-session";
+import { createStaffSessionGate } from "./modules/identity/staff-session.api";
 import connectPgSimple from "connect-pg-simple";
 import { Pool } from "pg";
 import cookieParser from "cookie-parser";
@@ -61,7 +66,7 @@ import {
   reingestEbayOrder,
   recordOmsReconcileReviewEvent,
 } from "./modules/oms/channel-order-intake.api";
-import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
+import { startBillingScheduler } from "./modules/subscriptions/runtime-scheduler.api";
 import {
   setDropshipFulfillmentSync,
   setDropshipInventoryRuntimeAuthorityGate,

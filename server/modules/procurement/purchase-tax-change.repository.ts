@@ -6,7 +6,7 @@ import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { costInteger, costFingerprint, lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
-import { readPurchaseApprovalActor } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor } from "../identity/purchase-approval-authority.api";
 import { assertInvoiceQuantityAuthority } from "./invoice-quantity-correction.policy";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import { readPoTaxEvidence, readInvoiceTaxEvidence, readPurchaseTaxTypes, readShipmentTaxEvidence } from "./purchase-tax-evidence.repository";

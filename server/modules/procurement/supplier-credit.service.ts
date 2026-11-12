@@ -3,7 +3,7 @@ import { db } from "../../db";
 import { auditEvents, supplierCredits, supplierCreditLines, supplierCreditApplications, supplierCreditApplicationReversals, vendorInvoices } from "@shared/schema";
 import { supplierCreditApplyInputSchema, supplierCreditCreateInputSchema, supplierCreditReviewInputSchema, supplierCreditIdSchema, supplierCreditLineSourceKey, supplierCreditListQuerySchema, supplierCreditListSchema, type SupplierCreditCommand, type SupplierCreditCreateInput, type SupplierCreditApplyInput, type SupplierCreditDetail } from "@shared/procurement/supplier-credit";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
-import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
+import { readCommandAuthorityActor } from "../identity/command-authority.api";
 import { recalculateInvoiceBalance, recomputeLinkedPurchaseOrders } from "./ap-ledger.service";
 import { assertInvoiceSettlementEvidence } from "./supplier-credit-settlement.repository";
 import { approveSupplierCreditSources, validateSupplierCreditSourceLines, voidSupplierCreditSources, createSupplierCreditCostReadCache } from "./supplier-credit-source.service";

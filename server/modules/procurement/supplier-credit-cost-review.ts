@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { supplierCreditCostPreviewSchema } from "@shared/procurement/supplier-credit-cost-review";
 import { supplierCreditReviewInputSchema, supplierCreditLineRequiresCostReview, supplierCreditIdSchema, type SupplierCreditDetail } from "@shared/procurement/supplier-credit";
-import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { hasQuantityAmendmentAuthority } from "./po-quantity-amendment.policy";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import { readInvoiceCorrectionInventoryValues } from "./invoice-correction-cost-values";
