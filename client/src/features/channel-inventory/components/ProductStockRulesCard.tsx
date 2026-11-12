@@ -13,26 +13,31 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useAuth } from "@/lib/auth";
 
 import { describeError } from "../api";
-import { describePackUnit } from "../format";
-import { invalidateChannelInventory, useChannelInventoryView } from "../hooks";
-import { sellableVariants, type PolicyFormError, type View } from "../model";
+import { describePackUnit, formatAbsoluteTime, formatRelativeTime } from "../format";
+import { invalidateChannelInventory, useChannelInventoryView, usePublicationStatus } from "../hooks";
+import { describeDestination, sellableVariants, type PolicyFormError, type Target, type View } from "../model";
 import {
-  EMPTY_STOCK_RULE_INPUT, STOCK_RULE_FIELDS, describeStockRuleOutcome, listChannelStockRules, mergeStockRuleInput,
-  needsStockRuleRewrite,
-  sameStockRuleInput, saveAndApplyStockRule, stockRuleInputFor, stockRuleValue,
-  type ChannelStockRuleRow, type StockRuleCell, type StockRuleInput, type StockRuleSaveOutcome, type StockRuleSubject,
+  EMPTY_STOCK_RULE_INPUT, STOCK_RULE_FIELDS, describeLastSent, describeStockRuleOutcome, discardPendingStockRule,
+  listChannelStockRules, mergeStockRuleInput, needsStockRuleRewrite,
+  sameStockRuleInput, saveAndApplyStockRule, stockRuleInputFor, stockRuleValue, stopsSelling,
+  type ChannelStockRuleRow, type StockRuleCell, type StockRuleFieldKey, type StockRuleInput, type StockRuleSaveOutcome,
+  type StockRuleSubject,
 } from "../product-stock-rules";
-import { Callout, EvidenceNote, NoteField, PendingPill, StatePill } from "./primitives";
+import { Callout, EvidenceNote, NoteField, StatePill } from "./primitives";
 
 /** Which channels an open editor writes to. */
 type EditorTarget = { kind: "channel"; channelId: number } | { kind: "all" };
 interface SaveResult { channelName: string; outcome: StockRuleSaveOutcome }
 
+const SAVE_OK: ReadonlyArray<StockRuleSaveOutcome["status"]> = ["applied", "unchanged", "undone"];
+const RULE_SOURCE_LABEL = { sku: "SKU rule", product: "Product rule", channel: "Channel default", unset: "" } as const;
+
 /**
  * The product page's SKU view of channel stock rules: pick the whole product
- * or one SKU and see, per channel, the four numbers that decide what the
- * channel shows. Saving takes effect straight away. The same rows are edited
- * per channel in Channel Inventory → Stock rules.
+ * or one SKU and see, per channel, the four numbers in use, which rule they
+ * come from and, for a SKU, the quantity the channel was last sent. Saving
+ * takes effect straight away. The same rows are edited per channel in Channel
+ * Inventory → Stock rules.
  */
 export function ProductStockRulesCard({ productId }: { productId: number }) {
   const { hasPermission } = useAuth();
@@ -44,7 +49,7 @@ export function ProductStockRulesCard({ productId }: { productId: number }) {
       <CardHeader className="p-3 md:p-6">
         <CardTitle className="text-base md:text-lg">Stock rules by channel</CardTitle>
         <CardDescription className="text-xs md:text-sm">
-          What each channel is allowed to show for this product. Set Max to 0 to show it as out of stock.
+          How much stock each channel may be sent for this product. Set Max to 0 to stop selling it on a channel.
           Changes take effect when you save.
         </CardDescription>
       </CardHeader>
@@ -87,6 +92,9 @@ function StockRules({ productId, canChange }: { productId: number; canChange: bo
   const subjectName = variant ? (variant.sku ?? variant.name)
     : skuNames.length > 1 ? `the whole product, all ${skuNames.length} SKUs (${skuNames.join(", ")})` : "the whole product";
   const managedRows = rows.filter(row => row.managed);
+  const leftoverRows = managedRows.filter(row => row.pending);
+  // Last sent is one number per SKU; a whole product has several, so it is shown once a SKU is picked.
+  const columnCount = STOCK_RULE_FIELDS.length + (variantId === null ? 3 : 4);
 
   return (
     <div className="space-y-4">
@@ -117,23 +125,35 @@ function StockRules({ productId, canChange }: { productId: number; canChange: bo
             <TableRow>
               <TableHead>Channel</TableHead>
               {STOCK_RULE_FIELDS.map(field => <TableHead key={field.key} className="text-right" title={field.help}>{field.label}</TableHead>)}
-              <TableHead>Status</TableHead>
+              <TableHead title="The most specific rule in use on this channel">Rule in use</TableHead>
+              {variantId !== null && (
+                <TableHead className="text-right" title="The quantity this channel last accepted for this SKU. It only changes when the number changes.">Last sent</TableHead>
+              )}
               <TableHead><span className="sr-only">Actions</span></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {rows.length === 0 && (
-              <TableRow><TableCell colSpan={STOCK_RULE_FIELDS.length + 3} className="text-sm text-muted-foreground">No active channels.</TableCell></TableRow>
+              <TableRow><TableCell colSpan={columnCount} className="text-sm text-muted-foreground">No active channels.</TableCell></TableRow>
             )}
             {rows.map(row => (
               <TableRow key={row.channel.id} data-testid={`stock-rule-row-${row.channel.id}`}>
                 <TableCell className="font-medium">{row.channel.name}</TableCell>
                 {row.managed
-                  ? STOCK_RULE_FIELDS.map(field => <RuleCell key={field.key} cell={row.cells[field.key]} />)
+                  ? STOCK_RULE_FIELDS.map(field => <RuleCell key={field.key} field={field.key} cell={row.cells[field.key]} />)
                   : <TableCell colSpan={STOCK_RULE_FIELDS.length} className="text-sm text-muted-foreground">
                       No channel default yet, so nothing is sent here. Set it up in Channel Inventory.
                     </TableCell>}
-                <TableCell><RowStatus row={row} /></TableCell>
+                <TableCell>
+                  {row.managed
+                    ? <span className="text-xs text-muted-foreground">{RULE_SOURCE_LABEL[row.ruleSource]}</span>
+                    : <StatePill tone="off">Not managed</StatePill>}
+                </TableCell>
+                {variantId !== null && (
+                  <TableCell className="text-right tabular-nums" data-testid={`last-sent-${row.channel.id}`}>
+                    <LastSentCell view={view.data} channelId={row.channel.id} productId={productId} variantId={variantId} />
+                  </TableCell>
+                )}
                 <TableCell className="text-right">
                   {row.managed && canChange && (
                     <Button type="button" size="sm" variant="outline" className="min-h-[36px]"
@@ -155,10 +175,21 @@ function StockRules({ productId, canChange }: { productId: number; canChange: bo
       )}
       {!canChange && <p className="text-xs text-muted-foreground">Changing stock rules needs inventory planning edit and activate permission.</p>}
 
+      {leftoverRows.length > 0 && (
+        <Callout tone="warning" title="A saved change never took effect">
+          {leftoverRows.map(row => (
+            <p key={row.channel.id}>
+              <span className="font-medium">{row.channel.name}:</span> {row.pendingChange}. The channel is still using the numbers shown above.
+              {canChange ? " Open Edit to apply it or discard it." : ""}
+            </p>
+          ))}
+        </Callout>
+      )}
+
       {results && (
         <div role="status" className="space-y-1 rounded-md border p-3 text-sm" data-testid="stock-rule-results">
           {results.map(result => (
-            <p key={result.channelName} className={result.outcome.status === "applied" || result.outcome.status === "unchanged" ? "" : "text-destructive"}>
+            <p key={result.channelName} className={SAVE_OK.includes(result.outcome.status) ? "" : "text-destructive"}>
               <span className="font-medium">{result.channelName}:</span> {describeStockRuleOutcome(result.outcome, variantId)}
             </p>
           ))}
@@ -166,7 +197,7 @@ function StockRules({ productId, canChange }: { productId: number; canChange: bo
       )}
 
       <EvidenceNote>
-        Stock is one shared pool across this product's SKUs and follows the package hierarchy. These rules only limit what each channel shows.
+        Stock is one shared pool across this product's SKUs and follows the package hierarchy. These rules only limit what each channel is sent.
       </EvidenceNote>
 
       {target && (
@@ -184,26 +215,49 @@ function StockRules({ productId, canChange }: { productId: number; canChange: bo
   );
 }
 
-function RuleCell({ cell }: { cell: StockRuleCell }) {
+function RuleCell({ field, cell }: { field: StockRuleFieldKey; cell: StockRuleCell }) {
   const own = cell.source === "sku" || cell.source === "product";
+  const source = cell.source === "sku" ? "SKU rule" : cell.source === "product" ? "product rule" : cell.source === "channel" ? "default" : "";
+  // Max 0 is a decision not to sell here, not a stock level: say so next to the number.
+  const stopped = field === "maxPublish" && cell.display === "0" && cell.source !== "unset";
   return (
     <TableCell className="text-right tabular-nums">
       <span className={own ? "font-semibold" : "text-muted-foreground"}>{cell.display}</span>
-      <span className="block text-[11px] text-muted-foreground">
-        {cell.source === "sku" ? "SKU rule" : cell.source === "product" ? "product rule" : cell.source === "channel" ? "default" : ""}
-      </span>
+      <span className="block text-[11px] text-muted-foreground">{stopped ? `not sold here · ${source}` : source}</span>
     </TableCell>
   );
 }
 
-function RowStatus({ row }: { row: ChannelStockRuleRow }) {
-  if (!row.managed) return <StatePill tone="off">Not managed</StatePill>;
+/** One line per destination of the channel; most channels have exactly one. */
+function LastSentCell({ view, channelId, productId, variantId }: { view: View; channelId: number; productId: number; variantId: number }) {
+  const targets = view.publicationTargets.filter(target => target.channelId === channelId);
+  if (targets.length === 0) return <span className="text-xs text-muted-foreground">No destination</span>;
   return (
-    <div className="flex flex-wrap items-center gap-1">
-      {row.outOfStock ? <StatePill tone="held">Out of stock</StatePill>
-        : row.liveException ? <StatePill tone="neutral">Exception</StatePill>
-        : <span className="text-xs text-muted-foreground">Channel default</span>}
-      {row.pending && <PendingPill>Not applied: {row.pendingChange}</PendingPill>}
+    <div className="space-y-1">
+      {targets.map(target => (
+        <LastSentLine key={target.id} target={target} productId={productId} variantId={variantId}
+          label={targets.length > 1 ? describeDestination(target, view).title : null} />
+      ))}
+    </div>
+  );
+}
+
+function LastSentLine({ target, productId, variantId, label }: { target: Target; productId: number; variantId: number; label: string | null }) {
+  const status = usePublicationStatus(target.id, productId);
+  if (status.isLoading) return <span className="text-xs text-muted-foreground">Loading…</span>;
+  if (status.isError || !status.data) {
+    return <span className="text-xs text-muted-foreground" title={describeError(status.error).message}>Unavailable</span>;
+  }
+  const sent = describeLastSent(status.data.rows.find(row => row.productVariantId === variantId));
+  // Display only: "3 hours ago" is read against the viewer's clock and decides nothing.
+  const when = sent.at === null ? null : formatRelativeTime(sent.at, new Date());
+  return (
+    <div>
+      {label && <span className="block text-[11px] text-muted-foreground">{label}</span>}
+      <span className={sent.tone === "muted" ? "text-muted-foreground" : ""}>{sent.primary}</span>
+      {when && <span className="block text-[11px] text-muted-foreground" title={formatAbsoluteTime(sent.at!)}>{when}</span>}
+      {sent.detail && <span className={`block text-[11px] ${sent.tone === "problem" ? "text-destructive" : "text-muted-foreground"}`}>{sent.detail}</span>}
+      {target.state !== "live" && <span className="block text-[11px] text-muted-foreground">Sending is off</span>}
     </div>
   );
 }
@@ -232,6 +286,24 @@ function StockRuleEditor({ view, rows, allChannels, subjectName, onClose, onDone
   const canSave = !busy && rows.length > 0
     && (allChannels ? !nothingTyped : (!sameStockRuleInput(input, initial) || hasUnapplied));
 
+  const finish = async (work: () => Promise<SaveResult[]>) => {
+    inFlight.current = true; setBusy(true);
+    let results: SaveResult[] = [];
+    try { results = await work(); }
+    finally {
+      inFlight.current = false; setBusy(false);
+      // Refresh even after a failure: an unknown outcome is resolved by what the server now holds.
+      await invalidateChannelInventory(queryClient).catch(() => undefined);
+      onDone(results);
+      onClose();
+    }
+  };
+
+  const discard = () => {
+    if (inFlight.current || !single) return;
+    void finish(async () => [{ channelName: single.channel.name, outcome: await discardPendingStockRule(single) }]);
+  };
+
   const run = async (inputFor: (row: ChannelStockRuleRow) => StockRuleInput) => {
     if (inFlight.current) return;
     // Validate every channel before writing to any, so a typo changes nothing.
@@ -243,21 +315,15 @@ function StockRuleEditor({ view, rows, allChannels, subjectName, onClose, onDone
       planned.push({ row, value: parsed.value, changed: !sameStockRuleInput(next, stockRuleInputFor(row.head)) || needsStockRuleRewrite(row.head) });
     }
     setErrors([]);
-    inFlight.current = true; setBusy(true);
-    const results: SaveResult[] = [];
-    try {
+    await finish(async () => {
+      const results: SaveResult[] = [];
       // One channel at a time: each apply replans this product on every
       // destination, and running them together would only make them contend.
       for (const item of planned) {
         results.push({ channelName: item.row.channel.name, outcome: await saveAndApplyStockRule({ ...item, note }) });
       }
-    } finally {
-      inFlight.current = false; setBusy(false);
-      // Refresh even after a failure: an unknown outcome is resolved by what the server now holds.
-      await invalidateChannelInventory(queryClient).catch(() => undefined);
-      onDone(results);
-      onClose();
-    }
+      return results;
+    });
   };
 
   const fieldError = (key: PolicyFormError["field"]) => errors.find(error => error.field === key)?.message ?? null;
@@ -291,20 +357,24 @@ function StockRuleEditor({ view, rows, allChannels, subjectName, onClose, onDone
             </Select>
             {input.maxMode === "units" && (
               <Input aria-label="Max units" inputMode="numeric" className="min-h-[44px]" value={input.maxUnits} disabled={busy}
-                onChange={event => patch({ maxUnits: event.target.value })} placeholder="0 = out of stock" />
+                onChange={event => patch({ maxUnits: event.target.value })} placeholder="0 = not sold here" />
             )}
             {fieldError("maxPublish")
               ? <p role="alert" className="text-xs text-destructive">{fieldError("maxPublish")}</p>
-              : <p className="text-xs text-muted-foreground">0 = out of stock</p>}
+              : <p className="text-xs text-muted-foreground">0 = not sold on this channel</p>}
           </div>
           <NumberField id="stock-rule-hide-below" label="Hide when below" help="Shows 0 when fewer than this are available"
             placeholder={blankHint} value={input.hideBelowUnits} onChange={hideBelowUnits => patch({ hideBelowUnits })}
             error={fieldError("minPublishSellableUnits")} disabled={busy} />
         </div>
         {fieldError("form") && <Callout tone="warning">{fieldError("form")}</Callout>}
+        {stopsSelling(input) && (
+          <Callout>With Max 0 nothing is sent to {allChannels ? "these channels" : "this channel"}, so Stock %, Buffer and Hide when below have no effect.</Callout>
+        )}
         {hasUnapplied && !allChannels && (
-          <Callout tone="warning">
-            A saved change on this rule was never applied ({single?.pendingChange}). The fields show that saved change, not what the channel uses now. Saving applies it.
+          <Callout tone="warning" title="A saved change never took effect"
+            action={<Button type="button" size="sm" variant="outline" disabled={busy} onClick={discard}>Discard saved change</Button>}>
+            {single?.pendingChange}. The fields show that saved change, not what the channel uses now. Save applies it; Discard throws it away.
           </Callout>
         )}
         <NoteField id="stock-rule-note" value={note} onChange={setNote} disabled={busy} />

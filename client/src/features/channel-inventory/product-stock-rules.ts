@@ -1,6 +1,7 @@
 import type {
   ChannelExposurePolicyHead, ChannelExposurePolicyScope, ChannelExposurePolicyValue,
 } from "@shared/types/inventory-channel-exposure";
+import type { ChannelPublicationStatus } from "@shared/types/inventory-channel-publication-status";
 import type { ChannelRuleReview } from "@shared/types/inventory-channel-rule";
 import { channelRuleSelectionSchema } from "@shared/types/inventory-channel-rule";
 
@@ -11,20 +12,21 @@ import {
   effectiveMaxPublish, findPolicyHead, policyFormToValue, policyValueToForm, savedPolicy,
   type Channel, type PolicyForm, type PolicyFormError, type View,
 } from "./model";
-import { applyChannelRule, buildApplyRuleCommand, reviewChannelRule } from "./rule-apply";
+import { IN_FLIGHT_DELIVERY_STATES, applyChannelRule, buildApplyRuleCommand, reviewChannelRule } from "./rule-apply";
 
 /**
  * The SKU view of channel stock rules: one SKU (or whole product), every
  * channel. It reads and writes the same exception rows as Channel Inventory →
  * Stock rules; nothing here is a second store. Saving takes effect: the rule is
- * saved, checked and applied in one action.
+ * saved, checked and applied in one action, and a save that cannot be applied
+ * is put back the way it was, so the card has one state: what the channel uses.
  */
 
 /** The four numbers an exception can change, in calculation order. */
 export const STOCK_RULE_FIELDS = [
   { key: "shareBps", label: "Stock %", help: "Share of available stock" },
   { key: "holdbackSellableUnits", label: "Buffer", help: "Subtracted after the %" },
-  { key: "maxPublish", label: "Max", help: "0 = out of stock" },
+  { key: "maxPublish", label: "Max", help: "0 = not sold on this channel" },
   { key: "minPublishSellableUnits", label: "Hide when below", help: "Shows 0 when fewer than this are available" },
 ] as const;
 export type StockRuleFieldKey = typeof STOCK_RULE_FIELDS[number]["key"];
@@ -41,14 +43,16 @@ export interface ChannelStockRuleRow {
   managed: boolean;
   /** This subject has its own saved rule on the channel, applied or not (so there is something to edit or clear). */
   hasException: boolean;
-  /** This subject's own rule is in effect on the channel right now. */
-  liveException: boolean;
-  /** A saved change on this exact rule has not been applied yet. It has no effect until it is. */
+  /** The most specific applied rule in effect on the channel right now. */
+  ruleSource: StockRuleSource;
+  /**
+   * A change saved on this exact rule never took effect and would change what
+   * the channel uses. Normal saves never leave one; it exists only when an
+   * earlier save was interrupted or made in the old editor.
+   */
   pending: boolean;
-  /** What the unapplied change would do, e.g. "Max 0" or "Clear exception"; null when nothing is pending. */
+  /** What that leftover change would do, e.g. "Max 0" or "Clear exception"; null when there is none. */
   pendingChange: string | null;
-  /** The max in effect right now is 0: the channel shows this item as out of stock. */
-  outOfStock: boolean;
   /** The values in effect right now. An unapplied change never appears here. */
   cells: Record<StockRuleFieldKey, StockRuleCell>;
 }
@@ -72,6 +76,36 @@ function displayField(key: StockRuleFieldKey, value: ChannelExposurePolicyValue)
   }
 }
 
+/**
+ * Two rule values that mean the same thing. Compared field by field rather
+ * than by definition hash: the hash is taken over the request as it was sent,
+ * and the server reads a stored rule back without its unset optional fields
+ * (no warehouses set), so the same rule saved twice is not
+ * guaranteed the same hash.
+ */
+export function sameRuleValue(left: ChannelExposurePolicyValue, right: ChannelExposurePolicyValue): boolean {
+  const shape = (value: ChannelExposurePolicyValue) => value.inheritAll === true ? "inherit" : JSON.stringify([
+    value.allocationSemantics, value.eligible, value.shareBps, value.holdbackSellableUnits,
+    value.maxPublish === null ? null : value.maxPublish.mode === "unlimited" ? "unlimited" : `units:${value.maxPublish.units}`,
+    value.minPublishSellableUnits,
+    value.sourceFulfillmentNodeIds ? [...value.sourceFulfillmentNodeIds].sort((a, b) => a - b) : null,
+  ]);
+  return shape(left) === shape(right);
+}
+
+/**
+ * True when the head holds a saved version that is not applied AND would
+ * change what the channel uses. A saved version that means the same as the
+ * applied one (or a "use the default" marker where no rule is applied) changes
+ * nothing, so it is not a pending change.
+ */
+export function hasPendingChange(head: ChannelExposurePolicyHead | null): boolean {
+  const draft = head?.draftPolicy ?? null;
+  if (!draft) return false;
+  const active = head?.activePolicy ?? null;
+  return active ? !sameRuleValue(draft.value, active.value) : !draft.value.inheritAll;
+}
+
 /** What a saved, unapplied rule would set, in the operator's words. */
 function describePendingChange(value: ChannelExposurePolicyValue): string {
   if (value.inheritAll) return "Clear exception";
@@ -85,8 +119,8 @@ function describePendingChange(value: ChannelExposurePolicyValue): string {
 /**
  * One row per channel for a subject. Each field shows the value in effect
  * right now (SKU rule → product rule → channel default, applied rules only)
- * and where it comes from. A saved change that was never applied changes
- * nothing a channel shows, so it is reported separately (`pending`,
+ * and where it comes from. A leftover saved change that never took effect
+ * changes nothing a channel shows, so it is reported separately (`pending`,
  * `pendingChange`) and never as the current value.
  */
 export function listChannelStockRules(view: Pick<View, "channels" | "policyHeads">, subject: StockRuleSubject): ChannelStockRuleRow[] {
@@ -115,16 +149,14 @@ export function listChannelStockRules(view: Pick<View, "channels" | "policyHeads
     }
     const head = findPolicyHead(view.policyHeads, scope);
     const own = savedPolicy(head);
-    const ownSource: StockRuleSource = scope.scopeType === "variant" ? "sku" : "product";
-    const draft = head?.draftPolicy?.value ?? null;
+    const pending = hasPendingChange(head);
     return {
       channel, scope, head,
       managed: live.some(link => link.source === "channel"),
       hasException: own !== null && !own.value.inheritAll,
-      liveException: live.some(link => link.source === ownSource),
-      pending: draft !== null,
-      pendingChange: draft === null ? null : describePendingChange(draft),
-      outOfStock: cells.maxPublish.display === "0" && cells.maxPublish.source !== "unset",
+      ruleSource: live[0]?.source ?? "unset",
+      pending,
+      pendingChange: pending && head?.draftPolicy ? describePendingChange(head.draftPolicy.value) : null,
       cells,
     };
   });
@@ -194,19 +226,49 @@ export function stockRuleValue(input: StockRuleInput, head: ChannelExposurePolic
     maxMode: input.maxMode, maxUnits: input.maxMode === "units" ? input.maxUnits.trim() : "",
     minMode: hideBelow === "" ? "inherit" : "set", minUnits: hideBelow,
   };
-  return policyFormToValue(form, {
+  const parsed = policyFormToValue(form, {
     allowInheritAll: true,
     sourceFulfillmentNodeIds: existing?.sourceFulfillmentNodeIds ?? null,
   });
+  if (!parsed.ok) return parsed;
+  const conflict = stockRuleConflict(parsed.value);
+  return conflict ? { ok: false, errors: [conflict] } : parsed;
+}
+
+/**
+ * Settings on one rule that cancel each other out. The calculation caps at Max
+ * and THEN sends 0 when the result is below "Hide when below"
+ * (shared/inventory/channel-exposure-calculation.ts), so a cutoff above a
+ * non-zero Max can never be met: the channel would always be sent 0 while the
+ * rule looks like it sells. Only values set on this rule are compared; a value
+ * left to the product rule or channel default is not known here.
+ */
+export function stockRuleConflict(value: Pick<ChannelExposurePolicyValue, "maxPublish" | "minPublishSellableUnits">): PolicyFormError | null {
+  const max = value.maxPublish;
+  const hideBelow = value.minPublishSellableUnits;
+  if (max === null || max.mode !== "units" || hideBelow === null) return null;
+  const maxUnits = BigInt(max.units);
+  if (maxUnits === BigInt(0) || BigInt(hideBelow) <= maxUnits) return null;
+  return {
+    field: "minPublishSellableUnits",
+    message: `Hide when below (${formatUnits(hideBelow)}) is more than Max (${formatUnits(max.units)}), so this channel would always be sent 0. Lower it, or set Max to 0 to stop selling here.`,
+  };
+}
+
+/** True when the typed Max is 0: nothing is sent, so the other three numbers have no effect. */
+export function stopsSelling(input: Pick<StockRuleInput, "maxMode" | "maxUnits">): boolean {
+  return input.maxMode === "units" && /^0+$/.test(input.maxUnits.trim());
 }
 
 export type StockRuleSaveOutcome =
   | { status: "applied"; quantities: ChannelRuleReview["quantities"]; skipped: string[] }
   | { status: "unchanged" }
-  /** Saved, but applying it would create a problem. It stays saved and unapplied. */
-  | { status: "blocked"; blockers: string[] }
-  /** Definitely not saved or not applied; nothing changed beyond what `saved` says. */
-  | { status: "rejected"; message: string; saved: boolean }
+  /** A leftover saved change was thrown away. Nothing the channel uses changed. */
+  | { status: "undone" }
+  /** Applying it would create a problem, so it was not applied. `leftover`: a saved change still waits on this rule. */
+  | { status: "blocked"; blockers: string[]; leftover: boolean }
+  /** Definitely not applied. `leftover`: a saved change still waits on this rule. */
+  | { status: "rejected"; message: string; leftover: boolean }
   /** The request may or may not have landed (network). Reload shows the truth. */
   | { status: "unknown"; message: string };
 
@@ -221,19 +283,53 @@ export const stockRuleSaveSteps: StockRuleSaveSteps = {
   save: savePolicyDraft, review: reviewChannelRule, apply: applyChannelRule, newKey: () => crypto.randomUUID(),
 };
 
-function failure(error: unknown, saved: boolean): StockRuleSaveOutcome {
-  const message = describeError(error).message;
-  return isDefinitiveDraftRejection(error instanceof ChannelInventoryApiError ? error.status : null)
-    ? { status: "rejected", message, saved }
-    : { status: "unknown", message: "The outcome is unknown. Reload to see whether this rule was saved and applied." };
+const UNKNOWN_OUTCOME = "The outcome is unknown. Reload to see whether this rule was saved and applied.";
+const UNDO_NOTE = "Put back: this change could not be applied.";
+const DISCARD_NOTE = "Discarded a saved change that was never applied.";
+
+type SavedVersion = { policyId: number; definitionHash: string; headRevision: string };
+
+/**
+ * The rule value that changes nothing when saved over a pending change: a copy
+ * of the applied rule, or "use the default" when no rule is applied. Saved
+ * versions are append-only (they cannot be deleted), so a change is withdrawn
+ * by overwriting it with this.
+ */
+function noChangeValue(head: ChannelExposurePolicyHead | null): ChannelExposurePolicyValue | null {
+  if (head?.activePolicy) return head.activePolicy.value;
+  const cleared = stockRuleValue(EMPTY_STOCK_RULE_INPUT, null);
+  return cleared.ok ? cleared.value : null;
 }
 
 /**
- * Save one channel's rule and make it take effect: save the draft, check
- * exactly what it changes, apply only it. Each step is the existing audited
- * command; the head revision and hashes fence every step, so a concurrent
- * edit is rejected instead of being overwritten. A rule that is already saved
- * but unapplied is applied without saving again.
+ * Put a rule back the way it was before this save wrote `written`. Returns
+ * whether it worked; the caller reports a failure as a leftover saved change,
+ * so a failed undo is never silent.
+ */
+async function putBack(
+  scope: ChannelExposurePolicyScope, before: ChannelExposurePolicyHead | null, written: SavedVersion, steps: StockRuleSaveSteps,
+): Promise<boolean> {
+  const value = before?.draftPolicy?.value ?? noChangeValue(before);
+  if (value === null) return false;
+  try {
+    await steps.save(buildPolicyDraftRequest({
+      scope, value, note: UNDO_NOTE, idempotencyKey: steps.newKey(),
+      head: { revision: written.headRevision, draftPolicy: { policyId: written.policyId, definitionHash: written.definitionHash } },
+    }));
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * Save one channel's rule and make it take effect: save it, check exactly what
+ * it changes, apply only it. Each step is the existing audited command; the
+ * head revision and hashes fence every step, so a concurrent edit is rejected
+ * instead of being overwritten.
+ *
+ * A save that cannot be applied is put back the way it was, so nothing waits
+ * half-saved. Only an outcome that is genuinely unknown (a lost response) or a
+ * failed put-back leaves a saved change behind, and that is reported
+ * (`leftover`). A leftover from an earlier save is applied without saving again.
  */
 export async function saveAndApplyStockRule(input: {
   row: Pick<ChannelStockRuleRow, "scope" | "head">;
@@ -243,7 +339,7 @@ export async function saveAndApplyStockRule(input: {
 }, steps: StockRuleSaveSteps = stockRuleSaveSteps): Promise<StockRuleSaveOutcome> {
   const { scope, head } = input.row;
   if (scope.scopeType === "channel") throw new Error("Channel defaults are edited in Channel Inventory.");
-  let draft: { policyId: number; definitionHash: string; headRevision: string } | null = head?.draftPolicy
+  let version: SavedVersion | null = hasPendingChange(head) && head?.draftPolicy
     ? { policyId: head.draftPolicy.policyId, definitionHash: head.draftPolicy.definitionHash, headRevision: head.revision }
     : null;
   if (input.changed) {
@@ -251,23 +347,62 @@ export async function saveAndApplyStockRule(input: {
       const saved = await steps.save(buildPolicyDraftRequest({
         scope, value: input.value, head, note: input.note, idempotencyKey: steps.newKey(),
       }));
-      draft = { policyId: saved.definitionId, definitionHash: saved.definitionHash, headRevision: saved.headRevision };
-    } catch (error) { return failure(error, false); }
+      version = { policyId: saved.definitionId, definitionHash: saved.definitionHash, headRevision: saved.headRevision };
+    } catch (error) {
+      return isDefinitive(error)
+        ? { status: "rejected", message: describeError(error).message, leftover: hasPendingChange(head) }
+        : { status: "unknown", message: UNKNOWN_OUTCOME };
+    }
   }
-  if (!draft) return { status: "unchanged" };
+  if (!version) return { status: "unchanged" };
+  const written = version;
+  // What still waits on the rule after a refusal: put back what this save
+  // wrote; a leftover that was already there stays (it was not ours to remove).
+  const leftoverAfterRefusal = async () => input.changed
+    ? (await putBack(scope, head, written, steps) ? hasPendingChange(head) : true)
+    : true;
   let review: ChannelRuleReview;
   try {
     review = await steps.review(channelRuleSelectionSchema.parse({
-      scope, draftPolicyId: draft.policyId, expectedHeadRevision: draft.headRevision, expectedDefinitionHash: draft.definitionHash,
+      scope, draftPolicyId: written.policyId, expectedHeadRevision: written.headRevision, expectedDefinitionHash: written.definitionHash,
     }));
   } catch (error) {
-    // A failed read changes nothing: the rule is saved and simply not applied yet.
-    return { status: "rejected", message: describeError(error).message, saved: true };
+    // The check is a read: it applied nothing, whatever the error was.
+    return { status: "rejected", message: describeError(error).message, leftover: await leftoverAfterRefusal() };
   }
-  if (!review.ready) return { status: "blocked", blockers: review.blockers };
+  if (!review.ready) return { status: "blocked", blockers: review.blockers, leftover: await leftoverAfterRefusal() };
   try { await steps.apply(buildApplyRuleCommand(review, steps.newKey())); }
-  catch (error) { return failure(error, true); }
+  catch (error) {
+    // A lost response may have applied it; putting it back then would be wrong.
+    if (!isDefinitive(error)) return { status: "unknown", message: UNKNOWN_OUTCOME };
+    return { status: "rejected", message: describeError(error).message, leftover: await leftoverAfterRefusal() };
+  }
   return { status: "applied", quantities: review.quantities, skipped: review.skippedDestinations };
+}
+
+function isDefinitive(error: unknown): boolean {
+  return isDefinitiveDraftRejection(error instanceof ChannelInventoryApiError ? error.status : null);
+}
+
+/**
+ * Throw away a leftover saved change without applying it. The channel keeps
+ * using exactly what it uses now.
+ */
+export async function discardPendingStockRule(
+  row: Pick<ChannelStockRuleRow, "scope" | "head">, steps: StockRuleSaveSteps = stockRuleSaveSteps,
+): Promise<StockRuleSaveOutcome> {
+  const { scope, head } = row;
+  if (scope.scopeType === "channel") throw new Error("Channel defaults are edited in Channel Inventory.");
+  const value = noChangeValue(head);
+  if (!hasPendingChange(head) || value === null) return { status: "unchanged" };
+  try {
+    await steps.save(buildPolicyDraftRequest({ scope, value, head, note: DISCARD_NOTE, idempotencyKey: steps.newKey() }));
+    return { status: "undone" };
+  } catch (error) {
+    return isDefinitive(error)
+      ? { status: "rejected", message: describeError(error).message, leftover: true }
+      : { status: "unknown", message: UNKNOWN_OUTCOME };
+  }
 }
 
 /**
@@ -288,16 +423,50 @@ export function mergeStockRuleInput(current: StockRuleInput, typed: StockRuleInp
 
 /** One line a person can read for a finished save on one channel. */
 export function describeStockRuleOutcome(outcome: StockRuleSaveOutcome, variantId: number | null): string {
+  const leftover = " An earlier saved change is still waiting on this rule; open Edit to apply or discard it.";
   switch (outcome.status) {
     case "unchanged": return "No change.";
-    case "blocked": return `Saved but not applied: ${outcome.blockers.join(" ")}`;
-    case "rejected": return outcome.saved ? `Saved but not applied: ${outcome.message}` : `Not saved: ${outcome.message}`;
+    case "undone": return "Saved change discarded. Nothing changed on the channel.";
+    case "blocked": return `Not saved. ${outcome.blockers.join(" ")}${outcome.leftover ? leftover : ""}`;
+    case "rejected": return `Not saved. ${outcome.message}${outcome.leftover ? leftover : ""}`;
     case "unknown": return outcome.message;
     case "applied": {
       const rows = outcome.quantities.filter(row => (variantId === null || row.variantId === variantId) && row.current !== row.proposed);
       const moved = rows.slice(0, 3).map(row => `${row.channelName} ${row.current === null ? "?" : formatUnits(row.current)} → ${formatUnits(row.proposed)}`);
       const more = rows.length > 3 ? ` and ${rows.length - 3} more` : "";
-      return rows.length === 0 ? "Applied. No quantity changes right now." : `Applied. ${moved.join(", ")}${more}.`;
+      return rows.length === 0 ? "Saved. The quantity sent does not change right now." : `Saved. ${moved.join(", ")}${more}.`;
     }
   }
+}
+
+export type LastSentRow = ChannelPublicationStatus["rows"][number];
+export interface LastSent {
+  /** The quantity the channel last accepted, or why there is none. */
+  primary: string;
+  /** What is happening now, when a newer send is on its way or failed. */
+  detail: string | null;
+  /** When the channel accepted `primary`; null when it never did. */
+  at: string | null;
+  tone: "normal" | "muted" | "problem";
+}
+
+/**
+ * The quantity a destination last accepted for one SKU, from recorded delivery
+ * evidence (never a fresh calculation). An old time is normal: an unchanged
+ * result is not re-sent, so a capped SKU keeps its last send until the number
+ * moves.
+ */
+export function describeLastSent(row: LastSentRow | undefined): LastSent {
+  if (!row || row.activeInventoryItemId === null) return { primary: "Not listed", detail: null, at: null, tone: "muted" };
+  const { acknowledged, desired } = row;
+  const primary = acknowledged ? formatUnits(acknowledged.quantity) : "Never sent";
+  const at = acknowledged?.acknowledgedAt ?? null;
+  const newer = desired !== null && desired.outboxId !== acknowledged?.outboxId ? desired : null;
+  if (newer?.state === "dead_letter") {
+    return { primary, detail: `Sending ${formatUnits(newer.quantity)} failed`, at, tone: "problem" };
+  }
+  if (newer && IN_FLIGHT_DELIVERY_STATES.includes(newer.state)) {
+    return { primary, detail: `Sending ${formatUnits(newer.quantity)} now`, at, tone: "normal" };
+  }
+  return { primary, detail: null, at, tone: acknowledged ? "normal" : "muted" };
 }
