@@ -83,9 +83,24 @@ export function createSideChannelPool(config: {
 
 export const db = drizzle(pool, { schema });
 
-// Run startup migrations to ensure schema is up to date
-export async function runStartupMigrations(): Promise<void> {
-  // Use a SEPARATE connection so it doesn't block the shared pool
+export type ReleaseSchemaFallbackOutcome = "completed" | "failed_partway";
+
+/**
+ * Idempotent schema fallbacks (`... IF NOT EXISTS`) that predate the tracked
+ * migrations in `migrations/`.
+ *
+ * Runs ONLY in the release phase (`scripts/release-schema-fallbacks.ts`, called
+ * from `scripts/release.sh`). It must never run while the web process boots:
+ * its ALTER TABLE statements need exclusive locks on live tables, the web
+ * process used to wait for them before listening, and a single blocked lock
+ * kept every dyno from starting (outages on 2026-11-10 and 2026-11-11).
+ * `server/__tests__/unit/boot-does-not-change-schema.test.ts` enforces this.
+ *
+ * Do not add statements here. New schema goes in a tracked migration.
+ */
+export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallbackOutcome> {
+  let outcome: ReleaseSchemaFallbackOutcome = "completed";
+  // A dedicated connection: the limits below are set for its whole session.
   const migrationsPool = new Pool(createDatabasePoolConfig({
     connectionString,
     ssl: useSSL ? { rejectUnauthorized: false } : undefined,
@@ -95,9 +110,10 @@ export async function runStartupMigrations(): Promise<void> {
   }));
   const connection = await migrationsPool.connect();
   try {
-    // Boot must not wait on these fallbacks: bound every statement and the
-    // routine as a whole (see startup-migration-guard.ts). A limit that trips
-    // lands in the catch below, which skips the remainder and logs loudly.
+    // The previous release is still serving traffic while this runs, so a
+    // statement must not queue for long in front of live queries: bound every
+    // statement and the routine as a whole (see startup-migration-guard.ts).
+    // A limit that trips lands in the catch below, which skips the remainder.
     const client = await boundStartupMigrationClient(connection);
     // Both pools receive the same search_path in the PostgreSQL startup packet.
     // Unqualified names therefore resolve consistently before any query can run.
@@ -1189,11 +1205,12 @@ export async function runStartupMigrations(): Promise<void> {
     }
 
   } catch (error) {
-    // Deliberately resilient: a fallback-DDL hiccup must not crash-loop every
-    // dyno (release-phase migrations are the fail-fast gate; this routine is
-    // the safety net). But the failure mode is "some schema fallbacks were
-    // silently skipped" (DB-ROLE-SEPARATION-RUNBOOK.md), so make it scream.
+    // Deliberately resilient: tracked migrations are the fail-fast gate and
+    // this routine is only the safety net behind them. But the failure mode is
+    // "some schema fallbacks were silently skipped"
+    // (DB-ROLE-SEPARATION-RUNBOOK.md), so report it and make it scream.
     // P4.1 consolidates to a single migration authority and removes this.
+    outcome = "failed_partway";
     console.error(
       "[startup-migration] FAILED PARTWAY — remaining schema fallbacks were SKIPPED. " +
         "If a recent deploy relies on a new column/table, run its tracked migration " +
@@ -1204,4 +1221,5 @@ export async function runStartupMigrations(): Promise<void> {
     connection.release();
     await migrationsPool.end().catch(() => {}); // Close the separate pool
   }
+  return outcome;
 }

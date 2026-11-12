@@ -1,17 +1,17 @@
 /**
- * Bounds for the boot-time schema fallbacks in runStartupMigrations().
+ * Bounds for the legacy schema fallbacks in runReleaseSchemaFallbacks().
  *
- * The web process does not listen until that routine returns, and Heroku kills
- * a web dyno that has not bound its port within 60 seconds. The routine issues
- * ALTER TABLE statements against live tables (oms.oms_orders among them), each
- * of which waits indefinitely for an exclusive lock by default. On 2026-11-10
- * one such statement waited 55 seconds, the dyno was killed twice and the whole
- * application stayed down until it was restarted by hand.
+ * The routine issues ALTER TABLE statements against live tables
+ * (oms.oms_orders among them). Each needs an exclusive lock, waits
+ * indefinitely for it by default, and while it waits every new query on that
+ * table queues behind it. The routine now runs in the release phase, with the
+ * previous release still serving, so an unbounded wait would stall live
+ * traffic. (When it ran inside web boot, one such wait took the whole
+ * application down on 2026-11-10: the dyno was killed twice for not starting.)
  *
- * Release-phase migrations are the schema authority; these fallbacks are a
- * safety net whose documented failure mode is "skip the rest and log loudly".
- * The limits below make a slow or blocked fallback take that path instead of
- * consuming the boot window.
+ * Tracked migrations are the schema authority; these fallbacks are a safety
+ * net whose documented failure mode is "skip the rest and log loudly". The
+ * limits below make a slow or blocked fallback take that path quickly.
  */
 
 /** Longest a single fallback statement may wait for a lock. */
@@ -20,8 +20,7 @@ export const STARTUP_MIGRATION_LOCK_TIMEOUT_MS = 3_000;
 export const STARTUP_MIGRATION_STATEMENT_TIMEOUT_MS = 10_000;
 /**
  * Total time the fallbacks may take before the remainder is skipped. With the
- * statement limit, the routine returns within 30 seconds in the worst case,
- * leaving half of Heroku's 60-second boot window for the rest of startup.
+ * statement limit, the routine returns within 30 seconds in the worst case.
  */
 export const STARTUP_MIGRATION_BUDGET_MS = 20_000;
 

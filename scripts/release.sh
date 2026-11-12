@@ -8,6 +8,12 @@ set -e
 echo "Running SQL migrations from migrations/ folder..."
 npx tsx migrations/run-migrations.ts
 
+# Legacy idempotent schema fallbacks. These used to run inside the web process
+# on every boot, where one blocked table lock kept the app from starting. They
+# run here instead, once per release, while the previous release still serves.
+echo "Running legacy schema fallbacks..."
+npx tsx scripts/release-schema-fallbacks.ts
+
 if [[ "${RUN_DRIZZLE_PUSH_ON_RELEASE:-false}" == "true" ]]; then
   echo "Running drizzle-kit push (non-interactive)..."
   export NODE_OPTIONS="${NODE_OPTIONS:-} --use-system-ca"

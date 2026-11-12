@@ -50,7 +50,7 @@ import {
   runStartupZombieOrderRepair,
   startShopifyReconciliation,
 } from "./modules/orders/reconciliation-and-repair.api";
-import { runStartupMigrations, db } from "./db";
+import { db } from "./db";
 import { createServices } from "./services";
 import {
   startEbayOrderPolling,
@@ -140,7 +140,6 @@ import { createEbayApiClient } from "./modules/channels/adapters/ebay/ebay-api.c
 import { requireAuth, requirePermission } from "./routes/middleware";
 import {
   envBoundedPositiveInteger,
-  envFlagEnabled,
   envPositiveInteger,
   getSchedulerDisableReason,
   schedulerIsDisabled,
@@ -434,16 +433,9 @@ function startEchelonSyncScheduler(
 }
 
 (async () => {
-  // Run startup migrations to ensure database schema is up to date
-  if (envFlagEnabled("SKIP_STARTUP_MIGRATIONS")) {
-    console.warn("Startup migrations skipped (SKIP_STARTUP_MIGRATIONS=true)");
-  } else {
-    try {
-      await runStartupMigrations();
-    } catch (err) {
-      console.error("Startup migrations failed, continuing anyway:", err);
-    }
-  }
+  // The web process never changes table structure. Schema is applied in the
+  // release phase (scripts/release.sh) before this process starts; see
+  // runReleaseSchemaFallbacks() in ./db for why it must stay out of boot.
 
   // Create WMS service container and attach to app for route handlers
   const services = createServices(db, dbPool);

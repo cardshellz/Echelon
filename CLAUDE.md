@@ -218,8 +218,10 @@ non-idempotent financial operations · use `allowNegative: true` · commit secre
 - **Database:** uses the EXTERNAL database (`EXTERNAL_DATABASE_URL`), not Replit's. The
   dev database is empty; production is on Heroku (`cardshellz-echelon`).
 - **Money:** confirm the unit (cents vs decimal) of any financial column before computing.
-- **Migrations:** numbered SQL files in `migrations/`; `server/db.ts` has fallback
-  startup migrations.
+- **Migrations:** numbered SQL files in `migrations/`, applied in the release phase
+  (`scripts/release.sh`). New schema goes there. The web process never changes table
+  structure at boot; `runReleaseSchemaFallbacks()` in `server/db.ts` holds legacy
+  idempotent fallbacks that also run only in the release phase. Do not add to it.
 - **Shipping engine:** fully engine-agnostic via `shippingEngine.*` interface (C9 complete).
   ShipStation adapter is the only implementation. Legacy `shipstation_order_id` /
   `shipstation_order_key` columns remain on `oms.oms_orders` and `wms.outbound_shipments`
