@@ -40,6 +40,7 @@ import {
 } from "./customer-account-access";
 import type { CustomerReturnCustomerOrder } from "@shared/returns/customer-return-access.contract";
 import type { CustomerReturnCustomerLabelStatus } from "@shared/returns/customer-return-customer.contract";
+import type { OrderEditCodeMessageCatalog } from "@shared/order-edits/order-edit-code-errors";
 import "../index.css";
 import "./storefront.css";
 
@@ -61,12 +62,14 @@ function AccountModal({
   choice,
   onClose,
   customerId,
+  codeMessages,
 }: {
   api: CustomerAccountTransport;
   session: Bootstrap;
   choice: Choice;
   onClose: () => void;
   customerId: string;
+  codeMessages?: OrderEditCodeMessageCatalog;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [portalRoot, setPortalRoot] = useState<HTMLDivElement | null>(null);
@@ -145,6 +148,7 @@ function AccountModal({
                 onBusy={setBusy}
                 paymentOwner={customerId}
                 returnOperationId={choice.returnOperationId}
+                codeMessages={codeMessages}
                 onDone={() => {
                   onClose();
                   window.location.reload();
@@ -178,6 +182,7 @@ function CustomerAccount({
   statusTarget,
   signInUrl,
   customerId,
+  codeMessages,
   initialDisplay,
   initialOverview,
   saveDisplay,
@@ -190,6 +195,7 @@ function CustomerAccount({
   statusTarget: HTMLElement | null;
   signInUrl: string;
   customerId: string;
+  codeMessages?: OrderEditCodeMessageCatalog;
 }) {
   const [session, setSession] = useState<Bootstrap | null>(null);
   const [choice, setChoice] = useState<Choice | null>(null);
@@ -874,6 +880,7 @@ function CustomerAccount({
           choice={choice}
           onClose={closeModal}
           customerId={customerId}
+          codeMessages={codeMessages}
         />
       )}
       {session && (
@@ -1003,6 +1010,7 @@ if (root && mount && configElement) {
           statusTarget={statusTarget}
           signInUrl={signInUrl}
           customerId={config.customerId}
+          codeMessages={config.codeMessages}
           initialDisplay={initialDisplay}
           saveDisplay={saveDisplay}
           initialOverview={initialOverview}
