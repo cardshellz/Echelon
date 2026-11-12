@@ -193,39 +193,9 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
       console.error("[startup-migration] refund return lifecycle DDL failed:", e?.message ?? e);
     }
 
-    // Fulfillment-state ledger (FULFILLMENT_STATE_DESIGN.md §2.1, migration 103).
-    // Startup-fallback parity for the inert Phase-0 schema so a fresh/dev boot
-    // (the dev DB is empty) gets the table without the deploy migration step.
-    // Own try/catch + fully schema-qualified wms.* for the same reason as the
-    // refund block above. Idempotent (IF NOT EXISTS); no reader/writer yet.
-    try {
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS wms.line_fulfillments (
-          id                BIGINT       GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-          order_item_id     INTEGER      NOT NULL REFERENCES wms.order_items(id),
-          shipment_id       INTEGER      NOT NULL REFERENCES wms.outbound_shipments(id),
-          qty               INTEGER      NOT NULL,
-          kind              VARCHAR(20)  NOT NULL,
-          source            VARCHAR(30)  NOT NULL,
-          external_event_id VARCHAR(200),
-          occurred_at       TIMESTAMPTZ  NOT NULL,
-          created_at        TIMESTAMPTZ  NOT NULL DEFAULT now(),
-          CONSTRAINT line_fulfillments_qty_nonzero_chk CHECK (qty <> 0),
-          CONSTRAINT line_fulfillments_kind_chk
-            CHECK (kind IN ('shipped', 'void_reversal', 'return', 'manual_correction')),
-          CONSTRAINT line_fulfillments_source_chk
-            CHECK (source IN ('warehouse', 'reconcile', 'operator'))
-        )
-      `);
-      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_line_fulfillments_idempotency ON wms.line_fulfillments (order_item_id, shipment_id, kind, external_event_id)`);
-      await client.query(`CREATE INDEX IF NOT EXISTS idx_line_fulfillments_order_item ON wms.line_fulfillments (order_item_id)`);
-      await client.query(`CREATE INDEX IF NOT EXISTS idx_line_fulfillments_shipment ON wms.line_fulfillments (shipment_id)`);
-      await client.query(`ALTER TABLE wms.order_items ADD COLUMN IF NOT EXISTS on_hold BOOLEAN NOT NULL DEFAULT false`);
-      await client.query(`ALTER TABLE wms.order_items ADD COLUMN IF NOT EXISTS hold_reason VARCHAR(200)`);
-      console.log("Checked fulfillment-state ledger (wms.line_fulfillments, wms.order_items.on_hold)");
-    } catch (e: any) {
-      console.error("[startup-migration] fulfillment-state ledger DDL failed:", e?.message ?? e);
-    }
+    // Retired (P4.1): the fulfillment-state ledger block. wms.line_fulfillments,
+    // its indexes and wms.order_items.on_hold/hold_reason are created by tracked
+    // migration 103_line_fulfillments_ledger.sql.
 
     // OMS/WMS reconciliation exceptions (authority remediation Phase 5).
     // This gives ShipStation and future reconciliation paths a durable review
@@ -830,24 +800,11 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     await client.query(`CREATE INDEX IF NOT EXISTS idx_sync_log_status ON sync_log(status)`);
     console.log("Checked sync control system tables (sync_settings, sync_log, channel sync columns, warehouse feed_enabled)");
 
-    // 5. ShipStation integration columns on oms_orders
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_id INTEGER`);
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipstation_order_key VARCHAR(100)`);
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS shipping_engine VARCHAR(30)`);
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS engine_order_ref VARCHAR(200)`);
-    // P0.2: the engine-ref backfill UPDATE was removed — it was a one-time
-    // mirror of migration 0573 (long applied in prod) that kept re-stamping
-    // rows at boot, masking any writer that creates rows without engine refs.
-    console.log("Checked shipping engine columns on oms_orders");
-
-    // 5b. Engine-agnostic columns on outbound_shipments (mirrors migration 0573)
-    await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS shipping_engine VARCHAR(30)`);
-    await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS engine_order_ref VARCHAR(200)`);
-    await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS engine_shipment_ref VARCHAR(200)`);
-    // P0.2: engine-ref backfill UPDATE removed (mirror of migration 0573,
-    // long applied). Rows missing engine refs must be surfaced and fixed at
-    // their writer (audit: create-shipment child rows), not re-stamped at boot.
-    console.log("Checked shipping engine columns on outbound_shipments");
+    // Retired (P4.1): the shipping-engine column blocks. oms.oms_orders
+    // shipstation_order_id/shipstation_order_key come from the table's own
+    // CREATE in 0002/0071; shipping_engine/engine_order_ref from
+    // 0574_oms_engine_agnostic_refs.sql; and the three wms.outbound_shipments
+    // engine columns from 0573_engine_agnostic_shipment_refs.sql.
 
     // 5c. Hold flag columns (Phase 1a of SHIPMENT-STATE-MACHINE-DESIGN.md).
     await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS held BOOLEAN NOT NULL DEFAULT false`);
