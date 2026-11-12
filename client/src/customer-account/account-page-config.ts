@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { orderEditCodeMessageCatalogSchema } from "@shared/order-edits/order-edit-code-errors";
+
 export const customerAccountPageConfigSchema = z
   .object({
     themeId: z
@@ -18,6 +20,7 @@ export const customerAccountPageConfigSchema = z
       .string()
       .regex(/^\/(apps|a|community|tools)\/[a-z0-9][a-z0-9-]*$/)
       .refine((path) => !path.endsWith("/member-portal")),
+    codeMessages: orderEditCodeMessageCatalogSchema.optional(),
   })
   .strict();
 export type CustomerAccountPageConfig = z.input<

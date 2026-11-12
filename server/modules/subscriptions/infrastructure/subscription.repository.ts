@@ -1,7 +1,7 @@
 import { readIntegerCents } from "@shared/money-read";
 // subscription.storage.ts — Database operations for subscriptions
 import { db } from "../../../db";
-import { eq, inArray, desc, asc, and, sql } from "drizzle-orm";
+import { eq, inArray, desc, asc, and, ne, sql } from "drizzle-orm";
 import {
   plans,
   sellingPlanMap,
@@ -18,12 +18,24 @@ import type {
   SubscriptionDashboardStats,
 } from "../subscription.types";
 
+export type SubscriptionDbExecutor = Pick<
+  typeof db,
+  "select" | "insert" | "update" | "delete" | "execute"
+>;
+
 let currentMembershipRelationKind: string | null | undefined;
 let warnedCurrentMembershipReadonly = false;
 
-async function currentMembershipWritesSupported(): Promise<boolean> {
+export function resetCurrentMembershipRelationCacheForTests(): void {
+  currentMembershipRelationKind = undefined;
+  warnedCurrentMembershipReadonly = false;
+}
+
+async function currentMembershipWritesSupported(
+  executor: SubscriptionDbExecutor = db,
+): Promise<boolean> {
   if (currentMembershipRelationKind === undefined) {
-    const result = await db.execute(sql`
+    const result = await executor.execute(sql`
       SELECT c.relkind
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -101,10 +113,10 @@ export async function updatePlanDetails(
     includes_dropship: boolean;
     is_active: boolean;
     priority_modifier: number;
-  }>
+  }>,
+  executor: SubscriptionDbExecutor = db,
 ): Promise<void> {
-  if (Object.keys(updates).length === 0) return;
-  const dbUpdates: any = {};
+  const dbUpdates: Record<string, unknown> = {};
   if (updates.name !== undefined) dbUpdates.name = updates.name;
   if (updates.billing_interval !== undefined) dbUpdates.billingInterval = updates.billing_interval;
   if (updates.billing_interval_count !== undefined) dbUpdates.billingIntervalCount = updates.billing_interval_count;
@@ -112,12 +124,27 @@ export async function updatePlanDetails(
   if (updates.includes_dropship !== undefined) dbUpdates.includesDropship = updates.includes_dropship;
   if (updates.is_active !== undefined) dbUpdates.isActive = updates.is_active;
   if (updates.priority_modifier !== undefined) dbUpdates.priorityModifier = updates.priority_modifier;
+  if (Object.keys(dbUpdates).length === 0) return;
 
-  await db.update(plans).set(dbUpdates).where(eq(plans.id, String(planId)));
+  await executor.update(plans).set(dbUpdates).where(eq(plans.id, String(planId)));
 }
 
-export async function getPlanBySellingPlanGid(gid: string): Promise<PlanRecord | null> {
-  const result = await db.select({
+export async function updatePlanPriorityModifier(
+  planId: number | string,
+  priorityModifier: number,
+  executor: SubscriptionDbExecutor = db,
+): Promise<void> {
+  await executor
+    .update(plans)
+    .set({ priorityModifier })
+    .where(eq(plans.id, String(planId)));
+}
+
+export async function getPlanBySellingPlanGid(
+  gid: string,
+  executor: SubscriptionDbExecutor = db,
+): Promise<PlanRecord | null> {
+  const result = await executor.select({
     id: sql<number>`CAST(${plans.id} AS INTEGER)`,
     name: plans.name,
     billing_interval: plans.billingInterval,
@@ -135,8 +162,11 @@ export async function getPlanBySellingPlanGid(gid: string): Promise<PlanRecord |
   return (result[0] as unknown as PlanRecord) || null;
 }
 
-export async function getPlanById(planId: number): Promise<PlanRecord | null> {
-  const result = await db.select({
+export async function getPlanById(
+  planId: number,
+  executor: SubscriptionDbExecutor = db,
+): Promise<PlanRecord | null> {
+  const result = await executor.select({
     id: sql<number>`CAST(${plans.id} AS INTEGER)`,
     name: plans.name,
     billing_interval: plans.billingInterval,
@@ -203,36 +233,45 @@ export async function getSellingPlanMap(): Promise<Array<{
 
 // ─── Members ─────────────────────────────────────────────────────────
 
-export async function findMemberByShopifyCustomerId(customerId: number): Promise<any | null> {
-  const result = await db.select().from(members).where(eq(members.shopifyCustomerId, String(customerId))).limit(1);
+export async function findMemberByShopifyCustomerId(
+  customerId: number,
+  executor: SubscriptionDbExecutor = db,
+): Promise<any | null> {
+  const result = await executor.select().from(members).where(eq(members.shopifyCustomerId, String(customerId))).limit(1);
   return result[0] || null;
 }
 
-export async function findMemberByEmail(email: string): Promise<any | null> {
-  const result = await db.select().from(members).where(sql`LOWER(${members.email}) = LOWER(${email})`).limit(1);
+export async function findMemberByEmail(
+  email: string,
+  executor: SubscriptionDbExecutor = db,
+): Promise<any | null> {
+  const result = await executor.select().from(members).where(sql`LOWER(${members.email}) = LOWER(${email})`).limit(1);
   return result[0] || null;
 }
 
-export async function upsertMember(data: {
-  email: string;
-  shopify_customer_id: number;
-  first_name?: string;
-  last_name?: string;
-  tier?: string;
-}): Promise<number> {
-  let existing = await findMemberByShopifyCustomerId(data.shopify_customer_id);
+export async function upsertMember(
+  data: {
+    email: string;
+    shopify_customer_id: number;
+    first_name?: string;
+    last_name?: string;
+    tier?: string;
+  },
+  executor: SubscriptionDbExecutor = db,
+): Promise<number> {
+  let existing = await findMemberByShopifyCustomerId(data.shopify_customer_id, executor);
   if (!existing) {
-    existing = await findMemberByEmail(data.email);
+    existing = await findMemberByEmail(data.email, executor);
   }
 
   if (existing) {
-    await db.update(members).set({
+    await executor.update(members).set({
       shopifyCustomerId: String(data.shopify_customer_id),
     }).where(eq(members.id, existing.id));
     return Number(existing.id);
   }
 
-  const result = await db.insert(members).values({
+  const result = await executor.insert(members).values({
     id: String(Date.now() + Math.floor(Math.random() * 1000)), // Fallback ID generator, hopefully DB has a trigger
     email: data.email,
     shopifyCustomerId: String(data.shopify_customer_id),
@@ -247,8 +286,11 @@ export async function upsertMember(data: {
 
 // ─── Subscriptions ───────────────────────────────────────────────────
 
-export async function findSubscriptionByContractId(contractId: number): Promise<SubscriptionRecord | null> {
-  const result = await db.select().from(memberSubscriptions).where(eq(memberSubscriptions.shopifySubscriptionContractId, contractId)).limit(1);
+export async function findSubscriptionByContractId(
+  contractId: number,
+  executor: SubscriptionDbExecutor = db,
+): Promise<SubscriptionRecord | null> {
+  const result = await executor.select().from(memberSubscriptions).where(eq(memberSubscriptions.shopifySubscriptionContractId, contractId)).limit(1);
   if (!result[0]) return null;
   return {
     ...result[0],
@@ -273,18 +315,21 @@ export async function findSubscriptionByContractId(contractId: number): Promise<
   } as unknown as SubscriptionRecord;
 }
 
-export async function createSubscription(data: {
-  member_id: number;
-  plan_id: number;
-  shopify_subscription_contract_id: number;
-  shopify_subscription_contract_gid: string;
-  shopify_customer_id: number;
-  next_billing_date: Date;
-  current_period_start: Date;
-  current_period_end: Date;
-  billing_status?: string;
-}): Promise<number> {
-  const result = await db.insert(memberSubscriptions).values({
+export async function createSubscription(
+  data: {
+    member_id: number;
+    plan_id: number;
+    shopify_subscription_contract_id: number;
+    shopify_subscription_contract_gid: string;
+    shopify_customer_id: number;
+    next_billing_date: Date;
+    current_period_start: Date;
+    current_period_end: Date;
+    billing_status?: string;
+  },
+  executor: SubscriptionDbExecutor = db,
+): Promise<number> {
+  const result = await executor.insert(memberSubscriptions).values({
     id: String(Date.now() + Math.floor(Math.random() * 1000)), // Assuming standard logic if ID is required
     memberId: String(data.member_id),
     planId: String(data.plan_id),
@@ -295,6 +340,8 @@ export async function createSubscription(data: {
     currentPeriodStart: data.current_period_start,
     currentPeriodEnd: data.current_period_end,
     billingStatus: data.billing_status || "current",
+    billingInProgress: false,
+    failedBillingAttempts: 0,
     status: "active",
     cycleStartedAt: new Date(),
     createdAt: new Date(),
@@ -306,23 +353,25 @@ export async function updateSubscriptionStatus(
   subscriptionId: number,
   status: string,
   billingStatus?: string,
-  extra?: Partial<{ cancelled_at: Date; cancellation_reason: string }>
+  extra?: Partial<{ cancelled_at: Date; cancellation_reason: string }>,
+  executor: SubscriptionDbExecutor = db,
 ): Promise<void> {
-  const updates: any = { status };
+  const updates: Record<string, unknown> = { status };
   if (billingStatus) updates.billingStatus = billingStatus;
   if (extra?.cancelled_at) updates.cancelledAt = extra.cancelled_at;
   if (extra?.cancellation_reason) updates.cancellationReason = extra.cancellation_reason;
 
-  await db.update(memberSubscriptions).set(updates).where(eq(memberSubscriptions.id, String(subscriptionId)));
+  await executor.update(memberSubscriptions).set(updates).where(eq(memberSubscriptions.id, String(subscriptionId)));
 }
 
 export async function updateSubscriptionBillingDate(
   subscriptionId: number,
   nextBillingDate: Date,
   periodStart: Date,
-  periodEnd: Date
+  periodEnd: Date,
+  executor: SubscriptionDbExecutor = db,
 ): Promise<void> {
-  await db.update(memberSubscriptions).set({
+  await executor.update(memberSubscriptions).set({
     nextBillingDate,
     currentPeriodStart: periodStart,
     currentPeriodEnd: periodEnd,
@@ -332,12 +381,60 @@ export async function updateSubscriptionBillingDate(
   }).where(eq(memberSubscriptions.id, String(subscriptionId)));
 }
 
-export async function updateSubscriptionPlan(subscriptionId: number, planId: number): Promise<void> {
-  await db.update(memberSubscriptions).set({ planId: String(planId) }).where(eq(memberSubscriptions.id, String(subscriptionId)));
+export async function setNextBillingDate(
+  subscriptionId: number,
+  nextBillingDate: Date,
+  executor: SubscriptionDbExecutor = db,
+): Promise<void> {
+  await executor
+    .update(memberSubscriptions)
+    .set({ nextBillingDate })
+    .where(eq(memberSubscriptions.id, String(subscriptionId)));
 }
 
-export async function incrementFailedBilling(subscriptionId: number): Promise<number> {
-  const result = await db.update(memberSubscriptions).set({
+export async function updateSubscriptionPlan(
+  subscriptionId: number,
+  planId: number,
+  executor: SubscriptionDbExecutor = db,
+): Promise<void> {
+  await executor.update(memberSubscriptions).set({ planId: String(planId) }).where(eq(memberSubscriptions.id, String(subscriptionId)));
+}
+
+export async function updateSubscriptionRevision(
+  subscriptionId: number,
+  revisionId: string,
+  executor: SubscriptionDbExecutor = db,
+): Promise<void> {
+  await executor
+    .update(memberSubscriptions)
+    .set({ revisionId })
+    .where(eq(memberSubscriptions.id, String(subscriptionId)));
+}
+
+export async function hasOtherActiveSubscription(
+  memberId: number | string,
+  excludeSubscriptionId: number | string,
+  executor: SubscriptionDbExecutor = db,
+): Promise<boolean> {
+  const rows = await executor
+    .select({ id: memberSubscriptions.id })
+    .from(memberSubscriptions)
+    .where(
+      and(
+        eq(memberSubscriptions.memberId, String(memberId)),
+        eq(memberSubscriptions.status, "active"),
+        ne(memberSubscriptions.id, String(excludeSubscriptionId)),
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
+}
+
+export async function incrementFailedBilling(
+  subscriptionId: number,
+  executor: SubscriptionDbExecutor = db,
+): Promise<number> {
+  const result = await executor.update(memberSubscriptions).set({
     failedBillingAttempts: sql`COALESCE(${memberSubscriptions.failedBillingAttempts}, 0) + 1`,
     billingStatus: "past_due",
     billingInProgress: false
@@ -346,8 +443,33 @@ export async function incrementFailedBilling(subscriptionId: number): Promise<nu
   return result[0]?.failedBillingAttempts || 0;
 }
 
-export async function setBillingInProgress(subscriptionId: number, inProgress: boolean): Promise<void> {
-  await db.update(memberSubscriptions).set({ billingInProgress: inProgress }).where(eq(memberSubscriptions.id, String(subscriptionId)));
+export async function setBillingInProgress(
+  subscriptionId: number,
+  inProgress: boolean,
+  executor: SubscriptionDbExecutor = db,
+): Promise<void> {
+  await executor.update(memberSubscriptions).set({ billingInProgress: inProgress }).where(eq(memberSubscriptions.id, String(subscriptionId)));
+}
+
+/**
+ * Atomically claims `billing_in_progress = false -> true` so concurrent retries or
+ * scheduler passes cannot dispatch duplicate provider billing attempts.
+ */
+export async function claimBillingInProgress(
+  subscriptionId: number,
+  executor: SubscriptionDbExecutor = db,
+): Promise<boolean> {
+  const claimed = await executor
+    .update(memberSubscriptions)
+    .set({ billingInProgress: true })
+    .where(
+      and(
+        eq(memberSubscriptions.id, String(subscriptionId)),
+        sql`COALESCE(${memberSubscriptions.billingInProgress}, false) = false`,
+      ),
+    )
+    .returning({ id: memberSubscriptions.id });
+  return claimed.length > 0;
 }
 
 export async function getDueBillings(): Promise<SubscriptionRecord[]> {
@@ -382,7 +504,7 @@ export async function getDueBillings(): Promise<SubscriptionRecord[]> {
         inArray(memberSubscriptions.billingStatus, ["current", "past_due"]),
         eq(memberSubscriptions.status, "active"),
         sql`${memberSubscriptions.nextBillingDate} <= NOW()`,
-        eq(memberSubscriptions.billingInProgress, false),
+        sql`COALESCE(${memberSubscriptions.billingInProgress}, false) = false`,
         sql`${memberSubscriptions.shopifySubscriptionContractGid} IS NOT NULL`
       )
     ).orderBy(asc(memberSubscriptions.nextBillingDate)).limit(100);
@@ -392,21 +514,29 @@ export async function getDueBillings(): Promise<SubscriptionRecord[]> {
 
 // ─── Current Membership ──────────────────────────────────────────────
 
-export async function upsertCurrentMembership(memberId: number, planId: number, planName: string): Promise<void> {
+export async function upsertCurrentMembership(
+  memberId: number | string,
+  planId: number | string,
+  planName: string,
+  executor: SubscriptionDbExecutor = db,
+): Promise<void> {
   void planName;
-  if (!(await currentMembershipWritesSupported())) return;
+  if (!(await currentMembershipWritesSupported(executor))) return;
 
-  await db.execute(sql`
+  await executor.execute(sql`
     INSERT INTO membership.member_current_membership (member_id, plan_id, updated_at)
     VALUES (${String(memberId)}, ${String(planId)}, NOW())
     ON CONFLICT (member_id) DO UPDATE SET plan_id = ${String(planId)}, updated_at = NOW()
   `);
 }
 
-export async function clearCurrentMembership(memberId: number): Promise<void> {
-  if (!(await currentMembershipWritesSupported())) return;
+export async function clearCurrentMembership(
+  memberId: number | string,
+  executor: SubscriptionDbExecutor = db,
+): Promise<void> {
+  if (!(await currentMembershipWritesSupported(executor))) return;
 
-  await db.execute(sql`DELETE FROM membership.member_current_membership WHERE member_id = ${String(memberId)}`);
+  await executor.execute(sql`DELETE FROM membership.member_current_membership WHERE member_id = ${String(memberId)}`);
 }
 
 // ─── Reconciliation (M7) ─────────────────────────────────────────────
@@ -431,20 +561,23 @@ export async function reconcileCurrentMemberships(): Promise<{ upserted: number 
 
 // ─── Billing Log ─────────────────────────────────────────────────────
 
-export async function insertBillingLog(entry: {
-  member_subscription_id: number;
-  shopify_billing_attempt_id?: string;
-  shopify_order_id?: number;
-  amount_cents: number;
-  status: string;
-  error_code?: string;
-  error_message?: string;
-  idempotency_key?: string;
-  billing_period_start?: Date;
-  billing_period_end?: Date;
-}): Promise<number> {
+export async function insertBillingLog(
+  entry: {
+    member_subscription_id: number;
+    shopify_billing_attempt_id?: string;
+    shopify_order_id?: number | string | null;
+    amount_cents: number;
+    status: string;
+    error_code?: string;
+    error_message?: string;
+    idempotency_key?: string;
+    billing_period_start?: Date;
+    billing_period_end?: Date;
+  },
+  executor: SubscriptionDbExecutor = db,
+): Promise<number> {
   // Using subscriptionBillingAttempts as previously identified in the schema check
-  const result = await db.insert(subscriptionBillingAttempts).values({
+  const result = await executor.insert(subscriptionBillingAttempts).values({
     id: String(Date.now() + Math.floor(Math.random() * 1000)),
     contractId: String(entry.member_subscription_id), // Maps to contract_id
     shopifyBillingAttemptId: entry.shopify_billing_attempt_id,
@@ -452,7 +585,10 @@ export async function insertBillingLog(entry: {
     amountCents: entry.amount_cents,
     errorCode: entry.error_code,
     errorMessage: entry.error_message,
-    shopifyOrderId: String(entry.shopify_order_id),
+    shopifyOrderId:
+      entry.shopify_order_id != null && entry.shopify_order_id !== ""
+        ? String(entry.shopify_order_id)
+        : null,
     processedAt: new Date(),
     createdAt: new Date(),
   }).returning({ id: subscriptionBillingAttempts.id });
@@ -507,15 +643,18 @@ export async function getBillingLogs(filters?: {
 
 // ─── Events ──────────────────────────────────────────────────────────
 
-export async function insertEvent(entry: {
-  member_subscription_id?: number;
-  shopify_subscription_contract_id?: number;
-  event_type: string;
-  event_source: string;
-  payload?: any;
-  notes?: string;
-}): Promise<void> {
-  await db.insert(subscriptionEvents).values({
+export async function insertEvent(
+  entry: {
+    member_subscription_id?: number;
+    shopify_subscription_contract_id?: number;
+    event_type: string;
+    event_source: string;
+    payload?: any;
+    notes?: string;
+  },
+  executor: SubscriptionDbExecutor = db,
+): Promise<void> {
+  await executor.insert(subscriptionEvents).values({
     id: String(Date.now() + Math.floor(Math.random() * 1000)),
     memberSubscriptionId: entry.member_subscription_id ? String(entry.member_subscription_id) : null,
     shopifyContractId: entry.shopify_subscription_contract_id ? String(entry.shopify_subscription_contract_id) : null,
@@ -654,18 +793,24 @@ export async function getSubscriberList(filters?: {
 
 // ─── Subscription Detail ────────────────────────────────────────────
 
-export async function getSubscriptionDetail(subscriptionId: number): Promise<any | null> {
-  const result = await db.select({
+export async function getSubscriptionDetail(
+  subscriptionId: number,
+  executor: SubscriptionDbExecutor = db,
+): Promise<any | null> {
+  const result = await executor.select({
     id: memberSubscriptions.id,
     member_id: memberSubscriptions.memberId,
     plan_id: memberSubscriptions.planId,
     status: memberSubscriptions.status,
     billing_status: memberSubscriptions.billingStatus,
     next_billing_date: memberSubscriptions.nextBillingDate,
+    current_period_end: memberSubscriptions.currentPeriodEnd,
     started_at: memberSubscriptions.cycleStartedAt,
     cancelled_at: memberSubscriptions.cancelledAt,
     failed_billing_attempts: memberSubscriptions.failedBillingAttempts,
+    billing_in_progress: memberSubscriptions.billingInProgress,
     shopify_subscription_contract_id: memberSubscriptions.shopifySubscriptionContractId,
+    shopify_subscription_contract_gid: memberSubscriptions.shopifySubscriptionContractGid,
     email: members.email,
     first_name: members.firstName,
     last_name: members.lastName,
