@@ -128,7 +128,6 @@ import { createDefaultShipStationV2WebhookVerifier } from "./modules/shipping/sh
 import { createCarrierTrackingProjectionReader } from "./modules/shipping/carrier-tracking-and-dispatch.api";
 import { registerCarrierTrackingProjectionRoutes } from "./modules/shipping/carrier-tracking-and-dispatch.api";
 import { deriveReconcileEvent } from "./modules/shipping/engine-and-reconcile.api";
-import type { SafeUser } from "@shared/schema";
 import {
   channels as channelsTable,
   inventoryAvailabilityRuntimeAuthority,
@@ -152,12 +151,6 @@ import { observeRuntimeRequests, observeRuntimeWork, startRuntimeMemoryTelemetry
 import { getPostgresPoolSnapshot } from "./infrastructure/postgres-pool-observability";
 import { getSchedulerLockPoolSnapshot } from "./infrastructure/scheduler-lock";
 
-declare module "express-session" {
-  interface SessionData {
-    user?: SafeUser;
-  }
-}
-
 const app = express();
 const httpServer = createServer(app);
 const stopMemoryTelemetry = startRuntimeMemoryTelemetry({
@@ -170,12 +163,6 @@ httpServer.once("close", stopMemoryTelemetry);
 app.use(observeRuntimeRequests);
 
 // setupWebSocket is deferred until sessionMiddleware is created
-
-declare module "http" {
-  interface IncomingMessage {
-    rawBody: unknown;
-  }
-}
 
 installShipStationTrackingRawBodyCapture(app);
 
