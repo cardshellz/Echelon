@@ -39,6 +39,7 @@ import { ChannelDefinitionService } from "../../application/inventory-channel-de
 import { PostgresChannelDefinitionStore } from "../../infrastructure/inventory-channel-definition.repository";
 import { ChannelRuleService } from "../../application/inventory-channel-rule.service";
 import { PostgresChannelRuleStore } from "../../infrastructure/inventory-channel-rule.repository";
+import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
 import { activateReviewedWarehouseSourcesInsideTransaction } from "../../../warehouse/infrastructure/warehouse-source-activation.repository";
 import { readInventoryProductBalances } from "../../infrastructure/inventory-product-balances.reader";
 import { installStockSelectionFixture } from "../fixtures/stock-selection.fixture";
@@ -1132,7 +1133,10 @@ dbDescribe.sequential.each([
     expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_targets ORDER BY id")).rows).toEqual(targets);
   },30000);
   it("sets one SKU rule in one transaction: a refused or failed set leaves no rows; a good one saves, applies and replays", async () => {
-    const service = new ChannelRuleService(new PostgresChannelRuleStore(database.pool), { now:() => now });
+    // The real rule version writer. It only ever runs on the set command's own transaction client, so it is given
+    // no connection of its own (the process-global one is disabled in this suite).
+    const drafts = new PostgresInventoryChannelExposureAdminStore(null as never, null as never);
+    const service = new ChannelRuleService(new PostgresChannelRuleStore(database.pool, drafts), { now:() => now });
     const scope = { scopeType:"variant" as const, channelId:36, productId:20, productVariantId:101 };
     const unset = { allocationSemantics:null, eligible:null, shareBps:null, holdbackSellableUnits:null, maxPublish:null, minPublishSellableUnits:null };
     // Every table the two-step path writes: versions, heads, draft receipts, audit events, apply receipts, queued stock.
@@ -1143,8 +1147,9 @@ dbDescribe.sequential.each([
       `SELECT h.revision::text AS revision,h.active_policy_id,h.draft_policy_id,d.definition_hash AS draft_hash
        FROM inventory.channel_exposure_policy_heads h LEFT JOIN inventory.channel_exposure_policy_versions d ON d.id=h.draft_policy_id
        WHERE h.scope_key='channel:36:variant:101'`)).rows[0];
+    // A note is sent on every command: this fixture's schema predates the optional-note migration (247).
     const fence = (head: Awaited<ReturnType<typeof readHead>>) => ({ expectedHeadRevision:head.revision,
-      expectedDraftPolicyId:head.draft_policy_id, expectedDraftDefinitionHash:head.draft_hash });
+      expectedDraftPolicyId:head.draft_policy_id, expectedDraftDefinitionHash:head.draft_hash, changeReason:"One SKU rule" });
     const stock = (await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;
     const claims = (await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows;
     const authority = (await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows;
@@ -1155,7 +1160,7 @@ dbDescribe.sequential.each([
     const leftover = await readHead();
     expect(leftover.draft_policy_id).not.toBeNull();
     const beforeRefusals = await rowsWritten();
-    const blocked = await service.set({ scope, value:blockedValue, ...fence(leftover), changeReason:null, idempotencyKey:"rule-set-blocked" },"operator")
+    const blocked = await service.set({ scope, value:blockedValue, ...fence(leftover), idempotencyKey:"rule-set-blocked" },"operator")
       .then(() => null, (error: unknown) => error as { code:string; status:number; details:string[] });
     expect(blocked).toMatchObject({ code:"CHANNEL_RULE_REVIEW_BLOCKED", status:409 });
     expect(blocked!.details.some(message => message.includes("overriding supply warehouse"))).toBe(true);

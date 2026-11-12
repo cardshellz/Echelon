@@ -42,9 +42,10 @@ import { enqueueReviewedDefinitionPublication } from "./inventory-product-defini
 const RULE_SET_DRAFT_KEY_PREFIX = "rule-set:";
 
 export class PostgresChannelRuleStore implements ChannelRuleStore {
+  /** `drafts`: the rule version writer `set` runs inside its own transaction. Built on first use, so review, apply
+   * and progress never construct it. */
   constructor(private readonly connectionPool: Pick<Pool, "connect"> = pool,
-    private readonly drafts: Pick<PostgresInventoryChannelExposureAdminStore, "savePolicyDraftInsideTransaction">
-      = new PostgresInventoryChannelExposureAdminStore()) {}
+    private drafts: Pick<PostgresInventoryChannelExposureAdminStore, "savePolicyDraftInsideTransaction"> | null = null) {}
 
   review(selection: ChannelRuleSelection) {
     return this.transaction(false, client => captureRuleReview(client, selection));
@@ -118,6 +119,7 @@ export class PostgresChannelRuleStore implements ChannelRuleStore {
           before: stored.change.before?.id ?? null };
       }
       await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "canonical", expectedConfigurationRunId: null });
+      this.drafts ??= new PostgresInventoryChannelExposureAdminStore();
       const saved = await this.drafts.savePolicyDraftInsideTransaction(drizzle(client), {
         scope: command.scope, value: command.value, expectedHeadRevision: command.expectedHeadRevision,
         expectedDraftPolicyId: command.expectedDraftPolicyId, expectedDraftDefinitionHash: command.expectedDraftDefinitionHash,

@@ -1,8 +1,10 @@
 import {
   applyChannelRuleSchema, channelRuleProgressSchema, channelRuleReceiptSchema, channelRuleReviewSchema, channelRuleSelectionSchema,
+  channelRuleSetResultSchema, setChannelRuleSchema,
   type ApplyChannelRule, type ChannelRuleProgress, type ChannelRuleReceipt, type ChannelRuleReview, type ChannelRuleSelection,
+  type ChannelRuleSetResult, type SetChannelRule,
 } from "@shared/types/inventory-channel-rule";
-import type { ChannelExposurePolicyHead, ChannelExposurePolicyScope } from "@shared/types/inventory-channel-exposure";
+import type { ChannelExposurePolicyHead, ChannelExposurePolicyScope, ChannelExposurePolicyValue } from "@shared/types/inventory-channel-exposure";
 
 import { jsonInit, requestJson } from "./api";
 
@@ -38,6 +40,37 @@ export function reviewChannelRule(selection: ChannelRuleSelection, signal?: Abor
 
 export function applyChannelRule(command: ApplyChannelRule): Promise<ChannelRuleReceipt> {
   return requestJson(`${RULE_ENDPOINT}/apply`, channelRuleReceiptSchema, jsonInit("POST", applyChannelRuleSchema.parse(command)));
+}
+
+/** The server refuses a set with this code when the rule would create a problem; `details` lists each one. */
+export const RULE_BLOCKED_CODE = "CHANNEL_RULE_REVIEW_BLOCKED";
+
+/**
+ * One command that saves a rule and makes it take effect. The head fence names
+ * what the operator was looking at: the revision, and the saved change being
+ * replaced when one is waiting.
+ */
+export function buildSetRuleCommand(input: {
+  scope: ChannelExposurePolicyScope;
+  value: ChannelExposurePolicyValue;
+  head: { revision: string; draftPolicy: Pick<NonNullable<ChannelExposurePolicyHead["draftPolicy"]>, "policyId" | "definitionHash"> | null } | null;
+  note: string;
+  idempotencyKey: string;
+}): SetChannelRule {
+  return setChannelRuleSchema.parse({
+    scope: input.scope,
+    value: input.value,
+    expectedHeadRevision: input.head?.revision ?? "0",
+    expectedDraftPolicyId: input.head?.draftPolicy?.policyId ?? null,
+    expectedDraftDefinitionHash: input.head?.draftPolicy?.definitionHash ?? null,
+    changeReason: input.note.trim() === "" ? null : input.note.trim(),
+    idempotencyKey: input.idempotencyKey,
+  });
+}
+
+/** Saved, checked and applied in one server transaction: it either all happens or nothing is written. */
+export function setChannelRule(command: SetChannelRule): Promise<ChannelRuleSetResult> {
+  return requestJson(`${RULE_ENDPOINT}/set`, channelRuleSetResultSchema, jsonInit("POST", setChannelRuleSchema.parse(command)));
 }
 
 export function fetchChannelRuleProgress(scopeKey: string, signal?: AbortSignal): Promise<ChannelRuleProgress | null> {
