@@ -4,7 +4,7 @@ import { db } from "../../db";
 import { apInvoiceTransitionActionSchema, apInvoiceTransitionInputSchema, apInvoiceTransitionPreviewSchema, apInvoiceTransitionReceiptSchema,
   type ApInvoiceTransitionAction } from "@shared/procurement/ap-invoice-transition";
 import { costFingerprint, costInteger, lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
-import { readPurchaseInvoiceActionActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseInvoiceActionActor, readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { ApLedgerError, executeApInvoiceCommandInTransaction, type ApInvoiceFinancialCommand, type ApprovedInvoiceVarianceReconciliationResult } from "./ap-ledger.service";
 import { readInvoiceTransitionDocuments, readInvoiceTransitionHistory, retainInvoiceTransitionReview } from "./ap-invoice-transition.repository";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";

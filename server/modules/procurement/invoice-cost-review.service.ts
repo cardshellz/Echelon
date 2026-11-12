@@ -8,7 +8,7 @@ import { readPoAmendmentDependencies } from "./po-amendment-dependencies.reposit
 import { buildCostDestinationImpact } from "./cost-change-impact";
 import { ApLedgerError, invoiceCostReviewVersion } from "./ap-ledger.service";
 import { reconcilePurchaseCostEvidence } from "./purchase-cost-application.service";
-import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { hasQuantityAmendmentAuthority, PoQuantityAmendmentError } from "./po-quantity-amendment.policy";
 import { CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
 import { MoneyInputError } from "@shared/money-read";

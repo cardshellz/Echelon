@@ -2,7 +2,7 @@ import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { hasInvoiceCreditHistory, SupplierCreditEvidenceError, assertInvoiceHasNoCreditHistory, assertInvoiceSettlementEvidence, readInvoiceCreditAmount, readVerifiedInvoiceSettlementProjections } from "./supplier-credit-settlement.repository";
 import { paymentApplicationInputSchema, paymentCalendarDateSchema, type PaymentApplicationInput } from "@shared/procurement/ap-payment-contract";
 import { readPaymentBalances } from "./ap-payment-balance.repository";
-import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
+import { readCommandAuthorityActor } from "../identity/command-authority.api";
 import { readShipmentBillingOwnership, readInvoiceSourceCapabilities } from "./shipment-billing-ownership.repository";
 import { readPoFinancialEvidenceSourcesWithClient } from "./po-financial-evidence.repository";
 import { buildPoFinancialWorkflow } from "./domain/po-financial-workflow";

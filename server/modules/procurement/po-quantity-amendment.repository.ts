@@ -9,7 +9,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { warehouseSettings } from "@shared/schema/inventory.schema";
 import { readProcurementSettings } from "./procurement-settings.repository";
 import type { PurchaseApprovalSnapshot } from "./purchase-order-approval.policy";
-import { readPurchaseApprovalActor } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor } from "../identity/purchase-approval-authority.api";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { recomputePurchaseOrderInvoiceMatchesInTransaction } from "./ap-ledger.service";
 import { replacePurchaseOrderMatchExceptions } from "./purchase-order-match-exceptions.repository";

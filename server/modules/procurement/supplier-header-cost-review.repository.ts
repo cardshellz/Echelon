@@ -5,7 +5,7 @@ import {
   supplierHeaderContextSchema, supplierHeaderApprovalSchema, supplierHeaderPreviewSchema,
   type SupplierHeaderTarget, type SupplierHeaderPreview,
 } from "@shared/procurement/supplier-header-costs";
-import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { hasQuantityAmendmentAuthority } from "./po-quantity-amendment.policy";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import { costInteger, costFingerprint, lockInventoryCostGraph, CostEvidenceError } from "../inventory/infrastructure/cost-evidence.repository";

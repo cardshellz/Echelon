@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons } from "./modules/identity";
 
-import { registerAuthRoutes } from "./modules/identity/identity.routes";
+import { registerAuthRoutes } from "./modules/identity/routes.api";
 import { registerLocationRoutes } from "./modules/warehouse/locations.routes";
 import { registerPickingRoutes } from "./modules/orders/routes.api";
 import { registerOperationsDashboardRoutes } from "./modules/orders/routes.api";
@@ -43,8 +43,10 @@ import { router as ebayPricingRouter } from "./routes/ebay/ebay-pricing.routes";
 import { router as ebayPoliciesRouter } from "./routes/ebay/ebay-policies.routes";
 import { registerSyncControlRoutes } from "./modules/channels/sync-control.routes";
 import { registerOmsRoutes } from "./routes/oms.routes";
-import { registerSubscriptionWebhookRoutes } from "./modules/subscriptions/subscription.webhooks";
-import { registerSubscriptionRoutes } from "./modules/subscriptions/subscription.routes";
+import {
+  registerSubscriptionWebhookRoutes,
+  registerSubscriptionRoutes,
+} from "./modules/subscriptions/routes.api";
 import { registerDiagnosticsRoutes } from "./routes/diagnostics";
 import { registerPickPriorityRoutes } from "./routes/pick-priority.routes";
 import { createMarketplaceListingRegistrationResolverFromEnv } from "./marketplace-listing-registration.composition";

@@ -3,7 +3,7 @@ import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { sqlIntegerArray } from "../../infrastructure/postgres-array";
-import { readStaffSystemRoleAuthority } from "../identity/staff-authority";
+import { readStaffSystemRoleAuthority } from "../identity/staff-authority.api";
 import { readLabelEvidence, readPreviousItems, readSources,
   type AuthorizedLabelReplacement, type PreviousItem, type SourceItem } from "./ebay-label-replacement.repository";
 import { planPackageReconciliation, packageReconciliationInputSchema, type PackageReconciliationInput, type PackageReconciliationPlan } from "./package-reconciliation.domain";

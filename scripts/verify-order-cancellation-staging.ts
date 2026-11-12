@@ -6,7 +6,7 @@ import { writeFile, mkdir } from "node:fs/promises";
 import { execFileSync } from "node:child_process";
 import { z } from "zod";
 import { ShopifyOrderEditProvider } from "../server/modules/order-edits/infrastructure/shopify-order-edit.provider";
-import { cancellationPaymentsSettled } from "../server/modules/customer-account/application/order-cancellation.ports";
+import { cancellationPaymentsSettled } from "../server/modules/customer-account/order-cancellation-contracts.api";
 import { matchesOrderCancellationSettlement } from "../server/modules/order-edits/domain/order-edit-financials";
 
 const shop = z
