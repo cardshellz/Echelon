@@ -12,7 +12,7 @@ import { refreshPoAmendmentCosts, type PoAmendmentShipmentOwner } from "./po-ame
 import { costFingerprint, CostEvidenceError } from "../inventory/infrastructure/cost-evidence-values";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import type { PoQuantityPreviewRequest } from "@shared/procurement/po-quantity-amendment";
-import { preparePoAdditions } from "./po-line-composition.repository";
+import { preparePoAdditions, preparePoProductChanges } from "./po-line-composition.repository";
 
 function input<T>(schema: z.ZodType<T>, value: unknown): T {
   const parsed = schema.safeParse(value);
@@ -26,7 +26,8 @@ export function createPoQuantityAmendmentService(database: AmendmentDatabase, no
   const repository = createDrizzleFinancialCommandRepository(database);
   async function prepare(tx: AmendmentTransaction, source: Awaited<ReturnType<typeof readQuantityAmendmentSource>>, request: PoQuantityPreviewRequest) {
     const additions = await preparePoAdditions(tx, source.facts.header, Math.max(0, ...source.facts.lines.map(line => line.lineNumber)) + 1, request);
-    const plan = planQuantityAmendment(source.facts, request, additions);
+    const productChanges = await preparePoProductChanges(tx, source.facts.header, source.facts.lines, request);
+    const plan = planQuantityAmendment(source.facts, request, additions, productChanges);
     const approval = buildCurrentPurchaseApprovalSnapshot({ ...source, totalCents: plan.preview.afterTotalCents });
     return { plan, approval };
   }

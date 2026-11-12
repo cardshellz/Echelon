@@ -8,6 +8,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { exactMoneyAsInput } from "@/lib/exact-money-input";
 import type { PoQuantityAmendmentContext } from "@shared/procurement/po-quantity-amendment";
+import type { PoProductChangeDraft } from "./PoLineProductChange";
 
 type Line = PoQuantityAmendmentContext["lines"][number];
 export type PoAmendmentLineDraft = { quantity: string; basis: "per_piece" | "extended_total" | "per_purchase_uom"; price: string; packaging: string; discount: string; tax: string; charge: string; touched: boolean };
@@ -18,11 +19,16 @@ type Props = {
   totalLabel: (line: Line, draft: PoAmendmentLineDraft, currency: string) => string;
   removals?: readonly number[];
   onRemove?: (id: number) => void;
+  productChanges?: Readonly<Record<number, PoProductChangeDraft>>;
+  /** Unset while another line or a new line is being picked. */
+  onChangeProduct?: (id: number) => void;
+  onUndoProductChange?: (id: number) => void;
 };
 
-/** Product and receiving identities stay fixed on approved documents. Only the
- * amendment owner validates and saves the raw economic drafts from this table. */
-export function PoAmendmentLineTable({ disabled, lines, drafts, currency, onChange, totalLabel, removals = [], onRemove }: Props) {
+/** Economic drafts and drafted product changes are raw input only. The amendment
+ * owner validates product identity changes (open, untouched lines only), prices
+ * and totals, and saves them after administrator review. */
+export function PoAmendmentLineTable({ disabled, lines, drafts, currency, onChange, totalLabel, removals = [], onRemove, productChanges = {}, onChangeProduct, onUndoProductChange }: Props) {
   return <CompactPoLineTable aria-label="Edit PO lines" className="min-w-[820px]">
     <TableHeader><TableRow className="bg-slate-50">
       <TableHead className="w-[30%]">Product / line</TableHead><TableHead className="w-28">Pieces</TableHead>
@@ -36,10 +42,25 @@ export function PoAmendmentLineTable({ disabled, lines, drafts, currency, onChan
       const basisLabel = draft.basis === "extended_total" ? "Product total" : draft.basis === "per_purchase_uom" && line.pricing?.basis === "per_purchase_uom" ? `Per ${line.pricing.purchaseUom}` : "Per piece";
       const inconsistent = line.componentTotalCents !== undefined && line.componentTotalCents !== line.lineTotalCents;
       if (removals.includes(line.id)) return <TableRow key={line.id} className="bg-red-50/40"><TableCell colSpan={6}><span className="line-through">Line {line.lineNumber} · {line.name}</span><p className="text-xs">Will be removed from the active PO. Original line and approval remain in history.</p></TableCell><TableCell><Button type="button" variant="outline" size="sm" disabled={disabled} onClick={() => onRemove?.(line.id)}>Undo removal</Button></TableCell></TableRow>;
+      const productChange = productChanges[line.id];
+      const canChangeProduct = product && !line.blockedReason && line.productChangeBlockedReason === null;
       return <TableRow key={line.id} className={inconsistent ? "bg-amber-50/40" : ""}>
         <TableCell className="py-2 align-top">
-          <p className="line-clamp-2 text-sm font-medium" title={line.name}>Line {line.lineNumber} · {line.name}</p>
+          <p className={`line-clamp-2 text-sm font-medium ${productChange ? "line-through text-muted-foreground" : ""}`} title={line.name}>Line {line.lineNumber} · {line.name}</p>
+          {product && line.sku && <p className={`font-mono text-xs text-muted-foreground ${productChange ? "line-through" : ""}`}>{line.sku}</p>}
           {product && <p className="text-xs text-muted-foreground">Received {line.receivedQty.toLocaleString()} · Invoiced {line.invoicedQty.toLocaleString()}</p>}
+          {productChange && <div className="mt-1 rounded border border-green-600 p-1.5 text-xs">
+            <p className="font-medium">New product: {productChange.sku ? `${productChange.sku} · ` : ""}{productChange.name}</p>
+            <p>Receive as {productChange.unitName}{productChange.supplierItem ? ` · Supplier item ${productChange.supplierItem}` : ""}</p>
+            <div className="mt-1 flex flex-wrap gap-1">
+              <Button type="button" variant="outline" size="sm" className="h-7 text-xs" disabled={disabled || !onChangeProduct} onClick={() => onChangeProduct?.(line.id)}>Edit product change</Button>
+              <Button type="button" variant="outline" size="sm" className="h-7 text-xs" disabled={disabled} onClick={() => onUndoProductChange?.(line.id)}>Undo product change</Button>
+            </div>
+          </div>}
+          {!productChange && canChangeProduct && <Button type="button" variant="outline" size="sm" className="mt-1 h-7 text-xs" disabled={disabled || !onChangeProduct}
+            aria-label={`Change product for line ${line.lineNumber}`} onClick={() => onChangeProduct?.(line.id)}>Change product</Button>}
+          {/* Received lines are self-explanatory; an untouched line locked by another document says which one. */}
+          {product && !line.blockedReason && line.receivedQty === 0 && line.productChangeBlockedReason && <p className="mt-1 text-xs text-muted-foreground">Product locked: {line.productChangeBlockedReason}</p>}
           {line.blockedReason && <p className="mt-1 text-xs text-muted-foreground">{line.blockedReason}</p>}
           {inconsistent && <p className="mt-1 text-xs text-amber-800 dark:text-amber-300">The saved line total does not equal its product, packaging, discount and tax amounts. Check the supplier document.</p>}
         </TableCell>

@@ -66,6 +66,84 @@ test("PO editor adds and removes lines in one review and retains protected recei
   await expect(page).toHaveURL(/purchase-orders\/17\?tab=lines/);
 });
 
+test("PO editor changes an untouched line's product, receiving unit and supplier item in one review", async ({ page }) => {
+  const failures = await installFixtures(page);
+  const line: PoQuantityAmendmentContext["lines"][number] = { id: 11, lineNumber: 1, name: "Archived toploader", orderQty: 5000, receivedQty: 0, invoicedQty: 5000,
+    unitCostMills: 100, totalProductCostCents: 5000, packagingCostCents: 0, discountCents: 0, taxCents: 0, componentTotalCents: 5000,
+    lineType: "product", pricing: { basis: "per_piece", quantityPieces: 5000, unitCostMills: 100 }, lineTotalCents: 5000, status: "open", blockedReason: null,
+    removalBlockedReason: "This line has invoice history and must stay linked to it. You can correct its values; correct billing from the invoice.",
+    sku: "OLD-SKU", productId: 7, receiveVariantId: 14, receiveUnitsPerVariant: 1000, vendorProductId: 30, vendorSku: null, productChangeBlockedReason: null };
+  const receivedLine = { ...line, id: 12, lineNumber: 2, name: "Received product", receivedQty: 10, invoicedQty: 0, status: "received", sku: "RECEIVED-SKU",
+    productChangeBlockedReason: "Goods were received on this line, so it keeps its product. Reduce it to the received quantity and add the new product as a separate line." };
+  const context: PoQuantityAmendmentContext = { purchaseOrderId: 17, vendorId: 2, currency: "USD", sourceVersion: version, canApprove: true, blockedReason: null, lines: [line, receivedLine] };
+  const replacement = { id: 8, sku: "NEW-SKU", name: "Replacement toploader", isActive: true, variants: [
+    { id: 16, sku: "NEW-SKU-C1000", name: "Case of 1000", unitsPerVariant: 1000, isActive: true },
+    { id: 15, sku: "NEW-SKU-P25", name: "Pack of 25", unitsPerVariant: 25, isActive: false }] };
+  const expectedChange = { lineId: 11, productId: 8, expectedReceiveVariantId: 16, expectedReceiveUnitsPerVariant: 1000, vendorProductId: 41, vendorSku: "AST-35-CLR" };
+  let preview: PoQuantityAmendmentPreview;
+  const approvals: PoQuantityPreviewRequest[] = [];
+  await page.route("**/api/**", async route => {
+    const request = route.request(), url = new URL(request.url()), path = url.pathname;
+    if (path === "/api/auth/me") return route.fulfill({ json: admin });
+    if (path === "/api/products") return route.fulfill({ json: [replacement] });
+    if (path === "/api/vendor-products") {
+      expect(Object.fromEntries(url.searchParams)).toEqual({ vendorId: "2", productId: "8", isActive: "1" });
+      return route.fulfill({ json: { vendorProducts: [{ id: 41, vendorId: 2, productId: 8, productVariantId: 16, vendorSku: "AST-35-CLR", vendorProductName: "35PT clear", isActive: 1 }] } });
+    }
+    if (path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), status: "partially_received" } });
+    if (path === "/api/purchase-orders/17/quantity-amendment" && request.method() === "GET") return route.fulfill({ json: context });
+    if (path === "/api/purchase-orders/17/quantity-amendment/preview") {
+      const body = request.postDataJSON() as PoQuantityPreviewRequest;
+      expect(body.productChanges).toEqual([expectedChange]); expect(body.changes).toEqual([]);
+      expect(body.removals).toBeUndefined(); expect(body.additions).toBeUndefined();
+      const identity = { receiveVariantSku: null, receiveUnitsPerVariant: 1000, vendorSku: null };
+      preview = { purchaseOrderId: 17, currency: "USD", sourceVersion: version, previewVersion: reviewed, reason: body.reason, lines: [],
+        productChanges: [{ lineId: 11, lineNumber: 1, sourceFingerprint: version,
+          before: { ...identity, productId: 7, sku: "OLD-SKU", name: "Archived toploader", receiveVariantId: 14, receiveVariantName: "Case of 1000", vendorProductId: 30 },
+          after: { ...identity, productId: 8, sku: "NEW-SKU", name: "Replacement toploader", receiveVariantId: 16, receiveVariantName: "Case of 1000", vendorProductId: 41, vendorSku: "AST-35-CLR" },
+          invoiceLines: [{ invoiceId: 71, invoiceNumber: "TEST-INV-71", invoiceLineId: 82, description: "Archived toploader" }] }],
+        beforeTotalCents: 5100, afterTotalCents: 5100, beforeStatus: "partially_received", afterStatus: "partially_received", invoiceMatches: [],
+        warnings: ["Line 1: invoice TEST-INV-71 keeps its recorded supplier description and stays matched to this line."],
+        impact: { quantities: [], shipments: [], lots: [], orderCosts: [], historicalCosts: [], applications: [] } };
+      return route.fulfill({ json: preview });
+    }
+    if (path === "/api/purchase-orders/17/quantity-amendment" && request.method() === "POST") {
+      approvals.push(request.postDataJSON());
+      return route.fulfill({ json: { purchaseOrderId: 17, revisionNumber: 3, auditEventId: 101, preview } });
+    }
+    return route.fallback();
+  });
+  await page.goto("/purchase-orders/17?tab=lines");
+  await page.getByRole("button", { name: "Edit PO", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByText("OLD-SKU", { exact: true })).toBeVisible();
+  // A received line keeps its product: no change control is offered for it.
+  await expect(dialog.getByRole("button", { name: "Change product for line 2", exact: true })).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Change product for line 1", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "Review changes", exact: true })).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "Add line item" })).toBeDisabled();
+  await dialog.getByLabel("New product", { exact: true }).selectOption("8");
+  await expect(dialog.getByLabel("New receive as", { exact: true }).locator("option")).toHaveText(["Choose receiving unit", "Case of 1000 · 1,000 pieces"]);
+  await dialog.getByLabel("New receive as", { exact: true }).selectOption("16");
+  await expect(dialog.getByText("Expect 5 × Case of 1000.")).toBeVisible();
+  await dialog.getByLabel("Supplier catalog item", { exact: true }).selectOption("41");
+  await expect(dialog.getByLabel("Supplier SKU on the PO", { exact: true })).toHaveValue("AST-35-CLR");
+  await dialog.screenshot({ path: test.info().outputPath("po-product-change-picker.png") });
+  await dialog.getByRole("button", { name: "Use this product" }).click();
+  await expect(dialog.getByText("New product: NEW-SKU · Replacement toploader")).toBeVisible();
+  await dialog.getByLabel("Reason for editing / supplier reference").fill("Ordered product was archived; supplier ships the replacement");
+  await dialog.getByRole("button", { name: "Review changes", exact: true }).click();
+  const changes = dialog.getByRole("table", { name: "Product changes" });
+  await expect(changes).toContainText("OLD-SKU"); await expect(changes).toContainText("NEW-SKU");
+  await expect(dialog.getByText("Line 1: invoice TEST-INV-71 keeps its recorded supplier description and stays matched to this line.")).toBeVisible();
+  await expect(dialog.getByText(/1 product changed/)).toBeVisible();
+  await dialog.screenshot({ path: test.info().outputPath("po-product-change-review.png") });
+  await dialog.getByRole("checkbox").check();
+  await dialog.getByRole("button", { name: "Approve & save PO" }).click();
+  await expect(dialog.getByRole("status")).toContainText("saved as revision 3");
+  expect(approvals).toHaveLength(1); expect(approvals[0].productChanges).toEqual([expectedChange]); expect(failures).toEqual([]);
+});
+
 async function shipmentSetup(page: Page, options: { lost?: boolean; blocked?: boolean; stale?: boolean; canApprove?: boolean; refreshFailure?: boolean; unallocated?: boolean } = {}) {
   const failures = await installFixtures(page);
   const line: ShipmentEditorContext["lines"][number] = { key: "line:7", id: 7, sku: "ORIGINAL", name: "Original product", purchaseOrderId: 17, purchaseOrderLineId: 11, poNumber: "TEST-PO-17",
