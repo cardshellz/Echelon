@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 /**
  * P0.2 — boot must never mutate data (source invariant / writer-ratchet seed).
  *
- * runStartupMigrations() historically carried one-time data repairs that
+ * The schema fallbacks in db.ts (once run at every boot, now once per
+ * release) historically carried one-time data repairs that
  * re-ran on EVERY deploy: an unledgered DELETE of inventory_levels rows, a
  * hold wipe that silently released every line-item hold on restart (audit
  * F2, CRITICAL), shipment status rewrites, engine-ref re-stamping, and a
@@ -51,7 +52,7 @@ describe("db.ts boot path — no data mutations (P0.2)", () => {
     expect(
       unexpected,
       `Boot-time DML found outside the allowlist — data mutations belong in ` +
-        `reviewed tracked migrations, never in runStartupMigrations():\n${unexpected.join("\n")}`,
+        `reviewed tracked migrations, never in the db.ts schema fallbacks:\n${unexpected.join("\n")}`,
     ).toEqual([]);
   });
 
