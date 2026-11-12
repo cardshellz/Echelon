@@ -1,6 +1,9 @@
 import { z } from "zod";
-import type { CustomerReturnCustomerSession, ReturnCustomerAuthConfig } from "../../returns/application/customer-return-customer-auth.service";
-import { CustomerReturnCustomerAccessError } from "../../returns/application/customer-return-customer-auth.service";
+import {
+  CustomerReturnCustomerAccessError,
+  type CustomerReturnCustomerSession,
+  type ReturnCustomerAuthConfig,
+} from "../../returns/customer-return-access-contracts.api";
 
 const id = z.string().max(30).regex(/^[1-9][0-9]*$/);
 // Keep rollout configuration bounded; theme IDs do not authenticate customers.

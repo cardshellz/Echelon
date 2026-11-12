@@ -1,6 +1,9 @@
 import { createAccountNativeSummariesWorker } from "./modules/customer-account/infrastructure/account-native-summaries.composition";
-import { createCustomerReturnWorkflowWorker, startCustomerReturnWorkflowScheduler } from "./modules/returns/infrastructure/customer-return-workflow.composition";
-import type { ReturnWorkflowReport } from "./modules/returns/application/customer-return-workflow.worker";
+import {
+  createCustomerReturnWorkflowWorker,
+  startCustomerReturnWorkflowScheduler,
+  type ReturnWorkflowReport,
+} from "./modules/returns/runtime-workflow.api";
 import { createChannelSyncBatchService } from "./channel-sync-batch.composition";
 import { registerChannelSyncBatchRoutes } from "./modules/marketplace-listings/infrastructure/channel-sync-batch.routes";
 import { createListingIntentPropagationService } from "./listing-intent-propagation.composition";

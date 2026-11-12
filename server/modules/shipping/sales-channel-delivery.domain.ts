@@ -6,7 +6,7 @@ import {
 import {
   customerReturnShopifySnapshotSchema,
   type CustomerReturnShopifySnapshot,
-} from "../returns/application/customer-return-shopify-snapshot.ports";
+} from "../returns/shopify-snapshot-contracts.api";
 import {
   normalizeTrackingNumber,
   type CanonicalCarrierTrackingStatus,

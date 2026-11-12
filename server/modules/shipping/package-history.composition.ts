@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { ChannelIdentityService } from "../channels/channel-identity.service";
-import { ShopifyCustomerReturnSnapshotReader } from "../returns/infrastructure/customer-return-shopify-snapshot.reader";
+import { ShopifyCustomerReturnSnapshotReader } from "../returns/shopify-snapshot-reader.api";
 import {
   createPackageHistoryShipStationRequester,
   createPackageHistorySource,

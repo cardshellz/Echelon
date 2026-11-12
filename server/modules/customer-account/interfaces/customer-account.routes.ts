@@ -1,5 +1,5 @@
 import { customerAccountOverviewSchema } from "@shared/customer-account/account-overview";
-import { dispatchCustomerReturn } from "../../returns/interfaces/http/customer-return-dispatch";
+import { dispatchCustomerReturn } from "../../returns/customer-account-http.api";
 import type { Express, Response } from "express";
 import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
@@ -27,12 +27,12 @@ import {
 import {
   CustomerReturnCustomerAccessError,
   type CustomerReturnCustomerSession,
-} from "../../returns/application/customer-return-customer-auth.service";
-import { createCustomerReturnCustomerAuth } from "../../returns/infrastructure/customer-return-customer-auth.composition";
+} from "../../returns/customer-return-access-contracts.api";
 import {
+  createCustomerReturnCustomerAuth,
   returnCustomerError,
   returnCustomerPrivateResponse,
-} from "../../returns/interfaces/http/customer-return-customer-auth.routes";
+} from "../../returns/customer-account-http.api";
 import {
   OrderEditError,
   orderEditOrderManagementPresentation,
