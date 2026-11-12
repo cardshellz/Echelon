@@ -404,9 +404,12 @@ scope (order/line), released_by; picking + push + release all consult it; boot w
   |---|---|---|---|
   | 2026-11-12 | Fulfillment-state ledger; shipping-engine columns on `oms.oms_orders`; shipping-engine columns on `wms.outbound_shipments` | `103_line_fulfillments_ledger.sql`; `0002`/`0071` + `0574_oms_engine_agnostic_refs.sql`; `0573_engine_agnostic_shipment_refs.sql` (all recorded as applied in production) | 157 statements, 27 blocks |
 
-  The first two were chosen because they were the statements that hit the lock limit in the
-  v3528 release. Next: the hold-flag block (`wms.outbound_shipments.held`, `held_at`), which no
-  tracked migration creates, so it needs a new migration before it can be deleted.
+  | 2026-11-12 | Hold flags on `wms.outbound_shipments` (`held`, `held_at`) | New tracked migration `*_outbound_shipment_hold_flags.sql`: no earlier migration created these columns. It adds each only when missing, so it takes no table lock where they already exist | 155 statements, 26 blocks |
+
+  The first two blocks were chosen because they were the statements that hit the lock limit in
+  the v3528 release. The hold-flag block is the first one that needed a migration written; use
+  it as the pattern (check the catalog first, alter only when missing, compare the result with
+  production's definition).
 
   **Separate item, same phase:** make a new empty database buildable from tracked migrations
   (a baseline schema file plus the migrations after it), and have CI build one. Until that exists
