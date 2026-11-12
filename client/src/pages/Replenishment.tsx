@@ -42,7 +42,8 @@ import {
   isNoSourceReviewOnlyTask,
 } from "./replen-task-retry-model";
 import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
-import { 
+import { caseBreakTargetQty, caseBreakTargetsForSource } from "@/features/inventory/case-break-targets";
+import {
   Plus, 
   Edit, 
   Trash2,
@@ -114,6 +115,7 @@ interface LocationInventoryItem {
 }
 
 const EMPTY_INVENTORY: LocationInventoryItem[] = [];
+const NO_CONVERSIONS: unknown[] = [];
 
 interface ReplenTierDefault {
   id: number;
@@ -458,6 +460,35 @@ export default function Replenishment() {
   const { data: variants = [] } = useQuery<ProductVariant[]>({
     queryKey: ["/api/product-variants"],
   });
+
+  // Case break targets come only from the product's active saved conversion
+  // rules (the same rules the server enforces), never from hierarchy level.
+  const caseBreakSource = taskMode === "case_break" && taskForm.sourceVariantId
+    ? variants.find(v => v.id === parseInt(taskForm.sourceVariantId)) ?? null
+    : null;
+  const caseBreakProductId = caseBreakSource?.productId ?? null;
+  const {
+    data: caseBreakConversions = NO_CONVERSIONS,
+    isLoading: caseBreakConversionsLoading,
+    isError: caseBreakConversionsFailed,
+  } = useQuery<unknown[]>({
+    queryKey: ["/api/inventory/products", caseBreakProductId, "allowed-conversions"],
+    queryFn: async () => {
+      const res = await fetch(`/api/inventory/products/${caseBreakProductId}/allowed-conversions`, { credentials: "include" });
+      if (!res.ok) throw new Error("Failed to load conversion rules");
+      return res.json();
+    },
+    enabled: caseBreakProductId !== null,
+  });
+  const caseBreakTargets = useMemo(
+    () => caseBreakSource ? caseBreakTargetsForSource(caseBreakSource, variants, caseBreakConversions) : [],
+    [caseBreakSource, variants, caseBreakConversions],
+  );
+  const caseBreakTargetUnits = (sourceQty: string, pickVariantId: string) => {
+    const selected = caseBreakTargets.find(t => t.target.id.toString() === pickVariantId);
+    const qty = selected ? caseBreakTargetQty(parseInt(sourceQty), selected.conversion) : null;
+    return qty === null ? "" : qty.toString();
+  };
 
   // Fetch inventory at the selected FROM location for task creation
   const { data: fromLocationInventory = EMPTY_INVENTORY, isLoading: fromInventoryLoading } = useQuery<LocationInventoryItem[]>({
@@ -1120,23 +1151,19 @@ export default function Replenishment() {
     }
   }, [fromLocationInventory, taskMode]);
 
-  // Auto-select child variant when there's exactly one option (case break)
+  // Auto-select the break target when the saved rules allow exactly one
   useEffect(() => {
     if (taskMode !== "case_break" || !taskForm.sourceVariantId) return;
-    const sourceV = variants.find(v => v.id === parseInt(taskForm.sourceVariantId));
-    if (!sourceV) return;
-    const childVariants = variants.filter(v => v.productId === sourceV.productId && v.hierarchyLevel < sourceV.hierarchyLevel);
-    if (childVariants.length === 1 && taskForm.pickVariantId !== childVariants[0].id.toString()) {
-      const cv = childVariants[0];
-      const conversionRatio = sourceV.unitsPerVariant / cv.unitsPerVariant;
-      const casesQty = parseInt(taskForm.qtySourceUnits) || 1;
-      setTaskForm(prev => ({
-        ...prev,
-        pickVariantId: cv.id.toString(),
-        qtyTargetUnits: Math.floor(casesQty * conversionRatio).toString(),
-      }));
-    }
-  }, [taskMode, taskForm.sourceVariantId, variants]);
+    if (caseBreakTargets.length !== 1) return;
+    const only = caseBreakTargets[0];
+    if (taskForm.pickVariantId === only.target.id.toString()) return;
+    const qty = caseBreakTargetQty(parseInt(taskForm.qtySourceUnits) || 1, only.conversion);
+    setTaskForm(prev => ({
+      ...prev,
+      pickVariantId: only.target.id.toString(),
+      qtyTargetUnits: qty === null ? "" : qty.toString(),
+    }));
+  }, [taskMode, taskForm.sourceVariantId, caseBreakTargets]);
 
   const resetLocConfigForm = () => {
     setLocConfigForm({
@@ -3331,51 +3358,67 @@ export default function Replenishment() {
 
             {/* Case break: pick variant at destination */}
             {taskMode === "case_break" && taskForm.sourceVariantId && taskForm.toLocationId && (() => {
-              const sourceV = variants.find(v => v.id === parseInt(taskForm.sourceVariantId));
+              const sourceV = caseBreakSource;
               if (!sourceV) return null;
-              // Find child variants: same product, lower hierarchy
-              const childVariants = variants
-                .filter(v => v.productId === sourceV.productId && v.hierarchyLevel < sourceV.hierarchyLevel)
-                .sort((a, b) => a.hierarchyLevel - b.hierarchyLevel);
               // Check what's at the TO location (if anything) for validation
               const toItems = toLocationInventory.filter(i => {
                 const v = variants.find(vr => vr.id === i.variantId);
                 return v && v.productId === sourceV.productId;
               });
 
-              if (childVariants.length === 0) {
+              if (caseBreakConversionsLoading) {
+                return (
+                  <div className="flex items-center gap-2 py-2">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span className="text-xs text-muted-foreground">Loading conversion rules...</span>
+                  </div>
+                );
+              }
+
+              if (caseBreakConversionsFailed) {
                 return (
                   <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3">
-                    <p className="text-xs text-destructive font-medium">No child variants found for this product. Cannot case break.</p>
+                    <p className="text-xs text-destructive font-medium">Could not load this product's conversion rules. Close and reopen to retry.</p>
+                  </div>
+                );
+              }
+
+              if (caseBreakTargets.length === 0) {
+                return (
+                  <div className="rounded-md border border-destructive/50 bg-destructive/5 p-3">
+                    <p className="text-xs text-destructive font-medium">
+                      No active break-down rule for {sourceV.sku || sourceV.name}. Set one under Inventory behavior on the product page, then apply it.
+                    </p>
                   </div>
                 );
               }
 
               return (
                 <div>
-                  <Label className="text-xs md:text-sm">Break into (child variant)</Label>
+                  <Label className="text-xs md:text-sm">Break into</Label>
                   <div className="space-y-1.5 mt-1">
-                    {childVariants.map(cv => {
+                    {caseBreakTargets.map(({ target: cv, conversion }) => {
                       const isSelected = taskForm.pickVariantId === cv.id.toString();
-                      const conversionRatio = sourceV.unitsPerVariant / cv.unitsPerVariant;
                       const toItem = toItems.find(i => i.variantId === cv.id);
                       return (
                         <button
                           key={cv.id}
                           type="button"
                           onClick={() => {
-                            const casesQty = parseInt(taskForm.qtySourceUnits) || 1;
+                            const qty = caseBreakTargetQty(parseInt(taskForm.qtySourceUnits) || 1, conversion);
                             setTaskForm(prev => ({
                               ...prev,
                               pickVariantId: cv.id.toString(),
-                              qtyTargetUnits: Math.floor(casesQty * conversionRatio).toString(),
+                              qtyTargetUnits: qty === null ? "" : qty.toString(),
                             }));
                           }}
                           className={`w-full flex items-center gap-3 rounded-md border p-2.5 text-left transition-colors ${isSelected ? "border-primary bg-primary/5" : "border-border hover:bg-accent"}`}
                         >
                           <div className="flex-1 min-w-0">
                             <div className="font-medium text-sm truncate">{cv.sku || cv.name}</div>
-                            <div className="text-xs text-muted-foreground">L{cv.hierarchyLevel} · 1 source = {conversionRatio} of these</div>
+                            <div className="text-xs text-muted-foreground">
+                              {conversion.inputQty} source = {conversion.outputQty} of these
+                            </div>
                           </div>
                           {toItem && (
                             <div className="text-right flex-shrink-0">
@@ -3397,10 +3440,10 @@ export default function Replenishment() {
                 const maxAvailable = selectedItem ? selectedItem.qty - selectedItem.reservedQty : 0;
 
                 if (taskMode === "case_break") {
-                  const sourceV = taskForm.sourceVariantId ? variants.find(v => v.id === parseInt(taskForm.sourceVariantId)) : null;
+                  const sourceV = caseBreakSource;
                   const pickV = taskForm.pickVariantId ? variants.find(v => v.id === parseInt(taskForm.pickVariantId)) : null;
-                  const conversionRatio = sourceV && pickV ? sourceV.unitsPerVariant / pickV.unitsPerVariant : 0;
                   const casesQty = parseInt(taskForm.qtySourceUnits) || 0;
+                  const targetUnits = caseBreakTargetUnits(taskForm.qtySourceUnits, taskForm.pickVariantId);
 
                   return (
                     <>
@@ -3416,7 +3459,7 @@ export default function Replenishment() {
                           let val = parseInt(e.target.value);
                           if (!isNaN(val) && val > maxAvailable && maxAvailable > 0) val = maxAvailable;
                           const newQtySource = isNaN(val) ? e.target.value : val.toString();
-                          const targetQty = !isNaN(val) && conversionRatio > 0 ? Math.floor(val * conversionRatio).toString() : "";
+                          const targetQty = isNaN(val) ? "" : caseBreakTargetUnits(val.toString(), taskForm.pickVariantId);
                           setTaskForm(prev => ({ ...prev, qtySourceUnits: newQtySource, qtyTargetUnits: targetQty }));
                         }}
                         min={1}
@@ -3425,11 +3468,15 @@ export default function Replenishment() {
                         autoComplete="off"
                         data-testid="input-qty-source"
                       />
-                      {casesQty > 0 && conversionRatio > 0 && (
+                      {casesQty > 0 && pickV && (targetUnits ? (
                         <p className="text-xs text-muted-foreground mt-1">
-                          {casesQty} {sourceV?.sku?.match(/^(B|C|SK)/)?.[0] === "C" ? "case" : "source"}{casesQty > 1 ? "s" : ""} = <span className="font-medium text-foreground">{Math.floor(casesQty * conversionRatio)} {pickV?.sku?.match(/^P/)?.[0] === "P" ? "packs" : "units"}</span>
+                          {casesQty} × {sourceV?.sku || sourceV?.name} = <span className="font-medium text-foreground">{targetUnits} × {pickV.sku || pickV.name}</span>
                         </p>
-                      )}
+                      ) : (
+                        <p className="text-xs text-destructive mt-1">
+                          This quantity doesn't break into a whole number of {pickV.sku || pickV.name}.
+                        </p>
+                      ))}
                     </>
                   );
                 }
