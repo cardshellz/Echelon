@@ -36,7 +36,9 @@ async function setup(page: Page, options: {
       ...(options.extraHeads ?? []),
     ],
   });
-  const state = { data, saves: [] as Array<Record<string, any>>, reviews: [] as Array<Record<string, any>>, applies: [] as Array<Record<string, any>>,
+  // `sets`: the one command that saves and applies. `saves`: plain draft saves, which only Discard still makes.
+  // The separate review and apply endpoints are not mocked: a call to either is an unexpected request.
+  const state = { data, sets: [] as Array<Record<string, any>>, saves: [] as Array<Record<string, any>>,
     unexpected: [] as string[], errors: [] as string[], nextPolicyId: 50 };
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/api/**", async route => {
@@ -63,27 +65,30 @@ async function setup(page: Page, options: {
       return route.fulfill({ json: { definitionId: policyId, version: 2, definitionHash: HASH_B, headRevision: revision,
         alreadyApplied: false, runtimeAuthorityChanged: false, providerWriteAttempted: false } });
     }
-    if (path === `${RULES}/review` && method === "POST") {
-      const selection = request.postDataJSON();
-      state.reviews.push(selection);
-      const channelId = selection.scope.channelId;
-      const scopeKey = `channel:${channelId}:variant:101`;
-      const blocked = options.blockOn === channelId;
-      return route.fulfill({ json: { selection, scopeKey, channelId, channelName: channelId === 3 ? "Shopify US" : "eBay", productId: 10,
-        authorityRevision: "1", activationRunId: "1", reviewHash: HASH_A, ready: !blocked,
-        blockers: blocked ? ["eBay listing CARD-P5 has no stock link yet."] : [], warnings: [], skippedDestinations: [],
-        change: { selection: { kind: "channel_policy", key: scopeKey, definitionId: selection.draftPolicyId, definitionHash: selection.expectedDefinitionHash },
-          headRevision: selection.expectedHeadRevision, label: "CARD-P5", before: null, after: {} },
-        quantities: [{ targetId: channelId === 3 ? 5 : 6, channelName: channelId === 3 ? "Shopify US" : "eBay", variantId: 101, sku: "CARD-P5", current: "12", proposed: "0" }] } });
-    }
-    if (path === `${RULES}/apply` && method === "POST") {
+    if (path === `${RULES}/set` && method === "POST") {
       const command = request.postDataJSON();
-      state.applies.push(command);
-      const scopeKey = `channel:${command.scope.channelId}:variant:101`;
-      state.data = { ...state.data, policyHeads: state.data.policyHeads.map(head => head.scopeKey !== scopeKey ? head
-        : { ...head, activePolicy: { ...head.draftPolicy!, lifecycleStatus: "sealed" as const }, draftPolicy: null }) };
-      return route.fulfill({ json: { channelId: command.scope.channelId, appliedAt: "2026-11-10T12:00:00.000Z", appliedBy: "operator-1",
-        reviewHash: HASH_A, publicationIds: ["31"], changedDefinitions: 1, alreadyApplied: false, scopeKey, productId: 10, policyId: command.draftPolicyId } });
+      state.sets.push(command);
+      const channelId = command.scope.channelId;
+      const channelName = channelId === 3 ? "Shopify US" : "eBay";
+      const scopeKey = `channel:${channelId}:variant:101`;
+      // A refusal is the whole transaction rolled back: the view is exactly what it was.
+      if (options.blockOn === channelId) {
+        return route.fulfill({ status: 409, json: { error: { code: "CHANNEL_RULE_REVIEW_BLOCKED",
+          message: "This rule would create a problem, so it was not saved. Nothing changed.",
+          details: ["eBay listing CARD-P5 has no stock link yet."] } } });
+      }
+      const policyId = state.nextPolicyId += 1;
+      const existing = state.data.policyHeads.find(head => head.scopeKey === scopeKey);
+      // Saved and applied together: the value is the rule in use and nothing is left waiting.
+      const applied = policyHead({ scopeKey, channelId, scope: command.scope, active: command.value,
+        revision: String(Number(existing?.revision ?? "0") + 2) });
+      state.data = { ...state.data, policyHeads: [...state.data.policyHeads.filter(head => head.scopeKey !== scopeKey),
+        { ...applied, activePolicy: { ...applied.activePolicy!, policyId } }] };
+      return route.fulfill({ json: {
+        receipt: { channelId, appliedAt: "2026-11-10T12:00:00.000Z", appliedBy: "operator-1", reviewHash: HASH_A, publicationIds: ["31"],
+          changedDefinitions: 1, alreadyApplied: false, scopeKey, productId: 10, policyId },
+        quantities: [{ targetId: channelId === 3 ? 5 : 6, channelName, variantId: 101, sku: "CARD-P5", current: "12", proposed: "0" }],
+        skippedDestinations: [], warnings: [] } });
     }
     state.unexpected.push(`${method} ${path}`);
     return route.fulfill({ status: 500, json: { error: { code: "UNEXPECTED_TEST_REQUEST", message: "Unexpected request" } } });
@@ -143,12 +148,12 @@ test("Max 0 on one channel saves and takes effect in one step", async ({ page })
   await expect(page.getByTestId("stock-rule-results")).toContainText("Shopify US: Saved. Shopify US 12 → 0.");
   await expect(page.getByTestId("stock-rule-row-3")).toContainText("0not sold here · SKU rule");
   await expect(page.getByTestId("stock-rule-row-3")).not.toContainText(/out of stock/i);
-  expect(state.saves).toHaveLength(1);
-  expect(state.saves[0]).toMatchObject({ scope: skuScope(3), expectedHeadRevision: "0",
+  // One request does all of it; no separate save, check or apply request is made.
+  expect(state.sets).toHaveLength(1);
+  expect(state.sets[0]).toMatchObject({ scope: skuScope(3), expectedHeadRevision: "0", expectedDraftPolicyId: null, expectedDraftDefinitionHash: null,
     value: { maxPublish: { mode: "units", units: "0" }, shareBps: null, holdbackSellableUnits: null, minPublishSellableUnits: null } });
-  expect(state.reviews).toHaveLength(1);
-  expect(state.applies).toHaveLength(1);
-  expect(state.applies[0]).toMatchObject({ scope: skuScope(3), draftPolicyId: state.reviews[0].draftPolicyId, expectedReviewHash: HASH_A });
+  expect(state.sets[0].idempotencyKey).toEqual(expect.any(String));
+  expect(state.saves).toEqual([]);
   expect(state.unexpected).toEqual([]);
 });
 
@@ -163,11 +168,13 @@ test("Set on all channels writes only the typed field and keeps each channel's o
   await dialog.getByLabel("Max units").fill("0");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByTestId("stock-rule-results")).toContainText("eBay: Saved.");
-  expect(state.saves.map(save => save.scope.channelId)).toEqual([3, 4]);
+  expect(state.sets.map(command => command.scope.channelId)).toEqual([3, 4]);
   // eBay already had Buffer 5 on this SKU; it is kept.
-  expect(state.saves[1].value).toMatchObject({ maxPublish: { mode: "units", units: "0" }, holdbackSellableUnits: "5" });
-  expect(state.saves[0].value).toMatchObject({ maxPublish: { mode: "units", units: "0" }, holdbackSellableUnits: null });
-  expect(state.applies).toHaveLength(2);
+  expect(state.sets[1].value).toMatchObject({ maxPublish: { mode: "units", units: "0" }, holdbackSellableUnits: "5" });
+  expect(state.sets[0].value).toMatchObject({ maxPublish: { mode: "units", units: "0" }, holdbackSellableUnits: null });
+  expect(state.sets[1]).toMatchObject({ expectedHeadRevision: "3", expectedDraftPolicyId: null });
+  expect(state.saves).toEqual([]);
+  expect(state.unexpected).toEqual([]);
   await expect(page.getByTestId("stock-rule-row-3")).toContainText("not sold here");
   await expect(page.getByTestId("stock-rule-row-4")).toContainText("not sold here");
 });
@@ -191,11 +198,11 @@ test("an old unapplied Show as out of stock rule is shown as Max 0 and saved as 
   await expect(page.getByTestId("stock-rule-results")).toContainText("eBay: Saved.");
   await expect(page.getByText("A saved change never took effect")).toHaveCount(0);
   // Shopify already read as Max 0, so nothing typed differs there; it is still re-saved without the flag.
-  expect(state.saves.map(save => save.scope.channelId)).toEqual([3, 4]);
-  expect(state.saves[0]).toMatchObject({ expectedHeadRevision: "2", value: { eligible: null, maxPublish: { mode: "units", units: "0" } } });
-  expect(state.applies).toHaveLength(2);
-  expect(state.applies[0].draftPolicyId).toBe(state.reviews[0].draftPolicyId);
-  expect(state.reviews[0].draftPolicyId).toBe(51);
+  expect(state.sets.map(command => command.scope.channelId)).toEqual([3, 4]);
+  // The command names the leftover it replaces, so the server overwrites exactly that saved change.
+  expect(state.sets[0]).toMatchObject({ expectedHeadRevision: "2", expectedDraftPolicyId: expect.any(Number),
+    expectedDraftDefinitionHash: expect.any(String), value: { eligible: null, maxPublish: { mode: "units", units: "0" } } });
+  expect(state.saves).toEqual([]);
   expect(state.unexpected).toEqual([]);
 });
 
@@ -210,14 +217,13 @@ test("an old unapplied change can be discarded without changing what the channel
   await expect(page.getByTestId("stock-rule-results")).toContainText("Shopify US: Saved change discarded. Nothing changed on the channel.");
   expect(state.saves).toHaveLength(1);
   expect(state.saves[0]).toMatchObject({ scope: skuScope(3), expectedHeadRevision: "2", value: { inheritAll: true } });
-  expect(state.reviews).toEqual([]);
-  expect(state.applies).toEqual([]);
+  expect(state.sets).toEqual([]);
   await expect(page.getByText("A saved change never took effect")).toHaveCount(0);
   await expect(page.getByTestId("stock-rule-row-3").getByRole("button", { name: "Add exception" })).toBeVisible();
   expect(state.unexpected).toEqual([]);
 });
 
-test("a channel whose check fails is put back as it was, and the others still save", async ({ page }) => {
+test("a channel whose rule is refused has nothing saved there, and the others still save", async ({ page }) => {
   const state = await setup(page, { blockOn: 4 });
   await page.getByRole("radio", { name: "CARD-P5" }).click();
   await page.getByRole("button", { name: "Set on all channels" }).click();
@@ -227,11 +233,9 @@ test("a channel whose check fails is put back as it was, and the others still sa
   const results = page.getByTestId("stock-rule-results");
   await expect(results).toContainText("Shopify US: Saved.");
   await expect(results).toContainText("eBay: Not saved. eBay listing CARD-P5 has no stock link yet.");
-  expect(state.applies.map(command => command.scope.channelId)).toEqual([3]);
-  // eBay's refused change was overwritten with a copy of its applied rule: Shopify, eBay, then eBay put back.
-  expect(state.saves.map(save => save.scope.channelId)).toEqual([3, 4, 4]);
-  expect(state.saves[2]).toMatchObject({ expectedDraftPolicyId: 52,
-    value: { holdbackSellableUnits: "5", minPublishSellableUnits: null } });
+  // One command per channel and nothing after the refusal: the server saved nothing for eBay, so there is nothing to undo.
+  expect(state.sets.map(command => command.scope.channelId)).toEqual([3, 4]);
+  expect(state.saves).toEqual([]);
   // One state: eBay shows exactly what it uses, with nothing waiting.
   const ebay = page.getByTestId("stock-rule-row-4");
   await expect(ebay).toContainText("5SKU rule");
@@ -252,6 +256,7 @@ test("a cutoff that a non-zero Max can never reach is refused before anything is
   await dialog.getByLabel("Hide when below").fill("10");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect(dialog.getByRole("alert")).toContainText("Hide when below (10) is more than Max (5), so this channel would always be sent 0.");
+  expect(state.sets).toEqual([]);
   expect(state.saves).toEqual([]);
 });
 
@@ -264,7 +269,7 @@ test("a whole-product rule names every SKU it reaches before it is saved", async
   await page.getByRole("radio", { name: "CARD-P5" }).click();
   await page.getByRole("button", { name: "Set on all channels" }).click();
   await expect(page.getByRole("dialog", { name: "Set on all channels" })).toContainText("For CARD-P5.");
-  expect(state.saves).toEqual([]);
+  expect(state.sets).toEqual([]);
 });
 
 test("a bad number changes nothing on any channel", async ({ page }) => {
@@ -275,7 +280,7 @@ test("a bad number changes nothing on any channel", async ({ page }) => {
   await dialog.getByLabel("Stock %").fill("150");
   await dialog.getByRole("button", { name: "Save", exact: true }).click();
   await expect(dialog.getByRole("alert")).toBeVisible();
-  expect(state.saves).toEqual([]);
+  expect(state.sets).toEqual([]);
 });
 
 test("clearing an exception returns the SKU to the channel default", async ({ page }) => {
@@ -286,7 +291,8 @@ test("clearing an exception returns the SKU to the channel default", async ({ pa
   await expect(dialog.getByLabel("Buffer")).toHaveValue("5");
   await dialog.getByRole("button", { name: "Clear exception" }).click();
   await expect(page.getByTestId("stock-rule-results")).toContainText("eBay: Saved.");
-  expect(state.saves[0].value).toMatchObject({ inheritAll: true, holdbackSellableUnits: null });
+  expect(state.sets[0].value).toMatchObject({ inheritAll: true, holdbackSellableUnits: null });
+  expect(state.saves).toEqual([]);
   await expect(page.getByTestId("stock-rule-row-4")).toContainText("Channel default");
 });
 

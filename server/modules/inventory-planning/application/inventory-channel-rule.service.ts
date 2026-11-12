@@ -1,8 +1,9 @@
 import { z } from "zod";
 import {
   applyChannelRuleSchema, channelRuleProgressSchema, channelRuleReceiptSchema, channelRuleReviewSchema,
-  channelRuleScopeKeySchema, channelRuleSelectionSchema,
+  channelRuleScopeKeySchema, channelRuleSelectionSchema, channelRuleSetResultSchema, setChannelRuleSchema,
   type ApplyChannelRule, type ChannelRuleProgress, type ChannelRuleReceipt, type ChannelRuleReview, type ChannelRuleSelection,
+  type ChannelRuleSetResult, type SetChannelRule,
 } from "@shared/types/inventory-channel-rule";
 import { inventoryCutoverEvidenceHash } from "../domain/inventory-cutover-manifest";
 import { ChannelDefinitionError } from "./inventory-channel-definition.service";
@@ -11,6 +12,8 @@ import { ChannelDefinitionError } from "./inventory-channel-definition.service";
 export interface ChannelRuleStore {
   review(selection: ChannelRuleSelection): Promise<ChannelRuleReview>;
   apply(command: ApplyChannelRule, actor: string, requestHash: string, now: Date): Promise<ChannelRuleReceipt>;
+  /** Saves, reviews and applies one rule in a single transaction; a refusal leaves no rows. */
+  set(command: SetChannelRule, actor: string, requestHash: string, now: Date): Promise<ChannelRuleSetResult>;
   progress(scopeKey: string): Promise<ChannelRuleProgress | null>;
 }
 
@@ -30,6 +33,16 @@ export class ChannelRuleService {
     // The kind keeps a reused key from ever matching the other command's hash.
     const requestHash = inventoryCutoverEvidenceHash({ kind: "channel_rule", command, actor: authenticatedActor });
     return validatedResponse(channelRuleReceiptSchema, await this.store.apply(command, authenticatedActor, requestHash, now));
+  }
+
+  async set(input: unknown, actor: unknown): Promise<ChannelRuleSetResult> {
+    const command = setChannelRuleSchema.parse(input);
+    const authenticatedActor = z.string().trim().min(1).max(100).parse(actor);
+    const now = z.date().parse(this.clock.now());
+    // Shares the receipt table and retry-key space with both applies; the kind
+    // keeps a reused key from ever matching another command's hash.
+    const requestHash = inventoryCutoverEvidenceHash({ kind: "channel_rule_set", command, actor: authenticatedActor });
+    return validatedResponse(channelRuleSetResultSchema, await this.store.set(command, authenticatedActor, requestHash, now));
   }
 
   async progress(scopeKey: unknown): Promise<ChannelRuleProgress | null> {

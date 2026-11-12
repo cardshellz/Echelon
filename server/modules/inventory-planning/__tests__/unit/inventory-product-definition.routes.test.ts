@@ -8,7 +8,9 @@ import { registerChannelDefinitionRoutes } from "../../interfaces/http/inventory
 import { registerChannelRuleDefinitionRoutes } from "../../interfaces/http/inventory-channel-rule.routes";
 import { ProductDefinitionError } from "../../application/inventory-product-definition.service";
 import { ChannelDefinitionError } from "../../application/inventory-channel-definition.service";
+import { ZodError } from "zod";
 import { InventoryCutoverManifestError } from "../../domain/inventory-cutover-manifest";
+import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-availability-master-data.contracts";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));
 vi.mock("../../../identity", () => ({ hasPermission }));
@@ -63,7 +65,7 @@ describe.each(["product", "safety", "channel", "channel-rule"] as const)("%s def
 describe("single channel rule error classification", () => {
   let server: http.Server;
   let url: string;
-  const service = { review: vi.fn(), apply: vi.fn(), progress: vi.fn() };
+  const service = { review: vi.fn(), apply: vi.fn(), set: vi.fn(), progress: vi.fn() };
   beforeEach(async () => {
     hasPermission.mockReset().mockResolvedValue(true);
     for (const method of Object.values(service)) method.mockReset();
@@ -95,6 +97,48 @@ describe("single channel rule error classification", () => {
   it("keeps an unverified result retryable with the same key", async () => {
     service.apply.mockRejectedValue(new ChannelDefinitionError("CHANNEL_RULE_RESULT_INVALID", "The result could not be verified.", 500));
     expect((await apply()).status).toBe(500);
+  });
+
+  const set = () => fetch(`${url}/set`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ any: "body" }) });
+
+  it("set needs both the edit and the activate permission and passes only the body and the session actor", async () => {
+    service.set.mockResolvedValue({ receipt: {} });
+    const response = await set();
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toBe("no-store");
+    expect(await response.json()).toEqual({ receipt: {} });
+    expect(hasPermission).toHaveBeenCalledWith("operator", "inventory_planning", "edit");
+    expect(hasPermission).toHaveBeenCalledWith("operator", "inventory_planning", "activate");
+    expect(service.set).toHaveBeenCalledWith({ any: "body" }, "operator");
+  });
+
+  it.each(["edit", "activate"])("set is refused without the %s permission, before the command runs", async missing => {
+    hasPermission.mockImplementation(async (...args: unknown[]) => args[2] !== missing);
+    expect((await set()).status).toBe(403);
+    expect(service.set).not.toHaveBeenCalled();
+  });
+
+  it("a refused set names every problem the rule would create", async () => {
+    service.set.mockRejectedValue(new ChannelDefinitionError("CHANNEL_RULE_REVIEW_BLOCKED", "Nothing changed.", 409,
+      ["Shopify / C1000: An overriding supply warehouse is missing, duplicated or inactive."]));
+    const response = await set();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { code: "CHANNEL_RULE_REVIEW_BLOCKED", message: "Nothing changed.",
+      details: ["Shopify / C1000: An overriding supply warehouse is missing, duplicated or inactive."] } });
+  });
+
+  it("a rule that moved first is a definite conflict from the draft writer, not an unknown outcome", async () => {
+    service.set.mockRejectedValue(new InventoryAvailabilityMasterDataError(409, "INVENTORY_CHANNEL_EXPOSURE_STALE_POLICY_DRAFT", "Reload it before saving."));
+    const response = await set();
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: { code: "INVENTORY_CHANNEL_EXPOSURE_STALE_POLICY_DRAFT", message: "Reload it before saving." } });
+  });
+
+  it("an invalid set body is a 400 and an unexpected failure stays retryable with the same key", async () => {
+    service.set.mockRejectedValue(new ZodError([]));
+    expect((await set()).status).toBe(400);
+    service.set.mockRejectedValue(new Error("connection lost"));
+    expect((await set()).status).toBe(500);
   });
 
   it("passes the progress scope key through unchanged", async () => {
