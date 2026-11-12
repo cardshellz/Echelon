@@ -19,7 +19,7 @@ describe("reading a stored hold-back setting", () => {
   it("shows a plain number for the modes this screen edits", () => {
     expect(describeHoldBack(fixed(1250))).toEqual({ text: "1,250", simple: true });
     expect(describeHoldBack({ policyMode: "off" })).toEqual({ text: "0", simple: true });
-    expect(describeHoldBack({ policyMode: "inherit" })).toEqual({ text: "Business number", simple: true });
+    expect(describeHoldBack({ policyMode: "inherit" })).toEqual({ text: "Default", simple: true });
     expect(describeHoldBack(null)).toEqual({ text: "Not set", simple: true });
   });
 
@@ -40,22 +40,22 @@ describe("reading a stored hold-back setting", () => {
 
 describe("turning what was typed into a setting", () => {
   it("accepts whole numbers including zero", () => {
-    expect(parseHoldBack(" 25 ", { blankUsesBusiness: false })).toEqual({ ok: true, value: fixed(25) });
-    expect(parseHoldBack("0", { blankUsesBusiness: false })).toEqual({ ok: true, value: fixed(0) });
-    expect(parseHoldBack("2147483647", { blankUsesBusiness: false })).toEqual({ ok: true, value: fixed(2_147_483_647) });
+    expect(parseHoldBack(" 25 ", { blankUsesDefault: false })).toEqual({ ok: true, value: fixed(25) });
+    expect(parseHoldBack("0", { blankUsesDefault: false })).toEqual({ ok: true, value: fixed(0) });
+    expect(parseHoldBack("2147483647", { blankUsesDefault: false })).toEqual({ ok: true, value: fixed(2_147_483_647) });
   });
 
   it("rejects anything that is not a whole number of units", () => {
     for (const text of ["-1", "2.5", "1e3", "ten", "1,000", "+5"]) {
-      expect(parseHoldBack(text, { blankUsesBusiness: true })).toEqual({ ok: false, message: "Enter a whole number, 0 or more." });
+      expect(parseHoldBack(text, { blankUsesDefault: true })).toEqual({ ok: false, message: "Enter a whole number, 0 or more." });
     }
-    expect(parseHoldBack("2147483648", { blankUsesBusiness: false })).toEqual({ ok: false, message: "That number is too large." });
-    expect(parseHoldBack("99999999999999999999", { blankUsesBusiness: false }).ok).toBe(false);
+    expect(parseHoldBack("2147483648", { blankUsesDefault: false })).toEqual({ ok: false, message: "That number is too large." });
+    expect(parseHoldBack("99999999999999999999", { blankUsesDefault: false }).ok).toBe(false);
   });
 
-  it("treats a blank box as 'use the business number' only where there is one to use", () => {
-    expect(parseHoldBack("  ", { blankUsesBusiness: true })).toEqual({ ok: true, value: { policyMode: "inherit" } });
-    expect(parseHoldBack("", { blankUsesBusiness: false })).toEqual({ ok: false, message: "Enter a number, 0 or more." });
+  it("treats a blank box as 'use the default' only where there is one to use", () => {
+    expect(parseHoldBack("  ", { blankUsesDefault: true })).toEqual({ ok: true, value: { policyMode: "inherit" } });
+    expect(parseHoldBack("", { blankUsesDefault: false })).toEqual({ ok: false, message: "Enter a number, 0 or more." });
   });
 
   it("compares settings by what they hold back", () => {
@@ -72,7 +72,7 @@ describe("turning what was typed into a setting", () => {
 
 describe("which SKUs count as exceptions", () => {
   const row = (scopeKey: string, value: HoldBackException["value"], hasUnappliedChange = false) => ({ scopeKey, value, hasUnappliedChange }) as HoldBackException;
-  it("drops a SKU handed back to the business number and keeps everything else", () => {
+  it("drops a SKU handed back to the default and keeps everything else", () => {
     const kept = activeHoldBackExceptions({ exceptions: [
       row("network:variant:1", fixed(5)), row("network:variant:2", { policyMode: "inherit" }), row("network:variant:3", { policyMode: "off" }),
       row("network:variant:4", cover), row("network:variant:5", null, true), row("network:variant:6", null, false),

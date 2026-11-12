@@ -11,7 +11,7 @@ import { formatUnits } from "./format";
 /**
  * Available stock: how many units of a SKU are held back from EVERY channel
  * before any channel stock rule runs ("promise safety" on the server). One
- * number for the business, optional numbers per SKU. A save takes effect: the
+ * default number, optional numbers per SKU. A save takes effect: the
  * server saves, checks and applies it in one transaction, and a refused save
  * leaves nothing behind.
  */
@@ -39,7 +39,7 @@ export function describeHoldBack(value: PromiseSafetyAdminValue | null): { text:
   switch (value.policyMode) {
     case "fixed_units": return { text: formatUnits(String(value.fixedUnits)), simple: true };
     case "off": return { text: "0", simple: true };
-    case "inherit": return { text: "Business number", simple: true };
+    case "inherit": return { text: "Default", simple: true };
     case "days_of_cover": return { text: `${formatDays(value.daysOfCoverMilliDays)} of recent sales`, simple: false };
   }
 }
@@ -58,14 +58,14 @@ export function holdBackInput(value: PromiseSafetyAdminValue | null): string {
 export type HoldBackParse = { ok: true; value: PromiseSafetyAdminValue } | { ok: false; message: string };
 
 /**
- * The typed number as a setting. A blank box means "use the business number"
- * for a SKU; the business number itself has nothing above it, so it must be a
+ * The typed number as a setting. A blank box means "use the default"
+ * for a SKU; the default itself has nothing above it, so it must be a
  * number.
  */
-export function parseHoldBack(text: string, options: { blankUsesBusiness: boolean }): HoldBackParse {
+export function parseHoldBack(text: string, options: { blankUsesDefault: boolean }): HoldBackParse {
   const trimmed = text.trim();
   if (trimmed === "") {
-    return options.blankUsesBusiness ? { ok: true, value: { policyMode: "inherit" } } : { ok: false, message: "Enter a number, 0 or more." };
+    return options.blankUsesDefault ? { ok: true, value: { policyMode: "inherit" } } : { ok: false, message: "Enter a number, 0 or more." };
   }
   if (!/^\d+$/.test(trimmed)) return { ok: false, message: "Enter a whole number, 0 or more." };
   const units = Number(trimmed);
@@ -87,7 +87,7 @@ export function sameHoldBack(left: PromiseSafetyAdminValue | null, right: Promis
   return shape(left) === shape(right);
 }
 
-/** SKU settings that are in effect. A SKU handed back to the business number is no longer an exception. */
+/** SKU settings that are in effect. A SKU handed back to the default is no longer an exception. */
 export function activeHoldBackExceptions(overview: Pick<PromiseSafetyOverview, "exceptions">): HoldBackException[] {
   return overview.exceptions.filter(row => row.value === null ? row.hasUnappliedChange : row.value.policyMode !== "inherit");
 }

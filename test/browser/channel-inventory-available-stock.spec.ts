@@ -11,7 +11,7 @@ const AT = "2026-11-12T12:00:00.000Z";
 const receipt = (scopeKey: string, policyId: number) => ({ scopeKey, policyId, appliedAt: AT, appliedBy: "operator-1",
   reviewHash: HASH_A, publicationIds: ["31"], alreadyApplied: false });
 
-/** Card Shell (product 10) has CARD-P5 (101) and CARD-EA (102). The business holds back 0; CARD-EA holds back 10. */
+/** Card Shell (product 10) has CARD-P5 (101) and CARD-EA (102). The default holds back 0; CARD-EA holds back 10. */
 async function setup(page: Page, options: { permissions?: string[]; legacy?: boolean; refuse?: boolean } = {}) {
   const overview: PromiseSafetyOverview = {
     runtimeAuthority: options.legacy ? "legacy" : "canonical",
@@ -62,7 +62,7 @@ async function setup(page: Page, options: { permissions?: string[]; legacy?: boo
   return state;
 }
 
-test("shows the business number and each SKU exception, and opens from the rail", async ({ page }, testInfo) => {
+test("shows the default and each SKU exception, and opens from the rail", async ({ page }, testInfo) => {
   const state = await setup(page);
   const panel = page.getByRole("region", { name: "Available stock" });
   await expect(panel.getByLabel("Units to hold back")).toHaveValue("0");
@@ -80,7 +80,7 @@ test("shows the business number and each SKU exception, and opens from the rail"
   expect(state.errors).toEqual([]);
 });
 
-test("saving the business number takes effect in one step and says what moved", async ({ page }) => {
+test("saving the default takes effect in one step and says what moved", async ({ page }) => {
   const state = await setup(page);
   const panel = page.getByRole("region", { name: "Available stock" });
   await panel.getByLabel("Units to hold back").fill("5");

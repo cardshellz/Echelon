@@ -29,7 +29,7 @@ type Editing = { kind: "add" } | { kind: "edit"; row: HoldBackException };
 
 /**
  * Channel Inventory → Available stock: what is held back from every channel
- * before any channel stock rule runs. One number for the business and optional
+ * before any channel stock rule runs. One default number and optional
  * numbers per SKU; saving takes effect straight away.
  */
 export function AvailableStockPanel({ view, canChange }: { view: View; canChange: boolean }) {
@@ -68,16 +68,16 @@ export function AvailableStockPanel({ view, canChange }: { view: View; canChange
 
       {!canChange && <Callout>Changing held-back stock needs inventory planning edit and activate permission.</Callout>}
 
-      <BusinessHoldBack key={data.business?.revision ?? "none"} setting={data.business} canChange={canChange}
+      <DefaultHoldBack key={data.business?.revision ?? "none"} setting={data.business} canChange={canChange}
         onDone={outcome => finished("Every SKU", outcome)} />
 
       <SectionCard
         title="SKU exceptions"
-        description="A SKU listed here uses its own number instead of the one above."
+        description="A SKU listed here uses its own number instead of the default."
         actions={canChange ? <Button type="button" size="sm" onClick={() => { setMessage(null); setEditing({ kind: "add" }); }}>Add exception</Button> : undefined}
       >
         {exceptions.length === 0
-          ? <p className="text-sm text-muted-foreground">No exceptions. Every SKU uses the number above.</p>
+          ? <p className="text-sm text-muted-foreground">No exceptions. Every SKU uses the default.</p>
           : (
             <div className="overflow-x-auto rounded-md border">
               <Table>
@@ -135,7 +135,7 @@ function useHoldBackSave() {
   return { busy, save };
 }
 
-function BusinessHoldBack({ setting, canChange, onDone }: {
+function DefaultHoldBack({ setting, canChange, onDone }: {
   setting: { revision: string; value: PromiseSafetyAdminValue | null } | null;
   canChange: boolean;
   onDone(outcome: HoldBackOutcome): Promise<void>;
@@ -146,7 +146,7 @@ function BusinessHoldBack({ setting, canChange, onDone }: {
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
   const { busy, save } = useHoldBackSave();
-  const parsed = parseHoldBack(text, { blankUsesBusiness: false });
+  const parsed = parseHoldBack(text, { blankUsesDefault: false });
   const changed = parsed.ok ? !sameHoldBack(parsed.value, current) : text.trim() !== holdBackInput(current);
 
   const submit = async () => {
@@ -157,7 +157,7 @@ function BusinessHoldBack({ setting, canChange, onDone }: {
   };
 
   return (
-    <SectionCard title="Hold back from every channel" description="Taken off each SKU's stock before any channel stock rule runs. Saves take effect immediately.">
+    <SectionCard title="Hold back from every channel" description="The default for every SKU. Taken off each SKU's stock before any channel stock rule runs. Saves take effect immediately.">
       <div className="space-y-3">
         {!described.simple && (
           <Callout>
@@ -246,12 +246,12 @@ function ExceptionEditor({ view, editing, existing, onClose, onDone }: {
     onClose();
   };
   const submitNumber = () => {
-    // Clearing is its own button, so a blank box here is a mistake, not "use the business number".
-    const parsed = parseHoldBack(text, { blankUsesBusiness: false });
+    // Clearing is its own button, so a blank box here is a mistake, not "use the default".
+    const parsed = parseHoldBack(text, { blankUsesDefault: false });
     if (!parsed.ok) { setError(parsed.message); return; }
     void submit(parsed.value);
   };
-  const unchanged = row !== null && (() => { const parsed = parseHoldBack(text, { blankUsesBusiness: false }); return parsed.ok && sameHoldBack(parsed.value, row.value); })();
+  const unchanged = row !== null && (() => { const parsed = parseHoldBack(text, { blankUsesDefault: false }); return parsed.ok && sameHoldBack(parsed.value, row.value); })();
 
   return (
     <Dialog open onOpenChange={open => { if (!open && !busy) onClose(); }}>
@@ -259,7 +259,7 @@ function ExceptionEditor({ view, editing, existing, onClose, onDone }: {
         <DialogHeader>
           <DialogTitle>{row ? `Hold back for ${subject}` : "Add a SKU exception"}</DialogTitle>
           <DialogDescription>
-            {row?.warehouseCode ? `Applies only at ${row.warehouseCode}. ` : ""}This SKU uses its own number instead of the business one. It takes effect when you save.
+            {row?.warehouseCode ? `Applies only at ${row.warehouseCode}. ` : ""}This SKU uses its own number instead of the default. It takes effect when you save.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
