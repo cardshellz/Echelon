@@ -950,12 +950,6 @@
   "inventory.safety_definition_applications": [
     "modules/inventory-planning"
   ],
-  "inventory.sales_status_events": [
-    "modules/inventory-planning"
-  ],
-  "inventory.sales_statuses": [
-    "modules/inventory-planning"
-  ],
   "inventory.stock_link_checks": [
     "modules/inventory-planning"
   ],

@@ -32,7 +32,6 @@ import { GradedCardPolicyCorrection } from "../../../../../scripts/lib/graded-ca
 import { createLegacyInventoryAtpService } from "../../../inventory/atp.service";
 import { catalogBatchExecutionPreview } from "@shared/types/inventory-catalog-batch";
 import { PostgresInventoryAvailabilityBackfillRepository } from "../../infrastructure/inventory-availability-backfill.repository";
-import { salesStatusMigrationSql } from "../fixtures/sales-status-migration.fixture";
 import { transformationModelDefinitionSchema } from "../../domain/inventory-availability-master-data.contracts";
 import {
   projectCanonicalAtp,
@@ -367,8 +366,6 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(optionalChangeNoteMigrationSql);
       await migrationClient.query(publicationHoldMigrationSql);
       await migrationClient.query(variantHoldMigrationSql);
-      // The same target read loads the product's sales statuses.
-      await migrationClient.query(salesStatusMigrationSql());
       await migrationClient.query(readFileSync(resolve(process.cwd(), "migrations/0687_inventory_channel_definition_completion.sql"), "utf8"));
       await migrationClient.query(publicationMembershipMigrationSql);
       await migrationClient.query(readFileSync(resolve(process.cwd(), "migrations/0718_inventory_model_behavior.sql"), "utf8"));
