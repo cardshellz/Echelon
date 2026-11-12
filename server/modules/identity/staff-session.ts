@@ -1,4 +1,8 @@
 import type { RequestHandler, Request } from "express";
+// Type-only: loads the express-session typings (`req.session`, `SessionData`) into
+// every TypeScript program that contains this file, so the augmentation below
+// resolves even when the server entry point is not part of the program.
+import type {} from "express-session";
 import type { SafeUser } from "@shared/schema";
 import { isCurrentStaffCredential } from "@shared/staff-credentials";
 export { isCurrentStaffCredential } from "@shared/staff-credentials";
@@ -7,6 +11,7 @@ import { readCurrentStaffAccess } from "./infrastructure/staff-access.repository
 import { logger } from "../../platform/observability/logger";
 
 declare module "express-session" { interface SessionData {
+  user?: SafeUser;
   staffCredentialVersion?: string;
   /** Lifecycle only; never a truthy legacy staff user. */
   staffCredentialCompletion?: {user:SafeUser;credentialVersion:string};
