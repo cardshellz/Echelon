@@ -258,6 +258,89 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     expect(result.status).toBeLessThan(500);
     expect(await evidence()).toEqual(before);
   });
+  async function productChangeRequest() {
+    // An open, untouched line on the original product, already billed on the
+    // paid supplier invoice (the PO-20260602-001 line 6 shape).
+    await pool.query(`INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,product_id,expected_receive_variant_id,expected_receive_units_per_variant,sku,product_name,order_qty,status,unit_cost_cents,unit_cost_mills,total_product_cost_cents,line_total_cents,pricing_basis,pricing_source,quoted_unit_cost_mills)
+        VALUES(12,1,2,1,1,1,'TEST-ORIGINAL','Original product',5,'open',100,10000,500,500,'per_piece','manual',10000);
+      UPDATE procurement.purchase_orders SET subtotal_cents=1600,total_cents=1600,line_count=2,status='partially_received',physical_status='receiving' WHERE id=1;
+      INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,line_number,purchase_order_line_id,product_name,description,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents,match_status)
+        VALUES(82,71,2,12,'Original product','Supplier toploader description',5,100,10000,500,'over_billed')`);
+    return { sourceVersion: (await service.context(1, "admin-user")).sourceVersion, changes: [],
+      productChanges: [{ lineId: 12, productId: 2, expectedReceiveVariantId: 2, expectedReceiveUnitsPerVariant: 1, vendorProductId: null, vendorSku: "SUPPLIER-NEW" }],
+      reason: "The ordered product was archived; the supplier ships the replacement product" };
+  }
+  it("changes an untouched, invoiced line's product in one reviewed revision without touching quantities, money or billing", async () => {
+    const request = await productChangeRequest();
+    // Match status is the AP owner's derived projection; the recorded supplier
+    // document (identity, description, quantity and money) must not move.
+    const invoiceDocument = "SELECT id,vendor_invoice_id,purchase_order_line_id,product_variant_id,sku,product_name,description,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents FROM procurement.vendor_invoice_lines WHERE id=82";
+    const invoiceLineBefore = (await pool.query(invoiceDocument)).rows[0];
+    const lineBefore = (await pool.query("SELECT order_qty,unit_cost_mills,total_product_cost_cents,line_total_cents,status,pricing_source FROM procurement.purchase_order_lines WHERE id=12")).rows[0];
+    const context = await service.context(1, "admin-user");
+    expect(context.lines.find(line => line.id === 12)).toMatchObject({ sku: "TEST-ORIGINAL", productId: 1, productChangeBlockedReason: null });
+    expect(context.lines.find(line => line.id === 11)?.productChangeBlockedReason).toMatch(/received/);
+    const before = await evidence(), protectedBefore = await protectedRecords();
+    const preview = await service.preview(1, request, "admin-user");
+    expect(await evidence()).toEqual(before);
+    expect(preview).toMatchObject({ beforeTotalCents: 1600, afterTotalCents: 1600, lines: [],
+      productChanges: [{ lineId: 12, before: { sku: "TEST-ORIGINAL", productId: 1, receiveVariantSku: "TEST-ORIGINAL-PIECE" },
+        after: { sku: "TEST-NEW", productId: 2, name: "New product", receiveVariantSku: "TEST-NEW-PIECE", vendorSku: "SUPPLIER-NEW" },
+        invoiceLines: [{ invoiceId: 71, invoiceNumber: "TEST-INV", invoiceLineId: 82 }] }] });
+    const approval = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true as const };
+    const key = randomUUID();
+    const result = await post(approval, key);
+    expect(result).toMatchObject({ status: 200, body: { revisionNumber: 1, preview } });
+    const after = await evidence();
+    expect(await post(approval, key)).toMatchObject({ status: 200, replayed: "true", body: result.body });
+    expect(await evidence()).toEqual(after);
+    expect((await pool.query(`SELECT product_id,product_variant_id,expected_receive_variant_id,expected_receive_units_per_variant,sku,product_name,vendor_sku,vendor_product_id
+      FROM procurement.purchase_order_lines WHERE id=12`)).rows[0]).toEqual({ product_id: 2, product_variant_id: 2, expected_receive_variant_id: 2,
+      expected_receive_units_per_variant: 1, sku: "TEST-NEW", product_name: "New product", vendor_sku: "SUPPLIER-NEW", vendor_product_id: null });
+    expect((await pool.query("SELECT order_qty,unit_cost_mills,total_product_cost_cents,line_total_cents,status,pricing_source FROM procurement.purchase_order_lines WHERE id=12")).rows[0]).toEqual(lineBefore);
+    // The supplier document is untouched and stays matched to the same line.
+    expect((await pool.query(invoiceDocument)).rows[0]).toEqual(invoiceLineBefore);
+    expect(await protectedRecords()).toEqual(protectedBefore);
+    expect((await pool.query("SELECT event_type,payload_json->'before'->>'productId' AS before_product,payload_json->'after'->>'productId' AS after_product FROM procurement.po_events ORDER BY id")).rows)
+      .toEqual([{ event_type: "product_identity_corrected", before_product: "1", after_product: "2" }, { event_type: "line_amendment_approved", before_product: null, after_product: null }]);
+    expect((await pool.query("SELECT change_type,field_changed,old_value,new_value FROM procurement.po_revisions WHERE line_id=12 AND field_changed IN ('productId','sku','vendorSku') ORDER BY field_changed")).rows).toEqual([
+      { change_type: "product_changed", field_changed: "productId", old_value: "1", new_value: "2" },
+      { change_type: "product_changed", field_changed: "sku", old_value: "TEST-ORIGINAL", new_value: "TEST-NEW" },
+      { change_type: "product_changed", field_changed: "vendorSku", old_value: null, new_value: "SUPPLIER-NEW" }]);
+    expect((await pool.query("SELECT revision_number,total_cents FROM procurement.purchase_orders WHERE id=1")).rows[0]).toEqual({ revision_number: 1, total_cents: "1600" });
+  });
+  it("keeps the product while an active shipment or any receipt names it, and re-verifies the catalog at approval", async () => {
+    const request = await productChangeRequest();
+    try {
+      await pool.query(`INSERT INTO procurement.inbound_shipments(id,shipment_number,status) VALUES(61,'TEST-SHIP','booked');
+        INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,qty_shipped) VALUES(62,61,1,12,5)`);
+      const shipped = await service.context(1, "admin-user");
+      expect(shipped.lines.find(line => line.id === 12)?.productChangeBlockedReason).toMatch(/shipment TEST-SHIP/);
+      await expect(service.preview(1, { ...request, sourceVersion: shipped.sourceVersion }, "admin-user")).rejects.toMatchObject({ code: "PO_AMENDMENT_PRODUCT_CHANGE_BLOCKED" });
+      // A cancelled shipment is history only; its manifest keeps its own description.
+      await pool.query("UPDATE procurement.inbound_shipments SET status='cancelled' WHERE id=61");
+      const cancelled = await service.context(1, "admin-user");
+      expect(cancelled.lines.find(line => line.id === 12)?.productChangeBlockedReason).toBeNull();
+    } finally {
+      await pool.query("DELETE FROM procurement.inbound_shipment_lines WHERE id=62; DELETE FROM procurement.inbound_shipments WHERE id=61");
+    }
+    await pool.query(`INSERT INTO procurement.receiving_orders(id,receipt_number,purchase_order_id,status) VALUES(32,'TEST-DRAFT-RCV',1,'draft');
+      INSERT INTO procurement.receiving_lines(id,receiving_order_id,purchase_order_line_id,expected_qty,received_qty,product_variant_id,units_per_variant_snapshot) VALUES(42,32,12,5,0,1,1)`);
+    const receiving = await service.context(1, "admin-user");
+    expect(receiving.lines.find(line => line.id === 12)?.productChangeBlockedReason).toMatch(/receiving history \(TEST-DRAFT-RCV\)/);
+    await expect(service.preview(1, { ...request, sourceVersion: receiving.sourceVersion }, "admin-user")).rejects.toMatchObject({ code: "PO_AMENDMENT_PRODUCT_CHANGE_BLOCKED" });
+    await pool.query("DELETE FROM procurement.receiving_lines WHERE id=42; DELETE FROM procurement.receiving_orders WHERE id=32");
+
+    // Archived after review: approval re-runs the catalog checks and saves nothing.
+    const current = { ...request, sourceVersion: (await service.context(1, "admin-user")).sourceVersion };
+    const preview = await service.preview(1, current, "admin-user");
+    await pool.query("UPDATE catalog.products SET is_active=false WHERE id=2");
+    const before = await evidence();
+    const result = await post({ ...current, previewVersion: preview.previewVersion, approvalConfirmed: true });
+    expect(result.status).toBeGreaterThanOrEqual(400);
+    expect(result.status).toBeLessThan(500);
+    expect(await evidence()).toEqual(before);
+  });
   it("rejects removing received/invoiced lines and adding new purchases to a closed PO", async () => {
     const request = await compositionRequest();
     const before = await evidence();
