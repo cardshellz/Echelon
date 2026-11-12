@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { inventoryCutoverDefinitionSelectionSchema } from "./inventory-cutover-commit";
 import { channelDefinitionReceiptSchema } from "./inventory-channel-definition";
+import { channelExposurePolicyValueSchema } from "./inventory-channel-exposure";
 import { productDefinitionProgressSchema } from "./inventory-product-definition";
 
 /**
@@ -33,6 +34,16 @@ export const channelRuleSelectionSchema = z.object({
   expectedDefinitionHash: hash,
 }).strict();
 
+/** One row a rule apply publishes. `current` is the quantity under the active rules. */
+const channelRuleQuantitySchema = z.object({
+  targetId: id,
+  channelName: z.string(),
+  variantId: id,
+  sku: z.string().nullable(),
+  current: quantity.nullable(),
+  proposed: quantity,
+}).strict();
+
 export const channelRuleReviewSchema = z.object({
   selection: channelRuleSelectionSchema,
   scopeKey: channelRuleScopeKeySchema,
@@ -57,14 +68,7 @@ export const channelRuleReviewSchema = z.object({
     after: z.record(z.unknown()),
   }).strict(),
   /** Every row this apply publishes. `current` is the quantity under the active rules. */
-  quantities: z.array(z.object({
-    targetId: id,
-    channelName: z.string(),
-    variantId: id,
-    sku: z.string().nullable(),
-    current: quantity.nullable(),
-    proposed: quantity,
-  }).strict()).max(10_000),
+  quantities: z.array(channelRuleQuantitySchema).max(10_000),
 }).strict().superRefine((review, context) => {
   if (review.ready !== (review.blockers.length === 0)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["ready"], message: "Readiness must match the blocking evidence." });
@@ -103,9 +107,44 @@ export const channelRuleProgressSchema = z.object({
   publications: productDefinitionProgressSchema.shape.publications,
 }).strict();
 
+/**
+ * Setting ONE product or SKU rule so that it takes effect (owner decision
+ * 2026-11-07: a single-SKU save simply takes effect, with one visible state).
+ * The value is saved as a new version, reviewed and applied in one database
+ * transaction: either all of it commits, or nothing is written. There is no
+ * review hash to send because no saved version exists before the command runs;
+ * the head fence (revision, plus the saved version being replaced when one is
+ * waiting) pins what the operator was looking at.
+ */
+export const setChannelRuleSchema = z.object({
+  scope: channelRuleScopeSchema,
+  value: channelExposurePolicyValueSchema,
+  expectedHeadRevision: headRevision,
+  expectedDraftPolicyId: id.nullable(),
+  expectedDraftDefinitionHash: hash.nullable(),
+  changeReason: z.string().trim().max(1000).nullable().optional().transform(value => (value ? value : null)),
+  /** 100, not 120: the version row stores it behind a fixed prefix in a 120-character column. */
+  idempotencyKey: z.string().trim().min(1).max(100),
+}).strict().superRefine((command, context) => {
+  if ((command.expectedDraftPolicyId === null) !== (command.expectedDraftDefinitionHash === null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["expectedDraftPolicyId"],
+      message: "Expected saved version id and definition hash must be both present or both absent." });
+  }
+});
+
+/** What a committed set did: the same receipt an apply returns, plus the quantities it published. */
+export const channelRuleSetResultSchema = z.object({
+  receipt: channelRuleReceiptSchema,
+  quantities: z.array(channelRuleQuantitySchema).max(10_000),
+  skippedDestinations: z.array(z.string()),
+  warnings: z.array(z.string()),
+}).strict();
+
 export type ChannelRuleScope = z.infer<typeof channelRuleScopeSchema>;
 export type ChannelRuleSelection = z.infer<typeof channelRuleSelectionSchema>;
 export type ChannelRuleReview = z.infer<typeof channelRuleReviewSchema>;
 export type ApplyChannelRule = z.infer<typeof applyChannelRuleSchema>;
 export type ChannelRuleReceipt = z.infer<typeof channelRuleReceiptSchema>;
 export type ChannelRuleProgress = z.infer<typeof channelRuleProgressSchema>;
+export type SetChannelRule = z.infer<typeof setChannelRuleSchema>;
+export type ChannelRuleSetResult = z.infer<typeof channelRuleSetResultSchema>;

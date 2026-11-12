@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ChannelRuleService, type ChannelRuleStore } from "../../application/inventory-channel-rule.service";
 import { inventoryCutoverEvidenceHash } from "../../domain/inventory-cutover-manifest";
-import { channelRuleReviewSchema } from "@shared/types/inventory-channel-rule";
+import { channelRuleReviewSchema, setChannelRuleSchema } from "@shared/types/inventory-channel-rule";
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
@@ -16,8 +16,15 @@ const review = { selection, scopeKey: "channel:36:variant:22", channelId: 36, ch
     headRevision: "1", label: "SHLZ-TOP-40PT-BLU-C1000", before: null, after: { eligible: false } },
   quantities: [{ targetId: 1, channelName: "Shopify", variantId: 22, sku: "SHLZ-TOP-40PT-BLU-C1000", current: "153", proposed: "0" }] };
 
+const value = { allocationSemantics: null, eligible: null, shareBps: null, holdbackSellableUnits: null,
+  maxPublish: { mode: "units" as const, units: "0" }, minPublishSellableUnits: null };
+const setCommand = { scope, value, expectedHeadRevision: "0", expectedDraftPolicyId: null, expectedDraftDefinitionHash: null,
+  changeReason: null, idempotencyKey: "set-one-rule" };
+const setResult = { receipt, quantities: review.quantities, skippedDestinations: [], warnings: [] };
+
 function fixture() {
   const store = { review: vi.fn<ChannelRuleStore["review"]>(), apply: vi.fn<ChannelRuleStore["apply"]>(),
+    set: vi.fn<ChannelRuleStore["set"]>(),
     progress: vi.fn<ChannelRuleStore["progress"]>(async () => null) } satisfies ChannelRuleStore;
   const service = new ChannelRuleService(store, { now: () => new Date("2026-11-07T12:00:00.000Z") });
   return { store, service };
@@ -82,6 +89,76 @@ describe("single channel rule boundary", () => {
     for (const key of ["channel:36", "channel:0:variant:22", "channel:36:variant:22;DROP", undefined]) {
       await expect(service.progress(key)).rejects.toThrow();
     }
+  });
+});
+
+describe("single channel rule set boundary", () => {
+  it("rejects channel defaults, extra fields, an invalid value and a half-stated fence before the store", async () => {
+    const { store, service } = fixture();
+    await expect(service.set({ ...setCommand, scope: { scopeType: "channel", channelId: 36 } }, "operator")).rejects.toThrow();
+    await expect(service.set({ ...setCommand, expectedReviewHash: HASH_A }, "operator")).rejects.toThrow();
+    await expect(service.set({ ...setCommand, value: { ...value, maxPublish: null } }, "operator")).rejects.toThrow();
+    await expect(service.set({ ...setCommand, value: { ...value, shareBps: 10_001 } }, "operator")).rejects.toThrow();
+    await expect(service.set({ ...setCommand, expectedDraftPolicyId: 900 }, "operator")).rejects.toThrow();
+    await expect(service.set({ ...setCommand, expectedDraftDefinitionHash: HASH_B }, "operator")).rejects.toThrow();
+    await expect(service.set({ ...setCommand, expectedHeadRevision: "-1" }, "operator")).rejects.toThrow();
+    await expect(service.set({ ...setCommand, idempotencyKey: " " }, "operator")).rejects.toThrow();
+    expect(store.set).not.toHaveBeenCalled();
+  });
+
+  it("keeps the retry key short enough for the version row behind its prefix", () => {
+    expect(setChannelRuleSchema.safeParse({ ...setCommand, idempotencyKey: "k".repeat(100) }).success).toBe(true);
+    expect(setChannelRuleSchema.safeParse({ ...setCommand, idempotencyKey: "k".repeat(101) }).success).toBe(false);
+  });
+
+  it("accepts replacing a saved change that is waiting, and clearing an exception", async () => {
+    const { store, service } = fixture();
+    store.set.mockResolvedValue(setResult);
+    await service.set({ ...setCommand, expectedHeadRevision: "3", expectedDraftPolicyId: 900, expectedDraftDefinitionHash: HASH_B }, "operator");
+    await service.set({ ...setCommand, value: { ...value, maxPublish: null, inheritAll: true } }, "operator");
+    expect(store.set).toHaveBeenCalledTimes(2);
+    expect(store.set.mock.calls[0][0]).toMatchObject({ expectedDraftPolicyId: 900, expectedDraftDefinitionHash: HASH_B });
+  });
+
+  it("pins the actor, kind and injected time so a retry is the same logical command", async () => {
+    const { store, service } = fixture();
+    store.set.mockResolvedValue(setResult);
+    await service.set(setCommand, "operator");
+    await service.set({ ...setCommand, changeReason: undefined }, "operator");
+    // An omitted note and a null note are the same command.
+    expect(store.set.mock.calls[1]).toEqual(store.set.mock.calls[0]);
+    expect(store.set.mock.calls[0][2]).toBe(inventoryCutoverEvidenceHash({ kind: "channel_rule_set", command: setCommand, actor: "operator" }));
+    expect(store.set.mock.calls[0][3]).toEqual(new Date("2026-11-07T12:00:00.000Z"));
+    await service.set(setCommand, "other-operator");
+    await service.set({ ...setCommand, value: { ...value, maxPublish: { mode: "units", units: "1" } } }, "operator");
+    expect(store.set.mock.calls[2][2]).not.toBe(store.set.mock.calls[0][2]);
+    expect(store.set.mock.calls[3][2]).not.toBe(store.set.mock.calls[0][2]);
+  });
+
+  it("never matches an apply that reused the same retry key", async () => {
+    const { store, service } = fixture();
+    store.set.mockResolvedValue(setResult);
+    store.apply.mockResolvedValue(receipt);
+    await service.set(setCommand, "operator");
+    await service.apply({ ...command, idempotencyKey: setCommand.idempotencyKey }, "operator");
+    expect(store.set.mock.calls[0][2]).not.toBe(store.apply.mock.calls[0][2]);
+  });
+
+  it("requires an authenticated actor", async () => {
+    const { store, service } = fixture();
+    await expect(service.set(setCommand, " ")).rejects.toThrow();
+    await expect(service.set(setCommand, undefined)).rejects.toThrow();
+    expect(store.set).not.toHaveBeenCalled();
+  });
+
+  it("treats a malformed result as an unverified server result, not success", async () => {
+    const { store, service } = fixture();
+    store.set.mockResolvedValue({ receipt } as never);
+    await expect(service.set(setCommand, "operator")).rejects.toMatchObject({ code: "CHANNEL_RULE_RESULT_INVALID", status: 500 });
+    store.set.mockResolvedValue({ ...setResult, quantities: [{ ...review.quantities[0], proposed: "-1" }] } as never);
+    await expect(service.set(setCommand, "operator")).rejects.toMatchObject({ code: "CHANNEL_RULE_RESULT_INVALID", status: 500 });
+    store.set.mockResolvedValue(setResult);
+    await expect(service.set(setCommand, "operator")).resolves.toEqual(setResult);
   });
 });
 

@@ -218,17 +218,16 @@ describe("saving a rule so it takes effect", () => {
   const value = policyValue({ maxPublish: { mode: "units", units: "0" } });
   const saved = { definitionId: 9, version: 2, definitionHash: HASH_B, headRevision: "5", alreadyApplied: false,
     runtimeAuthorityChanged: false as const, providerWriteAttempted: false as const };
-  const selection = { scope, draftPolicyId: 9, expectedHeadRevision: "5", expectedDefinitionHash: HASH_B };
   const quantities = [{ targetId: 5, channelName: "Shopify US", variantId: 101, sku: "CARD-P5", current: "12", proposed: "0" }];
-  const review = (ready = true) => ({ selection, reviewHash: HASH_A, ready, blockers: ready ? [] : ["Listing would be oversold."],
-    quantities, skippedDestinations: [] }) as never;
+  const setResult = { receipt: {}, quantities, skippedDestinations: ["eBay: stock is not updating."], warnings: [] } as never;
+  const blockedError = () => new ChannelInventoryApiError(409, "CHANNEL_RULE_REVIEW_BLOCKED",
+    "This rule would create a problem, so it was not saved. Nothing changed.", ["Listing would be oversold."]);
   function steps(overrides: Partial<StockRuleSaveSteps> = {}) {
     let key = 0;
     const calls: string[] = [];
     const base: StockRuleSaveSteps = {
+      set: vi.fn(async () => { calls.push("set"); return setResult; }),
       save: vi.fn(async () => { calls.push("save"); return saved; }),
-      review: vi.fn(async () => { calls.push("review"); return review(); }),
-      apply: vi.fn(async () => { calls.push("apply"); return {} as never; }),
       newKey: () => `key-${key += 1}`,
       ...overrides,
     };
@@ -236,23 +235,40 @@ describe("saving a rule so it takes effect", () => {
   }
   const row = { scope, head: null };
 
-  it("saves, checks, then applies exactly the draft it just saved", async () => {
+  it("sends one command that saves and applies the rule", async () => {
     const h = steps();
     await expect(saveAndApplyStockRule({ row, value, changed: true, note: " stop the case " }, h.steps))
-      .resolves.toEqual({ status: "applied", quantities, skipped: [] });
-    expect(h.calls).toEqual(["save", "review", "apply"]);
-    expect(h.steps.save).toHaveBeenCalledWith(expect.objectContaining({ scope, value, expectedHeadRevision: "0",
-      expectedDraftPolicyId: null, changeReason: "stop the case", idempotencyKey: "key-1" }));
-    expect(h.steps.review).toHaveBeenCalledWith(selection);
-    expect(h.steps.apply).toHaveBeenCalledWith({ ...selection, expectedReviewHash: HASH_A, idempotencyKey: "key-2" });
+      .resolves.toEqual({ status: "applied", quantities, skipped: ["eBay: stock is not updating."] });
+    expect(h.calls).toEqual(["set"]);
+    expect(h.steps.set).toHaveBeenCalledWith({ scope, value, expectedHeadRevision: "0", expectedDraftPolicyId: null,
+      expectedDraftDefinitionHash: null, changeReason: "stop the case", idempotencyKey: "key-1" });
   });
 
-  it("applies a change that was saved earlier but never applied, without saving again", async () => {
+  it("fences the command on the rule the operator was looking at", async () => {
     const h = steps();
-    const head = skuRule(3, value, true);
-    await saveAndApplyStockRule({ row: { scope, head }, value, changed: false, note: "" }, h.steps);
-    expect(h.calls).toEqual(["review", "apply"]);
-    expect(h.steps.review).toHaveBeenCalledWith({ scope, draftPolicyId: 2, expectedHeadRevision: "4", expectedDefinitionHash: HASH_B });
+    await saveAndApplyStockRule({ row: { scope, head: skuRule(3, policyValue({ shareBps: 5000 })) }, value, changed: true, note: "" }, h.steps);
+    expect(h.steps.set).toHaveBeenCalledWith(expect.objectContaining({ expectedHeadRevision: "4", expectedDraftPolicyId: null,
+      expectedDraftDefinitionHash: null, changeReason: null }));
+  });
+
+  it("replaces a change that was saved earlier but never applied", async () => {
+    const h = steps();
+    const earlier = skuRule(3, policyValue({ shareBps: 2500 }), true);
+    await saveAndApplyStockRule({ row: { scope, head: earlier }, value, changed: true, note: "" }, h.steps);
+    expect(h.steps.set).toHaveBeenCalledWith(expect.objectContaining({ value, expectedHeadRevision: "4",
+      expectedDraftPolicyId: 2, expectedDraftDefinitionHash: HASH_B }));
+  });
+
+  it("applies a change that was saved earlier but never applied when nothing new was typed", async () => {
+    const h = steps();
+    const waiting = policyValue({ shareBps: 2500 });
+    const head = skuRule(3, waiting, true);
+    await expect(saveAndApplyStockRule({ row: { scope, head }, value, changed: false, note: "" }, h.steps))
+      .resolves.toMatchObject({ status: "applied" });
+    // Exactly the waiting change, not whatever the form holds.
+    expect(h.steps.set).toHaveBeenCalledWith(expect.objectContaining({ value: waiting, expectedHeadRevision: "4",
+      expectedDraftPolicyId: 2, expectedDraftDefinitionHash: HASH_B }));
+    expect(h.steps.save).not.toHaveBeenCalled();
   });
 
   it("does nothing when nothing changed and nothing is waiting", async () => {
@@ -268,83 +284,49 @@ describe("saving a rule so it takes effect", () => {
     expect(h.calls).toEqual([]);
   });
 
-  it("puts the rule back when the check says it would cause a problem, so nothing waits", async () => {
-    const h = steps({ review: vi.fn(async () => review(false)) });
+  it("reports the problems of a refused save and writes nothing more: the server saved nothing", async () => {
+    const h = steps({ set: vi.fn(async () => { throw blockedError(); }) });
     await expect(saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps))
       .resolves.toEqual({ status: "blocked", blockers: ["Listing would be oversold."], leftover: false });
-    expect(h.steps.apply).not.toHaveBeenCalled();
-    // Second save overwrites exactly the version the first one wrote, with "use the default".
-    expect(h.steps.save).toHaveBeenCalledTimes(2);
-    expect(h.steps.save).toHaveBeenLastCalledWith(expect.objectContaining({ scope, value: policyValue({ inheritAll: true }),
-      expectedHeadRevision: "5", expectedDraftPolicyId: 9, expectedDraftDefinitionHash: HASH_B }));
-  });
-
-  it("puts back a copy of the applied rule when one exists", async () => {
-    const h = steps({ review: vi.fn(async () => review(false)) });
-    const applied = skuRule(3, policyValue({ shareBps: 5000 }));
-    const outcome = await saveAndApplyStockRule({ row: { scope, head: applied }, value, changed: true, note: "" }, h.steps);
-    expect(outcome).toMatchObject({ status: "blocked", leftover: false });
-    expect(h.steps.save).toHaveBeenLastCalledWith(expect.objectContaining({ value: policyValue({ shareBps: 5000 }), expectedDraftPolicyId: 9 }));
-  });
-
-  it("restores an earlier saved change it overwrote, and says it is still waiting", async () => {
-    const h = steps({ review: vi.fn(async () => review(false)) });
-    const earlier = skuRule(3, policyValue({ shareBps: 2500 }), true);
-    const outcome = await saveAndApplyStockRule({ row: { scope, head: earlier }, value, changed: true, note: "" }, h.steps);
-    expect(outcome).toMatchObject({ status: "blocked", leftover: true });
-    expect(h.steps.save).toHaveBeenLastCalledWith(expect.objectContaining({ value: policyValue({ shareBps: 2500 }) }));
-  });
-
-  it("reports a leftover when putting the rule back fails", async () => {
-    let saves = 0;
-    const h = steps({
-      save: vi.fn(async () => { saves += 1; if (saves === 2) throw new TypeError("Failed to fetch"); return saved; }),
-      review: vi.fn(async () => review(false)),
-    });
-    await expect(saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps))
-      .resolves.toEqual({ status: "blocked", blockers: ["Listing would be oversold."], leftover: true });
-  });
-
-  it("does not touch a leftover it did not write when that leftover cannot be applied", async () => {
-    const h = steps({ review: vi.fn(async () => review(false)) });
-    const head = skuRule(3, value, true);
-    await expect(saveAndApplyStockRule({ row: { scope, head }, value, changed: false, note: "" }, h.steps))
-      .resolves.toMatchObject({ status: "blocked", leftover: true });
+    // No compensation: there is no half-saved rule to put back.
+    expect(h.steps.set).toHaveBeenCalledTimes(1);
     expect(h.steps.save).not.toHaveBeenCalled();
   });
 
-  it("reports a rejected save as not saved and stops", async () => {
-    const h = steps({ save: vi.fn(async () => { throw new ChannelInventoryApiError(409, "CONFLICT", "This rule changed."); }) });
+  it("falls back to the refusal's message when it lists no problems", async () => {
+    const h = steps({ set: vi.fn(async () => { throw new ChannelInventoryApiError(409, "CHANNEL_RULE_REVIEW_BLOCKED", "Nothing changed."); }) });
+    await expect(saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps))
+      .resolves.toEqual({ status: "blocked", blockers: ["Nothing changed."], leftover: false });
+  });
+
+  it("says an earlier saved change is still waiting after a refusal, without touching it", async () => {
+    const earlier = skuRule(3, policyValue({ shareBps: 2500 }), true);
+    const blocked = steps({ set: vi.fn(async () => { throw blockedError(); }) });
+    await expect(saveAndApplyStockRule({ row: { scope, head: earlier }, value, changed: true, note: "" }, blocked.steps))
+      .resolves.toMatchObject({ status: "blocked", leftover: true });
+    expect(blocked.steps.save).not.toHaveBeenCalled();
+    const stale = steps({ set: vi.fn(async () => { throw new ChannelInventoryApiError(409, "CONFLICT", "This rule changed."); }) });
+    await expect(saveAndApplyStockRule({ row: { scope, head: earlier }, value: earlier.draftPolicy!.value, changed: false, note: "" }, stale.steps))
+      .resolves.toEqual({ status: "rejected", message: "This rule changed.", leftover: true });
+    expect(stale.steps.save).not.toHaveBeenCalled();
+  });
+
+  it("reports a rejected save as not saved", async () => {
+    const h = steps({ set: vi.fn(async () => { throw new ChannelInventoryApiError(409, "INVENTORY_CHANNEL_EXPOSURE_STALE_POLICY_DRAFT", "This rule changed."); }) });
     await expect(saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps))
       .resolves.toEqual({ status: "rejected", message: "This rule changed.", leftover: false });
-    expect(h.steps.review).not.toHaveBeenCalled();
+    expect(h.steps.set).toHaveBeenCalledTimes(1);
   });
 
-  it("puts the rule back after a rejected apply", async () => {
-    const h = steps({ apply: vi.fn(async () => { throw new ChannelInventoryApiError(409, "CHANNEL_RULE_REVIEW_STALE", "Check the change again."); }) });
-    await expect(saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps))
-      .resolves.toEqual({ status: "rejected", message: "Check the change again.", leftover: false });
-    expect(h.steps.save).toHaveBeenCalledTimes(2);
-  });
-
-  it("never claims success or failure when the network drops mid-request", async () => {
-    for (const failing of ["save", "apply"] as const) {
-      const h = steps({ [failing]: vi.fn(async () => { throw new TypeError("Failed to fetch"); }) });
-      const outcome = await saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps);
-      expect(outcome.status).toBe("unknown");
-    }
-    const timeout = steps({ apply: vi.fn(async () => { throw new ChannelInventoryApiError(504, "GATEWAY_TIMEOUT", "Gateway timeout"); }) });
+  it("never claims success or failure when the response is lost, and writes nothing more", async () => {
+    const dropped = steps({ set: vi.fn(async () => { throw new TypeError("Failed to fetch"); }) });
+    expect((await saveAndApplyStockRule({ row, value, changed: true, note: "" }, dropped.steps)).status).toBe("unknown");
+    const timeout = steps({ set: vi.fn(async () => { throw new ChannelInventoryApiError(504, "GATEWAY_TIMEOUT", "Gateway timeout"); }) });
     expect((await saveAndApplyStockRule({ row, value, changed: true, note: "" }, timeout.steps)).status).toBe("unknown");
-    // The apply may have landed: putting the rule back would overwrite nothing useful and could mislead.
-    expect(timeout.steps.save).toHaveBeenCalledTimes(1);
-  });
-
-  it("puts the rule back after a failed check, since a read applies nothing", async () => {
-    const h = steps({ review: vi.fn(async () => { throw new TypeError("Failed to fetch"); }) });
-    const outcome = await saveAndApplyStockRule({ row, value, changed: true, note: "" }, h.steps);
-    expect(outcome).toMatchObject({ status: "rejected", leftover: false });
-    expect(h.steps.apply).not.toHaveBeenCalled();
-    expect(h.steps.save).toHaveBeenCalledTimes(2);
+    // Even a refusal code is not trusted on a 5xx: the command may have committed.
+    const blockedOn500 = steps({ set: vi.fn(async () => { throw new ChannelInventoryApiError(500, "CHANNEL_RULE_REVIEW_BLOCKED", "?"); }) });
+    expect((await saveAndApplyStockRule({ row, value, changed: true, note: "" }, blockedOn500.steps)).status).toBe("unknown");
+    for (const h of [dropped, timeout, blockedOn500]) expect(h.steps.save).not.toHaveBeenCalled();
   });
 
   it("discards a leftover saved change without applying anything", async () => {

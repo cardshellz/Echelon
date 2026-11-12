@@ -1,11 +1,13 @@
 import type { Pool, PoolClient } from "pg";
+import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import { pool } from "../../../db";
 import type { SupplySnapshotDto } from "@shared/types/inventory-availability-planner";
 import { channelDefinitionReceiptSchema } from "@shared/types/inventory-channel-definition";
 import {
-  channelRuleProgressSchema, channelRuleReceiptSchema, channelRuleReviewSchema, channelRuleScopeKeySchema,
+  channelRuleProgressSchema, channelRuleReceiptSchema, channelRuleReviewSchema, channelRuleScopeKeySchema, channelRuleSetResultSchema,
   type ApplyChannelRule, type ChannelRuleReceipt, type ChannelRuleReview, type ChannelRuleSelection,
+  type ChannelRuleSetResult, type SetChannelRule,
 } from "@shared/types/inventory-channel-rule";
 import { ChannelDefinitionError } from "../application/inventory-channel-definition.service";
 import type { ChannelRuleStore } from "../application/inventory-channel-rule.service";
@@ -18,6 +20,7 @@ import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutov
 import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 import { previewProductDefinitionPublicationInsideTransaction } from "./inventory-availability-runtime-publication.repository";
 import { CHANNEL_POLICY_DRAFT_CHANGES_SQL } from "./inventory-channel-definition.repository";
+import { PostgresInventoryChannelExposureAdminStore } from "./inventory-channel-exposure-admin.repository";
 import { loadActivePublicationTargets, loadChannelRuleReviewTargets, loadManagedSellableVariantIds } from "./inventory-channel-exposure-runtime.repository";
 import { promoteInventoryCutoverDefinitionsInsideTransaction } from "./inventory-cutover-definitions.repository";
 import { enqueueReviewedDefinitionPublication } from "./inventory-product-definition.repository";
@@ -35,8 +38,14 @@ import { enqueueReviewedDefinitionPublication } from "./inventory-product-defini
  * the channel receipt shape; the stored review is this rule review, whose
  * top-level scopeKey identifies a rule apply.
  */
+/** The version row's idempotency key for a version written by `set`; distinct from keys the draft endpoint is given. */
+const RULE_SET_DRAFT_KEY_PREFIX = "rule-set:";
+
 export class PostgresChannelRuleStore implements ChannelRuleStore {
-  constructor(private readonly connectionPool: Pick<Pool, "connect"> = pool) {}
+  /** `drafts`: the rule version writer `set` runs inside its own transaction. Built on first use, so review, apply
+   * and progress never construct it. */
+  constructor(private readonly connectionPool: Pick<Pool, "connect"> = pool,
+    private drafts: Pick<PostgresInventoryChannelExposureAdminStore, "savePolicyDraftInsideTransaction"> | null = null) {}
 
   review(selection: ChannelRuleSelection) {
     return this.transaction(false, client => captureRuleReview(client, selection));
@@ -64,20 +73,8 @@ export class PostgresChannelRuleStore implements ChannelRuleStore {
         throw new ChannelDefinitionError("CHANNEL_RULE_REVIEW_STALE", "This rule, its listings or its destinations changed. Check the change again before applying.");
       }
       if (!review.ready) throw new ChannelDefinitionError("CHANNEL_RULE_REVIEW_BLOCKED", "Fix the problems this rule would create before applying it.");
-      const changedDefinitions = await promoteInventoryCutoverDefinitionsInsideTransaction(client, {
-        contractVersion: "inventory_cutover_selection_manifest_v1", productIds: [review.productId], publicationTargetIds: [],
-        selections: [review.change.selection],
-      }, { actor, occurredAt: now, reason: `Applied one channel stock rule (${review.scopeKey}).` });
-      const publicationIds = await enqueueReviewedDefinitionPublication(client, {
-        affectedProductIds: [review.productId], activationRunId: review.activationRunId,
-        channels: review.quantities.map(row => ({ productId: review.productId, ...row })),
-      }, { triggeredBy: "channel_rule_apply", acceptProjectionWarnings: true });
-      const stored = channelDefinitionReceiptSchema.parse({ channelId: review.channelId, appliedAt: now.toISOString(), appliedBy: actor,
-        reviewHash: review.reviewHash, publicationIds, changedDefinitions, alreadyApplied: false });
-      await client.query(`INSERT INTO inventory.channel_definition_applications
-        (channel_id,idempotency_key,request_hash,actor,occurred_at,review,receipt) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)`,
-      [review.channelId, command.idempotencyKey, requestHash, actor, now.toISOString(), JSON.stringify(review), JSON.stringify(stored)]);
-      return { receipt: ruleReceipt(stored, review), before: numericId(review.change.before?.id) };
+      const receipt = await promoteReviewedRule(client, review, { idempotencyKey: command.idempotencyKey, requestHash, actor, now });
+      return { receipt, before: numericId(review.change.before?.id) };
     });
     // After COMMIT only. The durable audit trail is the receipt row, the sealed
     // version (sealed_by/sealed_at) and the head revision; this line is for search.
@@ -87,6 +84,70 @@ export class PostgresChannelRuleStore implements ChannelRuleStore {
       before: { active_policy_id: before }, after: { active_policy_id: receipt.policyId },
       publication_ids: receipt.publicationIds, applied_at: receipt.appliedAt }));
     return receipt;
+  }
+
+  /**
+   * Save + review + apply of ONE rule as a single transaction, so a refused or
+   * failed set leaves no rows at all (rule versions are append-only: a version
+   * that committed could never be deleted again).
+   *
+   * How the two writers share one transaction: this method's pinned client owns
+   * BEGIN/COMMIT/ROLLBACK. The draft writer is the existing drizzle code, so it
+   * is handed a drizzle handle bound to that same client and used for statements
+   * only. `.transaction()` is never called on that handle: on a bare client it
+   * would issue its own BEGIN/COMMIT and commit this transaction early. This is
+   * the arrangement saveVariantMappingDraftInsideTransaction already uses
+   * (exact-stock-identity.apply.ts).
+   *
+   * Lock order: retry key, cutover fence, then the rule's own locks (taken by
+   * the draft writer). Both applies take the fence before any head row, so
+   * taking it after the head lock here could deadlock against them.
+   */
+  async set(command: SetChannelRule, actor: string, requestHash: string, now: Date): Promise<ChannelRuleSetResult> {
+    const { result, before } = await this.transaction(true, async client => {
+      // One retry-key space with both applies: a key has one owner on any of the three endpoints.
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,0))", [`channel_definition:${command.idempotencyKey}`]);
+      const replay = (await client.query<{ request_hash: string; review: unknown; receipt: unknown }>(
+        "SELECT request_hash,review,receipt FROM inventory.channel_definition_applications WHERE idempotency_key=$1", [command.idempotencyKey],
+      )).rows[0];
+      if (replay) {
+        if (replay.request_hash !== requestHash) {
+          throw new ChannelDefinitionError("CHANNEL_RULE_COMMAND_CONFLICT", "This retry key belongs to another command or user.");
+        }
+        const stored = storedRuleSetReviewSchema.parse(replay.review);
+        return { result: ruleSetResult({ ...ruleReceipt(replay.receipt, stored), alreadyApplied: true }, stored),
+          before: stored.change.before?.id ?? null };
+      }
+      await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "canonical", expectedConfigurationRunId: null });
+      this.drafts ??= new PostgresInventoryChannelExposureAdminStore();
+      const saved = await this.drafts.savePolicyDraftInsideTransaction(drizzle(client), {
+        scope: command.scope, value: command.value, expectedHeadRevision: command.expectedHeadRevision,
+        expectedDraftPolicyId: command.expectedDraftPolicyId, expectedDraftDefinitionHash: command.expectedDraftDefinitionHash,
+        changeReason: command.changeReason, idempotencyKey: `${RULE_SET_DRAFT_KEY_PREFIX}${command.idempotencyKey}`,
+        requestHash, actorId: actor, occurredAt: now,
+      });
+      // The draft receipt is written in this transaction, so it cannot exist without the receipt checked above.
+      if (saved.alreadyApplied) {
+        throw new ChannelDefinitionError("CHANNEL_RULE_SET_RECEIPT_INCONSISTENT", "This command's records are incomplete. Nothing was changed.", 500);
+      }
+      // Captured under the fence against the version just written: nothing can move between this review and the apply.
+      const review = await captureRuleReview(client, { scope: command.scope, draftPolicyId: saved.definitionId,
+        expectedHeadRevision: saved.headRevision, expectedDefinitionHash: saved.definitionHash });
+      if (!review.ready) {
+        throw new ChannelDefinitionError("CHANNEL_RULE_REVIEW_BLOCKED",
+          "This rule would create a problem, so it was not saved. Nothing changed.", 409, review.blockers);
+      }
+      const receipt = await promoteReviewedRule(client, review, { idempotencyKey: command.idempotencyKey, requestHash, actor, now });
+      return { result: ruleSetResult(receipt, review), before: numericId(review.change.before?.id) };
+    });
+    // After COMMIT only; see apply. The saved version's own audit event is in the same transaction.
+    const { receipt } = result;
+    console.info(JSON.stringify({ level: "info", event: "channel_rule_set", action: "channel_rule_set",
+      outcome: receipt.alreadyApplied ? "replayed" : "applied", error_code: null, actor,
+      channel_id: receipt.channelId, scope_key: receipt.scopeKey, product_id: receipt.productId,
+      before: { active_policy_id: before }, after: { active_policy_id: receipt.policyId },
+      publication_ids: receipt.publicationIds, applied_at: receipt.appliedAt }));
+    return result;
   }
 
   progress(scopeKey: string) {
@@ -136,6 +197,39 @@ const storedRuleReviewSchema = z.object({
     before: z.object({ id: z.number().int().positive() }).passthrough().nullable(),
   }).passthrough(),
 }).passthrough();
+
+/** What a set returns needs the published rows too; they are read back from the stored review on a replay. */
+const storedRuleSetReviewSchema = storedRuleReviewSchema.extend({
+  quantities: channelRuleSetResultSchema.shape.quantities,
+  skippedDestinations: channelRuleSetResultSchema.shape.skippedDestinations,
+  warnings: channelRuleSetResultSchema.shape.warnings,
+}).passthrough();
+
+function ruleSetResult(receipt: ChannelRuleReceipt,
+  review: Pick<ChannelRuleSetResult, "quantities" | "skippedDestinations" | "warnings">): ChannelRuleSetResult {
+  return channelRuleSetResultSchema.parse({ receipt, quantities: review.quantities,
+    skippedDestinations: review.skippedDestinations, warnings: review.warnings });
+}
+
+/** The write half shared by apply and set: seal the reviewed version, enqueue its product's stock, store the receipt. */
+async function promoteReviewedRule(client: PoolClient, review: ChannelRuleReview,
+  input: { idempotencyKey: string; requestHash: string; actor: string; now: Date }): Promise<ChannelRuleReceipt> {
+  const { actor, now } = input;
+  const changedDefinitions = await promoteInventoryCutoverDefinitionsInsideTransaction(client, {
+    contractVersion: "inventory_cutover_selection_manifest_v1", productIds: [review.productId], publicationTargetIds: [],
+    selections: [review.change.selection],
+  }, { actor, occurredAt: now, reason: `Applied one channel stock rule (${review.scopeKey}).` });
+  const publicationIds = await enqueueReviewedDefinitionPublication(client, {
+    affectedProductIds: [review.productId], activationRunId: review.activationRunId,
+    channels: review.quantities.map(row => ({ productId: review.productId, ...row })),
+  }, { triggeredBy: "channel_rule_apply", acceptProjectionWarnings: true });
+  const stored = channelDefinitionReceiptSchema.parse({ channelId: review.channelId, appliedAt: now.toISOString(), appliedBy: actor,
+    reviewHash: review.reviewHash, publicationIds, changedDefinitions, alreadyApplied: false });
+  await client.query(`INSERT INTO inventory.channel_definition_applications
+    (channel_id,idempotency_key,request_hash,actor,occurred_at,review,receipt) VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)`,
+  [review.channelId, input.idempotencyKey, input.requestHash, actor, now.toISOString(), JSON.stringify(review), JSON.stringify(stored)]);
+  return ruleReceipt(stored, review);
+}
 
 function ruleReceipt(stored: unknown, review: { scopeKey: string; productId: number; change: { selection: { definitionId: number } } }): ChannelRuleReceipt {
   return channelRuleReceiptSchema.parse({ ...channelDefinitionReceiptSchema.parse(stored),

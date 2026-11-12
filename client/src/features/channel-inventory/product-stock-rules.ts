@@ -2,8 +2,7 @@ import type {
   ChannelExposurePolicyHead, ChannelExposurePolicyScope, ChannelExposurePolicyValue,
 } from "@shared/types/inventory-channel-exposure";
 import type { ChannelPublicationStatus } from "@shared/types/inventory-channel-publication-status";
-import type { ChannelRuleReview } from "@shared/types/inventory-channel-rule";
-import { channelRuleSelectionSchema } from "@shared/types/inventory-channel-rule";
+import type { ChannelRuleSetResult } from "@shared/types/inventory-channel-rule";
 
 import { ChannelInventoryApiError, buildPolicyDraftRequest, describeError, savePolicyDraft } from "./api";
 import { isDefinitiveDraftRejection } from "./draft-session";
@@ -12,14 +11,15 @@ import {
   effectiveMaxPublish, findPolicyHead, policyFormToValue, policyValueToForm, savedPolicy,
   type Channel, type PolicyForm, type PolicyFormError, type View,
 } from "./model";
-import { IN_FLIGHT_DELIVERY_STATES, applyChannelRule, buildApplyRuleCommand, reviewChannelRule } from "./rule-apply";
+import { IN_FLIGHT_DELIVERY_STATES, RULE_BLOCKED_CODE, buildSetRuleCommand, setChannelRule } from "./rule-apply";
 
 /**
  * The SKU view of channel stock rules: one SKU (or whole product), every
  * channel. It reads and writes the same exception rows as Channel Inventory →
  * Stock rules; nothing here is a second store. Saving takes effect: the rule is
- * saved, checked and applied in one action, and a save that cannot be applied
- * is put back the way it was, so the card has one state: what the channel uses.
+ * saved, checked and applied by one server command in one transaction, and a
+ * save that cannot be applied writes nothing, so the card has one state: what
+ * the channel uses.
  */
 
 /** The four numbers an exception can change, in calculation order. */
@@ -47,8 +47,9 @@ export interface ChannelStockRuleRow {
   ruleSource: StockRuleSource;
   /**
    * A change saved on this exact rule never took effect and would change what
-   * the channel uses. Normal saves never leave one; it exists only when an
-   * earlier save was interrupted or made in the old editor.
+   * the channel uses. Saves from this card no longer leave one; it exists only
+   * when the change was saved in Channel Inventory and not applied there, or
+   * was left by this card before its save became one command.
    */
   pending: boolean;
   /** What that leftover change would do, e.g. "Max 0" or "Clear exception"; null when there is none. */
@@ -261,38 +262,36 @@ export function stopsSelling(input: Pick<StockRuleInput, "maxMode" | "maxUnits">
 }
 
 export type StockRuleSaveOutcome =
-  | { status: "applied"; quantities: ChannelRuleReview["quantities"]; skipped: string[] }
+  | { status: "applied"; quantities: ChannelRuleSetResult["quantities"]; skipped: string[] }
   | { status: "unchanged" }
   /** A leftover saved change was thrown away. Nothing the channel uses changed. */
   | { status: "undone" }
-  /** Applying it would create a problem, so it was not applied. `leftover`: a saved change still waits on this rule. */
+  /** Applying it would create a problem, so nothing was saved. `leftover`: an earlier saved change still waits on this rule. */
   | { status: "blocked"; blockers: string[]; leftover: boolean }
-  /** Definitely not applied. `leftover`: a saved change still waits on this rule. */
+  /** Definitely not saved. `leftover`: an earlier saved change still waits on this rule. */
   | { status: "rejected"; message: string; leftover: boolean }
   /** The request may or may not have landed (network). Reload shows the truth. */
   | { status: "unknown"; message: string };
 
 export interface StockRuleSaveSteps {
+  /** Save, check and apply in one server transaction. */
+  set: typeof setChannelRule;
+  /** Only for discarding a leftover: saved versions cannot be deleted, so one is withdrawn by overwriting it. */
   save: typeof savePolicyDraft;
-  review: typeof reviewChannelRule;
-  apply: typeof applyChannelRule;
   newKey(): string;
 }
 
 export const stockRuleSaveSteps: StockRuleSaveSteps = {
-  save: savePolicyDraft, review: reviewChannelRule, apply: applyChannelRule, newKey: () => crypto.randomUUID(),
+  set: setChannelRule, save: savePolicyDraft, newKey: () => crypto.randomUUID(),
 };
 
-const UNKNOWN_OUTCOME = "The outcome is unknown. Reload to see whether this rule was saved and applied.";
-const UNDO_NOTE = "Put back: this change could not be applied.";
+const UNKNOWN_OUTCOME = "The outcome is unknown. Reload to see whether this rule was saved.";
 const DISCARD_NOTE = "Discarded a saved change that was never applied.";
-
-type SavedVersion = { policyId: number; definitionHash: string; headRevision: string };
 
 /**
  * The rule value that changes nothing when saved over a pending change: a copy
  * of the applied rule, or "use the default" when no rule is applied. Saved
- * versions are append-only (they cannot be deleted), so a change is withdrawn
+ * versions are append-only (they cannot be deleted), so a leftover is withdrawn
  * by overwriting it with this.
  */
 function noChangeValue(head: ChannelExposurePolicyHead | null): ChannelExposurePolicyValue | null {
@@ -302,34 +301,16 @@ function noChangeValue(head: ChannelExposurePolicyHead | null): ChannelExposureP
 }
 
 /**
- * Put a rule back the way it was before this save wrote `written`. Returns
- * whether it worked; the caller reports a failure as a leftover saved change,
- * so a failed undo is never silent.
- */
-async function putBack(
-  scope: ChannelExposurePolicyScope, before: ChannelExposurePolicyHead | null, written: SavedVersion, steps: StockRuleSaveSteps,
-): Promise<boolean> {
-  const value = before?.draftPolicy?.value ?? noChangeValue(before);
-  if (value === null) return false;
-  try {
-    await steps.save(buildPolicyDraftRequest({
-      scope, value, note: UNDO_NOTE, idempotencyKey: steps.newKey(),
-      head: { revision: written.headRevision, draftPolicy: { policyId: written.policyId, definitionHash: written.definitionHash } },
-    }));
-    return true;
-  } catch { return false; }
-}
-
-/**
- * Save one channel's rule and make it take effect: save it, check exactly what
- * it changes, apply only it. Each step is the existing audited command; the
- * head revision and hashes fence every step, so a concurrent edit is rejected
- * instead of being overwritten.
+ * Save one channel's rule and make it take effect. One server command saves
+ * the rule, checks exactly what it changes and applies only it, inside one
+ * database transaction: a refused or failed save writes nothing, so there is
+ * no half-saved state to clean up here. The head revision fences the command,
+ * so a concurrent edit is rejected instead of being overwritten.
  *
- * A save that cannot be applied is put back the way it was, so nothing waits
- * half-saved. Only an outcome that is genuinely unknown (a lost response) or a
- * failed put-back leaves a saved change behind, and that is reported
- * (`leftover`). A leftover from an earlier save is applied without saving again.
+ * A leftover saved change (one saved in Channel Inventory and never applied)
+ * is replaced by what is saved here; with nothing typed, Save applies that
+ * leftover as it is. A refusal leaves a leftover exactly as it was, and that
+ * is reported (`leftover`).
  */
 export async function saveAndApplyStockRule(input: {
   row: Pick<ChannelStockRuleRow, "scope" | "head">;
@@ -339,45 +320,20 @@ export async function saveAndApplyStockRule(input: {
 }, steps: StockRuleSaveSteps = stockRuleSaveSteps): Promise<StockRuleSaveOutcome> {
   const { scope, head } = input.row;
   if (scope.scopeType === "channel") throw new Error("Channel defaults are edited in Channel Inventory.");
-  let version: SavedVersion | null = hasPendingChange(head) && head?.draftPolicy
-    ? { policyId: head.draftPolicy.policyId, definitionHash: head.draftPolicy.definitionHash, headRevision: head.revision }
-    : null;
-  if (input.changed) {
-    try {
-      const saved = await steps.save(buildPolicyDraftRequest({
-        scope, value: input.value, head, note: input.note, idempotencyKey: steps.newKey(),
-      }));
-      version = { policyId: saved.definitionId, definitionHash: saved.definitionHash, headRevision: saved.headRevision };
-    } catch (error) {
-      return isDefinitive(error)
-        ? { status: "rejected", message: describeError(error).message, leftover: hasPendingChange(head) }
-        : { status: "unknown", message: UNKNOWN_OUTCOME };
-    }
-  }
-  if (!version) return { status: "unchanged" };
-  const written = version;
-  // What still waits on the rule after a refusal: put back what this save
-  // wrote; a leftover that was already there stays (it was not ours to remove).
-  const leftoverAfterRefusal = async () => input.changed
-    ? (await putBack(scope, head, written, steps) ? hasPendingChange(head) : true)
-    : true;
-  let review: ChannelRuleReview;
+  const leftover = hasPendingChange(head);
+  const value = input.changed ? input.value : leftover ? head?.draftPolicy?.value ?? null : null;
+  if (value === null) return { status: "unchanged" };
   try {
-    review = await steps.review(channelRuleSelectionSchema.parse({
-      scope, draftPolicyId: written.policyId, expectedHeadRevision: written.headRevision, expectedDefinitionHash: written.definitionHash,
-    }));
+    const result = await steps.set(buildSetRuleCommand({ scope, value, head, note: input.note, idempotencyKey: steps.newKey() }));
+    return { status: "applied", quantities: result.quantities, skipped: result.skippedDestinations };
   } catch (error) {
-    // The check is a read: it applied nothing, whatever the error was.
-    return { status: "rejected", message: describeError(error).message, leftover: await leftoverAfterRefusal() };
-  }
-  if (!review.ready) return { status: "blocked", blockers: review.blockers, leftover: await leftoverAfterRefusal() };
-  try { await steps.apply(buildApplyRuleCommand(review, steps.newKey())); }
-  catch (error) {
-    // A lost response may have applied it; putting it back then would be wrong.
+    // The server rolled the whole command back on any definite refusal, so what was there before is still there.
     if (!isDefinitive(error)) return { status: "unknown", message: UNKNOWN_OUTCOME };
-    return { status: "rejected", message: describeError(error).message, leftover: await leftoverAfterRefusal() };
+    if (error instanceof ChannelInventoryApiError && error.code === RULE_BLOCKED_CODE) {
+      return { status: "blocked", blockers: error.details.length > 0 ? [...error.details] : [error.message], leftover };
+    }
+    return { status: "rejected", message: describeError(error).message, leftover };
   }
-  return { status: "applied", quantities: review.quantities, skipped: review.skippedDestinations };
 }
 
 function isDefinitive(error: unknown): boolean {
