@@ -12,8 +12,8 @@ import { fileURLToPath } from "node:url";
  * test here means a statement was added to the routine, and it must move to a
  * tracked migration instead.
  */
-const MAX_FALLBACK_STATEMENTS = 170;
-const MAX_FALLBACK_BLOCKS = 30;
+const MAX_FALLBACK_STATEMENTS = 157;
+const MAX_FALLBACK_BLOCKS = 27;
 
 const SOURCE = readFileSync(fileURLToPath(new URL("../../db.ts", import.meta.url)), "utf8");
 
