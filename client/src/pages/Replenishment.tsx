@@ -3354,6 +3354,13 @@ export default function Replenishment() {
                   </Command>
                 </PopoverContent>
               </Popover>
+              {taskForm.fromLocationId && taskForm.fromLocationId === taskForm.toLocationId && (
+                <p className="mt-1 text-xs text-muted-foreground" data-testid="text-same-location">
+                  {taskMode === "case_break"
+                    ? "Breaking in place: the smaller units stay in this location."
+                    : "Choose a different destination. Only a case break can stay in one location."}
+                </p>
+              )}
             </div>
 
             {/* Case break: pick variant at destination */}
@@ -3534,7 +3541,8 @@ export default function Replenishment() {
                 onClick={() => createTaskMutation.mutate({ ...taskForm, mode: taskMode })}
                 disabled={
                   !taskForm.fromLocationId || !taskForm.toLocationId || !taskForm.sourceVariantId || !taskForm.qtyTargetUnits ||
-                  (taskMode === "case_break" && (!taskForm.pickVariantId || !taskForm.qtySourceUnits))
+                  (taskMode === "case_break" && (!taskForm.pickVariantId || !taskForm.qtySourceUnits)) ||
+                  (taskMode !== "case_break" && taskForm.fromLocationId === taskForm.toLocationId)
                 }
                 data-testid="button-save-task"
               >

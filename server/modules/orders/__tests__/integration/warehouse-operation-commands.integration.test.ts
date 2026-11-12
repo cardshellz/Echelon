@@ -728,6 +728,21 @@ suite("warehouse command owners with actual PostgreSQL migrations", () => {
         )
       ).rows,
     ).toHaveLength(8);
+
+    // A case break may stay in one location; its output is a different SKU.
+    await orm.execute(sql`INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant)
+      VALUES(102,1,'NONSTOCK-EACH','Nonstock each',1)`);
+    const inPlace = await createManualReplenishmentTask(dependencies, {
+      commandId: randomUUID(), fromLocationId: 200, toLocationId: 200,
+      sourceVariantId: 101, pickVariantId: 102, qtySourceUnits: 2, replenMethod: "case_break",
+    }, actor, clock);
+    expect(inPlace).toMatchObject({ fromLocationId: 200, toLocationId: 200, sourceProductVariantId: 101,
+      pickProductVariantId: 102, qtySourceUnits: 2, qtyTargetUnits: 10, replenMethod: "case_break" });
+    // A transfer into its own location still moves nothing and is refused.
+    await expect(createManualReplenishmentTask(dependencies, {
+      commandId: randomUUID(), fromLocationId: 200, toLocationId: 200,
+      sourceVariantId: 101, pickVariantId: 101, qtySourceUnits: 2, replenMethod: "full_case",
+    }, actor, clock)).rejects.toThrow("Source and destination must be different locations");
   });
 
   it("does not let a waiting maintenance cancellation overwrite newly completed work", async () => {
