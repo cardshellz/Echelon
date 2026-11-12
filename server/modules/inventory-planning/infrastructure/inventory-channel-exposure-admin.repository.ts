@@ -824,7 +824,14 @@ implements InventoryChannelExposureAdminStore {
   async savePolicyDraft(
     command: SaveChannelExposurePolicyDraftCommand,
   ): Promise<ChannelExposureDraftSaveResult> {
-    return this.database.transaction(async (tx) => {
+    return this.database.transaction(tx => this.savePolicyDraftInsideTransaction(tx, command));
+  }
+
+  /** The single-rule set command (inventory-channel-rule.repository.ts `set`) supplies its existing transaction, so the
+   * saved version, its review and its apply commit or roll back together. That path and the ordinary draft save share
+   * this one writer. The caller owns BEGIN/COMMIT; nothing here opens or ends a transaction. */
+  async savePolicyDraftInsideTransaction(tx: Transaction,
+    command: SaveChannelExposurePolicyDraftCommand): Promise<ChannelExposureDraftSaveResult> {
       const receiptKey = `${POLICY_RECEIPT_PREFIX}${command.idempotencyKey}`;
       await lockIdempotency(tx, command.idempotencyKey);
       const replay = await loadReplay(tx, receiptKey, command.requestHash);
@@ -956,7 +963,6 @@ implements InventoryChannelExposureAdminStore {
       }, { timestamp: command.occurredAt, emitStructuredLog: false });
       await completeReceipt(tx, receiptKey, "channel_exposure_policy_draft_save", result);
       return result;
-    });
   }
 
   async saveSourceBindingDraft(
