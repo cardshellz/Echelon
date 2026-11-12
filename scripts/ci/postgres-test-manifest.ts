@@ -283,6 +283,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/dropship/__tests__/integration/dropship-ebay-stock-enrollment.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/quantity-publication-catchup-parking.integration.test.ts",
   "server/modules/catalog/__tests__/integration/product-category-update.integration.test.ts",
+  "server/modules/inventory-planning/__tests__/integration/sales-status-retirement-migration.integration.test.ts",
   "server/modules/catalog-export/__tests__/integration/postgres-catalog-export.repository.integration.test.ts",
   "server/modules/inventory-planning/__tests__/integration/inventory-availability-claim-lineage.integration.test.ts",
   "server/modules/channels/__tests__/integration/ebay-auth-refresh.integration.test.ts",
