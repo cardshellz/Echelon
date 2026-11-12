@@ -42,7 +42,8 @@ heroku pg:psql -a <db-owner-app> -c "SELECT tableowner, count(*) FROM pg_tables 
 ## Phase 1 — Strip Echelon's cross-ownership DDL (MUST precede Phase 3)
 
 After the flip, any Echelon statement that does DDL on transferred objects throws
-`permission denied` — and `runStartupMigrations()` is one big try/catch, so the
+`permission denied` — and `runReleaseSchemaFallbacks()` (formerly
+`runStartupMigrations()`, run at every boot until 2026-11) is one big try/catch, so the
 first failure **silently skips every later statement**, breaking Echelon's own
 bootstraps. Remove from `server/db.ts` before flipping:
 

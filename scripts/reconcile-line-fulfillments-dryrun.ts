@@ -35,8 +35,8 @@
  *     --sample  rows printed per flagged bucket to console (default: 25)
  *
  * Run against prod (this machine): EXTERNAL_DATABASE_URL in .env is used by
- * server/db. Importing `db` does NOT run migrations (runStartupMigrations is
- * only called from the server bootstrap), so this stays read-only.
+ * server/db. Importing `db` does NOT run migrations (runReleaseSchemaFallbacks is
+ * only called from the release script), so this stays read-only.
  */
 
 // Load .env BEFORE importing ../server/db — server/db reads

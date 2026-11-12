@@ -358,6 +358,50 @@ scope (order/line), released_by; picking + push + release all consult it; boot w
 - **P4.1 Migration authority:** delete db.ts DDL that duplicates tracked migrations; single
   numbering series (renumber the 43 collisions); drizzle `tablesFilter` per the runbook; boot and
   release runner use the same env var. Fail-fast, no swallow-all.
+
+  **Status 2026-11-11.** Step 0 is done: the routine (`runReleaseSchemaFallbacks()` in
+  `server/db.ts`, formerly `runStartupMigrations()`) no longer runs when the web process boots.
+  It runs once per release from `scripts/release.sh`. It still exists, and the end state is that
+  it does not. Retire it block by block; `server/__tests__/unit/schema-fallbacks-only-shrink.test.ts`
+  holds a ceiling on its size that each step lowers and nothing may raise.
+
+  **Facts the steps rest on (checked 2026-11-11):**
+  - The routine is 170 statements in 30 blocks (one `console.log("Checked ...")` per block).
+    Many blocks carry a comment naming the tracked migration they mirror (024, 037, 038, 045,
+    048, 051, 053, 103, 116, 0573, 0580); those comments are unverified leads.
+  - Production already has everything it creates: the v3518 boot logged all 30 blocks with no
+    error in 0.4 s. Confirmed 2026-11-12 by running the whole routine against a structure-only
+    copy of production (792 tables): the schema dump before and after is identical. On that
+    data-less copy the last block (WMS order dedup index) stops at its `UPDATE wms.orders`
+    because a trigger needs a singleton row; its two constraints and its index were confirmed
+    present in production by direct query, and its `UPDATE` matches 0 rows there. The three
+    seed statements also match existing rows (default product line, 16 product types, one
+    `sync_settings` row).
+  - The tracked migrations alone cannot build an empty database (they fail at
+    `0002_concerned_darwin.sql`), and CI never builds one from them. So a block may be the only
+    thing that creates its objects outside production; "production has it" is not enough to delete.
+
+  **Per block (one small PR each, or a few related blocks together):**
+  1. Restore a structure-only copy of production's schema locally (`pg_dump --schema-only`,
+     read-only). Run the block against it and diff the schema before and after. No diff proves the
+     block changes nothing in production.
+  2. Find the tracked migration that creates the same objects. The block's own comment usually
+     names it; confirm by reading the migration, not the comment.
+  3. If one exists: delete the block. If none exists: move the block's SQL, fully
+     schema-qualified, into a new tracked migration, run that migration against the production
+     schema copy (it must apply cleanly and leave no diff), then delete the block.
+  4. Lower the ceiling in the shrink test to the new counts.
+
+  **Order.** Start with the blocks whose comment names a migration (cheapest to prove). Leave the
+  four allow-listed data statements (`db-boot-no-dml.test.ts`) and the two blocks with their own
+  failure handling (WMS order dedup index, refund return lifecycle) for last; they need the most
+  care. When the last block goes, delete `runReleaseSchemaFallbacks`, `startup-migration-guard.ts`,
+  `scripts/release-schema-fallbacks.ts`, its line in `scripts/release.sh`, and the
+  `SKIP_STARTUP_MIGRATIONS` flag.
+
+  **Separate item, same phase:** make a new empty database buildable from tracked migrations
+  (a baseline schema file plus the migrations after it), and have CI build one. Until that exists
+  there is no tested way to create an Echelon database from the repository.
 - **P4.2 Logging:** adopt `server/platform/observability` everywhere (~1,600 console.* sites,
   mechanical/codemod-able); every log line carries `{oms_order_id, wms_order_id, shipment_id,
   channel_event_id, engine_ref}` per CLAUDE.md §10; DropshipLogger/AuditLogger fold in or wrap.
