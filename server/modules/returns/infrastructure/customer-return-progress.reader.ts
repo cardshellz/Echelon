@@ -8,7 +8,7 @@ import {
 import {
   customerAccountProgressScopeSchema,
   type CustomerAccountReturnProgressReader,
-} from "../../customer-account/application/customer-account-progress.ports";
+} from "../../customer-account/progress-contracts.api";
 import {
   aggregateCustomerReturnCases,
   customerReturnCaseProgressFactsSchema,

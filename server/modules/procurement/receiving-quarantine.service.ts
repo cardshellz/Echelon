@@ -3,8 +3,8 @@ import {
   receivingQuarantineIntakeSchema, prepareQuarantineAcceptanceSchema, returnQuarantineCustodySchema,
   cancelQuarantineAcceptanceSchema, receivingQuarantineCommandResultSchema, receivingQuarantineViewSchema,
 } from "@shared/procurement/receiving-quarantine";
-import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
-import type { CommandAuthorityActor } from "../identity/domain/command-authority";
+import { readCommandAuthorityActor } from "../identity/command-authority.api";
+import type { CommandAuthorityActor } from "../identity/authority-contracts.api";
 import { assertCustodyResolution, assertReviewedCustodyConversion, custodyQuantities, ReceivingQuarantineError } from "./domain/receiving-quarantine";
 import { validateReceivingLocations } from "./receiving-close-integrity.repository";
 import { lockReceivingCustodyFence } from "./receiving-custody-public";

@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { readStaffSystemRoleAuthorityPg } from "../identity/staff-authority";
+import { readStaffSystemRoleAuthorityPg } from "../identity/staff-authority.api";
 
 import {
   loadHistoricalShipStationExpectedContents,

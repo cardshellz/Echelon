@@ -1,6 +1,6 @@
 import { reviewRfqQuantity, rfqQuantityReviewMessage } from "@shared/procurement/rfq-quantity-review";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
-import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
+import { readCommandAuthorityActor } from "../identity/command-authority.api";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";

@@ -6,7 +6,7 @@ import {
   supplierReturnPreviewInputSchema, supplierReturnRecordInputSchema,
   type SupplierReturnDetail,
 } from "@shared/procurement/supplier-return";
-import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
+import { readCommandAuthorityActor } from "../identity/command-authority.api";
 import {
   previewSupplierReturnStock, executeSupplierReturnStock, readSupplierReturnStockOptions,
   readSupplierReturnInventoryEvidenceBatch,

@@ -129,6 +129,41 @@ export async function updatePlanDetails(
   await executor.update(plans).set(dbUpdates).where(eq(plans.id, String(planId)));
 }
 
+export interface PickPriorityPlanSummary {
+  id: string;
+  name: string;
+  tierLevel: number | null;
+  priorityModifier: number;
+  primaryColor: string | null;
+  isActive: boolean;
+}
+
+export async function readPickPriorityPlans(
+  executor: SubscriptionDbExecutor = db,
+): Promise<PickPriorityPlanSummary[]> {
+  const rows = await executor.execute<{
+    id: string;
+    name: string | null;
+    tier_level: number | null;
+    priority_modifier: number;
+    primary_color: string | null;
+    is_active: boolean | null;
+  }>(sql`
+    SELECT id, name, tier_level, priority_modifier, primary_color, is_active
+    FROM membership.plans
+    ORDER BY COALESCE(tier_level, 9999), name
+  `);
+
+  return rows.rows.map((r) => ({
+    id: r.id,
+    name: r.name ?? "(unnamed plan)",
+    tierLevel: r.tier_level,
+    priorityModifier: Number(r.priority_modifier ?? 0),
+    primaryColor: r.primary_color,
+    isActive: r.is_active === true,
+  }));
+}
+
 export async function updatePlanPriorityModifier(
   planId: number | string,
   priorityModifier: number,

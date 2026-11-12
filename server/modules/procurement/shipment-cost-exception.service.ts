@@ -4,7 +4,7 @@ import { shipmentExceptionContextSchema, shipmentExceptionIdSchema, shipmentExce
   shipmentExceptionResultSchema } from "@shared/procurement/shipment-cost-exception";
 import { createDrizzleFinancialCommandRepository } from "../../platform/commands/command-results.repository";
 import { FinancialCommandError, runTransactionalFinancialCommand, type FinancialCommandDescriptor } from "../../platform/commands/transactional-command.service";
-import { readPurchaseApprovalActor } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor } from "../identity/purchase-approval-authority.api";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { hasQuantityAmendmentAuthority } from "./po-quantity-amendment.policy";
 import type { AmendmentDatabase, AmendmentTransaction } from "./po-quantity-amendment.repository";

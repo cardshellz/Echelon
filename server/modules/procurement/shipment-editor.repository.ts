@@ -8,7 +8,7 @@ import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { costFingerprint, costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import { hasQuantityAmendmentAuthority } from "./po-quantity-amendment.policy";
-import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { shipmentLineVersion } from "./shipment-line-version";
 import { rejectShipmentEdit, sumShipmentCents, shipmentEditorBlockedReason } from "./shipment-editor.policy";
 import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";

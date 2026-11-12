@@ -1,4 +1,4 @@
-import type { CommandAuthorityActor } from "../../identity/domain/command-authority";
+import type { CommandAuthorityActor } from "../../identity/authority-contracts.api";
 
 export type PurchaseOrderCancellationState = Readonly<{
   status: string;

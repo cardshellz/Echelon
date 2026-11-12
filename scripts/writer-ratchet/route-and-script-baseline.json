@@ -51,9 +51,6 @@
     "ebay.ebay_type_aspect_defaults": [
       "server/routes/ebay/ebay-taxonomy.routes.ts"
     ],
-    "membership.plans": [
-      "server/routes/pick-priority.routes.ts"
-    ],
     "shipping.quote_snapshots": [
       "server/modules/shipping-engine/interfaces/http/carrier-callback.routes.ts"
     ],

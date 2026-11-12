@@ -13,7 +13,7 @@ import {
 import {
   readPurchaseApprovalActor,
   readPurchaseApproverName,
-} from "../identity/infrastructure/purchase-approval-access.repository";
+} from "../identity/purchase-approval-authority.api";
 import { assertInvoiceQuantityAuthority } from "./invoice-quantity-correction.policy";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import { readPurchaseCostSource } from "./purchase-cost-source.repository";

@@ -22,6 +22,10 @@ import { requireAuth, requirePermission } from "./middleware";
 import { invalidatePickPrioritySettingsCache } from "../modules/orders/sort-rank-and-priority.api";
 import { recomputeAllActiveSortRanksDetailed } from "../modules/orders/sort-rank-and-priority.api";
 import { enqueueShipStationSortRankSyncRetry } from "../modules/oms/webhook-retry.api";
+import {
+  readPickPriorityPlans,
+  updatePlanModifiersUseCase,
+} from "../modules/subscriptions/pick-priority-plans.api";
 
 // ---------------------------------------------------------------------------
 // Shape
@@ -152,27 +156,7 @@ async function readChannels(): Promise<PickPriorityPayload["channels"]> {
 }
 
 async function readPlans(): Promise<PickPriorityPayload["plans"]> {
-  const rows = await db.execute<{
-    id: string;
-    name: string | null;
-    tier_level: number | null;
-    priority_modifier: number;
-    primary_color: string | null;
-    is_active: boolean | null;
-  }>(sql`
-    SELECT id, name, tier_level, priority_modifier, primary_color, is_active
-    FROM membership.plans
-    ORDER BY COALESCE(tier_level, 9999), name
-  `);
-
-  return rows.rows.map((r) => ({
-    id: r.id,
-    name: r.name ?? "(unnamed plan)",
-    tierLevel: r.tier_level,
-    priorityModifier: Number(r.priority_modifier ?? 0),
-    primaryColor: r.primary_color,
-    isActive: r.is_active === true,
-  }));
+  return readPickPriorityPlans();
 }
 
 async function upsertSetting(key: string, value: number, type: string = "number"): Promise<void> {
@@ -268,16 +252,21 @@ export function registerPickPriorityRoutes(app: Express): void {
         }
 
         if (body.planModifiers && typeof body.planModifiers === "object") {
+          const planModifierUpdates: Array<{ id: string; priorityModifier: number }> = [];
           for (const [planId, raw] of Object.entries(body.planModifiers)) {
             if (!planId || typeof planId !== "string") {
               throw new Error("planModifiers keys must be plan ids");
             }
             const v = validateInt(raw, PLAN_MOD_MIN, PLAN_MOD_MAX, `planModifiers[${planId}]`);
-            tasks.push(db.execute(sql`
-              UPDATE membership.plans
-              SET priority_modifier = ${v}
-              WHERE id = ${planId}
-            `));
+            planModifierUpdates.push({ id: planId, priorityModifier: v });
+          }
+          if (planModifierUpdates.length > 0) {
+            const actorUser = (req as any).session?.user;
+            const actor =
+              actorUser?.username ||
+              actorUser?.email ||
+              (actorUser?.id ? `staff:${actorUser.id}` : "staff_admin");
+            tasks.push(updatePlanModifiersUseCase(planModifierUpdates, actor));
             affectsSortRank = true;
           }
         }

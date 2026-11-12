@@ -1,7 +1,7 @@
 import { asc, eq, sql } from "drizzle-orm";
 import { auditEvents, inboundShipments, inboundShipmentLines } from "@shared/schema";
 import { shipmentMeasurementContextSchema, shipmentMeasurementsSchema, shipmentMeasurementApprovalResultSchema, type ShipmentMeasurementReviewRequest, type ShipmentMeasurementPreview } from "@shared/procurement/shipment-measurement-correction";
-import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { lockInventoryCostGraph, costFingerprint } from "../inventory/infrastructure/cost-evidence.repository";
 import { readPoAmendmentDependencies, type PoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import type { AmendmentTransaction } from "./po-quantity-amendment.repository";

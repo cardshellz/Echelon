@@ -1,6 +1,6 @@
 import { parseArgs } from "node:util";
 import { z } from "zod";
-import { orderActionMaintenanceIdsSchema } from "../../server/modules/customer-account/application/order-action-projection.ports";
+import { orderActionMaintenanceIdsSchema } from "../../server/modules/customer-account/order-action-projection-contracts.api";
 
 const optionsSchema = z.object({
   orderIds: orderActionMaintenanceIdsSchema,

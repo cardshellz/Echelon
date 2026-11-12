@@ -4,7 +4,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { receivingQuarantineObservationSchema, type ReceivingQuarantineObservation } from "@shared/procurement/receiving-quarantine";
 import type { ReceivingIntegrityTransaction } from "./receiving-close-integrity.repository";
 import { custodyQuantities, ReceivingQuarantineError } from "./domain/receiving-quarantine";
-import type { CommandAuthorityActor } from "../identity/domain/command-authority";
+import type { CommandAuthorityActor } from "../identity/authority-contracts.api";
 
 export type CustodyTransaction = ReceivingIntegrityTransaction;
 const id = z.number().int().positive();

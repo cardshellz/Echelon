@@ -1,7 +1,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import type { Server } from "http";
 import type { Request, RequestHandler, Response } from "express";
-import { onStaffAuthorityChanged } from "./modules/identity/authority-events";
+import { onStaffAuthorityChanged } from "./modules/identity/staff-authority.api";
 import { readCurrentStaffAccess, readStaffCredentialState, isCurrentStaffCredential } from "./modules/identity";
 import { logger } from "./platform/observability/logger";
 import { classify } from "./platform/observability/errors";

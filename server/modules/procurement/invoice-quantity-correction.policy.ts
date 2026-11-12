@@ -4,7 +4,7 @@ import { classifyApPaymentState } from "./domain/ap-payment-state";
 import { centsToMills, millsToCents } from "@shared/utils/money";
 import { z } from "zod";
 import { invoiceQuantityContextSchema, invoiceQuantityPreviewSchema, invoiceQuantityIdSchema, invoiceAmountPerPiece, type InvoiceQuantityPreviewRequest } from "@shared/procurement/invoice-quantity-correction";
-import type { PurchaseApprovalActor } from "../identity/domain/purchase-approval-authority";
+import type { PurchaseApprovalActor } from "../identity/authority-contracts.api";
 import { hasQuantityAmendmentAuthority, type AmendmentFacts } from "./po-quantity-amendment.policy";
 import { evaluatePurchaseOrderInvoiceMatches } from "./purchase-order-invoice-match";
 import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";

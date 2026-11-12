@@ -1112,8 +1112,7 @@
     "modules/subscriptions"
   ],
   "membership.plans": [
-    "modules/subscriptions",
-    "server/routes/pick-priority.routes.ts"
+    "modules/subscriptions"
   ],
   "membership.selling_plan_map": [
     "modules/subscriptions"
