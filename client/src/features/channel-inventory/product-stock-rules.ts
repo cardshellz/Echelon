@@ -47,8 +47,9 @@ export interface ChannelStockRuleRow {
   ruleSource: StockRuleSource;
   /**
    * A change saved on this exact rule never took effect and would change what
-   * the channel uses. Saves from this card never leave one; it exists only when
-   * the change was saved in Channel Inventory and not applied there.
+   * the channel uses. Saves from this card no longer leave one; it exists only
+   * when the change was saved in Channel Inventory and not applied there, or
+   * was left by this card before its save became one command.
    */
   pending: boolean;
   /** What that leftover change would do, e.g. "Max 0" or "Clear exception"; null when there is none. */
