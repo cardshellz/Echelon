@@ -1,4 +1,4 @@
-import type { CommandAuthorityActor } from "../identity/domain/command-authority";
+import type { CommandAuthorityActor } from "../identity/authority-contracts.api";
 import type { ProcurementSettingsCommand, ProcurementSettingsSnapshot } from "@shared/procurement/procurement-settings";
 
 export class ProcurementSettingsError extends Error {

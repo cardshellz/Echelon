@@ -1,5 +1,5 @@
 import { createOrderEditCredentialStore } from "./infrastructure/order-edit-credential-store";
-import { PostgresAccountNativeSummaries } from "../customer-account/infrastructure/account-native-summaries.repository";
+import { PostgresAccountNativeSummaries } from "../customer-account/shopify-account-native.api";
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import type { ServiceRegistry } from "../../services";
@@ -13,7 +13,7 @@ import { OrderEditPreviewService } from "./application/order-edit-preview.servic
 import { createMemberPlanPresentationReader } from "../membership";
 import { ClubOrderEditCodeRedemptions } from "./infrastructure/club-order-edit-code-redemptions";
 import { PostgresOrderEditCodeHistory } from "./infrastructure/postgres-order-edit-code-history";
-import { OrderCancellationService } from "../customer-account/application/order-cancellation.service";
+import { OrderCancellationService } from "../customer-account/order-cancellation-contracts.api";
 
 export function createOrderEditService(
   pool: Pool,

@@ -1,7 +1,18 @@
-import { readAccountNativeScan, accountNativeScanQuery, advanceAccountNativeScan, serializeAccountNativeScan, accountNativePageInfoSchema } from "../../customer-account/domain/account-native-pagination";
+import {
+  readAccountNativeScan,
+  accountNativeScanQuery,
+  advanceAccountNativeScan,
+  serializeAccountNativeScan,
+  accountNativePageInfoSchema,
+  type AccountNativeRetainer,
+  type AccountNativeObservation,
+} from "../../customer-account/account-native-contracts.api";
 import { ORDER_EDIT_MEMBER_PRICING_DESCRIPTION, isManagedMemberPricingDescription } from "@shared/order-edits/order-edit-member-pricing";
-import { accountNativeFact, accountNativeNodeSchema, accountNativeObservationNode } from "../../customer-account/infrastructure/shopify-account-native.reader";
-import type { AccountNativeRetainer, AccountNativeObservation } from "../../customer-account/application/account-native-summaries.ports";
+import {
+  accountNativeFact,
+  accountNativeNodeSchema,
+  accountNativeObservationNode,
+} from "../../customer-account/shopify-account-native.api";
 import { matchingRefund, proveRefund } from "./shopify-order-edit-refund-evidence";
 import {
   matchesOrderEditQuote as matchesQuote,

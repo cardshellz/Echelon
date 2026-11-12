@@ -1,8 +1,10 @@
 import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { z } from "zod";
 import type { purchaseOrders, purchaseOrderLines, vendorInvoices, vendorInvoiceLines } from "@shared/schema/procurement.schema";
-import type { PurchaseApprovalActor } from "../identity/domain/purchase-approval-authority";
-import { SYSTEM_ROLES } from "../identity/domain/identity.domain";
+import {
+  SYSTEM_ROLES,
+  type PurchaseApprovalActor,
+} from "../identity/authority-contracts.api";
 import { normalizePoLinePricing, type PoLinePricingInput } from "@shared/utils/po-line-pricing";
 import { evaluatePurchaseOrderInvoiceMatches } from "./purchase-order-invoice-match";
 import {

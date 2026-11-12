@@ -3,7 +3,7 @@ import {
   type CustomerReturnOrderChoice,
 } from "@shared/returns/customer-return-access.contract";
 import { customerOrderActionPageSchema, customerOrderActionReferenceKey } from "@shared/customer-account/order-actions";
-import type { OrderActionProjectionReader } from "../../customer-account/application/order-action-projection.ports";
+import type { OrderActionProjectionReader } from "../../customer-account/order-action-projection-contracts.api";
 import type { CustomerReturnCustomerSession } from "../application/customer-return-customer-auth.service";
 import { customerReturnOrderAccessResultSchema, type CustomerReturnOrderAccessResult } from "../application/customer-return-order-access.service";
 import { CustomerReturnOrderChoicesError, type CustomerReturnOrderChoicesReader } from "../application/customer-return-order-choices.ports";

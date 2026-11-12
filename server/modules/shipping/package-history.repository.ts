@@ -1,7 +1,7 @@
 import { enqueueSavedLabelStatus } from "./saved-label-status.repository";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
-import { invalidateCustomerOrderActions } from "../customer-account/order-action-invalidation";
+import { invalidateCustomerOrderActions } from "../customer-account/order-action-invalidation.api";
 import { type PackageHistoryDocument } from "@shared/shipping/package-history";
 import {
   packageHistoryHash,
