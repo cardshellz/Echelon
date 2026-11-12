@@ -2213,6 +2213,32 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
+  // Active, saved conversion directions for one product (read-only). Manual
+  // case-break forms offer only these; the server re-authorizes on execution.
+  app.get("/api/inventory/products/:productId/allowed-conversions", requirePermission("inventory", "view"), async (req, res) => {
+    const productId = Number(req.params.productId);
+    if (!Number.isSafeInteger(productId) || productId <= 0) {
+      return res.status(400).json({
+        error: "INVALID_PRODUCT_ID",
+        message: "productId must be a positive integer",
+      });
+    }
+    try {
+      const conversions = await req.app.locals.services.inventoryConversions.getAllowedConversions(productId);
+      res.json(conversions);
+    } catch (error) {
+      console.error(JSON.stringify({
+        level: "error",
+        action: "inventory.allowed_conversions.read_failed",
+        outcome: "failed",
+        error_code: "INVENTORY_ALLOWED_CONVERSIONS_READ_FAILED",
+        product_id: productId,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+      res.status(500).json({ error: "INVENTORY_ALLOWED_CONVERSIONS_READ_FAILED", message: "Failed to read allowed conversions" });
+    }
+  });
+
   // ============================================
   // BIN-CENTRIC VIEW & INVENTORY MANAGEMENT
   // ============================================
