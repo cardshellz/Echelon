@@ -7,7 +7,7 @@ import { creditTransferToReplenishment, recordReplenishmentFollowup } from "../i
 import { eq, and, or, sql, inArray, isNull, asc } from "drizzle-orm";
 import { logger } from "../../../platform/observability/logger";
 import { validateReplenishmentTrigger } from "../domain/replenishment-trigger";
-import { supportsInlineReplenishment, resolveReplenishmentAutoExecution } from "../domain/replenishment-auto-execution";
+import { manualReplenishmentAutoOverride, supportsInlineReplenishment, resolveReplenishmentAutoExecution } from "../domain/replenishment-auto-execution";
 import { planReplenishmentDemand, ReplenishmentExecutionDomainError } from "../domain/replenishment-execution.domain";
 import { readReplenishmentRule, readReplenishmentTierDefault } from "../infrastructure/replenishment-policy.reader";
 import { assertReplenishmentTaskTransition } from "@shared/types/replenishment-task-command";
@@ -157,6 +157,8 @@ type ResolvedReplenParams = {
   priority: number;
   sourceLocationType: string;
   autoReplen: number;
+  /** Method of the rule or tier default that supplied autoReplen, if any. */
+  autoReplenMethod: string | null;
   sourceVariantId: number | null;
   sourceHierarchyLevel: number | null;
   sourcePriority: string;
@@ -757,11 +759,15 @@ export class ReplenishmentUseCases {
     const priority = rule?.priority ?? tierDefault?.priority ?? 5;
     const sourceLocationType = rule?.sourceLocationType ?? tierDefault?.sourceLocationType ?? "reserve";
     const autoReplen = rule?.autoReplen ?? tierDefault?.autoReplen ?? 0;
+    // Same precedence as autoReplen, so the method describes that exact setting.
+    const autoReplenMethod = rule?.autoReplen != null
+      ? rule.replenMethod ?? null
+      : tierDefault?.autoReplen != null ? tierDefault.replenMethod ?? null : null;
     const sourceVariantId = rule?.sourceProductVariantId ?? null;
     const sourceHierarchyLevel = tierDefault?.sourceHierarchyLevel ?? null;
     const sourcePriority = rule?.sourcePriority ?? tierDefault?.sourcePriority ?? "fifo";
 
-    return { triggerValue, maxQty, replenMethod, priority, sourceLocationType, autoReplen, sourceVariantId, sourceHierarchyLevel, sourcePriority };
+    return { triggerValue, maxQty, replenMethod, priority, sourceLocationType, autoReplen, autoReplenMethod, sourceVariantId, sourceHierarchyLevel, sourcePriority };
   }
 
   private buildImplicitZeroLevel(
@@ -2831,7 +2837,9 @@ export class ReplenishmentUseCases {
         const [location] = await owner.select().from(warehouseLocations).where(eq(warehouseLocations.id, locationId)).limit(1);
         const resolved = await this.resolveReplenParams(variant.id, variant, location.warehouseId ?? undefined,
           await this.loadLocationConfig(locationId, variant.id, owner), owner);
-        return this.resolveAutoExecute(resolved.autoReplen, null, settings, quantity, method);
+        const override = manualReplenishmentAutoOverride({
+          autoReplen: resolved.autoReplen, autoReplenMethod: resolved.autoReplenMethod, taskMethod: method });
+        return this.resolveAutoExecute(override, null, settings, quantity, method);
       } }, input, actor, this.clock);
     if (task.executionMode === "inline") {
       try { await this.executeTask(task.id, actor); }
