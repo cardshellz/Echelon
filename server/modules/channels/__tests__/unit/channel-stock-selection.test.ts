@@ -4,7 +4,7 @@ import { resolveChannelStockSelection, type ChannelStockSelectionFacts } from ".
 
 function facts(): ChannelStockSelectionFacts {
   return { channelId: 1, channelConnectionId: 2, provider: "ebay", productId: 10, productVariantIds: [101],
-    productIsListed: null, typeListingEnabled: true, latestJob: null,
+    productIsListed: null, typeListingEnabled: true, latestJob: null, reviewedAdditionVariantIds: [],
     catalog: { product: { id: 10, isActive: true, status: "active", productType: "holder", category: null,
       ebayListingExcluded: false, productLineIds: [] }, variants: [{ id: 101, productId: 10, sku: "PACK", uomType: "pack",
       isActive: true, requiresShipping: true, trackInventory: true, salesEligibility: "sellable", ebayListingExcluded: false }] },
@@ -44,6 +44,54 @@ describe("Channels stock publication selection", () => {
     const input = facts(); input.variants = [];
     input.latestJob = { id: "job", operation: "publish", state: "queued", members: [{ ...member, offerId: null, listingId: null }], verifiedMembers: [] };
     expect(action(input)).toBe("publish");
+  });
+  it("selects a size a reviewed listing change is adding, before it has any saved eBay identity", () => {
+    const input = facts();
+    input.variants = [{ productVariantId: 101, variantIsListed: null, feed: null,
+      listing: { status: "error", externalProductId: null, externalVariantId: null, externalSku: null } }];
+    expect(action(input)).toBe("read_only");
+    input.reviewedAdditionVariantIds = [101];
+    expect(resolveChannelStockSelection(input).variants[0]).toMatchObject({ action: "publish", blockers: [],
+      reason: "A reviewed listing change is adding this size to its eBay listing." });
+    // No listing row at all is the same case.
+    input.variants = [];
+    expect(action(input)).toBe("publish");
+    // The record is for exact sizes: another size of the product is not selected by it.
+    input.reviewedAdditionVariantIds = [102];
+    expect(action(input)).toBe("read_only");
+  });
+  it("never lets a reviewed addition override a listing rule, a quarantine or another channel's rules", () => {
+    const base = () => { const input = facts(); input.variants = []; input.reviewedAdditionVariantIds = [101]; return input; };
+    let input = base(); input.catalog.variants[0].ebayListingExcluded = true;
+    expect(action(input)).toBe("none");
+    input = base(); input.productIsListed = 0;
+    expect(action(input)).toBe("none");
+    input = base(); input.typeListingEnabled = false;
+    expect(action(input)).toBe("none");
+    input = base(); input.catalog.variants[0].trackInventory = false;
+    expect(action(input)).toBe("none");
+    input = base(); input.catalog.variants[0].isActive = false;
+    expect(action(input)).toBe("none");
+    input = base(); input.variants = [{ productVariantId: 101, variantIsListed: null,
+      feed: { active: true, quarantined: true, externalVariantId: null, externalInventoryItemId: null, externalSku: null }, listing: null }];
+    expect(resolveChannelStockSelection(input).variants[0].blockers).toMatchObject([{ code: "CHANNEL_SELECTION_MAPPING_QUARANTINED" }]);
+    // The record is an eBay listing fact; Shopify and Walmart still need their own feed.
+    input = base(); input.provider = "shopify";
+    expect(action(input)).toBe("read_only");
+  });
+  it("re-adds a size whose earlier listing ended once a reviewed change adds it, and binds the record into the fingerprint", () => {
+    const input = facts(); input.variants = [{ ...input.variants[0], listing: { ...input.variants[0].listing!, status: "ended" } }];
+    expect(action(input)).toBe("read_only");
+    const before = resolveChannelStockSelection(input).fingerprint;
+    input.reviewedAdditionVariantIds = [101];
+    const after = resolveChannelStockSelection(input);
+    expect(after.variants[0].action).toBe("publish");
+    expect(after.fingerprint).not.toBe(before);
+  });
+  it("keeps a pending withdrawal ahead of a reviewed addition", () => {
+    const input = facts(); input.reviewedAdditionVariantIds = [101];
+    input.latestJob = { id: "job", operation: "withdraw", state: "needs_attention", members: [member], verifiedMembers: [member] };
+    expect(action(input)).toBe("zero");
   });
   it.each(["shopify", "walmart"] as const)("requires existing %s feed intent and ignores eBay-only toggles", provider => {
     const input = facts(); input.provider = provider; input.catalog.product!.ebayListingExcluded = true; input.typeListingEnabled = false;

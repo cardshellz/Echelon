@@ -29,6 +29,9 @@ export interface ChannelStockSelectionFacts {
     members: readonly { variantId: number; sku: string; offerId: string | null; listingId: string | null }[];
     verifiedMembers: readonly { variantId: number; sku: string; offerId: string | null; listingId: string | null }[];
   } | null;
+  /** eBay only: sizes an operator-reviewed listing update or rebuild is adding right now (an open
+   * channels.ebay_listing_change_intents row). The durable intent a first publication gets from its job. */
+  reviewedAdditionVariantIds: readonly number[];
 }
 
 /** Listing eligibility remains with its existing resolver. This projection owns
@@ -82,16 +85,22 @@ export function resolveChannelStockSelection(facts: ChannelStockSelectionFacts):
         ? result("zero", withdrawing ? "The saved withdrawal is pending; positive stock must remain disabled." : "The channel selection excludes this retained destination; its stock must be cleared.")
         : result("none", "The variant is not selected and has no saved provider destination to clear.");
     }
-    const publishIntent = isEbay && jobMember && facts.latestJob?.operation === "publish";
+    // A size added by a reviewed listing change has no saved identity until that change succeeds. The review is
+    // its intent, exactly as a publish job is for a first publication; it never overrides the listing rules above.
+    const reviewedAddition = isEbay && facts.reviewedAdditionVariantIds.includes(productVariantId);
+    const publishIntent = (isEbay && jobMember && facts.latestJob?.operation === "publish") || reviewedAddition;
     const ended = listing && ["ended", "deleted"].includes(listing.status ?? "");
     if (isEbay && ended && !publishIntent)
       return result("read_only", "The variant is selected, but its previous listing ended. A new reviewed publication must establish its managed destination.");
     const managedIntent = isEbay ? Boolean(hasSavedIdentity || publishIntent) : feed?.active === true;
-    if (managedIntent) return result("publish", "The existing channel selection requests stock for this known listing destination.");
+    if (managedIntent) return result("publish", reviewedAddition && !hasSavedIdentity
+      ? "A reviewed listing change is adding this size to its eBay listing."
+      : "The existing channel selection requests stock for this known listing destination.");
     return result("read_only", "The candidate is selected for listing review, but no managed stock publication intent is saved yet.");
   });
   const fingerprint = createHash("sha256").update(canonicalJson({ ...facts,
     productVariantIds: [...facts.productVariantIds].sort((a, b) => a - b),
+    reviewedAdditionVariantIds: [...facts.reviewedAdditionVariantIds].sort((a, b) => a - b),
     variants: [...facts.variants].sort((a, b) => a.productVariantId - b.productVariantId),
     catalog: { product: facts.catalog.product, variants: [...facts.catalog.variants].sort((a, b) => a.id - b.id) },
     latestJob: facts.latestJob ? { ...facts.latestJob, members: [...facts.latestJob.members].sort((a, b) => a.variantId - b.variantId),
