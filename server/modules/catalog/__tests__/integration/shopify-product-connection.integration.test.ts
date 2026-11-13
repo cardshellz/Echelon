@@ -68,6 +68,50 @@ integration("durable per-product Shopify connections with real mapping and price
     return { commandKey: commandKey(), request, previewHash: (await f.service.preview(productId, request)).previewHash };
   }
 
+  it("delists a SKU whose Shopify variant was deleted and keeps every other SKU, stock and channel intact", async () => {
+    const product = await seed(); const [p1, c5] = product.variants;
+    const db = drizzle(database.pool, { schema });
+    let live = { id: "888001", title: "Test binder", variants: [
+      { id: "888011", sku: p1.sku, inventoryItemId: "888111", barcode: null },
+      { id: "888012", sku: c5.sku, inventoryItemId: "888112", barcode: null },
+    ] };
+    const owner = createShopifyProductMappingService({ database: db, now: () => NOW, sleep: async () => undefined,
+      verifyShopifyProduct: async () => structuredClone(live) });
+    await owner.repair({ productId: product.id, channelId: 7, targetProductId: "888001", actor: "user:test",
+      operatorVariantBindings: [{ variantId: p1.id, remoteVariantId: "888011" }, { variantId: c5.id, remoteVariantId: "888012" }] });
+    expect((await owner.getSummary(product.id, 7)).status).toBe("consistent");
+    // An unrelated channel feed on the same SKU must survive the delisting.
+    await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_type,channel_variant_id,is_active) VALUES(8,$1,'shopify','777',1)", [c5.id]);
+    const stock = await inventory();
+
+    live = { ...live, variants: [live.variants[0]] }; // C5's variant deleted in Shopify
+    const result = await owner.repair({ productId: product.id, channelId: 7, targetProductId: "888001", actor: "user:test" });
+    expect(result.alreadyConsistent).toBe(false);
+    expect(result.delistedVariants).toEqual([{ variantId: c5.id, sku: c5.sku, deletedVariantIds: ["888012"] }]);
+    expect(result.after.status).toBe("consistent");
+    expect(result.after.variants.map(variant => variant.variantId)).toEqual([p1.id]);
+
+    const q = async (text: string) => (await database.pool.query(text, [c5.id])).rows;
+    expect(await q("SELECT channel_id,is_listed FROM channels.channel_variant_overrides WHERE product_variant_id=$1 ORDER BY channel_id"))
+      .toEqual([{ channel_id: 7, is_listed: 0 }]);
+    expect(await q("SELECT channel_id,is_active,channel_product_id,channel_variant_id FROM channels.channel_feeds WHERE product_variant_id=$1 ORDER BY channel_id"))
+      .toEqual([{ channel_id: 7, is_active: 0, channel_product_id: null, channel_variant_id: "888012" },
+        { channel_id: 8, is_active: 1, channel_product_id: null, channel_variant_id: "777" }]);
+    expect(await q("SELECT external_product_id,external_variant_id,sync_status FROM channels.channel_listings WHERE product_variant_id=$1 AND channel_id=7"))
+      .toEqual([{ external_product_id: null, external_variant_id: null, sync_status: "error" }]);
+    expect(await q("SELECT shopify_variant_id,shopify_inventory_item_id,is_active,sales_eligibility FROM catalog.product_variants WHERE id=$1"))
+      .toEqual([{ shopify_variant_id: null, shopify_inventory_item_id: null, is_active: true, sales_eligibility: "sellable" }]);
+    expect((await database.pool.query("SELECT shopify_variant_id FROM catalog.product_variants WHERE id=$1", [p1.id])).rows)
+      .toEqual([{ shopify_variant_id: "888011" }]);
+    expect(await inventory()).toEqual(stock);
+    const audit = await database.pool.query("SELECT context FROM public.audit_events WHERE action='catalog.shopify_product_mapping_repaired' AND target=$1 ORDER BY id DESC LIMIT 1", [`catalog.product:${product.id}`]);
+    expect(audit.rows[0].context).toMatchObject({ delistedCount: 1, delistedVariants: [{ variantId: c5.id, deletedVariantIds: ["888012"] }] });
+
+    // A replay finds nothing left to do.
+    const replay = await owner.repair({ productId: product.id, channelId: 7, targetProductId: "888001", actor: "user:test" });
+    expect(replay).toMatchObject({ alreadyConsistent: true, delistedVariants: [] });
+  });
+
   it("searches with the database-owned store credentials without reserving a command or changing inventory", async () => {
     const local = await seed(); const f = fixture(); const before = await inventory();
     const search = vi.spyOn(f.provider, "search").mockResolvedValue({ products: [{ id: "900", title: "Draft binder", status: "DRAFT" }], nextCursor: null });
