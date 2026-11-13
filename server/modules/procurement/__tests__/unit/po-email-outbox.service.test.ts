@@ -138,6 +138,28 @@ describe("PO email dead-letter replay", () => {
       code: "DELIVERY_NOT_DEAD_LETTERED",
     });
   });
+
+  it("refuses to replay a dead-lettered delivery that already recorded provider acceptance (PWF-01)", async () => {
+    await expect(replayDeadLetterPurchaseOrderEmail({
+      purchaseOrderId: 7,
+      deliveryId: 42,
+      idempotencyKey: "replay-accepted-1",
+      dbPool: {
+        query: vi.fn().mockResolvedValue({
+          rows: [{
+            ...delivery,
+            status: "dead_letter",
+            providerMessageId: "<provider-accepted-42@example.com>",
+            lastErrorCode: "LOCAL_FINALIZE_FAILED_AFTER_SMTP_ACCEPT",
+            html: "<html>immutable PO</html>",
+          }],
+        }),
+      },
+    })).rejects.toMatchObject<Partial<PoEmailOutboxError>>({
+      statusCode: 409,
+      code: "DELIVERY_ALREADY_ACCEPTED_BY_PROVIDER",
+    });
+  });
 });
 
 describe("PO email verified document gate", () => {

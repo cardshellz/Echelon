@@ -8,7 +8,7 @@ const dependencies = vi.hoisted(() => ({ loadSource: vi.fn(), sendMail: vi.fn() 
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../supplier-po-document.repository", () => ({ loadSupplierPoDocumentSource: dependencies.loadSource }));
 vi.mock("nodemailer", () => ({ default: { createTransport: () => ({ sendMail: dependencies.sendMail }) } }));
-import { buildPurchaseOrderEmail } from "../../../notifications/email.service";
+import { buildPurchaseOrderEmail } from "../../po-email-builder";
 
 describe("supplier email uses the validated print document", () => {
   beforeEach(() => { vi.clearAllMocks(); });

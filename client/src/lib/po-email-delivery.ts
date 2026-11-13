@@ -2,6 +2,8 @@
 export interface PoEmailDeliveryState {
   status: "queued" | "processing" | "sent" | "partially_sent" | "dead_letter";
   documentHoldReason?: string | null;
+  lastErrorCode?: string | null;
+  providerMessageId?: string | null;
 }
 
 export function poEmailDeliveryPresentation(delivery: PoEmailDeliveryState): {
@@ -17,6 +19,25 @@ export function poEmailDeliveryPresentation(delivery: PoEmailDeliveryState): {
       description: "This saved document cannot be sent or replayed. Review the current purchase order and create a new email request.",
       needsAttention: true,
       canReplay: false,
+    };
+  }
+  if (
+    delivery.status === "dead_letter"
+    && (Boolean(delivery.providerMessageId) || delivery.lastErrorCode === "LOCAL_FINALIZE_FAILED_AFTER_SMTP_ACCEPT")
+  ) {
+    return {
+      label: "Accepted by provider (history sync needs attention)",
+      description: "The email provider accepted the message before local completion failed. Automatic retry and replay are disabled to prevent duplicate purchase orders.",
+      needsAttention: true,
+      canReplay: false,
+    };
+  }
+  if (delivery.status === "dead_letter" && delivery.lastErrorCode === "SMTP_OUTCOME_UNCERTAIN") {
+    return {
+      label: "Provider outcome uncertain",
+      description: "The connection closed before provider acceptance could be confirmed. Verify with the supplier or email provider before replaying.",
+      needsAttention: true,
+      canReplay: !held,
     };
   }
   const presentations = {

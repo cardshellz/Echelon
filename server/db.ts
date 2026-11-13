@@ -819,19 +819,12 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // on_hold rows restored to shipped/cancelled) ran long ago in prod; the
     // shipment status lifecycle belongs to the state machine, never to boot.
 
-    // 6. eBay listing control columns
-    await client.query(`ALTER TABLE ebay_category_mappings ADD COLUMN IF NOT EXISTS listing_enabled BOOLEAN NOT NULL DEFAULT true`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_listing_excluded BOOLEAN NOT NULL DEFAULT false`);
-    console.log("Checked eBay listing control columns (listing_enabled, ebay_listing_excluded)");
-
-    // 6b. Per-variant eBay listing exclusion
-    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_listing_excluded BOOLEAN NOT NULL DEFAULT false`);
-    console.log("Checked per-variant eBay listing exclusion column");
-
-    // 7. Per-product eBay browse category override columns
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_browse_category_id VARCHAR(20)`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_browse_category_name VARCHAR(200)`);
-    console.log("Checked per-product eBay browse category override columns");
+    // Retired (P4.1): the three eBay column blocks (6, 6b, 7).
+    // ebay_category_mappings.listing_enabled, product_variants.ebay_listing_excluded
+    // and products.ebay_browse_category_id/_name come from the tables' own CREATE
+    // in 0002/0071. products.ebay_listing_excluded is added by
+    // 051_ensure_catalog_columns.sql and made NOT NULL by the tracked migration
+    // *_products_ebay_listing_excluded_not_null.sql.
 
     // 8. eBay Item Specifics (Aspects) management tables
     await client.query(`
@@ -1046,11 +1039,9 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // exist, created by shellz-club. subscription_billing_log is not queried by
     // Echelon at all; if it is ever needed it belongs in a shellz-club migration.
 
-    // ─── Migration 053: OMS Shopify webhook columns ──────────
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS financial_status VARCHAR(30) DEFAULT 'paid'`);
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP`);
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMP`);
-    console.log("Checked OMS Shopify webhook columns (financial_status, cancelled_at, refunded_at)");
+    // Retired (P4.1): the OMS Shopify webhook column block. oms.oms_orders
+    // financial_status, cancelled_at and refunded_at come from the table's own
+    // CREATE in 0002_concerned_darwin.sql / 0071_create_namespaces.sql.
 
     // ─── Migration 0580: Forward Demand Events ──────────
     await client.query(`

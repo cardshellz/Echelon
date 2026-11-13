@@ -111,8 +111,9 @@ export async function processPoEmailOutboxBatch(dependencies: {
       held += 1;
       return;
     }
+    let result: EmailDeliveryResult;
     try {
-      const result = await deliver({
+      result = await deliver({
         to: delivery.toEmail,
         cc: delivery.ccEmail ?? undefined,
         subject: delivery.subject,
@@ -120,12 +121,19 @@ export async function processPoEmailOutboxBatch(dependencies: {
         text: delivery.textBody ?? undefined,
         messageId: delivery.messageId,
       });
-      await markDeliverySent(dbPool, delivery, result);
-      sent += 1;
     } catch (error) {
       const disposition = await markDeliveryFailed(dbPool, delivery, error, now);
       if (disposition === "dead_letter") deadLettered += 1;
       else retried += 1;
+      return;
+    }
+
+    try {
+      await markDeliverySent(dbPool, delivery, result);
+      sent += 1;
+    } catch (finalizeError) {
+      await parkAcceptedDeliveryAfterLocalFailure(dbPool, delivery, result, finalizeError, now);
+      deadLettered += 1;
     }
   }));
 
@@ -373,22 +381,136 @@ async function markDeliveryFailed(
   return deadLetter ? "dead_letter" : "queued";
 }
 
+async function parkAcceptedDeliveryAfterLocalFailure(
+  dbPool: PoEmailOutboxDbPool,
+  delivery: ClaimedDelivery,
+  result: EmailDeliveryResult,
+  finalizeError: unknown,
+  now: Date,
+): Promise<void> {
+  const errorDetail = finalizeError instanceof Error ? finalizeError.message : String(finalizeError);
+  const message = truncate(
+    `Provider accepted message (${result.messageId ?? "no-message-id"}), but local completion failed: ${errorDetail}. Automatic retry suppressed to prevent duplicate dispatch.`,
+    1000,
+  );
+  const updated = await dbPool.query(
+    `UPDATE procurement.po_email_outbox
+     SET status = 'dead_letter',
+         dead_lettered_at = $3,
+         provider_message_id = $4,
+         provider_response = $5,
+         last_error_code = 'LOCAL_FINALIZE_FAILED_AFTER_SMTP_ACCEPT',
+         last_error_message = $6,
+         lease_token = NULL,
+         lease_expires_at = NULL,
+         updated_at = $3
+     WHERE id = $1 AND status = 'processing' AND lease_token = $2
+     RETURNING id`,
+    [
+      delivery.id,
+      delivery.leaseToken,
+      now,
+      truncate(result.messageId, 500),
+      truncate(formatProviderResponse(result), 1000),
+      message,
+    ],
+  );
+  if (updated.rowCount !== 1) {
+    throw new Error(
+      `Delivery ${delivery.id} lost its worker lease after SMTP acceptance while parking local failure`,
+    );
+  }
+  console.error(`${LOG_PREFIX} Parked accepted delivery after local finalize failure`, {
+    deliveryId: delivery.id,
+    purchaseOrderId: delivery.purchaseOrderId,
+    providerMessageId: result.messageId,
+    error: errorDetail,
+  });
+}
+
+const PRE_COMMIT_SMTP_COMMANDS = new Set([
+  "CONN",
+  "EHLO",
+  "HELO",
+  "STARTTLS",
+  "AUTH",
+  "MAIL FROM",
+  "RCPT TO",
+]);
+
+const PRE_COMMIT_NETWORK_CODES = new Set([
+  "ECONNREFUSED",
+  "ENOTFOUND",
+  "EDNS",
+  "EAI_AGAIN",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+]);
+
+const AMBIGUOUS_POST_CONNECT_CODES = new Set([
+  "ETIMEDOUT",
+  "ESOCKET",
+  "ECONNRESET",
+  "EPIPE",
+]);
+
 export function classifyDeliveryError(error: unknown): {
   code: string;
   message: string;
   permanent: boolean;
+  uncertain: boolean;
 } {
   const value = error && typeof error === "object"
-    ? error as { code?: unknown; responseCode?: unknown }
+    ? error as { code?: unknown; responseCode?: unknown; command?: unknown }
     : {};
-  const code = typeof value?.code === "string" ? value.code : "SMTP_DELIVERY_FAILED";
+  const rawCode = typeof value?.code === "string" ? value.code : "SMTP_DELIVERY_FAILED";
   const responseCode = Number(value?.responseCode);
-  const permanent = (responseCode >= 500 && responseCode < 600)
-    || ["EENVELOPE", "EINVALID", "EAUTH"].includes(code);
+  const command = typeof value?.command === "string" ? value.command.trim().toUpperCase() : "";
+  const rawMessage = error instanceof Error ? error.message : String(error);
+
+  if ((responseCode >= 500 && responseCode < 600) || ["EENVELOPE", "EINVALID", "EAUTH"].includes(rawCode)) {
+    return {
+      code: rawCode,
+      message: rawMessage,
+      permanent: true,
+      uncertain: false,
+    };
+  }
+
+  // Explicit 4xx response or a pre-DATA / pre-connection failure proves SMTP did not accept DATA.
+  if (
+    (responseCode >= 400 && responseCode < 500)
+    || PRE_COMMIT_NETWORK_CODES.has(rawCode)
+    || (command.length > 0 && PRE_COMMIT_SMTP_COMMANDS.has(command))
+  ) {
+    return {
+      code: rawCode,
+      message: rawMessage,
+      permanent: false,
+      uncertain: false,
+    };
+  }
+
+  // Lost-response socket drop/timeout when DATA may already have been transmitted:
+  // park for operator verification rather than risking an automatic duplicate PO send (`PWF-01`).
+  if (
+    command === "DATA"
+    || command === "QUIT"
+    || AMBIGUOUS_POST_CONNECT_CODES.has(rawCode)
+  ) {
+    return {
+      code: "SMTP_OUTCOME_UNCERTAIN",
+      message: `Ambiguous transport failure (${rawCode}${command ? ` during ${command}` : ""}): ${rawMessage}. Automatic retry suppressed until provider/supplier receipt is verified.`,
+      permanent: true,
+      uncertain: true,
+    };
+  }
+
   return {
-    code,
-    message: error instanceof Error ? error.message : String(error),
-    permanent,
+    code: rawCode,
+    message: rawMessage,
+    permanent: false,
+    uncertain: false,
   };
 }
 
