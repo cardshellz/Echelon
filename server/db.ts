@@ -874,14 +874,10 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     await client.query(CHANNEL_PRICING_RULES_DDL);
     console.log("Checked channel_pricing_rules table");
 
-    // Migration: per-product and per-variant eBay policy overrides
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_fulfillment_policy_override VARCHAR(20)`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_return_policy_override VARCHAR(20)`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_payment_policy_override VARCHAR(20)`);
-    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_fulfillment_policy_override VARCHAR(20)`);
-    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_return_policy_override VARCHAR(20)`);
-    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_payment_policy_override VARCHAR(20)`);
-    console.log("Checked eBay policy override columns on products + product_variants");
+    // Retired (P4.1): the eBay policy override column block. The three
+    // ebay_*_policy_override columns on products and product_variants are
+    // created by 051_ensure_catalog_columns.sql and held at varchar(100) by the
+    // tracked migration *_catalog_ebay_policy_override_capacity.sql.
 
     // Migration: Make channel_allocation_rules.channel_id nullable for "All Channels" global rules
     await client.query(`ALTER TABLE channel_allocation_rules ALTER COLUMN channel_id DROP NOT NULL`);
