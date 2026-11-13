@@ -16,7 +16,7 @@ vi.mock("../../../../routes/middleware", () => ({
 }));
 vi.mock("../../../../middleware/idempotency", () => ({ requireIdempotency: () => (_req: Request, _res: Response, next: NextFunction) => next() }));
 vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../../notifications/notifications.service", () => ({}));
+vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 vi.mock("../../shipment-cost-update.commands", async importOriginal => ({
   ...await importOriginal<typeof import("../../shipment-cost-update.commands")>(),
   createShipmentCostUpdateCommands: () => ({ execute: mocks.execute }),

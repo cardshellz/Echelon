@@ -1,6 +1,6 @@
 import { randomUUID } from "crypto";
 import { pool } from "../../db";
-import { sendEmail, type EmailDeliveryResult } from "../notifications/email.service";
+import { sendEmail, type EmailDeliveryResult } from "../notifications/email-delivery.api";
 import type { PoEmailOutboxDbPool } from "./po-email-outbox.service";
 import { inspectPoEmailDocument, type PoEmailDocumentMetadata, type PoEmailDocumentHoldReason } from "./po-email-document-contract";
 
