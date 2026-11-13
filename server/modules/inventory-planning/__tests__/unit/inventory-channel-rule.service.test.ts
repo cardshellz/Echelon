@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { ChannelRuleService, type ChannelRuleStore } from "../../application/inventory-channel-rule.service";
 import { inventoryCutoverEvidenceHash } from "../../domain/inventory-cutover-manifest";
-import { channelRuleReviewSchema, setChannelRuleSchema } from "@shared/types/inventory-channel-rule";
+import { channelRuleReviewSchema, copyChannelRulesSchema, setChannelRuleSchema } from "@shared/types/inventory-channel-rule";
 
 const HASH_A = "a".repeat(64);
 const HASH_B = "b".repeat(64);
@@ -24,7 +24,7 @@ const setResult = { receipt, quantities: review.quantities, skippedDestinations:
 
 function fixture() {
   const store = { review: vi.fn<ChannelRuleStore["review"]>(), apply: vi.fn<ChannelRuleStore["apply"]>(),
-    set: vi.fn<ChannelRuleStore["set"]>(),
+    set: vi.fn<ChannelRuleStore["set"]>(), copy: vi.fn<ChannelRuleStore["copy"]>(),
     progress: vi.fn<ChannelRuleStore["progress"]>(async () => null) } satisfies ChannelRuleStore;
   const service = new ChannelRuleService(store, { now: () => new Date("2026-11-07T12:00:00.000Z") });
   return { store, service };
@@ -183,5 +183,52 @@ describe("single channel rule review contract", () => {
     for (const proposed of ["-1", "1.5", "01"]) {
       expect(channelRuleReviewSchema.safeParse({ ...review, quantities: [{ ...review.quantities[0], proposed }] }).success).toBe(false);
     }
+  });
+});
+
+describe("copy stock rules boundary", () => {
+  const copyCommand = { sourceChannelId: 36, targetChannelId: 104, changeReason: null, idempotencyKey: "copy-rules" };
+  const copyResult = { receipt: { channelId: 104, appliedAt: "2026-11-07T12:00:00.000Z", appliedBy: "operator", reviewHash: HASH_A,
+    publicationIds: [], changedDefinitions: 3, alreadyApplied: false }, sourceChannelId: 36, sourceChannelName: "Shopify",
+    targetChannelName: "Walmart", copiedExceptions: 2, skippedRules: [], changedQuantities: 0, skippedDestinations: [], warnings: [] };
+
+  it("rejects copying a channel onto itself, extra fields and malformed identities before the store", async () => {
+    const { store, service } = fixture();
+    await expect(service.copy({ ...copyCommand, targetChannelId: 36 }, "operator")).rejects.toThrow("different channel");
+    await expect(service.copy({ ...copyCommand, sourceChannelId: 0 }, "operator")).rejects.toThrow();
+    await expect(service.copy({ ...copyCommand, overwrite: true }, "operator")).rejects.toThrow();
+    await expect(service.copy({ ...copyCommand, idempotencyKey: " " }, "operator")).rejects.toThrow();
+    await expect(service.copy(copyCommand, "")).rejects.toThrow();
+    expect(store.copy).not.toHaveBeenCalled();
+  });
+
+  it("keeps the retry key short enough for each copied version row behind its prefix and position", () => {
+    expect(copyChannelRulesSchema.safeParse({ ...copyCommand, idempotencyKey: "k".repeat(80) }).success).toBe(true);
+    expect(copyChannelRulesSchema.safeParse({ ...copyCommand, idempotencyKey: "k".repeat(81) }).success).toBe(false);
+    // "rule-copy:" + 80 + ":" + up to 4 digits (5,000 rules at most) fits the 120-character column.
+    expect("rule-copy:".length + 80 + 1 + String(4_999).length).toBeLessThanOrEqual(120);
+  });
+
+  it("pins the actor, kind and injected time, and never matches a set or apply that reused the key", async () => {
+    const { store, service } = fixture();
+    store.copy.mockResolvedValue(copyResult);
+    store.set.mockResolvedValue(setResult);
+    await service.copy(copyCommand, "operator");
+    await service.copy({ ...copyCommand, changeReason: undefined }, "operator");
+    expect(store.copy.mock.calls[1]).toEqual(store.copy.mock.calls[0]);
+    expect(store.copy.mock.calls[0][2]).toBe(inventoryCutoverEvidenceHash({ kind: "channel_rule_copy", command: copyCommand, actor: "operator" }));
+    expect(store.copy.mock.calls[0][3]).toEqual(new Date("2026-11-07T12:00:00.000Z"));
+    await service.copy(copyCommand, "other-operator");
+    await service.copy({ ...copyCommand, sourceChannelId: 67 }, "operator");
+    expect(store.copy.mock.calls[2][2]).not.toBe(store.copy.mock.calls[0][2]);
+    expect(store.copy.mock.calls[3][2]).not.toBe(store.copy.mock.calls[0][2]);
+    await service.set({ ...setCommand, idempotencyKey: copyCommand.idempotencyKey }, "operator");
+    expect(store.set.mock.calls[0][2]).not.toBe(store.copy.mock.calls[0][2]);
+  });
+
+  it("reports an unverifiable result after a committed copy as a server error, never a rejection", async () => {
+    const { store, service } = fixture();
+    store.copy.mockResolvedValue({ ...copyResult, copiedExceptions: -1 });
+    await expect(service.copy(copyCommand, "operator")).rejects.toMatchObject({ code: "CHANNEL_RULE_RESULT_INVALID", status: 500 });
   });
 });
