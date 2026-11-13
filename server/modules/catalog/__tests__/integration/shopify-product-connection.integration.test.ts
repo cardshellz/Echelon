@@ -82,6 +82,8 @@ integration("durable per-product Shopify connections with real mapping and price
     expect((await owner.getSummary(product.id, 7)).status).toBe("consistent");
     // An unrelated channel feed on the same SKU must survive the delisting.
     await database.pool.query("INSERT INTO channels.channel_feeds(channel_id,product_variant_id,channel_type,channel_variant_id,is_active) VALUES(8,$1,'shopify','777',1)", [c5.id]);
+    // An existing override on the store keeps its other fields; only is_listed changes.
+    await database.pool.query("INSERT INTO channels.channel_variant_overrides(channel_id,product_variant_id,name_override) VALUES(7,$1,'Store name')", [c5.id]);
     const stock = await inventory();
 
     live = { ...live, variants: [live.variants[0]] }; // C5's variant deleted in Shopify
@@ -92,8 +94,8 @@ integration("durable per-product Shopify connections with real mapping and price
     expect(result.after.variants.map(variant => variant.variantId)).toEqual([p1.id]);
 
     const q = async (text: string) => (await database.pool.query(text, [c5.id])).rows;
-    expect(await q("SELECT channel_id,is_listed FROM channels.channel_variant_overrides WHERE product_variant_id=$1 ORDER BY channel_id"))
-      .toEqual([{ channel_id: 7, is_listed: 0 }]);
+    expect(await q("SELECT channel_id,is_listed,name_override FROM channels.channel_variant_overrides WHERE product_variant_id=$1 ORDER BY channel_id"))
+      .toEqual([{ channel_id: 7, is_listed: 0, name_override: "Store name" }]);
     expect(await q("SELECT channel_id,is_active,channel_product_id,channel_variant_id FROM channels.channel_feeds WHERE product_variant_id=$1 ORDER BY channel_id"))
       .toEqual([{ channel_id: 7, is_active: 0, channel_product_id: null, channel_variant_id: "888012" },
         { channel_id: 8, is_active: 1, channel_product_id: null, channel_variant_id: "777" }]);

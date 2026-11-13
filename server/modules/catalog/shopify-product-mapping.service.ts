@@ -25,6 +25,7 @@ import {
 } from "./shopify-product-mapping.domain";
 import { enqueueShippingGroupMetafieldWrite } from "./shipping-group-sync";
 import { upsertChannelProductIdentity } from "../channels/product-identity.api";
+import { markChannelVariantNotListed } from "../channels/channel-variant-listing.api";
 import { retryPublicationSelectionWrite } from "../inventory-planning/publication-selection-retry";
 
 const DEFAULT_SHOPIFY_API_VERSION = "2024-01";
@@ -522,17 +523,11 @@ async function delistDeletedShopifyVariants(
   },
 ): Promise<number> {
   for (const delisted of input.delistedVariants) {
-    await tx.insert(channelVariantOverrides)
-      .values({
-        channelId: input.channelId,
-        productVariantId: delisted.variantId,
-        isListed: 0,
-        updatedAt: input.writtenAt,
-      })
-      .onConflictDoUpdate({
-        target: [channelVariantOverrides.channelId, channelVariantOverrides.productVariantId],
-        set: { isListed: 0, updatedAt: input.writtenAt },
-      });
+    await markChannelVariantNotListed(tx, {
+      channelId: input.channelId,
+      productVariantId: delisted.variantId,
+      at: input.writtenAt,
+    });
 
     await tx.update(channelFeeds)
       .set({
