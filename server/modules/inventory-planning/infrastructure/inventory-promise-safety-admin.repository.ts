@@ -43,7 +43,9 @@ import {
   type DemandConsumptionEvent,
 } from "../domain/inventory-demand-evidence";
 
-type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+// Statements only. A handle bound to one pinned client (the one-step set command) satisfies it as well
+// as a real transaction, and it leaves no way to open or end a transaction from inside a writer.
+type Transaction = Pick<Parameters<Parameters<typeof db.transaction>[0]>[0], "execute" | "insert" | "update" | "delete" | "select">;
 const DEMAND_REFRESH_LOCK_NAMESPACE = 918424;
 const IDEMPOTENCY_LOCK_NAMESPACE = 918420;
 const DEMAND_REFRESH_RECEIPT_PREFIX = "inventory-demand-evidence:";
@@ -188,7 +190,19 @@ implements InventoryPromiseSafetyAdminStore {
   async updatePromiseSafetyPolicyDraft(
     command: UpdatePromiseSafetyPolicyDraftCommand,
   ) {
-    return this.database.transaction(async (tx) => {
+    return this.database.transaction((tx) => this.updatePromiseSafetyPolicyDraftInsideTransaction(tx, command));
+  }
+
+  /**
+   * The one writer that replaces a saved, unapplied promise-safety version. The
+   * one-step set command supplies its own transaction (see
+   * createPromiseSafetyPolicyDraftInsideTransaction). The caller owns
+   * BEGIN/COMMIT; nothing here opens or ends a transaction.
+   */
+  async updatePromiseSafetyPolicyDraftInsideTransaction(
+    tx: Transaction,
+    command: UpdatePromiseSafetyPolicyDraftCommand,
+  ) {
       const receiptKey = `${POLICY_UPDATE_RECEIPT_PREFIX}${command.idempotencyKey}`;
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(
@@ -312,7 +326,6 @@ implements InventoryPromiseSafetyAdminStore {
         },
       }).where(eq(idempotencyKeys.key, receiptKey));
       return result;
-    });
   }
 
   async refreshDemandEvidence(

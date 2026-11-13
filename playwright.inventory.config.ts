@@ -23,6 +23,7 @@ export default defineConfig({
     "inventory-publication-target-resume.spec.ts",
     "channel-inventory-workspace.spec.ts",
     "product-stock-rules.spec.ts",
+    "channel-inventory-available-stock.spec.ts",
     "walmart-channel-workspace.spec.ts",
     "catalog-images.spec.ts",
     "shopify-product-connection.spec.ts",
