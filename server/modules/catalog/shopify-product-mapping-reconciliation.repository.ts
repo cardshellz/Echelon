@@ -12,6 +12,7 @@ import {
   channelConnections,
   channelFeeds,
   channelListings,
+  channelVariantOverrides,
   channels,
   products,
   productVariants,
@@ -424,9 +425,19 @@ async function loadMappedProducts(
         eq(channelListings.channelId, channelId),
       ),
     )
+    .leftJoin(
+      channelVariantOverrides,
+      and(
+        eq(channelVariantOverrides.productVariantId, productVariants.id),
+        eq(channelVariantOverrides.channelId, channelId),
+      ),
+    )
     .where(and(
       inArray(productVariants.productId, productIds),
       eq(productVariants.salesEligibility, "sellable"),
+      // Same rule as the product mapping service: a SKU marked not listed on
+      // this store has no Shopify mapping to reconcile.
+      sql`COALESCE(${channelVariantOverrides.isListed}, 1) <> 0`,
     ))
     .orderBy(asc(productVariants.productId), asc(productVariants.id));
 
