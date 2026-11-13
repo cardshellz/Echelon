@@ -109,7 +109,7 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
     expect(input.triggeredBy).toBe(reason);
   });
 
-  it.each(["existing task", "picker shortage"] as const)("completes an exact case break without consuming reserved stock: %s", async (entryPoint) => {
+  it.each(["existing task", "existing task in place", "picker shortage"] as const)("completes an exact case break without consuming reserved stock: %s", async (entryPoint) => {
     expect((await context.pool.query("SELECT * FROM inventory.quantity_ledger_opening")).rows).toEqual([]);
     const executionAt = new Date("2026-09-03T13:15:30.000Z");
     const [warehouse] = await db.insert(warehouses).values({
@@ -188,9 +188,11 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
       costProvisional: 0,
       costSource: "po",
     });
+    // An in-place break leaves the smaller units in the case location itself.
+    const targetLocation = entryPoint === "existing task in place" ? sourceLocation : pickLocation;
     const taskInput = {
       fromLocationId: sourceLocation.id,
-      toLocationId: pickLocation.id,
+      toLocationId: targetLocation.id,
       warehouseId: warehouse.id,
       productId: product.id,
       sourceProductVariantId: sourceVariant.id,
@@ -214,7 +216,7 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
     const replenishment = createReplenishmentService(db, inventory, () => executionAt, legacyTransformationExecutionAuthority);
 
     let task: typeof replenTasks.$inferSelect;
-    if (entryPoint === "existing task") {
+    if (entryPoint !== "picker shortage") {
       [task] = await db.insert(replenTasks).values(taskInput).returning();
       const publish=vi.spyOn(inventory,"publishInventoryChange").mockRejectedValueOnce(new Error("publication unavailable after movement"));
       await expect(replenishment.executeTask(task.id, "system:test"))
@@ -268,7 +270,7 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
       SELECT product_variant_id, warehouse_location_id, variant_qty, reserved_qty
       FROM inventory.inventory_levels
       WHERE (product_variant_id = ${sourceVariant.id} AND warehouse_location_id = ${sourceLocation.id})
-         OR (product_variant_id = ${pickVariant.id} AND warehouse_location_id = ${pickLocation.id})
+         OR (product_variant_id = ${pickVariant.id} AND warehouse_location_id = ${targetLocation.id})
       ORDER BY product_variant_id, warehouse_location_id
     `);
     expect(balances.rows).toEqual(expect.arrayContaining([
@@ -280,7 +282,7 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
       }),
       expect.objectContaining({
         product_variant_id: pickVariant.id,
-        warehouse_location_id: pickLocation.id,
+        warehouse_location_id: targetLocation.id,
         variant_qty: remainingTargetQty,
         reserved_qty: 0,
       }),
@@ -293,7 +295,7 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
              SUM(qty_on_hand * total_unit_cost_mills)::bigint AS value_mills
       FROM inventory.inventory_lots
       WHERE (product_variant_id = ${sourceVariant.id} AND warehouse_location_id = ${sourceLocation.id})
-         OR (product_variant_id = ${pickVariant.id} AND warehouse_location_id = ${pickLocation.id})
+         OR (product_variant_id = ${pickVariant.id} AND warehouse_location_id = ${targetLocation.id})
       GROUP BY product_variant_id
       ORDER BY product_variant_id
     `);
@@ -327,7 +329,7 @@ dbDescribe("Replenishment canonical-claim safety / legacy compatibility", () => 
       SELECT EXTRACT(EPOCH FROM received_at)::double precision AS received_epoch
       FROM inventory.inventory_lots
       WHERE product_variant_id = ${pickVariant.id}
-        AND warehouse_location_id = ${pickLocation.id}
+        AND warehouse_location_id = ${targetLocation.id}
       ORDER BY id
     `);
     expect(outputLotReadback.rows).not.toHaveLength(0);

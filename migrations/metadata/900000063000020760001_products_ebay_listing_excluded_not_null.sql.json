@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000063000020760001_products_ebay_listing_excluded_not_null.sql",
+  "generation": 63,
+  "pr": 2076,
+  "ordinal": 1,
+  "after": [
+    "900000062000020730001_outbound_shipment_hold_flags.sql"
+  ]
+}
