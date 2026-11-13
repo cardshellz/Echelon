@@ -843,7 +843,7 @@ export class PickingUseCases {
 
       if (result.created) {
         try {
-          const { notify } = await import("../notifications/notifications.service");
+          const { notify } = await import("../notifications/in-app-notifications.api");
           await notify("allocation_blocked", {
             title: `Allocation blocked: ${item.sku}`,
             message,
@@ -1097,7 +1097,7 @@ export class PickingUseCases {
     });
 
     try {
-      const { notify } = await import("../notifications/notifications.service");
+      const { notify } = await import("../notifications/in-app-notifications.api");
       const notificationType = autoFixedSetup
         ? "allocation_auto_fixed"
         : reviewNeeded
@@ -2904,7 +2904,7 @@ export class PickingUseCases {
     else await this.storage.createPickingLog(log);
 
     try {
-      const { notify } = await import("../notifications/notifications.service");
+      const { notify } = await import("../notifications/in-app-notifications.api");
       await notify("allocation_review_needed", {
         title: `Inventory review needed: ${params.item.sku}`,
         message: params.resolution.message,
@@ -4104,7 +4104,7 @@ export class PickingUseCases {
       // break may have occurred. Notify leads to verify source bins.
       if (adjustment > 0) {
         try {
-          const { notify } = await import("../notifications/notifications.service");
+          const { notify } = await import("../notifications/in-app-notifications.api");
           await notify("cycle_count_needed", {
             title: `Bin variance: ${variant.sku}`,
             message: `Bin has +${adjustment} more than expected ` +

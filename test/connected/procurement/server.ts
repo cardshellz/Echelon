@@ -219,7 +219,7 @@ async function main(): Promise<void> {
     const { registerSettingsRoutes } = await import("../../../server/modules/warehouse/settings.routes");
     const { registerProductRoutes } = await import("../../../server/modules/catalog/catalog.routes");
     const { registerInventoryRoutes } = await import("../../../server/modules/inventory/inventory.routes");
-    const { registerNotificationRoutes } = await import("../../../server/modules/notifications/notifications.routes");
+    const { registerNotificationRoutes } = await import("../../../server/modules/notifications/routes.api");
     registerAuthRoutes(app);
     registerPurchasingRoutes(app);
     registerWarehouseRoutes(app);

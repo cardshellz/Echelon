@@ -21,7 +21,7 @@ export const RECEIVING_READ_GRANTS: readonly PermissionGrant[] = [
 export const DEFAULT_RECEIVING_LIST_LIMIT = 500;
 export const MAX_RECEIVING_LIST_LIMIT = 500;
 import { requireIdempotency } from "../../middleware/idempotency";
-import * as notificationService from "../notifications/notifications.service";
+import * as notificationService from "../notifications/in-app-notifications.api";
 import { millsToCents, centsToMills } from "@shared/utils/money";
 
 /**
