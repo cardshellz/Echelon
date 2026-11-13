@@ -35,6 +35,8 @@ import { ProductDefinitionService } from "../../application/inventory-product-de
 import { PostgresProductDefinitionStore } from "../../infrastructure/inventory-product-definition.repository";
 import { SafetyDefinitionService } from "../../application/inventory-safety-definition.service";
 import { PostgresSafetyDefinitionStore } from "../../infrastructure/inventory-safety-definition.repository";
+import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
+import { PostgresInventoryPromiseSafetyAdminStore } from "../../infrastructure/inventory-promise-safety-admin.repository";
 import { ChannelDefinitionService } from "../../application/inventory-channel-definition.service";
 import { PostgresChannelDefinitionStore } from "../../infrastructure/inventory-channel-definition.repository";
 import { ChannelRuleService } from "../../application/inventory-channel-rule.service";
@@ -1228,4 +1230,75 @@ dbDescribe.sequential.each([
     expect((await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows).toEqual(claims);
     expect((await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows).toEqual(authority);
   },30000);
+  it("sets one promise-safety setting in one transaction: a refused or failed set leaves no rows; a good one saves, applies and replays", async () => {
+    // The real version writers. They only ever run on the set command's own transaction client, so they are given
+    // no connection of their own (the process-global one is disabled in this suite).
+    const drafts = { create: new PostgresInventoryAvailabilityMasterDataStore(null as never), update: new PostgresInventoryPromiseSafetyAdminStore(null as never) };
+    const service = new SafetyDefinitionService(new PostgresSafetyDefinitionStore(database.pool, drafts), { now:() => now });
+    // Every table the three-step path writes: versions, heads, draft receipts, audit events, apply receipts, queued stock.
+    const written = ["inventory.promise_safety_policy_versions","inventory.promise_safety_policy_heads","public.idempotency_keys",
+      "public.audit_events","inventory.safety_definition_applications","inventory.inventory_publication_outbox"];
+    const rowsWritten = () => Promise.all(written.map(async table => (await database.pool.query(`SELECT * FROM ${table} ORDER BY 1`)).rows));
+    const readHead = async (scopeKey:string) => (await database.pool.query<{ revision:string; active_policy_id:number|null; draft_policy_id:number|null }>(
+      "SELECT revision::text AS revision,active_policy_id,draft_policy_id FROM inventory.promise_safety_policy_heads WHERE scope_key=$1",[scopeKey])).rows[0] ?? null;
+    const business = (await readHead("business"))!;
+    const hold = (fixedUnits:number) => ({ policyMode:"fixed_units" as const, fixedUnits });
+    const good = { scope:{ scopeType:"business" as const }, value:hold(3), expectedHeadRevision:business.revision,
+      changeReason:"Hold three back", idempotencyKey:"safety-set-good" };
+
+    // A setting that changed since it was loaded is refused before anything is written.
+    const before = await rowsWritten();
+    await expect(service.set({ ...good, expectedHeadRevision:(BigInt(business.revision)+BigInt(1)).toString(), idempotencyKey:"safety-set-stale" },"operator"))
+      .rejects.toMatchObject({ code:"DEFINITION_DRAFT_CHANGED" });
+    await expect(service.set({ ...good, scope:{ scopeType:"network_variant", productVariantId:101 }, expectedHeadRevision:"999", idempotencyKey:"safety-set-stale-sku" },"operator"))
+      .rejects.toMatchObject({ code:"DEFINITION_DRAFT_CHANGED" });
+    expect(await rowsWritten()).toEqual(before);
+
+    // A failure at the very last write rolls the saved version, its audit event and the queued stock back with it.
+    await database.pool.query(`CREATE FUNCTION inventory.test_safety_set_receipt_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'synthetic safety set receipt failure'; END $$;
+      CREATE TRIGGER test_safety_set_receipt_failure BEFORE INSERT ON inventory.safety_definition_applications
+      FOR EACH ROW EXECUTE FUNCTION inventory.test_safety_set_receipt_failure()`);
+    try { await expect(service.set(good,"operator")).rejects.toThrow("synthetic safety set receipt failure"); }
+    finally { await database.pool.query("DROP TRIGGER test_safety_set_receipt_failure ON inventory.safety_definition_applications; DROP FUNCTION inventory.test_safety_set_receipt_failure()"); }
+    expect(await rowsWritten()).toEqual(before);
+    expect(await readHead("business")).toEqual(business);
+
+    // The good set commits once; a concurrent retry of the same command replays it.
+    const results = await Promise.all([service.set(good,"operator"),service.set(good,"operator")]);
+    expect(results.map(result => result.receipt.alreadyApplied).sort()).toEqual([false,true]);
+    const first = results.find(result => !result.receipt.alreadyApplied)!;
+    expect(results.find(result => result.receipt.alreadyApplied)).toEqual({ ...first, receipt:{ ...first.receipt, alreadyApplied:true } });
+    expect(first.affectedProducts).toBeGreaterThan(0);
+    expect(first.changedRows).toBeGreaterThanOrEqual(first.changes.length);
+    expect(await readHead("business")).toMatchObject({ active_policy_id:first.receipt.policyId, draft_policy_id:null });
+    expect((await database.pool.query("SELECT lifecycle_status,policy_mode,fixed_units,change_reason FROM inventory.promise_safety_policy_versions WHERE id=$1",
+      [first.receipt.policyId])).rows[0]).toEqual({ lifecycle_status:"sealed", policy_mode:"fixed_units", fixed_units:3, change_reason:"Hold three back" });
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.inventory_publication_outbox WHERE id=ANY($1::bigint[])",
+      [first.receipt.publicationIds])).rows[0].n).toBe(first.receipt.publicationIds.length);
+    expect((await database.pool.query("SELECT scope_key,policy_id,actor FROM inventory.safety_definition_applications WHERE idempotency_key='safety-set-good'")).rows)
+      .toEqual([{ scope_key:"business", policy_id:first.receipt.policyId, actor:"operator" }]);
+    expect((await service.progress("business"))?.receipt.policyId).toBe(first.receipt.policyId);
+    await expect(service.set(good,"another-user")).rejects.toMatchObject({ code:"DEFINITION_COMMAND_CONFLICT" });
+    // The business setting can never be "inherit": nothing is above it.
+    await expect(service.set({ ...good, value:{ policyMode:"inherit" }, idempotencyKey:"safety-set-inherit" },"operator")).rejects.toThrow();
+
+    // A SKU setting wins over the business one for that SKU; "inherit" hands it back. No note is needed.
+    const skuScope = { scopeType:"network_variant" as const, productVariantId:101 };
+    const skuBefore = await readHead("network:variant:101");
+    const sku = await service.set({ scope:skuScope, value:hold(7), expectedHeadRevision:skuBefore?.revision ?? null, idempotencyKey:"safety-set-sku" },"operator");
+    const skuHead = (await readHead("network:variant:101"))!;
+    expect(skuHead).toMatchObject({ active_policy_id:sku.receipt.policyId, draft_policy_id:null });
+    expect((await database.pool.query("SELECT fixed_units FROM inventory.promise_safety_policy_versions WHERE id=$1",[sku.receipt.policyId])).rows[0])
+      .toEqual({ fixed_units:7 });
+    const cleared = await service.set({ scope:skuScope, value:{ policyMode:"inherit" }, expectedHeadRevision:skuHead.revision, idempotencyKey:"safety-set-sku-clear" },"operator");
+    expect((await database.pool.query("SELECT policy_mode FROM inventory.promise_safety_policy_versions WHERE id=$1",[cleared.receipt.policyId])).rows[0].policy_mode).toBe("inherit");
+
+    // The screen's read: the business setting and each SKU setting, named.
+    const overview = await service.overview();
+    expect(overview.runtimeAuthority).toBe("canonical");
+    expect(overview.business).toMatchObject({ scopeKey:"business", value:hold(3), hasUnappliedChange:false });
+    expect(overview.exceptions.find(row => row.scopeKey==="network:variant:101")).toMatchObject({
+      productId:20, productVariantId:101, sku:"P5", value:{ policyMode:"inherit" }, warehouseId:null, hasUnappliedChange:false });
+  },60000);
 });

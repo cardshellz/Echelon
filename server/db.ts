@@ -806,10 +806,8 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // 0574_oms_engine_agnostic_refs.sql; and the three wms.outbound_shipments
     // engine columns from 0573_engine_agnostic_shipment_refs.sql.
 
-    // 5c. Hold flag columns (Phase 1a of SHIPMENT-STATE-MACHINE-DESIGN.md).
-    await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS held BOOLEAN NOT NULL DEFAULT false`);
-    await client.query(`ALTER TABLE wms.outbound_shipments ADD COLUMN IF NOT EXISTS held_at TIMESTAMP`);
-    console.log("Checked hold flag columns on outbound_shipments (Phase 1a)");
+    // Retired (P4.1): the hold-flag block. wms.outbound_shipments.held and
+    // held_at are created by the tracked migration *_outbound_shipment_hold_flags.sql.
 
     // P0.2: three boot-time hold/status rewrites were REMOVED here (audit F2,
     // CRITICAL). The worst — `SET held = false WHERE held = true` — silently
