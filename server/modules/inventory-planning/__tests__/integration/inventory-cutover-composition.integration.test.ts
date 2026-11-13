@@ -1230,6 +1230,84 @@ dbDescribe.sequential.each([
     expect((await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows).toEqual(claims);
     expect((await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows).toEqual(authority);
   },30000);
+  it("copies a channel's stock rules to a channel with none in one transaction: a refused or failed copy leaves no rows; a good one applies and replays", async () => {
+    const drafts = new PostgresInventoryChannelExposureAdminStore(null as never, null as never);
+    const service = new ChannelRuleService(new PostgresChannelRuleStore(database.pool, drafts), { now:() => now });
+    await database.pool.query("INSERT INTO channels.channels(id,name,provider) VALUES(90,'New marketplace','walmart'),(91,'Empty marketplace','walmart')");
+    const written = ["inventory.channel_exposure_policy_versions","inventory.channel_exposure_policy_heads","public.idempotency_keys",
+      "public.audit_events","inventory.channel_definition_applications","inventory.inventory_publication_outbox"];
+    const rowsWritten = () => Promise.all(written.map(async table => (await database.pool.query(`SELECT * FROM ${table} ORDER BY 1`)).rows));
+    // The rules in effect on a channel, as the numbers a copy carries (never the warehouse choice).
+    const rules = async (channelId: number) => (await database.pool.query(`SELECT p.scope_type,p.product_id,p.product_variant_id,
+        p.allocation_semantics,p.eligible,p.share_bps,p.holdback_sellable_units::text AS buffer,p.max_publish_mode,
+        p.max_publish_sellable_units::text AS max_units,p.min_publish_sellable_units::text AS hide_below
+      FROM inventory.channel_exposure_policy_heads h JOIN inventory.channel_exposure_policy_versions p ON p.id=h.active_policy_id
+      WHERE h.channel_id=$1 AND p.inherit_all=false ORDER BY p.scope_type,p.product_id,p.product_variant_id`, [channelId])).rows;
+    const stock = (await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;
+    const claims = (await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows;
+    const authority = (await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows;
+    const targets = (await database.pool.query("SELECT * FROM inventory.inventory_publication_targets ORDER BY id")).rows;
+    const source = await rules(36);
+    // Channel 36 has its default and the SKU rule the previous test set (Max 0).
+    expect(source.map(row => row.scope_type)).toContain("channel");
+    expect(source.find(row => row.product_variant_id === 101)).toMatchObject({ max_publish_mode:"units", max_units:"0" });
+    const sourceHeads = (await database.pool.query("SELECT * FROM inventory.channel_exposure_policy_heads WHERE channel_id=36 ORDER BY scope_key")).rows;
+
+    // Refusals write nothing at all.
+    const before = await rowsWritten();
+    await expect(service.copy({ sourceChannelId:36, targetChannelId:36, idempotencyKey:"copy-self" },"operator")).rejects.toThrow("different channel");
+    await expect(service.copy({ sourceChannelId:91, targetChannelId:90, idempotencyKey:"copy-empty" },"operator"))
+      .rejects.toMatchObject({ code:"CHANNEL_RULE_COPY_SOURCE_EMPTY", status:409 });
+    await expect(service.copy({ sourceChannelId:36, targetChannelId:999, idempotencyKey:"copy-missing" },"operator"))
+      .rejects.toMatchObject({ code:"CHANNEL_RULE_NOT_FOUND", status:404 });
+    await expect(service.copy({ sourceChannelId:90, targetChannelId:36, idempotencyKey:"copy-over" },"operator"))
+      .rejects.toMatchObject({ code:"CHANNEL_RULE_COPY_TARGET_HAS_RULES", status:409 });
+    expect(await rowsWritten()).toEqual(before);
+    // A failure at the very last write (the receipt) rolls back every copied rule, its audit event and the queued stock.
+    const good = { sourceChannelId:36, targetChannelId:90, idempotencyKey:"copy-good" };
+    await database.pool.query(`CREATE FUNCTION inventory.test_rule_copy_receipt_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'synthetic rule copy receipt failure'; END $$;
+      CREATE TRIGGER test_rule_copy_receipt_failure BEFORE INSERT ON inventory.channel_definition_applications
+      FOR EACH ROW EXECUTE FUNCTION inventory.test_rule_copy_receipt_failure()`);
+    try { await expect(service.copy(good,"operator")).rejects.toThrow("synthetic rule copy receipt failure"); }
+    finally { await database.pool.query("DROP TRIGGER test_rule_copy_receipt_failure ON inventory.channel_definition_applications; DROP FUNCTION inventory.test_rule_copy_receipt_failure()"); }
+    expect(await rowsWritten()).toEqual(before);
+    expect(await rules(90)).toEqual([]);
+
+    // The same command now succeeds; a concurrent retry with the same key is one logical command.
+    const results = await Promise.all([service.copy(good,"operator"),service.copy(good,"operator")]);
+    expect(results.map(result => result.receipt.alreadyApplied).sort()).toEqual([false,true]);
+    const [first, second] = results;
+    expect({ ...second, receipt:{ ...second.receipt, alreadyApplied:false } }).toEqual({ ...first, receipt:{ ...first.receipt, alreadyApplied:false } });
+    expect(first).toMatchObject({ sourceChannelId:36, targetChannelName:"New marketplace", copiedExceptions:source.length-1, skippedRules:[],
+      receipt:{ channelId:90, appliedBy:"operator", changedDefinitions:source.length } });
+    // The target now has the same numbers, in effect, with nothing waiting and no warehouse choice carried over.
+    expect(await rules(90)).toEqual(source);
+    expect((await database.pool.query(`SELECT p.lifecycle_status,p.created_by,p.sealed_by,p.change_reason,p.source_fulfillment_node_ids,
+        h.draft_policy_id,left(p.idempotency_key,20) AS key
+      FROM inventory.channel_exposure_policy_heads h JOIN inventory.channel_exposure_policy_versions p ON p.id=h.active_policy_id
+      WHERE h.channel_id=90 AND p.scope_type='variant'`)).rows).toEqual([{ lifecycle_status:"sealed", created_by:"operator", sealed_by:"operator",
+      change_reason:"Copied from Test Shopify.", source_fulfillment_node_ids:null, draft_policy_id:null, key:"rule-copy:copy-good:" }]);
+    expect((await database.pool.query("SELECT count(*)::int AS waiting FROM inventory.channel_exposure_policy_heads WHERE channel_id=90 AND draft_policy_id IS NOT NULL")).rows)
+      .toEqual([{ waiting:0 }]);
+    expect((await database.pool.query("SELECT actor,review->>'kind' AS kind,(review->>'sourceChannelId')::int AS source FROM inventory.channel_definition_applications WHERE idempotency_key='copy-good'")).rows)
+      .toEqual([{ actor:"operator", kind:"channel_rule_copy", source:36 }]);
+    // The source is untouched, and a channel that now has rules cannot be copied over.
+    expect((await database.pool.query("SELECT * FROM inventory.channel_exposure_policy_heads WHERE channel_id=36 ORDER BY scope_key")).rows).toEqual(sourceHeads);
+    await expect(service.copy(good,"another-user")).rejects.toMatchObject({ code:"CHANNEL_RULE_COMMAND_CONFLICT" });
+    const afterCopy = await rowsWritten();
+    await expect(service.copy({ ...good, idempotencyKey:"copy-again" },"operator")).rejects.toMatchObject({ code:"CHANNEL_RULE_COPY_TARGET_HAS_RULES" });
+    expect(await rowsWritten()).toEqual(afterCopy);
+    // One retry-key space with the single-rule set: the key cannot be replayed as a different command.
+    await expect(service.set({ scope:{ scopeType:"variant", channelId:36, productId:20, productVariantId:101 },
+      value:{ allocationSemantics:null, eligible:null, shareBps:null, holdbackSellableUnits:null, maxPublish:{ mode:"units", units:"0" }, minPublishSellableUnits:null },
+      expectedHeadRevision:"1", expectedDraftPolicyId:null, expectedDraftDefinitionHash:null, changeReason:"x", idempotencyKey:"copy-good" },"operator"))
+      .rejects.toMatchObject({ code:"CHANNEL_RULE_COMMAND_CONFLICT" });
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows).toEqual(stock);
+    expect((await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows).toEqual(claims);
+    expect((await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows).toEqual(authority);
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_targets ORDER BY id")).rows).toEqual(targets);
+  },30000);
   it("sets one promise-safety setting in one transaction: a refused or failed set leaves no rows; a good one saves, applies and replays", async () => {
     // The real version writers. They only ever run on the set command's own transaction client, so they are given
     // no connection of their own (the process-global one is disabled in this suite).

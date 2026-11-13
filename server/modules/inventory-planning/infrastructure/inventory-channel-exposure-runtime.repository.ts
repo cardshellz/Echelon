@@ -231,6 +231,20 @@ export async function loadChannelRuleReviewTargets(
     undefined, false, channelRuleScopeKey(draftPolicyScopeKey));
 }
 
+/** Review only: every saved-but-unapplied stock rule on ONE channel is used;
+ * warehouse bindings and listing links stay active everywhere, and every other
+ * channel keeps its active rules. Copying stock rules to a channel reviews with
+ * this, so it never pulls in that channel's other pending setup. */
+export async function loadChannelRuleCopyReviewTargets(
+  client: InventoryAvailabilityTransactionQueryClient,
+  productId: number,
+  productVariantIds: readonly number[],
+  draftPolicyChannelId: number,
+): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
+  return loadSelectedPublicationTargets(client, productId, productVariantIds, undefined, false, undefined, false,
+    undefined, false, undefined, positiveInteger(draftPolicyChannelId, "draftPolicyChannelId"));
+}
+
 /**
  * Projects draft-preferred preview targets into their proposed post-cutover state.
  * It writes nothing and must never be used by a live runtime reader/publisher.
@@ -276,12 +290,18 @@ async function loadSelectedPublicationTargets(
   draftChannelId?: number,
   includeDeferredDropshipQuantities = false,
   draftPolicyScopeKey?: string,
+  draftPolicyChannelId?: number,
 ): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
   const targetState = proposed ? "preview" : "live";
   const useProposedDefinitions = proposed && !activeDefinitionsOnly;
   const channelDraft = draftChannelId == null ? null : positiveInteger(draftChannelId, "draftChannelId");
   if (draftPolicyScopeKey != null && (channelDraft !== null || proposed)) {
     throw invalidRow("A single-rule review cannot be combined with another draft projection.", {});
+  }
+  // Validated to a positive integer by the only caller; interpolated like draftChannelId, never request text.
+  const policyChannelDraft = draftPolicyChannelId == null ? null : positiveInteger(draftPolicyChannelId, "draftPolicyChannelId");
+  if (policyChannelDraft !== null && (draftPolicyScopeKey != null || channelDraft !== null || proposed)) {
+    throw invalidRow("A stock-rule copy review cannot be combined with another draft projection.", {});
   }
   const bindingPointer = channelDraft !== null
     ? `CASE WHEN target.channel_id=${channelDraft} THEN COALESCE(head.draft_binding_id, head.active_binding_id) ELSE head.active_binding_id END`
@@ -291,6 +311,8 @@ async function loadSelectedPublicationTargets(
   // $3 is the reviewed rule's scope key, bound as a parameter (never interpolated).
   const policyPointer = draftPolicyScopeKey != null
     ? "CASE WHEN head.scope_key = $3 THEN COALESCE(head.draft_policy_id, head.active_policy_id) ELSE head.active_policy_id END"
+    : policyChannelDraft !== null
+    ? `CASE WHEN head.channel_id=${policyChannelDraft} THEN COALESCE(head.draft_policy_id, head.active_policy_id) ELSE head.active_policy_id END`
     : channelDraft !== null
     ? `CASE WHEN head.channel_id=${channelDraft} THEN COALESCE(head.draft_policy_id, head.active_policy_id) ELSE head.active_policy_id END`
     : useProposedDefinitions
@@ -305,7 +327,7 @@ async function loadSelectedPublicationTargets(
   // Only the policy query may resolve a draft for a single-rule review; bindings
   // and listing links stay sealed-only. Every other policy head still points at
   // its active (sealed) version through the CASE above.
-  const policyStates = draftPolicyScopeKey != null ? "('draft', 'sealed')" : definitionStates;
+  const policyStates = draftPolicyScopeKey != null || policyChannelDraft !== null ? "('draft', 'sealed')" : definitionStates;
   const targetValues: unknown[] = [];
   const channelFilter = channelId == null ? "" : "AND target.channel_id = $1";
   if (channelId != null) targetValues.push(positiveInteger(channelId, "channelId"));
