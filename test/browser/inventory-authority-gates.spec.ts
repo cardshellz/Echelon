@@ -1,6 +1,7 @@
 import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { view, policyHead, policyValue, HASH_A } from "../../client/src/features/channel-inventory/__tests__/fixtures";
 
 type Authority = "legacy" | "canonical" | "unavailable";
 
@@ -22,9 +23,10 @@ async function setup(
   page: Page,
   mode: "allocation" | "reserves" | "warehouses" | "channels",
   authority: Authority,
-  options: { channelStatus?: number; emptyChannels?: boolean } = {},
+  options: { channelStatus?: number; emptyChannels?: boolean; canCopyStockRules?: boolean; copyRefused?: boolean } = {},
 ) {
   const state = {
+    created: [] as Array<Record<string, unknown>>, copies: [] as Array<Record<string, unknown>>, stockRuleReads: 0,
     unexpected: [] as string[], errors: [] as string[], channelReads: 0,
     channelStatus: options.channelStatus ?? 200,
   };
@@ -36,7 +38,8 @@ async function setup(
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (request.method() === "GET" && path === "/api/auth/me") {
-      return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator-1", username: "operator", role: "admin" }, permissions: ["channels:view", "channels:edit", "channels:create", "inventory:view", "inventory:edit", "inventory_planning:view"], systemRoles: ["admin"] }) });
+      return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator-1", username: "operator", role: "admin" }, permissions: ["channels:view", "channels:edit", "channels:create", "inventory:view", "inventory:edit", "inventory_planning:view",
+        ...(options.canCopyStockRules ? ["inventory_planning:edit", "inventory_planning:activate"] : [])], systemRoles: ["admin"] }) });
     }
     if (request.method() === "GET" && path === "/api/inventory-planning/runtime-authority") {
       if (authority === "unavailable") {
@@ -88,6 +91,31 @@ async function setup(
     }
     if (mode === "channels" && request.method() === "GET" && path === "/api/warehouse-settings/default") {
       return route.fulfill({ json: { channelSyncEnabled: 1 } });
+    }
+    // Adding a channel with "Copy stock rules from": the rules read, the create, then the copy.
+    if (mode === "channels" && request.method() === "GET" && path === "/api/inventory-planning/admin/channel-exposure") {
+      state.stockRuleReads += 1;
+      const defaults = policyValue({ allocationSemantics: "exposure", eligible: true, shareBps: 10_000,
+        holdbackSellableUnits: "0", maxPublish: { mode: "unlimited" }, minPublishSellableUnits: "0" });
+      // Only Shopify US (3) has rules in effect; eBay (4) has a default that was saved and never applied.
+      return route.fulfill({ json: view({ policyHeads: [
+        policyHead({ scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: defaults }),
+        policyHead({ scopeKey: "channel:4", channelId: 4, scope: { scopeType: "channel", channelId: 4 }, draft: defaults }),
+      ] }) });
+    }
+    if (mode === "channels" && request.method() === "POST" && path === "/api/channels") {
+      state.created.push(request.postDataJSON());
+      return route.fulfill({ status: 201, json: { id: 200, ...request.postDataJSON() } });
+    }
+    if (mode === "channels" && request.method() === "POST" && path === "/api/inventory-planning/admin/channel-rule-definitions/copy") {
+      const body = request.postDataJSON();
+      state.copies.push(body);
+      if (options.copyRefused) return route.fulfill({ status: 409, json: { error: { code: "CHANNEL_RULE_COPY_SOURCE_EMPTY",
+        message: "Shopify US has no stock rules in effect to copy." } } });
+      return route.fulfill({ json: { receipt: { channelId: body.targetChannelId, appliedAt: "2026-11-12T12:00:00.000Z", appliedBy: "operator-1",
+        reviewHash: HASH_A, publicationIds: [], changedDefinitions: 3, alreadyApplied: false }, sourceChannelId: body.sourceChannelId,
+        sourceChannelName: "Shopify US", targetChannelName: "TikTok Shop", copiedExceptions: 2, skippedRules: [], changedQuantities: 0,
+        skippedDestinations: [], warnings: [] } });
     }
     state.unexpected.push(`${request.method()} ${path}`);
     return route.fulfill({ status: 500, json: { error: "Unexpected request" } });
@@ -173,6 +201,59 @@ test.describe("inventory runtime authority gates", () => {
       expect(state.errors).toEqual([]);
     });
   }
+
+  test("adding a channel can copy another channel's stock rules, after the channel is created", async ({ page }, testInfo) => {
+    const state = await setup(page, "channels", "canonical", { canCopyStockRules: true });
+    await page.getByTestId("button-create-channel").click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByTestId("input-channel-name").fill("TikTok Shop");
+    // Nothing is copied unless asked.
+    await expect(dialog.getByTestId("select-copy-stock-rules")).toHaveText("Don't copy");
+    await dialog.getByTestId("select-copy-stock-rules").click();
+    // Only a channel whose rules are in effect can be copied from.
+    await expect(page.getByRole("option")).toHaveText(["Don't copy", "Shopify US"]);
+    await page.getByRole("option", { name: "Shopify US", exact: true }).click();
+    await page.screenshot({ path: testInfo.outputPath("add-channel-copy-stock-rules.png") });
+    await dialog.getByTestId("button-submit-channel").click();
+    await expect(page.getByText("Copied the default and 2 exceptions from Shopify US to TikTok Shop. No quantity sent to a channel changes right now.",
+      { exact: true }).first()).toBeVisible();
+    expect(state.created).toHaveLength(1);
+    expect(state.created[0]).toMatchObject({ name: "TikTok Shop" });
+    // The copy names the channel the server just created.
+    expect(state.copies).toHaveLength(1);
+    expect(state.copies[0]).toMatchObject({ sourceChannelId: 3, targetChannelId: 200 });
+    expect(state.unexpected).toEqual([]);
+    expect(state.errors).toEqual([]);
+  });
+
+  test("a refused copy still leaves the new channel created and says where to copy later", async ({ page }) => {
+    const state = await setup(page, "channels", "canonical", { canCopyStockRules: true, copyRefused: true });
+    await page.getByTestId("button-create-channel").click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByTestId("input-channel-name").fill("TikTok Shop");
+    await dialog.getByTestId("select-copy-stock-rules").click();
+    await page.getByRole("option", { name: "Shopify US", exact: true }).click();
+    await dialog.getByTestId("button-submit-channel").click();
+    await expect(page.getByText("Channel created, stock rules not copied", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText(/Not copied\. Shopify US has no stock rules in effect to copy\. You can copy them in Channel Inventory/).first()).toBeVisible();
+    expect(state.created).toHaveLength(1);
+    expect(state.unexpected).toEqual([]);
+    expect(state.errors).toEqual([]);
+  });
+
+  test("adding a channel without stock-rule permission offers no copy and reads no rules", async ({ page }) => {
+    const state = await setup(page, "channels", "canonical");
+    await page.getByTestId("button-create-channel").click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByTestId("input-channel-name").fill("TikTok Shop");
+    await expect(dialog.getByTestId("select-copy-stock-rules")).toHaveCount(0);
+    await dialog.getByTestId("button-submit-channel").click();
+    await expect(page.getByText("Channel created successfully", { exact: true }).first()).toBeVisible();
+    expect(state.stockRuleReads).toBe(0);
+    expect(state.copies).toEqual([]);
+    expect(state.unexpected).toEqual([]);
+    expect(state.errors).toEqual([]);
+  });
 
   test("warehouses exposes the legacy feed switch only under confirmed legacy authority", async ({ page }) => {
     const state = await setup(page, "warehouses", "legacy");

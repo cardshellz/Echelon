@@ -2,25 +2,24 @@ import type { Pool, PoolClient } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import { pool } from "../../../db";
-import type { SupplySnapshotDto } from "@shared/types/inventory-availability-planner";
 import { channelDefinitionReceiptSchema } from "@shared/types/inventory-channel-definition";
 import {
   channelRuleProgressSchema, channelRuleReceiptSchema, channelRuleReviewSchema, channelRuleScopeKeySchema, channelRuleSetResultSchema,
-  type ApplyChannelRule, type ChannelRuleReceipt, type ChannelRuleReview, type ChannelRuleSelection,
-  type ChannelRuleSetResult, type SetChannelRule,
+  type ApplyChannelRule, type ChannelRuleCopyResult, type ChannelRuleReceipt, type ChannelRuleReview, type ChannelRuleSelection,
+  type ChannelRuleSetResult, type CopyChannelRules, type SetChannelRule,
 } from "@shared/types/inventory-channel-rule";
 import { ChannelDefinitionError } from "../application/inventory-channel-definition.service";
 import type { ChannelRuleStore } from "../application/inventory-channel-rule.service";
-import { InventoryAvailabilityRuntimePublicationError } from "../application/inventory-availability-runtime-publication.service";
-import { planInventoryChannelExposureProduct, type ActiveInventoryPublicationTargetSnapshot } from "../application/inventory-channel-exposure-runtime.service";
+import { planInventoryChannelExposureProduct } from "../application/inventory-channel-exposure-runtime.service";
 import { channelExposurePolicyScopeKey } from "../domain/inventory-channel-exposure";
 import { classifyChannelRuleIssues } from "../domain/inventory-channel-rule-review";
 import { inventoryCutoverEvidenceHash } from "../domain/inventory-cutover-manifest";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
-import { previewProductDefinitionPublicationInsideTransaction } from "./inventory-availability-runtime-publication.repository";
 import { CHANNEL_POLICY_DRAFT_CHANGES_SQL } from "./inventory-channel-definition.repository";
 import { PostgresInventoryChannelExposureAdminStore } from "./inventory-channel-exposure-admin.repository";
+import { copyChannelRulesInsideTransaction } from "./inventory-channel-rule-copy.repository";
+import { previewIsolated } from "./inventory-channel-rule-preview";
 import { loadActivePublicationTargets, loadChannelRuleReviewTargets, loadManagedSellableVariantIds } from "./inventory-channel-exposure-runtime.repository";
 import { promoteInventoryCutoverDefinitionsInsideTransaction } from "./inventory-cutover-definitions.repository";
 import { enqueueReviewedDefinitionPublication } from "./inventory-product-definition.repository";
@@ -146,6 +145,23 @@ export class PostgresChannelRuleStore implements ChannelRuleStore {
       outcome: receipt.alreadyApplied ? "replayed" : "applied", error_code: null, actor,
       channel_id: receipt.channelId, scope_key: receipt.scopeKey, product_id: receipt.productId,
       before: { active_policy_id: before }, after: { active_policy_id: receipt.policyId },
+      publication_ids: receipt.publicationIds, applied_at: receipt.appliedAt }));
+    return result;
+  }
+
+  /** Copies a channel's stock rules to a channel that has none and applies them, in one transaction
+   * (inventory-channel-rule-copy.repository.ts). A refused or failed copy leaves no rows. */
+  async copy(command: CopyChannelRules, actor: string, requestHash: string, now: Date): Promise<ChannelRuleCopyResult> {
+    const result = await this.transaction(true, client => {
+      this.drafts ??= new PostgresInventoryChannelExposureAdminStore();
+      return copyChannelRulesInsideTransaction(client, this.drafts, command, actor, requestHash, now);
+    });
+    // After COMMIT only; the receipt row and each sealed version are the durable trail.
+    const { receipt } = result;
+    console.info(JSON.stringify({ level: "info", event: "channel_rules_copied", action: "channel_rule_copy",
+      outcome: receipt.alreadyApplied ? "replayed" : "applied", error_code: null, actor,
+      channel_id: receipt.channelId, source_channel_id: result.sourceChannelId,
+      before: { rules: 0 }, after: { rules: receipt.changedDefinitions },
       publication_ids: receipt.publicationIds, applied_at: receipt.appliedAt }));
     return result;
   }
@@ -317,21 +333,4 @@ async function captureRuleReview(client: PoolClient, selection: ChannelRuleSelec
   const reviewHash = inventoryCutoverEvidenceHash({ content, rows: quantities.map(row => [row.targetId, row.variantId]),
     currentTargets, proposedTargets });
   return channelRuleReviewSchema.parse({ ...content, quantities, reviewHash });
-}
-
-type IsolatedPreview =
-  | { publication: Awaited<ReturnType<typeof previewProductDefinitionPublicationInsideTransaction>> }
-  | { errorCode: string };
-
-/** Dry run with the publisher's own isolation. Isolation already skips unsafe
- * destinations; what still throws (for example two destinations claiming one
- * provider scope) stops the whole product and is reported, not hidden. */
-async function previewIsolated(client: PoolClient, productId: number, snapshot: SupplySnapshotDto,
-  targets: readonly ActiveInventoryPublicationTargetSnapshot[]): Promise<IsolatedPreview> {
-  try {
-    return { publication: await previewProductDefinitionPublicationInsideTransaction(client, productId, snapshot, targets, "isolate") };
-  } catch (error) {
-    if (error instanceof InventoryAvailabilityRuntimePublicationError) return { errorCode: error.code };
-    throw error;
-  }
 }

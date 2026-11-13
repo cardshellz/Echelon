@@ -9,7 +9,7 @@ import { sendError } from "./inventory-product-definition.routes";
 
 /** One product or SKU rule: review a saved change and apply only it, or set a rule so it takes effect in one step. */
 export function registerChannelRuleDefinitionRoutes(app: Express,
-  service: Pick<ChannelRuleService, "review" | "apply" | "set" | "progress"> = new ChannelRuleService(new PostgresChannelRuleStore()),
+  service: Pick<ChannelRuleService, "review" | "apply" | "set" | "copy" | "progress"> = new ChannelRuleService(new PostgresChannelRuleStore()),
 ): void {
   const respond = (res: Parameters<typeof sendError>[0], error: unknown) => {
     if (error instanceof ChannelDefinitionError) {
@@ -46,6 +46,12 @@ export function registerChannelRuleDefinitionRoutes(app: Express,
     requirePermission("inventory_planning", "activate"), async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     try { res.json(await service.set(req.body, req.session?.user?.id)); } catch (error) { respond(res, error); }
+  });
+  // Copy writes and applies a whole channel's rules, so it needs the same two permissions as set.
+  app.post("/api/inventory-planning/admin/channel-rule-definitions/copy", requirePermission("inventory_planning", "edit"),
+    requirePermission("inventory_planning", "activate"), async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    try { res.json(await service.copy(req.body, req.session?.user?.id)); } catch (error) { respond(res, error); }
   });
   app.get("/api/inventory-planning/admin/channel-rule-definitions/progress", requirePermission("inventory_planning", "view"), async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
