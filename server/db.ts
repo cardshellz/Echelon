@@ -1039,11 +1039,9 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // exist, created by shellz-club. subscription_billing_log is not queried by
     // Echelon at all; if it is ever needed it belongs in a shellz-club migration.
 
-    // ─── Migration 053: OMS Shopify webhook columns ──────────
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS financial_status VARCHAR(30) DEFAULT 'paid'`);
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP`);
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMP`);
-    console.log("Checked OMS Shopify webhook columns (financial_status, cancelled_at, refunded_at)");
+    // Retired (P4.1): the OMS Shopify webhook column block. oms.oms_orders
+    // financial_status, cancelled_at and refunded_at come from the table's own
+    // CREATE in 0002_concerned_darwin.sql / 0071_create_namespaces.sql.
 
     // ─── Migration 0580: Forward Demand Events ──────────
     await client.query(`
