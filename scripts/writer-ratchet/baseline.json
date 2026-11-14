@@ -1913,8 +1913,7 @@
   "wms.orders": [
     "modules/oms",
     "modules/orders",
-    "modules/wms",
-    "server/db.ts"
+    "modules/wms"
   ],
   "wms.outbound_shipment_items": [
     "modules/oms",
