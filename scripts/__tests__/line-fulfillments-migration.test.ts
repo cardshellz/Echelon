@@ -3,8 +3,8 @@
  *
  * These assert the SHAPE of the inert schema (FULFILLMENT_STATE_DESIGN.md §2.1)
  * without a database: the ledger table + idempotency index + CHECKs + FKs, the
- * additive per-line hold columns, the reverse migration, and the server/db.ts
- * startup-fallback parity. Crucially they prove Phase 0 is INERT/ADDITIVE — it
+ * additive per-line hold columns, the reverse migration, and that server/db.ts
+ * no longer carries a fallback copy. Crucially they prove Phase 0 is INERT/ADDITIVE — it
  * alters no existing table beyond ADD COLUMN IF NOT EXISTS.
  */
 import { readFileSync } from "node:fs";
@@ -66,11 +66,13 @@ describe("reverse migration 103", () => {
   });
 });
 
-describe("server/db.ts startup-fallback parity (D2)", () => {
-  it("mirrors the line_fulfillments table + indexes + hold columns idempotently", () => {
-    expect(DB_TS).toMatch(/CREATE TABLE IF NOT EXISTS wms\.line_fulfillments/i);
-    expect(DB_TS).toMatch(/uq_line_fulfillments_idempotency/);
-    expect(DB_TS).toMatch(/ALTER TABLE wms\.order_items ADD COLUMN IF NOT EXISTS on_hold BOOLEAN NOT NULL DEFAULT false/i);
-    expect(DB_TS).toMatch(/ALTER TABLE wms\.order_items ADD COLUMN IF NOT EXISTS hold_reason VARCHAR\(200\)/i);
+describe("server/db.ts legacy fallback copy (retired, REFACTOR-PLAN P4.1)", () => {
+  // Migration 103 is the only definition. The fallback copy in server/db.ts was
+  // retired and must not come back as a second, drifting source of this schema.
+  it("does not redefine the line_fulfillments table, its index or the hold columns", () => {
+    expect(DB_TS).not.toMatch(/CREATE TABLE IF NOT EXISTS wms\.line_fulfillments/i);
+    expect(DB_TS).not.toMatch(/CREATE UNIQUE INDEX IF NOT EXISTS uq_line_fulfillments_idempotency/i);
+    expect(DB_TS).not.toMatch(/ALTER TABLE wms\.order_items ADD COLUMN IF NOT EXISTS on_hold/i);
+    expect(DB_TS).not.toMatch(/ALTER TABLE wms\.order_items ADD COLUMN IF NOT EXISTS hold_reason/i);
   });
 });
