@@ -520,6 +520,8 @@ describe("fast CI preserves coverage and required checks", () => {
     const onDisk = [
       ...testFilesIn("server/infrastructure/__tests__/", /\.test\.ts$/),
       ...testFilesIn("server/platform/observability/__tests__/", /\.test\.ts$/),
+      ...testFilesIn("server/platform/document-numbering/__tests__/", /\.test\.ts$/),
+      ...testFilesIn("server/modules/operations/__tests__/", /\.test\.ts$/),
     ];
     expect(onDisk.length).toBeGreaterThan(0);
     for (const file of onDisk) {

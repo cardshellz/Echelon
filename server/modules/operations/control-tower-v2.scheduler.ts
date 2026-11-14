@@ -56,20 +56,37 @@ async function runLockedProjection(): Promise<void> {
   await withAdvisoryLock(CONTROL_TOWER_PROJECTOR_LOCK_ID, runControlTowerProjectionOnce);
 }
 
+let activeSchedulerHandle: ControlTowerProjectionSchedulerHandle | null = null;
+
 export function startControlTowerProjectionScheduler(options: {
   environment?: NodeJS.ProcessEnv;
 } = {}): ControlTowerProjectionSchedulerHandle {
+  if (activeSchedulerHandle !== null) {
+    console.warn("[Operations Control Tower projector] scheduler already running; reusing existing handle");
+    return activeSchedulerHandle;
+  }
+
   const intervalMs = projectorIntervalMs(options.environment ?? process.env);
   const initialDelayMs = controlTowerProjectorInitialDelayMs(intervalMs);
   console.log(`[Operations Control Tower projector] scheduler started intervalMs=${intervalMs} initialDelayMs=${initialDelayMs}`);
 
   let stopped = false;
+  let inFlight = false;
   let intervalTimer: NodeJS.Timeout | null = null;
   const run = () => {
     if (stopped) return;
-    runLockedProjection().catch((error) => {
-      console.error("[Operations Control Tower projector] scheduled projection failed", error);
-    });
+    if (inFlight) {
+      console.warn("[Operations Control Tower projector] skipping overlapping tick while previous run is still active");
+      return;
+    }
+    inFlight = true;
+    runLockedProjection()
+      .catch((error) => {
+        console.error("[Operations Control Tower projector] scheduled projection failed", error);
+      })
+      .finally(() => {
+        inFlight = false;
+      });
   };
   const initialTimer = setTimeout(() => {
     if (stopped) return;
@@ -80,11 +97,16 @@ export function startControlTowerProjectionScheduler(options: {
   }, initialDelayMs);
   initialTimer.unref?.();
 
-  return {
+  const handle: ControlTowerProjectionSchedulerHandle = {
     stop() {
       stopped = true;
       clearTimeout(initialTimer);
       if (intervalTimer !== null) clearInterval(intervalTimer);
+      if (activeSchedulerHandle === handle) {
+        activeSchedulerHandle = null;
+      }
     },
   };
+  activeSchedulerHandle = handle;
+  return handle;
 }
