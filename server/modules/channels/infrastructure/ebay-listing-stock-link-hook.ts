@@ -12,6 +12,8 @@ import type { ChannelEbayStockLinkInput, ChannelEbayStockLinkResult } from "../.
  *   price update with a held size goes through).
  * - It runs before the draft is prepared and before the connector is called, so a refused hook throws before any eBay
  *   call at all (zero eBay mutations, including the rebuild's early return for an already-published replacement).
+ * - A size the change ADDS has no saved eBay identity yet. Its caller records the reviewed addition first
+ *   (ebay-listing-change-intent.repository.ts); that record is what makes the size selected for stock here.
  * - Its command key is a UUIDv5 of the reviewed change (listing id, review token, linked sizes): a retry of the same
  *   review replays its receipt; a new review is a new command.
  */

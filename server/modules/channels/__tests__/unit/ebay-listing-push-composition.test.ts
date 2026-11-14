@@ -11,7 +11,13 @@ const fixture = vi.hoisted(() => ({
   photos: vi.fn(), prices: vi.fn(), quantities: vi.fn(), policies: vi.fn(), build: vi.fn(), identity: vi.fn(),
   inspect: vi.fn(), jobs: { getByCommand: vi.fn(), getAdmission: vi.fn(), enqueue: vi.fn(), recordAdmissionFailure: vi.fn() },
   liveGroup: vi.fn(), sync: vi.fn(),
+  intents: { open: vi.fn(), close: vi.fn() }, stockLink: vi.fn(),
 }));
+vi.mock("../../infrastructure/ebay-listing-change-intent.repository", () => ({
+  EbayListingChangeIntentRepository: class { constructor() { return fixture.intents; } },
+}));
+// The hook's own suite covers what it links; here it only succeeds or refuses.
+vi.mock("../../infrastructure/ebay-listing-stock-link-hook", () => ({ linkEbayListingStockBeforeChange: fixture.stockLink }));
 vi.mock("../../../../db", () => ({ db: {}, pool: { query: fixture.query }, getDatabasePoolSnapshot: () => ({ maximumConnections: 20 }) }));
 vi.mock("../../infrastructure/ebay-api-runtime", () => ({
   EBAY_CHANNEL_ID: 67, atpService: { getAtpPerVariant: fixture.quantities },
@@ -46,6 +52,7 @@ describe("eBay publication application composition", () => {
     vi.resetAllMocks();
     fixture.sync.mockImplementation(async (filter, _actor, commandKey) => ({ synced: 0, pending: 1, errors: 0, details: [], jobs: [{ id: commandKey, productId: filter.productIds[0], operation: "publish", kind: "sync", state: "queued" }] }));
     fixture.repository.withProductLock.mockImplementation((_id: number, work: () => Promise<unknown>) => work());
+    fixture.intents.open.mockResolvedValue(undefined); fixture.intents.close.mockResolvedValue(1); fixture.stockLink.mockResolvedValue(undefined);
     fixture.query.mockResolvedValue({ rows: [{ id: 34, metadata: { marketplaceId: "EBAY_US" } }] });
     fixture.auth.getVerifiedProviderAccount.mockResolvedValue({ externalAccountId: "seller-1" });
     fixture.auth.getAccessToken.mockResolvedValue("test-only-token");
@@ -165,6 +172,96 @@ describe("eBay publication application composition", () => {
     expect(prepared.preparedIntent).toBeDefined();
     expect(()=>assertEbayPreparedIntent(prepared)).not.toThrow();
     expect(routeDraft.inventoryItems[0].payload.product.aspects).toEqual({"Pack Size":["100"]});
+  });
+
+  describe("a reviewed in-place update that adds a size", () => {
+    const TOKEN = "c".repeat(64);
+    const update = (addedSkus: string[]) => {
+      fixture.repository.currentListingIds.mockResolvedValue(["listing-20"]);
+      fixture.repository.readVariants.mockResolvedValue([
+        { id: 101, sku: "PROVIDER-PACK", catalog_sku: "CATALOG-PACK", price_cents: 999, external_variant_id: "offer-101", external_product_id: "listing-20", external_sku: "PROVIDER-PACK", mapping_exists: true },
+        { id: 102, sku: "NEW-CASE", catalog_sku: "NEW-CASE", price_cents: 4999, external_variant_id: null, external_product_id: null, external_sku: null, mapping_exists: false }]);
+      fixture.quantities.mockResolvedValue([{ productVariantId: 101, atpUnits: 8 }, { productVariantId: 102, atpUnits: 5 }]);
+      fixture.prices.mockImplementation(async (_db: unknown, _channelId: number, _productId: number, variantId: number, priceCents: number) => ({
+        priceCents, basePriceCents: priceCents, source: "catalog_variant", provenance: { kind: "catalog_variant", variantId }, appliedRule: null }));
+      const item = (sku: string, size: string) => ({ sku, payload: { condition: "NEW", product: { title: "Pack", imageUrls: [], aspects: { "Pack Size": [size] } } } });
+      const routeDraft = { inventoryItems: [item("PROVIDER-PACK", "100"), item("NEW-CASE", "2500")],
+        offers: [{ variantId: 101, sku: "PROVIDER-PACK", payload: { pricingSummary: { price: { currency: "USD", value: "9.99" } } } },
+          { variantId: 102, sku: "NEW-CASE", payload: { pricingSummary: { price: { currency: "USD", value: "49.99" } } } }],
+        itemGroup: { groupKey: "PROVIDER-GROUP", payload: { title: "Pack", description: "Pack", aspects: {}, imageUrls: [], variantSKUs: ["PROVIDER-PACK", "NEW-CASE"],
+          variesBy: { specifications: [{ name: "Pack Size", values: ["100", "2500"] }] } } } };
+      fixture.build.mockReturnValue(routeDraft);
+      fixture.liveGroup.mockResolvedValue({ ...routeDraft.itemGroup.payload, inventoryItemGroupKey: "PROVIDER-GROUP", variantSKUs: ["PROVIDER-PACK"] });
+      fixture.connector.updateExistingListing.mockResolvedValue({ externalProductId: "listing-20", externalOfferIds: { 101: "offer-101", 102: "offer-102" } });
+      return ebayListingPushService.push({ productIds: [20], updateExisting: { mode: "execute", preview: { productId: 20, groupKey: "PROVIDER-GROUP",
+        currentExternalListingId: "listing-20", sourceState: "active", currentSkus: ["PROVIDER-PACK"], activeSkus: ["PROVIDER-PACK"], inactiveSkus: [],
+        desiredSkus: ["PROVIDER-PACK", "NEW-CASE"], addedSkus, removedSkus: [], rebuildRequired: false, confirmationToken: TOKEN } } }, { actor: "user:operator" });
+    };
+    const order = (mock: { mock: { invocationCallOrder: number[] } }) => mock.mock.invocationCallOrder[0];
+
+    it("records the added size before the stock link and any eBay call, then closes it as applied", async () => {
+      const result = await update(["NEW-CASE"]);
+      expect(result.summary.succeeded).toBe(1);
+      expect(fixture.intents.open).toHaveBeenCalledTimes(1);
+      expect(fixture.intents.open.mock.calls[0][0]).toEqual({ kind: "listing_update", channelId: 67, connectionId: 34, productId: 20,
+        externalListingId: "listing-20", reviewToken: TOKEN, actor: "user:operator", members: [{ productVariantId: 102, sku: "NEW-CASE" }] });
+      expect(order(fixture.intents.open)).toBeLessThan(order(fixture.stockLink));
+      expect(order(fixture.stockLink)).toBeLessThan(order(fixture.connector.updateExistingListing));
+      expect(order(fixture.repository.projectSuccess)).toBeLessThan(order(fixture.intents.close));
+      expect(fixture.intents.close).toHaveBeenCalledTimes(1);
+      expect(fixture.intents.close.mock.calls[0][0]).toEqual({ channelId: 67, productId: 20, reviewToken: TOKEN, reason: "applied" });
+    });
+
+    it("records nothing when the reviewed change adds no size", async () => {
+      expect((await update([])).summary.succeeded).toBe(1);
+      expect(fixture.intents.open).not.toHaveBeenCalled();
+      expect(fixture.intents.close).not.toHaveBeenCalled();
+      expect(fixture.stockLink).toHaveBeenCalledTimes(1);
+    });
+
+    it("withdraws the record when the stock link refuses, and sends nothing to eBay", async () => {
+      fixture.stockLink.mockRejectedValue(new EbayListingSyncError("STOCK_LISTING_HELD", "This stock destination is on hold."));
+      const result = await update(["NEW-CASE"]);
+      expect(result.results[0]).toMatchObject({ success: false, code: "STOCK_LISTING_HELD" });
+      expect(fixture.connector.updateExistingListing).not.toHaveBeenCalled();
+      expect(fixture.intents.close.mock.calls.map(call => call[0])).toEqual([{ channelId: 67, productId: 20, reviewToken: TOKEN, reason: "refused" }]);
+    });
+
+    it("withdraws the record when eBay changed since the review, which the connector checks before its first write", async () => {
+      const result = update(["NEW-CASE"]);
+      fixture.connector.updateExistingListing.mockRejectedValue(new EbayListingSyncError("EBAY_LISTING_REVIEW_CHANGED", "The live eBay listing changed after review."));
+      expect((await result).results[0]).toMatchObject({ success: false, code: "EBAY_LISTING_REVIEW_CHANGED" });
+      expect(fixture.intents.close.mock.calls.map(call => call[0].reason)).toEqual(["refused"]);
+    });
+
+    it("keeps the record open when the change fails after eBay writes may have begun, so the size keeps receiving stock", async () => {
+      const result = update(["NEW-CASE"]);
+      fixture.connector.updateExistingListing.mockRejectedValue(new Error("eBay 500 while publishing the group"));
+      expect((await result).results[0]).toMatchObject({ success: false });
+      expect(fixture.intents.close).not.toHaveBeenCalled();
+      // Saved locally or not, eBay may carry the size: the same holds when the local mapping could not be saved.
+      vi.clearAllMocks(); fixture.repository.withProductLock.mockImplementation((_id: number, work: () => Promise<unknown>) => work());
+      fixture.intents.open.mockResolvedValue(undefined); fixture.stockLink.mockResolvedValue(undefined); fixture.repository.recordFailure.mockResolvedValue(undefined);
+      const unsaved = update(["NEW-CASE"]);
+      fixture.repository.projectSuccess.mockRejectedValue(new Error("database unavailable"));
+      expect((await unsaved).results[0]).toMatchObject({ success: false, code: "EBAY_SYNC_PERSISTENCE_FAILED" });
+      expect(fixture.intents.close).not.toHaveBeenCalled();
+    });
+
+    it("stops before the stock link and eBay when the addition cannot be recorded", async () => {
+      const result = update(["NEW-CASE"]);
+      fixture.intents.open.mockRejectedValue(new Error("lock timeout"));
+      expect((await result).results[0]).toMatchObject({ success: false });
+      expect(fixture.stockLink).not.toHaveBeenCalled();
+      expect(fixture.connector.updateExistingListing).not.toHaveBeenCalled();
+      expect(fixture.intents.close).not.toHaveBeenCalled();
+    });
+
+    it("reports the applied change as a success even when its record could not be closed", async () => {
+      const result = update(["NEW-CASE"]);
+      fixture.intents.close.mockRejectedValue(new Error("lock timeout"));
+      expect((await result).summary.succeeded).toBe(1);
+    });
   });
 
   it("reports uncertain job admission without provider calls or claiming publication completed", async () => {

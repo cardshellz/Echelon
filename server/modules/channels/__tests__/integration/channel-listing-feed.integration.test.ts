@@ -32,6 +32,8 @@ CREATE TABLE channels.channel_variant_overrides(channel_id integer,product_varia
 CREATE TABLE channels.channel_listings(id integer PRIMARY KEY,channel_id integer,product_variant_id integer REFERENCES catalog.product_variants(id),
  external_product_id text,external_variant_id text,sync_status text,sync_error text,UNIQUE(channel_id,product_variant_id));
 CREATE TABLE channels.ebay_listing_sync_jobs(channel_id integer,product_id integer,state text);
+CREATE TABLE IF NOT EXISTS channels.ebay_listing_change_intents(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer,connection_id integer,product_id integer,product_variant_id integer,kind text,external_listing_id text,sku text,review_token text,actor text,opened_at timestamptz,closed_at timestamptz,close_reason text);
+CREATE UNIQUE INDEX IF NOT EXISTS ebay_listing_change_intents_open_variant_idx ON channels.ebay_listing_change_intents(channel_id,product_variant_id) WHERE closed_at IS NULL;
 CREATE TABLE channels.ebay_listing_sync_admission_failures(channel_id integer,product_id integer);
 CREATE TABLE ebay.ebay_category_aspects(category_id text,aspect_name text,aspect_required boolean);
 CREATE TABLE ebay.ebay_type_aspect_defaults(product_type_slug text,aspect_name text);

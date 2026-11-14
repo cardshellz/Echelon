@@ -1,7 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { readChannelStockSelection } from "../../channel-stock-selection";
+import { EbayListingChangeIntentRepository } from "../../infrastructure/ebay-listing-change-intent.repository";
+
+// The real migration, so its constraints and partial unique index are what the repository is tested against.
+// Its selection trigger function belongs to migration 0743 (covered by publication-selection-work.integration); a no-op stands in here.
+const intentMigration = readFileSync(resolve(process.cwd(), "migrations",
+  readdirSync(resolve(process.cwd(), "migrations")).find(file => file.endsWith("_ebay_listing_change_intents.sql"))!), "utf8");
+const TOKEN_A = "a".repeat(64), TOKEN_B = "b".repeat(64);
+const NOW = new Date("2026-11-13T12:00:00.000Z"), LATER = new Date("2026-11-13T12:05:00.000Z");
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -18,13 +28,16 @@ CREATE TABLE channels.channel_variant_overrides(channel_id integer,product_varia
 CREATE TABLE channels.channel_feeds(channel_id integer,product_variant_id integer,is_active integer,quarantined_at timestamptz,channel_variant_id text,channel_inventory_item_id text,channel_sku text,last_synced_qty integer);
 CREATE TABLE channels.channel_listings(channel_id integer,product_variant_id integer,sync_status text,external_product_id text,external_variant_id text,external_sku text);
 CREATE TABLE ebay.ebay_category_mappings(channel_id integer,product_type_slug text,listing_enabled boolean);
-CREATE TABLE channels.ebay_listing_sync_jobs(id uuid PRIMARY KEY,channel_id integer,connection_id integer,product_id integer,operation text,state text,identity jsonb,provider_identity jsonb,error_code text,created_at timestamptz DEFAULT now());`;
+CREATE TABLE channels.ebay_listing_sync_jobs(id uuid PRIMARY KEY,channel_id integer,connection_id integer,product_id integer,operation text,state text,identity jsonb,provider_identity jsonb,error_code text,created_at timestamptz DEFAULT now());
+CREATE SCHEMA inventory;
+CREATE FUNCTION inventory.notify_publication_selection_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END; $$;
+${intentMigration}`;
 describe.skipIf(!url || !disposable)("Channels selection owner SQL", () => {
   let database: InventoryCutoverTestDatabase;
   beforeAll(async () => { database = await createInventoryCutoverTestDatabase(url, disposable, ddl); });
   afterAll(async () => { await database?.close(); });
   beforeEach(async () => {
-    await database.pool.query(`TRUNCATE channels.channel_product_overrides,channels.channel_variant_overrides,channels.channel_feeds,channels.channel_listings,
+    await database.pool.query(`TRUNCATE channels.ebay_listing_change_intents,channels.channel_product_overrides,channels.channel_variant_overrides,channels.channel_feeds,channels.channel_listings,
       ebay.ebay_category_mappings,channels.ebay_listing_sync_jobs,catalog.product_line_products,catalog.product_variants,catalog.products,channels.channel_connections,channels.channels;
       INSERT INTO channels.channels VALUES(1,'ebay'),(2,'shopify'),(3,'walmart');
       INSERT INTO channels.channel_connections VALUES(11,1),(22,2),(33,3);
@@ -93,5 +106,72 @@ describe.skipIf(!url || !disposable)("Channels selection owner SQL", () => {
     const first = await readChannelStockSelection(database.pool,scoped);
     await database.pool.query("UPDATE channels.channel_feeds SET last_synced_qty=999 WHERE channel_id=2");
     expect((await readChannelStockSelection(database.pool,scoped)).fingerprint).toBe(first.fingerprint);
+  });
+
+  describe("a size added by a reviewed listing change", () => {
+    const intents = () => new EbayListingChangeIntentRepository(database.pool);
+    const added = { channelId: 1, channelConnectionId: 11, productId: 10, productVariantIds: [101, 102] };
+    const open = (reviewToken = TOKEN_A, members = [{ productVariantId: 102, sku: "CASE" }]) => intents().open({ kind: "listing_update",
+      channelId: 1, connectionId: 11, productId: 10, externalListingId: "listing", reviewToken, actor: "user:operator", members }, NOW);
+    const actions = async () => Object.fromEntries((await readChannelStockSelection(database.pool, added)).variants
+      .map(variant => [variant.productVariantId, variant.action]));
+    const rows = async () => (await database.pool.query(`SELECT product_variant_id AS variant,review_token AS token,close_reason AS reason,
+      closed_at IS NULL AS open FROM channels.ebay_listing_change_intents ORDER BY id`)).rows;
+
+    it("is selected only while its reviewed change is on record", async () => {
+      // CASE (102) has no saved eBay identity: a candidate, not a stock destination.
+      expect(await actions()).toEqual({ 101: "publish", 102: "read_only" });
+      await open();
+      expect(await actions()).toEqual({ 101: "publish", 102: "publish" });
+      // Refused before anything reached eBay: the size is a candidate again.
+      expect(await intents().close({ channelId: 1, productId: 10, reviewToken: TOKEN_A, reason: "refused" }, LATER)).toBe(1);
+      expect(await actions()).toEqual({ 101: "publish", 102: "read_only" });
+      expect(await rows()).toEqual([{ variant: 102, token: TOKEN_A, reason: "refused", open: false }]);
+    });
+
+    it("opens once per review, and closing twice or closing an unknown review changes nothing", async () => {
+      await open(); await open();
+      await Promise.all([open(), open()]);
+      expect(await rows()).toEqual([{ variant: 102, token: TOKEN_A, reason: null, open: true }]);
+      expect(await intents().close({ channelId: 1, productId: 10, reviewToken: TOKEN_B, reason: "applied" }, LATER)).toBe(0);
+      expect(await intents().close({ channelId: 1, productId: 10, reviewToken: TOKEN_A, reason: "applied" }, LATER)).toBe(1);
+      expect(await intents().close({ channelId: 1, productId: 10, reviewToken: TOKEN_A, reason: "applied" }, LATER)).toBe(0);
+      expect(await rows()).toEqual([{ variant: 102, token: TOKEN_A, reason: "applied", open: false }]);
+    });
+
+    it("replaces an earlier review of the same product and leaves other products alone", async () => {
+      await open();
+      await intents().open({ kind: "listing_update", channelId: 1, connectionId: 11, productId: 20, externalListingId: "other-listing",
+        reviewToken: TOKEN_A, actor: "user:operator", members: [{ productVariantId: 201, sku: "OTHER" }] }, NOW);
+      await open(TOKEN_B);
+      expect(await rows()).toEqual([
+        { variant: 102, token: TOKEN_A, reason: "superseded", open: false },
+        { variant: 201, token: TOKEN_A, reason: null, open: true },
+        { variant: 102, token: TOKEN_B, reason: null, open: true },
+      ]);
+      expect((await actions())[102]).toBe("publish");
+    });
+
+    it("refuses a size of another product, bad input and a row that breaks the table's rules, writing nothing", async () => {
+      await expect(open(TOKEN_A, [{ productVariantId: 201, sku: "OTHER" }])).rejects.toMatchObject({ code: "EBAY_LISTING_CHANGE_INTENT_NOT_RECORDED" });
+      await expect(open("not-a-token")).rejects.toThrow();
+      await expect(open(TOKEN_A, [])).rejects.toThrow();
+      await expect(open(TOKEN_A, [{ productVariantId: 102, sku: "CASE" }, { productVariantId: 102, sku: "CASE" }])).rejects.toThrow();
+      expect(await rows()).toEqual([]);
+      await expect(database.pool.query(`INSERT INTO channels.ebay_listing_change_intents(channel_id,connection_id,product_id,product_variant_id,kind,
+        external_listing_id,sku,review_token,actor,opened_at,closed_at,close_reason) VALUES(1,11,10,102,'listing_update','listing','CASE',$1,'operator',now(),now(),NULL)`,
+      [TOKEN_A])).rejects.toMatchObject({ code: "23514" });
+      await expect(database.pool.query(`INSERT INTO channels.ebay_listing_change_intents(channel_id,connection_id,product_id,product_variant_id,kind,
+        external_listing_id,sku,review_token,actor,opened_at) VALUES(1,11,10,102,'publish','listing','CASE',$1,'operator',now())`,
+      [TOKEN_A])).rejects.toMatchObject({ code: "23514" });
+    });
+
+    it("is read for its own channel connection only, and never changes a listing rule", async () => {
+      await open();
+      await database.pool.query("UPDATE catalog.product_variants SET ebay_listing_excluded=true WHERE id=102");
+      expect((await actions())[102]).toBe("none");
+      await database.pool.query("UPDATE catalog.product_variants SET ebay_listing_excluded=false WHERE id=102; UPDATE channels.ebay_listing_change_intents SET connection_id=22");
+      expect((await actions())[102]).toBe("read_only");
+    });
   });
 });

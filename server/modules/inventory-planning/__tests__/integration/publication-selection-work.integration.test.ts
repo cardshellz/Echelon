@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
@@ -9,6 +9,8 @@ import { PICKS_SELECTION_TRIGGERS_SQL } from "../../../dropship/infrastructure/d
 
 const configured = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const migration = readFileSync(resolve(process.cwd(), "migrations/0743_publication_selection_work.sql"), "utf8");
+const intentMigration = readFileSync(resolve(process.cwd(), "migrations",
+  readdirSync(resolve(process.cwd(), "migrations")).find(file => file.endsWith("_ebay_listing_change_intents.sql"))!), "utf8");
 const fixture = `
 CREATE SCHEMA inventory; CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA dropship; CREATE SCHEMA ebay;
 CREATE TABLE catalog.products(id integer PRIMARY KEY,is_active boolean,status text,product_type text,category text,ebay_listing_excluded boolean);
@@ -101,6 +103,35 @@ INSERT INTO channels.channel_feeds VALUES(3,101,1,NULL,'v101','i101','SKU-101',4
     } finally { await provider.query("SELECT pg_advisory_unlock_shared(918419,0)"); provider.release(); }
     await database.pool.query("UPDATE channels.channel_feeds SET is_active=0");
     expect((await database.pool.query("SELECT is_active FROM channels.channel_feeds")).rows[0].is_active).toBe(0);
+  });
+
+  it("replans the product when a reviewed listing change's added size is recorded or closed, and only then", async () => {
+    await database.pool.query(`CREATE TABLE channels.channels(id integer PRIMARY KEY); CREATE TABLE channels.channel_connections(id integer PRIMARY KEY);
+      INSERT INTO channels.channels VALUES(67); INSERT INTO channels.channel_connections VALUES(9);`);
+    await database.pool.query(intentMigration);
+    const work = async () => (await database.pool.query(`SELECT product_id, revision::text
+      FROM inventory.publication_selection_work ORDER BY product_id`)).rows;
+    const insert = (variantId: number, productId: number) => database.pool.query(`INSERT INTO channels.ebay_listing_change_intents
+      (channel_id,connection_id,product_id,product_variant_id,kind,external_listing_id,sku,review_token,actor,opened_at)
+      VALUES(67,9,$2,$1,'listing_update','listing-20','SKU',repeat('a',64),'user:operator',now())`, [variantId, productId]);
+    // A size of a product with no stock link yet queues nothing; a size of the linked product 20 bumps it once.
+    await insert(102, 21);
+    expect(await work()).toEqual([{ product_id: 20, revision: "1" }]);
+    await insert(101, 20);
+    expect(await work()).toEqual([{ product_id: 20, revision: "2" }]);
+    // One open record per size and channel.
+    await expect(insert(101, 20)).rejects.toMatchObject({ code: "23505" });
+    await database.pool.query("UPDATE channels.ebay_listing_change_intents SET actor='user:other' WHERE product_variant_id=101");
+    expect(await work()).toEqual([{ product_id: 20, revision: "2" }]);
+    await database.pool.query("UPDATE channels.ebay_listing_change_intents SET closed_at=now(),close_reason='refused' WHERE product_variant_id=101");
+    expect(await work()).toEqual([{ product_id: 20, revision: "3" }]);
+    // Not gated: recorded inside a listing workflow, even while a provider request holds the shared side.
+    const provider = await database.pool.connect();
+    try {
+      await provider.query("SELECT pg_advisory_lock_shared(918419,0)");
+      await insert(101, 20);
+      expect(await work()).toEqual([{ product_id: 20, revision: "4" }]);
+    } finally { await provider.query("SELECT pg_advisory_unlock_shared(918419,0)"); provider.release(); }
   });
 
   it("gates a vendor pick and invalidates only the picked size's product, as the overrides do (PLAN-B v4.1 V33)", async () => {

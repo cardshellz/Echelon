@@ -59,10 +59,16 @@ export async function readChannelStockSelectionFacts(client: StockSelectionQuery
   const job = jobRows.length ? jobSchema.parse(jobRows[0]) : null;
   if (job && (job.identity.channelId !== input.channelId || job.identity.connectionId !== input.channelConnectionId || job.identity.productId !== input.productId))
     throw new ChannelStockSelectionError("CHANNEL_SELECTION_JOB_SCOPE_CHANGED", "The saved listing request has a different product or connection identity. Review it before publishing stock.");
+  // Sizes a reviewed listing update or rebuild is adding (migration 900000065). Open rows only.
+  const reviewedAdditions = provider === "ebay" ? z.array(z.object({ product_variant_id: id })).parse((await client.query(
+    `SELECT product_variant_id FROM channels.ebay_listing_change_intents
+      WHERE channel_id=$1 AND connection_id=$2 AND product_id=$3 AND closed_at IS NULL AND product_variant_id=ANY($4::integer[])
+      ORDER BY product_variant_id`, [input.channelId, input.channelConnectionId, input.productId, input.productVariantIds])).rows) : [];
   if (productOverrides.length > 1 || types.length > 1 || [feeds, listings, variantOverrides].some(rows => new Set(rows.map(row => row.product_variant_id)).size !== rows.length))
     throw new ChannelStockSelectionError("CHANNEL_SELECTION_AMBIGUOUS", "Multiple saved channel selections or identities describe one variant. Review those mappings before publishing stock.");
   const facts: ChannelStockSelectionFacts = { ...input, provider, catalog,
     productIsListed: productOverrides[0]?.is_listed ?? null, typeListingEnabled: types[0]?.listing_enabled ?? null,
+    reviewedAdditionVariantIds: reviewedAdditions.map(row => row.product_variant_id),
     latestJob: job ? { id: job.id, operation: job.operation, state: job.state, accountId: job.identity.accountId, members: job.identity.variants,
       verifiedMembers: job.provider_identity?.channelId === input.channelId && job.provider_identity.connectionId === input.channelConnectionId
         && job.provider_identity.productId === input.productId && job.provider_identity.accountId === job.identity.accountId
