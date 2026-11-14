@@ -1072,79 +1072,11 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     await client.query(`CREATE INDEX IF NOT EXISTS idx_demand_event_lines_event ON procurement.demand_event_lines (demand_event_id)`);
     console.log("Checked forward demand events tables (demand_events, demand_event_lines)");
 
-    // ─── WMS order dedup: one active WMS order per OMS fulfillment partition ──────
-    // Advisory lock in syncOmsOrderToWms prevents races at runtime; this index
-    // is the permanent DB-level backstop. The default partition preserves
-    // today's one-WMS-order shape, while making future split routing explicit.
-    try {
-      await client.query(`
-        ALTER TABLE wms.orders
-          ADD COLUMN IF NOT EXISTS fulfillment_partition_key VARCHAR(120)
-      `);
-      await client.query(`
-        ALTER TABLE wms.orders
-          ALTER COLUMN fulfillment_partition_key SET DEFAULT 'default'
-      `);
-      // Migration 064 intentionally leaves legacy orphan WMS rows in place
-      // with NULL oms_fulfillment_order_id under a NOT VALID check constraint.
-      // Postgres still enforces that constraint on UPDATE, so do not touch
-      // those rows while backfilling the new partition key.
-      await client.query(`
-        UPDATE wms.orders
-        SET fulfillment_partition_key = 'default'
-        WHERE oms_fulfillment_order_id IS NOT NULL
-          AND (
-            fulfillment_partition_key IS NULL
-            OR BTRIM(fulfillment_partition_key) = ''
-          )
-      `);
-      await client.query(`
-        DO $$
-        BEGIN
-          IF NOT EXISTS (
-            SELECT 1
-            FROM pg_constraint
-            WHERE conname = 'wms_orders_fulfillment_partition_key_not_blank_chk'
-          ) THEN
-            ALTER TABLE wms.orders
-              ADD CONSTRAINT wms_orders_fulfillment_partition_key_not_blank_chk
-              CHECK (BTRIM(fulfillment_partition_key) <> '');
-          END IF;
-
-          IF NOT EXISTS (
-            SELECT 1
-            FROM pg_constraint
-            WHERE conname = 'wms_orders_fulfillment_partition_required_chk'
-          ) THEN
-            ALTER TABLE wms.orders
-              ADD CONSTRAINT wms_orders_fulfillment_partition_required_chk
-              CHECK (
-                oms_fulfillment_order_id IS NULL
-                OR fulfillment_partition_key IS NOT NULL
-              );
-          END IF;
-        END $$
-      `);
-      await client.query(`DROP INDEX IF EXISTS wms.uq_wms_orders_oms_fulfillment_active`);
-      await client.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_wms_orders_oms_fulfillment_partition_active
-          ON wms.orders (
-            source,
-            oms_fulfillment_order_id,
-            (COALESCE(warehouse_id, 0)),
-            fulfillment_partition_key
-          )
-          WHERE source = 'oms'
-            AND warehouse_status NOT IN ('cancelled', 'voided')
-            AND oms_fulfillment_order_id IS NOT NULL
-      `);
-      console.log("Checked WMS order dedup unique index (uq_wms_orders_oms_fulfillment_partition_active)");
-    } catch (err: any) {
-      console.error(
-        `[startup-migration] Could not create uq_wms_orders_oms_fulfillment_partition_active ` +
-          `(likely duplicate active WMS orders for same OMS fulfillment partition — needs manual reconciliation): ${err.message}`,
-      );
-    }
+    // Retired (P4.1): the WMS order dedup block. wms.orders.fulfillment_partition_key,
+    // its default, backfill and two check constraints, the drop of
+    // uq_wms_orders_oms_fulfillment_active and the unique index
+    // uq_wms_orders_oms_fulfillment_partition_active are all in tracked migration
+    // 111_oms_wms_fulfillment_partitions.sql (same statements).
 
   } catch (error) {
     // Deliberately resilient: tracked migrations are the fail-fast gate and
