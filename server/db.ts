@@ -132,71 +132,11 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // migration 109_oms_wms_reconciliation_exceptions.sql; the seven-value
     // classification check is in 0603_shipping_provider_label_direction.sql.
 
-    // Create combined_order_groups table if it doesn't exist
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS wms.combined_order_groups (
-        id SERIAL PRIMARY KEY,
-        group_code VARCHAR(20),
-        customer_name TEXT DEFAULT 'Unknown',
-        customer_email TEXT,
-        shipping_address TEXT,
-        shipping_city TEXT,
-        shipping_state TEXT,
-        shipping_postal_code TEXT,
-        shipping_country TEXT,
-        address_hash VARCHAR(64),
-        order_count INTEGER DEFAULT 0,
-        total_items INTEGER DEFAULT 0,
-        total_units INTEGER DEFAULT 0,
-        status VARCHAR(20) DEFAULT 'active',
-        created_by VARCHAR,
-        created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
-    
-    // Add any missing columns (safe to run multiple times with IF NOT EXISTS)
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS group_code VARCHAR(20)`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS customer_name TEXT DEFAULT 'Unknown'`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS customer_email TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS shipping_address TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS shipping_city TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS shipping_state TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS shipping_postal_code TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS shipping_country TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS order_count INTEGER DEFAULT 0`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS total_items INTEGER DEFAULT 0`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS total_units INTEGER DEFAULT 0`);
-    console.log("Checked combined_order_groups table structure");
+    // Retired (P4.1): the three order-combining blocks. The combined_order_groups
+    // table and its columns, and orders.combined_group_id / combined_role, are in
+    // tracked migration 001_order_combining.sql (same statements) and in the
+    // baseline 0002_concerned_darwin.sql.
 
-    // Add combined_group_id column if it doesn't exist
-    await client.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name = 'orders' AND column_name = 'combined_group_id'
-        ) THEN
-          ALTER TABLE orders ADD COLUMN combined_group_id INTEGER REFERENCES combined_order_groups(id) ON DELETE SET NULL;
-        END IF;
-      END $$;
-    `);
-    console.log("Checked/added combined_group_id column");
-
-    // Add combined_role column if it doesn't exist
-    await client.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name = 'orders' AND column_name = 'combined_role'
-        ) THEN
-          ALTER TABLE orders ADD COLUMN combined_role TEXT;
-        END IF;
-      END $$;
-    `);
-    console.log("Checked/added combined_role column");
-    
     // Migration 024: Channel allocation tables
     await client.query(`
       CREATE TABLE IF NOT EXISTS channels.channel_product_allocation (
