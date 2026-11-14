@@ -24,7 +24,7 @@ import { createInventoryLotService } from "../../lots.service";
 import { PostgresTransformationExecutionAuthorityRepository } from "../../../inventory-planning/infrastructure/transformation-execution-authority.repository";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
-vi.mock("../../../notifications/notifications.service", () => ({
+vi.mock("../../../notifications/in-app-notifications.api", () => ({
   notify: vi.fn(async () => undefined),
 }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;

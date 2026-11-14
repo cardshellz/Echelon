@@ -819,19 +819,12 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // on_hold rows restored to shipped/cancelled) ran long ago in prod; the
     // shipment status lifecycle belongs to the state machine, never to boot.
 
-    // 6. eBay listing control columns
-    await client.query(`ALTER TABLE ebay_category_mappings ADD COLUMN IF NOT EXISTS listing_enabled BOOLEAN NOT NULL DEFAULT true`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_listing_excluded BOOLEAN NOT NULL DEFAULT false`);
-    console.log("Checked eBay listing control columns (listing_enabled, ebay_listing_excluded)");
-
-    // 6b. Per-variant eBay listing exclusion
-    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_listing_excluded BOOLEAN NOT NULL DEFAULT false`);
-    console.log("Checked per-variant eBay listing exclusion column");
-
-    // 7. Per-product eBay browse category override columns
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_browse_category_id VARCHAR(20)`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_browse_category_name VARCHAR(200)`);
-    console.log("Checked per-product eBay browse category override columns");
+    // Retired (P4.1): the three eBay column blocks (6, 6b, 7).
+    // ebay_category_mappings.listing_enabled, product_variants.ebay_listing_excluded
+    // and products.ebay_browse_category_id/_name come from the tables' own CREATE
+    // in 0002/0071. products.ebay_listing_excluded is added by
+    // 051_ensure_catalog_columns.sql and made NOT NULL by the tracked migration
+    // *_products_ebay_listing_excluded_not_null.sql.
 
     // 8. eBay Item Specifics (Aspects) management tables
     await client.query(`
@@ -881,14 +874,10 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     await client.query(CHANNEL_PRICING_RULES_DDL);
     console.log("Checked channel_pricing_rules table");
 
-    // Migration: per-product and per-variant eBay policy overrides
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_fulfillment_policy_override VARCHAR(20)`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_return_policy_override VARCHAR(20)`);
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS ebay_payment_policy_override VARCHAR(20)`);
-    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_fulfillment_policy_override VARCHAR(20)`);
-    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_return_policy_override VARCHAR(20)`);
-    await client.query(`ALTER TABLE product_variants ADD COLUMN IF NOT EXISTS ebay_payment_policy_override VARCHAR(20)`);
-    console.log("Checked eBay policy override columns on products + product_variants");
+    // Retired (P4.1): the eBay policy override column block. The three
+    // ebay_*_policy_override columns on products and product_variants are
+    // created by 051_ensure_catalog_columns.sql and held at varchar(100) by the
+    // tracked migration *_catalog_ebay_policy_override_capacity.sql.
 
     // Migration: Make channel_allocation_rules.channel_id nullable for "All Channels" global rules
     await client.query(`ALTER TABLE channel_allocation_rules ALTER COLUMN channel_id DROP NOT NULL`);
@@ -1046,11 +1035,9 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // exist, created by shellz-club. subscription_billing_log is not queried by
     // Echelon at all; if it is ever needed it belongs in a shellz-club migration.
 
-    // ─── Migration 053: OMS Shopify webhook columns ──────────
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS financial_status VARCHAR(30) DEFAULT 'paid'`);
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP`);
-    await client.query(`ALTER TABLE oms.oms_orders ADD COLUMN IF NOT EXISTS refunded_at TIMESTAMP`);
-    console.log("Checked OMS Shopify webhook columns (financial_status, cancelled_at, refunded_at)");
+    // Retired (P4.1): the OMS Shopify webhook column block. oms.oms_orders
+    // financial_status, cancelled_at and refunded_at come from the table's own
+    // CREATE in 0002_concerned_darwin.sql / 0071_create_namespaces.sql.
 
     // ─── Migration 0580: Forward Demand Events ──────────
     await client.query(`
@@ -1085,79 +1072,11 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     await client.query(`CREATE INDEX IF NOT EXISTS idx_demand_event_lines_event ON procurement.demand_event_lines (demand_event_id)`);
     console.log("Checked forward demand events tables (demand_events, demand_event_lines)");
 
-    // ─── WMS order dedup: one active WMS order per OMS fulfillment partition ──────
-    // Advisory lock in syncOmsOrderToWms prevents races at runtime; this index
-    // is the permanent DB-level backstop. The default partition preserves
-    // today's one-WMS-order shape, while making future split routing explicit.
-    try {
-      await client.query(`
-        ALTER TABLE wms.orders
-          ADD COLUMN IF NOT EXISTS fulfillment_partition_key VARCHAR(120)
-      `);
-      await client.query(`
-        ALTER TABLE wms.orders
-          ALTER COLUMN fulfillment_partition_key SET DEFAULT 'default'
-      `);
-      // Migration 064 intentionally leaves legacy orphan WMS rows in place
-      // with NULL oms_fulfillment_order_id under a NOT VALID check constraint.
-      // Postgres still enforces that constraint on UPDATE, so do not touch
-      // those rows while backfilling the new partition key.
-      await client.query(`
-        UPDATE wms.orders
-        SET fulfillment_partition_key = 'default'
-        WHERE oms_fulfillment_order_id IS NOT NULL
-          AND (
-            fulfillment_partition_key IS NULL
-            OR BTRIM(fulfillment_partition_key) = ''
-          )
-      `);
-      await client.query(`
-        DO $$
-        BEGIN
-          IF NOT EXISTS (
-            SELECT 1
-            FROM pg_constraint
-            WHERE conname = 'wms_orders_fulfillment_partition_key_not_blank_chk'
-          ) THEN
-            ALTER TABLE wms.orders
-              ADD CONSTRAINT wms_orders_fulfillment_partition_key_not_blank_chk
-              CHECK (BTRIM(fulfillment_partition_key) <> '');
-          END IF;
-
-          IF NOT EXISTS (
-            SELECT 1
-            FROM pg_constraint
-            WHERE conname = 'wms_orders_fulfillment_partition_required_chk'
-          ) THEN
-            ALTER TABLE wms.orders
-              ADD CONSTRAINT wms_orders_fulfillment_partition_required_chk
-              CHECK (
-                oms_fulfillment_order_id IS NULL
-                OR fulfillment_partition_key IS NOT NULL
-              );
-          END IF;
-        END $$
-      `);
-      await client.query(`DROP INDEX IF EXISTS wms.uq_wms_orders_oms_fulfillment_active`);
-      await client.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_wms_orders_oms_fulfillment_partition_active
-          ON wms.orders (
-            source,
-            oms_fulfillment_order_id,
-            (COALESCE(warehouse_id, 0)),
-            fulfillment_partition_key
-          )
-          WHERE source = 'oms'
-            AND warehouse_status NOT IN ('cancelled', 'voided')
-            AND oms_fulfillment_order_id IS NOT NULL
-      `);
-      console.log("Checked WMS order dedup unique index (uq_wms_orders_oms_fulfillment_partition_active)");
-    } catch (err: any) {
-      console.error(
-        `[startup-migration] Could not create uq_wms_orders_oms_fulfillment_partition_active ` +
-          `(likely duplicate active WMS orders for same OMS fulfillment partition — needs manual reconciliation): ${err.message}`,
-      );
-    }
+    // Retired (P4.1): the WMS order dedup block. wms.orders.fulfillment_partition_key,
+    // its default, backfill and two check constraints, the drop of
+    // uq_wms_orders_oms_fulfillment_active and the unique index
+    // uq_wms_orders_oms_fulfillment_partition_active are all in tracked migration
+    // 111_oms_wms_fulfillment_partitions.sql (same statements).
 
   } catch (error) {
     // Deliberately resilient: tracked migrations are the fail-fast gate and

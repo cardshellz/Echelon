@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "crypto";
 import { pool } from "../../db";
-import { buildPurchaseOrderEmail } from "../notifications/email.service";
+import { buildPurchaseOrderEmail } from "./po-email-builder";
 import { inspectPoEmailDocument, type PoEmailDocumentMetadata } from "./po-email-document-contract";
 
 export type PoEmailDeliveryStatus = "queued" | "processing" | "sent" | "partially_sent" | "dead_letter";
@@ -207,6 +207,13 @@ export async function replayDeadLetterPurchaseOrderEmail(input: {
       "Only dead-lettered email deliveries can be replayed",
       409,
       "DELIVERY_NOT_DEAD_LETTERED",
+    );
+  }
+  if (source.providerMessageId || source.lastErrorCode === "LOCAL_FINALIZE_FAILED_AFTER_SMTP_ACCEPT") {
+    throw new PoEmailOutboxError(
+      "This delivery already recorded provider acceptance before local completion failed; replaying it would send a duplicate purchase order.",
+      409,
+      "DELIVERY_ALREADY_ACCEPTED_BY_PROVIDER",
     );
   }
 

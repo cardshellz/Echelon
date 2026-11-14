@@ -140,6 +140,40 @@ export const channelRuleSetResultSchema = z.object({
   warnings: z.array(z.string()),
 }).strict();
 
+/**
+ * Copying one channel's stock rules to a channel that has none (owner decision
+ * 2026-11-07: adding a channel offers "Copy stock rules from"). The default
+ * and every product/SKU exception in effect on the source are written to the
+ * target and applied in one database transaction: all of it, or nothing.
+ */
+export const copyChannelRulesSchema = z.object({
+  sourceChannelId: id,
+  targetChannelId: id,
+  changeReason: z.string().trim().max(1000).nullable().optional().transform(value => (value ? value : null)),
+  /** 80, not 120: each copied version stores it behind a fixed prefix and its position in a 120-character column. */
+  idempotencyKey: z.string().trim().min(1).max(80),
+}).strict().superRefine((command, context) => {
+  if (command.sourceChannelId === command.targetChannelId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["sourceChannelId"], message: "Choose a different channel to copy from." });
+  }
+});
+
+/** What a committed copy did. The receipt has the whole-channel receipt shape (same append-only table). */
+export const channelRuleCopyResultSchema = z.object({
+  receipt: channelDefinitionReceiptSchema,
+  sourceChannelId: id,
+  sourceChannelName: z.string(),
+  targetChannelName: z.string(),
+  /** Product and SKU rules copied, not counting the channel default (always copied). */
+  copiedExceptions: z.number().int().nonnegative(),
+  /** Source rules left behind, each with its reason. */
+  skippedRules: z.array(z.string()),
+  /** Destination/SKU quantities that are different after the copy. */
+  changedQuantities: z.number().int().nonnegative(),
+  skippedDestinations: z.array(z.string()),
+  warnings: z.array(z.string()),
+}).strict();
+
 export type ChannelRuleScope = z.infer<typeof channelRuleScopeSchema>;
 export type ChannelRuleSelection = z.infer<typeof channelRuleSelectionSchema>;
 export type ChannelRuleReview = z.infer<typeof channelRuleReviewSchema>;
@@ -148,3 +182,5 @@ export type ChannelRuleReceipt = z.infer<typeof channelRuleReceiptSchema>;
 export type ChannelRuleProgress = z.infer<typeof channelRuleProgressSchema>;
 export type SetChannelRule = z.infer<typeof setChannelRuleSchema>;
 export type ChannelRuleSetResult = z.infer<typeof channelRuleSetResultSchema>;
+export type CopyChannelRules = z.infer<typeof copyChannelRulesSchema>;
+export type ChannelRuleCopyResult = z.infer<typeof channelRuleCopyResultSchema>;

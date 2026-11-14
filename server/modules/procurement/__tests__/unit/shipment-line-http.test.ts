@@ -30,7 +30,7 @@ vi.mock("../../../../platform/commands/command-results.repository", () => ({
   createDrizzleFinancialCommandRepository: () => mocks.repository,
 }));
 vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../../notifications/notifications.service", () => ({}));
+vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
 import { ShipmentTrackingError } from "../../shipment-tracking.service";
 import { ShipmentUnitOptionsError } from "../../shipment-unit-options.service";

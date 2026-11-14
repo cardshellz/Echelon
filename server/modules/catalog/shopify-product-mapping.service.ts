@@ -1,8 +1,9 @@
-import { and, asc, eq, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import {
   channelConnections,
   channelProductIdentities,
   channelFeeds,
+  channelVariantOverrides,
   channelListings,
   channels,
   products,
@@ -18,14 +19,19 @@ import {
   type ImportedShopifyVariantBinding,
   type ShopifyProductMappingSource,
   type ShopifyProductMappingSummary,
+  type ShopifyVariantDelistResolution,
   type ShopifyVariantMappingResolution,
   type VerifiedShopifyVariantIdentity,
 } from "./shopify-product-mapping.domain";
 import { enqueueShippingGroupMetafieldWrite } from "./shipping-group-sync";
 import { upsertChannelProductIdentity } from "../channels/product-identity.api";
+import { markChannelVariantNotListed } from "../channels/channel-variant-listing.api";
 import { retryPublicationSelectionWrite } from "../inventory-planning/publication-selection-retry";
 
 const DEFAULT_SHOPIFY_API_VERSION = "2024-01";
+/** Recorded on a store listing whose Shopify variant was deleted in Shopify. */
+const DELETED_SHOPIFY_VARIANT_SYNC_ERROR =
+  "The linked Shopify variant was deleted; this SKU is not listed on this store";
 const SHOPIFY_REQUEST_TIMEOUT_MS = 10_000;
 const SHOPIFY_VARIANT_PAGE_LIMIT = 250;
 const SHOPIFY_VARIANT_MAX_PAGES = 20;
@@ -54,6 +60,8 @@ export interface ShopifyProductMappingRepairResult {
     title: string | null;
   };
   mappedVariantCount: number;
+  /** SKUs recorded as not listed on this store because Shopify deleted their variant. */
+  delistedVariants: ShopifyVariantDelistResolution[];
   updatedFeedCount: number;
   createdFeedCount: number;
   updatedListingCount: number;
@@ -168,9 +176,19 @@ async function loadMapping(
         eq(channelListings.channelId, channel.id),
       ),
     )
+    .leftJoin(
+      channelVariantOverrides,
+      and(
+        eq(channelVariantOverrides.productVariantId, productVariants.id),
+        eq(channelVariantOverrides.channelId, channel.id),
+      ),
+    )
     .where(and(
       eq(productVariants.productId, product.id),
       eq(productVariants.salesEligibility, "sellable"),
+      // A SKU marked not listed on this store has no Shopify mapping to keep
+      // consistent, exactly like an internal-only SKU.
+      sql`COALESCE(${channelVariantOverrides.isListed}, 1) <> 0`,
     ))
     .orderBy(asc(productVariants.id));
 
@@ -487,6 +505,75 @@ function mappingRequiresWrite(
   });
 }
 
+/**
+ * Record SKUs whose Shopify variant was deleted as not listed on this store,
+ * and detach their stale store links. Runs inside the repair transaction after
+ * its locks and fingerprint recheck. Inventory, other channels, and the SKU
+ * itself are untouched: only this store's override, feed, listing, and (for
+ * the primary store) the catalog's Shopify IDs for the deleted variant change.
+ */
+async function delistDeletedShopifyVariants(
+  tx: TransactionClient,
+  input: {
+    channelId: number;
+    isPrimary: boolean;
+    productId: number;
+    delistedVariants: readonly ShopifyVariantDelistResolution[];
+    writtenAt: Date;
+  },
+): Promise<number> {
+  for (const delisted of input.delistedVariants) {
+    await markChannelVariantNotListed(tx, {
+      channelId: input.channelId,
+      productVariantId: delisted.variantId,
+      at: input.writtenAt,
+    });
+
+    await tx.update(channelFeeds)
+      .set({
+        channelProductId: null,
+        channelInventoryItemId: null,
+        isActive: 0,
+        lastSyncedQty: null,
+        consecutivePushFailures: 0,
+        quarantinedAt: null,
+        quarantineReason: null,
+        updatedAt: input.writtenAt,
+      })
+      .where(and(
+        eq(channelFeeds.channelId, input.channelId),
+        eq(channelFeeds.channelType, "shopify"),
+        eq(channelFeeds.productVariantId, delisted.variantId),
+      ));
+
+    await tx.update(channelListings)
+      .set({
+        externalProductId: null,
+        externalVariantId: null,
+        externalUrl: null,
+        syncStatus: "error",
+        syncError: DELETED_SHOPIFY_VARIANT_SYNC_ERROR,
+        updatedAt: input.writtenAt,
+      })
+      .where(and(
+        eq(channelListings.channelId, input.channelId),
+        eq(channelListings.productVariantId, delisted.variantId),
+      ));
+
+    if (input.isPrimary && delisted.deletedVariantIds.length > 0) {
+      // Clear only IDs that point at the deleted variant; never a live one.
+      await tx.update(productVariants)
+        .set({ shopifyVariantId: null, shopifyInventoryItemId: null, updatedAt: input.writtenAt })
+        .where(and(
+          eq(productVariants.id, delisted.variantId),
+          eq(productVariants.productId, input.productId),
+          inArray(sql`substring(${productVariants.shopifyVariantId} from '([0-9]+)$')`, delisted.deletedVariantIds),
+        ));
+    }
+  }
+  return input.delistedVariants.length;
+}
+
 function activeVariantAuditSnapshot(summary: ShopifyProductMappingSummary) {
   return summary.variants
     .filter((variant) => variant.isActive)
@@ -588,7 +675,10 @@ export function createShopifyProductMappingService(dependencies: {
     }
     const mappedVariantIds = repairEvaluation.mappedVariantIds;
     const variantMappings = repairEvaluation.variantMappings;
-    const requiresWrite = before.channelProductId !== targetProductId || mappingRequiresWrite(before, targetProductId, variantMappings, loaded.skuEvidence);
+    const delistedVariants = repairEvaluation.delistedVariants;
+    const requiresWrite = before.channelProductId !== targetProductId
+      || delistedVariants.length > 0
+      || mappingRequiresWrite(before, targetProductId, variantMappings, loaded.skuEvidence);
 
     if (!requiresWrite) {
       if (input.afterMapping) {
@@ -613,6 +703,7 @@ export function createShopifyProductMappingService(dependencies: {
           title: verifiedShopifyProduct.title,
         },
         mappedVariantCount: variantMappings.length,
+        delistedVariants: [] as ShopifyVariantDelistResolution[],
         updatedFeedCount: 0,
         createdFeedCount: 0,
         updatedListingCount: 0,
@@ -895,6 +986,14 @@ export function createShopifyProductMappingService(dependencies: {
         }
       }
 
+      const delistedCount = await delistDeletedShopifyVariants(tx, {
+        channelId: before.channel.id,
+        isPrimary: before.channel.isPrimary === true,
+        productId: input.productId,
+        delistedVariants,
+        writtenAt,
+      });
+
       const repaired = await loadMapping(tx, input.productId, before.channel.id);
       if (
         repaired.summary.status !== "consistent"
@@ -938,6 +1037,8 @@ export function createShopifyProductMappingService(dependencies: {
           mappedVariantIds,
           variantMappings,
           mappedVariantCount: variantMappings.length,
+          delistedVariants,
+          delistedCount,
           updatedFeedCount,
           createdFeedCount,
           updatedListingCount,
@@ -958,6 +1059,7 @@ export function createShopifyProductMappingService(dependencies: {
 
       return {
         mappedVariantCount: variantMappings.length,
+        delistedVariants,
         updatedFeedCount,
         createdFeedCount,
         updatedListingCount,

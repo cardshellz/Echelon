@@ -43,7 +43,7 @@ vi.mock("../../../../modules/catalog", () => ({ catalogStorage: {} }));
 vi.mock("../../../../modules/warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
-vi.mock("../../../notifications/notifications.service", () => mocks.notifications);
+vi.mock("../../../notifications/in-app-notifications.api", () => mocks.notifications);
 
 vi.mock("../../receiving-entry.commands", async original => ({
   ...await original<typeof import("../../receiving-entry.commands")>(),

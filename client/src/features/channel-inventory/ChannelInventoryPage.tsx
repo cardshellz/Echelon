@@ -6,8 +6,10 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useAuth } from "@/lib/auth";
+import { cn } from "@/lib/utils";
 
 import { describeError } from "./api";
+import { AvailableStockPanel } from "./components/AvailableStockPanel";
 import { SetUpDestinationsDialog } from "./components/SetUpDestinationsDialog";
 import { ChannelRail, ChannelSelect, ProviderGlyph } from "./components/ChannelRail";
 import { DestinationStrip } from "./components/DestinationStrip";
@@ -23,10 +25,13 @@ import { DraftNavigation, useDraftNavigation } from "./DraftNavigation";
 
 export const CHANNEL_INVENTORY_PATH = "/channels/inventory";
 
+const AVAILABLE_STOCK_VIEW = "available-stock";
 const TABS = ["supply", "rules", "quantities"] as const;
 type Tab = typeof TABS[number];
 
 interface PageSelection {
+  /** Available stock (held back from every channel) instead of one channel's settings. */
+  availableStock: boolean;
   channelId: number | null;
   targetId: number | null;
   productId: number | null;
@@ -42,6 +47,7 @@ function readSelection(search: string): PageSelection {
   };
   const tab = params.get("tab");
   return {
+    availableStock: params.get("view") === AVAILABLE_STOCK_VIEW,
     channelId: number("channel"),
     targetId: number("destination"),
     productId: number("product"),
@@ -51,6 +57,7 @@ function readSelection(search: string): PageSelection {
 
 function writeSelection(selection: PageSelection): string {
   const params = new URLSearchParams();
+  if (selection.availableStock) params.set("view", AVAILABLE_STOCK_VIEW);
   if (selection.channelId !== null) params.set("channel", String(selection.channelId));
   if (selection.targetId !== null) params.set("destination", String(selection.targetId));
   if (selection.productId !== null) params.set("product", String(selection.productId));
@@ -169,17 +176,34 @@ function AuthorizedChannelInventoryPage() {
       ) : (
         <div className="grid gap-6 lg:grid-cols-[17rem_minmax(0,1fr)]">
           <aside className="space-y-3">
+            <button
+              type="button"
+              aria-current={selection.availableStock ? "page" : undefined}
+              onClick={() => requestNavigation(() => setSelection((current) => ({ ...current, availableStock: true })))}
+              className={cn(
+                "flex min-h-[44px] w-full flex-col justify-center rounded-md border px-3 py-2 text-left transition-colors",
+                "hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                selection.availableStock ? "border-primary/60 bg-accent" : "border-transparent",
+              )}
+            >
+              <span className="text-sm font-medium">Available stock</span>
+              <span className="text-xs text-muted-foreground">Held back from every channel</span>
+            </button>
             {isMobile ? (
-              <ChannelSelect entries={rail} selectedId={channelId} onSelect={(id) => requestNavigation(() => setSelection((current) => ({ ...current, channelId: id, targetId: null })))} />
+              <ChannelSelect entries={rail} selectedId={selection.availableStock ? null : channelId}
+                onSelect={(id) => requestNavigation(() => setSelection((current) => ({ ...current, availableStock: false, channelId: id, targetId: null })))} />
             ) : (
               <>
                 <p className="px-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">Sales channels</p>
-                <ChannelRail entries={rail} selectedId={channelId} onSelect={(id) => requestNavigation(() => setSelection((current) => ({ ...current, channelId: id, targetId: null })))} />
+                <ChannelRail entries={rail} selectedId={selection.availableStock ? null : channelId}
+                  onSelect={(id) => requestNavigation(() => setSelection((current) => ({ ...current, availableStock: false, channelId: id, targetId: null })))} />
               </>
             )}
           </aside>
 
-          {channel && (
+          {selection.availableStock && <AvailableStockPanel view={view} canChange={canEdit && canActivate} />}
+
+          {channel && !selection.availableStock && (
             <section className="min-w-0 space-y-5" aria-label={`${channel.name} channel inventory`}>
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex items-center gap-3">

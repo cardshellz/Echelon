@@ -101,7 +101,7 @@ function fixture(variantCount = 2) {
       }) });
     const before = local.mapping; local.mapping = mapping;
     return { before, after: mapping, verifiedShopifyProduct: { id: String(input.targetProductId), title: "Binder" },
-      mappedVariantCount: bindings.length, updatedFeedCount: 0, createdFeedCount: bindings.length, updatedListingCount: 0,
+      mappedVariantCount: bindings.length, delistedVariants: [], updatedFeedCount: 0, createdFeedCount: bindings.length, updatedListingCount: 0,
       createdListingCount: bindings.length, shippingGroupMetafieldQueued: true, alreadyConsistent: before.status === "consistent" };
   });
   const onConnected = vi.fn(async () => undefined);

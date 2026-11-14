@@ -443,7 +443,7 @@ export async function requestStaffPasswordRecoveryEmail(
   if (options.sendRecoveryEmail) {
     await options.sendRecoveryEmail({ to: toEmail, subject, html, text, resetUrl, expiresInMinutes });
   } else {
-    const { sendEmail } = await import("../../notifications/email.service");
+    const { sendEmail } = await import("../../notifications/email-delivery.api");
     await sendEmail({ to: toEmail, subject, html, text });
   }
   return { accepted: true, delivered: true };

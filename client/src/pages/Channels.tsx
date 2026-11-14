@@ -24,6 +24,8 @@ import {
   InventoryRuntimeAuthorityBadge,
   useInventoryRuntimeAuthority,
 } from "@/components/inventory/InventoryRuntimeAuthorityBadge";
+import { copySources, copyStockRules, describeCopyOutcome } from "@/features/channel-inventory/copy-stock-rules";
+import { invalidateChannelInventory, useChannelInventoryView } from "@/features/channel-inventory/hooks";
 
 interface ChannelConnection {
   id: number;
@@ -144,6 +146,9 @@ export default function Channels() {
     status: "pending_setup",
   });
 
+  /** Channel whose stock rules the new channel starts with; null starts it with none. */
+  const [copyRulesFromId, setCopyRulesFromId] = useState<number | null>(null);
+
   const canView = hasPermission("channels", "view");
   const canCreate = hasPermission("channels", "create");
   const canEdit = hasPermission("channels", "edit");
@@ -162,6 +167,11 @@ export default function Channels() {
     enabled: canView,
   });
 
+  // Copying saves and applies stock rules, so it needs the same permissions as changing one.
+  const canCopyStockRules = hasPermission("inventory_planning", "edit") && hasPermission("inventory_planning", "activate");
+  const stockRulesView = useChannelInventoryView(null, { enabled: isCreateOpen && canCopyStockRules });
+  const stockRuleSources = stockRulesView.data ? copySources(stockRulesView.data.channels, stockRulesView.data.policyHeads, null) : [];
+
   const createMutation = useMutation({
     mutationFn: async (data: typeof newChannel) => {
       const res = await fetch("/api/channels", {
@@ -171,13 +181,23 @@ export default function Channels() {
         body: JSON.stringify(data),
       });
       if (!res.ok) throw new Error("Failed to create channel");
-      return res.json();
+      const created: { id: number } = await res.json();
+      // The channel exists from here on. The copy is its own all-or-nothing command: if it is refused or its
+      // outcome is unknown, the channel simply has no stock rules yet and the copy is offered again in Channel Inventory.
+      const copied = copyRulesFromId === null ? null
+        : await copyStockRules({ sourceChannelId: copyRulesFromId, targetChannelId: created.id, idempotencyKey: crypto.randomUUID() });
+      return { created, copied };
     },
-    onSuccess: () => {
+    onSuccess: ({ copied }) => {
       queryClient.invalidateQueries({ queryKey: ["/api/channels"] });
+      void invalidateChannelInventory(queryClient);
       setIsCreateOpen(false);
       setNewChannel({ name: "", type: "internal", provider: "shopify", status: "pending_setup" });
-      toast({ title: "Channel created successfully" });
+      setCopyRulesFromId(null);
+      if (copied === null) toast({ title: "Channel created successfully" });
+      else if (copied.status === "copied") toast({ title: "Channel created", description: describeCopyOutcome(copied) });
+      else toast({ title: "Channel created, stock rules not copied", variant: "destructive",
+        description: `${describeCopyOutcome(copied)} You can copy them in Channel Inventory, under the channel's Stock rules.` });
     },
     onError: (err: Error) => {
       toast({ title: err.message, variant: "destructive" });
@@ -436,6 +456,28 @@ export default function Channels() {
                     </SelectContent>
                   </Select>
                 </div>
+                {stockRuleSources.length > 0 && (
+                  <div className="space-y-2">
+                    <Label htmlFor="channel-copy-stock-rules" className="text-sm">Copy stock rules from</Label>
+                    <Select
+                      value={copyRulesFromId === null ? "none" : String(copyRulesFromId)}
+                      onValueChange={(value) => setCopyRulesFromId(value === "none" ? null : Number(value))}
+                    >
+                      <SelectTrigger id="channel-copy-stock-rules" className="w-full h-11" data-testid="select-copy-stock-rules">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">Don't copy</SelectItem>
+                        {stockRuleSources.map(source => (
+                          <SelectItem key={source.id} value={String(source.id)}>{source.name}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      The new channel gets that channel's default and exceptions. You can change them afterwards in Channel Inventory.
+                    </p>
+                  </div>
+                )}
               </div>
               <DialogFooter>
                 <Button

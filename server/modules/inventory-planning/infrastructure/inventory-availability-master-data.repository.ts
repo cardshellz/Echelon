@@ -61,6 +61,9 @@ import {
 import { retrySerializableMasterDataTransaction } from "./serializable-master-data-transaction";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+// Statements only. A handle bound to one pinned client (the one-step set command) satisfies it as well
+// as a real transaction, and it leaves no way to open or end a transaction from inside a writer.
+type StatementTransaction = Pick<Transaction, "execute" | "insert" | "update" | "delete" | "select">;
 type Executor = typeof db | Transaction;
 
 const LOCATION_POLICY_LOCK_NAMESPACE = 918421;
@@ -813,7 +816,22 @@ implements InventoryAvailabilityMasterDataAdminStore {
       InventoryAvailabilityMasterDataAdminStore["createPromiseSafetyPolicyDraft"]
     >[0],
   ) {
-    return this.database.transaction(async (tx) => {
+    return this.database.transaction((tx) => this.createPromiseSafetyPolicyDraftInsideTransaction(tx, command));
+  }
+
+  /**
+   * The one writer of a new promise-safety version. The one-step set command
+   * (inventory-safety-definition.repository.ts `set`) supplies its own
+   * transaction so the saved version, its review and its apply commit or roll
+   * back together. The caller owns BEGIN/COMMIT; nothing here opens or ends a
+   * transaction.
+   */
+  async createPromiseSafetyPolicyDraftInsideTransaction(
+    tx: StatementTransaction,
+    command: Parameters<
+      InventoryAvailabilityMasterDataAdminStore["createPromiseSafetyPolicyDraft"]
+    >[0],
+  ) {
       const scopeKey = safetyPolicyScopeKey(command.scope);
       await lockIdempotencyKey(tx, command.idempotencyKey);
       await tx.execute(sql`
@@ -930,7 +948,6 @@ implements InventoryAvailabilityMasterDataAdminStore {
         definitionHash,
         alreadyApplied: false,
       };
-    });
   }
 }
 
@@ -1441,7 +1458,7 @@ function draftUpdateReceiptKey(idempotencyKey: string): string {
 }
 
 async function lockIdempotencyKey(
-  tx: Transaction,
+  tx: StatementTransaction,
   idempotencyKey: string,
 ): Promise<void> {
   await tx.execute(sql`
@@ -1453,7 +1470,7 @@ async function lockIdempotencyKey(
 }
 
 async function assertIdempotencyKeyUnusedByOtherType(
-  tx: Transaction,
+  tx: StatementTransaction,
   idempotencyKey: string,
   commandType:
     | "transformation_model"
@@ -1585,7 +1602,7 @@ function safetyPolicyColumns(
 }
 
 async function persistDraftAudit(
-  tx: Transaction,
+  tx: StatementTransaction,
   command: {
     actorId: string;
     changeReason: string;

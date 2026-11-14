@@ -72,6 +72,19 @@ export interface ShopifyVariantMappingResolution {
   replacedVariantIds: string[];
 }
 
+/**
+ * An active SKU whose linked Shopify variant no longer exists on the verified
+ * product, and whose SKU matches no live variant there. Shopify cannot move a
+ * variant between products, so absence from the product's complete variant
+ * list means it was deleted. The repair records the SKU as not listed on this
+ * store instead of blocking every other SKU on the product.
+ */
+export interface ShopifyVariantDelistResolution {
+  variantId: number;
+  sku: string | null;
+  deletedVariantIds: string[];
+}
+
 export type ImportedShopifyProductMappingDecision =
   | { action: "adopt"; productId: string }
   | { action: "retain"; productId: string }
@@ -83,6 +96,7 @@ export type ShopifyProductMappingRepairEvaluation =
       targetProductId: string;
       mappedVariantIds: string[];
       variantMappings: ShopifyVariantMappingResolution[];
+      delistedVariants: ShopifyVariantDelistResolution[];
     }
   | {
       ok: false;
@@ -372,6 +386,7 @@ export function evaluateShopifyProductMappingRepair(input: {
   }
 
   const variantMappings: ShopifyVariantMappingResolution[] = [];
+  const delistedVariants: ShopifyVariantDelistResolution[] = [];
   const assignedRemoteIds = new Map<string, number>();
   const activeVariants = input.summary.variants.filter((candidate) => candidate.isActive);
   const activeVariantIds = new Set(activeVariants.map((variant) => variant.variantId));
@@ -482,6 +497,16 @@ export function evaluateShopifyProductMappingRepair(input: {
         issues.push({ code: "LOCAL_SKU_MISSING", variantId: variant.variantId });
         continue;
       }
+      if (skuMatches.length === 0 && existingIds.length > 0 && verifiedIdMatches.length === 0) {
+        // Every ID this SKU was linked to is gone from the verified product and
+        // no live variant carries its SKU: the Shopify variant was deleted.
+        delistedVariants.push({
+          variantId: variant.variantId,
+          sku: variant.sku,
+          deletedVariantIds: existingIds,
+        });
+        continue;
+      }
       if (skuMatches.length === 0) {
         issues.push({
           code: "EXACT_SKU_NOT_FOUND",
@@ -550,6 +575,15 @@ export function evaluateShopifyProductMappingRepair(input: {
     }
   }
 
+  if (activeVariants.length > 0 && variantMappings.length === 0 && delistedVariants.length > 0) {
+    // Delisting every SKU would leave the product attached to Shopify with
+    // nothing on it. That is an unmapping decision, not a repair.
+    issues.push({
+      code: "NO_ACTIVE_VARIANT_ON_SHOPIFY",
+      delistedVariantIds: delistedVariants.map((variant) => variant.variantId),
+    });
+  }
+
   if (issues.length > 0) {
     return {
       ok: false,
@@ -563,6 +597,7 @@ export function evaluateShopifyProductMappingRepair(input: {
     targetProductId,
     mappedVariantIds: variantMappings.map((variant) => variant.remoteVariantId).sort(),
     variantMappings,
+    delistedVariants,
   };
 }
 

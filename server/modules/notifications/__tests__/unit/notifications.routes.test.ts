@@ -93,6 +93,24 @@ describe("notification routes", () => {
     expect(body).toEqual([{ id: 11, title: "Arrived" }]);
   });
 
+  it("clamps negative limit and offset query values safely", async () => {
+    mocks.service.getUserNotifications.mockResolvedValue([]);
+    server = await startServer(buildApp());
+
+    const { status } = await requestJson(
+      server.url,
+      "GET",
+      "/api/notifications?limit=-10&offset=-4",
+    );
+
+    expect(status).toBe(200);
+    expect(mocks.service.getUserNotifications).toHaveBeenCalledWith("test-user", {
+      unreadOnly: false,
+      limit: 1,
+      offset: 0,
+    });
+  });
+
   it("marks a single notification as read for the current user", async () => {
     mocks.service.markRead.mockResolvedValue(undefined);
     server = await startServer(buildApp());
@@ -102,6 +120,16 @@ describe("notification routes", () => {
     expect(status).toBe(200);
     expect(mocks.service.markRead).toHaveBeenCalledWith(42, "test-user");
     expect(body).toEqual({ ok: true });
+  });
+
+  it.each(["0", "-5", "abc", "12abc"])("rejects invalid notification id %s on markRead", async (badId) => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "POST", `/api/notifications/${badId}/read`);
+
+    expect(status).toBe(400);
+    expect(mocks.service.markRead).not.toHaveBeenCalled();
+    expect(body).toEqual({ error: "Valid notification id is required" });
   });
 
   it("rejects invalid notification preference payloads before writing", async () => {
@@ -114,5 +142,52 @@ describe("notification routes", () => {
     expect(status).toBe(400);
     expect(mocks.service.setUserPreference).not.toHaveBeenCalled();
     expect(body).toEqual({ error: "enabled (boolean) is required" });
+  });
+
+  it.each(["0", "-1", "xyz"])("rejects invalid notification type id %s before writing", async (badTypeId) => {
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(
+      server.url,
+      "PUT",
+      `/api/notification-preferences/${badTypeId}`,
+      { enabled: true },
+    );
+
+    expect(status).toBe(400);
+    expect(mocks.service.setUserPreference).not.toHaveBeenCalled();
+    expect(body).toEqual({ error: "Valid notification type id is required" });
+  });
+
+  it("maps typed 404 preference errors without exposing unexpected database internals on 500", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      mocks.service.setUserPreference.mockRejectedValueOnce(
+        Object.assign(new Error("Notification type not found"), {
+          statusCode: 404,
+          code: "NOTIFICATION_TYPE_NOT_FOUND",
+        }),
+      );
+      mocks.service.getPreferencesForUser.mockRejectedValueOnce(
+        new Error("relation \"notification_preferences\" connection password=secret"),
+      );
+      server = await startServer(buildApp());
+
+      const notFound = await requestJson(server.url, "PUT", "/api/notification-preferences/999", {
+        enabled: false,
+      });
+      expect(notFound.status).toBe(404);
+      expect(notFound.body).toEqual({
+        error: "Notification type not found",
+        code: "NOTIFICATION_TYPE_NOT_FOUND",
+      });
+
+      const serverErr = await requestJson(server.url, "GET", "/api/notification-preferences");
+      expect(serverErr.status).toBe(500);
+      expect(serverErr.body).toEqual({ error: "Failed to load notification preferences" });
+      expect(JSON.stringify(serverErr.body)).not.toContain("password=secret");
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });

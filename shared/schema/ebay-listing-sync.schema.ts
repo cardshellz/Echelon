@@ -13,7 +13,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
-import { products } from "./catalog.schema";
+import { products, productVariants } from "./catalog.schema";
 import {
   channels,
   channelConnections,
@@ -189,4 +189,31 @@ export const ebayListingMappingRejections = channelsSchema.table("ebay_listing_m
   check("ebay_listing_mapping_rejections_actor_check",sql`length(btrim(${table.actor})) BETWEEN 1 AND 200`),
   check("ebay_listing_mapping_rejections_error_code_check",sql`length(${table.errorCode}) BETWEEN 1 AND 100`),
   check("ebay_listing_mapping_rejections_error_message_check",sql`length(${table.errorMessage}) BETWEEN 1 AND 1000`),
+]);
+
+/** Migration 900000065: a reviewed eBay listing update or rebuild that adds a size.
+ * While open it is that size's stock selection intent (channel-stock-selection.domain.ts). */
+export const ebayListingChangeIntents = channelsSchema.table("ebay_listing_change_intents", {
+  id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  connectionId: integer("connection_id").notNull().references(() => channelConnections.id, { onDelete: "cascade" }),
+  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
+  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id, { onDelete: "cascade" }),
+  kind: text("kind").notNull(),
+  externalListingId: text("external_listing_id").notNull(),
+  sku: text("sku").notNull(),
+  reviewToken: text("review_token").notNull(),
+  actor: text("actor").notNull(),
+  openedAt: timestamp("opened_at", { withTimezone: true }).notNull(),
+  closedAt: timestamp("closed_at", { withTimezone: true }),
+  closeReason: text("close_reason"),
+}, table => [
+  uniqueIndex("ebay_listing_change_intents_open_variant_idx").on(table.channelId, table.productVariantId).where(sql`${table.closedAt} IS NULL`),
+  index("ebay_listing_change_intents_open_product_idx").on(table.channelId, table.productId).where(sql`${table.closedAt} IS NULL`),
+  check("ebay_listing_change_intents_kind_check", sql`${table.kind} IN ('listing_update','listing_rebuild')`),
+  check("ebay_listing_change_intents_review_token_check", sql`${table.reviewToken} ~ '^[a-f0-9]{64}$'`),
+  check("ebay_listing_change_intents_actor_check", sql`length(btrim(${table.actor})) BETWEEN 1 AND 200`),
+  check("ebay_listing_change_intents_listing_check", sql`length(btrim(${table.externalListingId})) BETWEEN 1 AND 100`),
+  check("ebay_listing_change_intents_sku_check", sql`length(btrim(${table.sku})) BETWEEN 1 AND 100`),
+  check("ebay_listing_change_intents_close_check", sql`(${table.closedAt} IS NULL AND ${table.closeReason} IS NULL) OR (${table.closedAt} IS NOT NULL AND ${table.closeReason} IS NOT NULL AND ${table.closeReason} IN ('applied','refused','superseded'))`),
 ]);

@@ -44,8 +44,8 @@ vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
 vi.mock("../../procurement", () => ({ procurementStorage: { getVendorById: vi.fn() } }));
 vi.mock("../../ap-ledger.service", () => ({}));
 vi.mock("../../po-document", () => ({ renderPoHtml: vi.fn() }));
-vi.mock("../../../notifications/email.service", () => ({}));
-vi.mock("../../../notifications/notifications.service", () => ({}));
+vi.mock("../../../notifications/email-delivery.api", () => ({}));
+vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
 const settingsCommandMocks = vi.hoisted(() => ({ update: vi.fn() }));
 vi.mock("../../procurement-settings.commands", async importOriginal => ({

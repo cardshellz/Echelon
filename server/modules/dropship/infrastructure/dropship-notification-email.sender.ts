@@ -1,4 +1,4 @@
-import { sendEmail } from "../../notifications/email.service";
+import { sendEmail } from "../../notifications/email-delivery.api";
 import type { DropshipNotificationEmailSender } from "../application/dropship-notification-service";
 
 export class SmtpDropshipNotificationEmailSender implements DropshipNotificationEmailSender {

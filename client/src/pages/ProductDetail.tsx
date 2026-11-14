@@ -61,7 +61,7 @@ import { formatDistanceToNow } from "date-fns";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { cn } from "@/lib/utils";
-import { formatShopifyMappingRepairError } from "@/lib/shopify-product-mapping";
+import { describeDelistedShopifyVariants, formatShopifyMappingRepairError } from "@/lib/shopify-product-mapping";
 import { Link } from "wouter";
 import {
   VendorCatalogQuoteEditor,
@@ -871,7 +871,7 @@ export function ShopifyProductMappingPanel({ productId, enabled }: { productId: 
       });
       const body = await response.json().catch(() => null);
       if (!response.ok) throw new Error(formatShopifyMappingRepairError(body));
-      return body as { alreadyConsistent: boolean; shippingGroupMetafieldQueued: boolean };
+      return body as { alreadyConsistent: boolean; shippingGroupMetafieldQueued: boolean; delistedVariants?: unknown };
     },
     onSuccess: async (result) => {
       setConfirmTargetId(null);
@@ -881,11 +881,13 @@ export function ShopifyProductMappingPanel({ productId, enabled }: { productId: 
         queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}/channel-listings`] }),
         queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}/channel-status`] }),
       ]);
+      const delistedNote = describeDelistedShopifyVariants(result);
+      const outcome = result.shippingGroupMetafieldQueued
+        ? "The parent and channel mappings now agree. Shipping-group sync was queued."
+        : "The live Shopify product and linked variants were verified; no additional write was needed.";
       toast({
         title: result.alreadyConsistent ? "Shopify mapping already consistent" : "Shopify mapping repaired",
-        description: result.shippingGroupMetafieldQueued
-          ? "The parent and channel mappings now agree. Shipping-group sync was queued."
-          : "The live Shopify product and linked variants were verified; no additional write was needed.",
+        description: delistedNote ? `${outcome} ${delistedNote}` : outcome,
       });
     },
     onError: (mutationError: Error) => {
@@ -1008,7 +1010,8 @@ export function ShopifyProductMappingPanel({ productId, enabled }: { productId: 
             <DialogTitle>Repair Shopify product mapping?</DialogTitle>
             <DialogDescription>
               Shopify will be checked before any write. Active variants will be resolved from a verified existing ID or one exact unique SKU.
-              Archived variants are excluded. The catalog, feed, and listing mappings will be updated together for product {confirmTargetId},
+              Archived variants are excluded. A variant whose linked Shopify variant was deleted in Shopify is marked not listed on this store
+              (its stock and other channels are untouched). The catalog, feed, and listing mappings will be updated together for product {confirmTargetId},
               then the shipping-group metafield will be queued.
             </DialogDescription>
           </DialogHeader>

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sent = vi.hoisted(() => [] as Array<{ to: string; subject: string; text: string; html: string }>);
-vi.mock("../../../notifications/email.service", () => ({
+vi.mock("../../../notifications/email-delivery.api", () => ({
   sendEmail: async (input: { to: string; subject: string; text: string; html: string }) => { sent.push(input); },
 }));
 

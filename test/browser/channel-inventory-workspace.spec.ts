@@ -42,6 +42,7 @@ async function setup(page: Page, options: {
     applyLostResponse: false, applyConflict: false, reviewBlocked: false, progress: null as ChannelDefinitionProgress | null,
     ruleProgress: null as ChannelRuleProgress | null, ruleApplyLostResponse: false, ruleReviews: [] as Array<Record<string, unknown>>,
     reads: [] as string[], errors: [] as string[], unexpected: [] as string[], loseResponse: false, conflict: false, invalidResponse: false,
+    copies: [] as Array<Record<string, unknown>>, copyRefused: false, copyLostResponse: false,
     enableFailed: false, enableLostResponse: false, globalFailed: false, globalChangeFailed: false, previewFailed: false, stopFailed: false,
     global: { globalEnabled: options.globalEnabled ?? true, sweepIntervalMinutes: 15, revision: "1",
       changedBy: "operator-1", changeReason: "Approved" as string | null, lastSweepAt: null },
@@ -210,6 +211,22 @@ async function setup(page: Page, options: {
       }
       return route.fulfill({ json: { definitionId: 2, version: 2, definitionHash: HASH_B, headRevision: "2", alreadyApplied: false,
         runtimeAuthorityChanged: false, providerWriteAttempted: false } });
+    }
+    if (req.method() === "POST" && path === "/api/inventory-planning/admin/channel-rule-definitions/copy") {
+      const body = req.postDataJSON();
+      state.copies.push(body);
+      if (state.copyRefused) return route.fulfill({ status: 409, json: { error: { code: "CHANNEL_RULE_COPY_BLOCKED",
+        message: "These rules would create a problem, so nothing was copied.", details: ["eBay / CARD-P5: shared stock is over-allocated."] } } });
+      // A reduced stand-in for the server: the target now has the source's default and one exception, in effect.
+      const targetId = body.targetChannelId as number;
+      state.data.policyHeads.push(
+        policyHead({ scopeKey: `channel:${targetId}`, channelId: targetId, scope: { scopeType: "channel", channelId: targetId }, active: defaults }),
+        policyHead({ scopeKey: `channel:${targetId}:variant:101`, channelId: targetId,
+          scope: { scopeType: "variant", channelId: targetId, productId: 10, productVariantId: 101 }, active: policyValue({ maxPublish: { mode: "units", units: "0" } }) }));
+      if (state.copyLostResponse) { state.copyLostResponse = false; return route.abort("failed"); }
+      return route.fulfill({ json: { receipt: { channelId: targetId, appliedAt: AT, appliedBy: "operator-1", reviewHash: HASH_A,
+        publicationIds: ["31"], changedDefinitions: 2, alreadyApplied: false }, sourceChannelId: body.sourceChannelId, sourceChannelName: "Shopify US",
+        targetChannelName: "eBay", copiedExceptions: 1, skippedRules: [], changedQuantities: 2, skippedDestinations: [], warnings: [] } });
     }
     state.unexpected.push(`${req.method()} ${path}`);
     return route.fulfill({ status: 500, json: { error: { code: "UNEXPECTED_TEST_REQUEST", message: "Unexpected request" } } });
@@ -411,6 +428,72 @@ test("channel default saves without a written reason or any activation call", as
   expect(state.writes).toHaveLength(1);
   expect(state.writes[0].body).toMatchObject({ expectedHeadRevision: "1", changeReason: null, value: { shareBps: 8000 } });
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+const COPY_CARD = "Copy stock rules from another channel";
+const EBAY_RULES = "?channel=4&destination=6&tab=rules";
+
+test("a channel with no stock rules copies another channel's rules in one step", async ({ page }, testInfo) => {
+  const state = await setup(page, { query: EBAY_RULES });
+  const card = page.locator("section").filter({ hasText: COPY_CARD }).first();
+  await expect(card).toBeVisible();
+  await expect(card.getByRole("button", { name: "Copy", exact: true })).toBeDisabled();
+  await card.getByRole("combobox", { name: "Copy stock rules from" }).click();
+  // Only a channel whose rules are in effect is offered, never the channel itself.
+  await expect(page.getByRole("option")).toHaveText(["Shopify US"]);
+  await page.getByRole("option", { name: "Shopify US", exact: true }).click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("copy-stock-rules.png"), fullPage: true });
+  await card.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(page.getByTestId("copy-stock-rules-result"))
+    .toHaveText("Copied the default and 1 exception from Shopify US to eBay. 2 quantities sent to channels changed.");
+  expect(state.copies).toHaveLength(1);
+  expect(state.copies[0]).toMatchObject({ sourceChannelId: 3, targetChannelId: 4 });
+  expect(Object.keys(state.copies[0]).sort()).toEqual(["changeReason", "idempotencyKey", "sourceChannelId", "targetChannelId"]);
+  expect(state.copies[0].changeReason).toBeNull();
+  // The channel has rules now, so the offer is gone and nothing was saved as a draft.
+  await expect(page.getByText(COPY_CARD)).toHaveCount(0);
+  expect(state.writes).toEqual([]);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a refused copy says why, changes nothing and stays on offer", async ({ page }) => {
+  const state = await setup(page, { query: EBAY_RULES });
+  state.copyRefused = true;
+  const card = page.locator("section").filter({ hasText: COPY_CARD }).first();
+  await card.getByRole("combobox", { name: "Copy stock rules from" }).click();
+  await page.getByRole("option", { name: "Shopify US", exact: true }).click();
+  await card.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(page.getByTestId("copy-stock-rules-result"))
+    .toHaveText("Not copied. These rules would create a problem, so nothing was copied. eBay / CARD-P5: shared stock is over-allocated.");
+  await expect(card).toBeVisible();
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a lost copy response is reported as unknown, and the screen reloads what is in effect", async ({ page }) => {
+  const state = await setup(page, { query: EBAY_RULES });
+  state.copyLostResponse = true;
+  const card = page.locator("section").filter({ hasText: COPY_CARD }).first();
+  await card.getByRole("combobox", { name: "Copy stock rules from" }).click();
+  await page.getByRole("option", { name: "Shopify US", exact: true }).click();
+  await card.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(page.getByTestId("copy-stock-rules-result")).toContainText("The outcome is unknown.");
+  // The copy did land on the server; the reload shows the channel's rules and withdraws the offer.
+  await expect(page.getByText(COPY_CARD)).toHaveCount(0);
+  expect(state.copies).toHaveLength(1);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("copying is not offered to a channel that has rules, to view-only staff, or when no channel has rules", async ({ page }) => {
+  await setup(page);
+  await expect(page.getByText("Inventory settings for Shopify US", { exact: true })).toBeVisible();
+  await expect(page.getByText(COPY_CARD)).toHaveCount(0);
+  await setup(page, { query: EBAY_RULES, permission: "view" });
+  await expect(page.getByText("Inventory settings for eBay", { exact: true })).toBeVisible();
+  await expect(page.getByText(COPY_CARD)).toHaveCount(0);
+  await setup(page, { query: EBAY_RULES, viewOverrides: { policyHeads: [] } });
+  await expect(page.getByText("Inventory settings for eBay", { exact: true })).toBeVisible();
+  await expect(page.getByText(COPY_CARD)).toHaveCount(0);
 });
 
 test("new channels show editable suggestions and save them only after the operator chooses Save", async ({ page }, testInfo) => {

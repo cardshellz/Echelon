@@ -209,7 +209,6 @@ describe("WMS-2: Orders, WMS, and Cartonization internal API boundaries (CI-03) 
       "modules/oms",
       "modules/orders",
       "modules/wms",
-      "server/db.ts",
     ]);
     expect(baseline["wms.order_items"]).toEqual(["modules/wms"]);
     expect(baseline["wms.pick_corrections"]).toEqual(["modules/wms"]);

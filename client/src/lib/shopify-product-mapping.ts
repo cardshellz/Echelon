@@ -24,10 +24,24 @@ export function formatShopifyMappingRepairError(
       LOCAL_SKU_MISSING: "the Echelon variant has no SKU for deterministic matching",
       LIVE_VARIANT_ASSIGNED_TWICE: "the same Shopify variant matched two Echelon variants",
       SELECTED_VARIANT_MISMATCH: "the selected Shopify variant does not match the verified SKU resolution",
+      NO_ACTIVE_VARIANT_ON_SHOPIFY: "every linked Shopify variant was deleted, so nothing would remain mapped",
     };
     const description = descriptions[String(issue.code)] ?? "the active variant could not be resolved";
     return [`${identifier}: ${description}`];
   });
 
   return issueMessages.length > 0 ? `${baseMessage}. ${issueMessages.join("; ")}` : baseMessage;
+}
+
+/** Names the SKUs a repair marked not listed because their Shopify variant was deleted. */
+export function describeDelistedShopifyVariants(body: unknown): string | null {
+  const response = body && typeof body === "object" ? body as Record<string, unknown> : null;
+  const delisted = Array.isArray(response?.delistedVariants) ? response.delistedVariants : [];
+  const labels = delisted.flatMap((raw) => {
+    if (!raw || typeof raw !== "object") return [];
+    const variant = raw as Record<string, unknown>;
+    return [typeof variant.sku === "string" && variant.sku ? variant.sku : `variant ${String(variant.variantId ?? "unknown")}`];
+  });
+  if (labels.length === 0) return null;
+  return `Not listed on this store anymore (deleted in Shopify): ${labels.join(", ")}.`;
 }

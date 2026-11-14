@@ -22,6 +22,7 @@ import { ensureEbayListingInventoryReady } from "../../../channels/infrastructur
 import { readEbayStockLinkGaps } from "../../infrastructure/ebay-publication-readiness.repository";
 import { linkChannelEbayStock } from "../../infrastructure/channel-ebay-stock-link";
 import { createChannelEbayStockLinkSource } from "../../../channels/infrastructure/ebay-stock-link-source";
+import { EbayListingChangeIntentRepository } from "../../../channels/infrastructure/ebay-listing-change-intent.repository";
 import type { EbayInventoryItem, EbayInventoryItemGroup, EbayBulkPriceQuantityRequest, EbayOffer } from "../../../channels/adapters/ebay/ebay-types";
 
 const runtime = vi.hoisted(() => ({ pool: null as Pool | null, api: vi.fn() }));
@@ -509,6 +510,31 @@ dbDescribe.sequential("reviewed eBay publication stock enrollment, real PostgreS
       variants: [{ productVariantId: 101, sku: "OTHER" }] }, { now: WALMART_INVENTORY_NOW, monotonicNow: () => 0 }))
       .toMatchObject({ status: "blocked" });
     expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 0 });
+  });
+  it("a size added by a reviewed listing change links its stock only while that reviewed change is on record", async () => {
+    // P5 with no saved eBay identity and no publish job: what an added size is before its listing change succeeds.
+    await database.pool.query("UPDATE channels.channel_listings SET external_variant_id=NULL,sync_status='error' WHERE id=1");
+    const link = (key: string) => linkChannelEbayStock(database.pool, { publicationTargetId: 3, channelId: 67, connectionId: 9, accountId: "seller-36",
+      environment: "production", productId: 20, purpose: "publish", variants: source().variants,
+      origin: { kind: "listing_update", key }, actor: "system:ebay-listing-change" }, { now: WALMART_INVENTORY_NOW, monotonicNow: () => 0 });
+    // The production refusal: nothing marks the size as selected, so nothing is linked or queued.
+    expect(await link("review-a")).toMatchObject({ status: "blocked", blockers: [{ code: "STOCK_LISTING_NOT_SELECTED",
+      message: expect.stringContaining("no managed stock publication intent is saved yet") }] });
+    expect(await counts()).toEqual({ mappings: 0, members: 0, updates: 0, receipts: 0, jobs: 0 });
+    const intents = new EbayListingChangeIntentRepository(database.pool);
+    const review = { channelId: 67, productId: 20, reviewToken: "a".repeat(64) };
+    await intents.open({ ...review, kind: "listing_update", connectionId: 9, externalListingId: "listing-20", actor: "user:operator",
+      members: [{ productVariantId: 101, sku: "P5" }] }, WALMART_INVENTORY_NOW);
+    // The same reviewed change, retried with the same key, now links the size and queues its real quantity.
+    expect(await link("review-a")).toMatchObject({ status: "ready", alreadyLinked: false });
+    expect(await counts()).toEqual({ mappings: 1, members: 0, updates: 1, receipts: 1, jobs: 0 });
+    expect((await database.pool.query("SELECT desired_quantity::text,external_inventory_item_id_snapshot FROM inventory.inventory_publication_outbox WHERE publication_target_id=3")).rows)
+      .toEqual([{ desired_quantity: "17", external_inventory_item_id_snapshot: "P5" }]);
+    expect(await link("review-a")).toMatchObject({ status: "ready", alreadyLinked: true });
+    // Withdrawn because the change never reached eBay: the size is no longer selected, so a later link is refused.
+    await intents.close({ ...review, reason: "refused" }, WALMART_INVENTORY_NOW);
+    expect(await link("review-b")).toMatchObject({ status: "blocked", blockers: [{ code: "STOCK_LISTING_NOT_SELECTED" }] });
+    expect((await counts()).receipts).toBe(1);
   });
   it("Card Shellz eBay source SQL: live listings of the verified account, their eBay SKU, and outstanding listing work as a wait", async () => {
     const source = createChannelEbayStockLinkSource();

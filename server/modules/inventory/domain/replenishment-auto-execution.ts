@@ -5,6 +5,25 @@ export interface ReplenishmentAutoExecutionSettings {
 
 const DEFAULT_INLINE_REPLENISHMENT_BASE_UNITS = 50;
 
+/**
+ * The run/queue override (1 = always run, 2 = always queue) that applies to a
+ * manually created task. A replen rule or tier default sets that override
+ * together with its own replenishment method, so it governs only tasks of
+ * that method. Example: the level-3 tier default is "pallet drop, always
+ * queue"; a manual case break into a level-3 SKU is not a pallet drop and
+ * follows the warehouse execution mode instead. An override with no recorded
+ * method keeps applying, as before.
+ */
+export function manualReplenishmentAutoOverride(input: {
+  autoReplen: number | null | undefined;
+  autoReplenMethod: string | null | undefined;
+  taskMethod: string;
+}): number | null {
+  if (input.autoReplen == null) return null;
+  if (input.autoReplenMethod && input.autoReplenMethod !== input.taskMethod) return null;
+  return input.autoReplen;
+}
+
 /** Methods whose routine movement is owned by the inline inventory executor. */
 export function supportsInlineReplenishment(method: string): boolean {
   return (

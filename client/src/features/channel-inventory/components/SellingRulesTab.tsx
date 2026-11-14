@@ -8,9 +8,11 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 
 import { buildPolicyDraftRequest, savePolicyDraft } from "../api";
+import { describeCopyOutcome } from "../copy-stock-rules";
 import { invalidateChannelInventory } from "../hooks";
 import { useDraftEditor } from "../use-draft-editor";
 import { useDraftNavigation } from "../DraftNavigation";
+import { CopyStockRulesCard } from "./CopyStockRulesCard";
 import { DraftSaveFeedback } from "./DraftSaveFeedback";
 import {
   findPolicyHead,
@@ -44,8 +46,22 @@ export function SellingRulesTab({ view, channel, canEdit, canActivate, focusProd
 }) {
   const [sheet, setSheet] = useState<{ open: boolean; subject: ExceptionSubject | null }>({ open: false, subject: null });
   const navigate = useDraftNavigation();
+  const queryClient = useQueryClient();
+  // Kept here, not in the card: a finished copy gives the channel rules, which removes the card.
+  const [copyResult, setCopyResult] = useState<{ channelId: number; ok: boolean; text: string } | null>(null);
   return (
     <div className="space-y-4">
+      <CopyStockRulesCard key={`copy-${channel.id}`} view={view} channel={channel} canChange={canEdit && canActivate}
+        onDone={async (outcome) => {
+          setCopyResult({ channelId: channel.id, ok: outcome.status === "copied", text: describeCopyOutcome(outcome) });
+          // Reload after every outcome, including an unknown one: the screen then shows what is actually in effect.
+          await invalidateChannelInventory(queryClient);
+        }} />
+      {copyResult?.channelId === channel.id && (
+        <p role="status" data-testid="copy-stock-rules-result" className={`rounded-md border p-3 text-sm ${copyResult.ok ? "" : "text-destructive"}`}>
+          {copyResult.text}
+        </p>
+      )}
       <ChannelDefaultCard key={channel.id} view={view} channel={channel} canEdit={canEdit} onReload={onReload} reloading={reloading} />
       <ExceptionsCard
         view={view}

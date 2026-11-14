@@ -1,7 +1,7 @@
 import { legacyTransformationExecutionAuthority } from "../application/transformation-execution-authority.port";
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../notifications/notifications.service", () => ({
+vi.mock("../../notifications/in-app-notifications.api", () => ({
   notify: vi.fn(async () => undefined),
 }));
 vi.mock("../../warehouse/settings.resolver", () => ({

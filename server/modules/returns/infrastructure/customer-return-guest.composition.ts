@@ -30,7 +30,7 @@ export async function createCustomerReturnGuestService(config: ReturnCustomerAut
     purchases: new ShopifyGuestReturnPurchaseGateway({ database: pool, connection: channel => identity.shopifyConnection(channel), request: fetch,
       storefrontOrigin: shop => new URL(config.shops[shop].proxyUrl).origin }),
     email: { send: async input => {
-      const { sendEmail } = await import("../../notifications/email.service");
+      const { sendEmail } = await import("../../notifications/email-delivery.api");
       const result = await sendEmail({ to: input.to, subject: "Your Card Shellz return verification code",
         messageId: `<return-guest-${input.challengeId}@cardshellz.com>`,
         text: `Your return verification code is ${input.code}. Codes expire 10 minutes after the first request. If you didn't request this, ignore this email.`,

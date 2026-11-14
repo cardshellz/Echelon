@@ -64,6 +64,7 @@ export default function ProcurementPromiseSafetySettings() {
           Procurement settings · promise-safety floors and demand evidence.
           This is separate from the purchasing reorder buffer (safetyStockDays).
           Saving a safety draft does not activate it or change live ATP.
+          For a plain number per SKU that takes effect on save, use Channel Inventory, Available stock.
         </p>
       </header>
       <Card>

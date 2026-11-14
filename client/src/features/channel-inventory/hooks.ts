@@ -11,10 +11,11 @@ export const PREVIEW_QUERY_KEY = [ENDPOINTS.preview] as const;
 export const PUBLISHING_STATUS_QUERY_KEY = [ENDPOINTS.syncStatus] as const;
 const PUBLISHING_STATUS_REFRESH_MS = 30_000;
 
-export function useChannelInventoryView(productId: number | null) {
+export function useChannelInventoryView(productId: number | null, options: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: [...VIEW_QUERY_KEY, productId],
     queryFn: () => fetchView(productId),
+    enabled: options.enabled ?? true,
     // Switching the product in focus refetches the same page; keep the last
     // good view on screen instead of flashing to a loading state.
     placeholderData: keepPreviousData,

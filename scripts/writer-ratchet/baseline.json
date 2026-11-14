@@ -121,6 +121,9 @@
     "modules/identity",
     "server/routes/pick-priority.routes.ts"
   ],
+  "channels.ebay_listing_change_intents": [
+    "modules/channels"
+  ],
   "channels.ebay_listing_exclusion_commands": [
     "modules/channels"
   ],
@@ -1913,8 +1916,7 @@
   "wms.orders": [
     "modules/oms",
     "modules/orders",
-    "modules/wms",
-    "server/db.ts"
+    "modules/wms"
   ],
   "wms.outbound_shipment_items": [
     "modules/oms",
