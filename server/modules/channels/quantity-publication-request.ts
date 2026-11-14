@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { QuantityPublicationAdmissionError } from "../inventory-planning/domain/quantity-publication-admission";
 import { observeEbayQuantityRequest, withEbayQuantityRequestJournal } from "../inventory-planning/application/quantity-provider-request-evidence";
 import { readEbayBulkQuantityResponse } from "./adapters/ebay/ebay-quantity-update";
+import { EbayApiRequestError, isMissingEbayOfferCollection } from "./adapters/ebay/ebay-api-error";
 
 export interface EbayQuantityHttpRequest {
   method: string; path: string; body?: unknown; expectNoContent?: boolean;
@@ -214,7 +215,15 @@ async function refreshCanonicalEbayQuantity(sku: string, quantity: number, marke
   if (hasQuantity(shipLocations) || hasQuantity(availability.pickupAtLocationAvailability)) {
     throw invalid("Retained per-location or pickup quantities require an explicit canonical location mapping before publication.");
   }
-  const response = record(await request({ method: "GET", path: `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${marketplaceId}` }));
+  let response: Record<string, unknown>;
+  try {
+    response = record(await request({ method: "GET", path: `/sell/inventory/v1/offer?sku=${encodeURIComponent(sku)}&marketplace_id=${marketplaceId}` }));
+  } catch (error) {
+    // A size being added to a live listing has an inventory item but no offer yet, and eBay answers that with
+    // 404/25713 instead of an empty list. It is the complete "no offers" answer the branch below already handles.
+    if (!isMissingOfferCollection(error)) throw error;
+    response = { offers: [], total: 0 };
+  }
   if (!Array.isArray(response.offers) || response.offers.length > 250) throw invalid("Provider offer membership could not be verified before publication.");
   if (typeof response.total === "number" && response.total !== response.offers.length) throw invalid("Provider offers are paginated; complete membership is required.");
   const offers = response.offers.map(raw => {
@@ -235,6 +244,13 @@ async function refreshCanonicalEbayQuantity(sku: string, quantity: number, marke
       body: rewriteEbayCanonicalQuantities({ ...item, availability: { ...availability,
         shipToLocationAvailability: { ...record(availability.shipToLocationAvailability), quantity } } }, quantity) });
   }
+}
+/** Every transport behind this protocol classifies eBay's authoritative "this SKU has no offer" (404 with only
+ * error 25713): the channel transports throw EbayApiRequestError, Dropship marks its error context. Any other
+ * refusal, including an unclassified 404, stays a failure. */
+function isMissingOfferCollection(error: unknown): boolean {
+  if (error instanceof EbayApiRequestError) return isMissingEbayOfferCollection(error.statusCode, error.errorIds);
+  return error instanceof Error && "context" in error && record(error.context).offerCollectionMissing === true;
 }
 function invalid(message: string): QuantityPublicationAdmissionError {
   return new QuantityPublicationAdmissionError("PUBLICATION_LISTING_MEMBERSHIP_UNPROVEN", message);
