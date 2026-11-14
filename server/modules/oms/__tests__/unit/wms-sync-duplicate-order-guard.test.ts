@@ -102,8 +102,12 @@ describe("wms-sync duplicate WMS order / ShipStation push guard", () => {
     expect(FULFILLMENT_PARTITION_MIGRATION).toContain("DROP INDEX IF EXISTS wms.uq_wms_orders_oms_fulfillment_active");
     expect(FULFILLMENT_PARTITION_MIGRATION).toContain("WHERE oms_fulfillment_order_id IS NOT NULL");
     expect(FULFILLMENT_PARTITION_MIGRATION).not.toContain("ALTER COLUMN fulfillment_partition_key SET NOT NULL");
-    expect(DB_SRC).toContain("uq_wms_orders_oms_fulfillment_partition_active");
-    expect(DB_SRC).toContain("WHERE oms_fulfillment_order_id IS NOT NULL");
+    // The tracked migration is the only definition. The legacy release
+    // fallback copy in server/db.ts was retired (REFACTOR-PLAN P4.1) and
+    // must not come back as a second, drifting source of this index.
+    expect(DB_SRC).not.toContain(
+      "CREATE UNIQUE INDEX IF NOT EXISTS uq_wms_orders_oms_fulfillment_partition_active",
+    );
     expect(DB_SRC).not.toContain("ALTER COLUMN fulfillment_partition_key SET NOT NULL");
   });
 
