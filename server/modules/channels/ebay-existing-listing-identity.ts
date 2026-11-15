@@ -126,6 +126,7 @@ export async function resolveExistingEbayListingIdentity(
   source: EbayListingSyncIdentity,
   observer: MarketplaceListingRegistrationObserver,
   candidates: readonly ListingRegistrationVariantCandidate[],
+  pendingAdditionSkus: readonly string[] = [],
 ): Promise<{ identity: EbayListingSyncIdentity; observation: MarketplaceObservedListingPublication }> {
   // Active saved members choose the maintenance target. Archived nonmembers
   // belong to the independent listing lifecycle and are not queried here.
@@ -149,7 +150,7 @@ export async function resolveExistingEbayListingIdentity(
     memberCandidates: candidates.filter(candidate => !source.variants.find(member => member.variantId === candidate.productVariantId)?.catalogArchived),
     topologyOnlySkus: source.variants.filter(member => member.catalogArchived).map(member => member.sku),
   }, observer, source.accountId);
-  return { identity: bindObservedEbayListingMembers(source, observation), observation };
+  return { identity: bindObservedEbayListingMembers(source, observation, pendingAdditionSkus), observation };
 }
 
 const nonMemberEvidenceSchema = z.array(z.object({
@@ -168,8 +169,15 @@ const nonMemberEvidenceSchema = z.array(z.object({
  * of this listing. Saved source mappings remain intact for replay and audit. */
 export function bindObservedEbayListingMembers(
   source: EbayListingSyncIdentity,
-  observation: MarketplaceObservedListingPublication,
+  rawObservation: MarketplaceObservedListingPublication,
+  // SKUs a reviewed listing change of this product and listing is adding (its open change-intent rows). eBay can
+  // keep such a size in the group, or even publish it, when the change stops part-way. That is Echelon's own
+  // unfinished work, so it must not lock the review that finishes it. It is never bound as a saved member here.
+  pendingAdditionSkus: readonly string[] = [],
 ): EbayListingSyncIdentity {
+  const pending = new Set(pendingAdditionSkus);
+  const observation = pending.size === 0 ? rawObservation
+    : { ...rawObservation, members: rawObservation.members.filter(member => !pending.has(member.sku)) };
   const observedBySku = new Map(observation.members.map(member => [member.sku, member]));
   const missing = source.variants.filter(member => !member.catalogArchived && !observedBySku.has(member.sku));
   if (observedBySku.size !== observation.members.length
@@ -200,12 +208,13 @@ export function bindObservedEbayListingMembers(
   const groupSkus = z.array(sku).max(250).parse(observation.evidence.groupVariantSkus ?? []);
   const retainedGroupSkus = groupSkus.filter(sku => !observedBySku.has(sku));
   if (new Set(groupSkus).size !== groupSkus.length
-    || retainedGroupSkus.some(sku => !source.variants.some(member => member.sku === sku && member.catalogArchived))) {
+    || retainedGroupSkus.some(sku => !pending.has(sku) && !source.variants.some(member => member.sku === sku && member.catalogArchived))) {
     throw identityError("EBAY_SYNC_MEMBERSHIP_CHANGED", "The eBay group contains an unverified member outside this product's saved archived variants.");
   }
   // Keep remotely present archived members in the topology snapshot. Content
   // sync must preserve that topology until the lifecycle removes them; this is
   // not permission to prepare their inventory or rewrite their item content.
+  const retainedArchivedSkus = retainedGroupSkus.filter(sku => !pending.has(sku));
   const published = source.variants.filter(member => observedBySku.has(member.sku));
   if (published.length > 1 && groupKey === null) {
     throw identityError("EBAY_SYNC_GROUP_IDENTITY_REQUIRED", `Product ${source.productId}'s multi-variant eBay listing has no verified inventory group.`);
@@ -221,7 +230,7 @@ export function bindObservedEbayListingMembers(
     return { ...member, offerId: observed.offerIdentity.externalId, listingId: observation.listingIdentity.externalId };
   });
   return ebayListingSyncIdentitySchema.parse({ ...source, groupKey, variants,
-    ...(retainedGroupSkus.length ? { retainedGroupSkus: [...retainedGroupSkus].sort() } : {}) });
+    ...(retainedArchivedSkus.length ? { retainedGroupSkus: [...retainedArchivedSkus].sort() } : {}) });
 }
 
 /** Shared read boundary for maintenance and interrupted first-publication replay.

@@ -615,7 +615,8 @@ export class EbayMarketplaceListingConnector {
   }
   /**
    * Update an active variation listing in eBay's required dependency order:
-   * inventory items, offers for added members, group membership, updates to
+   * inventory items, offers for added members, publication of the additions
+   * when members are also being removed, group membership, updates to
    * existing offers, then publication. The generic
    * push path intentionally repairs offers first and is not valid when the
    * set of variation specifics is changing.
@@ -697,6 +698,25 @@ export class EbayMarketplaceListingConnector {
         if (existingOfferId) continue;
         createdOfferIds.set(offer.variantId, await input.client.createOffer(offer.payload));
         await this.delay(this.offerDelayMs);
+      }
+
+      // A size is not buyable until its offer is published. Removing a size in the same group write that adds one
+      // can therefore leave the live listing with a single buyable variation, which eBay refuses (25604), and eBay
+      // keeps the added size in the group anyway. So publish the additions first on a group that still holds the
+      // sizes being removed; the target group write below then removes them from a listing that stays multi-SKU.
+      const removedMembers = normalizedSkus(input.removedSkus);
+      const hasUnpublishedMember = resolvedOffers.some(({ observedOffer }) => !observedOffer || !isPublishedObservedOffer(observedOffer));
+      if (hasUnpublishedMember && removedMembers.length > 0) {
+        const additiveGroup = buildRetainedVariationGroupPayload({
+          desiredGroup: input.draft.itemGroup.payload, currentGroup: workingGroup, retainedSkus: removedMembers });
+        await input.client.createOrReplaceInventoryItemGroup(input.draft.itemGroup.groupKey, additiveGroup);
+        workingGroup = { ...additiveGroup, inventoryItemGroupKey: input.draft.itemGroup.groupKey };
+        const additions = await this.publishGroupWithConsistencyRetry({
+          client: input.client, groupKey: input.draft.itemGroup.groupKey, marketplaceId: input.draft.marketplaceId });
+        if (additions.listingId !== undefined && additions.listingId !== expectedListingId) {
+          throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED",
+            "eBay did not preserve the reviewed listing id while publishing the added variations.");
+        }
       }
 
       try {
