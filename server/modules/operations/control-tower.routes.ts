@@ -5,6 +5,7 @@ import { enqueueShipStationRetry } from "../oms/webhook-retry.api";
 import { hasPermission } from "../identity";
 import { requireAuth, requirePermission } from "../../routes/middleware";
 import {
+  ControlTowerActionError,
   executeOperationsControlTowerAction,
   getOperationsControlTower,
   getOperationsControlTowerDetail,
@@ -345,6 +346,11 @@ export function registerOperationsControlTowerRoutes(app: Express) {
 
   app.post("/api/operations/control-tower/:id/actions/:actionId", requireAuth, async (req: Request, res: Response) => {
     try {
+      const itemId = String(req.params.id || "").trim();
+      if (!itemId || itemId.length > 200) {
+        res.status(400).json({ error: "A valid work item id is required" });
+        return;
+      }
       const actionId = String(req.params.actionId || "").trim();
       if (!/^[a-z_]+$/.test(actionId)) {
         res.status(400).json({ error: "Invalid action id" });
@@ -353,7 +359,6 @@ export function registerOperationsControlTowerRoutes(app: Express) {
 
       const userId = req.session.user?.id;
       const canViewProcurement = userId ? await hasPermission(userId, "purchasing", "view") : false;
-      const itemId = String(req.params.id || "").trim();
       const detail = await getOperationsControlTowerDetail({ ...dependencies(req), canViewProcurement }, itemId);
       if (!detail) {
         res.status(404).json({ error: "Control Tower work item not found or already resolved" });
@@ -380,11 +385,16 @@ export function registerOperationsControlTowerRoutes(app: Express) {
         detail,
       });
       res.json({ accepted: true, workItemId: itemId, actionId, result });
-    } catch (error: any) {
+    } catch (error: unknown) {
+      if (error instanceof ControlTowerActionError) {
+        res.status(error.statusCode).json({ error: error.message, code: error.code });
+        return;
+      }
       console.error("[Operations Control Tower] action failed:", error);
-      const message = error?.message || "Failed to execute control tower action";
-      const status = /not found/i.test(message) ? 404 : /permission|positive integer|required|invalid/i.test(message) ? 400 : 409;
-      res.status(status).json({ error: message });
+      res.status(500).json({
+        error: "Failed to execute control tower action",
+        code: "CONTROL_TOWER_ACTION_INTERNAL_ERROR",
+      });
     }
   });
 }
