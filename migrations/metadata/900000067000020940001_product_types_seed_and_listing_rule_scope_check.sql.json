@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000067000020940001_product_types_seed_and_listing_rule_scope_check.sql",
+  "generation": 67,
+  "pr": 2094,
+  "ordinal": 1,
+  "after": [
+    "900000066000020930001_legacy_performance_indexes.sql"
+  ]
+}
