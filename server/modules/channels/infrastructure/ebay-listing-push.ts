@@ -281,7 +281,8 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
         ? new EbayListingSyncError("EBAY_LISTING_PREFLIGHT_FAILED", `Saved listing inputs are invalid: ${caught.issues.map(issue => issue.path.join(".") || "listing").join(", ").slice(0, 300)}. Review this product and its eBay connection settings before publishing.`, { cause: caught })
         : caught;
       let failure = ebayListingPushFailure(productId, error, productName);
-      console.error(JSON.stringify({ event: "ebay_listing_push_failed", productId, code: failure.code, message: failure.error }));
+      console.error(JSON.stringify({ event: "ebay_listing_push_failed", productId, code: failure.code, message: failure.error,
+        cause: describeUnclassifiedFailure(error) }));
       // Nothing reached eBay: withdraw the reviewed additions so no size stays selected for stock without a listing.
       // After eBay writes began the size may be on the live listing, so its record stays open and it keeps receiving
       // stock updates until a later review applies or replaces it.
@@ -309,6 +310,17 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
   });
 }
 export const readEbayPushRecoveryIdentity = readEbayPublicationSource;
+
+/** What the public result hides when an error has no application code. Only identity fields are logged, never the
+ * message: database and transport messages can carry query parameters or credentials. */
+function describeUnclassifiedFailure(error: unknown): { name: string; code?: string; statusCode?: number; errorIds?: number[] } {
+  if (!(error instanceof Error)) return { name: typeof error };
+  const fields = error as Error & { code?: unknown; statusCode?: unknown; errorIds?: unknown };
+  return { name: error.name,
+    ...(typeof fields.code === "string" ? { code: fields.code.slice(0, 80) } : {}),
+    ...(typeof fields.statusCode === "number" ? { statusCode: fields.statusCode } : {}),
+    ...(Array.isArray(fields.errorIds) ? { errorIds: fields.errorIds.filter((id): id is number => typeof id === "number").slice(0, 10) } : {}) };
+}
 
 function neverPreview(): never { throw new Error("Reviewed rebuild execution requires a preview."); }
 

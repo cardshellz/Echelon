@@ -118,261 +118,29 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // Both pools receive the same search_path in the PostgreSQL startup packet.
     // Unqualified names therefore resolve consistently before any query can run.
 
-    // Refund return lifecycle (REFUND_RESTOCK_DESIGN.md): run FIRST and in its own
-    // try/catch. The rest of this function is one big try/catch, and a pre-existing
-    // unqualified index statement (idx_inventory_levels_*) resolves to a stray
-    // public.inventory_levels that lacks product_variant_id and throws — which would
-    // otherwise skip everything after it (including this). Fully schema-qualified
-    // (wms.*) here so search_path shadowing can't touch it.
-    try {
-      await client.query(`ALTER TABLE wms.returns ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'closed'`);
-      await client.query(`ALTER TABLE wms.returns ALTER COLUMN shipment_id DROP NOT NULL`);
-      await client.query(`ALTER TABLE wms.returns ADD COLUMN IF NOT EXISTS source_event_key VARCHAR(250)`);
-      await client.query(`
-        DO $$
-        DECLARE
-          existing_constraint_name TEXT;
-        BEGIN
-          SELECT constraint_row.conname
-          INTO existing_constraint_name
-          FROM pg_constraint constraint_row
-          JOIN pg_attribute column_row
-            ON column_row.attrelid = constraint_row.conrelid
-           AND column_row.attnum = ANY(constraint_row.conkey)
-          WHERE constraint_row.contype = 'f'
-            AND constraint_row.conrelid = 'wms.returns'::regclass
-            AND column_row.attname = 'shipment_id'
-          LIMIT 1;
-
-          IF existing_constraint_name IS NOT NULL
-             AND existing_constraint_name <> 'wms_returns_shipment_id_fkey' THEN
-            EXECUTE format(
-              'ALTER TABLE wms.returns DROP CONSTRAINT %I',
-              existing_constraint_name
-            );
-          END IF;
-
-          IF NOT EXISTS (
-            SELECT 1
-            FROM pg_constraint
-            WHERE conname = 'wms_returns_shipment_id_fkey'
-              AND conrelid = 'wms.returns'::regclass
-          ) THEN
-            ALTER TABLE wms.returns
-              ADD CONSTRAINT wms_returns_shipment_id_fkey
-              FOREIGN KEY (shipment_id)
-              REFERENCES wms.outbound_shipments(id)
-              ON DELETE SET NULL;
-          END IF;
-        END $$;
-      `);
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS wms.return_items (
-          id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-          return_id BIGINT NOT NULL REFERENCES wms.returns(id) ON DELETE CASCADE,
-          order_item_id INTEGER REFERENCES wms.order_items(id) ON DELETE SET NULL,
-          oms_order_line_id BIGINT,
-          external_line_item_id VARCHAR(100),
-          sku VARCHAR(100),
-          expected_qty INTEGER NOT NULL,
-          received_qty INTEGER NOT NULL DEFAULT 0,
-          restock_policy VARCHAR(20),
-          location_id VARCHAR(100),
-          condition VARCHAR(20),
-          status VARCHAR(20) NOT NULL DEFAULT 'expected',
-          created_at TIMESTAMP DEFAULT NOW() NOT NULL,
-          updated_at TIMESTAMP DEFAULT NOW() NOT NULL
-        )
-      `);
-      await client.query(`CREATE INDEX IF NOT EXISTS idx_return_items_return ON wms.return_items(return_id)`);
-      await client.query(`CREATE INDEX IF NOT EXISTS idx_return_items_order_item ON wms.return_items(order_item_id)`);
-      await client.query(`CREATE INDEX IF NOT EXISTS idx_returns_status_open ON wms.returns(status) WHERE status <> 'closed'`);
-      await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS uq_returns_source_event_key ON wms.returns(source_event_key) WHERE NULLIF(BTRIM(source_event_key), '') IS NOT NULL`);
-      console.log("Checked refund return lifecycle (wms.returns.status, wms.return_items)");
-    } catch (e: any) {
-      console.error("[startup-migration] refund return lifecycle DDL failed:", e?.message ?? e);
-    }
+    // Retired (P4.1): the refund return lifecycle block and its inner try/catch.
+    // wms.returns.status / source_event_key, the nullable shipment_id and its
+    // wms_returns_shipment_id_fkey, wms.return_items and the four indexes are in
+    // tracked migration 131_refund_line_disposition_authority.sql.
 
     // Retired (P4.1): the fulfillment-state ledger block. wms.line_fulfillments,
     // its indexes and wms.order_items.on_hold/hold_reason are created by tracked
     // migration 103_line_fulfillments_ledger.sql.
 
-    // OMS/WMS reconciliation exceptions (authority remediation Phase 5).
-    // This gives ShipStation and future reconciliation paths a durable review
-    // surface when proof is insufficient for a safe auto-repair.
-    try {
-      await client.query(`
-        CREATE TABLE IF NOT EXISTS wms.reconciliation_exceptions (
-          id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-          source VARCHAR(50) NOT NULL,
-          classification VARCHAR(30) NOT NULL,
-          rule VARCHAR(80) NOT NULL,
-          status VARCHAR(20) NOT NULL DEFAULT 'open',
-          severity VARCHAR(20) NOT NULL DEFAULT 'review',
-          wms_order_id INTEGER REFERENCES wms.orders(id) ON DELETE SET NULL,
-          wms_shipment_id INTEGER REFERENCES wms.outbound_shipments(id) ON DELETE SET NULL,
-          external_system VARCHAR(40),
-          external_order_ref VARCHAR(200),
-          external_shipment_ref VARCHAR(200),
-          external_order_key VARCHAR(200),
-          idempotency_key VARCHAR(500) NOT NULL,
-          summary TEXT NOT NULL,
-          details JSONB NOT NULL DEFAULT '{}'::jsonb,
-          first_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          occurrence_count INTEGER NOT NULL DEFAULT 1,
-          resolved_at TIMESTAMPTZ,
-          resolved_by VARCHAR(120),
-          resolution TEXT,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT wms_reconciliation_exceptions_classification_chk
-            CHECK (classification IN (
-              'safe_auto_repair',
-              'manual_review',
-              'hard_block',
-              'historical_ignore',
-              'provider_voided_label',
-              'provider_package_echo',
-              'provider_return_label'
-            )),
-          CONSTRAINT wms_reconciliation_exceptions_status_chk
-            CHECK (status IN ('open', 'acknowledged', 'resolved', 'ignored')),
-          CONSTRAINT wms_reconciliation_exceptions_severity_chk
-            CHECK (severity IN ('info', 'warning', 'review', 'blocker')),
-          CONSTRAINT wms_reconciliation_exceptions_occurrence_count_chk
-            CHECK (occurrence_count > 0)
-        )
-      `);
-      await client.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_wms_reconciliation_exceptions_open_idem
-        ON wms.reconciliation_exceptions (idempotency_key)
-        WHERE status IN ('open', 'acknowledged')
-      `);
-      await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_wms_reconciliation_exceptions_status
-        ON wms.reconciliation_exceptions (status, classification, last_seen_at DESC)
-      `);
-      await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_wms_reconciliation_exceptions_shipment
-        ON wms.reconciliation_exceptions (wms_shipment_id)
-        WHERE wms_shipment_id IS NOT NULL
-      `);
-      await client.query(`
-        CREATE INDEX IF NOT EXISTS idx_wms_reconciliation_exceptions_external
-        ON wms.reconciliation_exceptions (
-          external_system,
-          external_order_ref,
-          external_shipment_ref
-        )
-      `);
-      console.log("Checked OMS/WMS reconciliation exceptions (wms.reconciliation_exceptions)");
-    } catch (e: any) {
-      console.error("[startup-migration] reconciliation exceptions DDL failed:", e?.message ?? e);
-    }
+    // Retired (P4.1): the OMS/WMS reconciliation exceptions block and its inner
+    // try/catch. wms.reconciliation_exceptions and its four indexes are in tracked
+    // migration 109_oms_wms_reconciliation_exceptions.sql; the seven-value
+    // classification check is in 0603_shipping_provider_label_direction.sql.
 
-    // Create combined_order_groups table if it doesn't exist
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS wms.combined_order_groups (
-        id SERIAL PRIMARY KEY,
-        group_code VARCHAR(20),
-        customer_name TEXT DEFAULT 'Unknown',
-        customer_email TEXT,
-        shipping_address TEXT,
-        shipping_city TEXT,
-        shipping_state TEXT,
-        shipping_postal_code TEXT,
-        shipping_country TEXT,
-        address_hash VARCHAR(64),
-        order_count INTEGER DEFAULT 0,
-        total_items INTEGER DEFAULT 0,
-        total_units INTEGER DEFAULT 0,
-        status VARCHAR(20) DEFAULT 'active',
-        created_by VARCHAR,
-        created_at TIMESTAMP DEFAULT NOW(),
-        updated_at TIMESTAMP DEFAULT NOW()
-      )
-    `);
-    
-    // Add any missing columns (safe to run multiple times with IF NOT EXISTS)
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS group_code VARCHAR(20)`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS customer_name TEXT DEFAULT 'Unknown'`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS customer_email TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS shipping_address TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS shipping_city TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS shipping_state TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS shipping_postal_code TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS shipping_country TEXT`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS order_count INTEGER DEFAULT 0`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS total_items INTEGER DEFAULT 0`);
-    await client.query(`ALTER TABLE combined_order_groups ADD COLUMN IF NOT EXISTS total_units INTEGER DEFAULT 0`);
-    console.log("Checked combined_order_groups table structure");
+    // Retired (P4.1): the three order-combining blocks. The combined_order_groups
+    // table and its columns, and orders.combined_group_id / combined_role, are in
+    // tracked migration 001_order_combining.sql (same statements) and in the
+    // baseline 0002_concerned_darwin.sql.
 
-    // Add combined_group_id column if it doesn't exist
-    await client.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name = 'orders' AND column_name = 'combined_group_id'
-        ) THEN
-          ALTER TABLE orders ADD COLUMN combined_group_id INTEGER REFERENCES combined_order_groups(id) ON DELETE SET NULL;
-        END IF;
-      END $$;
-    `);
-    console.log("Checked/added combined_group_id column");
-
-    // Add combined_role column if it doesn't exist
-    await client.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns 
-          WHERE table_name = 'orders' AND column_name = 'combined_role'
-        ) THEN
-          ALTER TABLE orders ADD COLUMN combined_role TEXT;
-        END IF;
-      END $$;
-    `);
-    console.log("Checked/added combined_role column");
-    
-    // Migration 024: Channel allocation tables
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS channels.channel_product_allocation (
-        id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-        channel_id integer NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-        product_id integer NOT NULL REFERENCES catalog.products(id) ON DELETE CASCADE,
-        min_atp_base integer,
-        max_atp_base integer,
-        is_listed integer NOT NULL DEFAULT 1,
-        notes text,
-        created_at timestamp DEFAULT now() NOT NULL,
-        updated_at timestamp DEFAULT now() NOT NULL
-      )
-    `);
-    await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS channel_product_alloc_channel_product_idx
-      ON channel_product_allocation(channel_id, product_id)
-    `);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS channels.channel_sync_log (
-        id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-        product_id integer REFERENCES catalog.products(id),
-        product_variant_id integer REFERENCES catalog.product_variants(id),
-        channel_id integer REFERENCES channels(id),
-        channel_feed_id integer REFERENCES channel_feeds(id),
-        atp_base integer NOT NULL,
-        pushed_qty integer NOT NULL,
-        previous_qty integer,
-        status varchar(20) NOT NULL,
-        error_message text,
-        response_code integer,
-        duration_ms integer,
-        triggered_by varchar(30),
-        created_at timestamp DEFAULT now() NOT NULL
-      )
-    `);
-    console.log("Checked channel_product_allocation and channel_sync_log tables");
+    // Retired (P4.1): the channel allocation tables block.
+    // channels.channel_product_allocation, its unique (channel_id, product_id)
+    // index and channels.channel_sync_log are in tracked migration
+    // 024_channel_allocation_tables.sql and the baseline 0002_concerned_darwin.sql.
 
     // Add aisle_filter column to cycle_counts if missing
     await client.query(`ALTER TABLE inventory.cycle_counts ADD COLUMN IF NOT EXISTS aisle_filter VARCHAR(20)`);
@@ -494,24 +262,10 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
         ON warehouse.warehouse_locations (id)
         WHERE cycle_count_freeze_id IS NULL
     `);
-    // Shipment dedup — one outbound_shipment per external_fulfillment_id.
-    // Closes the parallel Shopify-fulfillment-webhook race. Wrapped so a
-    // pre-existing duplicate (a real double-ship needing manual review) is
-    // surfaced as a WARNING instead of crashing startup — the formal
-    // migration 0579 RAISES on duplicates for the controlled path.
-    try {
-      await client.query(`
-        CREATE UNIQUE INDEX IF NOT EXISTS uq_outbound_shipments_external_fulfillment_id
-          ON wms.outbound_shipments (external_fulfillment_id)
-          WHERE external_fulfillment_id IS NOT NULL
-      `);
-    } catch (err: any) {
-      console.error(
-        `[startup-migration] Could not create uq_outbound_shipments_external_fulfillment_id ` +
-          `(likely duplicate external_fulfillment_id rows — possible double-ship needing manual ` +
-          `reconciliation): ${err.message}`,
-      );
-    }
+    // Retired (P4.1): the shipment dedup index and its inner try/catch.
+    // uq_outbound_shipments_external_fulfillment_id is in tracked migration
+    // 0579_outbound_shipment_fulfillment_dedup.sql, which raises on duplicates
+    // instead of logging and carrying on.
     // Phase 4: receipt dedup — one receipt ledger row per (receiving_order, variant, location)
     await client.query(`
       CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_transactions_receipt_line_dedup
