@@ -615,7 +615,8 @@ export class EbayMarketplaceListingConnector {
   }
   /**
    * Update an active variation listing in eBay's required dependency order:
-   * inventory items, group membership, offers, then publication. The generic
+   * inventory items, offers for added members, group membership, updates to
+   * existing offers, then publication. The generic
    * push path intentionally repairs offers first and is not valid when the
    * set of variation specifics is changing.
    */
@@ -632,6 +633,7 @@ export class EbayMarketplaceListingConnector {
     );
     const offerIdsByVariantId: Record<number, string> = {};
     const removedOfferIds = new Map<string, string>();
+    const createdOfferIds = new Map<number, string>();
     const expectedListingId = input.draft.existingExternalProductId!;
     for (const sku of normalizedSkus(input.removedSkus)) {
       const observed = exactObservedOffer((await input.client.getOffers(sku, input.draft.marketplaceId)).offers,
@@ -687,6 +689,16 @@ export class EbayMarketplaceListingConnector {
         await this.delay(this.inventoryDelayMs);
       }
 
+      // eBay adds a SKU to a live variation listing only when its inventory item AND its offer already exist
+      // (Listing Management guide, "Adding a SKU"). A group write naming a member with no offer was rejected
+      // with 25604 "Converting active listing from Multi-SKU to single SKU is not allowed". An offer left behind
+      // by a failed attempt is found by the next attempt's offer read and reused, never created twice.
+      for (const { offer, existingOfferId } of resolvedOffers) {
+        if (existingOfferId) continue;
+        createdOfferIds.set(offer.variantId, await input.client.createOffer(offer.payload));
+        await this.delay(this.offerDelayMs);
+      }
+
       try {
         await input.client.createOrReplaceInventoryItemGroup(
           input.draft.itemGroup.groupKey,
@@ -718,9 +730,7 @@ export class EbayMarketplaceListingConnector {
       }
 
       for (const { offer, existingOfferId } of resolvedOffers) {
-        const offerId = existingOfferId
-          ? existingOfferId
-          : await input.client.createOffer(offer.payload);
+        const offerId = existingOfferId ?? createdOfferIds.get(offer.variantId)!;
         if (existingOfferId || input.draft.updateOfferAfterCreate) {
           await input.client.updateOffer(
             offerId,

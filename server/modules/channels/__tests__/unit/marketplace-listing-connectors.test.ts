@@ -596,6 +596,52 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     expect(client.deleteInventoryItemGroup).not.toHaveBeenCalled();
   });
 
+  // Production: adding GLV-MAG-180PT-C2500 to live listing 298148420100 sent the group write before the new size
+  // had an offer, and eBay rejected it with 25604 (quantity publication attempt 36417).
+  it("creates an added member's offer before the group write names it", async () => {
+    const calls: string[] = [];
+    const client = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"], currentListingId: "listing-old", calls });
+    const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
+    let newOfferCreated = false;
+    vi.mocked(client.getOffers).mockImplementation(async (sku, marketplaceId) =>
+      sku === "CATALOG-NEW" && !newOfferCreated ? { offers: [] } : readOffers(sku, marketplaceId));
+    vi.mocked(client.createOffer).mockImplementation(async offer => {
+      calls.push(`create_offer:${offer.sku}`); newOfferCreated = true; return `offer-${offer.sku}`;
+    });
+    vi.mocked(client.publishOfferByInventoryItemGroup).mockImplementation(async () => {
+      calls.push("publish_group"); return { listingId: "listing-old" };
+    });
+    const connector = new EbayMarketplaceListingConnector();
+    const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-NEW"]);
+    const preview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: "listing-old" });
+
+    await expect(connector.updateExistingListing({ client, draft, preview }))
+      .resolves.toMatchObject({ externalProductId: "listing-old", status: "updated", removedSkus: ["CATALOG-OLD"] });
+
+    expect(calls.filter(call => call.startsWith("create_offer"))).toEqual(["create_offer:CATALOG-NEW"]);
+    expect(calls.lastIndexOf("put_inventory")).toBeLessThan(calls.indexOf("create_offer:CATALOG-NEW"));
+    expect(calls.indexOf("create_offer:CATALOG-NEW")).toBeLessThan(calls.indexOf("put_group"));
+    expect(calls.indexOf("put_group")).toBeLessThan(calls.indexOf("update_offer"));
+    expect(calls.indexOf("update_offer")).toBeLessThan(calls.indexOf("publish_group"));
+  });
+
+  it("does not write the group when an added member's offer cannot be created", async () => {
+    const calls: string[] = [];
+    const client = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"], currentListingId: "listing-old", calls });
+    const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
+    vi.mocked(client.getOffers).mockImplementation(async (sku, marketplaceId) =>
+      sku === "CATALOG-NEW" ? { offers: [] } : readOffers(sku, marketplaceId));
+    const refused = new Error("eBay refused the offer");
+    vi.mocked(client.createOffer).mockRejectedValue(refused);
+    const connector = new EbayMarketplaceListingConnector();
+    const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-NEW"]);
+    const preview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: "listing-old" });
+
+    await expect(connector.updateExistingListing({ client, draft, preview })).rejects.toBe(refused);
+    expect(calls).not.toContain("put_group");
+    expect(calls).not.toContain("publish_group");
+  });
+
   it("preserves the live eBay variation aspect name when the catalog-derived name changed", async () => {
     const client = makeLifecycleClient({
       currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"],
