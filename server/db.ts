@@ -168,82 +168,13 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     //   them. idx_inventory_levels_pv_wl duplicated the identity unique index and
     //   is no longer created anywhere.
 
-    // Migration: product_types reference table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS catalog.product_types (
-        id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        slug VARCHAR(50) UNIQUE NOT NULL,
-        name VARCHAR(100) NOT NULL,
-        description TEXT,
-        sort_order INTEGER DEFAULT 0,
-        created_at TIMESTAMP DEFAULT NOW() NOT NULL
-      )
-    `);
-    // Seed product types (idempotent)
-    await client.query(`
-      INSERT INTO catalog.product_types (slug, name, sort_order) VALUES
-        ('toploaders', 'Toploaders', 1),
-        ('easy-glide-sleeves', 'Easy Glide Soft Sleeves', 2),
-        ('magnetic-holders', 'Magnetic Holders', 3),
-        ('semi-rigids', 'Semi-Rigid Holders', 4),
-        ('armalopes', 'Armalope Envelopes', 5),
-        ('hero-cases', 'HERO Graded Card Cases', 6),
-        ('binders', 'Binders & Pages', 7),
-        ('storage-boxes', 'Storage Boxes (Quad Box, 400ct, etc.)', 8),
-        ('glove-fit-toploader', 'Glove-Fit Toploader Sleeves', 9),
-        ('glove-fit-mag', 'Glove-Fit Magnetic Holder Sleeves', 10),
-        ('glove-fit-graded', 'Glove-Fit Graded Card Sleeves', 11),
-        ('glove-fit-semi', 'Glove-Fit Semi-Rigid Sleeves', 12),
-        ('sleeves-bags', 'Sleeves & Bags (team bags, 8x10, etc.)', 13),
-        ('accessories', 'Accessories (mats, stamps, dividers, stands)', 14),
-        ('wax', 'Wax/Sealed Products (boxes, packs)', 15),
-        ('other', 'Other', 99)
-      ON CONFLICT (slug) DO NOTHING
-    `);
-    // Add product_type column to products if missing
-    await client.query(`ALTER TABLE products ADD COLUMN IF NOT EXISTS product_type VARCHAR(50)`);
-    console.log("Checked product_types table and seeded data");
-
-    // Migration: ebay_listing_rules table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS ebay.ebay_listing_rules (
-        id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        channel_id INTEGER NOT NULL REFERENCES channels(id),
-        scope_type VARCHAR(20) NOT NULL CHECK (scope_type IN ('default', 'product_type', 'sku')),
-        scope_value VARCHAR(100),
-        ebay_category_id VARCHAR(20),
-        ebay_store_category_id VARCHAR(20),
-        fulfillment_policy_id VARCHAR(20),
-        return_policy_id VARCHAR(20),
-        payment_policy_id VARCHAR(20),
-        sort_order INTEGER DEFAULT 0,
-        enabled BOOLEAN DEFAULT true,
-        created_at TIMESTAMP DEFAULT NOW() NOT NULL,
-        updated_at TIMESTAMP DEFAULT NOW() NOT NULL,
-        UNIQUE(channel_id, scope_type, scope_value)
-      )
-    `);
-    console.log("Checked ebay_listing_rules table");
-
-    // Migration: ebay_category_mappings table
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS ebay.ebay_category_mappings (
-        id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        channel_id INTEGER NOT NULL REFERENCES channels(id),
-        product_type_slug VARCHAR(50) NOT NULL,
-        ebay_browse_category_id VARCHAR(20),
-        ebay_browse_category_name VARCHAR(200),
-        ebay_store_category_id VARCHAR(20),
-        ebay_store_category_name VARCHAR(200),
-        fulfillment_policy_override VARCHAR(20),
-        return_policy_override VARCHAR(20),
-        payment_policy_override VARCHAR(20),
-        created_at TIMESTAMP DEFAULT NOW() NOT NULL,
-        updated_at TIMESTAMP DEFAULT NOW() NOT NULL,
-        UNIQUE(channel_id, product_type_slug)
-      )
-    `);
-    console.log("Checked ebay_category_mappings table");
+    // Retired (P4.1): the product types, eBay listing rules and eBay category
+    // mappings blocks.
+    // - catalog.product_types, products.product_type, ebay.ebay_listing_rules and
+    //   ebay.ebay_category_mappings: baseline 0002_concerned_darwin.sql.
+    // - The 16 product type rows and the ebay_listing_rules scope_type check had
+    //   no tracked migration; the product_types_seed_and_listing_rule_scope_check
+    //   migration now declares both.
 
     // Migration 045: OMS tables
     await client.query(`

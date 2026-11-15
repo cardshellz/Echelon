@@ -24,9 +24,6 @@
   "catalog.product_merge_runs": [
     "modules/catalog"
   ],
-  "catalog.product_types": [
-    "server/db.ts"
-  ],
   "catalog.product_variants": [
     "modules/catalog",
     "modules/channels",
