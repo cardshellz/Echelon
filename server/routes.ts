@@ -6,7 +6,7 @@ import { registerAuthRoutes } from "./modules/identity/routes.api";
 import { registerLocationRoutes } from "./modules/warehouse/locations.routes";
 import { registerPickingRoutes } from "./modules/orders/routes.api";
 import { registerOperationsDashboardRoutes } from "./modules/orders/routes.api";
-import { registerOperationsControlTowerRoutes } from "./modules/operations/control-tower.routes";
+import { registerOperationsControlTowerRoutes } from "./modules/operations/routes.api";
 import { registerFinancialCommandOperationsRoutes } from "./platform/commands/financial-command-operations.routes";
 import { registerShopifyRoutes } from "./routes/shopify.routes";
 import { registerWarehouseRoutes } from "./modules/warehouse/warehouse.routes";

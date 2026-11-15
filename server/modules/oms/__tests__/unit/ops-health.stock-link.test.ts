@@ -12,7 +12,7 @@ import { STOCK_LINK_ACTOR, STOCK_LINK_DECISION_CODES, STOCK_LINK_RETIRE_HOLD } f
 import { STOCK_LINK_ENROLLMENT_CODES } from "../../../inventory-planning/domain/stock-link-enrollment";
 import { getOmsOpsHealth } from "../../ops-health.service";
 import { evaluateOmsOpsAlert } from "../../oms-ops-alert.service";
-import { getOperationsControlTower, parseControlTowerFilters } from "../../../operations/control-tower.service";
+import { getOperationsControlTower, parseControlTowerFilters } from "../../../operations/legacy-overview.api";
 
 // Channels PR2 (PLAN-CH2 v4.1 §8): OMS operations health embeds inventory planning's published read-only stock-link
 // checks, one count and one sample per issue. The SQL itself runs against PostgreSQL in stock-link.integration.test.ts
