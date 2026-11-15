@@ -210,7 +210,11 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
       // including a legitimately withdrawn group after interrupted rebuilding.
       let existingIdentity: EbayListingSyncIdentity | null = null;
       if (command.rebuild?.mode === "preview") {
-        try { existingIdentity = await readExistingEbayListingIdentityForProduct(productId); }
+        // A reviewed change that stopped part-way can leave the size it was adding in eBay's group. This review
+        // exists to finish or replace that change, so those sizes must not make the listing unreadable.
+        const pendingAdditionSkus = listingIds.length === 1
+          ? await changeIntents.openAdditionSkus({ channelId: EBAY_CHANNEL_ID, productId, externalListingId: listingIds[0]! }) : [];
+        try { existingIdentity = await readExistingEbayListingIdentityForProduct(productId, pendingAdditionSkus); }
         catch (error) {
           const code = error && typeof error === "object" && "code" in error ? error.code : null;
           if (code === "EBAY_REGISTRATION_LISTING_NOT_FOUND" || code === "EBAY_REGISTRATION_LISTING_NOT_LIVE")

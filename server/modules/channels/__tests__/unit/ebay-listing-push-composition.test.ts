@@ -11,7 +11,7 @@ const fixture = vi.hoisted(() => ({
   photos: vi.fn(), prices: vi.fn(), quantities: vi.fn(), policies: vi.fn(), build: vi.fn(), identity: vi.fn(),
   inspect: vi.fn(), jobs: { getByCommand: vi.fn(), getAdmission: vi.fn(), enqueue: vi.fn(), recordAdmissionFailure: vi.fn() },
   liveGroup: vi.fn(), sync: vi.fn(),
-  intents: { open: vi.fn(), close: vi.fn() }, stockLink: vi.fn(),
+  intents: { open: vi.fn(), close: vi.fn(), openAdditionSkus: vi.fn() }, stockLink: vi.fn(),
 }));
 vi.mock("../../infrastructure/ebay-listing-change-intent.repository", () => ({
   EbayListingChangeIntentRepository: class { constructor() { return fixture.intents; } },
@@ -53,6 +53,7 @@ describe("eBay publication application composition", () => {
     fixture.sync.mockImplementation(async (filter, _actor, commandKey) => ({ synced: 0, pending: 1, errors: 0, details: [], jobs: [{ id: commandKey, productId: filter.productIds[0], operation: "publish", kind: "sync", state: "queued" }] }));
     fixture.repository.withProductLock.mockImplementation((_id: number, work: () => Promise<unknown>) => work());
     fixture.intents.open.mockResolvedValue(undefined); fixture.intents.close.mockResolvedValue(1); fixture.stockLink.mockResolvedValue(undefined);
+    fixture.intents.openAdditionSkus.mockResolvedValue([]);
     fixture.query.mockResolvedValue({ rows: [{ id: 34, metadata: { marketplaceId: "EBAY_US" } }] });
     fixture.auth.getVerifiedProviderAccount.mockResolvedValue({ externalAccountId: "seller-1" });
     fixture.auth.getAccessToken.mockResolvedValue("test-only-token");
@@ -138,6 +139,15 @@ describe("eBay publication application composition", () => {
     expect(fixture.sync).toHaveBeenCalledWith({ productIds: [20] }, "ebay-listing-publish", expect.any(String));
     expect(fixture.connector.pushListing).not.toHaveBeenCalled();
     expect(fixture.repository.recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("reads the listing for review with the sizes an unfinished reviewed change was adding", async () => {
+    fixture.repository.currentListingIds.mockResolvedValue(["listing-20"]);
+    fixture.intents.openAdditionSkus.mockResolvedValue(["SKU-HALF-ADDED"]);
+    fixture.connector.previewListingRebuild.mockResolvedValue({ groupKey: "PROVIDER-GROUP" });
+    await ebayListingPushService.push({ productIds: [20], rebuild: { mode: "preview" } });
+    expect(fixture.intents.openAdditionSkus).toHaveBeenCalledWith({ channelId: 67, productId: 20, externalListingId: "listing-20" });
+    expect(fixture.identity).toHaveBeenCalledWith(20, ["SKU-HALF-ADDED"]);
   });
 
   it("uses the observed provider group for Analyze and does not persist a preview failure", async () => {
