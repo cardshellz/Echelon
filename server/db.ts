@@ -142,64 +142,14 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // index and channels.channel_sync_log are in tracked migration
     // 024_channel_allocation_tables.sql and the baseline 0002_concerned_darwin.sql.
 
-    // Add aisle_filter column to cycle_counts if missing
-    await client.query(`ALTER TABLE inventory.cycle_counts ADD COLUMN IF NOT EXISTS aisle_filter VARCHAR(20)`);
-
-    // Migration 116: reservation quantities on the ledger (P0.1b).
-    // reserve:+qty, unreserve:-qty, pick:-(reservation consumed). NULL = pre-116 row.
-    await client.query(`ALTER TABLE inventory.inventory_transactions ADD COLUMN IF NOT EXISTS reserved_qty_delta integer`);
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_invtx_reservation_by_order_item
-        ON inventory.inventory_transactions (order_id, order_item_id)
-        WHERE transaction_type IN ('reserve', 'unreserve', 'pick') AND voided_at IS NULL
-    `);
-
-    // Migration 037: Product lines
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS catalog.product_lines (
-        id SERIAL PRIMARY KEY,
-        code VARCHAR(50) UNIQUE NOT NULL,
-        name VARCHAR(100) NOT NULL,
-        description TEXT,
-        is_active BOOLEAN NOT NULL DEFAULT true,
-        sort_order INTEGER NOT NULL DEFAULT 0,
-        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
-      )
-    `);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS catalog.product_line_products (
-        id SERIAL PRIMARY KEY,
-        product_line_id INTEGER NOT NULL REFERENCES catalog.product_lines(id) ON DELETE CASCADE,
-        product_id INTEGER NOT NULL REFERENCES catalog.products(id) ON DELETE CASCADE,
-        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-        UNIQUE(product_line_id, product_id)
-      )
-    `);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS channels.channel_product_lines (
-        id SERIAL PRIMARY KEY,
-        channel_id INTEGER NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-        product_line_id INTEGER NOT NULL REFERENCES catalog.product_lines(id) ON DELETE CASCADE,
-        is_active BOOLEAN NOT NULL DEFAULT true,
-        created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-        UNIQUE(channel_id, product_line_id)
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_plp_product_id ON catalog.product_line_products(product_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_plp_product_line_id ON catalog.product_line_products(product_line_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_cpl_channel_id ON channels.channel_product_lines(channel_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_cpl_product_line_id ON channels.channel_product_lines(product_line_id)`);
-    // Seed default product line
-    await client.query(`
-      INSERT INTO catalog.product_lines (code, name, description, sort_order)
-      VALUES ('TRADING_CARD_SUPPLIES', 'Trading Card Supplies', 'Card sleeves, toploaders, boxes, and accessories', 0)
-      ON CONFLICT (code) DO NOTHING
-    `);
-    // Do not backfill product/channel assignments here. Product-line assignment
-    // is admin-owned configuration; rerunning a startup seed would silently
-    // restore products to the default line after an operator moves them.
-    console.log("Checked product_lines tables and ensured default line exists");
+    // Retired (P4.1): the product lines block.
+    // - inventory.cycle_counts.aisle_filter: baseline 0002_concerned_darwin.sql.
+    // - inventory_transactions.reserved_qty_delta and its reservation index:
+    //   116_reservation_ledger_qty.sql.
+    // - catalog.product_lines, catalog.product_line_products,
+    //   channels.channel_product_lines, their indexes and the default product
+    //   line seed row: 037_product_lines.sql. The seed is no longer re-applied on
+    //   every release, so a product line an operator removes stays removed.
 
     // Add location_codes column to cycle_counts for quick single-bin counts
     await client.query(`ALTER TABLE inventory.cycle_counts ADD COLUMN IF NOT EXISTS location_codes TEXT`);
