@@ -151,97 +151,22 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     //   line seed row: 037_product_lines.sql. The seed is no longer re-applied on
     //   every release, so a product line an operator removes stays removed.
 
-    // Add location_codes column to cycle_counts for quick single-bin counts
-    await client.query(`ALTER TABLE inventory.cycle_counts ADD COLUMN IF NOT EXISTS location_codes TEXT`);
-
-    // Migration 038: Make location code unique per warehouse instead of globally
-    await client.query(`
-      DO $$
-      BEGIN
-        -- Drop global unique constraint (may exist under either name)
-        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'warehouse_locations_code_unique') THEN
-          ALTER TABLE warehouse_locations DROP CONSTRAINT warehouse_locations_code_unique;
-        END IF;
-        IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'warehouse_locations_code_key') THEN
-          ALTER TABLE warehouse_locations DROP CONSTRAINT warehouse_locations_code_key;
-        END IF;
-        -- Add composite unique (code + warehouse_id) if not already present
-        IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'warehouse_locations_code_warehouse_unique') THEN
-          ALTER TABLE warehouse_locations ADD CONSTRAINT warehouse_locations_code_warehouse_unique UNIQUE (code, warehouse_id);
-          RAISE NOTICE 'Migrated location code constraint to per-warehouse unique';
-        END IF;
-      END $$;
-    `);
-
-    // Performance indexes on high-traffic query columns
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_order_items_sku ON order_items(sku)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_levels_product_variant_id ON inventory_levels(product_variant_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_levels_warehouse_location_id ON inventory_levels(warehouse_location_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_levels_pv_wl ON inventory_levels(product_variant_id, warehouse_location_id)`);
-    await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_inventory_levels_variant_location ON inventory_levels(product_variant_id, warehouse_location_id)`);
-    // Phase 1: ledger immutability (C5) — soft-delete column for inventory_transactions.
-    await client.query(`ALTER TABLE inventory.inventory_transactions ADD COLUMN IF NOT EXISTS voided_at timestamptz DEFAULT NULL`);
-    // Phase 1: forward-only on-hand guard (C2). NOT VALID so existing negative
-    // drift is preserved for the reconciler to correct via ledgered adjustments.
-    await client.query(`
-      DO $$
-      BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM pg_constraint WHERE conname = 'chk_variant_qty_non_negative'
-        ) THEN
-          ALTER TABLE inventory.inventory_levels
-            ADD CONSTRAINT chk_variant_qty_non_negative CHECK (variant_qty >= 0) NOT VALID;
-        END IF;
-      END $$;
-    `);
-    // Reserve dedup is scoped to a supply segment so a recipe-managed order
-    // item can reserve finished stock now and built shortfall later.
-    await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_transactions_reserve_dedup
-        ON inventory.inventory_transactions
-          (order_id, order_item_id, (COALESCE(reference_type, 'order')), (COALESCE(reference_id, order_id::text)))
-        WHERE transaction_type = 'reserve'
-          AND order_id IS NOT NULL
-          AND order_item_id IS NOT NULL
-          AND voided_at IS NULL
-    `);
-    // Phase 3: freeze-aware index for reservation bin lookup
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_warehouse_locations_unfrozen
-        ON warehouse.warehouse_locations (id)
-        WHERE cycle_count_freeze_id IS NULL
-    `);
-    // Retired (P4.1): the shipment dedup index and its inner try/catch.
-    // uq_outbound_shipments_external_fulfillment_id is in tracked migration
-    // 0579_outbound_shipment_fulfillment_dedup.sql, which raises on duplicates
-    // instead of logging and carrying on.
-    // Phase 4: receipt dedup — one receipt ledger row per (receiving_order, variant, location)
-    await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_transactions_receipt_line_dedup
-        ON inventory.inventory_transactions (receiving_line_id)
-        WHERE transaction_type = 'receipt'
-          AND receiving_line_id IS NOT NULL
-          AND voided_at IS NULL
-    `);
-    await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS uq_inventory_transactions_receipt_legacy_dedup
-        ON inventory.inventory_transactions (receiving_order_id, product_variant_id, to_location_id)
-        WHERE transaction_type = 'receipt'
-          AND receiving_line_id IS NULL
-          AND receiving_order_id IS NOT NULL
-          AND product_variant_id IS NOT NULL
-          AND to_location_id IS NOT NULL
-          AND voided_at IS NULL
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_order_id ON picking_logs(order_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_sku ON picking_logs(sku)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_picking_logs_timestamp ON picking_logs(timestamp)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_transactions_product_variant_id ON inventory_transactions(product_variant_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_inventory_transactions_order_id ON inventory_transactions(order_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_orders_warehouse_status ON orders(warehouse_status)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_orders_source_table_id ON orders(source_table_id)`);
-    console.log("Checked performance indexes");
+    // Retired (P4.1): the performance indexes block.
+    // - inventory.cycle_counts.location_codes: baseline 0002_concerned_darwin.sql.
+    // - location code unique per warehouse: 038_location_code_warehouse_unique.sql.
+    // - order_items, inventory_levels, picking_logs and orders indexes:
+    //   002_consolidate_inventory_model.sql; the inventory level identity unique
+    //   index: 0671_inventory_quantity_level_identity.sql.
+    // - inventory_transactions.voided_at and chk_variant_qty_non_negative:
+    //   0575_inventory_ledger_immutability.sql.
+    // - reserve dedup index: 209_recipe_mixed_supply_reservations.sql; the
+    //   unfrozen-locations index: 0577_reservation_dedup_and_freeze_index.sql.
+    // - receipt dedup indexes: 155_receipt_line_idempotency.sql.
+    // - idx_picking_logs_sku, idx_inventory_transactions_product_variant_id,
+    //   idx_inventory_transactions_order_id and idx_orders_source_table_id had no
+    //   tracked migration; the legacy_performance_indexes migration now creates
+    //   them. idx_inventory_levels_pv_wl duplicated the identity unique index and
+    //   is no longer created anywhere.
 
     // Migration: product_types reference table
     await client.query(`
