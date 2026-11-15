@@ -13,9 +13,11 @@ import { fileURLToPath } from "node:url";
  * recurring lot-cost "repair" that masked live cost-drift writers.
  *
  * This test freezes the boot DML surface to an explicit allowlist:
- *   - idempotent CONFIG seeds (product lines/types, sync settings default)
- *   - the fulfillment_partition_key backfill, which is load-bearing for the
- *     CHECK constraint + unique index created immediately after it
+ *   - idempotent CONFIG seeds (product types, sync settings default)
+ *
+ * The allowlist only shrinks. The product-lines seed and the
+ * fulfillment_partition_key backfill were retired with their fallback blocks
+ * (REFACTOR-PLAN P4.1); both live in tracked migrations (037, 111).
  *
  * Any new INSERT/UPDATE/DELETE in db.ts fails this test and must go through
  * a reviewed, tracked migration instead.
@@ -32,10 +34,8 @@ const CODE_ONLY = DB_SRC.split("\n")
   .join("\n");
 
 const DML_ALLOWLIST: Array<{ pattern: RegExp; why: string }> = [
-  { pattern: /INSERT INTO catalog\.product_lines/, why: "config seed (idempotent WHERE NOT EXISTS)" },
   { pattern: /INSERT INTO catalog\.product_types/, why: "config seed (idempotent ON CONFLICT)" },
   { pattern: /INSERT INTO sync_settings/, why: "config default row (idempotent WHERE NOT EXISTS)" },
-  { pattern: /UPDATE wms\.orders\s*\n?\s*SET fulfillment_partition_key = 'default'/, why: "DDL-coupled backfill required by the partition CHECK constraint + unique index" },
 ];
 
 describe("db.ts boot path — no data mutations (P0.2)", () => {

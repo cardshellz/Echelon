@@ -19,8 +19,7 @@
     "modules/channels"
   ],
   "catalog.product_lines": [
-    "modules/channels",
-    "server/db.ts"
+    "modules/channels"
   ],
   "catalog.product_merge_runs": [
     "modules/catalog"
