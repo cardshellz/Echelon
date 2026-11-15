@@ -149,11 +149,26 @@ export interface ControlTowerDependencies {
   flowReconciliation?: OmsFlowReconciliationDependencies;
 }
 
+export class ControlTowerActionError extends Error {
+  constructor(
+    message: string,
+    public readonly statusCode: 400 | 404 | 409 | 503,
+    public readonly code: string,
+  ) {
+    super(message);
+    this.name = "ControlTowerActionError";
+  }
+}
+
 function requireFlowReconciliationDependencies(
   dependencies: ControlTowerDependencies,
 ): OmsFlowReconciliationDependencies {
   if (!dependencies.flowReconciliation) {
-    throw new Error("OMS flow reconciliation dependencies are unavailable");
+    throw new ControlTowerActionError(
+      "OMS flow reconciliation dependencies are unavailable",
+      503,
+      "FLOW_RECONCILIATION_UNAVAILABLE",
+    );
   }
   return dependencies.flowReconciliation;
 }
@@ -188,7 +203,13 @@ function intOrNull(value: unknown): number | null {
 
 function positiveInt(value: unknown, field: string): number {
   const parsed = intOrNull(value);
-  if (parsed === null || parsed <= 0) throw new Error(`${field} must be a positive integer`);
+  if (parsed === null || parsed <= 0) {
+    throw new ControlTowerActionError(
+      `${field} must be a positive integer`,
+      400,
+      "INVALID_ACTION_RECORD",
+    );
+  }
   return parsed;
 }
 
@@ -263,7 +284,11 @@ function omsAffected(sample: any): ControlTowerWorkItem["affected"] {
 function omsRemediationInput(code: string, sample: any, operator: string) {
   const affected = omsAffected(sample);
   if (!OMS_REMEDIABLE_CODES.has(code)) {
-    throw new Error(`Unsupported OMS remediation code: ${code}`);
+    throw new ControlTowerActionError(
+      `Unsupported OMS remediation code: ${code}`,
+      409,
+      "UNSUPPORTED_REMEDIATION_CODE",
+    );
   }
 
   const input: {
@@ -922,13 +947,37 @@ export async function executeOperationsControlTowerAction(input: {
   detail?: ControlTowerDetail;
 }): Promise<unknown> {
   const detail = input.detail ?? await getOperationsControlTowerDetail(input.deps, input.id);
-  if (!detail) throw new Error("Control Tower work item not found or already resolved");
+  if (!detail) {
+    throw new ControlTowerActionError(
+      "Control Tower work item not found or already resolved",
+      404,
+      "WORK_ITEM_NOT_FOUND",
+    );
+  }
   const action = detail.actions.find((candidate) => candidate.id === input.actionId);
-  if (!action) throw new Error(`Action ${input.actionId} is not available for this work item`);
-  if (!action.enabled || action.kind !== "execute") throw new Error(action.unavailableReason || "Action is not executable");
+  if (!action) {
+    throw new ControlTowerActionError(
+      `Action ${input.actionId} is not available for this work item`,
+      400,
+      "ACTION_NOT_AVAILABLE",
+    );
+  }
+  if (!action.enabled || action.kind !== "execute") {
+    throw new ControlTowerActionError(
+      action.unavailableReason || "Action is not executable",
+      409,
+      "ACTION_NOT_EXECUTABLE",
+    );
+  }
 
   if (detail.domain === "oms" && input.actionId === "remediate") {
-    if (!input.record || typeof input.record !== "object") throw new Error("A concrete affected OMS record is required");
+    if (!input.record || typeof input.record !== "object") {
+      throw new ControlTowerActionError(
+        "A concrete affected OMS record is required",
+        400,
+        "ACTION_RECORD_REQUIRED",
+      );
+    }
     return remediateOmsFlowIssue(input.deps.db, {
       ...omsRemediationInput(detail.code, input.record, input.operator),
     }, requireFlowReconciliationDependencies(input.deps));
@@ -959,7 +1008,13 @@ export async function executeOperationsControlTowerAction(input: {
 
   if (detail.domain === "wms" && input.actionId === "execute") {
     const item = detail.evidence.item as any;
-    if (!input.deps.replenishment) throw new Error("Replenishment service is unavailable");
+    if (!input.deps.replenishment) {
+      throw new ControlTowerActionError(
+        "Replenishment service is unavailable",
+        503,
+        "REPLENISHMENT_UNAVAILABLE",
+      );
+    }
     if (item.action === "queue_replen") {
       return input.deps.replenishment.queueMissingPickBinReplen({
         mode: "queue_replen",
@@ -979,5 +1034,9 @@ export async function executeOperationsControlTowerAction(input: {
     }
   }
 
-  throw new Error(`No safe action delegate exists for ${detail.domain}:${detail.code}`);
+  throw new ControlTowerActionError(
+    `No safe action delegate exists for ${detail.domain}:${detail.code}`,
+    409,
+    "NO_ACTION_DELEGATE",
+  );
 }
