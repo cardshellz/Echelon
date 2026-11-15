@@ -91,7 +91,7 @@ import {
   startOmsFlowReconciliationScheduler,
   startOmsOpsAlertScheduler,
 } from "./modules/oms/operations-observability.api";
-import { startControlTowerProjectionScheduler } from "./modules/operations/control-tower-v2.scheduler";
+import { startControlTowerProjectionScheduler } from "./modules/operations/projection-scheduler.api";
 import { startPoEmailOutboxWorker } from "./modules/procurement/po-email-outbox.worker";
 import { startReceiptCostRecoveryWorker } from "./modules/procurement/receipt-cost-recovery.worker";
 import { createReceiptCostRecoveryRepository } from "./modules/procurement/receipt-cost-recovery.repository";
