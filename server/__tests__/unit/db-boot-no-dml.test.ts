@@ -13,11 +13,12 @@ import { fileURLToPath } from "node:url";
  * recurring lot-cost "repair" that masked live cost-drift writers.
  *
  * This test freezes the boot DML surface to an explicit allowlist:
- *   - idempotent CONFIG seeds (product types, sync settings default)
+ *   - one idempotent CONFIG default (the sync settings row)
  *
- * The allowlist only shrinks. The product-lines seed and the
- * fulfillment_partition_key backfill were retired with their fallback blocks
- * (REFACTOR-PLAN P4.1); both live in tracked migrations (037, 111).
+ * The allowlist only shrinks. The product-lines seed, the
+ * fulfillment_partition_key backfill and the product types seed were retired
+ * with their fallback blocks (REFACTOR-PLAN P4.1); all three live in tracked
+ * migrations (037, 111, product_types_seed_and_listing_rule_scope_check).
  *
  * Any new INSERT/UPDATE/DELETE in db.ts fails this test and must go through
  * a reviewed, tracked migration instead.
@@ -34,7 +35,6 @@ const CODE_ONLY = DB_SRC.split("\n")
   .join("\n");
 
 const DML_ALLOWLIST: Array<{ pattern: RegExp; why: string }> = [
-  { pattern: /INSERT INTO catalog\.product_types/, why: "config seed (idempotent ON CONFLICT)" },
   { pattern: /INSERT INTO sync_settings/, why: "config default row (idempotent WHERE NOT EXISTS)" },
 ];
 
