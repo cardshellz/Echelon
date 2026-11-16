@@ -399,6 +399,28 @@ describe("writer-ratchet (P2.1)", () => {
     expect(baseline[table]).toEqual(["modules/channels"]);
   });
 
+  it.each([
+    ["catalog.product_line_products", "modules/catalog"],
+    ["catalog.product_variants", "modules/catalog"],
+    ["catalog.products", "modules/catalog"],
+    ["channels.channel_connections", "modules/channels"],
+    ["channels.channel_feeds", "modules/channels"],
+    ["channels.channel_listings", "modules/channels"],
+    ["channels.channels", "modules/channels"],
+    ["channels.sync_settings", "modules/channels"],
+  ])("%s has only its sole runtime owning writer in Catalog or Channels (P2-2A)", (table, owner) => {
+    expect(current[table]).toEqual([owner]);
+    expect(baseline[table]).toEqual([owner]);
+  });
+
+  it.each([
+    "channels.channel_connections",
+    "channels.channels",
+    "channels.sync_settings",
+  ])("%s has only the Channels owning writer, including operational scripts (P2-2A)", (table) => {
+    expect(currentIncludingScripts[table]).toEqual(["modules/channels"]);
+  });
+
   it("blocks any new direct database writes in scripts/ or script/ outside the frozen baseline", () => {
     const addedScriptWrites: string[] = [];
     for (const [table, files] of Object.entries(currentScriptWriters)) {

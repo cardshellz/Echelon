@@ -22,6 +22,7 @@
 
 import { and, asc, eq, isNull } from "drizzle-orm";
 import { channelConnections, channels, productVariants } from "@shared/schema";
+import { updateVariantWeightIfNullInCatalog } from "../catalog/cross-module-product-mutations.api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -364,13 +365,7 @@ export function createShopifyWeightBackfillDeps(
     async updateVariantWeightIfNull(variantId: number, grams: number): Promise<boolean> {
       // The IS NULL guard is IN the WHERE clause — a concurrent manual weight
       // entry can never be overwritten, even mid-run.
-      const rows = await db
-        .update(productVariants)
-        .set({ weightGrams: grams, updatedAt: new Date() })
-        .where(and(eq(productVariants.id, variantId), isNull(productVariants.weightGrams)))
-        .returning({ id: productVariants.id });
-
-      return rows.length > 0;
+      return updateVariantWeightIfNullInCatalog(db, variantId, grams);
     },
   };
 }

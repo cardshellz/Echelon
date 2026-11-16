@@ -39,6 +39,14 @@ import {
   buildProductScopeCondition,
   type ProductScope,
 } from "./product-line-scope";
+import {
+  replaceProductLineProductsInCatalog,
+  addProductToProductLineInCatalog,
+  removeProductFromProductLineInCatalog,
+  addProductsToProductLineInCatalog,
+  removeProductsFromLineInCatalog,
+  removeProductsFromAllLinesInCatalog,
+} from "../catalog/product-line-membership.api";
 
 export interface IChannelStorage {
   getAllChannels(): Promise<Channel[]>;
@@ -492,53 +500,27 @@ export const channelMethods: IChannelStorage = {
   },
 
   async replaceProductLineProducts(lineId: number, productIds: number[]): Promise<void> {
-    await db.delete(productLineProducts).where(eq(productLineProducts.productLineId, lineId));
-    if (productIds.length > 0) {
-      await db.insert(productLineProducts).values(
-        productIds.map((pid: number) => ({ productLineId: lineId, productId: pid }))
-      ).onConflictDoNothing();
-    }
+    await replaceProductLineProductsInCatalog(db, lineId, productIds);
   },
 
   async addProductToProductLine(lineId: number, productId: number): Promise<ProductLineProduct | null> {
-    const [created] = await db.insert(productLineProducts).values({
-      productLineId: lineId,
-      productId,
-    }).onConflictDoNothing().returning();
-    return created || null;
+    return addProductToProductLineInCatalog(db, lineId, productId);
   },
 
   async removeProductFromProductLine(lineId: number, productId: number): Promise<void> {
-    await db.delete(productLineProducts).where(
-      and(eq(productLineProducts.productLineId, lineId), eq(productLineProducts.productId, productId))
-    );
+    await removeProductFromProductLineInCatalog(db, lineId, productId);
   },
 
   async addProductsToProductLine(lineId: number, productIds: number[]): Promise<number> {
-    if (productIds.length === 0) return 0;
-    const result = await db.insert(productLineProducts).values(
-      productIds.map((pid: number) => ({ productLineId: lineId, productId: pid }))
-    ).onConflictDoNothing().returning({ id: productLineProducts.id });
-    return result.length;
+    return addProductsToProductLineInCatalog(db, lineId, productIds);
   },
 
   async removeProductsFromLine(lineId: number, productIds: number[]): Promise<number> {
-    if (productIds.length === 0) return 0;
-    const result = await db.delete(productLineProducts).where(
-      and(
-        eq(productLineProducts.productLineId, lineId),
-        inArray(productLineProducts.productId, productIds),
-      )
-    ).returning({ id: productLineProducts.id });
-    return result.length;
+    return removeProductsFromLineInCatalog(db, lineId, productIds);
   },
 
   async removeProductsFromAllLines(productIds: number[]): Promise<number> {
-    if (productIds.length === 0) return 0;
-    const result = await db.delete(productLineProducts)
-      .where(inArray(productLineProducts.productId, productIds))
-      .returning({ id: productLineProducts.id });
-    return result.length;
+    return removeProductsFromAllLinesInCatalog(db, productIds);
   },
 
   async getProductLineProductIds(lineId: number, executor: any = db): Promise<number[]> {

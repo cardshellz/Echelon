@@ -11,6 +11,7 @@ import { readPurchasePlanningSnapshot } from "./purchase-planning-snapshot.repos
 import { purchaseInventorySnapshotQuery } from "./purchase-inventory-snapshot.query";
 import { getPurchasePlanningPolicyService } from "./purchase-planning-policy.runtime";
 import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
+import { setProductReorderExcludedInCatalog } from "../catalog/cross-module-product-mutations.api";
 import {
   db,
   type Vendor,
@@ -2009,7 +2010,7 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async setProductReorderExcluded(productId: number, excluded: boolean): Promise<void> {
-    await db.update(products).set({ reorderExcluded: excluded }).where(eq(products.id, productId));
+    await setProductReorderExcludedInCatalog(db, productId, excluded);
   },
 
   async getLatestAutoDraftRun(): Promise<any | undefined> {

@@ -14,6 +14,7 @@ import type {
 } from "../application/inventory-publication-global-control.service";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
 import { QUANTITY_PUBLICATION_LOCK_NAMESPACE } from "./quantity-publication-admission.repository";
+import { updateGlobalSyncSettingsSingletonWithCasInTx } from "../../channels/sync-settings-global-control.api";
 
 type Database = typeof db;
 export type InventoryPublicationGlobalControlTransaction = Pick<
@@ -114,17 +115,14 @@ export async function applyInventoryPublicationGlobalControlInsideTransaction(
     createdAt: command.occurredAt,
     expiresAt: null,
   });
-  const updated = await transaction.update(syncSettings).set({
+  const updated = await updateGlobalSyncSettingsSingletonWithCasInTx(transaction, {
     globalEnabled: after.globalEnabled,
     sweepIntervalMinutes: after.sweepIntervalMinutes,
-    revision: sql`${syncSettings.revision} + 1`,
-    changedBy: command.actorId,
+    currentRevision: BigInt(currentRevision),
+    actorId: command.actorId,
     changeReason: command.changeReason,
-    updatedAt: command.occurredAt,
-  }).where(and(
-    eq(syncSettings.singletonKey, true),
-    eq(syncSettings.revision, BigInt(currentRevision)),
-  )).returning({ revision: syncSettings.revision });
+    occurredAt: command.occurredAt,
+  });
   if (updated.length !== 1) {
     throw new InventoryAvailabilityMasterDataError(
       409,

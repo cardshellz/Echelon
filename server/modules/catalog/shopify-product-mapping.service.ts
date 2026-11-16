@@ -26,6 +26,10 @@ import {
 import { enqueueShippingGroupMetafieldWrite } from "./shipping-group-sync";
 import { upsertChannelProductIdentity } from "../channels/product-identity.api";
 import { markChannelVariantNotListed } from "../channels/channel-variant-listing.api";
+import {
+  disableDelistedShopifyVariantFeedAndListingInTx,
+  upsertRepairedShopifyVariantFeedAndListingInTx,
+} from "../channels/channel-feed-listing-mutations.api";
 import { retryPublicationSelectionWrite } from "../inventory-planning/publication-selection-retry";
 
 const DEFAULT_SHOPIFY_API_VERSION = "2024-01";
@@ -529,36 +533,12 @@ async function delistDeletedShopifyVariants(
       at: input.writtenAt,
     });
 
-    await tx.update(channelFeeds)
-      .set({
-        channelProductId: null,
-        channelInventoryItemId: null,
-        isActive: 0,
-        lastSyncedQty: null,
-        consecutivePushFailures: 0,
-        quarantinedAt: null,
-        quarantineReason: null,
-        updatedAt: input.writtenAt,
-      })
-      .where(and(
-        eq(channelFeeds.channelId, input.channelId),
-        eq(channelFeeds.channelType, "shopify"),
-        eq(channelFeeds.productVariantId, delisted.variantId),
-      ));
-
-    await tx.update(channelListings)
-      .set({
-        externalProductId: null,
-        externalVariantId: null,
-        externalUrl: null,
-        syncStatus: "error",
-        syncError: DELETED_SHOPIFY_VARIANT_SYNC_ERROR,
-        updatedAt: input.writtenAt,
-      })
-      .where(and(
-        eq(channelListings.channelId, input.channelId),
-        eq(channelListings.productVariantId, delisted.variantId),
-      ));
+    await disableDelistedShopifyVariantFeedAndListingInTx(tx, {
+      channelId: input.channelId,
+      variantId: delisted.variantId,
+      syncError: DELETED_SHOPIFY_VARIANT_SYNC_ERROR,
+      writtenAt: input.writtenAt,
+    });
 
     if (input.isPrimary && delisted.deletedVariantIds.length > 0) {
       // Clear only IDs that point at the deleted variant; never a live one.
@@ -918,72 +898,19 @@ export function createShopifyProductMappingService(dependencies: {
           );
         }
 
-        const updatedFeeds = await tx
-          .update(channelFeeds)
-          .set({
-            channelType: "shopify",
-            channelProductId: targetProductId,
-            channelVariantId: mapping.remoteVariantId,
-            channelInventoryItemId: mapping.remoteInventoryItemId,
-            channelSku: mapping.remoteSku || mapping.sku || null,
-            isActive: 1,
-            consecutivePushFailures: 0,
-            quarantinedAt: null,
-            quarantineReason: null,
-            updatedAt: writtenAt,
-          })
-          .where(and(
-            eq(channelFeeds.channelId, before.channel.id),
-            eq(channelFeeds.channelType, "shopify"),
-            eq(channelFeeds.productVariantId, mapping.variantId),
-          ))
-          .returning({ id: channelFeeds.id });
-        if (updatedFeeds.length > 0) {
-          updatedFeedCount += updatedFeeds.length;
-        } else {
-          await tx.insert(channelFeeds).values({
-            channelId: before.channel.id,
-            productVariantId: mapping.variantId,
-            channelType: "shopify",
-            channelProductId: targetProductId,
-            channelVariantId: mapping.remoteVariantId,
-            channelInventoryItemId: mapping.remoteInventoryItemId,
-            channelSku: mapping.remoteSku || mapping.sku || null,
-            isActive: 1,
-          });
-          createdFeedCount += 1;
-        }
-
-        const updatedListings = await tx
-          .update(channelListings)
-          .set({
-            externalProductId: targetProductId,
-            externalVariantId: mapping.remoteVariantId,
-            externalSku: mapping.remoteSku || mapping.sku || null,
-            syncStatus: "synced",
-            syncError: null,
-            lastSyncedAt: writtenAt,
-            updatedAt: writtenAt,
-          })
-          .where(and(
-            eq(channelListings.channelId, before.channel.id),
-            eq(channelListings.productVariantId, mapping.variantId),
-          ))
-          .returning({ id: channelListings.id });
-        if (updatedListings.length > 0) {
-          updatedListingCount += updatedListings.length;
-        } else {
-          await tx.insert(channelListings).values({
-            channelId: before.channel.id,
-            productVariantId: mapping.variantId,
-            externalProductId: targetProductId,
-            externalVariantId: mapping.remoteVariantId,
-            externalSku: mapping.remoteSku || mapping.sku || null,
-            syncStatus: "synced",
-            lastSyncedAt: writtenAt,
-          });
-          createdListingCount += 1;
-        }
+        const repairedCounts = await upsertRepairedShopifyVariantFeedAndListingInTx(tx, {
+          channelId: before.channel.id,
+          variantId: mapping.variantId,
+          targetProductId,
+          remoteVariantId: mapping.remoteVariantId,
+          remoteInventoryItemId: mapping.remoteInventoryItemId,
+          channelSku: mapping.remoteSku || mapping.sku || null,
+          writtenAt,
+        });
+        updatedFeedCount += repairedCounts.updatedFeedCount;
+        createdFeedCount += repairedCounts.createdFeedCount;
+        updatedListingCount += repairedCounts.updatedListingCount;
+        createdListingCount += repairedCounts.createdListingCount;
       }
 
       const delistedCount = await delistDeletedShopifyVariants(tx, {

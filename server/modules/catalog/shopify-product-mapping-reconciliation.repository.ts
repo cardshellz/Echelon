@@ -22,6 +22,7 @@ import {
 import { db } from "../../db";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import { removeChannelProductIdentities } from "../channels/product-identity.api";
+import { disableShopifyVariantFeedsAndResetListingsInTx } from "../channels/channel-feed-listing-mutations.api";
 import {
   buildShopifyProductMappingSummary,
   normalizeShopifyId,
@@ -714,44 +715,13 @@ export function createShopifyProductMappingReconciliationRepository(
           .returning({ id: productVariants.id });
         const internalVariantIds = clearedVariants.map((variant) => variant.id);
 
-        const disabledFeeds = internalVariantIds.length === 0
-          ? []
-          : await tx
-            .update(channelFeeds)
-            .set({
-              channelProductId: null,
-              channelInventoryItemId: null,
-              isActive: 0,
-              lastSyncedQty: null,
-              consecutivePushFailures: 0,
-              quarantinedAt: null,
-              quarantineReason: null,
-              updatedAt: input.now,
-            })
-            .where(and(
-              eq(channelFeeds.channelId, input.channelId),
-              eq(channelFeeds.channelType, "shopify"),
-              inArray(channelFeeds.productVariantId, internalVariantIds),
-            ))
-            .returning({ id: channelFeeds.id });
-
-        const resetListings = internalVariantIds.length === 0
-          ? []
-          : await tx
-            .update(channelListings)
-            .set({
-              externalProductId: null,
-              externalVariantId: null,
-              externalUrl: null,
-              syncStatus: "error",
-              syncError: RETIRED_MAPPING_SYNC_ERROR,
-              updatedAt: input.now,
-            })
-            .where(and(
-              eq(channelListings.channelId, input.channelId),
-              inArray(channelListings.productVariantId, internalVariantIds),
-            ))
-            .returning({ id: channelListings.id });
+        const { disabledFeeds, resetListings } = await disableShopifyVariantFeedsAndResetListingsInTx(tx, {
+          channelId: input.channelId,
+          variantIds: internalVariantIds,
+          clearChannelVariantId: false,
+          syncError: RETIRED_MAPPING_SYNC_ERROR,
+          now: input.now,
+        });
 
         const after = (
           await loadMappedProducts(tx, input.channelId, input.productId)
@@ -978,45 +948,13 @@ export function createShopifyProductMappingReconciliationRepository(
             ))
             .returning({ id: productVariants.id });
 
-        const disabledFeeds = detachedVariantIds.length === 0
-          ? []
-          : await tx
-            .update(channelFeeds)
-            .set({
-              channelProductId: null,
-              channelVariantId: null,
-              channelInventoryItemId: null,
-              isActive: 0,
-              lastSyncedQty: null,
-              consecutivePushFailures: 0,
-              quarantinedAt: null,
-              quarantineReason: null,
-              updatedAt: input.now,
-            })
-            .where(and(
-              eq(channelFeeds.channelId, input.channel.id),
-              eq(channelFeeds.channelType, "shopify"),
-              inArray(channelFeeds.productVariantId, detachedVariantIds),
-            ))
-            .returning({ id: channelFeeds.id });
-
-        const resetListings = detachedVariantIds.length === 0
-          ? []
-          : await tx
-            .update(channelListings)
-            .set({
-              externalProductId: null,
-              externalVariantId: null,
-              externalUrl: null,
-              syncStatus: "error",
-              syncError: DETACHED_OWNERSHIP_SYNC_ERROR,
-              updatedAt: input.now,
-            })
-            .where(and(
-              eq(channelListings.channelId, input.channel.id),
-              inArray(channelListings.productVariantId, detachedVariantIds),
-            ))
-            .returning({ id: channelListings.id });
+        const { disabledFeeds, resetListings } = await disableShopifyVariantFeedsAndResetListingsInTx(tx, {
+          channelId: input.channel.id,
+          variantIds: detachedVariantIds,
+          clearChannelVariantId: true,
+          syncError: DETACHED_OWNERSHIP_SYNC_ERROR,
+          now: input.now,
+        });
 
         const remainingCatalogMappings = await tx
           .select({ id: products.id })
