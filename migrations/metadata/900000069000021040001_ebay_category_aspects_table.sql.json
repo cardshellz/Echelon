@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000069000021040001_ebay_category_aspects_table.sql",
+  "generation": 69,
+  "pr": 2104,
+  "ordinal": 1,
+  "after": [
+    "900000068000020990001_channels_sync_mode_check.sql"
+  ]
+}
