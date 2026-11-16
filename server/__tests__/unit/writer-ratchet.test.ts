@@ -358,19 +358,45 @@ describe("writer-ratchet (P2.1)", () => {
     expect(currentIncludingScripts["inventory.cycle_count_items"]).toEqual(["modules/inventory","scripts/create-daily-replen-qa-counts.ts"]);
   });
 
-  it("blocks any new direct database writes in *.routes.ts files across server/ and server/modules/", () => {
-    const addedRouteWrites: string[] = [];
-    for (const [table, files] of Object.entries(currentRouteWriters)) {
-      const allowed = new Set(routeAndScriptBaseline.routeWriters[table] ?? []);
-      for (const file of files) {
-        if (!allowed.has(file)) addedRouteWrites.push(`${table}  ←  ${file}`);
+  it("blocks any direct database writes in *.routes.ts files or server/routes/* across the entire repository (P2-1C)", () => {
+    expect(
+      routeAndScriptBaseline.routeWriters,
+      "routeWriters in route-and-script-baseline.json must remain permanently empty ({}) — zero route DB writes allowed.",
+    ).toEqual({});
+    expect(
+      currentRouteWriters,
+      `Direct DB write(s) detected in *.routes.ts. Route files must be pure HTTP transport and delegate all writes to owning module .api.ts contracts:\n` +
+        Object.entries(currentRouteWriters)
+          .flatMap(([table, files]) => files.map((file) => `${table}  ←  ${file}`))
+          .join("\n"),
+    ).toEqual({});
+
+    const serverRouteBuckets: string[] = [];
+    for (const [table, buckets] of Object.entries(current)) {
+      for (const bucket of buckets) {
+        if (bucket.startsWith("server/routes/")) {
+          serverRouteBuckets.push(`${table}  ←  ${bucket}`);
+        }
       }
     }
     expect(
-      addedRouteWrites,
-      `NEW direct DB write(s) detected in *.routes.ts. Route files must delegate writes to application/use-case/repository layers:\n` +
-        addedRouteWrites.join("\n"),
+      serverRouteBuckets,
+      `Direct DB write(s) detected inside server/routes/* (including route state/helper files). Delegate to owning module .api.ts contracts:\n` +
+        serverRouteBuckets.join("\n"),
     ).toEqual([]);
+  });
+
+  it.each([
+    "channels.channel_variant_overrides",
+    "ebay.ebay_category_aspects",
+    "ebay.ebay_category_mappings",
+    "ebay.ebay_listing_rules",
+    "ebay.ebay_product_aspect_overrides",
+    "ebay.ebay_type_aspect_defaults",
+  ])("%s has only the Channels owning writer, including operational scripts (P2-1C)", (table) => {
+    expect(current[table]).toEqual(["modules/channels"]);
+    expect(currentIncludingScripts[table]).toEqual(["modules/channels"]);
+    expect(baseline[table]).toEqual(["modules/channels"]);
   });
 
   it("blocks any new direct database writes in scripts/ or script/ outside the frozen baseline", () => {

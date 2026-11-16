@@ -71,6 +71,17 @@ import {
   sendInventoryLegacyAdminControlError,
 } from "../inventory-planning/legacy-admin-control.api";
 import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work";
+import {
+  assignProductsShippingGroupInTx,
+  clearPrimaryProductAssetsForProduct,
+  deactivateVariantChannelFeedsInTx,
+  insertProductCategoryRecord,
+  insertShippingGroupRecord,
+  linkVariantShopifyFeedAndListingInTx,
+  updateScopedVariantPackageAttributesInTx,
+  updateShippingGroupRecordById,
+  updateVariantPackageAttributesByIdInTx,
+} from "./infrastructure/catalog-route-mutations.repository";
 
 type CatalogRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -735,11 +746,12 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           );
         }
 
-        const updated = await tx
-          .update(products)
-          .set({ shippingGroupId, updatedAt: changedAt })
-          .where(inArray(products.id, productIds))
-          .returning({ id: products.id });
+        const updated = await assignProductsShippingGroupInTx(
+          tx,
+          productIds,
+          shippingGroupId,
+          changedAt,
+        );
         if (updated.length !== productIds.length) {
           throw new Error("Shipping-group assignment did not update every locked product");
         }
@@ -804,15 +816,12 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const code = String(req.body.code ?? name).trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
       if (!code) return res.status(400).json({ error: "Shipping group code must contain at least one letter or number" });
 
-      const [group] = await db
-        .insert(shippingGroups)
-        .values({
-          code,
-          name,
-          description: req.body.description || null,
-          sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
-        })
-        .returning();
+      const group = await insertShippingGroupRecord({
+        code,
+        name,
+        description: req.body.description || null,
+        sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
+      });
       res.status(201).json(group);
     } catch (error: any) {
       if (error?.code === "23505") return res.status(409).json({ error: "Shipping group code already exists" });
@@ -832,17 +841,13 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (!name) return res.status(400).json({ error: "Shipping group name is required" });
 
       // code is intentionally immutable on update (stable storefront/sync key).
-      const [group] = await db
-        .update(shippingGroups)
-        .set({
-          name,
-          description: req.body.description !== undefined ? req.body.description || null : existing[0].description,
-          sortOrder: req.body.sortOrder !== undefined ? Number(req.body.sortOrder) : existing[0].sortOrder,
-          isActive: req.body.isActive !== undefined ? Boolean(req.body.isActive) : existing[0].isActive,
-          updatedAt: new Date(),
-        })
-        .where(eq(shippingGroups.id, id))
-        .returning();
+      const group = await updateShippingGroupRecordById(id, {
+        name,
+        description: req.body.description !== undefined ? req.body.description || null : existing[0].description,
+        sortOrder: req.body.sortOrder !== undefined ? Number(req.body.sortOrder) : existing[0].sortOrder,
+        isActive: req.body.isActive !== undefined ? Boolean(req.body.isActive) : existing[0].isActive,
+        updatedAt: new Date(),
+      });
       res.json(group);
     } catch (error) {
       console.error("Error updating shipping group:", error);
@@ -860,15 +865,12 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (!slug) {
         return res.status(400).json({ error: "Category slug is required" });
       }
-      const [category] = await db
-        .insert(productCategories)
-        .values({
-          name,
-          slug,
-          description: req.body.description || null,
-          sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
-        })
-        .returning();
+      const category = await insertProductCategoryRecord({
+        name,
+        slug,
+        description: req.body.description || null,
+        sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
+      });
       res.status(201).json(category);
     } catch (error: any) {
       if (error?.code === "23505") {
@@ -1455,10 +1457,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       // If setting as primary, unset existing primary
       if (isPrimary && existingAssets.length > 0) {
-        await db
-          .update(productAssets)
-          .set({ isPrimary: 0 })
-          .where(eq(productAssets.productId, productId));
+        await clearPrimaryProductAssetsForProduct(productId);
       }
 
       const asset = await storage.createProductAsset({
@@ -1714,10 +1713,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         const updatedVariant = await storage.updateProductVariant(id, payload, tx);
         if (!updatedVariant) return { variant: null, renamed: false };
         if (!isInventoryManagedVariant(updatedVariant)) {
-          await tx
-            .update(channelFeeds)
-            .set({ isActive: 0, updatedAt: new Date() })
-            .where(eq(channelFeeds.productVariantId, id));
+          await deactivateVariantChannelFeedsInTx(tx, id);
         }
         if (
           existing.requiresShipping !== updatedVariant.requiresShipping
@@ -1844,11 +1840,12 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const updatedVariants = await db.transaction(async (tx) => {
         const updated = [];
         for (const row of rows) {
-          const [variant] = await tx
-            .update(productVariants)
-            .set({ ...serializePackageAttributeUpdates(row.updates), updatedAt: new Date() })
-            .where(and(eq(productVariants.productId, productId), eq(productVariants.id, row.variantId)))
-            .returning();
+          const variant = await updateScopedVariantPackageAttributesInTx(
+            tx,
+            productId,
+            row.variantId,
+            serializePackageAttributeUpdates(row.updates),
+          );
           if (!variant) {
             throw Object.assign(new Error(`Variant ${row.variantId} was not updated`), { statusCode: 409 });
           }
@@ -1888,11 +1885,11 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const updatedVariants = await db.transaction(async (tx) => {
         const updated = [];
         for (const row of rows) {
-          const [variant] = await tx
-            .update(productVariants)
-            .set({ ...serializePackageAttributeUpdates(row.updates), updatedAt: new Date() })
-            .where(eq(productVariants.id, row.variantId))
-            .returning();
+          const variant = await updateVariantPackageAttributesByIdInTx(
+            tx,
+            row.variantId,
+            serializePackageAttributeUpdates(row.updates),
+          );
           if (!variant) {
             throw Object.assign(new Error(`Variant ${row.variantId} was not updated`), { statusCode: 409 });
           }
@@ -2407,80 +2404,15 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           variantUpdates.barcode = String(shopifyVariant.barcode).trim();
         }
 
-        const [updatedVariant] = await tx
-          .update(productVariants)
-          .set(variantUpdates)
-          .where(eq(productVariants.id, id))
-          .returning();
-
-        const updatedFeeds = await tx
-          .update(channelFeeds)
-          .set({
-            channelVariantId: shopifyVariantId,
-            channelProductId: shopifyProductId,
-            channelSku: shopifySku || echelonSku,
-            channelInventoryItemId: shopifyInventoryItemId,
-            isActive: 1,
-            updatedAt: new Date(),
-          })
-          .where(and(
-            eq(channelFeeds.channelId, channel.id),
-            eq(channelFeeds.productVariantId, id),
-            eq(channelFeeds.channelType, "shopify"),
-          ))
-          .returning({ id: channelFeeds.id });
-
-        let feedIds = updatedFeeds.map((row) => row.id);
-        if (feedIds.length === 0) {
-          const insertedFeeds = await tx
-            .insert(channelFeeds)
-            .values({
-              channelId: channel.id,
-              productVariantId: id,
-              channelType: "shopify",
-              channelVariantId: shopifyVariantId,
-              channelProductId: shopifyProductId,
-              channelSku: shopifySku || echelonSku,
-              channelInventoryItemId: shopifyInventoryItemId,
-              isActive: 1,
-            })
-            .returning({ id: channelFeeds.id });
-          feedIds = insertedFeeds.map((row) => row.id);
-        }
-
-        const updatedListings = await tx
-          .update(channelListings)
-          .set({
-            externalProductId: shopifyProductId,
-            externalVariantId: shopifyVariantId,
-            externalSku: shopifySku || echelonSku,
-            syncStatus: "synced",
-            syncError: null,
-            lastSyncedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(and(
-            eq(channelListings.channelId, channel.id),
-            eq(channelListings.productVariantId, id),
-          ))
-          .returning({ id: channelListings.id });
-
-        let listingIds = updatedListings.map((row) => row.id);
-        if (listingIds.length === 0) {
-          const insertedListings = await tx
-            .insert(channelListings)
-            .values({
-              channelId: channel.id,
-              productVariantId: id,
-              externalProductId: shopifyProductId,
-              externalVariantId: shopifyVariantId,
-              externalSku: shopifySku || echelonSku,
-              syncStatus: "synced",
-              lastSyncedAt: new Date(),
-            })
-            .returning({ id: channelListings.id });
-          listingIds = insertedListings.map((row) => row.id);
-        }
+        const { updatedVariant, feedIds, listingIds } = await linkVariantShopifyFeedAndListingInTx(tx, {
+          variantId: id,
+          channelId: channel.id,
+          shopifyProductId,
+          shopifyVariantId,
+          shopifyInventoryItemId,
+          effectiveSku: shopifySku || echelonSku,
+          variantUpdates,
+        });
 
         await persistAuditEvent(tx, {
           actor,
