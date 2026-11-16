@@ -3,21 +3,21 @@ import path from "node:path";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import * as procurementBarrel from "../../index";
+import * as procurementHealthApi from "../../health-and-observability.api";
+import * as procurementMaintenanceApi from "../../maintenance-remediation.api";
+import * as procurementPlanningJobsApi from "../../planning-and-pipeline-jobs.api";
+import * as procurementReceivingCustodyApi from "../../receiving-custody.api";
+import * as procurementRoutesApi from "../../routes.api";
+import * as procurementWorkersApi from "../../runtime-workers.api";
 
 const REPO_ROOT = path.resolve(__dirname, "../../../../..");
 const SERVER_ROOT = path.resolve(__dirname, "../../../..");
 const PROCUREMENT_ROOT = path.resolve(__dirname, "../..");
 
 const EXPECTED_BARREL_FACADES = [
-  "./routes.api",
-  "./runtime-workers.api",
   "./runtime-services.api",
   "./cost-source-evidence.api",
-  "./receiving-custody.api",
   "./catalog-identity-coordination.api",
-  "./health-and-observability.api",
-  "./planning-and-pipeline-jobs.api",
-  "./maintenance-remediation.api",
 ];
 
 function collectProductionCodeFiles(dir: string): string[] {
@@ -140,22 +140,24 @@ describe("P2-1A: Procurement internal API boundaries (CI-03) and sole-writer aut
     expect(violations).toEqual([]);
   });
 
-  it("keeps procurement/index.ts strictly layered over capability-scoped .api.ts facades", () => {
+  it("keeps procurement/index.ts strictly layered over pure service .api.ts facades without route/worker cycles", () => {
     const indexPath = path.resolve(PROCUREMENT_ROOT, "index.ts");
     const indexContent = fs.readFileSync(indexPath, "utf8");
     const specifiers = collectSpecifiers(indexPath, indexContent);
     expect(specifiers).toEqual(EXPECTED_BARREL_FACADES);
+    expect(specifiers).not.toContain("./routes.api");
+    expect(specifiers).not.toContain("./runtime-workers.api");
 
-    expect(typeof procurementBarrel.registerPurchasingRoutes).toBe("function");
-    expect(typeof procurementBarrel.startPoEmailOutboxWorker).toBe("function");
+    expect(typeof procurementRoutesApi.registerPurchasingRoutes).toBe("function");
+    expect(typeof procurementWorkersApi.startPoEmailOutboxWorker).toBe("function");
     expect(typeof procurementBarrel.createPurchasingService).toBe("function");
     expect(typeof procurementBarrel.createReceivingService).toBe("function");
     expect(typeof procurementBarrel.readReceivingLineCostProvenance).toBe("function");
-    expect(typeof procurementBarrel.readUnresolvedReceivingCustody).toBe("function");
+    expect(typeof procurementReceivingCustodyApi.readUnresolvedReceivingCustody).toBe("function");
     expect(typeof procurementBarrel.synchronizeProcurementSkuReferences).toBe("function");
-    expect(typeof procurementBarrel.loadProcurementHealthSummary).toBe("function");
-    expect(typeof procurementBarrel.generatePurchasingRecommendations).toBe("function");
-    expect(typeof procurementBarrel.previewHistoricalPoSupplierEvidence).toBe("function");
+    expect(typeof procurementHealthApi.loadProcurementHealthSummary).toBe("function");
+    expect(typeof procurementPlanningJobsApi.generatePurchasingRecommendations).toBe("function");
+    expect(typeof procurementMaintenanceApi.previewHistoricalPoSupplierEvidence).toBe("function");
   });
 
   it("locks sole-writer ownership across all 82+ procurement.* tables with zero route or script leaks", () => {

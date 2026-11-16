@@ -2,15 +2,11 @@
  * @echelon/procurement — Vendors, POs, receiving, inbound shipments, landed cost, AP
  *
  * Public entrypoint barrel for `server/modules/procurement`.
- * External production and operational script callers must import strictly from
- * `server/modules/procurement` or one of its capability-scoped `.api.ts` facades.
+ * Re-exports only pure/service contracts (`runtime-services.api`, `cost-source-evidence.api`,
+ * `catalog-identity-coordination.api`) so importing the barrel never evaluates HTTP routes or
+ * background worker loops. Callers of routes, workers, custody fences, health observability,
+ * pipeline jobs, and CLI maintenance scripts import their dedicated `*.api.ts` contracts directly.
  */
-export * from "./routes.api";
-export * from "./runtime-workers.api";
 export * from "./runtime-services.api";
 export * from "./cost-source-evidence.api";
-export * from "./receiving-custody.api";
 export * from "./catalog-identity-coordination.api";
-export * from "./health-and-observability.api";
-export * from "./planning-and-pipeline-jobs.api";
-export * from "./maintenance-remediation.api";
