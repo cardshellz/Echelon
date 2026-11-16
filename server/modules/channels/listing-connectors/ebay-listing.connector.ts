@@ -636,12 +636,16 @@ export class EbayMarketplaceListingConnector {
     const removedOfferIds = new Map<string, string>();
     const createdOfferIds = new Map<number, string>();
     const expectedListingId = input.draft.existingExternalProductId!;
+    // Removed sizes eBay already reports as out of stock. They stay in the group as zero-quantity members: see
+    // isOutOfStockObservedOffer for why a write that deletes one is refused.
+    const outOfStockRemovedSkus: string[] = [];
     for (const sku of normalizedSkus(input.removedSkus)) {
       const observed = exactObservedOffer((await input.client.getOffers(sku, input.draft.marketplaceId)).offers,
         { sku, marketplaceId: input.draft.marketplaceId, format: "FIXED_PRICE" });
       if (!observed || !isPublishedObservedOffer(observed) || observedOfferListingId(observed) !== expectedListingId)
         throw new EbayListingSyncError("EBAY_SYNC_MAPPING_INVALID", `Removed variation ${sku} no longer identifies the reviewed listing. Analyze it again before changing membership.`);
       removedOfferIds.set(sku, observed.offerId);
+      if (isOutOfStockObservedOffer(observed)) outOfStockRemovedSkus.push(sku);
     }
     const originalGroup = toWritableGroupPayload(input.currentGroup);
     let workingGroup = input.currentGroup;
@@ -706,6 +710,7 @@ export class EbayMarketplaceListingConnector {
       // sizes being removed; the target group write below then removes them from a listing that stays multi-SKU.
       const removedMembers = normalizedSkus(input.removedSkus);
       const hasUnpublishedMember = resolvedOffers.some(({ observedOffer }) => !observedOffer || !isPublishedObservedOffer(observedOffer));
+      let publishedAdditiveGroup: Omit<EbayInventoryItemGroup, "inventoryItemGroupKey"> | null = null;
       if (hasUnpublishedMember && removedMembers.length > 0) {
         const additiveGroup = buildRetainedVariationGroupPayload({
           desiredGroup: input.draft.itemGroup.payload, currentGroup: workingGroup, retainedSkus: removedMembers });
@@ -717,17 +722,25 @@ export class EbayMarketplaceListingConnector {
           throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED",
             "eBay did not preserve the reviewed listing id while publishing the added variations.");
         }
+        publishedAdditiveGroup = additiveGroup;
       }
 
+      // Decided before the write, never by sending a write eBay refuses: a refused write also starts the quantity
+      // owner's provider cooldown, which stops the follow-up writes of this same change.
+      retainedRemovedSkus = [...outOfStockRemovedSkus];
+      const targetGroup = retainedRemovedSkus.length === 0 ? input.draft.itemGroup.payload
+        : buildRetainedVariationGroupPayload({
+          desiredGroup: input.draft.itemGroup.payload, currentGroup: workingGroup, retainedSkus: retainedRemovedSkus });
       try {
-        await input.client.createOrReplaceInventoryItemGroup(
-          input.draft.itemGroup.groupKey,
-          input.draft.itemGroup.payload,
-        );
+        // When every removed size is retained, the group published above already is the target. Each group write
+        // revises the live listing, so the identical one is not sent again.
+        if (!publishedAdditiveGroup || canonicalJson(publishedAdditiveGroup) !== canonicalJson(targetGroup)) {
+          await input.client.createOrReplaceInventoryItemGroup(input.draft.itemGroup.groupKey, targetGroup);
+        }
         targetGroupApplied = true;
       } catch (error) {
         if (
-          input.removedSkus.length === 0 ||
+          retainedRemovedSkus.length === removedMembers.length ||
           !isInvalidInventoryItemGroupError(error)
         ) {
           throw error;
@@ -793,7 +806,16 @@ export class EbayMarketplaceListingConnector {
       marketplaceId: input.draft.marketplaceId,
     });
     await this.verifyListingMedia({ client: input.client, draft: input.draft });
-    await this.verifyPublishedContent(input.client, input.draft, publishResult.listingId ?? input.draft.existingExternalProductId ?? undefined);
+    // A listed size with no stock is not on the live listing unless it has sold (see isOutOfStockObservedOffer), so
+    // the published-listing check must not wait for it. Read after the last write: only eBay's current answer counts.
+    const outOfStockSkus = new Set<string>();
+    for (const offer of input.draft.offers) {
+      const observed = exactObservedOffer((await input.client.getOffers(offer.sku, input.draft.marketplaceId)).offers,
+        { sku: offer.sku, marketplaceId: input.draft.marketplaceId, format: offer.payload.format, offerId: offerIdsByVariantId[offer.variantId] });
+      if (observed && isOutOfStockObservedOffer(observed)) outOfStockSkus.add(offer.sku);
+    }
+    await this.verifyPublishedContent(input.client, input.draft,
+      publishResult.listingId ?? input.draft.existingExternalProductId ?? undefined, outOfStockSkus);
     return {
       productId: input.draft.productId,
       status: "updated",
@@ -1162,6 +1184,8 @@ export class EbayMarketplaceListingConnector {
     client: EbayListingConnectorClient,
     draft: Pick<EbayListingConnectorDraft, "offers" | "inventoryItems" | "itemGroup">,
     listingId: string | undefined,
+    /** Sizes eBay itself reports as out of stock: they may be absent from the live listing. Every other size must be on it. */
+    outOfStockSkus: ReadonlySet<string> = new Set(),
   ): Promise<void> {
     if (!listingId) throw readbackPending("published listing", "publishedIdentity");
     if (!client.getPublishedListingContent) throw new EbayListingSyncError("EBAY_SYNC_PUBLISHED_READER_REQUIRED",
@@ -1172,7 +1196,7 @@ export class EbayMarketplaceListingConnector {
       if (!urls.length) throw readbackPending("published listing", "published.photos.source");
       const policy = offer.payload.listingPolicies;
       const mismatch = findChannelPublishedContentMismatch(published, {
-        listingId, skus: draft.offers.map(member => member.sku),
+        listingId, skus: draft.offers.map(member => member.sku).filter(sku => !outOfStockSkus.has(sku)),
         policies: { ...(policy?.fulfillmentPolicyId ? { shipping: policy.fulfillmentPolicyId } : {}),
           ...(policy?.returnPolicyId ? { return: policy.returnPolicyId } : {}),
           ...(policy?.paymentPolicyId ? { payment: policy.paymentPolicyId } : {}) },
@@ -1772,6 +1796,20 @@ async function inspectListingPublication(input: {
 }
 function isPublishedObservedOffer(offer: EbayObservedOffer): boolean {
   return offer.status?.trim().toUpperCase() === "PUBLISHED";
+}
+
+/**
+ * eBay reports `listing.listingStatus: OUT_OF_STOCK` on a published offer whose quantity is 0. For a size that
+ * never sold, eBay has by then taken the variation off the live listing (the quantity write is answered with
+ * warning 25013 "Variations with quantity '0' will be removed"), while the Inventory API still shows the offer as
+ * PUBLISHED and the SKU in the group. A group write that then drops the SKU is refused every time with 400/25082
+ * "A variation could not be found for the given SKU number". Observed in the eBay sandbox on 2026-11-16 and on
+ * production listing 298148420100 (GLV-MAG-180PT-C5000: offer PUBLISHED, OUT_OF_STOCK, absent from the listing).
+ * A size that did sell stays on the listing at zero and eBay will not delete it either. So an out-of-stock size
+ * is never deleted from the group: it is kept as a zero-quantity member, which buyers do not see.
+ */
+function isOutOfStockObservedOffer(offer: EbayObservedOffer): boolean {
+  return offer.listing?.listingStatus?.trim().toUpperCase() === "OUT_OF_STOCK";
 }
 
 function observedOfferListingId(offer: EbayObservedOffer): string | undefined {
