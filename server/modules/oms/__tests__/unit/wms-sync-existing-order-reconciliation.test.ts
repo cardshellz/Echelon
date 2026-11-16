@@ -97,6 +97,18 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/await enqueueShippingEngineShipmentAmendRetry\(\s*tx/);
   });
 
+  // #65696: growth on an item the engine already holds must amend that line,
+  // in the same transaction as the coverage read, with an audit event.
+  it("routes quantity growth on engine-held rows to a quantity amend in the coverage transaction", () => {
+    const start = WMS_SYNC_SRC.indexOf('if (target.status === "queued" || target.status === "on_hold")');
+    const end = WMS_SYNC_SRC.indexOf('if (["labeled", "shipped", "delivered"].includes(target.status))', start);
+    const body = WMS_SYNC_SRC.slice(start, end);
+    expect(body).toMatch(/for \(const increase of attached\.quantityIncreases\)/);
+    expect(body).toMatch(/await enqueueShippingEngineShipmentQuantityAmendRetry\(\s*tx,\s*target\.id,\s*increase\.shipmentItemId/);
+    expect(body).toMatch(/"amend_engine_line_quantity"/);
+    expect(body).toMatch(/coverage\.quantityIncreases\.length/);
+  });
+
   it("does not reconcile cancelled or refunded OMS orders back into WMS work", () => {
     expect(WMS_SYNC_SRC).toMatch(/isFinalOrCancelledOmsOrder/);
     expect(WMS_SYNC_SRC).toMatch(/cancelExistingWmsOrderForFinalOmsOrder/);

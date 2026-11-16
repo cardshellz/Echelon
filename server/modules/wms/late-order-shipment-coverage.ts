@@ -13,10 +13,27 @@ import {
 } from "../../infrastructure/session-advisory-lock";
 import { WMS_ORDER_SHIPMENT_LOCK_NAMESPACE } from "./shipment-lock-namespaces";
 
+/**
+ * Demand growth for an order item that already has a row on a package the
+ * shipping engine holds. The row cannot simply be rewritten locally (the
+ * engine still has the old quantity) and a second row for the same order item
+ * is forbidden by uq_wms_outbound_shipment_items_shipment_order_item, so the
+ * caller must hand it to a provider quantity amend.
+ */
+export interface ShipmentItemQuantityIncrease {
+  shipmentItemId: number;
+  orderItemId: number;
+  fromQuantity: number;
+  toQuantity: number;
+}
+
 export interface AppendUncoveredShipmentItemsResult {
   shipmentId: number;
+  /** Rows inserted, or (planned packages only) rows whose quantity was raised. */
   shipmentItemIds: number[];
   addedQuantity: number;
+  /** Existing rows on an engine-held package that need a provider quantity amend. */
+  quantityIncreases: ShipmentItemQuantityIncrease[];
 }
 
 export interface MovePendingShipmentItemsResult {
@@ -118,7 +135,7 @@ export async function appendUncoveredItemsToShipment(
     { useXactLock: options.useXactLock === true, sessionLock: options.sessionLock },
     async () => {
       const target = await db.execute(sql`
-        SELECT id
+        SELECT id, status
         FROM wms.outbound_shipments
         WHERE id = ${shipmentId}
           AND order_id = ${wmsOrderId}
@@ -130,6 +147,7 @@ export async function appendUncoveredItemsToShipment(
           `shipment ${shipmentId} is not an active package for WMS order ${wmsOrderId}`,
         );
       }
+      const targetStatus = String((target.rows?.[0] as any)?.status ?? "");
 
       const itemRowsResult = await db.execute(sql`
         SELECT id, quantity, fulfilled_quantity, product_id
@@ -167,7 +185,26 @@ export async function appendUncoveredItemsToShipment(
         );
       }
 
+      // A package holds at most one customer-fulfillment row per order item
+      // (uq_wms_outbound_shipment_items_shipment_order_item). Growth for an
+      // item already on this package changes that row instead of inserting.
+      const existingRowResult = await db.execute(sql`
+        SELECT id, order_item_id, qty
+        FROM wms.outbound_shipment_items
+        WHERE shipment_id = ${shipmentId}
+          AND order_item_id = ANY(ARRAY[${sql.join(normalizedOrderItemIds.map((id) => sql`${id}`), sql`, `)}]::int[])
+        FOR UPDATE
+      `);
+      const existingRowByOrderItemId = new Map<number, { id: number; qty: number }>();
+      for (const row of existingRowResult.rows ?? []) {
+        existingRowByOrderItemId.set(Number((row as any).order_item_id), {
+          id: Number((row as any).id),
+          qty: Number((row as any).qty ?? 0),
+        });
+      }
+
       const shipmentItemIds: number[] = [];
+      const quantityIncreases: ShipmentItemQuantityIncrease[] = [];
       let addedQuantity = 0;
       for (const row of itemRows) {
         const orderItemId = Number((row as any).id);
@@ -179,6 +216,43 @@ export async function appendUncoveredItemsToShipment(
           0,
         );
         if (uncoveredQuantity <= 0) continue;
+
+        const existingRow = existingRowByOrderItemId.get(orderItemId);
+        if (existingRow) {
+          const toQuantity = existingRow.qty + uncoveredQuantity;
+          if (options.providerMembershipState === PROVIDER_MEMBERSHIP_PENDING_APPEND) {
+            // The engine already holds this row at its old quantity.
+            quantityIncreases.push({
+              shipmentItemId: existingRow.id,
+              orderItemId,
+              fromQuantity: existingRow.qty,
+              toQuantity,
+            });
+            continue;
+          }
+          if (targetStatus !== "planned") {
+            // Authoritative growth may only be written locally while no engine
+            // holds the package; anything else would silently diverge from it.
+            throw new Error(
+              `shipment ${shipmentId} (${targetStatus}) needs a provider quantity amend for order item ${orderItemId}`,
+            );
+          }
+          const updated = await db.execute(sql`
+            UPDATE wms.outbound_shipment_items
+            SET qty = ${toQuantity}
+            WHERE id = ${existingRow.id}
+              AND qty = ${existingRow.qty}
+            RETURNING id
+          `);
+          if ((updated.rows?.length ?? 0) !== 1) {
+            throw new Error(
+              `shipment item ${existingRow.id} changed while its planned quantity was raised`,
+            );
+          }
+          shipmentItemIds.push(existingRow.id);
+          addedQuantity += uncoveredQuantity;
+          continue;
+        }
 
         const defaults = await resolveShipmentItemDefaults(db, orderItemId);
         const inserted = await db.execute(sql`
@@ -209,7 +283,7 @@ export async function appendUncoveredItemsToShipment(
         addedQuantity += uncoveredQuantity;
       }
 
-      return { shipmentId, shipmentItemIds, addedQuantity };
+      return { shipmentId, shipmentItemIds, addedQuantity, quantityIncreases };
     },
   );
 }
