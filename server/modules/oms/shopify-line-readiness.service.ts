@@ -23,6 +23,8 @@ export interface ReconcileShopifyLineReadinessInput {
   lineItems: ShopifyLineReadinessSnapshot[];
   now?: Date;
   channelUpdatedAt?: Date | string | null;
+  /** Shopify's statement that the order is fully paid for its current contents. */
+  channelPaymentSettled?: boolean | null;
 }
 
 export interface ReconcileShopifyLineReadinessResult {
@@ -202,6 +204,7 @@ export async function reconcileShopifyLineReadiness(
         quantity: snapshot.quantity,
         currentQuantity: snapshot.currentQuantity,
         channelUpdatedAt: input.channelUpdatedAt,
+        channelPaymentSettled: input.channelPaymentSettled ?? null,
         fulfillableQuantity: snapshot.fulfillableQuantity,
         previous: line,
         now,

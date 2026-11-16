@@ -8,6 +8,8 @@ export { queueOmsPaidEventReplay } from "./shopify-paid-event-replay";
 export { automaticPaidReplayEvidenceSchema } from "./domain/shopify-paid-replay-policy";
 export { normalizeShopifyCustomerId } from "./shopify-customer-identity";
 export { reconcileShopifyLineReadiness } from "./shopify-line-readiness.service";
+export { recordChannelAuthorityGap } from "./infrastructure/channel-authority-gap.repository";
+export { deriveShopifyChannelPaymentSettled } from "./domain/channel-payment-settlement";
 export { readShopifyLineCurrentQuantity } from "./shopify-line-item-normalizer";
 export { processShopifyFulfillmentIngress } from "./shopify-fulfillment-ingress.adapter";
 export {

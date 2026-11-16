@@ -66,6 +66,9 @@ import type { ShippingEngine } from "../shipping/engine-and-reconcile.api";
 import { recordShopifyRefundReturnCase } from "../returns/shopify-return-intake.api";
 import { deriveShopifyRefundFinancialStatus } from "./domain/shopify-refund-financial-status";
 import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
+import { deriveShopifyChannelPaymentSettled } from "./domain/channel-payment-settlement";
+import { recordChannelAuthorityGap } from "./infrastructure/channel-authority-gap.repository";
+import { applyVersionedShopifyOrderMoney } from "./infrastructure/shopify-order-money.repository";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -181,6 +184,16 @@ function verifyShopifyHmac(rawBody: Buffer, hmacHeader: string | undefined): boo
 // ---------------------------------------------------------------------------
 // Shopify payload → OMS OrderData mapping
 // ---------------------------------------------------------------------------
+
+/**
+ * mapShopifyOrderToOrderData always fills header money, but OrderData types it
+ * optional for other channels. A missing amount here is a mapper defect: fail
+ * the webhook (retried) rather than writing zero money onto the order.
+ */
+function requireMappedCents(value: number | undefined, field: string): number {
+  if (value === undefined) throw new Error(`Shopify order mapping produced no ${field}`);
+  return value;
+}
 
 function dollarsToCents(value: string | number | undefined | null): number {
   if (value === null || value === undefined) return 0;
@@ -1220,6 +1233,14 @@ export function registerOmsWebhooks(
 
       const nextShipTo = canonicalShipToFromShopifyUpdate(shopifyOrder, existing);
       const now = new Date();
+      // Shopify's own statement that the order is fully paid for its current
+      // contents. Lets a Shopify-admin edit that adds units without a new
+      // payment (e.g. #65696) raise paid authority. A malformed amount throws
+      // here, fails the inbox row, and is retried rather than authorizing.
+      const channelPaymentSettled = deriveShopifyChannelPaymentSettled({
+        financialStatus: shopifyOrder.financial_status,
+        totalOutstanding: shopifyOrder.total_outstanding,
+      });
       const isCancelledPayload = Boolean(shopifyOrder.cancelled_at);
       // cancelNow (channel truth) drives the cancel cascade; isFinalOmsState
       // (includes our existing terminal status) drives only the reconcile/
@@ -1229,6 +1250,28 @@ export function registerOmsWebhooks(
         ? await readChannelShopifyMerchandise(db, { channelId, orderId: externalOrderId }) : null;
       const { cancelNow: isCancelledByChannel, isFinal: isFinalOmsState } =
         deriveOmsUpdateFinality(shopifyOrder, existing.status, { verifiedCancelled: nativeMerchandise?.cancelled ?? null });
+
+      // Order money and the raw snapshot are channel facts that only a
+      // same-or-newer Shopify version may replace. One conditional statement
+      // keeps a late, older webhook from regressing them (the line ledger
+      // guards quantities the same way via channel_quantity_updated_at).
+      // Without a version the payload cannot be ordered, so money is left as is.
+      const channelVersion = shopifyOrder.updated_at ? new Date(shopifyOrder.updated_at) : null;
+      const hasChannelVersion = channelVersion !== null && Number.isFinite(channelVersion.getTime());
+      if (hasChannelVersion) {
+        await applyVersionedShopifyOrderMoney(db, {
+          omsOrderId: existing.id,
+          channelVersion: channelVersion!,
+          money: {
+            subtotalCents: requireMappedCents(orderData.subtotalCents, "subtotalCents"),
+            shippingCents: requireMappedCents(orderData.shippingCents, "shippingCents"),
+            taxCents: requireMappedCents(orderData.taxCents, "taxCents"),
+            discountCents: requireMappedCents(orderData.discountCents, "discountCents"),
+            totalCents: requireMappedCents(orderData.totalCents, "totalCents"),
+          },
+          rawPayload: shopifyOrder,
+        });
+      }
 
       // Update OMS order fields
       await db
@@ -1258,7 +1301,8 @@ export function registerOmsWebhooks(
           shipToZip: nextShipTo.zip,
           shipToCountry: nextShipTo.country,
           notes: shopifyOrder.note ?? existing.notes,
-          rawPayload: shopifyOrder as any,
+          // Versioned payloads are written by the guarded statement above.
+          ...(hasChannelVersion ? {} : { rawPayload: shopifyOrder as any }),
           updatedAt: now,
         })
         .where(eq(omsOrders.id, existing.id));
@@ -1424,6 +1468,7 @@ export function registerOmsWebhooks(
                   : previousAuthority.fulfillableQuantity,
                 currentQuantity: readShopifyLineCurrentQuantity(item),
                 channelUpdatedAt: shopifyOrder.updated_at ?? null,
+                channelPaymentSettled,
                 previous: previousAuthority,
               });
               if (authority.staleChannelObservation) return;
@@ -1488,7 +1533,8 @@ export function registerOmsWebhooks(
                 ? Number(item.fulfillable_quantity)
                 : null,
               currentQuantity: readShopifyLineCurrentQuantity(item),
-                channelUpdatedAt: shopifyOrder.updated_at ?? null,
+              channelUpdatedAt: shopifyOrder.updated_at ?? null,
+              channelPaymentSettled,
             });
             // Insert new line and authority ledger atomically.
             await db.transaction(async (tx: any) => {
@@ -1676,6 +1722,16 @@ export function registerOmsWebhooks(
           }
         }
       }
+
+      // Units Shopify sold that OMS still will not ship are never silent:
+      // awaiting payment is recorded as a visible state, and a fully paid
+      // order with unshippable units is an error for a human.
+      await recordChannelAuthorityGap(db, {
+        omsOrderId: existing.id,
+        externalOrderNumber: shopifyOrder.name ?? null,
+        channelPaymentSettled,
+        sourceEventId: orderData.sourceEventId,
+      });
 
       // Log event
       await db.insert(omsOrderEvents).values({

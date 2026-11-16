@@ -26,6 +26,12 @@ export interface OmsLineAuthorityInput {
    */
   currentQuantity?: number | null;
   channelUpdatedAt?: Date | string | null;
+  /**
+   * The channel's own statement that the order is fully paid for its CURRENT
+   * contents (see deriveShopifyChannelPaymentSettled). null/undefined means
+   * the channel did not state it, and only the topic-based rules apply.
+   */
+  channelPaymentSettled?: boolean | null;
   previous?: {
     channelObservedQuantity?: number | null;
     channelCurrentQuantity?: number | null;
@@ -147,6 +153,42 @@ function canGrantFirstAuthorityFromPaidRefresh(input: OmsLineAuthorityInput): bo
     && String(previous.authorizationStatus ?? "seen") === "seen";
 }
 
+/**
+ * A Shopify edit can raise a line's quantity on an already-paid order with no
+ * new payment event: when the edited total is not higher than what was paid,
+ * Shopify refunds or keeps the difference and sends no orders/paid. #65696
+ * (2026-11-16) added 2 units plus a 15% discount; the line stayed at its old
+ * paid quantity of 8 and the 2 units never reached WMS or ShipStation.
+ *
+ * The sales channel owns what was bought and paid for. When a fresh channel
+ * snapshot states the order is fully paid for its current contents
+ * (channelPaymentSettled), it may raise paid authority to the channel's
+ * quantity. Only increases are granted here: reductions keep flowing through
+ * the non-authorizing path so removal and cancellation semantics are unchanged.
+ * A stale snapshot never authorizes, because its payment statement is exactly
+ * as old as its quantity. Cancelled, refunded and review lines keep their
+ * owning decision.
+ */
+function canAuthorizeIncreaseFromSettledChannelSnapshot(
+  input: OmsLineAuthorityInput,
+  observation: { stale: boolean; channelQuantity: number },
+): boolean {
+  if (observation.stale) return false;
+  // Only a dated current_quantity is the channel's statement of what is
+  // bought now; without it the merchandise observation echoes the previous
+  // value and proves nothing about an increase.
+  if (input.currentQuantity == null || input.channelUpdatedAt == null) return false;
+  if (!READINESS_REFRESH_TOPICS.has(input.sourceTopic)) return false;
+  if (input.channelPaymentSettled !== true) return false;
+  const previous = input.previous;
+  if (!previous) return observation.channelQuantity > 0;
+  if (Number(previous.cancelledQuantity ?? 0) !== 0) return false;
+  if (Number(previous.refundedQuantity ?? 0) !== 0) return false;
+  const previousStatus = String(previous.authorizationStatus ?? "seen");
+  if (previousStatus !== "seen" && previousStatus !== "authorized") return false;
+  return observation.channelQuantity > Number(previous.paidQuantity ?? 0);
+}
+
 export function canSourceTopicAuthorizeOmsLine(sourceTopic: string): boolean {
   return AUTHORIZING_TOPICS.has(sourceTopic);
 }
@@ -233,7 +275,11 @@ export function deriveOmsLineAuthority(
   const eventCanAuthorize =
     (canSourceTopicAuthorizeOmsLine(input.sourceTopic) &&
       isPaidFinancialStatus(input.financialStatus)) ||
-    canGrantFirstAuthorityFromPaidRefresh(input);
+    canGrantFirstAuthorityFromPaidRefresh(input) ||
+    canAuthorizeIncreaseFromSettledChannelSnapshot(input, {
+      stale: merchandise.stale,
+      channelQuantity: merchandise.channelCurrentQuantity ?? observedQuantity,
+    });
   // Freshness applies to Shopify's mutable merchandise observation, not to the
   // independent payment fact. A paid webhook can arrive after a newer
   // orders/updated webhook; preserve the newer quantity snapshot while still
