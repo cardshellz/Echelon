@@ -5,6 +5,7 @@ import { parseInventoryTrackingWrite, resolveInventoryTrackingPolicy } from "@sh
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import type { db } from "../../db";
 import { loadTrackingStopSnapshot, retainTrackingStopHistory, trackingStopOperationalBlockers } from "../inventory/catalog-inventory.api";
+import { deactivateAllChannelFeedsByVariantIdInChannels } from "../channels/channel-feed-listing-mutations.api";
 
 import { MAX_TRACKING_HISTORY_RECORDS } from "@shared/catalog/inventory-tracking-history";
 
@@ -96,7 +97,7 @@ async function projectVariant(tx: Transaction, variant: ProductVariant, next: bo
     snapshot: await loadTrackingStopSnapshot(tx, variant.id),
   });
   await tx.update(productVariants).set({ trackInventory: next, updatedAt: now }).where(eq(productVariants.id, variant.id));
-  if (!next) await tx.update(channelFeeds).set({ isActive: 0, updatedAt: now }).where(eq(channelFeeds.productVariantId, variant.id));
+  if (!next) await deactivateAllChannelFeedsByVariantIdInChannels(tx, variant.id, now);
 }
 
 export async function updateProductInventoryTracking(

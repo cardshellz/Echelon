@@ -1,5 +1,9 @@
 import { productMethods } from "../catalog/catalog.storage";
 import { createSharedProductPhotoImporter } from "../catalog";
+import {
+  updateProductFromShopifyBackfillInCatalog,
+  insertProductFromShopifyBackfillInCatalog,
+} from "../catalog/cross-module-product-mutations.api";
 import { parseDollarPriceToCents } from "./channel-pricing-resolver";
 import { createChannelPricingService } from "./channel-pricing.service";
 import { ChannelPricingError } from "./channel-pricing.domain";
@@ -402,21 +406,15 @@ class CatalogBackfillService {
 
       // Update existing product
       if (!isDryRun) {
-        const [updated] = await this.db
-          .update(products)
-          .set({
-            title: shopifyProduct.title,
-            description: shopifyProduct.body_html,
-            brand: shopifyProduct.vendor,
-            category: shopifyProduct.product_type,
-            tags: tags,
-            status: shopifyProduct.status === "active" ? "active" : shopifyProduct.status === "draft" ? "draft" : "archived",
-            shopifyProductId: mappingDecision.productId,
-            updatedAt: new Date(),
-          })
-          .where(eq(products.id, existing.id))
-          .returning();
-        echelonProduct = updated;
+        echelonProduct = await updateProductFromShopifyBackfillInCatalog(this.db, existing.id, {
+          title: shopifyProduct.title,
+          description: shopifyProduct.body_html,
+          brand: shopifyProduct.vendor,
+          category: shopifyProduct.product_type,
+          tags: tags,
+          status: shopifyProduct.status === "active" ? "active" : shopifyProduct.status === "draft" ? "draft" : "archived",
+          shopifyProductId: mappingDecision.productId,
+        });
       } else {
         echelonProduct = existing;
       }
@@ -425,22 +423,18 @@ class CatalogBackfillService {
     } else {
       // Create new product
       if (!isDryRun) {
-        const [created] = await this.db
-          .insert(products)
-          .values({
-            sku: baseSku,
-            name: shopifyProduct.title,
-            title: shopifyProduct.title,
-            description: shopifyProduct.body_html,
-            brand: shopifyProduct.vendor,
-            category: shopifyProduct.product_type,
-            tags: tags,
-            status: shopifyProduct.status === "active" ? "active" : shopifyProduct.status === "draft" ? "draft" : "archived",
-            shopifyProductId: shopifyProductId,
-            baseUnit: "EA",
-          })
-          .returning();
-        echelonProduct = created;
+        echelonProduct = await insertProductFromShopifyBackfillInCatalog(this.db, {
+          sku: baseSku,
+          name: shopifyProduct.title,
+          title: shopifyProduct.title,
+          description: shopifyProduct.body_html,
+          brand: shopifyProduct.vendor,
+          category: shopifyProduct.product_type,
+          tags: tags,
+          status: shopifyProduct.status === "active" ? "active" : shopifyProduct.status === "draft" ? "draft" : "archived",
+          shopifyProductId: shopifyProductId,
+          baseUnit: "EA",
+        });
       } else {
         echelonProduct = { id: -1 } as Product; // Placeholder for dry run
       }

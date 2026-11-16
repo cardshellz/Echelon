@@ -17,6 +17,7 @@
 import { eq, and, or, isNull, isNotNull, sql, inArray } from "drizzle-orm";
 import { describeAllocationFailure } from "./allocation-engine.errors";
 import { logger } from "../../platform/observability/logger";
+import { updateProductPulledContentFieldsInCatalog } from "../catalog/cross-module-product-mutations.api";
 import {
   products,
   productVariants,
@@ -1439,10 +1440,7 @@ class EchelonSyncOrchestrator {
 
               if (Object.keys(updates).length > 0) {
                 updates.updatedAt = new Date();
-                await this.db
-                  .update(products)
-                  .set(updates)
-                  .where(eq(products.id, product.id));
+                await updateProductPulledContentFieldsInCatalog(this.db, product.id, updates);
 
                 result.pulled++;
                 result.details.push({

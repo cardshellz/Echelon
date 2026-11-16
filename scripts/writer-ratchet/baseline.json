@@ -15,8 +15,7 @@
     "modules/catalog"
   ],
   "catalog.product_line_products": [
-    "modules/catalog",
-    "modules/channels"
+    "modules/catalog"
   ],
   "catalog.product_lines": [
     "modules/channels"
@@ -25,14 +24,10 @@
     "modules/catalog"
   ],
   "catalog.product_variants": [
-    "modules/catalog",
-    "modules/channels",
-    "modules/inventory"
+    "modules/catalog"
   ],
   "catalog.products": [
-    "modules/catalog",
-    "modules/channels",
-    "modules/procurement"
+    "modules/catalog"
   ],
   "catalog.publication_media_references": [
     "modules/catalog"
@@ -59,16 +54,12 @@
     "modules/channels"
   ],
   "channels.channel_connections": [
-    "modules/channels",
-    "modules/dropship"
+    "modules/channels"
   ],
   "channels.channel_feeds": [
-    "modules/catalog",
-    "modules/channels",
-    "modules/inventory"
+    "modules/channels"
   ],
   "channels.channel_listings": [
-    "modules/catalog",
     "modules/channels"
   ],
   "channels.channel_pricing": [
@@ -105,9 +96,7 @@
     "modules/channels"
   ],
   "channels.channels": [
-    "modules/channels",
-    "modules/dropship",
-    "modules/identity"
+    "modules/channels"
   ],
   "channels.ebay_listing_change_intents": [
     "modules/channels"
@@ -152,8 +141,7 @@
     "modules/channels"
   ],
   "channels.sync_settings": [
-    "modules/channels",
-    "modules/inventory-planning"
+    "modules/channels"
   ],
   "channels.walmart_connection_events": [
     "modules/channels"

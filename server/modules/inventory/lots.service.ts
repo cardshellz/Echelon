@@ -33,6 +33,7 @@ import {
   calculateLotPickableOnHand,
   calculateUnreservedLotOnHand,
 } from "./domain/inventory.domain";
+import { updateVariantReceiptCostRollupInCatalog } from "../catalog/cross-module-product-mutations.api";
 import { millsToCents, centsToMills } from "@shared/utils/money";
 import { AppError, IntegrityError, ValidationError } from "../../../shared/errors";
 import { normalizeLotCosts as normalizeBuildLotCosts, lotCostRecord, recordedUnitCostMills,
@@ -1284,14 +1285,11 @@ export class InventoryLotService {
 
     const avgCost = agg.totalQty > 0 ? Math.round(agg.totalCost / agg.totalQty) : receiptCostCents;
 
-    await this.db
-      .update(productVariants)
-      .set({
-        lastCostCents: receiptCostCents,
-        avgCostCents: avgCost,
-        updatedAt: new Date(),
-      })
-      .where(eq(productVariants.id, productVariantId));
+    await updateVariantReceiptCostRollupInCatalog(this.db, {
+      productVariantId,
+      lastCostCents: receiptCostCents,
+      avgCostCents: avgCost,
+    });
   }
 
   // ---------------------------------------------------------------------------

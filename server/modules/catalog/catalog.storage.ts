@@ -25,6 +25,7 @@ import { renameWmsOrderItemSku } from "../wms/order-intake-and-items.api";
 import { renameWmsPickingLogSku } from "../wms/picking-logs.api";
 import { reorderCatalogAssets } from "./product-asset-order.repository";
 import { ProductAssetError } from "./product-asset-errors";
+import { deactivateActiveChannelFeedsByVariantIdInChannels } from "../channels/channel-feed-listing-mutations.api";
 import {
   cancelProductReplenishmentTasksInTx,
   deactivateProductReplenishmentRulesInTx,
@@ -277,11 +278,7 @@ export const productMethods: IProductStorage = {
   },
 
   async deactivateChannelFeedsByVariantId(variantId: number): Promise<number> {
-    const result = await db.update(channelFeeds)
-      .set({ isActive: 0, updatedAt: new Date() })
-      .where(and(eq(channelFeeds.productVariantId, variantId), eq(channelFeeds.isActive, 1)))
-      .returning();
-    return result.length;
+    return deactivateActiveChannelFeedsByVariantIdInChannels(db, variantId);
   },
 
   async deactivateReplenRulesByProductId(productId: number): Promise<number> {
