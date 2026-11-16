@@ -27,15 +27,12 @@
   "catalog.product_variants": [
     "modules/catalog",
     "modules/channels",
-    "modules/inventory",
-    "server/routes/ebay/ebay-listing-state.ts"
+    "modules/inventory"
   ],
   "catalog.products": [
     "modules/catalog",
     "modules/channels",
-    "modules/procurement",
-    "server/routes/ebay-listing-rules.routes.ts",
-    "server/routes/ebay/ebay-config.routes.ts"
+    "modules/procurement"
   ],
   "catalog.publication_media_references": [
     "modules/catalog"
@@ -63,8 +60,7 @@
   ],
   "channels.channel_connections": [
     "modules/channels",
-    "modules/dropship",
-    "server/routes/ebay-settings.routes.ts"
+    "modules/dropship"
   ],
   "channels.channel_feeds": [
     "modules/catalog",
@@ -73,9 +69,7 @@
   ],
   "channels.channel_listings": [
     "modules/catalog",
-    "modules/channels",
-    "server/routes/ebay/ebay-listing-state.ts",
-    "server/routes/ebay/ebay-listings.routes.ts"
+    "modules/channels"
   ],
   "channels.channel_pricing": [
     "modules/channels"
@@ -105,8 +99,7 @@
     "modules/channels"
   ],
   "channels.channel_variant_overrides": [
-    "modules/channels",
-    "server/routes/ebay/ebay-listing-state.ts"
+    "modules/channels"
   ],
   "channels.channel_warehouse_assignments": [
     "modules/channels"
@@ -496,23 +489,22 @@
     "modules/dropship"
   ],
   "ebay.ebay_category_aspects": [
-    "server/routes/ebay/ebay-taxonomy.routes.ts"
+    "modules/channels"
   ],
   "ebay.ebay_category_mappings": [
-    "modules/channels",
-    "server/routes/ebay/ebay-config.routes.ts"
+    "modules/channels"
   ],
   "ebay.ebay_listing_rules": [
-    "server/routes/ebay-listing-rules.routes.ts"
+    "modules/channels"
   ],
   "ebay.ebay_oauth_tokens": [
     "modules/channels"
   ],
   "ebay.ebay_product_aspect_overrides": [
-    "server/routes/ebay/ebay-taxonomy.routes.ts"
+    "modules/channels"
   ],
   "ebay.ebay_type_aspect_defaults": [
-    "server/routes/ebay/ebay-taxonomy.routes.ts"
+    "modules/channels"
   ],
   "identity.auth_permissions": [
     "modules/identity"

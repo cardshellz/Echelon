@@ -42,6 +42,15 @@ import {
   EbayAuthService,
   createEbayAuthConfig,
 } from "../modules/channels/adapters/ebay/ebay-auth.service";
+import {
+  bulkUpdateCatalogProductType,
+  updateCatalogProductType,
+} from "../modules/catalog/ebay-product-metadata.api";
+import {
+  deleteEbayListingRuleRecord,
+  insertEbayListingRuleRecord,
+  updateEbayListingRuleRecord,
+} from "../modules/channels/ebay-route-admin.api";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -159,10 +168,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         }
       }
 
-      await (db as any)
-        .update(products)
-        .set({ productType: typeValue, updatedAt: new Date() })
-        .where(eq(products.id, productId));
+      await updateCatalogProductType(productId, typeValue, db);
 
       res.json({ success: true, productId, productType: typeValue });
     } catch (err: any) {
@@ -198,18 +204,9 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         }
       }
 
-      // Bulk update via raw SQL for efficiency
-      const client = await pool.connect();
-      try {
-        const idList = productIds.map((id: number) => parseInt(String(id), 10)).filter((id: number) => !isNaN(id));
-        await client.query(
-          `UPDATE catalog.products SET product_type = $1, updated_at = NOW() WHERE id = ANY($2::int[])`,
-          [typeValue, idList]
-        );
-        res.json({ success: true, updated: idList.length, productType: typeValue });
-      } finally {
-        client.release();
-      }
+      const idList = productIds.map((id: number) => parseInt(String(id), 10)).filter((id: number) => !isNaN(id));
+      await bulkUpdateCatalogProductType(idList, typeValue, pool);
+      res.json({ success: true, updated: idList.length, productType: typeValue });
     } catch (err: any) {
       console.error("[Bulk Product Type] Error:", err.message);
       res.status(500).json({ error: err.message });
@@ -256,16 +253,16 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         return;
       }
 
-      const [rule] = await (db as any)
-        .insert(ebayListingRules)
-        .values({
+      const rule = await insertEbayListingRuleRecord(
+        {
           channelId: EBAY_CHANNEL_ID,
           scopeType,
           scopeValue: scopeType === "default" ? null : scopeValue,
           ebayCategoryId: ebayCategoryId || null,
           ebayStoreCategoryId: ebayStoreCategoryId || null,
-        })
-        .returning();
+        },
+        db,
+      );
 
       res.json(listingRuleView(rule));
     } catch (err: any) {
@@ -302,16 +299,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
       if (ebayStoreCategoryId !== undefined) updateData.ebayStoreCategoryId = ebayStoreCategoryId || null;
       if (enabled !== undefined) updateData.enabled = enabled;
 
-      const [updated] = await (db as any)
-        .update(ebayListingRules)
-        .set(updateData)
-        .where(
-          and(
-            eq(ebayListingRules.id, ruleId),
-            eq(ebayListingRules.channelId, EBAY_CHANNEL_ID),
-          )
-        )
-        .returning();
+      const updated = await updateEbayListingRuleRecord(ruleId, EBAY_CHANNEL_ID, updateData, db);
 
       if (!updated) {
         res.status(404).json({ error: "Rule not found" });
@@ -359,9 +347,7 @@ export function registerEbayListingRulesRoutes(app: Express): void {
         return;
       }
 
-      await (db as any)
-        .delete(ebayListingRules)
-        .where(eq(ebayListingRules.id, ruleId));
+      await deleteEbayListingRuleRecord(ruleId, db);
 
       res.json({ success: true });
     } catch (err: any) {
