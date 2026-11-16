@@ -92,11 +92,13 @@ import {
   startOmsOpsAlertScheduler,
 } from "./modules/oms/operations-observability.api";
 import { startControlTowerProjectionScheduler } from "./modules/operations/projection-scheduler.api";
-import { startPoEmailOutboxWorker } from "./modules/procurement/po-email-outbox.worker";
-import { startReceiptCostRecoveryWorker } from "./modules/procurement/receipt-cost-recovery.worker";
-import { createReceiptCostRecoveryRepository } from "./modules/procurement/receipt-cost-recovery.repository";
-import { startInboundTrackingScheduler } from "./modules/procurement/inbound-tracking.runtime";
-import { startCostReportingWorker } from "./modules/procurement/cost-reporting.service";
+import {
+  createReceiptCostRecoveryRepository,
+  startCostReportingWorker,
+  startInboundTrackingScheduler,
+  startPoEmailOutboxWorker,
+  startReceiptCostRecoveryWorker,
+} from "./modules/procurement/runtime-workers.api";
 import { startVariantAvailabilitySyncWorker } from "./modules/channels/variant-availability-sync.worker";
 import {
   startInventoryPublicationSweepScheduler,

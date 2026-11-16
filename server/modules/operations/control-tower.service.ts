@@ -9,7 +9,7 @@ import {
   type OmsFlowReconciliationDependencies,
   type OmsOpsIssue,
 } from "../oms/operations-observability.api";
-import { loadProcurementHealthSummary } from "../procurement/procurement-health-summary.service";
+import { loadProcurementHealthSummary } from "../procurement/health-and-observability.api";
 
 export const CONTROL_TOWER_DOMAINS = [
   "oms",

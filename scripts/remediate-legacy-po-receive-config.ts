@@ -89,7 +89,7 @@ async function main(): Promise<void> {
     applyLegacyPoReceiveConfigRemediation,
     previewLegacyPoReceiveConfigRemediation,
   } = await import(
-    "../server/modules/procurement/legacy-po-receive-config-remediation.service"
+    "../server/modules/procurement/maintenance-remediation.api"
   );
 
   try {

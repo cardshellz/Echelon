@@ -1,17 +1,15 @@
 import { db } from "../db";
 import { inventoryStorage } from "../modules/inventory";
-import { procurementMethods } from "../modules/procurement/procurement.storage";
-import { loadPurchaseRecommendationSnapshotAnalysis } from "../modules/procurement/purchase-recommendation-analysis.service";
-import { purchasePipelineJobRunLifecycleRepository } from "../modules/procurement/purchase-pipeline-job-run-lifecycle.repository";
-import {
-  createPurchasePipelineJobRunLifecycleService,
-  sanitizePurchasePipelineJobError,
-  type PurchasePipelineJobRunLifecycleService,
-} from "../modules/procurement/purchase-pipeline-job-run-lifecycle.service";
+import { procurementMethods } from "../modules/procurement/runtime-services.api";
 import {
   buildPurchaseRecommendationRunInput,
+  createPurchasePipelineJobRunLifecycleService,
   createPurchaseRecommendationSnapshotService,
-} from "../modules/procurement/purchase-recommendation-snapshot.service";
+  loadPurchaseRecommendationSnapshotAnalysis,
+  purchasePipelineJobRunLifecycleRepository,
+  sanitizePurchasePipelineJobError,
+  type PurchasePipelineJobRunLifecycleService,
+} from "../modules/procurement/planning-and-pipeline-jobs.api";
 
 const SCHEDULED_RECOMMENDATION_ACTOR = "system:scheduled-purchase-recommendations";
 const defaultJobLifecycle = createPurchasePipelineJobRunLifecycleService(

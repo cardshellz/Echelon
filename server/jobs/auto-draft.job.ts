@@ -10,41 +10,31 @@ import { readIntegerMills } from "@shared/money-read";
 import { db } from "../db";
 import { normalizePoLinePricing } from "@shared/utils/po-line-pricing";
 import { inventoryStorage } from "../modules/inventory";
-import { runStaleAutoDraftPoEscalationCheck } from "../modules/procurement/auto-draft-po-escalation.service";
-import { procurementMethods } from "../modules/procurement/procurement.storage";
+import { procurementMethods } from "../modules/procurement/runtime-services.api";
 import {
-  generatePurchasingRecommendations,
-  passesAutoDraftApprovalPolicy,
-  type AutoDraftRecommendationSettings,
-  type PurchasingRecommendationItem,
-} from "../modules/procurement/purchasing-recommendation.engine";
-import { loadPurchaseRecommendationSnapshotAnalysis } from "../modules/procurement/purchase-recommendation-analysis.service";
-import { createDrizzleAutoDraftRunLifecycleRepository } from "../modules/procurement/auto-draft-run-lifecycle.repository";
-import {
+  buildPurchaseRecommendationRunInput,
+  buildPurchasingRecommendationRunDetail,
   createAutoDraftRunLifecycleService,
+  createAutomaticRfqDraftService,
+  createDrizzleAutoDraftRunLifecycleRepository,
+  createDrizzleRecommendationPoHandoffRepository,
+  createPurchaseRecommendationSnapshotService,
+  createRecommendationPoHandoffService,
+  generatePurchasingRecommendations,
+  loadPurchaseRecommendationSnapshotAnalysis,
+  normalizeAutomaticRfqDraftPolicy,
+  passesAutoDraftApprovalPolicy,
+  runStaleAutoDraftPoEscalationCheck,
+  summarizeAutomaticRfqDraftResult,
+  type AutoDraftRecommendationSettings,
   type AutoDraftRunLifecycleService,
   type AutoDraftRunRecord,
-} from "../modules/procurement/auto-draft-run-lifecycle.service";
-import {
-  buildPurchasingRecommendationRunDetail,
-  type PurchasingRecommendationRunPoMutation,
-} from "../modules/procurement/purchasing-recommendation.run-detail";
-import { createDrizzleRecommendationPoHandoffRepository } from "../modules/procurement/recommendation-po-handoff.repository";
-import {
-  createRecommendationPoHandoffService,
   type AutomaticRecommendationPoHandoffItem,
   type AutomaticRecommendationPoHandoffResult,
   type CreatedRecommendationPurchaseOrder,
-} from "../modules/procurement/recommendation-po-handoff.service";
-import {
-  buildPurchaseRecommendationRunInput,
-  createPurchaseRecommendationSnapshotService,
-} from "../modules/procurement/purchase-recommendation-snapshot.service";
-import {
-  createAutomaticRfqDraftService,
-  normalizeAutomaticRfqDraftPolicy,
-  summarizeAutomaticRfqDraftResult,
-} from "../modules/procurement/automatic-rfq-draft.service";
+  type PurchasingRecommendationItem,
+  type PurchasingRecommendationRunPoMutation,
+} from "../modules/procurement/planning-and-pipeline-jobs.api";
 
 export interface AutoDraftOptions {
   triggeredBy: "scheduler" | "manual";

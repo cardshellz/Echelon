@@ -1,6 +1,6 @@
 /** Standalone command for an on-demand or scheduled forecast-evaluation batch. */
 
-import { sanitizePurchasePipelineJobError } from "../modules/procurement/purchase-pipeline-job-run-lifecycle.service";
+import { sanitizePurchasePipelineJobError } from "../modules/procurement/planning-and-pipeline-jobs.api";
 import { runPurchaseForecastBacktestingJob } from "./purchase-forecast-backtesting.job";
 
 function parseLimit(value: string | undefined): number | undefined {

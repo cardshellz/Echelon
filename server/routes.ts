@@ -29,10 +29,12 @@ import { registerInventoryPublicationInitialScopeRoutes } from "./modules/invent
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
 import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
 import { registerPickZoneRoutes } from "./modules/warehouse/pick-zones.routes";
-import { registerPurchasingRoutes } from "./modules/procurement/procurement.routes";
-import { registerInboundTrackingRoutes } from "./modules/procurement/inbound-tracking.routes";
-import { registerCostReportingRoutes } from "./modules/procurement/cost-reporting.routes";
-import { registerSupplierSourcingRoutes } from "./modules/procurement/supplier-sourcing.routes";
+import {
+  registerCostReportingRoutes,
+  registerInboundTrackingRoutes,
+  registerPurchasingRoutes,
+  registerSupplierSourcingRoutes,
+} from "./modules/procurement/routes.api";
 import { registerEbayOAuthRoutes } from "./routes/ebay-oauth.routes";
 import { registerEbaySettingsRoutes } from "./routes/ebay-settings.routes";
 import { registerEbayListingRulesRoutes } from "./routes/ebay-listing-rules.routes";
