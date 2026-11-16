@@ -1,31 +1,5 @@
 {
-  "routeWriters": {
-    "catalog.products": [
-      "server/routes/ebay-listing-rules.routes.ts",
-      "server/routes/ebay/ebay-config.routes.ts"
-    ],
-    "channels.channel_connections": [
-      "server/routes/ebay-settings.routes.ts"
-    ],
-    "channels.channel_listings": [
-      "server/routes/ebay/ebay-listings.routes.ts"
-    ],
-    "ebay.ebay_category_aspects": [
-      "server/routes/ebay/ebay-taxonomy.routes.ts"
-    ],
-    "ebay.ebay_category_mappings": [
-      "server/routes/ebay/ebay-config.routes.ts"
-    ],
-    "ebay.ebay_listing_rules": [
-      "server/routes/ebay-listing-rules.routes.ts"
-    ],
-    "ebay.ebay_product_aspect_overrides": [
-      "server/routes/ebay/ebay-taxonomy.routes.ts"
-    ],
-    "ebay.ebay_type_aspect_defaults": [
-      "server/routes/ebay/ebay-taxonomy.routes.ts"
-    ]
-  },
+  "routeWriters": {},
   "scriptWriters": {
     "catalog.product_assets": [
       "scripts/patch-catalog-sql.js"

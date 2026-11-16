@@ -34,6 +34,10 @@ import { queueVariantAvailabilityRepair } from "../../modules/channels/variant-a
 import {
   createEbayRouteListingClient,
 } from "./ebay-listing-connector-client";
+import {
+  markChannelListingReconcileDeleted,
+  markChannelListingReconcileEnded,
+} from "../../modules/channels/ebay-route-admin.api";
 
 export const router = express.Router();
 const EBAY_LISTING_DEFAULT_MARKETPLACE_ID = "EBAY_US";
@@ -273,11 +277,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
 
             if (!inspection.inventoryItemExists) {
               // Inventory item gone — mark as deleted
-              await client.query(
-                `UPDATE channel_listings SET sync_status = 'deleted', sync_error = 'Inventory item not found on eBay', updated_at = NOW()
-                 WHERE id = $1`,
-                [listing.id],
-              );
+              await markChannelListingReconcileDeleted(listing.id, client);
               deleted++;
               changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "deleted" });
               continue;
@@ -304,11 +304,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
               active++;
             } else {
               // Offer ended/withdrawn
-              await client.query(
-                `UPDATE channel_listings SET sync_status = 'ended', sync_error = 'Offer no longer active on eBay', updated_at = NOW()
-                 WHERE id = $1`,
-                [listing.id],
-              );
+              await markChannelListingReconcileEnded(listing.id, client);
               ended++;
               changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "ended" });
             }

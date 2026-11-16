@@ -17,6 +17,11 @@ import {
   ebayProductAspectOverrides,
 } from "@shared/schema";
 import { getAuthService, getChannelConnection, escapeXml, getCached, setCache, ebayApiRequest, ebayApiRequestWithRateNotify, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
+import {
+  replaceEbayCategoryAspects,
+  replaceEbayProductAspectOverrides,
+  replaceEbayTypeAspectDefaults,
+} from "../../modules/channels/ebay-route-admin.api";
 
 export const router = express.Router();
 
@@ -306,22 +311,7 @@ export const router = express.Router();
           }
 
           // Delete old + insert fresh (transactional)
-          await db.transaction(async (tx) => {
-            await tx.delete(ebayCategoryAspects).where(eq(ebayCategoryAspects.categoryId, categoryId));
-            if (aspects.length > 0) {
-              const insertData = aspects.map(a => ({
-                  categoryId,
-                  aspectName: a.name,
-                  aspectRequired: a.required,
-                  aspectMode: a.mode,
-                  aspectUsage: a.usage,
-                  aspectValues: a.values,
-                  aspectOrder: a.order,
-                  fetchedAt: new Date()
-              }));
-              await tx.insert(ebayCategoryAspects).values(insertData);
-            }
-          });
+          await replaceEbayCategoryAspects(categoryId, aspects, db);
         }
 
         // Return cached aspects
@@ -388,30 +378,13 @@ export const router = express.Router();
         return;
       }
 
-      await db.transaction(async (tx) => {
-        await tx.delete(ebayTypeAspectDefaults).where(eq(ebayTypeAspectDefaults.productTypeSlug, productTypeSlug));
-        
-        const entries = Object.entries(defaults).filter(
-          ([, v]) => v !== undefined && v !== null && v !== "",
-        );
-        
-        if (entries.length > 0) {
-          const insertData = entries.map(([name, value]) => ({
-            productTypeSlug,
-            aspectName: name,
-            aspectValue: value,
-            createdAt: new Date(),
-            updatedAt: new Date()
-          }));
-          await tx.insert(ebayTypeAspectDefaults).values(insertData);
-        }
-      });
-
-      // Return updated defaults
-      const result: Record<string, string> = {};
       const entries = Object.entries(defaults).filter(
         ([, v]) => v !== undefined && v !== null && v !== "",
       );
+      await replaceEbayTypeAspectDefaults(productTypeSlug, entries, db);
+
+      // Return updated defaults
+      const result: Record<string, string> = {};
       for (const [name, value] of entries) {
         result[name] = value;
       }
@@ -465,29 +438,12 @@ export const router = express.Router();
         return;
       }
 
-      await db.transaction(async (tx) => {
-        await tx.delete(ebayProductAspectOverrides).where(eq(ebayProductAspectOverrides.productId, productId));
-
-        const entries = Object.entries(overrides).filter(
-          ([, v]) => v !== undefined && v !== null && v !== "",
-        );
-        
-        if (entries.length > 0) {
-          const insertData = entries.map(([name, value]) => ({
-            productId,
-            aspectName: name,
-            aspectValue: value,
-            createdAt: new Date(),
-            updatedAt: new Date()
-          }));
-          await tx.insert(ebayProductAspectOverrides).values(insertData);
-        }
-      });
-
-      const result: Record<string, string> = {};
       const entries = Object.entries(overrides).filter(
         ([, v]) => v !== undefined && v !== null && v !== "",
       );
+      await replaceEbayProductAspectOverrides(productId, entries, db);
+
+      const result: Record<string, string> = {};
       for (const [name, value] of entries) {
         result[name] = value;
       }
