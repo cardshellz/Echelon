@@ -8,6 +8,7 @@ import {
   openOperationalQuantityPosting,
   type InventoryUseCases,
 } from "../../inventory/catalog-inventory.api";
+import { deactivateActiveChannelFeedsByVariantIdInChannels } from "../../channels/channel-feed-listing-mutations.api";
 import { CatalogInventoryCommandError, CatalogInventoryCommandService,
   type CatalogInventoryCommandRepository, type CatalogInventoryUnitOfWork } from "../application/catalog-inventory-command.service";
 
@@ -69,8 +70,7 @@ export class PostgresCatalogInventoryCommandRepository implements CatalogInvento
                   .returning({ id: productLocations.id })).length;
               }
               // is_active triggers retain listing identity and enqueue publication.
-              result.channelFeedsDeactivated += (await tx.update(channelFeeds).set({ isActive: 0, updatedAt: now })
-                .where(and(eq(channelFeeds.productVariantId, sourceId), eq(channelFeeds.isActive, 1))).returning({ id: channelFeeds.id })).length;
+              result.channelFeedsDeactivated += await deactivateActiveChannelFeedsByVariantIdInChannels(tx, sourceId, now);
             }
             await tx.update(productVariants).set({ isActive: false, updatedAt: now }).where(eq(productVariants.id, sourceId));
           }

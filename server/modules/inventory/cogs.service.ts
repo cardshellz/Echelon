@@ -33,6 +33,7 @@ import {
 import type { InventoryLot } from "@shared/schema";
 import { assertLegacyQuantityImportAllowed } from "./application/legacy-quantity-import";
 import { parseCostLotsReport, parseInventoryValuationReport } from "@shared/inventory/cost-report-read";
+import { updateVariantBackfillCostsInCatalog } from "../catalog/cross-module-product-mutations.api";
 import { revalueSupplierReturnAllocations } from "./infrastructure/supplier-return-cost.repository";
 import type { SupplierReturnCostAdjustment } from "@shared/procurement/supplier-return";
 import { buildOrderCOGSReport, type OrderCOGSResult } from "./domain/order-cogs-read";
@@ -1163,17 +1164,7 @@ export class COGSService {
       }
 
       // Update variant catalog costs so future lots pick this up via the resolver
-      await this.db.execute(sql`
-        UPDATE catalog.product_variants
-        SET last_cost_cents = ${entry.unitCostCents},
-            standard_cost_cents = CASE
-              WHEN standard_cost_cents IS NULL OR standard_cost_cents = 0
-              THEN ${entry.unitCostCents}
-              ELSE standard_cost_cents
-            END,
-            updated_at = NOW()
-        WHERE id = ${variantId}
-      `);
+      await updateVariantBackfillCostsInCatalog(this.db, variantId, entry.unitCostCents);
 
       processed++;
     }

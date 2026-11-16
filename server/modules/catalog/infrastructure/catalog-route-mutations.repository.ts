@@ -9,6 +9,10 @@ import {
   shippingGroups,
 } from "@shared/schema";
 import { db } from "../../../db";
+import {
+  deactivateAllChannelFeedsByVariantIdInChannels,
+  upsertShopifyVariantFeedAndListingLinkInTx,
+} from "../../channels/channel-feed-listing-mutations.api";
 
 type CatalogTx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -68,10 +72,7 @@ export async function deactivateVariantChannelFeedsInTx(
   tx: CatalogTx,
   productVariantId: number,
 ): Promise<void> {
-  await tx
-    .update(channelFeeds)
-    .set({ isActive: 0, updatedAt: new Date() })
-    .where(eq(channelFeeds.productVariantId, productVariantId));
+  await deactivateAllChannelFeedsByVariantIdInChannels(tx, productVariantId);
 }
 
 export async function updateScopedVariantPackageAttributesInTx(
@@ -119,78 +120,14 @@ export async function linkVariantShopifyFeedAndListingInTx(
     .where(eq(productVariants.id, input.variantId))
     .returning();
 
-  const updatedFeeds = await tx
-    .update(channelFeeds)
-    .set({
-      channelVariantId: input.shopifyVariantId,
-      channelProductId: input.shopifyProductId,
-      channelSku: input.effectiveSku,
-      channelInventoryItemId: input.shopifyInventoryItemId,
-      isActive: 1,
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(channelFeeds.channelId, input.channelId),
-        eq(channelFeeds.productVariantId, input.variantId),
-        eq(channelFeeds.channelType, "shopify"),
-      ),
-    )
-    .returning({ id: channelFeeds.id });
-
-  let feedIds = updatedFeeds.map((row) => row.id);
-  if (feedIds.length === 0) {
-    const insertedFeeds = await tx
-      .insert(channelFeeds)
-      .values({
-        channelId: input.channelId,
-        productVariantId: input.variantId,
-        channelType: "shopify",
-        channelVariantId: input.shopifyVariantId,
-        channelProductId: input.shopifyProductId,
-        channelSku: input.effectiveSku,
-        channelInventoryItemId: input.shopifyInventoryItemId,
-        isActive: 1,
-      })
-      .returning({ id: channelFeeds.id });
-    feedIds = insertedFeeds.map((row) => row.id);
-  }
-
-  const updatedListings = await tx
-    .update(channelListings)
-    .set({
-      externalProductId: input.shopifyProductId,
-      externalVariantId: input.shopifyVariantId,
-      externalSku: input.effectiveSku,
-      syncStatus: "synced",
-      syncError: null,
-      lastSyncedAt: new Date(),
-      updatedAt: new Date(),
-    })
-    .where(
-      and(
-        eq(channelListings.channelId, input.channelId),
-        eq(channelListings.productVariantId, input.variantId),
-      ),
-    )
-    .returning({ id: channelListings.id });
-
-  let listingIds = updatedListings.map((row) => row.id);
-  if (listingIds.length === 0) {
-    const insertedListings = await tx
-      .insert(channelListings)
-      .values({
-        channelId: input.channelId,
-        productVariantId: input.variantId,
-        externalProductId: input.shopifyProductId,
-        externalVariantId: input.shopifyVariantId,
-        externalSku: input.effectiveSku,
-        syncStatus: "synced",
-        lastSyncedAt: new Date(),
-      })
-      .returning({ id: channelListings.id });
-    listingIds = insertedListings.map((row) => row.id);
-  }
+  const { feedIds, listingIds } = await upsertShopifyVariantFeedAndListingLinkInTx(tx, {
+    channelId: input.channelId,
+    variantId: input.variantId,
+    shopifyProductId: input.shopifyProductId,
+    shopifyVariantId: input.shopifyVariantId,
+    shopifyInventoryItemId: input.shopifyInventoryItemId,
+    effectiveSku: input.effectiveSku,
+  });
 
   return { updatedVariant, feedIds, listingIds };
 }

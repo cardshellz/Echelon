@@ -5,6 +5,7 @@ import type { User, InsertUser, SafeUser } from "../../../storage/base";
 import type { AuthRole, AuthPermission, InsertAuthPermission } from "@shared/schema";
 import { assertRolePermissionEditSupported, parseRolePermissionEdit } from "../domain/role-permission-edit";
 import { assertRoleAssignmentTargets, parseRoleAssignment } from "../domain/role-assignment";
+import { ensureDefaultShopifyChannelSeeded } from "../../channels/channel-registry-mutations.api";
 
 type Tx = typeof db | any; // Drizzle transaction or db instance
 type IdentityTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
@@ -197,10 +198,7 @@ export async function assignUserRoles(userId: string, roleIds: number[], tx: Ide
 export async function seedDefaultChannels() {
   console.log("Checking default channels...");
   try {
-    const existingShopify = await db.execute(sql`SELECT id FROM channels.channels WHERE provider = 'shopify' LIMIT 1`);
-    if (existingShopify.rows.length === 0) {
-      await db.execute(sql`INSERT INTO channels (name, type, provider, status) VALUES ('Shopify Store', 'internal', 'shopify', 'active') ON CONFLICT DO NOTHING`);
-    }
+    await ensureDefaultShopifyChannelSeeded(db);
   } catch (error) {
     console.warn("Could not seed default channels:", error);
   }

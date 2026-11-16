@@ -9,6 +9,12 @@ import type {
   NormalizedConfigureDropshipOmsChannelInput,
 } from "../application/dropship-oms-channel-config-service";
 import { DropshipError } from "../domain/errors";
+import {
+  repairDropshipDefaultOmsChannelInTx,
+  insertDropshipDefaultOmsChannelInTx,
+  clearExistingDropshipOmsChannelAndConnectionMarkersInTx,
+  markChannelAsDropshipOmsInTx,
+} from "../../channels/channel-registry-mutations.api";
 
 interface OmsChannelRow {
   id: number;
@@ -244,31 +250,23 @@ async function ensureDefaultDropshipOmsChannel(client: PoolClient, now: Date): P
   );
   const existingId = existing.rows[0]?.id;
   if (existingId) {
-    const updated = await client.query<{ id: number }>(
-      `UPDATE channels.channels
-       SET status = 'active',
-           shipping_config = COALESCE(shipping_config, '{}'::jsonb),
-           updated_at = $2
-       WHERE id = $1
-       RETURNING id`,
-      [existingId, now],
-    );
-    return requiredRow(updated.rows[0], "Dropship OMS default source repair did not return a channel.").id;
+    const updatedId = await repairDropshipDefaultOmsChannelInTx(client, existingId, now);
+    return requiredRow(
+      updatedId !== undefined ? { id: updatedId } : undefined,
+      "Dropship OMS default source repair did not return a channel.",
+    ).id;
   }
 
-  const inserted = await client.query<{ id: number }>(
-    `INSERT INTO channels.channels
-       (name, type, provider, status, shipping_config, created_at, updated_at)
-     VALUES ($1, $2, $3, 'active', '{}'::jsonb, $4, $4)
-     RETURNING id`,
-    [
-      DEFAULT_DROPSHIP_OMS_CHANNEL_NAME,
-      DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE,
-      DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER,
-      now,
-    ],
-  );
-  return requiredRow(inserted.rows[0], "Dropship OMS default source create did not return a channel.").id;
+  const insertedId = await insertDropshipDefaultOmsChannelInTx(client, {
+    name: DEFAULT_DROPSHIP_OMS_CHANNEL_NAME,
+    type: DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE,
+    provider: DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER,
+    now,
+  });
+  return requiredRow(
+    insertedId !== undefined ? { id: insertedId } : undefined,
+    "Dropship OMS default source create did not return a channel.",
+  ).id;
 }
 
 async function lockConfiguredChannel(client: PoolClient, channelId: number): Promise<{
@@ -299,110 +297,20 @@ async function lockConfiguredChannel(client: PoolClient, channelId: number): Pro
 }
 
 async function clearExistingDropshipOmsMarkers(client: PoolClient, now: Date): Promise<void> {
-  await client.query(
-    `UPDATE channels.channels
-     SET shipping_config = jsonb_set(
-           COALESCE(shipping_config, '{}'::jsonb)
-             #- '{dropship,role}'
-             #- '{dropship,configuredAt}'
-             #- '{dropship,configuredBy}'
-             #- '{dropship,source}',
-           '{dropship,omsChannel}',
-           'false'::jsonb,
-           true
-         ),
-         updated_at = $1
-     WHERE LOWER(COALESCE(shipping_config #>> '{dropship,role}', '')) = 'oms'
-        OR COALESCE(shipping_config #>> '{dropship,omsChannel}', 'false') = 'true'`,
-    [now],
-  );
-
-  await client.query(
-    `UPDATE channels.channel_connections
-     SET metadata = jsonb_set(
-           jsonb_set(
-             COALESCE(metadata, '{}'::jsonb)
-               #- '{dropship,role}'
-               #- '{dropship,configuredAt}'
-               #- '{dropship,configuredBy}'
-               #- '{dropship,source}',
-             '{features,dropshipOms}',
-             'false'::jsonb,
-             true
-           ),
-           '{features,dropship_oms}',
-           'false'::jsonb,
-           true
-         ),
-         updated_at = $1
-     WHERE LOWER(COALESCE(metadata #>> '{dropship,role}', '')) = 'oms'
-        OR COALESCE(metadata #>> '{features,dropshipOms}', 'false') = 'true'
-        OR COALESCE(metadata #>> '{features,dropship_oms}', 'false') = 'true'`,
-    [now],
-  );
+  await clearExistingDropshipOmsChannelAndConnectionMarkersInTx(client, now);
 }
 
 async function markDropshipOmsChannel(
   client: PoolClient,
   input: NormalizedConfigureDropshipOmsChannelInput & DropshipOmsChannelConfigCommandContext,
 ): Promise<DropshipOmsChannelOption> {
-  const result = await client.query<OmsChannelRow>(
-    `UPDATE channels.channels
-     SET shipping_config = jsonb_set(
-           jsonb_set(
-             jsonb_set(
-               jsonb_set(
-                 jsonb_set(
-                   COALESCE(shipping_config, '{}'::jsonb),
-                   '{dropship}',
-                   COALESCE(
-                     CASE
-                       WHEN jsonb_typeof(shipping_config -> 'dropship') = 'object'
-                         THEN shipping_config -> 'dropship'
-                       ELSE NULL
-                     END,
-                     '{}'::jsonb
-                   ),
-                   true
-                 ),
-                 '{dropship,role}',
-                 to_jsonb('oms'::text),
-                 true
-               ),
-               '{dropship,omsChannel}',
-               'true'::jsonb,
-               true
-             ),
-             '{dropship,configuredAt}',
-             to_jsonb($2::text),
-             true
-           ),
-           '{dropship,configuredBy}',
-           to_jsonb($3::text),
-           true
-         ),
-         updated_at = $4
-     WHERE id = $1
-     RETURNING
-       id,
-       name,
-       type,
-       provider,
-       status,
-       updated_at,
-       true AS internal_dropship_channel,
-       LOWER(COALESCE(shipping_config #>> '{dropship,role}', '')) = 'oms' AS channel_role_marked,
-       COALESCE(shipping_config #>> '{dropship,omsChannel}', 'false') = 'true' AS channel_flag_marked,
-       false AS connection_role_marked,
-       false AS connection_feature_marked`,
-    [
-      input.channelId,
-      input.now.toISOString(),
-      input.actor.actorId ?? input.actor.actorType,
-      input.now,
-    ],
-  );
-  return mapOmsChannelRow(requiredRow(result.rows[0], "Dropship OMS channel update did not return a row."));
+  const row = await markChannelAsDropshipOmsInTx<OmsChannelRow>(client, {
+    channelId: input.channelId,
+    configuredAtIso: input.now.toISOString(),
+    configuredBy: input.actor.actorId ?? input.actor.actorType,
+    now: input.now,
+  });
+  return mapOmsChannelRow(requiredRow(row, "Dropship OMS channel update did not return a row."));
 }
 
 async function claimAdminConfigCommand(
