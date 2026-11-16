@@ -113,7 +113,9 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // statement must not queue for long in front of live queries: bound every
     // statement and the routine as a whole (see startup-migration-guard.ts).
     // A limit that trips lands in the catch below, which skips the remainder.
-    const client = await boundStartupMigrationClient(connection);
+    // Every block has been retired (P4.1), so no statement runs on the bounded
+    // client any more. The routine itself is deleted in a follow-up change.
+    await boundStartupMigrationClient(connection);
     // Both pools receive the same search_path in the PostgreSQL startup packet.
     // Unqualified names therefore resolve consistently before any query can run.
 
@@ -255,104 +257,22 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // schema change to order tables belongs in a reviewed migration owned by the
     // order authority (Echelon), never in this boot routine.
 
-    // ─── Migration 051: COGS Engine — FIFO cost tracking ──────────
-    // Dropship V2 DDL is migration-owned; the Phase 0 startup DDL was removed.
-    // Add COGS columns to inventory_lots
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS po_line_id INTEGER`);
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS po_unit_cost_cents NUMERIC(10,4) DEFAULT 0`);
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS landed_cost_cents NUMERIC(10,4) DEFAULT 0`);
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS total_unit_cost_cents NUMERIC(10,4) DEFAULT 0`);
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS qty_received INTEGER DEFAULT 0`);
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS qty_consumed INTEGER DEFAULT 0`);
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS cost_source VARCHAR(20) DEFAULT 'manual'`);
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS batch_number VARCHAR(100)`);
-
-    // P0.2: the cents→COGS-columns backfill UPDATE was removed — a one-time
-    // mirror of migration 051, long applied in prod. Boot must not mutate
-    // lot cost data (financial history).
-
-    // --- Mills cost layers: AUTHORITATIVE source of truth for cost ------------
-    // Integer mills (1/100 cent, 4-decimal dollars) so per-unit × pack-size and
-    // FIFO × qty never amplify cent-rounding. *_cents stay as derived display
-    // mirrors. These columns are NEW, so ADD COLUMN IF NOT EXISTS actually
-    // applies — unlike the NUMERIC(10,4) upgrade above, which silently no-op'd on
-    // the pre-existing bigint po/landed/total columns (that drift is why total
-    // still stores whole cents today).
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS unit_cost_mills BIGINT NOT NULL DEFAULT 0`);
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS po_unit_cost_mills BIGINT NOT NULL DEFAULT 0`);
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS packaging_cost_mills BIGINT NOT NULL DEFAULT 0`);
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS landed_cost_mills BIGINT NOT NULL DEFAULT 0`);
-    await client.query(`ALTER TABLE inventory_lots ADD COLUMN IF NOT EXISTS total_unit_cost_mills BIGINT NOT NULL DEFAULT 0`);
-    await client.query(`ALTER TABLE oms.order_item_costs ADD COLUMN IF NOT EXISTS unit_cost_mills BIGINT NOT NULL DEFAULT 0`);
-    await client.query(`ALTER TABLE oms.order_item_costs ADD COLUMN IF NOT EXISTS total_cost_mills BIGINT NOT NULL DEFAULT 0`);
-
-    // P0.2: two classes of boot-time lot-cost DML were REMOVED here:
-    //  1. The cents→mills backfills for inventory_lots and
-    //     oms.order_item_costs — one-time mirrors of the mills PR1
-    //     migration, long applied in prod.
-    //  2. The PR5 "drifted mills" repair — a RECURRING silent re-write of
-    //     lot cost data on every deploy. Repairing drift at boot masks
-    //     whichever writer creates it (audit F8g: convertSku/transfers/CSV
-    //     import mutate levels without lots). Drift must be surfaced by the
-    //     lot reconciler (`wms:reconcile-lots`) and fixed at the writer or
-    //     via the reviewed remediation script — never silently at boot.
-    console.log("Checked inventory_lots + oms.order_item_costs mills cost columns");
-
-    // order_line_costs table (COGS per order line)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS order_line_costs (
-        id SERIAL PRIMARY KEY,
-        order_id INTEGER NOT NULL,
-        order_item_id INTEGER,
-        product_variant_id INTEGER NOT NULL,
-        lot_id INTEGER NOT NULL REFERENCES inventory_lots(id),
-        qty_consumed INTEGER NOT NULL,
-        unit_cost_cents NUMERIC(10,4) NOT NULL,
-        total_cost_cents NUMERIC(10,4) NOT NULL,
-        shipped_at TIMESTAMP,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW()
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_olc_order ON order_line_costs(order_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_olc_lot ON order_line_costs(lot_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_olc_variant ON order_line_costs(product_variant_id)`);
-
-    // cost_adjustment_log table (tracks cost changes)
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS inventory.cost_adjustment_log (
-        id SERIAL PRIMARY KEY,
-        lot_id INTEGER NOT NULL,
-        lot_number VARCHAR(50),
-        product_variant_id INTEGER,
-        sku VARCHAR(100),
-        old_cost_cents NUMERIC(10,4),
-        new_cost_cents NUMERIC(10,4),
-        delta_cents NUMERIC(10,4),
-        reason VARCHAR(100),
-        created_at TIMESTAMP NOT NULL DEFAULT NOW()
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_cal_lot ON inventory.cost_adjustment_log(lot_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_cal_created ON inventory.cost_adjustment_log(created_at DESC)`);
-
-    // FIFO indexes
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_lots_variant_fifo
-      ON inventory_lots (product_variant_id, received_at ASC)
-      WHERE status = 'active'
-    `);
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_lots_shipment_cogs
-      ON inventory_lots (inbound_shipment_id)
-      WHERE inbound_shipment_id IS NOT NULL
-    `);
-    await client.query(`
-      CREATE INDEX IF NOT EXISTS idx_lots_cost_source
-      ON inventory_lots (cost_source)
-      WHERE status = 'active'
-    `);
-
-    console.log("Checked COGS engine tables (order_line_costs, cost_adjustment_log, inventory_lots COGS columns)");
+    // Retired (P4.1): the lot cost column block and the COGS engine tables block.
+    // They declared, with IF NOT EXISTS: eight COGS columns and five mills columns
+    // on inventory_lots, two mills columns on oms.order_item_costs,
+    // order_line_costs and inventory.cost_adjustment_log with their indexes, and
+    // three partial indexes on inventory_lots.
+    // - None of these has a tracked CREATE. Tracked migrations that run before
+    //   this routine already require them (0083_inventory_fk_constraints.sql,
+    //   0576_align_money_columns_bigint.sql, 0751_exact_inventory_cost_totals.sql),
+    //   so the blocks could never create them for a database that needed them.
+    //   Declaring them belongs to the buildable-from-migrations baseline work
+    //   (REFACTOR-PLAN).
+    // - order_line_costs was unqualified, so it resolved to a leftover
+    //   public.order_line_costs, not to inventory.order_line_costs.
+    // - Lot cost data is financial history: nothing here may backfill or repair
+    //   it. Drift is surfaced by the lot reconciler (`wms:reconcile-lots`) and
+    //   fixed at the writer or by a reviewed remediation script.
 
     // ─── Migration 052 REMOVED (Path A — no cross-schema DDL at startup) ───────
     // These ADD COLUMN / CREATE INDEX statements on membership.plans,
@@ -390,38 +310,9 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // financial_status, cancelled_at and refunded_at come from the table's own
     // CREATE in 0002_concerned_darwin.sql / 0071_create_namespaces.sql.
 
-    // ─── Migration 0580: Forward Demand Events ──────────
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS procurement.demand_events (
-        id              SERIAL PRIMARY KEY,
-        name            VARCHAR(255) NOT NULL,
-        event_type      VARCHAR(50)  NOT NULL DEFAULT 'manual_forecast',
-        start_date      DATE NOT NULL,
-        end_date        DATE,
-        status          VARCHAR(20) NOT NULL DEFAULT 'planned',
-        notes           TEXT,
-        created_by      INTEGER,
-        created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS procurement.demand_event_lines (
-        id                  SERIAL PRIMARY KEY,
-        demand_event_id     INTEGER NOT NULL REFERENCES procurement.demand_events(id) ON DELETE CASCADE,
-        product_id          INTEGER NOT NULL,
-        product_variant_id  INTEGER,
-        expected_pieces     INTEGER NOT NULL CHECK (expected_pieces > 0),
-        confidence          VARCHAR(10) NOT NULL DEFAULT 'medium',
-        notes               TEXT,
-        created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_demand_events_status_date ON procurement.demand_events (status, start_date)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_demand_event_lines_product ON procurement.demand_event_lines (product_id)`);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_demand_event_lines_event ON procurement.demand_event_lines (demand_event_id)`);
-    console.log("Checked forward demand events tables (demand_events, demand_event_lines)");
+    // Retired (P4.1): the forward demand events block. procurement.demand_events,
+    // procurement.demand_event_lines and their three indexes are in tracked
+    // migration 0580_demand_events.sql.
 
     // Retired (P4.1): the WMS order dedup block. wms.orders.fulfillment_partition_key,
     // its default, backfill and two check constraints, the drop of
