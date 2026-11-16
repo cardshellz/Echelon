@@ -21,7 +21,7 @@ import {
   resolveAssignedBinLocation,
 } from "../../oms/channel-order-intake.api";
 import { reassignWmsOrderItemVariant } from "../../wms/order-intake-and-items.api";
-import { mergePurchasingProductIdentity, readPurchasingMergeEvidence } from "../../procurement/purchasing-product-merge";
+import { mergePurchasingProductIdentity, readPurchasingMergeEvidence } from "../../procurement/catalog-identity-coordination.api";
 import { productMethods as catalogStorage } from "../catalog.storage";
 import { renameDerivedVariantSkus } from "../application/product-sku-rename";
 import {

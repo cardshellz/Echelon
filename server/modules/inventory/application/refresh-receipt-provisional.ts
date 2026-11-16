@@ -8,7 +8,7 @@ import {
   type CostRevisionInput,
 } from "../infrastructure/cost-evidence.repository";
 import { readLatestCostApplicationStatuses } from "../cost-application-public";
-import { readLatestLandedCostRevisions } from "../../procurement/cost-source-evidence-public";
+import { readLatestLandedCostRevisions } from "../../procurement/cost-source-evidence.api";
 
 /** Inventory owns this derived flag. Supplier coverage is evaluated per frozen
  * root; mixed transfers/repacking inherit any provisional input. Clearing also

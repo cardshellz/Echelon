@@ -63,6 +63,7 @@ const PRIORITY_1_TO_15_INDEX_MODULES = [
 
 const PRIORITY_1_TO_15_API_FACADE_MODULES = [
   "catalog",
+  "procurement",
   "inventory",
   "warehouse",
   "inventory-planning",
