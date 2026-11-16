@@ -44,6 +44,8 @@ export interface EbayObservedOffer extends EbayOffer {
   listing?: {
     listingId?: string;
     listingStatus?: string;
+    /** Units eBay reports as sold through this offer's listing. Absent when eBay does not send it. */
+    soldQuantity?: number;
   };
 }
 
@@ -636,16 +638,16 @@ export class EbayMarketplaceListingConnector {
     const removedOfferIds = new Map<string, string>();
     const createdOfferIds = new Map<number, string>();
     const expectedListingId = input.draft.existingExternalProductId!;
-    // Removed sizes eBay already reports as out of stock. They stay in the group as zero-quantity members: see
-    // isOutOfStockObservedOffer for why a write that deletes one is refused.
-    const outOfStockRemovedSkus: string[] = [];
+    // Removed sizes eBay will not delete: out of stock, or with sales. They stay in the group as zero-quantity
+    // members. See isUndeletableObservedOffer for why a write that deletes one is refused.
+    const undeletableRemovedSkus: string[] = [];
     for (const sku of normalizedSkus(input.removedSkus)) {
       const observed = exactObservedOffer((await input.client.getOffers(sku, input.draft.marketplaceId)).offers,
         { sku, marketplaceId: input.draft.marketplaceId, format: "FIXED_PRICE" });
       if (!observed || !isPublishedObservedOffer(observed) || observedOfferListingId(observed) !== expectedListingId)
         throw new EbayListingSyncError("EBAY_SYNC_MAPPING_INVALID", `Removed variation ${sku} no longer identifies the reviewed listing. Analyze it again before changing membership.`);
       removedOfferIds.set(sku, observed.offerId);
-      if (isOutOfStockObservedOffer(observed)) outOfStockRemovedSkus.push(sku);
+      if (isUndeletableObservedOffer(observed)) undeletableRemovedSkus.push(sku);
     }
     const originalGroup = toWritableGroupPayload(input.currentGroup);
     let workingGroup = input.currentGroup;
@@ -725,42 +727,21 @@ export class EbayMarketplaceListingConnector {
         publishedAdditiveGroup = additiveGroup;
       }
 
-      // Decided before the write, never by sending a write eBay refuses: a refused write also starts the quantity
-      // owner's provider cooldown, which stops the follow-up writes of this same change.
-      retainedRemovedSkus = [...outOfStockRemovedSkus];
+      // Decided before the write, never by sending a write eBay refuses. A refused write starts the quantity
+      // owner's 60 second provider cooldown on the group and every member, so a corrected write sent right after
+      // it is refused locally with PUBLICATION_PROVIDER_COOLDOWN and never reaches eBay (proven in
+      // ebay-size-removal-admission.integration.test.ts). There is therefore no retry-with-retention after a
+      // refusal: a refusal here surfaces as eBay's own error.
+      retainedRemovedSkus = [...undeletableRemovedSkus];
       const targetGroup = retainedRemovedSkus.length === 0 ? input.draft.itemGroup.payload
         : buildRetainedVariationGroupPayload({
           desiredGroup: input.draft.itemGroup.payload, currentGroup: workingGroup, retainedSkus: retainedRemovedSkus });
-      try {
-        // When every removed size is retained, the group published above already is the target. Each group write
-        // revises the live listing, so the identical one is not sent again.
-        if (!publishedAdditiveGroup || canonicalJson(publishedAdditiveGroup) !== canonicalJson(targetGroup)) {
-          await input.client.createOrReplaceInventoryItemGroup(input.draft.itemGroup.groupKey, targetGroup);
-        }
-        targetGroupApplied = true;
-      } catch (error) {
-        if (
-          retainedRemovedSkus.length === removedMembers.length ||
-          !isInvalidInventoryItemGroupError(error)
-        ) {
-          throw error;
-        }
-        const currentGroup = await input.client.getInventoryItemGroup(
-          input.draft.itemGroup.groupKey,
-        );
-        if (!currentGroup) throw error;
-
-        retainedRemovedSkus = normalizedSkus(input.removedSkus);
-        await input.client.createOrReplaceInventoryItemGroup(
-          input.draft.itemGroup.groupKey,
-          buildRetainedVariationGroupPayload({
-            desiredGroup: input.draft.itemGroup.payload,
-            currentGroup,
-            retainedSkus: retainedRemovedSkus,
-          }),
-        );
-        targetGroupApplied = true;
+      // When every removed size is retained, the group published above already is the target. Each group write
+      // revises the live listing, so the identical one is not sent again.
+      if (!publishedAdditiveGroup || canonicalJson(publishedAdditiveGroup) !== canonicalJson(targetGroup)) {
+        await input.client.createOrReplaceInventoryItemGroup(input.draft.itemGroup.groupKey, targetGroup);
       }
+      targetGroupApplied = true;
 
       for (const { offer, existingOfferId } of resolvedOffers) {
         const offerId = existingOfferId ?? createdOfferIds.get(offer.variantId)!;
@@ -1810,6 +1791,23 @@ function isPublishedObservedOffer(offer: EbayObservedOffer): boolean {
  */
 function isOutOfStockObservedOffer(offer: EbayObservedOffer): boolean {
   return offer.listing?.listingStatus?.trim().toUpperCase() === "OUT_OF_STOCK";
+}
+
+/**
+ * A size with sales cannot be deleted from its listing: eBay keeps the variation for its order history and
+ * refuses the group write that drops it (the connector's long-standing 25013 "Invalid data in the Inventory Item
+ * Group" case). eBay reports the units sold as `listing.soldQuantity` on the published offer.
+ * ASSUMPTION: that a positive soldQuantity is the condition eBay applies was not observed; no sandbox buyer
+ * exists, so no sale could be made there. A missing or non-numeric value is read as "no sales".
+ */
+function hasSalesObservedOffer(offer: EbayObservedOffer): boolean {
+  const sold = offer.listing?.soldQuantity;
+  return typeof sold === "number" && Number.isFinite(sold) && sold > 0;
+}
+
+/** The removed sizes that must stay in the group at zero quantity instead of being deleted from it. */
+function isUndeletableObservedOffer(offer: EbayObservedOffer): boolean {
+  return isOutOfStockObservedOffer(offer) || hasSalesObservedOffer(offer);
 }
 
 function observedOfferListingId(offer: EbayObservedOffer): string | undefined {
