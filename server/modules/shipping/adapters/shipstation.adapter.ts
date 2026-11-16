@@ -27,6 +27,7 @@ import type {
   EngineRef,
   EngineShipmentItemAppendResult,
   ShipmentItemAppendPayload,
+  ShipmentItemQuantityPayload,
   ShipmentPushPayload,
   CanonicalShipmentEvent,
 } from "../types";
@@ -160,6 +161,10 @@ export type ShipStationServiceHandle = {
     shipmentId: number,
     shipmentItemIds: readonly number[],
   ): Promise<EngineShipmentItemAppendResult>;
+  setShipmentItemQuantity(
+    shipmentId: number,
+    shipmentItemId: number,
+  ): Promise<EngineShipmentItemAppendResult>;
   cancelOrder(shipstationOrderId: number): Promise<EngineCancelResult>;
   putOrderOnHold(shipstationOrderId: number): Promise<void>;
   releaseOrderFromHold(shipstationOrderId: number): Promise<void>;
@@ -213,6 +218,12 @@ export function createShipStationEngine(
         payload.shipmentId,
         payload.shipmentItemIds,
       );
+    },
+
+    async setShipmentItemQuantity(
+      payload: ShipmentItemQuantityPayload,
+    ): Promise<EngineShipmentItemAppendResult> {
+      return ss.setShipmentItemQuantity(payload.shipmentId, payload.shipmentItemId);
     },
 
     async cancel(engineRef: EngineRef): Promise<EngineCancelResult> {

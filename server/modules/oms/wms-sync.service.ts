@@ -95,6 +95,7 @@ import {
 } from "../wms/order-intake-and-items.api";
 import {
   enqueueShippingEngineShipmentAmendRetry,
+  enqueueShippingEngineShipmentQuantityAmendRetry,
   enqueueShipStationShipmentPushRetry,
   enqueueShipStationSortRankSyncRetry,
 } from "./webhook-retry.worker";
@@ -357,6 +358,7 @@ type WmsReconciliationAutoRepairRule =
   | "create_missing_initial_shipment"
   | "attach_authorized_line_to_planned_shipment"
   | "attach_authorized_line_to_editable_engine_order"
+  | "amend_engine_line_quantity"
   | "create_late_edit_residual_shipment";
 
 type WmsReconciliationManualReviewRule =
@@ -3016,6 +3018,31 @@ export class WmsSyncService {
             useXactLock: true,
           },
         );
+        // An order item already in the engine's order grows in place: the
+        // engine line's quantity is amended (one row per order item per
+        // package). #65696 stranded 2 units here because the old code tried to
+        // insert a second row and hit the unique index.
+        for (const increase of attached.quantityIncreases) {
+          await enqueueShippingEngineShipmentQuantityAmendRetry(
+            tx,
+            target.id,
+            increase.shipmentItemId,
+            `OMS order edit raised order item ${increase.orderItemId} from ${increase.fromQuantity} to ${increase.toQuantity} after shipping-engine push`,
+          );
+          await this.recordWmsReconciliationAuditEvent(
+            tx,
+            omsOrderId,
+            "amend_engine_line_quantity",
+            {
+              wmsOrderId,
+              wmsShipmentId: target.id,
+              outboundShipmentItemId: increase.shipmentItemId,
+              orderItemId: increase.orderItemId,
+              fromQuantity: increase.fromQuantity,
+              toQuantity: increase.toQuantity,
+            },
+          );
+        }
         if (attached.shipmentItemIds.length > 0) {
           await enqueueShippingEngineShipmentAmendRetry(
             tx,
@@ -3039,7 +3066,7 @@ export class WmsSyncService {
         }
         return attached;
       });
-      updatedShipments += coverage.shipmentItemIds.length;
+      updatedShipments += coverage.shipmentItemIds.length + coverage.quantityIncreases.length;
       return { insertedItems: insertedItems.length, updatedShipments };
     }
 

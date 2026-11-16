@@ -119,6 +119,16 @@ export interface ShipmentItemAppendPayload {
   shipmentItemIds: readonly number[];
 }
 
+/**
+ * Raise the quantity of one package row the engine already holds to the
+ * current WMS demand for that order item. The target quantity is computed by
+ * the adapter at execution time, so the payload carries identity only.
+ */
+export interface ShipmentItemQuantityPayload {
+  shipmentId: number;
+  shipmentItemId: number;
+}
+
 export type EngineShipmentItemAppendState =
   | "applied"
   | "already_applied"
