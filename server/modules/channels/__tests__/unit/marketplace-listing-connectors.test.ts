@@ -900,28 +900,32 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     expect(calls.filter((call) => call === "put_inventory:CATALOG-NEW")).toHaveLength(2);
   });
 
-  it("retains a removed variation at zero when eBay rejects desired membership with error 25013", async () => {
+  // eBay rule reproduced by the next two tests: a group write that deletes a size with sales is refused with 25013
+  // "Invalid data in the Inventory Item Group". ASSUMPTION: the refusal was not observed (the sandbox has no buyer);
+  // the offer field `listing.soldQuantity` was observed on production offers.
+  const refuseDroppingSku = (client: ReturnType<typeof makeLifecycleClient>, undeletableSku: string, soldQuantity: number | undefined) => {
+    const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
+    vi.mocked(client.getOffers).mockImplementation(async (sku, marketplaceId) => sku !== undeletableSku ? readOffers(sku, marketplaceId)
+      : { offers: (await readOffers(sku, marketplaceId)).offers.map(offer => ({ ...offer,
+        listing: { listingId: "listing-old", listingStatus: "ACTIVE", ...(soldQuantity === undefined ? {} : { soldQuantity }) } })) });
+    const readInventoryItem = vi.mocked(client.getInventoryItem).getMockImplementation()!;
+    vi.mocked(client.getInventoryItem).mockImplementation(async sku => sku !== undeletableSku ? readInventoryItem(sku) : ({
+      sku, condition: "NEW", product: { title: "Generic catalog item", imageUrls: ["https://example.com/product.jpg"], aspects: { Size: [sku] } },
+      availability: { shipToLocationAvailability: { quantity: 5 } } }));
+    const applyGroup = vi.mocked(client.createOrReplaceInventoryItemGroup).getMockImplementation()!;
+    vi.mocked(client.createOrReplaceInventoryItemGroup).mockImplementation(async (key, payload) => {
+      if (!(payload.variantSKUs ?? []).includes(undeletableSku))
+        throw new Error("eBay rejected this update (HTTP 400; codes 25013). 25013 Request: Invalid data in the Inventory Item Group.");
+      await applyGroup(key, payload);
+    });
+  };
+
+  it("keeps a removed size that has sales in the group at zero instead of sending the write eBay refuses with 25013", async () => {
     const client = makeLifecycleClient({
       currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"],
       currentListingId: "listing-old",
     });
-    const applyGroup = vi.mocked(client.createOrReplaceInventoryItemGroup).getMockImplementation()!;
-    // The first write publishes the added size beside the old one; eBay refuses the write that removes the old one.
-    vi.mocked(client.createOrReplaceInventoryItemGroup)
-      .mockImplementationOnce(applyGroup)
-      .mockRejectedValueOnce(new Error("eBay API failed: errorId:25013 Invalid data in the Inventory Item Group"))
-      .mockImplementationOnce(applyGroup);
-    const readInventoryItem = vi.mocked(client.getInventoryItem).getMockImplementation()!;
-    vi.mocked(client.getInventoryItem).mockImplementation(async sku => sku !== "CATALOG-OLD" ? readInventoryItem(sku) : ({
-      sku: "CATALOG-OLD",
-      condition: "NEW",
-      product: {
-        title: "Generic catalog item",
-        imageUrls: ["https://example.com/product.jpg"],
-        aspects: { Size: ["CATALOG-OLD"] },
-      },
-      availability: { shipToLocationAvailability: { quantity: 5 } },
-    }));
+    refuseDroppingSku(client, "CATALOG-OLD", 4);
     vi.mocked(client.publishOfferByInventoryItemGroup)
       .mockResolvedValue({ listingId: "listing-old" });
     const connector = new EbayMarketplaceListingConnector();
@@ -934,6 +938,8 @@ describe("explicit eBay listing rebuild lifecycle", () => {
 
     await expect(connector.updateExistingListing({ client, draft, preview }))
       .resolves.toMatchObject({ externalProductId: "listing-old", previousExternalListingId: "listing-old", removedSkus: [] });
+    // One group write: it adds the new size beside the sold one and already is the target, so nothing is resent.
+    expect(client.createOrReplaceInventoryItemGroup).toHaveBeenCalledTimes(1);
     expect(client.createOrReplaceInventoryItemGroup).toHaveBeenLastCalledWith(
       "CATALOG-GROUP",
       expect.objectContaining({
@@ -955,10 +961,177 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     });
   });
 
+  it.each([{ label: "no sold quantity", soldQuantity: undefined }, { label: "a sold quantity of 0", soldQuantity: 0 }])(
+    "reports eBay's 25013 refusal and sends no corrected write when the offer shows $label", async ({ soldQuantity }) => {
+      // A corrected write straight after a refusal is stopped by the quantity owner's provider cooldown
+      // (ebay-size-removal-admission.integration.test.ts), so the connector does not attempt one.
+      const client = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"], currentListingId: "listing-old" });
+      refuseDroppingSku(client, "CATALOG-OLD", soldQuantity);
+      vi.mocked(client.publishOfferByInventoryItemGroup).mockResolvedValue({ listingId: "listing-old" });
+      const connector = new EbayMarketplaceListingConnector();
+      const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-NEW"]);
+      const preview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: "listing-old" });
+
+      await expect(connector.updateExistingListing({ client, draft, preview })).rejects.toThrow(/25013/);
+      // The write that adds the new size, then the refused write that deletes the old one. Nothing after it.
+      expect(vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.map(call => call[1].variantSKUs)).toEqual([
+        ["CATALOG-KEEP", "CATALOG-NEW", "CATALOG-OLD"], ["CATALOG-KEEP", "CATALOG-NEW"]]);
+      expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+      expect(client.publishOfferByInventoryItemGroup).toHaveBeenCalledTimes(1);
+    });
+
+  // eBay behaviour reproduced by these two tests (eBay sandbox, 2026-11-16; production listing 298148420100 shows the
+  // same state): a size that never sold is taken off the live listing when its quantity reaches 0, while its offer
+  // still reads PUBLISHED with listingStatus OUT_OF_STOCK. Any group write that drops that SKU is refused with 25082.
+  const refuseDroppingOutOfStockSku = (client: ReturnType<typeof makeLifecycleClient>, outOfStockSku: string) => {
+    const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
+    vi.mocked(client.getOffers).mockImplementation(async (sku, marketplaceId) => sku !== outOfStockSku ? readOffers(sku, marketplaceId)
+      : { offers: (await readOffers(sku, marketplaceId)).offers.map(offer => ({ ...offer, status: "PUBLISHED", availableQuantity: 0,
+        listing: { listingId: "listing-old", listingStatus: "OUT_OF_STOCK" } })) });
+    const readInventoryItem = vi.mocked(client.getInventoryItem).getMockImplementation()!;
+    vi.mocked(client.getInventoryItem).mockImplementation(async sku => sku !== outOfStockSku ? readInventoryItem(sku) : ({
+      sku, condition: "NEW", product: { title: "Generic catalog item", imageUrls: ["https://example.com/product.jpg"], aspects: { Size: [sku] } },
+      availability: { shipToLocationAvailability: { quantity: 0 } } }));
+    const applyGroup = vi.mocked(client.createOrReplaceInventoryItemGroup).getMockImplementation()!;
+    vi.mocked(client.createOrReplaceInventoryItemGroup).mockImplementation(async (key, payload) => {
+      if (!(payload.variantSKUs ?? []).includes(outOfStockSku))
+        throw new Error(`eBay rejected this update (HTTP 400; codes 25082). 25082 Request: Invalid value for A variation could not be found for the given SKU number ${outOfStockSku}.`);
+      await applyGroup(key, payload);
+    });
+    // Buyers do not see the out-of-stock size: the live listing has every group member except it.
+    const readPublished = vi.mocked(client.getPublishedListingContent!).getMockImplementation()!;
+    vi.mocked(client.getPublishedListingContent!).mockImplementation(async listingId => {
+      const published = await readPublished(listingId);
+      return { ...published, skus: published.skus.filter(sku => sku !== outOfStockSku) };
+    });
+  };
+
+  it("keeps a removed out-of-stock size in the group instead of sending the write eBay refuses with 25082", async () => {
+    const client = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP", "CATALOG-STAY"], currentListingId: "listing-old" });
+    refuseDroppingOutOfStockSku(client, "CATALOG-OLD");
+    vi.mocked(client.publishOfferByInventoryItemGroup).mockResolvedValue({ listingId: "listing-old" });
+    const connector = new EbayMarketplaceListingConnector();
+    const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-STAY"]);
+    const preview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: "listing-old" });
+    expect(preview).toMatchObject({ addedSkus: [], removedSkus: ["CATALOG-OLD"] });
+
+    // The size stays a zero-quantity member, so it is reported as retained, not removed.
+    await expect(connector.updateExistingListing({ client, draft, preview }))
+      .resolves.toMatchObject({ externalProductId: "listing-old", status: "updated", removedSkus: [] });
+
+    const groupWrites = vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.map(([, payload]) => payload);
+    expect(groupWrites).toHaveLength(1);
+    expect(groupWrites[0]).toMatchObject({ variantSKUs: ["CATALOG-KEEP", "CATALOG-OLD", "CATALOG-STAY"],
+      variesBy: { specifications: [{ name: "Size", values: ["CATALOG-KEEP", "CATALOG-STAY", "CATALOG-OLD"] }] } });
+    // Its inventory item and offer already read zero: no quantity write is needed.
+    expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+    // The retained size receives no content write either; only the sizes that stay listed do.
+    expect(vi.mocked(client.createOrReplaceInventoryItem).mock.calls.map(([sku]) => sku)).toEqual(["CATALOG-KEEP", "CATALOG-STAY"]);
+  });
+
+  it("adds a size and retires an out-of-stock one with a single group write (the product 54 state)", async () => {
+    const calls: string[] = [];
+    // eBay's record: the old size (out of stock, off the live listing), the kept size, and the new size already in
+    // the group from an earlier failed attempt but with no offer.
+    const client = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP", "CATALOG-NEW"], currentListingId: "listing-old", calls });
+    const published = new Set(["CATALOG-OLD", "CATALOG-KEEP"]);
+    const offered = new Set(["CATALOG-OLD", "CATALOG-KEEP"]);
+    const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
+    vi.mocked(client.getOffers).mockImplementation(async (sku, marketplaceId) => !offered.has(sku) ? { offers: [] }
+      : { offers: (await readOffers(sku, marketplaceId)).offers.map(offer => published.has(sku)
+        ? { ...offer, status: "PUBLISHED", listing: { listingId: "listing-old", listingStatus: "ACTIVE" } }
+        : { ...offer, status: "UNPUBLISHED", listing: undefined }) });
+    refuseDroppingOutOfStockSku(client, "CATALOG-OLD");
+    vi.mocked(client.createOffer).mockImplementation(async offer => { calls.push("create_offer:" + offer.sku); offered.add(offer.sku); return "offer-" + offer.sku; });
+    vi.mocked(client.publishOfferByInventoryItemGroup).mockImplementation(async () => {
+      calls.push("publish_group");
+      if (offered.has("CATALOG-NEW")) published.add("CATALOG-NEW");
+      return { listingId: "listing-old" };
+    });
+    const connector = new EbayMarketplaceListingConnector();
+    const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-NEW"]);
+    const preview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: "listing-old" });
+    expect(preview).toMatchObject({ addedSkus: ["CATALOG-NEW"], removedSkus: ["CATALOG-OLD"], inactiveSkus: ["CATALOG-NEW"] });
+
+    await expect(connector.updateExistingListing({ client, draft, preview }))
+      .resolves.toMatchObject({ externalProductId: "listing-old", status: "updated", removedSkus: [] });
+
+    expect([...published].sort()).toEqual(["CATALOG-KEEP", "CATALOG-NEW", "CATALOG-OLD"]);
+    // One group write: the one that publishes the new size already is the final group, and every group write
+    // revises the live listing, so it is not repeated.
+    expect(calls.filter(call => call === "put_group")).toHaveLength(1);
+    expect(vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls[0][1].variantSKUs).toEqual(["CATALOG-KEEP", "CATALOG-NEW", "CATALOG-OLD"]);
+    expect(calls.indexOf("create_offer:CATALOG-NEW")).toBeLessThan(calls.indexOf("put_group"));
+    expect(calls.indexOf("put_group")).toBeLessThan(calls.indexOf("publish_group"));
+    expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+  });
+
+  it("still deletes a removed size that is in stock, and does not repeat a refused write once every removal is retained", async () => {
+    // In stock and never sold: eBay deletes the variation, so the size is not retained.
+    const inStock = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP", "CATALOG-STAY"], currentListingId: "listing-old" });
+    vi.mocked(inStock.publishOfferByInventoryItemGroup).mockResolvedValue({ listingId: "listing-old" });
+    const connector = new EbayMarketplaceListingConnector();
+    const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-STAY"]);
+    const inStockPreview = await connector.previewListingRebuild({ client: inStock, draft, currentExternalListingId: "listing-old" });
+    await expect(connector.updateExistingListing({ client: inStock, draft, preview: inStockPreview }))
+      .resolves.toMatchObject({ removedSkus: ["CATALOG-OLD"] });
+    expect(inStock.createOrReplaceInventoryItemGroup).toHaveBeenLastCalledWith("CATALOG-GROUP",
+      expect.objectContaining({ variantSKUs: ["CATALOG-KEEP", "CATALOG-STAY"] }));
+
+    // Out of stock, already retained, and eBay still refuses the group: there is no further size to retain, so the
+    // refusal is reported instead of sending the same write again.
+    const refused = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP", "CATALOG-STAY"], currentListingId: "listing-old" });
+    refuseDroppingOutOfStockSku(refused, "CATALOG-OLD");
+    const refusal = new Error("eBay API failed: errorId:25013 Invalid data in the Inventory Item Group");
+    vi.mocked(refused.createOrReplaceInventoryItemGroup).mockRejectedValue(refusal);
+    const refusedPreview = await connector.previewListingRebuild({ client: refused, draft, currentExternalListingId: "listing-old" });
+    await expect(connector.updateExistingListing({ client: refused, draft, preview: refusedPreview })).rejects.toBe(refusal);
+    expect(refused.createOrReplaceInventoryItemGroup).toHaveBeenCalledTimes(1);
+    expect(refused.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+  });
+
+  it("completes an update of a listing that keeps a size at zero stock, which eBay leaves off the live listing", async () => {
+    // The owner retires a size: it stays a listed member at quantity 0. eBay accepts every write and reports the
+    // offer as PUBLISHED / OUT_OF_STOCK, but buyers never see a never-sold size with no stock.
+    const client = makeLifecycleClient({ currentSkus: ["CATALOG-KEEP", "CATALOG-STAY"], currentListingId: "listing-old" });
+    const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
+    vi.mocked(client.getOffers).mockImplementation(async (sku, marketplaceId) => sku !== "CATALOG-STAY" ? readOffers(sku, marketplaceId)
+      : { offers: (await readOffers(sku, marketplaceId)).offers.map(offer => ({ ...offer, availableQuantity: 0,
+        listing: { listingId: "listing-old", listingStatus: "OUT_OF_STOCK" } })) });
+    const readPublished = vi.mocked(client.getPublishedListingContent!).getMockImplementation()!;
+    vi.mocked(client.getPublishedListingContent!).mockImplementation(async listingId => {
+      const published = await readPublished(listingId);
+      return { ...published, skus: published.skus.filter(sku => sku !== "CATALOG-STAY") };
+    });
+    vi.mocked(client.publishOfferByInventoryItemGroup).mockResolvedValue({ listingId: "listing-old" });
+    const connector = new EbayMarketplaceListingConnector();
+    const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-STAY"]);
+    const preview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: "listing-old" });
+    expect(preview).toMatchObject({ addedSkus: [], removedSkus: [] });
+
+    await expect(connector.updateExistingListing({ client, draft, preview }))
+      .resolves.toMatchObject({ externalProductId: "listing-old", status: "updated", removedSkus: [] });
+  });
+
+  it("still fails an update when a size with stock is missing from the live listing", async () => {
+    // eBay reports the offer as ACTIVE, so the size must be visible to buyers. Its absence is a real discrepancy.
+    const client = makeLifecycleClient({ currentSkus: ["CATALOG-KEEP", "CATALOG-STAY"], currentListingId: "listing-old" });
+    const readPublished = vi.mocked(client.getPublishedListingContent!).getMockImplementation()!;
+    vi.mocked(client.getPublishedListingContent!).mockImplementation(async listingId => {
+      const published = await readPublished(listingId);
+      return { ...published, skus: published.skus.filter(sku => sku !== "CATALOG-STAY") };
+    });
+    vi.mocked(client.publishOfferByInventoryItemGroup).mockResolvedValue({ listingId: "listing-old" });
+    const connector = new EbayMarketplaceListingConnector();
+    const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-STAY"]);
+    const preview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: "listing-old" });
+
+    await expect(connector.updateExistingListing({ client, draft, preview })).rejects.toMatchObject({ code: "EBAY_SYNC_READBACK_PENDING" });
+  });
+
   it.each(["sku", "marketplace", "offer", "listing", "inventory_item"])("refuses retained quantity reduction after exact %s identity changes", async changed => {
+    // The removed size has sales, so it is retained at zero. Its identity changes after the group write.
     const client = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"], currentListingId: "listing-old" });
-    vi.mocked(client.createOrReplaceInventoryItemGroup).mockResolvedValueOnce(undefined)
-      .mockRejectedValueOnce(new Error("eBay errorId:25013 Invalid data in the Inventory Item Group")).mockResolvedValue(undefined);
     vi.mocked(client.publishOfferByInventoryItemGroup).mockResolvedValue({ listingId: "listing-old" });
     const readInventoryItem = vi.mocked(client.getInventoryItem).getMockImplementation()!;
     vi.mocked(client.getInventoryItem).mockImplementation(async sku => sku !== "CATALOG-OLD" ? readInventoryItem(sku) : ({
@@ -966,9 +1139,11 @@ describe("explicit eBay listing rebuild lifecycle", () => {
       product: { title: "Old", imageUrls: ["https://example.com/product.jpg"], aspects: {} }, availability: { shipToLocationAvailability: { quantity: 5 } } }));
     const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
     vi.mocked(client.getOffers).mockImplementation(async (sku, marketplace) => ({
-      offers: (await readOffers(sku, marketplace)).offers.map(offer => sku === "CATALOG-OLD" && vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.length >= 3
-        ? { ...offer, ...(changed === "sku" ? { sku: "WRONG" } : {}), ...(changed === "marketplace" ? { marketplaceId: "EBAY_GB" } : {}),
-          ...(changed === "offer" ? { offerId: "another-offer" } : {}), ...(changed === "listing" ? { listing: { listingId: "another-listing" } } : {}) } : offer),
+      offers: (await readOffers(sku, marketplace)).offers.map(offer => sku !== "CATALOG-OLD" ? offer
+        : vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.length < 1
+          ? { ...offer, listing: { listingId: "listing-old", listingStatus: "ACTIVE", soldQuantity: 4 } }
+          : { ...offer, ...(changed === "sku" ? { sku: "WRONG" } : {}), ...(changed === "marketplace" ? { marketplaceId: "EBAY_GB" } : {}),
+            ...(changed === "offer" ? { offerId: "another-offer" } : {}), ...(changed === "listing" ? { listing: { listingId: "another-listing" } } : {}) }),
     }));
     const connector = new EbayMarketplaceListingConnector();
     const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-NEW"]);
