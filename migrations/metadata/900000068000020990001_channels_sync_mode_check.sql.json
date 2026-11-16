@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000068000020990001_channels_sync_mode_check.sql",
+  "generation": 68,
+  "pr": 2099,
+  "ordinal": 1,
+  "after": [
+    "900000067000020940001_product_types_seed_and_listing_rule_scope_check.sql"
+  ]
+}
