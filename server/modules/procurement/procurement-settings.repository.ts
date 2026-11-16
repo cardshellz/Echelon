@@ -3,6 +3,7 @@ import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { PROCUREMENT_SETTING_KEYS, procurementSettingsSnapshotSchema, type ProcurementSettingKey, type ProcurementSettingsSnapshot } from "@shared/procurement/procurement-settings";
 import { ProcurementSettingsError } from "./procurement-settings.policy";
+import { updateDefaultProcurementPolicySettingsWithCasInTx } from "../inventory/cross-module-inventory-mutations.api";
 
 export interface ProcurementSettingsTransaction { execute(query: SQL): Promise<{ rows: unknown[] }> }
 
@@ -48,12 +49,13 @@ export async function saveProcurementSettings(
   commandKey: string,
 ): Promise<void> {
   const assignments = PROCUREMENT_SETTING_KEYS.map(key => sql`${sql.identifier(COLUMNS[key])}=${after[key]}`);
-  const result = await tx.execute(sql`
-    UPDATE inventory.warehouse_settings SET ${sql.join(assignments, sql`, `)},
-      procurement_policy_revision=${after.revision}, updated_at=${at}
-    WHERE id=${record.id} AND warehouse_code='DEFAULT' AND procurement_policy_revision=${record.settings.revision}
-    RETURNING id
-  `);
+  const result = await updateDefaultProcurementPolicySettingsWithCasInTx(tx, {
+    id: record.id,
+    previousRevision: record.settings.revision,
+    revision: after.revision,
+    assignments,
+    updatedAt: at,
+  });
   if (result.rows.length !== 1) throw new Error("Locked procurement policy update did not affect its canonical row");
   await tx.execute(sql`
     INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)

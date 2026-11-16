@@ -4,6 +4,8 @@ import {
   updateProductFromShopifyBackfillInCatalog,
   insertProductFromShopifyBackfillInCatalog,
 } from "../catalog/cross-module-product-mutations.api";
+import { insertShopifyBackfillInventoryLevelAndReceiptTxnInInventory } from "../inventory/cross-module-inventory-mutations.api";
+import { insertBackfillDefaultWarehouseLocationInWarehouse } from "../warehouse/cross-module-warehouse-mutations.api";
 import { parseDollarPriceToCents } from "./channel-pricing-resolver";
 import { createChannelPricingService } from "./channel-pricing.service";
 import { ChannelPricingError } from "./channel-pricing.domain";
@@ -906,30 +908,13 @@ class CatalogBackfillService {
         continue;
       }
 
-      // Create inventory record in Echelon
+      // Create inventory record in Echelon + audit transaction
       const qtyToImport = Math.max(0, shopifyQty); // Don't import negative quantities
-      await this.db.insert(inventoryLevels).values({
+      await insertShopifyBackfillInventoryLevelAndReceiptTxnInInventory(this.db, {
         warehouseLocationId: defaultLocation.locationId,
         productVariantId: vi.echelonVariantId,
-        variantQty: qtyToImport,
-        reservedQty: 0,
-        pickedQty: 0,
-        packedQty: 0,
-        backorderQty: 0,
-      });
-
-      // Log the transaction for audit trail
-      await this.db.insert(inventoryTransactions).values({
-        productVariantId: vi.echelonVariantId,
-        toLocationId: defaultLocation.locationId,
-        transactionType: "receipt",
-        variantQtyDelta: qtyToImport,
-        variantQtyBefore: 0,
-        variantQtyAfter: qtyToImport,
-        referenceType: "shopify_backfill",
-        referenceId: `shopify-inv-item-${vi.shopifyInventoryItemId}`,
-        notes: `Backfill from Shopify inventory level (${qtyToImport} units)`,
-        userId: "system:catalog-backfill",
+        qtyToImport,
+        shopifyInventoryItemId: vi.shopifyInventoryItemId,
       });
 
       console.log(
@@ -1059,16 +1044,7 @@ class CatalogBackfillService {
     }
 
     // Create a default virtual location for backfill
-    const [newLocation] = await this.db
-      .insert(warehouseLocations)
-      .values({
-        warehouseId: warehouse.id,
-        code: "BACKFILL-DEFAULT",
-        name: "Backfill Default Location",
-        locationType: "pick",
-        isActive: 1,
-      })
-      .returning();
+    const newLocation = await insertBackfillDefaultWarehouseLocationInWarehouse(this.db, warehouse.id);
 
     console.log(
       `[CatalogBackfill] Created default location BACKFILL-DEFAULT in warehouse ${warehouse.code} (ID ${warehouse.id})`,

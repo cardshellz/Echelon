@@ -26,6 +26,12 @@ import { renameWmsPickingLogSku } from "../wms/picking-logs.api";
 import { reorderCatalogAssets } from "./product-asset-order.repository";
 import { ProductAssetError } from "./product-asset-errors";
 import { deactivateActiveChannelFeedsByVariantIdInChannels } from "../channels/channel-feed-listing-mutations.api";
+import { deleteZeroPreLedgerInventoryLevelsByVariantIdInInventory } from "../inventory/cross-module-inventory-mutations.api";
+import {
+  deleteProductLocationsByVariantIdInWarehouse,
+  updateProductLocationsSkuByVariantIdInWarehouse,
+  reassignProductLocationsToVariantInWarehouse,
+} from "../warehouse/cross-module-warehouse-mutations.api";
 import {
   cancelProductReplenishmentTasksInTx,
   deactivateProductReplenishmentRulesInTx,
@@ -263,18 +269,11 @@ export const productMethods: IProductStorage = {
   async deleteInventoryLevelsByVariantId(variantId: number): Promise<number> {
     // A ledger-era level is a permanent identity even after stock moves away.
     // Legacy cleanup may remove only genuinely empty, unclaimed rows.
-    const result = await db.delete(inventoryLevels).where(and(
-      eq(inventoryLevels.productVariantId, variantId),
-      eq(inventoryLevels.variantQty, 0), eq(inventoryLevels.reservedQty, 0),
-      eq(inventoryLevels.pickedQty, 0), eq(inventoryLevels.packedQty, 0),
-      sql`NOT EXISTS (SELECT 1 FROM inventory.quantity_ledger_opening)`,
-    )).returning();
-    return result.length;
+    return deleteZeroPreLedgerInventoryLevelsByVariantIdInInventory(db, variantId);
   },
 
   async deleteProductLocationsByVariantId(variantId: number): Promise<number> {
-    const result = await db.delete(productLocations).where(eq(productLocations.productVariantId, variantId)).returning();
-    return result.length;
+    return deleteProductLocationsByVariantIdInWarehouse(db, variantId);
   },
 
   async deactivateChannelFeedsByVariantId(variantId: number): Promise<number> {
@@ -523,7 +522,7 @@ export const productMethods: IProductStorage = {
     const now = new Date();
     // Procurement references are updated through Procurement's published command.
     // These remaining operational caches stay in the caller's transaction.
-    await executor.update(productLocations).set({ sku: newSku, updatedAt: now }).where(eq(productLocations.productVariantId, variantId));
+    await updateProductLocationsSkuByVariantIdInWarehouse(executor, variantId, newSku, now);
 
     // Tables without productVariantId FK — match by old SKU string
     await renameWmsOrderItemSku(executor, { oldSku, newSku });
@@ -532,11 +531,7 @@ export const productMethods: IProductStorage = {
   },
 
   async reassignProductLocationsToVariant(sourceVariantId: number, targetVariantId: number): Promise<number> {
-    const result = await db.update(productLocations)
-      .set({ productVariantId: targetVariantId, updatedAt: new Date() })
-      .where(eq(productLocations.productVariantId, sourceVariantId))
-      .returning();
-    return result.length;
+    return reassignProductLocationsToVariantInWarehouse(db, sourceVariantId, targetVariantId);
   },
 
   async searchProducts(opts: { q: string; limit: number; includeInactive?: boolean }): Promise<Array<{ id: number }>> {

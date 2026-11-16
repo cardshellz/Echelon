@@ -9,6 +9,12 @@ import {
   warehouses,
 } from "@shared/schema";
 import { recomputeOrderStatusFromShipments } from "./shipment-rollup";
+import {
+  updateWarehouseOrderCombiningSettingInInventory,
+  insertWarehouseOrderCombiningSettingInInventory,
+  updateDefaultOrderCombiningSettingInInventory,
+  insertDefaultOrderCombiningSettingInInventory,
+} from "../inventory/cross-module-inventory-mutations.api";
 import type {
   CombinedOrderGroup,
   Order,
@@ -248,10 +254,7 @@ class OrderCombiningService {
         .where(eq(warehouseSettings.warehouseId, warehouseId))
         .limit(1);
       if (existing.length > 0) {
-        await this.db
-          .update(warehouseSettings)
-          .set({ enableOrderCombining: value, updatedAt: new Date() })
-          .where(eq(warehouseSettings.warehouseId, warehouseId));
+        await updateWarehouseOrderCombiningSettingInInventory(this.db, warehouseId, value);
       } else {
         // Create a per-warehouse row. Need a unique warehouseCode and name;
         // pull them from the warehouses table.
@@ -266,7 +269,7 @@ class OrderCombiningService {
             statusCode: 404,
           });
         }
-        await this.db.insert(warehouseSettings).values({
+        await insertWarehouseOrderCombiningSettingInInventory(this.db, {
           warehouseId,
           warehouseCode: wh[0].code,
           warehouseName: wh[0].name,
@@ -282,16 +285,9 @@ class OrderCombiningService {
       .where(eq(warehouseSettings.warehouseCode, "DEFAULT"))
       .limit(1);
     if (existing.length > 0) {
-      await this.db
-        .update(warehouseSettings)
-        .set({ enableOrderCombining: value, updatedAt: new Date() })
-        .where(eq(warehouseSettings.warehouseCode, "DEFAULT"));
+      await updateDefaultOrderCombiningSettingInInventory(this.db, value);
     } else {
-      await this.db.insert(warehouseSettings).values({
-        warehouseCode: "DEFAULT",
-        warehouseName: "Default",
-        enableOrderCombining: value,
-      });
+      await insertDefaultOrderCombiningSettingInInventory(this.db, value);
     }
     return { enabled };
   }

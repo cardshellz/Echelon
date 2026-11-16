@@ -1,5 +1,5 @@
 import { db } from "./db";
-import { productLocations } from "@shared/schema";
+import { seedSampleProductLocationsInWarehouse } from "./modules/warehouse/cross-module-warehouse-mutations.api";
 
 const sampleLocations = [
   { sku: "NK-292-BLK", name: "Nike Air Max 90 Black", location: "A-01-02-B", zone: "A" },
@@ -19,9 +19,7 @@ async function seed() {
   console.log("Seeding product locations...");
   
   try {
-    for (const loc of sampleLocations) {
-      await db.insert(productLocations).values(loc).onConflictDoNothing();
-    }
+    await seedSampleProductLocationsInWarehouse(db, sampleLocations);
     console.log("✓ Seeded", sampleLocations.length, "product locations");
   } catch (error) {
     console.error("Error seeding database:", error);

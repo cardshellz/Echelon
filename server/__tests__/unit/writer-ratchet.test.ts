@@ -421,6 +421,30 @@ describe("writer-ratchet (P2.1)", () => {
     expect(currentIncludingScripts[table]).toEqual(["modules/channels"]);
   });
 
+  it.each([
+    ["inventory.adjustment_reasons", "modules/inventory"],
+    ["inventory.inventory_levels", "modules/inventory"],
+    ["inventory.inventory_transactions", "modules/inventory"],
+    ["inventory.replen_tasks", "modules/inventory"],
+    ["inventory.warehouse_settings", "modules/inventory"],
+    ["warehouse.echelon_settings", "modules/warehouse"],
+    ["warehouse.product_locations", "modules/warehouse"],
+    ["warehouse.warehouse_locations", "modules/warehouse"],
+    ["warehouse.warehouses", "modules/warehouse"],
+  ])("%s has only its sole runtime owning writer in Inventory or Warehouse (P2-2B)", (table, owner) => {
+    expect(current[table]).toEqual([owner]);
+    expect(baseline[table]).toEqual([owner]);
+  });
+
+  it.each([
+    ["inventory.adjustment_reasons", "modules/inventory"],
+    ["inventory.warehouse_settings", "modules/inventory"],
+    ["warehouse.echelon_settings", "modules/warehouse"],
+    ["warehouse.warehouses", "modules/warehouse"],
+  ])("%s has only its Inventory or Warehouse owning writer, including operational scripts (P2-2B)", (table, owner) => {
+    expect(currentIncludingScripts[table]).toEqual([owner]);
+  });
+
   it("blocks any new direct database writes in scripts/ or script/ outside the frozen baseline", () => {
     const addedScriptWrites: string[] = [];
     for (const [table, files] of Object.entries(currentScriptWriters)) {

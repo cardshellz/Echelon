@@ -14,6 +14,11 @@ import { canonicalAvailabilityClaimPickCommandSchema, canonicalAvailabilityClaim
 import { eq, and, sql } from "drizzle-orm";
 import { IntegrityError, NotFoundError, ValidationError } from "../../../shared/errors";
 import { AuditLogger, persistAuditEvent } from "../../infrastructure/auditLogger";
+import { cancelShipmentBlockingReplenTasksForOrderInInventory } from "../inventory/cross-module-inventory-mutations.api";
+import {
+  updateAutoFixedPickProductLocationInTx,
+  insertAutoFixedPickProductLocationInTx,
+} from "../warehouse/cross-module-warehouse-mutations.api";
 import {
   inventoryLevels,
   warehouseLocations,
@@ -999,22 +1004,16 @@ export class PickingUseCases {
           .limit(1);
 
         if (existingAtBin) {
-          await tx
-            .update(productLocations)
-            .set({
-              productVariantId: variant.id,
-              productId: variant.productId,
-              sku: item.sku,
-              name: variant.name || item.name,
-              location: location.code,
-              zone,
-              isPrimary: 1,
-              status: "active",
-              updatedAt: new Date(),
-            })
-            .where(eq(productLocations.id, existingAtBin.id));
+          await updateAutoFixedPickProductLocationInTx(tx, existingAtBin.id, {
+            productVariantId: variant.id,
+            productId: variant.productId,
+            sku: item.sku,
+            name: variant.name || item.name,
+            location: location.code,
+            zone,
+          });
         } else {
-          await tx.insert(productLocations).values({
+          await insertAutoFixedPickProductLocationInTx(tx, {
             productId: variant.productId,
             productVariantId: variant.id,
             sku: item.sku,
@@ -1022,8 +1021,6 @@ export class PickingUseCases {
             location: location.code,
             zone,
             warehouseLocationId: location.id,
-            isPrimary: 1,
-            status: "active",
             imageUrl: item.imageUrl || null,
             barcode: item.barcode || variant.barcode || null,
           });
@@ -3997,17 +3994,11 @@ export class PickingUseCases {
       RETURNING id
     `);
 
-    const replenResult = await this.db.execute(sql`
-      UPDATE inventory.replen_tasks
-      SET
-        status = 'cancelled',
-        blocks_shipment = FALSE,
-        notes = CONCAT(COALESCE(notes, ''), CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE E'\n' END, ${blockerNote})
-      WHERE order_id = ${orderId}
-        AND blocks_shipment = TRUE
-        AND status NOT IN ('completed', 'cancelled')
-      RETURNING id
-    `);
+    const replenResult = await cancelShipmentBlockingReplenTasksForOrderInInventory(
+      this.db,
+      orderId,
+      blockerNote,
+    );
 
     return {
       allocationExceptionsClosed: allocationResult.rows?.length ?? 0,

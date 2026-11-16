@@ -1,6 +1,7 @@
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
 import { withAdvisoryLock } from "../../infrastructure/scheduler-lock";
+import { releaseStaleCycleCountLocationFreezesInWarehouse } from "../warehouse/cross-module-warehouse-mutations.api";
 import {
   recordRunCompleted,
   runBootCatchUpIfBehind,
@@ -68,11 +69,7 @@ export async function runCycleCountFreezeGuard(dbArg: any = db): Promise<{ relea
     // partial failure between the two statements never leaves a completed count
     // excluded from future guard passes while its bins remain frozen (COUNT-03).
     const idList = sql.raw(ids.join(","));
-    await dbArg.execute(sql`
-      UPDATE warehouse.warehouse_locations
-      SET cycle_count_freeze_id = NULL, updated_at = NOW()
-      WHERE cycle_count_freeze_id IN (${idList})
-    `);
+    await releaseStaleCycleCountLocationFreezesInWarehouse(dbArg, ids);
     await dbArg.execute(sql`
       UPDATE inventory.cycle_counts
       SET status = 'completed', completed_at = NOW(), updated_at = NOW(),

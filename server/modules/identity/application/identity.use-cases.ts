@@ -17,6 +17,7 @@ import { runIdentityAdministration, type IdentityAdministrationMutation } from "
 import { IdentityAdministrationError, parseAdministrationActor, parseAdministrationInput, userProfileEditSchema,
   type IdentityAdministrationActor } from "../domain/access-administration";
 import { notifyStaffAuthorityChanged } from "../authority-events";
+import { seedDefaultAdjustmentReasonsInInventory } from "../../inventory/cross-module-inventory-mutations.api";
 
 function safeUser(user: User): SafeUser {
   const { password: _password, ...safe } = user;
@@ -179,16 +180,8 @@ export async function seedAdjustmentReasonsUseCase(): Promise<void> {
   try {
     const { adjustmentReasons } = await import("@shared/schema");
     await db.select().from(adjustmentReasons).limit(1);
-    
-    const { eq } = await import("drizzle-orm");
-    const oldLowercaseCodes = ["po_received", "rma_return", "cycle_count", "damaged"];
-    
-    for (const code of oldLowercaseCodes) {
-      try { await db.delete(adjustmentReasons).where(eq(adjustmentReasons.code, code)); } catch(e) {}
-    }
 
-    for (const reason of domain.DEFAULT_ADJUSTMENT_REASONS) {
-      try { await db.insert(adjustmentReasons).values(reason as any).onConflictDoNothing(); } catch(e) {}
-    }
+    const oldLowercaseCodes = ["po_received", "rma_return", "cycle_count", "damaged"];
+    await seedDefaultAdjustmentReasonsInInventory(db, oldLowercaseCodes, domain.DEFAULT_ADJUSTMENT_REASONS);
   } catch(e) { /* ignore schema error during early startup */ }
 }

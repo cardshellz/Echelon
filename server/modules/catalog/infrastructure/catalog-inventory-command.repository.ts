@@ -9,6 +9,11 @@ import {
   type InventoryUseCases,
 } from "../../inventory/catalog-inventory.api";
 import { deactivateActiveChannelFeedsByVariantIdInChannels } from "../../channels/channel-feed-listing-mutations.api";
+import { deleteZeroInventoryLevelsByVariantIdInTx } from "../../inventory/cross-module-inventory-mutations.api";
+import {
+  deleteProductLocationsByVariantIdInWarehouse,
+  reassignProductLocationsToVariantInWarehouse,
+} from "../../warehouse/cross-module-warehouse-mutations.api";
 import { CatalogInventoryCommandError, CatalogInventoryCommandService,
   type CatalogInventoryCommandRepository, type CatalogInventoryUnitOfWork } from "../application/catalog-inventory-command.service";
 
@@ -56,18 +61,17 @@ export class PostgresCatalogInventoryCommandRepository implements CatalogInvento
             replenDeactivated: 0, replenTasksCancelled: 0, movedLocationCount: 0 };
           for (const sourceId of sourceVariantIds) {
             if (command.operation === "variant_merge") {
-              result.movedLocationCount += (await tx.update(productLocations)
-                .set({ productVariantId: command.targetVariantId!, updatedAt: now })
-                .where(eq(productLocations.productVariantId, sourceId)).returning({ id: productLocations.id })).length;
+              result.movedLocationCount += await reassignProductLocationsToVariantInWarehouse(
+                tx,
+                sourceId,
+                command.targetVariantId!,
+                now,
+              );
             } else {
               if (command.targetVariantId !== null) {
                 // Every ledger-era zero projection retains its historical identity.
-                if (!posting) result.inventoryCleared += (await tx.delete(inventoryLevels).where(and(
-                  eq(inventoryLevels.productVariantId, sourceId), eq(inventoryLevels.variantQty, 0),
-                  eq(inventoryLevels.reservedQty, 0), eq(inventoryLevels.pickedQty, 0), eq(inventoryLevels.packedQty, 0),
-                )).returning({ id: inventoryLevels.id })).length;
-                result.binAssignmentsCleared += (await tx.delete(productLocations).where(eq(productLocations.productVariantId, sourceId))
-                  .returning({ id: productLocations.id })).length;
+                if (!posting) result.inventoryCleared += await deleteZeroInventoryLevelsByVariantIdInTx(tx, sourceId);
+                result.binAssignmentsCleared += await deleteProductLocationsByVariantIdInWarehouse(tx, sourceId);
               }
               // is_active triggers retain listing identity and enqueue publication.
               result.channelFeedsDeactivated += await deactivateActiveChannelFeedsByVariantIdInChannels(tx, sourceId, now);

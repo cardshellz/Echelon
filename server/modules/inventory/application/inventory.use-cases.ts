@@ -28,6 +28,10 @@ import {
   planReplenishmentExecution,
 } from "../domain/replenishment-execution.domain";
 import { InventoryQuantityError } from "../domain/quantity-ledger";
+import {
+  insertVirtual3plWarehouseLocationInWarehouse,
+  updateWarehouseInventorySyncStatusInWarehouse,
+} from "../../warehouse/cross-module-warehouse-mutations.api";
 
 export class FreezeViolationError extends AppError {
   constructor(locationId: number) {
@@ -2538,9 +2542,7 @@ export class InventoryUseCases {
     }
 
     try {
-      await this.db.update(warehouses)
-        .set({ inventorySyncStatus: "syncing", updatedAt: new Date() })
-        .where(eq(warehouses.id, warehouseId));
+      await updateWarehouseInventorySyncStatusInWarehouse(this.db, warehouseId, "syncing");
 
       const config = (wh.inventorySourceConfig as Record<string, any>) || {};
       const channelId = config?.channelId;
@@ -2600,14 +2602,11 @@ export class InventoryUseCases {
 
       let virtualLocationId = existingLoc?.id;
       if (!virtualLocationId) {
-        const [createdLoc] = await this.db.insert(warehouseLocations).values({
+        const createdLoc = await insertVirtual3plWarehouseLocationInWarehouse(this.db, {
           warehouseId,
           code: virtualCode,
           name: `${wh.code} Virtual Inventory`,
-          locationType: "3pl_virtual",
-          binType: "floor",
-          isPickable: 0,
-        }).returning();
+        });
         virtualLocationId = createdLoc.id;
       }
 
@@ -2648,14 +2647,12 @@ export class InventoryUseCases {
         }
       }
 
-      await this.db.update(warehouses)
-        .set({ inventorySyncStatus: "ok", lastInventorySyncAt: new Date(), updatedAt: new Date() })
-        .where(eq(warehouses.id, warehouseId));
+      await updateWarehouseInventorySyncStatusInWarehouse(this.db, warehouseId, "ok", {
+        lastInventorySyncAt: new Date(),
+      });
 
     } catch (err: any) {
-      await this.db.update(warehouses)
-        .set({ inventorySyncStatus: "error", updatedAt: new Date() })
-        .where(eq(warehouses.id, warehouseId));
+      await updateWarehouseInventorySyncStatusInWarehouse(this.db, warehouseId, "error");
       result.errors.push(err.message);
     }
 

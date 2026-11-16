@@ -33,6 +33,10 @@ type DrizzleDb = {
 
 import { InventoryUseCases } from "./inventory.use-cases";
 import { validateWarehouseLocationIntegrity } from "../../warehouse/inventory-governance.api";
+import {
+  unfreezeWarehouseLocationsForCycleCountInWarehouse,
+  freezeWarehouseLocationsChunkForCycleCountInWarehouse,
+} from "../../warehouse/cross-module-warehouse-mutations.api";
 import { logger } from "../../../platform/observability/logger";
 
 type ChannelSync = {
@@ -396,11 +400,7 @@ export class CycleCountUseCases {
    * Clear cycle count freeze from all locations frozen by this count.
    */
   private async unfreezeLocations(cycleCountId: number): Promise<void> {
-    await this.db.execute(sql`
-      UPDATE warehouse.warehouse_locations
-      SET cycle_count_freeze_id = NULL, updated_at = NOW()
-      WHERE cycle_count_freeze_id = ${cycleCountId}
-    `);
+    await unfreezeWarehouseLocationsForCycleCountInWarehouse(this.db, cycleCountId);
   }
 
   /**
@@ -688,12 +688,7 @@ export class CycleCountUseCases {
       const chunkSize = 500;
       for (let i = 0; i < locationIds.length; i += chunkSize) {
         const chunk = locationIds.slice(i, i + chunkSize);
-        await this.db.execute(sql`
-          UPDATE warehouse.warehouse_locations
-          SET cycle_count_freeze_id = ${id}, updated_at = NOW()
-          WHERE id IN (${sql.join(chunk.map((cid: number) => sql`${cid}`), sql`, `)})
-            AND cycle_count_freeze_id IS NULL
-        `);
+        await freezeWarehouseLocationsChunkForCycleCountInWarehouse(this.db, id, chunk);
       }
     }
 

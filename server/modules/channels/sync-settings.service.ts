@@ -14,6 +14,7 @@ import {
   type SyncSettings,
   type SyncLogEntry,
 } from "@shared/schema";
+import { updateWarehouseFeedEnabledInWarehouse } from "../warehouse/cross-module-warehouse-mutations.api";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -157,10 +158,7 @@ class SyncSettingsService {
     warehouseId: number,
     feedEnabled: boolean,
   ): Promise<void> {
-    await this.db
-      .update(warehouses)
-      .set({ feedEnabled, updatedAt: new Date() })
-      .where(eq(warehouses.id, warehouseId));
+    await updateWarehouseFeedEnabledInWarehouse(this.db, warehouseId, feedEnabled);
   }
 
   // =========================================================================
