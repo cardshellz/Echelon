@@ -12,13 +12,14 @@ import { fileURLToPath } from "node:url";
  * F2, CRITICAL), shipment status rewrites, engine-ref re-stamping, and a
  * recurring lot-cost "repair" that masked live cost-drift writers.
  *
- * This test freezes the boot DML surface to an explicit allowlist:
- *   - one idempotent CONFIG default (the sync settings row)
+ * This test freezes the boot DML surface to an explicit allowlist, which is
+ * now empty: the schema fallbacks write no rows at all.
  *
  * The allowlist only shrinks. The product-lines seed, the
- * fulfillment_partition_key backfill and the product types seed were retired
- * with their fallback blocks (REFACTOR-PLAN P4.1); all three live in tracked
- * migrations (037, 111, product_types_seed_and_listing_rule_scope_check).
+ * fulfillment_partition_key backfill, the product types seed and the sync
+ * settings default row were retired with their fallback blocks
+ * (REFACTOR-PLAN P4.1); all four live in tracked migrations (037, 111,
+ * product_types_seed_and_listing_rule_scope_check, 0669).
  *
  * Any new INSERT/UPDATE/DELETE in db.ts fails this test and must go through
  * a reviewed, tracked migration instead.
@@ -34,9 +35,7 @@ const CODE_ONLY = DB_SRC.split("\n")
   .filter((line) => !line.trim().startsWith("//") && !line.trim().startsWith("*"))
   .join("\n");
 
-const DML_ALLOWLIST: Array<{ pattern: RegExp; why: string }> = [
-  { pattern: /INSERT INTO sync_settings/, why: "config default row (idempotent WHERE NOT EXISTS)" },
-];
+const DML_ALLOWLIST: Array<{ pattern: RegExp; why: string }> = [];
 
 describe("db.ts boot path — no data mutations (P0.2)", () => {
   it("contains no DML outside the explicit allowlist", () => {
