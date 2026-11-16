@@ -161,8 +161,7 @@
   ],
   "channels.sync_settings": [
     "modules/channels",
-    "modules/inventory-planning",
-    "server/db.ts"
+    "modules/inventory-planning"
   ],
   "channels.walmart_connection_events": [
     "modules/channels"
