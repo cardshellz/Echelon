@@ -116,7 +116,13 @@ ShipStation can confirm or update a shipment only when the callback maps to know
 - One OMS line per `(order_id, external_line_item_id)` when a channel line id exists.
 - OMS line display name preserves the richest channel-provided line name.
 - OMS line fulfillable quantity cannot exceed paid quantity minus cancelled/refunded quantity.
-- Update payload presence alone cannot increase fulfillable quantity.
+- Update payload presence alone cannot increase fulfillable quantity. An update
+  can increase it only when the channel itself states the order is fully paid
+  for its current contents (Shopify: `financial_status` paid/partially_refunded
+  and `total_outstanding` <= 0), from a fresh, dated `current_quantity`.
+- Units the channel sold that OMS will not ship are never silent: each distinct
+  gap is an `oms_order_events` row (`channel_quantity_not_authorized`) with code
+  `OMS_LINE_AWAITING_CHANNEL_PAYMENT` or `OMS_PAID_QUANTITY_BELOW_CHANNEL`.
 
 ### WMS Invariants
 
@@ -436,7 +442,9 @@ The procedures are captured in
 
 ## Open Questions
 
-- What exact Shopify event sequence should authorize paid edited-order lines?
+- ~~What exact Shopify event sequence should authorize paid edited-order lines?~~
+  Answered 2026-11-16 (#65696): no event sequence. The channel's own payment
+  statement on the snapshot decides; see the Decision Log.
 - What eBay payload fields represent paid line authority and ship-by date?
 - Which historical WMS rows should remain visible in normal UI versus exception-only views?
 - Which ShipStation split cases are operationally valid and should remain automatic?
@@ -449,3 +457,11 @@ The procedures are captured in
 - Reconciliation must be proof-first.
 - ShipStation is not a source of commercial order truth.
 - Database constraints should enforce core lineage once historical data is classified.
+- 2026-11-16: The sales channel owns what was bought and paid for. A Shopify
+  edit can add units to a paid order with no new payment (a discount or
+  overpayment keeps the total covered), so no orders/paid ever follows; #65696
+  stayed at 8 of 10 units silently. orders/updated and the shopify/reconcile
+  poll now raise paid authority up to the channel's current quantity when the
+  snapshot says the order is fully paid and is not stale. Reductions,
+  cancellations, refunds and review keep their existing owners. The reconciler
+  re-observes any line whose channel quantity exceeds its paid quantity.
