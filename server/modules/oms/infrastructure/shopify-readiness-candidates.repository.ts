@@ -38,6 +38,16 @@ export async function loadShopifyReadinessCandidates(
         OR COALESCE(ol.authority_fulfillable_quantity, 0) >
            COALESCE(ol.wms_materialized_quantity, 0)
         OR ol.channel_quantity_updated_at IS NULL
+        -- Shopify sold more units than OMS has paid authority for (an edit
+        -- with no new payment, #65696). Re-observe so a settled order is
+        -- authorized and an unsettled one stays visibly awaiting payment.
+        OR (
+          ol.authorization_status IN ('seen', 'authorized')
+          AND COALESCE(ol.cancelled_quantity, 0) = 0
+          AND COALESCE(ol.refunded_quantity, 0) = 0
+          AND COALESCE(ol.channel_current_quantity, ol.quantity, 0) > COALESCE(ol.paid_quantity, 0)
+          AND COALESCE(ol.paid_quantity, 0) > 0
+        )
         OR (
           oo.financial_status = 'paid'
           AND oo.created_at < NOW() - INTERVAL '15 minutes'

@@ -2,11 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { paidReplayFixture } from "../../../oms/__tests__/fixtures/shopify-paid-replay.fixture";
 
-const ports = vi.hoisted(() => ({ execute: vi.fn(), select: vi.fn(), readiness: vi.fn(), replay: vi.fn(), sync: vi.fn() }));
+const ports = vi.hoisted(() => ({ execute: vi.fn(), select: vi.fn(), readiness: vi.fn(), replay: vi.fn(), sync: vi.fn(), gap: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: ports }));
 vi.mock("../../../oms/shopify-bridge", () => ({ bridgeShopifyOrderToOms: vi.fn() }));
 vi.mock("../../../oms/shopify-line-readiness.service", () => ({ reconcileShopifyLineReadiness: ports.readiness }));
 vi.mock("../../../oms/shopify-paid-event-replay", () => ({ queueOmsPaidEventReplay: ports.replay }));
+vi.mock("../../../oms/infrastructure/channel-authority-gap.repository", () => ({ recordChannelAuthorityGap: ports.gap }));
 import { initReconciliation, runReconciliationNow } from "../../shopify-order-reconciliation";
 
 const dialect = new PgDialect();

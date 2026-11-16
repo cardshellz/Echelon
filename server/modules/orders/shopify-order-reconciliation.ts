@@ -6,6 +6,8 @@ import {
   queueOmsPaidEventReplay,
   readShopifyLineCurrentQuantity,
   reconcileShopifyLineReadiness,
+  recordChannelAuthorityGap,
+  deriveShopifyChannelPaymentSettled,
 } from "../oms/shopify-intake.api";
 import type {
   OmsService,
@@ -63,6 +65,8 @@ interface ShopifyApiOrder {
   subtotal_price: string;
   total_tax: string;
   total_discounts: string;
+  /** Shopify's amount still owed; <= 0 means fully paid (negative = overpaid). */
+  total_outstanding?: string | null;
   taxes_included: boolean;
   tax_exempt: boolean;
   note: string | null;
@@ -326,12 +330,18 @@ async function reconcileExistingOmsOrderReadiness(
     );
   }
 
+  const channelPaymentSettled = deriveShopifyChannelPaymentSettled({
+    financialStatus: order.financial_status,
+    totalOutstanding: order.total_outstanding,
+  });
+  const sourceEventId = buildReadinessSourceEventId(order);
   const readiness = await reconcileShopifyLineReadiness({
     db,
     omsOrderId,
     financialStatus: order.financial_status,
-    sourceEventId: buildReadinessSourceEventId(order),
+    sourceEventId,
     channelUpdatedAt: order.updated_at ?? null,
+    channelPaymentSettled,
     lineItems: order.line_items.map((line) => ({
       externalLineItemId: line.id,
       quantity: line.quantity,
@@ -358,6 +368,15 @@ async function reconcileExistingOmsOrderReadiness(
   if (readiness.wmsSyncRequired) {
     await wmsSyncService.syncOmsOrderToWms(omsOrderId);
   }
+
+  // Safety net: every reconciler pass re-states any units Shopify sold that
+  // OMS still will not ship (recorded once per distinct gap, logged each pass).
+  await recordChannelAuthorityGap(db as any, {
+    omsOrderId,
+    externalOrderNumber: order.name ?? null,
+    channelPaymentSettled,
+    sourceEventId,
+  });
 
   return {
     advancedLines: readiness.advancedLines,
