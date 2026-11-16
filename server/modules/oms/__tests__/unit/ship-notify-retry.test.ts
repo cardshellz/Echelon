@@ -34,6 +34,7 @@ import { resolve } from "node:path";
 
 const createShipmentForOrderMock = vi.hoisted(() => vi.fn());
 const movePendingShipmentItemsMock = vi.hoisted(() => vi.fn());
+const createLateEditResidualShipmentMock = vi.hoisted(() => vi.fn());
 
 // The worker's top-level `import { db } from "../../db"` would otherwise
 // try to build a real Postgres client at import time and fail on
@@ -59,6 +60,7 @@ vi.mock("../../../wms/create-shipment", () => ({
 vi.mock("../../../wms/late-order-shipment-coverage", () => ({
   movePendingShipmentItemsToLateEditResidual:
     movePendingShipmentItemsMock,
+  createLateEditResidualShipment: createLateEditResidualShipmentMock,
 }));
 
 import {
@@ -75,6 +77,9 @@ import {
   dispatchShipStationSortRankSyncRetry,
   dispatchShipStationShipmentPushRetry,
   dispatchShippingEngineShipmentAmendRetry,
+  dispatchShippingEngineShipmentQuantityAmendRetry,
+  enqueueShippingEngineShipmentQuantityAmendRetry,
+  SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC,
   dispatchOmsWmsSyncRetry,
   dispatchWmsShipmentCreateRetry,
   recordRetryFailure,
@@ -2398,5 +2403,117 @@ describe("ship-notify retry :: wiring in server/index.ts", () => {
       /await engine\.applyInboundShipmentAuthority\(\{\s*engineRef: ref,\s*orderNumber,\s*\}\)/,
     );
     expect(SRC).toMatch(/EBAY_RECONCILE_PHYSICAL_AUTHORITY_UNAVAILABLE/);
+  });
+});
+
+// #65696: quantity growth on a line the engine already holds.
+describe("dispatchShippingEngineShipmentQuantityAmendRetry", () => {
+  beforeEach(() => {
+    createLateEditResidualShipmentMock.mockReset();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const row = (payload: Record<string, unknown> = {}) => ({
+    id: 970,
+    provider: "internal",
+    topic: SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC,
+    payload: { shipmentId: 20973, shipmentItemId: 30121, amendmentKey: "20973:30121", ...payload },
+    attempts: 0,
+  });
+
+  it("marks the command successful after the engine verifies the new quantity", async () => {
+    const setShipmentItemQuantity = vi.fn().mockResolvedValue({ state: "applied", providerStatus: "awaiting_shipment" });
+    const { db, updates } = makeDb({ shippingEngine: { setShipmentItemQuantity } as any });
+
+    await expect(dispatchShippingEngineShipmentQuantityAmendRetry(db, row() as any)).resolves.toBe("success");
+    expect(setShipmentItemQuantity).toHaveBeenCalledWith({ shipmentId: 20973, shipmentItemId: 30121 });
+    expect(updates.some((update) => update.set.status === "success")).toBe(true);
+    expect(createLateEditResidualShipmentMock).not.toHaveBeenCalled();
+  });
+
+  it("routes the extra units to a residual package when the engine order is locked", async () => {
+    const setShipmentItemQuantity = vi.fn().mockResolvedValue({ state: "not_editable", providerStatus: "shipped" });
+    createLateEditResidualShipmentMock.mockResolvedValue({
+      shipmentId: 999, shipmentItemIds: [40001], addedQuantity: 2, quantityIncreases: [], created: true,
+    });
+    const { db, inserts, updates } = makeDb({
+      shippingEngine: { setShipmentItemQuantity } as any,
+      transaction: true,
+      executeRows: [{ rows: [{ order_id: 211265, channel_id: 36, order_item_id: 328259 }] }],
+    });
+
+    await expect(dispatchShippingEngineShipmentQuantityAmendRetry(db, row() as any)).resolves.toBe("success");
+    expect(createLateEditResidualShipmentMock).toHaveBeenCalledWith(db, 211265, 36, [328259], { useXactLock: true });
+    expect(inserts.some((insert) =>
+      insert.values.topic === "shipstation_shipment_push" && insert.values.payload?.shipmentId === 999)).toBe(true);
+    expect(updates.some((update) => update.set.status === "success")).toBe(true);
+  });
+
+  it("dead-letters a permanent engine error immediately instead of retrying", async () => {
+    const setShipmentItemQuantity = vi.fn().mockRejectedValue(
+      new ShipStationPushError("ShipStation order has no line wms-item-30121 to amend", {
+        code: "SS_PUSH_QUANTITY_AMEND_LINE_MISSING", shipmentId: 20973, field: "lineItemKey", value: "wms-item-30121",
+      } as any),
+    );
+    const { db, updates } = makeDb({ shippingEngine: { setShipmentItemQuantity } as any });
+
+    await expect(dispatchShippingEngineShipmentQuantityAmendRetry(db, row() as any)).resolves.toBe("dead");
+    expect(updates.some((update) => update.set.status === "dead")).toBe(true);
+  });
+
+  it("schedules a retry for a transient engine error", async () => {
+    const setShipmentItemQuantity = vi.fn().mockRejectedValue(new Error("ShipStation 503"));
+    const { db, updates } = makeDb({ shippingEngine: { setShipmentItemQuantity } as any });
+
+    const outcome = await dispatchShippingEngineShipmentQuantityAmendRetry(db, row() as any);
+    expect(outcome).not.toBe("dead");
+    expect(outcome).not.toBe("success");
+    expect(updates.some((update) => update.set.status === "dead")).toBe(false);
+  });
+
+  it("dead-letters a malformed payload without calling the engine", async () => {
+    const setShipmentItemQuantity = vi.fn();
+    const { db } = makeDb({ shippingEngine: { setShipmentItemQuantity } as any });
+
+    await expect(dispatchShippingEngineShipmentQuantityAmendRetry(db, row({ amendmentKey: "20973:1" }) as any))
+      .resolves.toBe("malformed");
+    expect(setShipmentItemQuantity).not.toHaveBeenCalled();
+  });
+
+  it("keeps the command pending when no engine supports quantity amends", async () => {
+    const { db } = makeDb({ shippingEngine: { appendShipmentItems: vi.fn() } });
+    await expect(dispatchShippingEngineShipmentQuantityAmendRetry(db, row() as any)).resolves.toBe("pending");
+  });
+
+  it("enqueues one pending command per package row", async () => {
+    const { db, inserts } = makeDb({ executeRows: [{ rows: [] }] });
+    await enqueueShippingEngineShipmentQuantityAmendRetry(db, 20973, 30121, "edit");
+    expect(inserts).toHaveLength(1);
+    expect(inserts[0].values).toMatchObject({
+      provider: "internal",
+      topic: SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC,
+      payload: { shipmentId: 20973, shipmentItemId: 30121, amendmentKey: "20973:30121" },
+      status: "pending",
+    });
+
+    const pending = makeDb({ executeRows: [{ rows: [{ id: 1 }] }] });
+    await enqueueShippingEngineShipmentQuantityAmendRetry(pending.db, 20973, 30121, "edit again");
+    expect(pending.inserts).toHaveLength(0);
+  });
+
+  it("rejects invalid identities", async () => {
+    const { db } = makeDb();
+    await expect(enqueueShippingEngineShipmentQuantityAmendRetry(db, 0, 30121)).rejects.toThrow(/shipmentId/);
+    await expect(enqueueShippingEngineShipmentQuantityAmendRetry(db, 20973, -1)).rejects.toThrow(/shipmentItemId/);
+  });
+
+  it("is dispatched by the worker loop", () => {
+    expect(WEBHOOK_RETRY_WORKER_SRC).toContain("item.topic === SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC");
   });
 });

@@ -5,6 +5,7 @@ import { incr } from "../../instrumentation/metrics";
 import { createShipmentForOrder } from "../wms/shipment-execution-and-projection.api";
 import { describeWmsSyncFailure } from "./domain/wms-sync-failure";
 import {
+  createLateEditResidualShipment,
   movePendingShipmentItemsToLateEditResidual,
 } from "../wms/shipment-execution-and-projection.api";
 // Stable error code for a deterministic, non-retryable ShipStation push
@@ -245,6 +246,10 @@ export interface RetryShipStationService {
   appendShipmentItems?(
     shipmentId: number,
     shipmentItemIds: readonly number[],
+  ): Promise<{ state: "applied" | "already_applied" | "not_editable"; providerStatus: string }>;
+  setShipmentItemQuantity?(
+    shipmentId: number,
+    shipmentItemId: number,
   ): Promise<{ state: "applied" | "already_applied" | "not_editable"; providerStatus: string }>;
   syncWmsOrderShipStationHoldState?(
     wmsOrderId: number,
@@ -663,6 +668,53 @@ export async function enqueueShippingEngineShipmentAmendRetry(
       shipmentItemIds: normalizedItemIds,
       amendmentKey,
     },
+    attempts: 0,
+    status: "pending",
+    lastError: message || null,
+    nextRetryAt: new Date(),
+  });
+}
+
+export const SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC = "shipping_engine_shipment_quantity_amend";
+
+/**
+ * Queue a provider quantity amend for one package row the shipping engine
+ * already holds. The payload names only the row: the target quantity is
+ * recomputed from current WMS demand when the amend runs, so a later edit
+ * before dispatch is applied too, and replays are idempotent.
+ */
+export async function enqueueShippingEngineShipmentQuantityAmendRetry(
+  dbArg: any,
+  shipmentId: number,
+  shipmentItemId: number,
+  cause?: unknown,
+): Promise<void> {
+  if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+    throw new Error(
+      `enqueueShippingEngineShipmentQuantityAmendRetry: shipmentId must be a positive integer (got ${shipmentId})`,
+    );
+  }
+  if (!Number.isInteger(shipmentItemId) || shipmentItemId <= 0) {
+    throw new Error(
+      `enqueueShippingEngineShipmentQuantityAmendRetry: shipmentItemId must be a positive integer (got ${shipmentItemId})`,
+    );
+  }
+  const amendmentKey = `${shipmentId}:${shipmentItemId}`;
+  const message =
+    cause instanceof Error ? cause.message : typeof cause === "string" ? cause : cause == null ? "" : String(cause);
+
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "internal",
+    topic: SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC,
+    scope: sql`payload->>'amendmentKey' = ${amendmentKey}`,
+  })) {
+    return;
+  }
+
+  await insertWebhookRetryQueueRow(dbArg, {
+    provider: "internal",
+    topic: SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC,
+    payload: { shipmentId, shipmentItemId, amendmentKey },
     attempts: 0,
     status: "pending",
     lastError: message || null,
@@ -1560,6 +1612,141 @@ export async function dispatchShippingEngineShipmentAmendRetry(
     } else {
       console.warn(
         `${LOG_PREFIX} Item ${item.id} (shipping_engine_shipment_amend, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+}
+
+/**
+ * Error codes from a provider quantity amend that identical retries can never
+ * fix (the engine order lost the line, or the row is not a customer line).
+ * These dead-letter immediately instead of burning the retry budget.
+ */
+export const PERMANENT_QUANTITY_AMEND_ERROR_CODES = new Set([
+  "SS_PUSH_QUANTITY_AMEND_LINE_MISSING",
+  SS_PUSH_INVALID_SHIPMENT,
+]);
+
+export async function dispatchShippingEngineShipmentQuantityAmendRetry(
+  dbArg: any,
+  item: RetryDispatchItem,
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  const payload = item.payload as {
+    shipmentId?: number;
+    shipmentItemId?: number;
+    amendmentKey?: string;
+  } | null;
+  const shipmentId = Number(payload?.shipmentId);
+  const shipmentItemId = Number(payload?.shipmentItemId);
+  if (
+    !Number.isInteger(shipmentId) || shipmentId <= 0 ||
+    !Number.isInteger(shipmentItemId) || shipmentItemId <= 0 ||
+    payload?.amendmentKey !== `${shipmentId}:${shipmentItemId}`
+  ) {
+    await markRowDead(dbArg, item, "malformed payload: shipmentId, shipmentItemId, or amendmentKey invalid");
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed ${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC} payload)`,
+    );
+    return "malformed";
+  }
+
+  const eng = resolveShippingEngine(dbArg);
+  const ssSvc = resolveShipStationService(dbArg);
+  if (
+    (!eng || typeof eng.setShipmentItemQuantity !== "function") &&
+    (!ssSvc || typeof ssSvc.setShipmentItemQuantity !== "function")
+  ) {
+    await keepPending(dbArg, item.id, "shipping engine quantity amendment API is unavailable");
+    console.warn(
+      `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) deferred - engine unavailable`,
+    );
+    return "pending";
+  }
+
+  try {
+    const result = eng && typeof eng.setShipmentItemQuantity === "function"
+      ? await eng.setShipmentItemQuantity({ shipmentId, shipmentItemId })
+      : await ssSvc!.setShipmentItemQuantity!(shipmentId, shipmentItemId);
+
+    if (result.state === "not_editable") {
+      // The engine positively reported the order locked (shipped/cancelled):
+      // the extra units go in a separate residual package instead.
+      if (typeof dbArg?.transaction !== "function") {
+        throw new Error("database transaction API is required for late-edit residual fallback");
+      }
+      const residual = await dbArg.transaction(async (tx: any) => {
+        const source = await tx.execute(sql`
+          SELECT os.order_id, os.channel_id, osi.order_item_id
+          FROM wms.outbound_shipment_items osi
+          JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+          WHERE osi.id = ${shipmentItemId} AND os.id = ${shipmentId}
+          LIMIT 1
+        `);
+        const row = source.rows?.[0] as any;
+        if (!row || row.order_item_id == null) {
+          throw Object.assign(new Error(`shipment item ${shipmentItemId} is not a customer line on shipment ${shipmentId}`), {
+            code: SS_PUSH_INVALID_SHIPMENT,
+          });
+        }
+        const created = await createLateEditResidualShipment(
+          tx,
+          Number(row.order_id),
+          row.channel_id == null ? null : Number(row.channel_id),
+          [Number(row.order_item_id)],
+          { useXactLock: true },
+        );
+        if (created.shipmentItemIds.length > 0) {
+          await enqueueShipStationShipmentPushRetry(
+            tx,
+            created.shipmentId,
+            `provider status ${result.providerStatus} locked shipment ${shipmentId}; quantity growth moved to residual`,
+          );
+        }
+        await markRowSuccess(tx, item);
+        return created;
+      });
+      console.log(
+        `${LOG_PREFIX} Item ${item.id} routed ${residual.addedQuantity} unit(s) from locked shipment ${shipmentId} to residual shipment ${residual.shipmentId}`,
+      );
+      return "success";
+    }
+
+    await markRowSuccess(dbArg, item);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} amended quantity of shipment item ${shipmentItemId} on shipment ${shipmentId} (${result.state}, providerStatus=${result.providerStatus})`,
+    );
+    return "success";
+  } catch (err: any) {
+    // ShipStationPushError carries its code on context; plain errors on .code.
+    const errorCode = err?.context?.code ?? err?.code;
+    if (PERMANENT_QUANTITY_AMEND_ERROR_CODES.has(errorCode)) {
+      await markRowDead(dbArg, item, `${errorCode}: ${err?.message || String(err)}`);
+      console.error(JSON.stringify({
+        level: "error",
+        action: "shipping_engine_quantity_amend",
+        outcome: "dead_lettered",
+        error_code: errorCode,
+        shipment_id: shipmentId,
+        shipment_item_id: shipmentItemId,
+        retry_item_id: item.id,
+        message: err?.message || String(err),
+      }));
+      return "dead";
+    }
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      { topic: SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC, shipmentId },
+    );
+    if (status === "dead") {
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
       );
     }
     return status;
@@ -2599,6 +2786,20 @@ async function processPendingWebhooks(
       } catch (branchErr: any) {
         console.error(
           `${LOG_PREFIX} Item ${item.id} shipping_engine_shipment_amend dispatch threw: ${branchErr?.message || branchErr}`,
+        );
+      }
+      continue;
+    }
+
+    if (
+      item.provider === "internal" &&
+      item.topic === SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC
+    ) {
+      try {
+        await dispatchShippingEngineShipmentQuantityAmendRetry(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} ${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC} dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
