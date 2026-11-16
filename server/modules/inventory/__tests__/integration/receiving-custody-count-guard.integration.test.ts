@@ -5,7 +5,7 @@ import type { PoolClient } from "pg";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../fixtures/inventory-cutover-database";
 import { assertReceivingCustodyCountable } from "../../application/receiving-custody-count-guard";
 import { costEvidenceTransactionFromPg } from "../../infrastructure/cost-evidence-pg";
-import { lockReceivingCustodyFence } from "../../../procurement/receiving-custody-public";
+import { lockReceivingCustodyFence } from "../../../procurement/receiving-custody.api";
 import { PostgresCanonicalClaimInventoryRepository } from "../../infrastructure/canonical-claim-inventory.repository";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));

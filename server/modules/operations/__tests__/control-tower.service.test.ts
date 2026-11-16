@@ -7,7 +7,7 @@ vi.mock("../../oms/operations-observability.api", () => ({
   remediateOmsFlowIssue: vi.fn(),
   SHIPSTATION_UNMAPPED_PHYSICAL_RULE: "shipstation_unmapped_physical_shipment",
 }));
-vi.mock("../../procurement/procurement-health-summary.service", () => ({
+vi.mock("../../procurement/health-and-observability.api", () => ({
   loadProcurementHealthSummary: vi.fn(),
 }));
 

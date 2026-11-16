@@ -74,23 +74,30 @@ import { AssemblyPackageReviewService } from "../modules/warehouse/work/applicat
 import { AssemblyPackingRepository } from "../modules/warehouse/work/infrastructure/assembly-packing.repository";
 import { createOrderCombiningService } from "../modules/orders/runtime-services.api";
 import { createOperationsDashboardService } from "../modules/orders/runtime-services.api";
-import { createReceivingService } from "../modules/procurement/receiving.service";
-import { createReceiptReversalService } from "../modules/procurement/receipt-reversal.service";
-import { createReceiveValidationService } from "../modules/procurement/receive-validation.service";
+import {
+  createReceiptReversalService,
+  createReceiveValidationService,
+  createReceivingService,
+} from "../modules/procurement/runtime-services.api";
 import { createProductImportService } from "../modules/catalog/product-import.service";
 import { createChannelProductPushService } from "../modules/channels/product-push.service";
 import { createSyncSettingsService } from "../modules/channels/sync-settings.service";
 import { InventoryPublicationWorkCoordinator } from "../modules/inventory-planning/application/inventory-publication-work-coordinator.service";
 import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
-import { createPurchasingService } from "../modules/procurement/purchasing.service";
-import { CostReportingRepository } from "../modules/procurement/cost-reporting.repository";
-import { createCostReportingService } from "../modules/procurement/cost-reporting.service";
-import { createVendorService } from "../modules/procurement/vendor.service";
-import { createRecommendationPoHandoffService } from "../modules/procurement/recommendation-po-handoff.service";
-import { createDrizzleRecommendationPoHandoffRepository } from "../modules/procurement/recommendation-po-handoff.repository";
-import { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
-import { recordReceivingReconciliationFailure, recordReceiveValidationWarnings } from "../modules/procurement/po-exceptions.service";
-import { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } from "../modules/procurement/ap-ledger.service";
+import {
+  CostReportingRepository,
+  createCostReportingService,
+  createPurchasingService,
+  createShipmentTrackingService,
+  createVendorService,
+  reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction,
+  recordReceivingReconciliationFailure,
+  recordReceiveValidationWarnings,
+} from "../modules/procurement/runtime-services.api";
+import {
+  createDrizzleRecommendationPoHandoffRepository,
+  createRecommendationPoHandoffService,
+} from "../modules/procurement/planning-and-pipeline-jobs.api";
 import {
   createOmsService,
   WmsSyncService,
@@ -903,7 +910,7 @@ export { createSLAMonitorService } from "../modules/orders/runtime-services.api"
 export { createPickingService } from "../modules/orders/runtime-services.api";
 export { createOrderCombiningService } from "../modules/orders/runtime-services.api";
 export { createOperationsDashboardService } from "../modules/orders/runtime-services.api";
-export { createReceivingService } from "../modules/procurement/receiving.service";
+export { createReceivingService } from "../modules/procurement/runtime-services.api";
 export { createProductImportService } from "../modules/catalog/product-import.service";
 export { createChannelProductPushService } from "../modules/channels/product-push.service";
 
@@ -918,21 +925,21 @@ export type { PickingService, PickItemResult, PickInventoryContext, BinCountResu
 export type { OrderCombiningService, CombinableGroup, CombineResult, UncombineResult, GroupForShipping } from "../modules/orders/runtime-services.api";
 export type { CycleCountUseCases as CycleCountService, CycleCountError, ApproveResult, ReconciliationPreview, TransferSuggestion, ReconciliationItem } from "../modules/inventory";
 export type { OperationsDashboardService, BinInventoryParams, ActionQueueParams } from "../modules/orders/runtime-services.api";
-export type { ReceivingService, ReceivingError } from "../modules/procurement/receiving.service";
+export type { ReceivingService, ReceivingError } from "../modules/procurement/runtime-services.api";
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "../modules/catalog/product-import.service";
 export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "../modules/channels/product-push.service";
 export { createSyncSettingsService } from "../modules/channels/sync-settings.service";
 export type { SyncSettingsService, SyncLogWriteParams } from "../modules/channels/sync-settings.service";
 export { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
 export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "../modules/warehouse/bin-assignment.service";
-export { createPurchasingService } from "../modules/procurement/purchasing.service";
-export type { PurchasingService, PurchasingError } from "../modules/procurement/purchasing.service";
-export { createVendorService } from "../modules/procurement/vendor.service";
-export type { VendorService, VendorServiceError } from "../modules/procurement/vendor.service";
-export { createRecommendationPoHandoffService } from "../modules/procurement/recommendation-po-handoff.service";
-export type { RecommendationPoHandoffService, RecommendationPoHandoffError } from "../modules/procurement/recommendation-po-handoff.service";
-export { createShipmentTrackingService } from "../modules/procurement/shipment-tracking.service";
-export type { ShipmentTrackingService, ShipmentTrackingError } from "../modules/procurement/shipment-tracking.service";
+export { createPurchasingService } from "../modules/procurement/runtime-services.api";
+export type { PurchasingService, PurchasingError } from "../modules/procurement/runtime-services.api";
+export { createVendorService } from "../modules/procurement/runtime-services.api";
+export type { VendorService, VendorServiceError } from "../modules/procurement/runtime-services.api";
+export { createRecommendationPoHandoffService } from "../modules/procurement/planning-and-pipeline-jobs.api";
+export type { RecommendationPoHandoffService, RecommendationPoHandoffError } from "../modules/procurement/planning-and-pipeline-jobs.api";
+export { createShipmentTrackingService } from "../modules/procurement/runtime-services.api";
+export type { ShipmentTrackingService, ShipmentTrackingError } from "../modules/procurement/runtime-services.api";
 export { createInventoryLotService } from "../modules/inventory/lots.service";
 export type { InventoryLotService } from "../modules/inventory/lots.service";
 export { createCOGSService } from "../modules/inventory/cogs.service";

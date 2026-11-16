@@ -13,7 +13,7 @@ import {
 import {
   correctProduct102PurchasingIdentity,
   recordProduct102PurchasingCleanupAudit,
-} from "../../procurement/product-102-identity-cleanup.repository";
+} from "../../procurement/catalog-identity-coordination.api";
 import {
   PRODUCT_102_CLEANUP_KEY,
   PRODUCT_102_COUNT_IDS,

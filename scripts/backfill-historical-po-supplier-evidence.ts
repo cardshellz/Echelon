@@ -105,7 +105,7 @@ async function main(): Promise<void> {
     applyHistoricalPoSupplierEvidence,
     previewHistoricalPoSupplierEvidence,
   } = await import(
-    "../server/modules/procurement/historical-po-supplier-evidence-backfill.service"
+    "../server/modules/procurement/maintenance-remediation.api"
   );
 
   try {

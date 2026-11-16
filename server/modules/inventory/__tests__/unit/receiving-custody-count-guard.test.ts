@@ -1,10 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { readUnresolvedReceivingCustody } from "../../../procurement/receiving-custody-public";
+import { readUnresolvedReceivingCustody } from "../../../procurement/receiving-custody.api";
 import { assertReceivingCustodyCountable } from "../../application/receiving-custody-count-guard";
 import { InventoryUseCases } from "../../application/inventory.use-cases";
 import { PostgresCanonicalClaimInventoryRepository } from "../../infrastructure/canonical-claim-inventory.repository";
 
-vi.mock("../../../procurement/receiving-custody-public", () => ({ readUnresolvedReceivingCustody: vi.fn() }));
+vi.mock("../../../procurement/receiving-custody.api", () => ({ readUnresolvedReceivingCustody: vi.fn() }));
 vi.mock("../../infrastructure/operational-quantity-posting", async importOriginal => ({
   ...await importOriginal<typeof import("../../infrastructure/operational-quantity-posting")>(),
   openOperationalQuantityPosting: vi.fn(async () => null),

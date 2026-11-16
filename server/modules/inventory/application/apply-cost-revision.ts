@@ -13,7 +13,7 @@ import { applyNoInventoryEffect } from "./apply-no-inventory-effect";
 import { projectCostForFrozenLot, replaceCostComponent } from "../domain/cost-application.domain";
 import { CostEvidenceError, costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../infrastructure/cost-evidence.repository";
 import type { SupplierReturnCostAdjustment } from "@shared/procurement/supplier-return";
-import { readReceivingLineCostProvenance } from "../../procurement/cost-source-evidence-public";
+import { readReceivingLineCostProvenance } from "../../procurement/cost-source-evidence.api";
 
 const MAX_APPLICATION_LOTS = 10_000;
 const MAX_APPLICATION_EDGES = 100_000;

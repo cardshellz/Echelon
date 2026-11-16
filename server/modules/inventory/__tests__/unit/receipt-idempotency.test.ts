@@ -144,4 +144,4 @@ vi.mock("../../infrastructure/operational-quantity-posting", async importOrigina
   openOperationalQuantityPosting: vi.fn(async () => null),
 }));
 // The receipt replay fixture has no held goods; real custody evidence has its own suite.
-vi.mock("../../../procurement/receiving-custody-public", () => ({ readUnresolvedReceivingCustody: vi.fn(async () => []) }));
+vi.mock("../../../procurement/receiving-custody.api", () => ({ readUnresolvedReceivingCustody: vi.fn(async () => []) }));
