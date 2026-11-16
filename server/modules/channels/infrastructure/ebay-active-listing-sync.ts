@@ -254,7 +254,8 @@ export async function readExistingEbayListingMappingSource(productId: number, op
       isActive: snapshot.rows.find(row => row.variant_id === member.variantId)!.variant_is_active,
       availableQuantity: byVariantId.get(member.variantId) ?? 0 })) };
 }
-async function readExistingEbayIdentitySnapshot(productId: number, expected?: EbayListingSyncIdentity) {
+async function readExistingEbayIdentitySnapshot(productId: number, expected?: EbayListingSyncIdentity,
+  pendingAdditionSkus: readonly string[] = []) {
   const ctx = await context(),
     listingsResult = await readActiveEbaySyncRows({
       productIds: [productId],
@@ -272,6 +273,7 @@ async function readExistingEbayIdentitySnapshot(productId: number, expected?: Eb
       isActive: listingsResult.find(row => row.variant_id === member.variantId)!.variant_is_active,
       availableQuantity: syncAtpByVariantId.get(member.variantId) ?? 0,
     })),
+    pendingAdditionSkus,
   );
   // Provider observation may take multiple reads; fence catalog/mapping changes
   // during those reads before preparing any provider write.
@@ -283,9 +285,11 @@ async function readExistingEbayIdentitySnapshot(productId: number, expected?: Eb
 
 /** Existing-listing previews and maintenance use the same provider observation,
  * including saved disabled/inactive members. Catalog content is not prepared. */
-export async function readExistingEbayListingIdentityForProduct(productId: number): Promise<EbayListingSyncIdentity> {
+export async function readExistingEbayListingIdentityForProduct(productId: number,
+  // Only the reviewed-change preview passes these (see bindObservedEbayListingMembers); content sync never does.
+  pendingAdditionSkus: readonly string[] = []): Promise<EbayListingSyncIdentity> {
   z.number().int().positive().max(2147483647).parse(productId);
-  return (await readExistingEbayIdentitySnapshot(productId)).boundIdentity;
+  return (await readExistingEbayIdentitySnapshot(productId, undefined, pendingAdditionSkus)).boundIdentity;
 }
 
 async function prepareActiveEbayListingSync(

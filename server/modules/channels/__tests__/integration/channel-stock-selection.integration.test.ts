@@ -152,6 +152,20 @@ describe.skipIf(!url || !disposable)("Channels selection owner SQL", () => {
       expect((await actions())[102]).toBe("publish");
     });
 
+    it("reports the sizes an open review is adding to one exact listing, and none once it closes", async () => {
+      const read = (productId: number, externalListingId: string) => intents().openAdditionSkus({ channelId: 1, productId, externalListingId });
+      expect(await read(10, "listing")).toEqual([]);
+      await open();
+      await intents().open({ kind: "listing_update", channelId: 1, connectionId: 11, productId: 20, externalListingId: "other-listing",
+        reviewToken: TOKEN_A, actor: "user:operator", members: [{ productVariantId: 201, sku: "OTHER" }] }, NOW);
+      expect(await read(10, "listing")).toEqual(["CASE"]);
+      expect(await read(10, "other-listing")).toEqual([]);
+      expect(await read(20, "other-listing")).toEqual(["OTHER"]);
+      await intents().close({ channelId: 1, productId: 10, reviewToken: TOKEN_A, reason: "applied" }, LATER);
+      expect(await read(10, "listing")).toEqual([]);
+      await expect(intents().openAdditionSkus({ channelId: 0, productId: 10, externalListingId: "listing" })).rejects.toThrow();
+    });
+
     it("refuses a size of another product, bad input and a row that breaks the table's rules, writing nothing", async () => {
       await expect(open(TOKEN_A, [{ productVariantId: 201, sku: "OTHER" }])).rejects.toMatchObject({ code: "EBAY_LISTING_CHANGE_INTENT_NOT_RECORDED" });
       await expect(open("not-a-token")).rejects.toThrow();

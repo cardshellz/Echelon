@@ -589,9 +589,14 @@ describe("explicit eBay listing rebuild lifecycle", () => {
       "CATALOG-GROUP",
       expect.objectContaining({ variantSKUs: ["CATALOG-KEEP", "CATALOG-NEW"] }),
     );
+    // The added size is published on a group that still holds the removed size, then the removal is written.
+    const groupWrites = vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.map(([, group]) => group.variantSKUs);
+    expect(groupWrites).toEqual([["CATALOG-KEEP", "CATALOG-NEW", "CATALOG-OLD"], ["CATALOG-KEEP", "CATALOG-NEW"]]);
     expect(calls.indexOf("put_inventory")).toBeLessThan(calls.indexOf("put_group"));
-    expect(calls.indexOf("put_group")).toBeLessThan(calls.indexOf("update_offer"));
-    expect(calls.indexOf("update_offer")).toBeLessThan(calls.indexOf("publish_group"));
+    expect(calls.indexOf("put_group")).toBeLessThan(calls.indexOf("publish_group"));
+    expect(calls.indexOf("publish_group")).toBeLessThan(calls.lastIndexOf("put_group"));
+    expect(calls.lastIndexOf("put_group")).toBeLessThan(calls.indexOf("update_offer"));
+    expect(calls.indexOf("update_offer")).toBeLessThan(calls.lastIndexOf("publish_group"));
     expect(client.withdrawOfferByInventoryItemGroup).not.toHaveBeenCalled();
     expect(client.deleteInventoryItemGroup).not.toHaveBeenCalled();
   });
@@ -621,8 +626,54 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     expect(calls.filter(call => call.startsWith("create_offer"))).toEqual(["create_offer:CATALOG-NEW"]);
     expect(calls.lastIndexOf("put_inventory")).toBeLessThan(calls.indexOf("create_offer:CATALOG-NEW"));
     expect(calls.indexOf("create_offer:CATALOG-NEW")).toBeLessThan(calls.indexOf("put_group"));
-    expect(calls.indexOf("put_group")).toBeLessThan(calls.indexOf("update_offer"));
-    expect(calls.indexOf("update_offer")).toBeLessThan(calls.indexOf("publish_group"));
+    expect(calls.lastIndexOf("put_group")).toBeLessThan(calls.indexOf("update_offer"));
+    expect(calls.indexOf("update_offer")).toBeLessThan(calls.lastIndexOf("publish_group"));
+  });
+
+  // What eBay did in production on listing 298148420100: a group write that would leave fewer than two published
+  // variations is refused with 25604, and eBay keeps the added SKU in the group anyway. A later read showed the
+  // group holding the old, kept and new SKUs, with the new SKU having no offer.
+  it("adds one size and removes another on a live listing under eBay's observed rules, resuming a half-added size", async () => {
+    const calls: string[] = [];
+    const client = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP", "CATALOG-NEW"], currentListingId: "listing-old", calls });
+    const published = new Set(["CATALOG-OLD", "CATALOG-KEEP"]);
+    const offered = new Set(["CATALOG-OLD", "CATALOG-KEEP"]);
+    const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
+    vi.mocked(client.getOffers).mockImplementation(async (sku, marketplaceId) => !offered.has(sku) ? { offers: [] }
+      : { offers: (await readOffers(sku, marketplaceId)).offers.map(offer => published.has(sku)
+        ? { ...offer, status: "PUBLISHED", listing: { listingId: "listing-old", listingStatus: "ACTIVE" } }
+        : { ...offer, status: "UNPUBLISHED", listing: undefined }) });
+    vi.mocked(client.createOffer).mockImplementation(async offer => { calls.push("create_offer:" + offer.sku); offered.add(offer.sku); return "offer-" + offer.sku; });
+    const applyGroup = vi.mocked(client.createOrReplaceInventoryItemGroup).getMockImplementation()!;
+    let group = ["CATALOG-OLD", "CATALOG-KEEP", "CATALOG-NEW"];
+    vi.mocked(client.createOrReplaceInventoryItemGroup).mockImplementation(async (key, payload) => {
+      const next = payload.variantSKUs ?? [];
+      if (next.filter(sku => published.has(sku)).length < 2) {
+        group = [...new Set([...group, ...next])];
+        throw new Error("eBay API PUT inventory_item_group failed (400): [25604] Converting active listing from Multi-SKU to single SKU is not allowed.");
+      }
+      group = [...next];
+      for (const sku of [...published]) if (!next.includes(sku)) published.delete(sku);
+      await applyGroup(key, payload);
+    });
+    vi.mocked(client.publishOfferByInventoryItemGroup).mockImplementation(async () => {
+      calls.push("publish_group");
+      for (const sku of group) if (offered.has(sku)) published.add(sku);
+      return { listingId: "listing-old" };
+    });
+    const connector = new EbayMarketplaceListingConnector();
+    const draft = makeGroupedDraft(["CATALOG-KEEP", "CATALOG-NEW"]);
+    const preview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: "listing-old" });
+    expect(preview).toMatchObject({ addedSkus: ["CATALOG-NEW"], removedSkus: ["CATALOG-OLD"], inactiveSkus: ["CATALOG-NEW"] });
+
+    await expect(connector.updateExistingListing({ client, draft, preview }))
+      .resolves.toMatchObject({ externalProductId: "listing-old", status: "updated", removedSkus: ["CATALOG-OLD"] });
+
+    expect([...published].sort()).toEqual(["CATALOG-KEEP", "CATALOG-NEW"]);
+    expect(group).toEqual(["CATALOG-KEEP", "CATALOG-NEW"]);
+    expect(calls.filter(call => call.startsWith("create_offer"))).toEqual(["create_offer:CATALOG-NEW"]);
+    expect(calls.indexOf("create_offer:CATALOG-NEW")).toBeLessThan(calls.indexOf("put_group"));
+    expect(calls.indexOf("publish_group")).toBeLessThan(calls.lastIndexOf("put_group"));
   });
 
   it("does not write the group when an added member's offer cannot be created", async () => {
@@ -830,6 +881,10 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     ]);
     expect(groupCalls[1]).toEqual([
       "CATALOG-GROUP",
+      expect.objectContaining({ variantSKUs: ["CATALOG-KEEP", "CATALOG-NEW", "CATALOG-OLD"] }),
+    ]);
+    expect(groupCalls[2]).toEqual([
+      "CATALOG-GROUP",
       expect.objectContaining({
         variantSKUs: ["CATALOG-KEEP", "CATALOG-NEW"],
         variesBy: {
@@ -851,7 +906,9 @@ describe("explicit eBay listing rebuild lifecycle", () => {
       currentListingId: "listing-old",
     });
     const applyGroup = vi.mocked(client.createOrReplaceInventoryItemGroup).getMockImplementation()!;
+    // The first write publishes the added size beside the old one; eBay refuses the write that removes the old one.
     vi.mocked(client.createOrReplaceInventoryItemGroup)
+      .mockImplementationOnce(applyGroup)
       .mockRejectedValueOnce(new Error("eBay API failed: errorId:25013 Invalid data in the Inventory Item Group"))
       .mockImplementationOnce(applyGroup);
     const readInventoryItem = vi.mocked(client.getInventoryItem).getMockImplementation()!;
@@ -900,14 +957,16 @@ describe("explicit eBay listing rebuild lifecycle", () => {
 
   it.each(["sku", "marketplace", "offer", "listing", "inventory_item"])("refuses retained quantity reduction after exact %s identity changes", async changed => {
     const client = makeLifecycleClient({ currentSkus: ["CATALOG-OLD", "CATALOG-KEEP"], currentListingId: "listing-old" });
-    vi.mocked(client.createOrReplaceInventoryItemGroup).mockRejectedValueOnce(new Error("eBay errorId:25013 Invalid data in the Inventory Item Group")).mockResolvedValue(undefined);
+    vi.mocked(client.createOrReplaceInventoryItemGroup).mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("eBay errorId:25013 Invalid data in the Inventory Item Group")).mockResolvedValue(undefined);
+    vi.mocked(client.publishOfferByInventoryItemGroup).mockResolvedValue({ listingId: "listing-old" });
     const readInventoryItem = vi.mocked(client.getInventoryItem).getMockImplementation()!;
     vi.mocked(client.getInventoryItem).mockImplementation(async sku => sku !== "CATALOG-OLD" ? readInventoryItem(sku) : ({
       sku: changed === "inventory_item" ? "WRONG" : "CATALOG-OLD", condition: "NEW",
       product: { title: "Old", imageUrls: ["https://example.com/product.jpg"], aspects: {} }, availability: { shipToLocationAvailability: { quantity: 5 } } }));
     const readOffers = vi.mocked(client.getOffers).getMockImplementation()!;
     vi.mocked(client.getOffers).mockImplementation(async (sku, marketplace) => ({
-      offers: (await readOffers(sku, marketplace)).offers.map(offer => sku === "CATALOG-OLD" && vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.length >= 2
+      offers: (await readOffers(sku, marketplace)).offers.map(offer => sku === "CATALOG-OLD" && vi.mocked(client.createOrReplaceInventoryItemGroup).mock.calls.length >= 3
         ? { ...offer, ...(changed === "sku" ? { sku: "WRONG" } : {}), ...(changed === "marketplace" ? { marketplaceId: "EBAY_GB" } : {}),
           ...(changed === "offer" ? { offerId: "another-offer" } : {}), ...(changed === "listing" ? { listing: { listingId: "another-listing" } } : {}) } : offer),
     }));
@@ -916,7 +975,8 @@ describe("explicit eBay listing rebuild lifecycle", () => {
     const preview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: "listing-old" });
     await expect(connector.updateExistingListing({ client, draft, preview })).rejects.toMatchObject({ code: "EBAY_SYNC_MAPPING_INVALID" });
     expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
-    expect(client.publishOfferByInventoryItemGroup).not.toHaveBeenCalled();
+    // Only the added size's publication ran; the listing is never republished after the refused reduction.
+    expect(client.publishOfferByInventoryItemGroup).toHaveBeenCalledTimes(1);
   });
 
   it("rejects an in-place update when live membership changed after review", async () => {

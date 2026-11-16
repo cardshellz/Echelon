@@ -75,6 +75,21 @@ export class EbayListingChangeIntentRepository {
     });
   }
 
+  /**
+   * The SKUs an open reviewed change is adding to this exact listing. A change that stopped after eBay writes began
+   * can leave such a size in eBay's group; the next review reads this so it can finish the change instead of
+   * refusing a group member it has no saved identity for.
+   */
+  async openAdditionSkus(raw: { channelId: number; productId: number; externalListingId: string }): Promise<string[]> {
+    const input = z.object({ channelId: id, productId: id, externalListingId: z.string().trim().min(1).max(100) }).strict().parse(raw);
+    const client = await this.pool.connect();
+    try {
+      return (await client.query<{ sku: string }>(`SELECT sku FROM channels.ebay_listing_change_intents
+        WHERE channel_id=$1 AND product_id=$2 AND external_listing_id=$3 AND closed_at IS NULL ORDER BY sku`,
+      [input.channelId, input.productId, input.externalListingId])).rows.map(row => row.sku);
+    } finally { client.release(); }
+  }
+
   /** Closes this review's open rows. Closing an already-closed or unknown review changes nothing. */
   async close(raw: CloseEbayListingChangeIntent, now: Date): Promise<number> {
     const input = closeSchema.parse(raw), at = z.date().parse(now);
