@@ -1,40 +1,14 @@
 {
   "routeWriters": {
-    "catalog.product_assets": [
-      "server/modules/catalog/catalog.routes.ts"
-    ],
-    "catalog.product_categories": [
-      "server/modules/catalog/catalog.routes.ts"
-    ],
-    "catalog.product_variants": [
-      "server/modules/catalog/catalog.routes.ts"
-    ],
     "catalog.products": [
-      "server/modules/catalog/catalog.routes.ts",
       "server/routes/ebay-listing-rules.routes.ts",
       "server/routes/ebay/ebay-config.routes.ts"
-    ],
-    "catalog.shipping_groups": [
-      "server/modules/catalog/catalog.routes.ts"
-    ],
-    "channels.channel_allocation_rules": [
-      "server/modules/channels/channels.routes.ts"
     ],
     "channels.channel_connections": [
       "server/routes/ebay-settings.routes.ts"
     ],
-    "channels.channel_feeds": [
-      "server/modules/catalog/catalog.routes.ts"
-    ],
     "channels.channel_listings": [
-      "server/modules/catalog/catalog.routes.ts",
       "server/routes/ebay/ebay-listings.routes.ts"
-    ],
-    "channels.channel_warehouse_assignments": [
-      "server/modules/channels/channels.routes.ts"
-    ],
-    "channels.channels": [
-      "server/routes/pick-priority.routes.ts"
     ],
     "ebay.ebay_category_aspects": [
       "server/routes/ebay/ebay-taxonomy.routes.ts"
@@ -50,25 +24,6 @@
     ],
     "ebay.ebay_type_aspect_defaults": [
       "server/routes/ebay/ebay-taxonomy.routes.ts"
-    ],
-    "shipping.quote_snapshots": [
-      "server/modules/shipping-engine/interfaces/http/carrier-callback.routes.ts"
-    ],
-    "shipping.rate_book_assignments": [
-      "server/modules/shipping-engine/interfaces/http/rate-book-admin.routes.ts"
-    ],
-    "shipping.rate_books": [
-      "server/modules/shipping-engine/interfaces/http/rate-book-admin.routes.ts"
-    ],
-    "shipping.rate_table_rows": [
-      "server/modules/shipping-engine/interfaces/http/rate-table-admin.routes.ts"
-    ],
-    "shipping.rate_tables": [
-      "server/modules/shipping-engine/interfaces/http/rate-book-admin.routes.ts",
-      "server/modules/shipping-engine/interfaces/http/rate-table-admin.routes.ts"
-    ],
-    "warehouse.echelon_settings": [
-      "server/routes/pick-priority.routes.ts"
     ]
   },
   "scriptWriters": {

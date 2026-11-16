@@ -360,16 +360,35 @@ describe("writer-ratchet (P2.1)", () => {
 
   it("blocks any new direct database writes in *.routes.ts files across server/ and server/modules/", () => {
     const addedRouteWrites: string[] = [];
+    const staleRouteWrites: string[] = [];
+    const moduleRouteWrites: string[] = [];
     for (const [table, files] of Object.entries(currentRouteWriters)) {
       const allowed = new Set(routeAndScriptBaseline.routeWriters[table] ?? []);
       for (const file of files) {
         if (!allowed.has(file)) addedRouteWrites.push(`${table}  ←  ${file}`);
+        if (file.startsWith("server/modules/")) moduleRouteWrites.push(`${table}  ←  ${file}`);
+      }
+    }
+    for (const [table, files] of Object.entries(routeAndScriptBaseline.routeWriters)) {
+      const now = new Set(currentRouteWriters[table] ?? []);
+      for (const file of files) {
+        if (!now.has(file)) staleRouteWrites.push(`${table}  ←  ${file}`);
       }
     }
     expect(
       addedRouteWrites,
       `NEW direct DB write(s) detected in *.routes.ts. Route files must delegate writes to application/use-case/repository layers:\n` +
         addedRouteWrites.join("\n"),
+    ).toEqual([]);
+    expect(
+      moduleRouteWrites,
+      `Direct DB write(s) detected inside server/modules/**/*.routes.ts (must be zero):\n` +
+        moduleRouteWrites.join("\n"),
+    ).toEqual([]);
+    expect(
+      staleRouteWrites,
+      `Eliminated route writer(s) must be removed from route-and-script-baseline.json:\n` +
+        staleRouteWrites.join("\n"),
     ).toEqual([]);
   });
 

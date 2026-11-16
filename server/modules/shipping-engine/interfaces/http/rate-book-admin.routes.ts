@@ -10,12 +10,11 @@
  */
 
 import type { Express, Request, Response } from "express";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   shippingRateBookAssignments,
   shippingRateBooks,
-  shippingRateTables,
   shippingZoneSets,
   warehouses,
 } from "@shared/schema";
@@ -26,6 +25,13 @@ import {
   findDuplicateAssignments,
   slugifyRateBookCode,
 } from "../../domain/rate-book-admin";
+import {
+  deactivateRateBookChildrenOnRetireInTx,
+  insertRateBookAssignmentsInTx,
+  insertRateBookRecordInTx,
+  replaceRateBookAssignmentsInTx,
+  updateRateBookRecordIfStatusInTx,
+} from "../../infrastructure/rate-book-admin.repository";
 
 const assignmentSchema = z.object({
   pricingChannel: z.string().trim().min(1).max(40).toLowerCase(),
@@ -114,24 +120,14 @@ export function registerRateBookAdminRoutes(
 
         const now = new Date();
         const created = await database.transaction(async (tx) => {
-          const [book] = await tx.insert(shippingRateBooks).values({
+          const book = await insertRateBookRecordInTx(tx, {
             code,
             name: parsed.data.name,
             zoneSetId: zoneSet.id,
             status: "active",
             metadata: { source: "admin-ui", createdVia: "pricing-programs" },
-          }).returning();
-          if (parsed.data.assignments.length > 0) {
-            await tx.insert(shippingRateBookAssignments).values(
-              parsed.data.assignments.map((assignment) => ({
-                rateBookId: book.id,
-                pricingChannel: assignment.pricingChannel,
-                ratePurpose: assignment.ratePurpose,
-                originWarehouseId: assignment.originWarehouseId,
-                isActive: true,
-              })),
-            );
-          }
+          });
+          await insertRateBookAssignmentsInTx(tx, book.id, parsed.data.assignments);
           await recordAudit(tx, {
             actor,
             action: "shipping.rate_book.created",
@@ -206,18 +202,12 @@ export function registerRateBookAdminRoutes(
 
           const shouldTouchBook =
             parsed.data.name !== undefined || parsed.data.assignments !== undefined;
-          const [book] = !shouldTouchBook
-            ? [current]
-            : await tx.update(shippingRateBooks)
-                .set({
-                  ...(parsed.data.name === undefined ? {} : { name: parsed.data.name }),
-                  updatedAt: now,
-                })
-                .where(and(
-                  eq(shippingRateBooks.id, id),
-                  eq(shippingRateBooks.status, current.status),
-                ))
-                .returning();
+          const book = !shouldTouchBook
+            ? current
+            : await updateRateBookRecordIfStatusInTx(tx, id, current.status, {
+                ...(parsed.data.name === undefined ? {} : { name: parsed.data.name }),
+                updatedAt: now,
+              });
           if (!book) {
             throw new RateBookAdminError(
               409,
@@ -228,19 +218,7 @@ export function registerRateBookAdminRoutes(
 
           const afterAssignments = parsed.data.assignments ?? beforeAssignments;
           if (parsed.data.assignments) {
-            await tx.delete(shippingRateBookAssignments)
-              .where(eq(shippingRateBookAssignments.rateBookId, id));
-            if (parsed.data.assignments.length > 0) {
-              await tx.insert(shippingRateBookAssignments).values(
-                parsed.data.assignments.map((assignment) => ({
-                  rateBookId: id,
-                  pricingChannel: assignment.pricingChannel,
-                  ratePurpose: assignment.ratePurpose,
-                  originWarehouseId: assignment.originWarehouseId,
-                  isActive: true,
-                })),
-              );
-            }
+            await replaceRateBookAssignmentsInTx(tx, id, parsed.data.assignments);
           }
           await recordAudit(tx, {
             actor,
@@ -310,23 +288,15 @@ export function registerRateBookAdminRoutes(
               asc(shippingRateBookAssignments.ratePurpose),
             );
 
-          const [book] = await tx.update(shippingRateBooks)
-            .set({ status: "retired", updatedAt: now })
-            .where(and(eq(shippingRateBooks.id, id), eq(shippingRateBooks.status, current.status)))
-            .returning();
+          const book = await updateRateBookRecordIfStatusInTx(tx, id, current.status, {
+            status: "retired",
+            updatedAt: now,
+          });
           if (!book) return null;
           // Channels pointed at this program stop resolving rates now; the
           // active rate tables stay readable for history but are retired so
           // they cannot be resurrected by a later assignment.
-          await tx.update(shippingRateBookAssignments)
-            .set({ isActive: false, updatedAt: now })
-            .where(eq(shippingRateBookAssignments.rateBookId, id));
-          await tx.update(shippingRateTables)
-            .set({ status: "retired", effectiveTo: now })
-            .where(and(
-              eq(shippingRateTables.rateBookId, id),
-              inArray(shippingRateTables.status, ["active", "superseded"]),
-            ));
+          await deactivateRateBookChildrenOnRetireInTx(tx, id, now);
           await recordAudit(tx, {
             actor,
             action: "shipping.rate_book.retired",

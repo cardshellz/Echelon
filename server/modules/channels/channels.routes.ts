@@ -52,6 +52,14 @@ import {
   sendInventoryLegacyAdminControlError,
 } from "../inventory-planning/legacy-admin-control.api";
 import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work";
+import {
+  deleteChannelAllocationRuleInTx,
+  deleteChannelWarehouseAssignmentInTx,
+  insertChannelAllocationRuleInTx,
+  insertChannelWarehouseAssignmentInTx,
+  updateChannelAllocationRuleInTx,
+  updateChannelWarehouseAssignmentInTx,
+} from "./infrastructure/channel-legacy-admin.repository";
 
 type ChannelRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -2379,7 +2387,7 @@ export function registerChannelRoutes(app: Express) {
 
       const [created] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
-        (transaction) => transaction.insert(channelWarehouseAssignments).values(parsed.data).returning(),
+        (transaction) => insertChannelWarehouseAssignmentInTx(transaction, parsed.data),
       );
       res.status(201).json(created);
     } catch (error: any) {
@@ -2411,11 +2419,7 @@ export function registerChannelRoutes(app: Express) {
       const updates: any = { ...parsed.data, updatedAt: new Date() };
       const [updated] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
-        (transaction) => transaction
-          .update(channelWarehouseAssignments)
-          .set(updates)
-          .where(eq(channelWarehouseAssignments.id, id))
-          .returning(),
+        (transaction) => updateChannelWarehouseAssignmentInTx(transaction, id, updates),
       );
 
       if (!updated) return res.status(404).json({ error: "Assignment not found" });
@@ -2435,10 +2439,7 @@ export function registerChannelRoutes(app: Express) {
 
       const [deleted] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
-        (transaction) => transaction
-          .delete(channelWarehouseAssignments)
-          .where(eq(channelWarehouseAssignments.id, id))
-          .returning(),
+        (transaction) => deleteChannelWarehouseAssignmentInTx(transaction, id),
       );
 
       if (!deleted) return res.status(404).json({ error: "Assignment not found" });
@@ -2598,7 +2599,7 @@ export function registerChannelRoutes(app: Express) {
 
       const [created] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
-        (transaction) => transaction.insert(channelAllocationRules).values(data).returning(),
+        (transaction) => insertChannelAllocationRuleInTx(transaction, data),
       );
 
       // Trigger immediate sync for the affected product
@@ -2653,11 +2654,7 @@ export function registerChannelRoutes(app: Express) {
 
       const [updated] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
-        (transaction) => transaction
-          .update(channelAllocationRules)
-          .set(updates)
-          .where(eq(channelAllocationRules.id, id))
-          .returning(),
+        (transaction) => updateChannelAllocationRuleInTx(transaction, id, updates),
       );
 
       if (!updated) return res.status(404).json({ error: "Rule not found" });
@@ -2687,10 +2684,7 @@ export function registerChannelRoutes(app: Express) {
 
       const [deleted] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
-        (transaction) => transaction
-          .delete(channelAllocationRules)
-          .where(eq(channelAllocationRules.id, id))
-          .returning(),
+        (transaction) => deleteChannelAllocationRuleInTx(transaction, id),
       );
 
       if (!deleted) return res.status(404).json({ error: "Rule not found" });
