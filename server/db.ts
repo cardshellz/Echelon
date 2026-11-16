@@ -4,7 +4,6 @@ const { Pool } = pkg;
 import * as schema from "@shared/schema";
 import { createDatabasePoolConfig } from "./database-pool-config";
 import { boundStartupMigrationClient } from "./startup-migration-guard";
-import { CHANNEL_PRICING_RULES_DDL } from "./modules/channels/infrastructure/channel-pricing-schema";
 import {
   getPostgresPoolSnapshot,
   type PostgresPoolSnapshot,
@@ -225,73 +224,26 @@ export async function runReleaseSchemaFallbacks(): Promise<ReleaseSchemaFallback
     // 051_ensure_catalog_columns.sql and made NOT NULL by the tracked migration
     // *_products_ebay_listing_excluded_not_null.sql.
 
-    // 8. eBay Item Specifics (Aspects) management tables
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS ebay.ebay_category_aspects (
-        id SERIAL PRIMARY KEY,
-        category_id VARCHAR(20) NOT NULL,
-        aspect_name VARCHAR(200) NOT NULL,
-        aspect_required BOOLEAN NOT NULL DEFAULT false,
-        aspect_mode VARCHAR(20) NOT NULL DEFAULT 'FREE_TEXT',
-        aspect_usage VARCHAR(20) NOT NULL DEFAULT 'RECOMMENDED',
-        aspect_values JSONB,
-        aspect_order INT NOT NULL DEFAULT 0,
-        fetched_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        UNIQUE(category_id, aspect_name)
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_ebay_cat_aspects_cat ON ebay_category_aspects(category_id)`);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS ebay.ebay_type_aspect_defaults (
-        id SERIAL PRIMARY KEY,
-        product_type_slug VARCHAR(100) NOT NULL,
-        aspect_name VARCHAR(200) NOT NULL,
-        aspect_value VARCHAR(500) NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        UNIQUE(product_type_slug, aspect_name)
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_ebay_type_aspects_slug ON ebay_type_aspect_defaults(product_type_slug)`);
-
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS ebay.ebay_product_aspect_overrides (
-        id SERIAL PRIMARY KEY,
-        product_id INTEGER NOT NULL REFERENCES catalog.products(id),
-        aspect_name VARCHAR(200) NOT NULL,
-        aspect_value VARCHAR(500) NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
-        UNIQUE(product_id, aspect_name)
-      )
-    `);
-    await client.query(`CREATE INDEX IF NOT EXISTS idx_ebay_prod_aspects_pid ON ebay_product_aspect_overrides(product_id)`);
-    console.log("Checked eBay Item Specifics (aspects) tables");
-
-    // Migration: channel_pricing_rules table for hierarchical pricing
-    await client.query(CHANNEL_PRICING_RULES_DDL);
-    console.log("Checked channel_pricing_rules table");
+    // Retired (P4.1): the eBay aspects block and the channel pricing rules block.
+    // - ebay.ebay_category_aspects had no tracked migration; the
+    //   ebay_category_aspects_table migration now creates it.
+    // - ebay.ebay_type_aspect_defaults, ebay.ebay_product_aspect_overrides and
+    //   channels.channel_pricing_rules still have no tracked CREATE. The tracked
+    //   migration *_listing_intent_propagation.sql refuses to run unless they
+    //   already exist, and migrations run before this routine, so this block
+    //   could never create them for a database that needed them. Declaring them
+    //   belongs to the buildable-from-migrations baseline work (REFACTOR-PLAN).
 
     // Retired (P4.1): the eBay policy override column block. The three
     // ebay_*_policy_override columns on products and product_variants are
     // created by 051_ensure_catalog_columns.sql and held at varchar(100) by the
     // tracked migration *_catalog_ebay_policy_override_capacity.sql.
 
-    // Migration: Make channel_allocation_rules.channel_id nullable for "All Channels" global rules
-    await client.query(`ALTER TABLE channel_allocation_rules ALTER COLUMN channel_id DROP NOT NULL`);
-    // Drop the old unique index that includes channel_id as NOT NULL and recreate with COALESCE
-    // so NULL channel_id (global) rules are unique per product/variant
-    await client.query(`DROP INDEX IF EXISTS car_channel_product_variant_idx`);
-    await client.query(`
-      CREATE UNIQUE INDEX IF NOT EXISTS car_channel_product_variant_idx
-      ON channel_allocation_rules(COALESCE(channel_id, 0), COALESCE(product_id, 0), COALESCE(product_variant_id, 0))
-    `);
-    console.log("Checked channel_allocation_rules nullable channel_id for global rules");
-
-    // Migration 048: Add floor_type column for days-of-cover floor mode
-    await client.query(`ALTER TABLE channel_allocation_rules ADD COLUMN IF NOT EXISTS floor_type VARCHAR(10) DEFAULT 'units'`);
-    console.log("Checked channel_allocation_rules floor_type column");
+    // Retired (P4.1): the two channel_allocation_rules blocks. The nullable
+    // channel_id, the COALESCE form of car_channel_product_variant_idx and
+    // floor_type are all in baseline 0002_concerned_darwin.sql (floor_type also in
+    // 048_floor_type_days_of_cover.sql). The block dropped and rebuilt that unique
+    // index on every release; nothing does that any more.
 
     // Migration 049 REMOVED (Path A — no cross-schema DDL at startup):
     // shopify_orders is ORDER data (OMS domain) — not membership data. No app
