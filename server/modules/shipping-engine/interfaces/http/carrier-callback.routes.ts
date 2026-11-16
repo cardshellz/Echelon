@@ -34,11 +34,11 @@ import type { Express, Request, Response } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import {
-  shippingQuoteSnapshots,
   warehouses,
 } from "@shared/schema";
 import { db } from "../../../../db";
 import { incr } from "../../../../instrumentation/metrics";
+import { insertCheckoutQuoteSnapshot } from "../../infrastructure/quote-snapshot.repository";
 import { deliveryWindow, type DeliveryWindow } from "../../domain/eta";
 import type { RateQuoteLine, RateQuoteResult } from "../../application/rate-quote.service";
 import {
@@ -849,7 +849,7 @@ async function persistCheckoutSnapshot(input: PersistCheckoutSnapshotInput): Pro
           items: input.request.items,
         }
       : { unparsedBody: safeJsonable(input.body) };
-    await db.insert(shippingQuoteSnapshots).values({
+    await insertCheckoutQuoteSnapshot({
       source: "checkout",
       destinationCountry: normalizeSnapshotCountry(input.request?.destCountry),
       destinationPostalCode: input.request?.destPostal ?? null,

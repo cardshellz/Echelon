@@ -114,8 +114,7 @@
   "channels.channels": [
     "modules/channels",
     "modules/dropship",
-    "modules/identity",
-    "server/routes/pick-priority.routes.ts"
+    "modules/identity"
   ],
   "channels.ebay_listing_change_intents": [
     "modules/channels"
@@ -1797,8 +1796,7 @@
   ],
   "warehouse.echelon_settings": [
     "modules/orders",
-    "modules/warehouse",
-    "server/routes/pick-priority.routes.ts"
+    "modules/warehouse"
   ],
   "warehouse.fulfillment_nodes": [
     "modules/warehouse"

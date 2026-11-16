@@ -185,11 +185,9 @@ describe("SHP-2: Shipping and Shipping Engine internal API boundaries (CI-03) an
       ),
     ) as { routeWriters: Record<string, string[]>; scriptWriters: Record<string, string[]> };
 
-    // Catalog SIOC confirmation delegated to modules/catalog:
+    // Catalog SIOC confirmation delegated to modules/catalog, and all catalog.product_variants route writers retired:
     expect(baseline["catalog.product_variants"]).not.toContain("modules/shipping-engine");
-    expect(routeAndScriptBaseline.routeWriters["catalog.product_variants"]).not.toContain(
-      "server/modules/shipping-engine/shipping-admin.routes.ts",
-    );
+    expect(routeAndScriptBaseline.routeWriters["catalog.product_variants"]).toBeUndefined();
     expect(routeAndScriptBaseline.routeWriters["shipping.service_levels"]).toBeUndefined();
     expect(routeAndScriptBaseline.routeWriters["shipping.variant_shipping_attrs"]).toBeUndefined();
 
