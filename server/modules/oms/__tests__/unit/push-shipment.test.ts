@@ -51,6 +51,7 @@ function okOrder(overrides: Partial<WmsOrderRow> = {}): WmsOrderRow {
     id: 42,
     order_number: "1001",
     channel_id: 7,
+    warehouse_id: null,
     oms_fulfillment_order_id: null,
     sort_rank: "0000000100",
     external_order_id: "EXT-1001",
@@ -1020,7 +1021,7 @@ describe("pushShipment :: happy path", () => {
   it.each([0, 1])("preserves independent warehouse hold=%s on a new provider job", async on_hold => {
     const mock = makeDb([{ rows: [okShipment()] }, { rows: [okOrder({ on_hold })] },
       { rows: [{ non_shipping_total_cents: 0 }] }, { rows: [okItem()] }]);
-    const request = mockFetchForPush({ orderId: 555000 }); globalThis.fetch = request as typeof fetch;
+    const request = mockFetchForPush({ orderId: 555000 }); globalThis.fetch = request as unknown as typeof fetch;
     await createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock }).pushShipment(9001);
     const sent = request.mock.calls.find(([, init]) => init?.method === "POST")!;
     expect(JSON.parse(sent[1].body).orderStatus).toBe(on_hold === 1 ? "on_hold" : "awaiting_shipment");
@@ -1045,7 +1046,7 @@ describe("pushShipment :: happy path", () => {
       const read = vi.fn(async () => ({ orderId: "gid://shopify/Order/1", shopDomain: "synthetic.myshopify.com",
         updatedAt: version, cancelled: kind === "native_cancelled",
         lines: [{ id: "gid://shopify/LineItem/101", quantity: 2, currentQuantity: 2, unfulfilledQuantity: 2 }] }));
-      const fetchMock = mockFetchForPush({ orderId: 555000 }); globalThis.fetch = fetchMock as typeof fetch;
+      const fetchMock = mockFetchForPush({ orderId: 555000 }); globalThis.fetch = fetchMock as unknown as typeof fetch;
       const service = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock,
         readChannelMerchandise: read });
       if (kind === "verified") {

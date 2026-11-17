@@ -111,7 +111,7 @@ function buildPurchasingMock(overrides: Record<string, any> = {}) {
 function buildApp(purchasing: any): Express {
   const app = express();
   app.use(express.json());
-  app.locals.services = { purchasing, shipmentTracking: {} };
+  app.locals.services = { purchasing, shipmentTracking: {} } as any;
   registerPurchasingRoutes(app);
   return app;
 }

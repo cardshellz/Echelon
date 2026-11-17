@@ -77,6 +77,7 @@ function appendPlanInput(): AppendPackageAllocationPlanInput {
     plannerVersion: "package-allocation-group-v1",
     reason: "partial-failure-test",
     createdBy: "unit-test",
+    authoritySnapshot: {},
     stateSnapshot: {} as AppendPackageAllocationPlanInput["stateSnapshot"],
     reviewSnapshot: { contractVersion: 1, reviews: [] },
     entries: [{

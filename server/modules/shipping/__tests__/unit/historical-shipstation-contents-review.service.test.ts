@@ -72,7 +72,7 @@ function harness() {
     exceptionId: "501",
     shippingProviderLabelId: "41",
   }));
-  const loadWmsResolutionReplay = vi.fn(async () => null);
+  const loadWmsResolutionReplay = vi.fn<HistoricalShipStationContentsReviewRepository["loadWmsResolutionReplay"]>(async () => null);
   const confirmWmsContents = vi.fn(async () => Object.freeze({
     kind: "created" as const,
     exceptionId: "501",
@@ -92,7 +92,7 @@ function harness() {
     confirmWmsContents,
     recordDecision,
   };
-  const loadShipmentContents = vi.fn(async () => providerResult());
+  const loadShipmentContents = vi.fn<HistoricalShipStationContentsClient["loadShipmentContents"]>(async () => providerResult());
   const client: HistoricalShipStationContentsClient = { loadShipmentContents };
   return {
     service: new HistoricalShipStationContentsReviewService(repository, client),

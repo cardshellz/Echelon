@@ -1741,6 +1741,7 @@ describe("ShipStation unmapped physical remediation", () => {
         operator: "ops:test",
         originalShipmentId: 10,
         reason: "lost",
+        contentsAuthority: "provider",
         lineMappings: [{ providerItemIndex: 0, orderItemId: 101, quantity: 1 }],
       },
     )).rejects.toThrow("voided ShipStation shipment cannot be adopted");
@@ -2153,6 +2154,7 @@ describe("ShipStation unmapped physical remediation", () => {
         operator: "ops:test",
         originalShipmentId: 10,
         reason: "misdelivery",
+        contentsAuthority: "provider",
         lineMappings: [{
           evidenceSource: "shipstation",
           providerItemIndex: 0,

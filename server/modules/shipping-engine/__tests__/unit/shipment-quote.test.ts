@@ -186,6 +186,12 @@ describe("quoteShipment", () => {
             promiseMaxBusinessDays: 7,
             ratedMeasure: 400,
             maxShipmentWeightGrams: null,
+            chargeModel: "fixed_band",
+            perStartedPoundCents: null,
+            billablePounds: null,
+            rateTableId: 1,
+            productPolicyApplied: false,
+            calculationTrace: [],
           }],
           warnings: [],
         };

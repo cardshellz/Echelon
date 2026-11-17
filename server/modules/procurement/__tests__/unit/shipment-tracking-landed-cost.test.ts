@@ -38,7 +38,7 @@ beforeEach(() => {
   vi.mocked(readShipmentCostReviewInTransaction).mockReset().mockResolvedValue({ shipmentId: 1,
     lines: [{ lineId: 11, sku: "SKU-1", sourceIssue: null, exceptionReview: null, application: null }] });
   vi.mocked(recordShipmentCostRevisions).mockReset().mockResolvedValue({ revisions: [], issues: [] } as any);
-  vi.mocked(applyShipmentCostRevisions).mockReset().mockResolvedValue({ updated: 0, total: 0, skipped: [], costApplications: [] });
+  vi.mocked(applyShipmentCostRevisions).mockReset().mockResolvedValue({ updated: 0, total: 0, status: "applied", skipped: [], costApplications: [] });
 });
 
 function buildTransactionalDb() {
@@ -570,7 +570,7 @@ describe("ShipmentTrackingService direct command lock order", () => {
     const { db, tx } = buildTransactionalDb();
     let releaseGraph!: () => void;
     const graphLock = new Promise<void>((resolve) => { releaseGraph = resolve; });
-    tx.execute.mockImplementationOnce(() => graphLock);
+    tx.execute.mockImplementationOnce(() => graphLock.then(() => ({ rows: [] })));
     const sourceFailure = new Error("Stop after the first protected source read");
     const storage = buildStorage({
       getInboundFreightCostById: vi.fn().mockRejectedValue(sourceFailure),
@@ -1079,7 +1079,7 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
 
   it("delegates exact shipment identity to the component owner with a transaction-bound COGS writer", async () => {
     const { db, tx } = buildTransactionalDb();
-    const result = { updated: 1, total: 1, skipped: [], costApplications: [] };
+    const result = { updated: 1, total: 1, status: "applied" as const, skipped: [], costApplications: [] };
     vi.mocked(applyShipmentCostRevisions).mockResolvedValueOnce(result);
     const storage = buildStorage();
     const clock = () => new Date("2026-09-07T12:00:00Z");
@@ -1093,7 +1093,7 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
 
   it.each(["source_cost_missing", "receipt_lineage_missing"])("returns the owner's %s review result unchanged", async (reason) => {
     const { db } = buildTransactionalDb();
-    const result = { updated: 0, total: 0, skipped: [{ applicationId: 11, reason, message: "Review source evidence" }], costApplications: [] };
+    const result = { updated: 0, total: 0, status: "review_required" as const, skipped: [{ applicationId: 11, reason, message: "Review source evidence" }], costApplications: [] };
     vi.mocked(applyShipmentCostRevisions).mockResolvedValueOnce(result);
     const service = createShipmentTrackingService(db as any, buildStorage());
     expect(await service.pushLandedCostsToLots(1)).toEqual(result);
@@ -1102,7 +1102,7 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
   it("keeps incomplete component graphs under owner review without calling the legacy lot updater", async () => {
     const { db } = buildTransactionalDb();
     const cogs = buildTransactionalCogs();
-    const result = { updated: 0, total: 0, skipped: [{ applicationId: 11, reason: "incomplete_graph", message: "Review lineage" }], costApplications: [] };
+    const result = { updated: 0, total: 0, status: "review_required" as const, skipped: [{ applicationId: 11, reason: "incomplete_graph", message: "Review lineage" }], costApplications: [] };
     vi.mocked(applyShipmentCostRevisions).mockResolvedValueOnce(result);
     const service = createShipmentTrackingService(db as any, buildStorage(), cogs as any);
     expect(await service.pushLandedCostsToLots(1)).toEqual(result);

@@ -51,8 +51,8 @@ async function reconcileOneShipment(
     oms_order_status?: string;
   },
   ref: { engine: string; engineOrderRef: string; engineShipmentRef?: string },
-  dispatchShipmentEvent: typeof import("../../orders/shipment-rollup").dispatchShipmentEvent,
-  recomputeOrderStatusFromShipments: typeof import("../../orders/shipment-rollup").recomputeOrderStatusFromShipments,
+  dispatchShipmentEvent: typeof import("../../../orders/shipment-rollup").dispatchShipmentEvent,
+  recomputeOrderStatusFromShipments: typeof import("../../../orders/shipment-rollup").recomputeOrderStatusFromShipments,
 ) {
   const shipmentId = row.shipment_id;
 
@@ -232,8 +232,8 @@ describe("reconcile-v2 :: per-shipment logic", () => {
 
   it("queued → engine shipped → dispatches markShipmentShipped + stamps", async () => {
     const engine = makeEngine({
-      state: { status: "shipped", trackingNumber: "1Z999", carrier: "ups", shipDate: new Date("2025-01-15") },
-      shipments: [{ kind: "shipped", trackingNumber: "1Z999", carrierRaw: "ups", shipDate: new Date("2025-01-15"), items: [] }],
+      state: { engineRef: makeRef(), status: "shipped", trackingNumber: "1Z999", carrier: "ups", shipDate: new Date("2025-01-15") },
+      shipments: [{ kind: "shipped", shipmentId: 100, engineRef: makeRef(), trackingNumber: "1Z999", carrier: "UPS", carrierRaw: "ups", shipDate: new Date("2025-01-15"), items: [] }],
     });
 
     const result = await reconcileOneShipment(
@@ -253,6 +253,7 @@ describe("reconcile-v2 :: per-shipment logic", () => {
     const applyInboundShipmentAuthority = vi.fn().mockResolvedValue(2);
     const engine = makeEngine({
       state: {
+        engineRef: makeRef("759013549"),
         status: "shipped",
         trackingNumber: "9434650106151102226396",
         carrier: "stamps_com",
@@ -261,7 +262,10 @@ describe("reconcile-v2 :: per-shipment logic", () => {
       shipments: [
         {
           kind: "shipped",
+          shipmentId: 6576,
+          engineRef: makeRef("759013549"),
           trackingNumber: "9434650106151102226396",
+          carrier: "USPS",
           carrierRaw: "stamps_com",
           shipDate: new Date("2026-07-08T23:19:00.000Z"),
           items: [],
@@ -313,6 +317,7 @@ describe("reconcile-v2 :: per-shipment logic", () => {
     const applyInboundShipmentAuthority = vi.fn().mockResolvedValue(1);
     const engine = makeEngine({
       state: {
+        engineRef: makeRef("759013549"),
         status: "shipped",
         trackingNumber: "1Z999",
         carrier: "ups",
@@ -321,7 +326,10 @@ describe("reconcile-v2 :: per-shipment logic", () => {
       shipments: [
         {
           kind: "shipped",
+          shipmentId: 6576,
+          engineRef: makeRef("759013549"),
           trackingNumber: "1Z999",
+          carrier: "UPS",
           carrierRaw: "ups",
           shipDate: new Date("2026-07-08T23:19:00.000Z"),
           items: [],
@@ -408,7 +416,7 @@ describe("reconcile-v2 :: per-shipment logic", () => {
 
   it("labeled → engine cancelled + ORDER cancelled → dispatches markShipmentCancelled + stamps", async () => {
     const engine = makeEngine({
-      state: { status: "cancelled", trackingNumber: null, carrier: null, shipDate: null },
+      state: { engineRef: makeRef(), status: "cancelled", trackingNumber: null, carrier: null, shipDate: null },
       shipments: [],
     });
 
@@ -430,7 +438,7 @@ describe("reconcile-v2 :: per-shipment logic", () => {
     // discrepancy to review — auto-cancelling here is the 606-shipment
     // incident class.
     const engine = makeEngine({
-      state: { status: "cancelled", trackingNumber: null, carrier: null, shipDate: null },
+      state: { engineRef: makeRef(), status: "cancelled", trackingNumber: null, carrier: null, shipDate: null },
       shipments: [],
     });
 
@@ -449,8 +457,8 @@ describe("reconcile-v2 :: per-shipment logic", () => {
 
   it("queued → engine voided (all shipments voided) → dispatches markShipmentVoided + stamps", async () => {
     const engine = makeEngine({
-      state: { status: "awaiting_shipment", trackingNumber: null, carrier: null, shipDate: null },
-      shipments: [{ kind: "voided", voidedAt: new Date("2025-01-16"), items: [] }],
+      state: { engineRef: makeRef(), status: "awaiting_shipment", trackingNumber: null, carrier: null, shipDate: null },
+      shipments: [{ kind: "voided", shipmentId: 100, engineRef: makeRef() }],
     });
 
     const result = await reconcileOneShipment(
@@ -471,8 +479,8 @@ describe("reconcile-v2 :: per-shipment logic", () => {
 
   it("shipped → engine shipped (idempotent) → no dispatch but stamps", async () => {
     const engine = makeEngine({
-      state: { status: "shipped", trackingNumber: "1Z999", carrier: "ups", shipDate: new Date() },
-      shipments: [{ kind: "shipped", trackingNumber: "1Z999", carrierRaw: "ups", shipDate: new Date(), items: [] }],
+      state: { engineRef: makeRef(), status: "shipped", trackingNumber: "1Z999", carrier: "ups", shipDate: new Date() },
+      shipments: [{ kind: "shipped", shipmentId: 100, engineRef: makeRef(), trackingNumber: "1Z999", carrier: "UPS", carrierRaw: "ups", shipDate: new Date(), items: [] }],
     });
 
     const result = await reconcileOneShipment(
@@ -488,7 +496,7 @@ describe("reconcile-v2 :: per-shipment logic", () => {
 
   it("queued → engine awaiting_shipment (no divergence) → no dispatch but stamps", async () => {
     const engine = makeEngine({
-      state: { status: "awaiting_shipment", trackingNumber: null, carrier: null, shipDate: null },
+      state: { engineRef: makeRef(), status: "awaiting_shipment", trackingNumber: null, carrier: null, shipDate: null },
       shipments: [],
     });
 
@@ -506,8 +514,8 @@ describe("reconcile-v2 :: per-shipment logic", () => {
 
   it("engine shipped but dispatch says changed=false → stamps but no recompute/OMS", async () => {
     const engine = makeEngine({
-      state: { status: "shipped", trackingNumber: "1Z999", carrier: "ups", shipDate: new Date("2025-01-15") },
-      shipments: [{ kind: "shipped", trackingNumber: "1Z999", carrierRaw: "ups", shipDate: new Date("2025-01-15"), items: [] }],
+      state: { engineRef: makeRef(), status: "shipped", trackingNumber: "1Z999", carrier: "ups", shipDate: new Date("2025-01-15") },
+      shipments: [{ kind: "shipped", shipmentId: 100, engineRef: makeRef(), trackingNumber: "1Z999", carrier: "UPS", carrierRaw: "ups", shipDate: new Date("2025-01-15"), items: [] }],
     });
     const noChangeDispatch = makeDispatch({ wmsOrderId: 1, changed: false });
 

@@ -4,6 +4,8 @@ import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { registerRateProgramCloneRoutes } from "../../interfaces/http/rate-program-clone.routes";
+import type { CopyRateProgramCommandInput } from "../../application/rate-program-clone.command";
+import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 
 const { requirePermissionMock } = vi.hoisted(() => ({
   requirePermissionMock: vi.fn(
@@ -153,7 +155,10 @@ describe("rate program clone routes", () => {
 
 function fakeCommand() {
   return {
-    execute: vi.fn(async () => ({
+    execute: vi.fn(async (
+      _input: CopyRateProgramCommandInput,
+      _descriptor: FinancialCommandDescriptor,
+    ) => ({
       commandId: 8,
       replayed: false,
       httpStatus: 201,

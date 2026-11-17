@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   copyActiveRatesToProgram,
   RateProgramCloneError,
+  type RateProgramBlockingRevision,
   type RateProgramCloneRepository,
 } from "../../application/rate-program-clone.service";
 
@@ -174,7 +175,7 @@ function fakeRepository() {
     loadActiveSourceRevisions: vi.fn(async () => [
       sourceRevision(101, 1, "standard", "Standard Shipping", 10),
     ]),
-    loadBlockingTargetRevisions: vi.fn(async () => []),
+    loadBlockingTargetRevisions: vi.fn(async (): Promise<RateProgramBlockingRevision[]> => []),
     cloneRevision: vi.fn(async () =>
       createdDraft(201, 101, 1, "standard", "Standard Shipping")),
     persistProgramCloneAudit: vi.fn(async () => undefined),

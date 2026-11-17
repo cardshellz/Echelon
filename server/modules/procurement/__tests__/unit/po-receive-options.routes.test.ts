@@ -55,7 +55,7 @@ function buildApp(purchasing: any): Express {
     shipmentTracking: {},
     receiving: {},
     poExceptions: {},
-  };
+  } as unknown as typeof app.locals.services;
   registerPurchasingRoutes(app);
   return app;
 }

@@ -118,7 +118,7 @@ integration.sequential("invoice component review transaction and replay", () => 
       adjustmentMills: 0, reason: "Supplier breakdown reviewed", ...patch };
     return { ...body, previewVersion: reviewed ? (await preview(72, body, actorId)).preview.previewVersion : "f".repeat(64) };
   }
-  function descriptor(body: unknown, key = randomUUID()): FinancialCommandDescriptor {
+  function descriptor(body: unknown, key: string = randomUUID()): FinancialCommandDescriptor {
     const scope = { method: "POST", routeTemplate: "/api/vendor-invoice-lines/:lineId/cost-components", resourceKey: "vendor_invoice_line:72" };
     return { ...scope, actorType: "user", actorId, idempotencyKey: key, requestHash: hashHttpFinancialCommand({ ...scope, body }), commandName: "ap.invoice.cost_components", contractVersion: 1 };
   }

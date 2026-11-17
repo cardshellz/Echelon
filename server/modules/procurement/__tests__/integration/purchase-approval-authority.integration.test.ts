@@ -154,7 +154,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       (req as any).session = { user: requestActor ? { id: requestActor, role: "admin" } : undefined };
       next();
     });
-    app.locals.services = { purchasing: service, shipmentTracking: {} };
+    app.locals.services = { purchasing: service, shipmentTracking: {} } as any;
     registerPurchaseOrderRoutes(app);
     server = createServer(app);
     await new Promise<void>((resolveValue) => server.listen(0, "127.0.0.1", resolveValue));

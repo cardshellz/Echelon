@@ -25,7 +25,7 @@ describe("shipstation physical recovery client", () => {
   });
 
   it("finds a combined physical package by its exact WMS shipment-item identities", async () => {
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.pathname === "/v2/shipments") {
         expect(url.searchParams.get("shipment_number")).toBe("#59564");
@@ -150,7 +150,7 @@ describe("shipstation physical recovery client", () => {
   });
 
   it("rejects a label whose return direction is omitted", async () => {
-    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = new URL(String(input));
       if (url.pathname === "/v2/shipments") {
         return jsonResponse({

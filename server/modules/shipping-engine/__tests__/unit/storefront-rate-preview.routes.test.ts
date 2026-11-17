@@ -140,7 +140,18 @@ describe("storefront rate preview routes", () => {
   });
 });
 
-function validRequest() {
+function validRequest(): {
+  destination: { country: string; region: string; postalCode: string };
+  groups: Array<{
+    code: string;
+    lines: Array<{
+      sku: string | null;
+      quantity: number;
+      grams: number | null;
+      priceCents: number;
+    }>;
+  }>;
+} {
   return {
     destination: {
       country: "US",

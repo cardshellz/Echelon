@@ -2054,7 +2054,7 @@ function canonicalAuthorityResult(commandId = 70001) {
 }
 
 function makeFulfillmentAuthority(
-  ensureLegacyShipment = vi.fn(async () => canonicalAuthorityResult()),
+  ensureLegacyShipment: (...args: any[]) => Promise<ReturnType<typeof canonicalAuthorityResult>> = vi.fn(async () => canonicalAuthorityResult()),
 ) {
   return {
     ensureLegacyShipment,
@@ -2201,7 +2201,7 @@ describe("dispatchShopifyFulfillmentRetry :: canonical adoption", () => {
     ["string", "42" as any],
   ])("dead-letters malformed shipment scope: %s", async (_label, shipmentId) => {
     const ensureLegacyShipment = vi.fn();
-    const { db, updates } = makeDb({
+    const { db, updates, fulfillmentAuthority } = makeDb({
       fulfillmentAuthority: makeFulfillmentAuthority(ensureLegacyShipment),
     });
 
@@ -2211,7 +2211,7 @@ describe("dispatchShopifyFulfillmentRetry :: canonical adoption", () => {
       topic: "shopify_fulfillment_push",
       payload: shipmentId === undefined ? {} : { shipmentId },
       attempts: 0,
-    });
+    }, fulfillmentAuthority as any);
 
     expect(outcome).toBe("malformed");
     expect(ensureLegacyShipment).not.toHaveBeenCalled();

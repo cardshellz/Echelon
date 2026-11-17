@@ -67,7 +67,7 @@ function database(options: { provider?: string; channelMismatch?: boolean; exter
 
 function shopifyAccount(channelId: number, settings: { existing?: boolean; existingQuantity?: number; existingTrackingNumber?: string; existingFulfillmentId?: string; error?: Error; afterRead?: () => Promise<void> } = {}) {
   const id = channelId - 10;
-  const client = { request: vi.fn(async (query: string, variables?: Record<string, unknown>) => {
+  const client = { request: vi.fn(async (query: string, variables?: Record<string, unknown>): Promise<any> => {
     expect(variables?.id ?? "gid://shopify/Order/10001").toBe("gid://shopify/Order/10001");
     if (settings.error) throw settings.error;
     if (query.includes("exactFulfillmentPackageForOrder")) {

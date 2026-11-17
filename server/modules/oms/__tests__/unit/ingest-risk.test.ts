@@ -24,8 +24,7 @@ vi.hoisted(() => {
   process.env.DATABASE_URL ??= "postgres://stub:stub@localhost:5432/stub";
 });
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { __test__ } = await import("../../oms-webhooks");
+import { __test__ } from "../../oms-webhooks";
 const { extractShopifyRisk } = __test__;
 
 describe("extractShopifyRisk :: modern risk_assessments payload", () => {
