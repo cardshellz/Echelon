@@ -48,7 +48,7 @@ function makeDependencies() {
     },
     calculation: {
       cartonization: { cartonize: vi.fn<DropshipListingShippingEstimateDependencies["calculation"]["cartonization"]["cartonize"]>(async (request) => ({
-        packages: [{ packageSequence: 1, items: request.items, placements: [], productVariantId: 101, quantity: request.items[0].quantity, boxId: null, boxCode: null, weightGrams: 200, lengthMm: null, widthMm: null, heightMm: null, requestedCarrier: null, requestedService: null }],
+        packages: [{ packageSequence: 1, items: [...request.items], placements: [], productVariantId: 101, quantity: request.items[0].quantity, boxId: null, boxCode: null, weightGrams: 200, lengthMm: null, widthMm: null, heightMm: null, requestedCarrier: null, requestedService: null }],
         engine: { name: "test", version: "1" }, warnings: [], packagingWarnings: [],
       })) },
       pricingProvider: { quote: vi.fn(async (): Promise<DropshipShippingPricingResult> => makePricing()) },

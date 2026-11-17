@@ -480,6 +480,6 @@ function queueInput(revisionId: number): CreateDropshipListingPushJobRepositoryI
       rows: [{ productVariantId: 101, productId: 7, priceSettingRevisionId: revisionId,
         priceCents: 1299, marketplaceQuantity: 2, previewStatus: "ready", blockers: [], warnings: [],
         listingMode: "draft_first", previewHash: "preview-hash", businessPolicySelection: null,
-        listingIntent: { priceCents: 1299 } } as CreateDropshipListingPushJobRepositoryInput["preview"]["rows"][number]],
+        listingIntent: { priceCents: 1299 } } as unknown as CreateDropshipListingPushJobRepositoryInput["preview"]["rows"][number]],
     } };
 }

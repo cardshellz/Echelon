@@ -1,12 +1,14 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
-import type { DropshipLogEvent } from "../../application/dropship-ports";
+import type {
+  DropshipLogEvent,
+  DropshipNotificationSenderInput,
+} from "../../application/dropship-ports";
 import {
   cancellationStatusForOrderIntakeEligibility,
   DropshipOrderIntakeService,
   evaluateDropshipOrderIntakeEligibility,
   hashDropshipOrderIntakePayload,
-  type DropshipNotificationSenderInput,
   type DropshipOrderIntakeRecord,
   type DropshipOrderIntakeRepository,
   type DropshipOrderIntakeRepositoryInput,

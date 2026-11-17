@@ -381,7 +381,7 @@ describe("PgDropshipOrderOpsRepository", () => {
 
   it("moves stale processing intakes to retrying with audit context", async () => {
     const staleUpdatedAt = new Date("2026-05-03T11:20:00.000Z");
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, _params?: unknown[]) => {
       const sqlText = String(sql);
       if (sqlText === "BEGIN" || sqlText === "COMMIT") {
         return { rows: [] };
@@ -452,7 +452,7 @@ describe("PgDropshipOrderOpsRepository", () => {
   });
 
   it("moves failed marketplace cancellations to retrying without clearing cancellation context", async () => {
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, _params?: unknown[]) => {
       const sqlText = String(sql);
       if (sqlText === "BEGIN" || sqlText === "COMMIT") {
         return { rows: [] };
@@ -739,7 +739,7 @@ function makeTrackingPushRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function makeClient(query: ReturnType<typeof vi.fn>): PoolClient {
+function makeClient(query: unknown): PoolClient {
   return { query, release: vi.fn() } as unknown as PoolClient;
 }
 

@@ -251,7 +251,7 @@ function makeHarness(input: {
   };
   const pool = {
     connect: vi.fn(async () => client),
-    query: vi.fn(async () => ({ rows: input.candidateRows ?? [], rowCount: input.candidateRows?.length ?? 0 })),
+    query: vi.fn(async (_sql?: string, _params?: unknown[]) => ({ rows: input.candidateRows ?? [], rowCount: input.candidateRows?.length ?? 0 })),
   };
   return { client, pool };
 }

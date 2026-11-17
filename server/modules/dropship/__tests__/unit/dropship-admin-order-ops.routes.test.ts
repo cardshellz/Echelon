@@ -145,8 +145,8 @@ class FakeDropshipOrderOpsService {
 function buildApp(service: DropshipOrderOpsService): express.Express {
   const app = express();
   app.use(express.json());
-  app.use((req: Request & { session?: { user?: { id: string } } }, _res, next) => {
-    req.session = { user: { id: "admin-1" } };
+  app.use((req: Request, _res, next) => {
+    req.session = { user: { id: "admin-1" } } as unknown as Request["session"];
     next();
   });
   registerDropshipAdminOrderOpsRoutes(app, service);

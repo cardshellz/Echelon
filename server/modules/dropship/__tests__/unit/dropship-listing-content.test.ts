@@ -128,9 +128,9 @@ describe("local description authority", () => {
   beforeEach(() => {
     saved = null; profile = noContentProfile;
     tx = { vendorId: 10, catalog: {
-      loadStoreContext: vi.fn(async () => ({ vendorId: 10, storeConnectionId: 22, platform: "ebay", vendorStatus: "onboarding",
-        entitlementStatus: "active", storeStatus: "needs_reauth", setupStatus: "incomplete", storeLaunchReady: false })),
-      listCatalogCandidates: vi.fn(async () => [contentCandidate()]), listCatalogExposureRules: vi.fn(async () => [{ scopeType: "catalog", action: "include" }]),
+      loadStoreContext: vi.fn(async () => ({ vendorId: 10, storeConnectionId: 22, platform: "ebay" as const, vendorStatus: "onboarding" as const,
+        entitlementStatus: "active", storeStatus: "needs_reauth" as const, setupStatus: "incomplete", storeLaunchReady: false })),
+      listCatalogCandidates: vi.fn(async () => [contentCandidate()]), listCatalogExposureRules: vi.fn(async () => [{ scopeType: "catalog" as const, action: "include" as const }]),
       listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)), listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
     },
       loadProfile: vi.fn(async () => profile), loadSaved: vi.fn(async () => saved), findReplay: vi.fn(async () => false),

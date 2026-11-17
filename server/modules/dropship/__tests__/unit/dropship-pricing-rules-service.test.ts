@@ -25,7 +25,7 @@ describe("store pricing review and approval", () => {
     candidates = Array.from({ length: 1000 }, (_, index) => ({ productId: 7, productVariantId: index + 1,
       productName: "Mailers", variantName: `Pack ${index + 1}`, title: `Mailer ${index + 1}`, sku: `SKU-${index + 1}`,
       productLineIds: [2], category: "Mailers", categoryId: null, productIsActive: true, variantIsActive: true, variantUomType: "pack",
-      defaultRetailPriceCents: 899, unitsPerVariant: 50 } as DropshipListingCatalogCandidate));
+      defaultRetailPriceCents: 899, unitsPerVariant: 50 } as unknown as DropshipListingCatalogCandidate));
     state = { profile: null, revisionId: null, updatedAt: null }; stored = null; settings = []; currentCost = cost;
     const catalog = {
       loadStoreContext: vi.fn(async () => ({ vendorId: 10, vendorStatus: "onboarding", entitlementStatus: "active", storeStatus: "needs_reauth" })),
@@ -35,7 +35,7 @@ describe("store pricing review and approval", () => {
       listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
       listSavedListingPrices: vi.fn(async () => settings), listPricingPolicies: vi.fn(async () => []),
     } as unknown as DropshipListingPreviewRepository;
-    tx = { vendorId: 10, catalog, costs: { loadProductCosts: vi.fn(async ({ productVariantIds }) => new Map(productVariantIds.map((id) => [id, currentCost]))) },
+    tx = { vendorId: 10, catalog, costs: { loadProductCosts: vi.fn(async ({ productVariantIds }: { vendorId: number; productVariantIds: readonly number[] }) => new Map(productVariantIds.map((id: number) => [id, currentCost]))) },
       listVariantIds: vi.fn(async (afterId, limit) => candidates.filter((row) => row.productVariantId > afterId).slice(0, limit).map((row) => row.productVariantId)),
       listProductLines: vi.fn(async () => [{ id: 2, name: "Mailing supplies" }]),
       loadProfile: vi.fn(async () => state), loadRuleLayers: vi.fn(async () => EMPTY_LISTING_SETTING_LAYERS),

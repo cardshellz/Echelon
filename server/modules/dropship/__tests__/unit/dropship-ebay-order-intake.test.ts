@@ -1,11 +1,13 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 
 import {
   recordDropshipOrderIntakeInputSchema,
   type DropshipOrderIntakeRepositoryResult,
+  type DropshipOrderIntakeService,
 } from "../../application/dropship-order-intake-service";
+import type { DropshipOrderIntakeHealthRepositoryResult } from "../../application/dropship-order-intake-health-service";
 import {
   DropshipEbayOrderIntakePollService,
   type DropshipEbayOrderIntakeProvider,
@@ -44,7 +46,7 @@ describe("eBay dropship order intake mapper", () => {
     expect(recordDropshipOrderIntakeInputSchema.safeParse(withService).success).toBe(true);
 
     const order = makeEbayOrder();
-    delete order.fulfillmentStartInstructions![0].shippingStep!.shippingServiceCode;
+    delete (order.fulfillmentStartInstructions![0].shippingStep as { shippingServiceCode?: string }).shippingServiceCode;
     const withoutService = buildEbayDropshipOrderIntakeInput({ store: { vendorId: 10, storeConnectionId: 22 }, order });
     expect(withoutService.normalizedPayload.buyerShippingServiceCode).toBeUndefined();
     expect(recordDropshipOrderIntakeInputSchema.safeParse(withoutService).success).toBe(true);
@@ -197,7 +199,7 @@ describe("eBay dropship order intake mapper", () => {
     delete order.lineItems![0].legacyItemId;
 
     expect(selectEbayDropshipLineItems(order, DROPSHIP_LISTING_IDS)).toEqual([]);
-    expect(selectEbayDropshipLineItems({ ...order, lineItems: undefined }, DROPSHIP_LISTING_IDS)).toEqual([]);
+    expect(selectEbayDropshipLineItems({ ...order, lineItems: undefined as unknown as EbayOrder["lineItems"] }, DROPSHIP_LISTING_IDS)).toEqual([]);
   });
 
   it("reads a discount eBay reports as a negative amount", () => {
@@ -227,7 +229,7 @@ describe("eBay dropship order intake mapper", () => {
 describe("EbayDropshipOrderIntakeProvider", () => {
   it("fetches connected seller orders with stored credentials and returns normalized intake inputs", async () => {
     const credentials = new FakeCredentialRepository();
-    const fetchImpl = vi.fn(async (url: string | URL | Request) => {
+    const fetchImpl = vi.fn(async (url: string | URL | Request, _init?: RequestInit) => {
       expect(String(url)).toContain("/sell/fulfillment/v1/order?");
       expect(String(url)).toContain("lastmodifieddate%3A%5B2026-05-03T14%3A00%3A00.000Z");
       return new Response(JSON.stringify({
@@ -423,7 +425,7 @@ describe("DropshipEbayOrderIntakePollService", () => {
       healthService,
       provider,
       orderIntakeService: {
-        recordMarketplaceOrder: vi.fn(async () => ({
+        recordMarketplaceOrder: vi.fn(async (): Promise<DropshipOrderIntakeRepositoryResult> => ({
           action: "created",
           intake: {
             intakeId: 1,
@@ -755,7 +757,7 @@ describe("DropshipEbayOrderIntakePollService order-side effects (sync-back plan 
     effects: FakeMarketplaceOrders;
     fetchOrders?: DropshipEbayOrderIntakeProvider["fetchOrders"];
     fetchOrder?: DropshipEbayOrderIntakeProvider["fetchOrder"];
-    recordMarketplaceOrder?: ReturnType<typeof vi.fn>;
+    recordMarketplaceOrder?: Mock<DropshipOrderIntakeService["recordMarketplaceOrder"]>;
     events?: string[];
   }) {
     const healthService = new FakeOrderIntakeHealthService();
@@ -763,10 +765,12 @@ describe("DropshipEbayOrderIntakePollService order-side effects (sync-back plan 
     healthService.recordPollSucceeded = async (success) => {
       events.push("poll succeeded");
       healthService.successes.push(success);
+      return makeFakeHealthResult(success.vendorId, success.storeConnectionId, success.platform, success.syncedThrough);
     };
     const logger = { ...nullLogger(), debug: vi.fn() };
-    const recordMarketplaceOrder = input.recordMarketplaceOrder ?? vi.fn(async (order: { externalOrderId: string }) =>
-      makeRecordedIntakeResult(order.externalOrderId, 301));
+    const recordMarketplaceOrder = input.recordMarketplaceOrder ?? vi.fn<DropshipOrderIntakeService["recordMarketplaceOrder"]>(
+      async (order) => makeRecordedIntakeResult((order as { externalOrderId: string }).externalOrderId, 301),
+    );
     const service = new DropshipEbayOrderIntakePollService({
       repository: new FakePollRepository(),
       healthService,
@@ -937,7 +941,7 @@ describe("DropshipEbayOrderIntakePollService order-side effects (sync-back plan 
 describe("PgDropshipEbayOrderIntakeRepository", () => {
   it("polls only launch-ready connected eBay store connections", async () => {
     const dbPool = {
-      query: vi.fn(async () => ({ rows: [] })),
+      query: vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] })),
     };
     const repository = new PgDropshipEbayOrderIntakeRepository(dbPool as any);
 
@@ -955,7 +959,7 @@ describe("PgDropshipEbayOrderIntakeRepository", () => {
 
   it("returns each store's dropship listing item numbers from its own listings", async () => {
     const dbPool = {
-      query: vi.fn(async () => ({
+      query: vi.fn(async (_sql: string, _params?: unknown[]) => ({
         rows: [{
           id: 22,
           vendor_id: 10,
@@ -991,7 +995,7 @@ describe("PgDropshipEbayOrderIntakeRepository", () => {
 
   it("refuses listing ids that are not a list of strings", async () => {
     const dbPool = {
-      query: vi.fn(async () => ({
+      query: vi.fn(async (_sql: string, _params?: unknown[]) => ({
         rows: [{ id: 22, vendor_id: 10, platform: "ebay", last_order_sync_at: null, dropship_listing_ids: null }],
       })),
     };
@@ -1193,24 +1197,64 @@ class FakeOrderIntakeHealthService {
   successes: Array<{
     vendorId: number;
     storeConnectionId: number;
-    platform: "ebay";
+    platform: string;
     syncedThrough: Date;
   }> = [];
   failures: Array<{
     vendorId: number;
     storeConnectionId: number;
-    platform: "ebay";
+    platform: string;
     failureCode: string;
     failureMessage: string;
   }> = [];
 
-  async recordPollSucceeded(input: (typeof this.successes)[number]): Promise<void> {
+  async recordPollSucceeded(input: (typeof this.successes)[number]): Promise<DropshipOrderIntakeHealthRepositoryResult> {
     this.successes.push(input);
+    return makeFakeHealthResult(input.vendorId, input.storeConnectionId, input.platform, input.syncedThrough);
   }
 
-  async recordPollFailed(input: (typeof this.failures)[number]): Promise<void> {
+  async recordPollFailed(input: (typeof this.failures)[number]): Promise<DropshipOrderIntakeHealthRepositoryResult> {
     this.failures.push(input);
+    return makeFakeHealthResult(input.vendorId, input.storeConnectionId, input.platform, new Date("2026-05-03T15:00:00.000Z"));
   }
+}
+
+function makeFakeHealthResult(
+  vendorId: number,
+  storeConnectionId: number,
+  platform: string,
+  at: Date,
+): DropshipOrderIntakeHealthRepositoryResult {
+  return {
+    connection: {
+      vendorId,
+      storeConnectionId,
+      platform,
+      externalDisplayName: null,
+      shopDomain: null,
+    },
+    transition: {
+      previousStatus: null,
+      transitioned: false,
+      reason: "poll_succeeded",
+      current: {
+        vendorId,
+        storeConnectionId,
+        platform,
+        mode: "poll",
+        status: "healthy",
+        consecutiveFailures: 0,
+        lastAttemptAt: at,
+        lastSuccessAt: at,
+        lastFailureAt: null,
+        lastFailureCode: null,
+        lastFailureMessage: null,
+        statusChangedAt: at,
+        createdAt: at,
+        updatedAt: at,
+      },
+    },
+  };
 }
 
 const DROPSHIP_LISTING_IDS: ReadonlySet<string> = new Set(["listing-1"]);

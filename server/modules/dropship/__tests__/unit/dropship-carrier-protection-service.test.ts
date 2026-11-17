@@ -183,10 +183,10 @@ function policyRecord(input: Parameters<CarrierProtectionRepository["createPolic
     policyId: 1, policyKey: input.policyKey, version: 1, supersedesPolicyId: input.supersedesPolicyId ?? null, name: input.name, status: input.status,
     coveredLoss: input.coveredLoss, coveredMisdelivery: input.coveredMisdelivery, coveredDamage: input.coveredDamage,
     merchandiseReimbursementBps: input.merchandiseReimbursementBps, shippingReimbursementBps: input.shippingReimbursementBps,
-    deductibleCents: input.deductibleCents, maxCreditCents: input.maxCreditCents, lossWaitDays: input.lossWaitDays,
+    deductibleCents: input.deductibleCents, maxCreditCents: input.maxCreditCents ?? null, lossWaitDays: input.lossWaitDays,
     misdeliveryWaitDays: input.misdeliveryWaitDays, damageInspectionRequired: input.damageInspectionRequired,
     payoutTrigger: input.payoutTrigger, carrierClaimRequired: input.carrierClaimRequired, approvalMode: input.approvalMode,
-    automaticApprovalLimitCents: input.automaticApprovalLimitCents, effectiveFrom: input.effectiveFrom,
+    automaticApprovalLimitCents: input.automaticApprovalLimitCents ?? null, effectiveFrom: input.effectiveFrom,
     effectiveTo: input.effectiveTo, createdBy: input.actor.actorId ?? null, createdAt: input.now, retiredAt: null,
   };
 }

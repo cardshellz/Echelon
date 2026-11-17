@@ -4,7 +4,7 @@ import { captureOpenBuildCutoverEvidence } from "../../infrastructure/inventory-
 
 describe("open build cutover evidence", () => {
   it("returns one actionable blocker for every executable legacy build", async () => {
-    const query = vi.fn(async () => ({ rows: [
+    const query = vi.fn(async (_statement: string, _parameters?: unknown[]) => ({ rows: [
       { id: 17, status: "released" },
       { id: 23, status: "in_progress" },
       { id: 41, status: "failed" },

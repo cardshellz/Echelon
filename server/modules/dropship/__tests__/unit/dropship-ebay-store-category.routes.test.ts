@@ -135,7 +135,7 @@ function buildApp(service: FakeService, authenticated: boolean): express.Express
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
-    (req as Request & { session: Record<string, unknown> }).session = authenticated
+    req.session = (authenticated
       ? {
           dropship: {
             authIdentityId: 1,
@@ -148,7 +148,7 @@ function buildApp(service: FakeService, authenticated: boolean): express.Express
           },
           dropshipSensitiveProofs: {},
         }
-      : {};
+      : {}) as unknown as Request["session"];
     next();
   });
   registerDropshipEbayStoreCategoryRoutes(

@@ -98,6 +98,7 @@ function allocation(
       reason: "Multi-warehouse breakdown.",
       warehouseScopeSource,
       warehouseBreakdown: [{ warehouseId: 1, qty: allocatedUnits }],
+      velocity: { status: "not_required" },
     }],
   };
 }

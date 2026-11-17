@@ -165,7 +165,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
   });
 
   it("surfaces shipping setup gaps in dogfood readiness", async () => {
-    const query = vi.fn(async () => ({
+    const query = vi.fn(async (_sql: string) => ({
       rows: [makeDogfoodReadinessRow({
         selected_variant_count: "3",
         selected_package_profile_count: "2",
@@ -240,7 +240,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
   });
 
   it("counts the vendor's picked items for the selection check, with the old field kept at the same value (PLAN-B v4.1 V17)", async () => {
-    const query = vi.fn(async () => ({ rows: [makeDogfoodReadinessRow({ vendor_selected_item_count: "12" })] }));
+    const query = vi.fn(async (_sql: string) => ({ rows: [makeDogfoodReadinessRow({ vendor_selected_item_count: "12" })] }));
     const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
 
     const result = await repository.listDogfoodReadiness({ generatedAt: now, page: 1, limit: 50 });
@@ -331,7 +331,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
   });
 
   it("excludes disconnected historical store connections from dogfood readiness rows", async () => {
-    const query = vi.fn(async () => ({
+    const query = vi.fn(async (_sql: string) => ({
       rows: [makeDogfoodReadinessRow()],
     }));
     const repository = new PgDropshipOpsSurfaceRepository({ query } as unknown as Pool);
@@ -348,7 +348,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
   });
 
   it("blocks dogfood readiness when launch wallet and auto-reload funding are not usable", async () => {
-    const query = vi.fn(async () => ({
+    const query = vi.fn(async (_sql: string) => ({
       rows: [makeDogfoodReadinessRow({
         available_balance_cents: "0",
         active_funding_method_count: "1",
@@ -429,7 +429,7 @@ describe("PgDropshipOpsSurfaceRepository", () => {
   });
 
   it("blocks eBay dogfood readiness when the store refresh token reference is missing", async () => {
-    const query = vi.fn(async () => ({
+    const query = vi.fn(async (_sql: string) => ({
       rows: [makeDogfoodReadinessRow({
         platform: "ebay",
         refresh_token_ref: null,

@@ -36,7 +36,7 @@ function facts(): InventoryCutoverPreflightFacts {
 
 describe("inventory cutover preflight routes", () => {
   let server: Awaited<ReturnType<typeof startServer>>;
-  let service: { preview: ReturnType<typeof vi.fn> };
+  let service: { preview: ReturnType<typeof vi.fn<(actorInput: unknown) => Promise<any>>> };
   let session: { user?: { id?: string } };
 
   beforeEach(async () => {

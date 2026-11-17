@@ -1,4 +1,4 @@
-import type { Pool, PoolClient, QueryResult } from "pg";
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
 import { PgDropshipShippingConfigRepository } from "../../infrastructure/dropship-shipping-config.repository";
@@ -24,14 +24,14 @@ describe("PgDropshipShippingConfigRepository policy windows", () => {
       now: new Date("2026-06-01T00:00:00.000Z"),
     });
 
-    await expect(operation).rejects.toMatchObject<DropshipError>({
+    await expect(operation).rejects.toMatchObject({
       code: "DROPSHIP_SHIPPING_POLICY_WINDOW_CONFLICT",
       context: {
         policyKind: "markup",
         conflictingPolicyId: 17,
         conflictingPolicyName: "Default shipping",
       },
-    });
+    } satisfies Partial<DropshipError>);
     expect(client.queries.some((sql) => sql.includes("INSERT INTO dropship.dropship_shipping_markup_config"))).toBe(false);
     expect(client.queries).toContain("ROLLBACK");
     expect(client.released).toBe(true);
@@ -122,18 +122,18 @@ class PackageProfileClient {
 
   constructor(private readonly options: { variantExists: boolean }) {}
 
-  async query<T>(sql: string, params: unknown[] = []): Promise<QueryResult<T>> {
+  async query<T extends QueryResultRow>(sql: string, params: unknown[] = []): Promise<QueryResult<T>> {
     const normalized = sql.trim();
     this.queries.push(normalized);
     this.calls.push({ sql: normalized, params });
     if (normalized.includes("INSERT INTO dropship.dropship_admin_config_commands")) {
-      return result([{ id: 91 } as T]);
+      return result([{ id: 91 } as unknown as T]);
     }
     if (normalized === "SELECT id FROM catalog.product_variants WHERE id = $1 LIMIT 1") {
-      return result(this.options.variantExists ? [{ id: 10 } as T] : []);
+      return result(this.options.variantExists ? [{ id: 10 } as unknown as T] : []);
     }
     if (normalized.includes("INSERT INTO dropship.dropship_package_profiles")) {
-      return result([{ id: 44 } as T]);
+      return result([{ id: 44 } as unknown as T]);
     }
     if (normalized.includes("FROM dropship.dropship_package_profiles pp")) {
       return result([{
@@ -156,7 +156,7 @@ class PackageProfileClient {
         is_active: true,
         created_at: new Date("2026-07-11T12:00:00.000Z"),
         updated_at: new Date("2026-07-11T12:00:00.000Z"),
-      } as T]);
+      } as unknown as T]);
     }
     return result([]);
   }
@@ -170,13 +170,13 @@ class PolicyConflictClient {
   readonly queries: string[] = [];
   released = false;
 
-  async query<T>(sql: string): Promise<QueryResult<T>> {
+  async query<T extends QueryResultRow>(sql: string): Promise<QueryResult<T>> {
     this.queries.push(sql.trim());
     if (sql.includes("INSERT INTO dropship.dropship_admin_config_commands")) {
-      return result([{ id: 91 } as T]);
+      return result([{ id: 91 } as unknown as T]);
     }
     if (sql.includes("SELECT id, name") && sql.includes("dropship_shipping_markup_config")) {
-      return result([{ id: 17, name: "Default shipping" } as T]);
+      return result([{ id: 17, name: "Default shipping" } as unknown as T]);
     }
     return result([]);
   }
@@ -186,7 +186,7 @@ class PolicyConflictClient {
   }
 }
 
-function result<T>(rows: T[]): QueryResult<T> {
+function result<T extends QueryResultRow>(rows: T[]): QueryResult<T> {
   return {
     command: "SELECT",
     rowCount: rows.length,
