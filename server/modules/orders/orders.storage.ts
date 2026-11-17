@@ -41,6 +41,15 @@ import {
   setWmsOrderItemLocation,
   syncWmsOrderItemsFulfilledFromOms,
 } from "../wms/order-intake-and-items.api";
+import {
+  backfillWmsOrdersAddressBatchFromOmsInWms,
+  cancelOrderBlockingAllocationExceptionsOnStatusCancelInWms,
+  claimWmsOrderForPickerInWms,
+  syncWmsOrdersCompletedFromFulfilledOmsInWms,
+  updateActiveWmsOrderFieldsReturningInWms,
+  updateWmsOrderByIdInWms,
+  updateWmsOrderByIdReturningInWms,
+} from "../wms/wms-order-mutations.api";
 
 /**
  * Order statuses that are DERIVED from the underlying shipments via
@@ -202,7 +211,7 @@ async function recomputeSortRank(orderId: number): Promise<string | null> {
     slaDueAt,
     orderPlacedAt: row.orderPlacedAt as any,
   });
-  await db.update(orders).set({ sortRank: rank, slaDueAt }).where(eq(orders.id, orderId));
+  await updateWmsOrderByIdInWms(db, orderId, { sortRank: rank, slaDueAt });
   return rank;
 }
 
@@ -264,7 +273,7 @@ export async function recomputeAllActiveSortRanksDetailed(): Promise<SortRankRec
       orderPlacedAt: row.orderPlacedAt as any,
     });
     if (row.sortRank === rank && sameDateTime(row.slaDueAt as any, slaDueAt)) continue;
-    await db.update(orders).set({ sortRank: rank, slaDueAt }).where(eq(orders.id, row.id));
+    await updateWmsOrderByIdInWms(db, row.id, { sortRank: rank, slaDueAt });
     if (row.sortRank !== rank) orderIds.push(row.id);
   }
   return { updated: orderIds.length, orderIds };
@@ -816,33 +825,7 @@ export const orderMethods: IOrderStorage = {
     // picker. This makes the claim correct regardless of how a stale picker id
     // got left behind (completion, shipment rollup, order edit, reconcile),
     // so we don't have to chase every status writer to null the field.
-    const result = await db
-      .update(orders)
-      .set({
-        warehouseStatus: "in_progress" as OrderStatus,
-        assignedPickerId: pickerId,
-        startedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(orders.id, orderId),
-          eq(orders.onHold, 0),
-          isNull(orders.orderEditOperationId),
-          inArray(orders.warehouseStatus, [
-            "ready",
-            "partially_shipped",
-            "ready_to_ship",
-            "in_progress",
-          ]),
-          // NOT (in_progress AND held by someone else)
-          or(
-            ne(orders.warehouseStatus, "in_progress"),
-            isNull(orders.assignedPickerId),
-            eq(orders.assignedPickerId, pickerId),
-          ),
-        )
-      )
-      .returning();
+    const result = await claimWmsOrderForPickerInWms(db, orderId, pickerId, new Date());
 
     if (result.length === 0) {
       console.log(`[CLAIM] Order ${orderId} claim failed - not available for picker ${pickerId}`);
@@ -884,11 +867,7 @@ export const orderMethods: IOrderStorage = {
       updates.completedAt = new Date();
     }
 
-    const result = await db
-      .update(orders)
-      .set(updates)
-      .where(and(eq(orders.id, orderId), notInArray(orders.warehouseStatus, ["shipped", "cancelled"])))
-      .returning();
+    const result = await updateActiveWmsOrderFieldsReturningInWms(db, orderId, updates);
 
     if (!result[0]) {
       return null;
@@ -902,25 +881,7 @@ export const orderMethods: IOrderStorage = {
     }
 
     if (status === "cancelled") {
-      await db.execute(sql`
-        UPDATE wms.allocation_exceptions
-        SET
-          status = 'cancelled',
-          resolution = 'order_cancelled_status_update',
-          resolved_at = NOW(),
-          updated_at = NOW(),
-          metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-            'closedBy', 'orders_storage',
-            'closedByOrderStatus', 'cancelled',
-            'closedAt', NOW()
-          )
-        WHERE order_id = ${orderId}
-          AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
-          AND (
-            status = 'blocked'
-            OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
-          )
-      `);
+      await cancelOrderBlockingAllocationExceptionsOnStatusCancelInWms(db, orderId);
     }
 
     return result[0] || null;
@@ -937,11 +898,7 @@ export const orderMethods: IOrderStorage = {
       return existing || null;
     }
     
-    const result = await db
-      .update(orders)
-      .set(safeUpdates)
-      .where(eq(orders.id, orderId))
-      .returning();
+    const result = await updateWmsOrderByIdReturningInWms(db, orderId, safeUpdates);
     
     return result[0] || null;
   },
@@ -1005,21 +962,13 @@ export const orderMethods: IOrderStorage = {
   },
 
   async holdOrder(orderId: number): Promise<Order | null> {
-    const result = await db
-      .update(orders)
-      .set({ onHold: 1, heldAt: new Date() })
-      .where(eq(orders.id, orderId))
-      .returning();
+    const result = await updateWmsOrderByIdReturningInWms(db, orderId, { onHold: 1, heldAt: new Date() });
     if (result[0]) await recomputeSortRank(orderId);
     return result[0] || null;
   },
 
   async releaseHoldOrder(orderId: number): Promise<Order | null> {
-    const result = await db
-      .update(orders)
-      .set({ onHold: 0, heldAt: null })
-      .where(eq(orders.id, orderId))
-      .returning();
+    const result = await updateWmsOrderByIdReturningInWms(db, orderId, { onHold: 0, heldAt: null });
     if (result[0]) await recomputeSortRank(orderId);
     return result[0] || null;
   },
@@ -1044,11 +993,7 @@ export const orderMethods: IOrderStorage = {
 
   async setOrderPriority(orderId: number, priority: number | "reset"): Promise<Order | null> {
     const finalPriority = priority === "reset" ? 100 : priority;
-    const result = await db
-      .update(orders)
-      .set({ priority: finalPriority })
-      .where(eq(orders.id, orderId))
-      .returning();
+    const result = await updateWmsOrderByIdReturningInWms(db, orderId, { priority: finalPriority });
     if (result[0]) await recomputeSortRank(orderId);
     return result[0] || null;
   },
@@ -1163,11 +1108,7 @@ export const orderMethods: IOrderStorage = {
         updates.heldAt = null;
       }
       
-      const result = await tx
-        .update(orders)
-        .set(updates)
-        .where(and(eq(orders.id, orderId), notInArray(orders.warehouseStatus, ["shipped", "cancelled"])))
-        .returning();
+      const result = await updateActiveWmsOrderFieldsReturningInWms(tx, orderId, updates);
       
       return result[0] || null;
     });
@@ -1261,15 +1202,7 @@ export const orderMethods: IOrderStorage = {
 
   async syncFulfilledStatusesFromShopify() {
     // 1. Update wms.orders status to 'completed' where OMS shows fulfilled/shipped
-    await db.execute(sql`
-      UPDATE wms.orders o SET
-        status = 'completed',
-        completed_at = COALESCE(o.completed_at, NOW())
-      FROM oms.oms_orders oms
-      WHERE o.order_number = oms.external_order_number
-        AND (oms.fulfillment_status = 'fulfilled' OR oms.status = 'shipped')
-        AND o.warehouse_status != 'completed'
-    `);
+    await syncWmsOrdersCompletedFromFulfilledOmsInWms(db);
 
     await syncWmsOrderItemsFulfilledFromOms(db);
   },
@@ -1307,21 +1240,7 @@ export const orderMethods: IOrderStorage = {
       let updated = 0;
       for (let offset = 0; offset < normalized.length; offset += ORDER_ADDRESS_BACKFILL_BATCH_SIZE) {
         const batch = normalized.slice(offset, offset + ORDER_ADDRESS_BACKFILL_BATCH_SIZE);
-        const result = await tx.execute(sql`
-          UPDATE wms.orders o SET
-            customer_name = COALESCE(oms.customer_name, oms.ship_to_name, o.customer_name),
-            customer_email = COALESCE(oms.customer_email, o.customer_email),
-            shipping_address = COALESCE(oms.ship_to_address1, o.shipping_address),
-            shipping_city = COALESCE(oms.ship_to_city, o.shipping_city),
-            shipping_state = COALESCE(oms.ship_to_state, o.shipping_state),
-            shipping_postal_code = COALESCE(oms.ship_to_zip, o.shipping_postal_code),
-            shipping_country = normalized.country
-          FROM oms.oms_orders oms,
-            (VALUES ${sql.join(batch.map(row => sql`(${row.id}::integer, ${row.oms_order_id}::integer, ${row.country}::text)`), sql`, `)})
-            AS normalized(order_id, oms_order_id, country)
-          WHERE o.id = normalized.order_id AND oms.id = normalized.oms_order_id
-            AND o.channel_id = oms.channel_id
-        `);
+        const result = await backfillWmsOrdersAddressBatchFromOmsInWms(tx, batch);
         updated += result.rowCount || 0;
       }
       return { updated };

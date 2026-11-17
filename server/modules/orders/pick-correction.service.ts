@@ -12,6 +12,7 @@ import {
 import type { PickingUseCases } from "./picking.use-cases";
 import { confirmedShipmentHoldRelease } from "../wms/pick-corrections-and-holds.api";
 import { releaseLineHoldInTransaction } from "../wms/pick-corrections-and-holds.api";
+import { releaseWmsOrderHoldIfHeldInWms } from "../wms/wms-order-mutations.api";
 
 /**
  * Recording what already shipped is never blocked by a hold; a hold only
@@ -146,8 +147,7 @@ export class PickCorrectionService {
       ? await releaseLineHoldInTransaction(tx, { wmsOrderId: correction.orderId, orderItemId: correction.orderItemId, now })
       : null;
     if (release.releaseOrder) {
-      await tx.execute(sql`UPDATE wms.orders SET on_hold = 0, held_at = NULL
-        WHERE id = ${correction.orderId} AND on_hold = 1`);
+      await releaseWmsOrderHoldIfHeldInWms(tx, correction.orderId);
     }
     await recordCorrectionEvent(tx, { correctionId: correction.id, commandId: `holds-retired:${commandId}`,
       requestHash: correctionHash({ correctionId: correction.id, commandId, release }), actor,

@@ -131,6 +131,8 @@ describe("WMS-2: Orders, WMS, and Cartonization internal API boundaries (CI-03) 
     const expectedWmsApis = [
       "index.ts",
       "order-intake-and-items.api.ts",
+      "wms-order-mutations.api.ts",
+      "outbound-shipment-mutations.api.ts",
       "picking-execution.api.ts",
       "picking-logs.api.ts",
       "pick-corrections-and-holds.api.ts",
@@ -205,11 +207,10 @@ describe("WMS-2: Orders, WMS, and Cartonization internal API boundaries (CI-03) 
     >;
 
     expect(baseline["wms.picking_logs"]).toEqual(["modules/wms"]);
-    expect(baseline["wms.orders"]).toEqual([
-      "modules/oms",
-      "modules/orders",
-      "modules/wms",
-    ]);
+    expect(baseline["wms.allocation_exceptions"]).toEqual(["modules/wms"]);
+    expect(baseline["wms.orders"]).toEqual(["modules/wms"]);
+    expect(baseline["wms.outbound_shipment_items"]).toEqual(["modules/wms"]);
+    expect(baseline["wms.outbound_shipments"]).toEqual(["modules/wms"]);
     expect(baseline["wms.order_items"]).toEqual(["modules/wms"]);
     expect(baseline["wms.pick_corrections"]).toEqual(["modules/wms"]);
     expect(baseline["wms.pick_correction_events"]).toEqual(["modules/wms"]);

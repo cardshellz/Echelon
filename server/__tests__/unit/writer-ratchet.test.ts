@@ -469,6 +469,36 @@ describe("writer-ratchet (P2.1)", () => {
     expect(currentIncludingScripts[table]).toEqual([owner]);
   });
 
+  it.each([
+    "wms.allocation_exceptions",
+    "wms.orders",
+    "wms.outbound_shipment_items",
+    "wms.outbound_shipments",
+  ])("%s has only the WMS runtime owning writer (P2-2D)", (table) => {
+    expect(current[table]).toEqual(["modules/wms"]);
+    expect(baseline[table]).toEqual(["modules/wms"]);
+  });
+
+  it("enforces zero multi-writer tables across the entire runtime codebase and baseline (P2-2D)", () => {
+    const baselineMultiWriters = Object.entries(baseline)
+      .filter(([, buckets]) => buckets.length > 1)
+      .map(([table, buckets]) => `${table}  ←  [${buckets.join(", ")}]`);
+    const currentMultiWriters = Object.entries(current)
+      .filter(([, buckets]) => buckets.length > 1)
+      .map(([table, buckets]) => `${table}  ←  [${buckets.join(", ")}]`);
+
+    expect(
+      baselineMultiWriters,
+      `baseline.json must permanently contain 0 multi-writer tables:\n` +
+        baselineMultiWriters.join("\n"),
+    ).toEqual([]);
+    expect(
+      currentMultiWriters,
+      `Multi-writer table(s) detected! Every table in server/ must have at most ONE owning module/repository writer. Delegate cross-module writes through the owning module's .api.ts contract:\n` +
+        currentMultiWriters.join("\n"),
+    ).toEqual([]);
+  });
+
   it("blocks any new direct database writes in scripts/ or script/ outside the frozen baseline", () => {
     const addedScriptWrites: string[] = [];
     for (const [table, files] of Object.entries(currentScriptWriters)) {

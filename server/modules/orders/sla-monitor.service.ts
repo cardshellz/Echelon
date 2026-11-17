@@ -5,6 +5,10 @@ import {
 } from "@shared/schema";
 import { resolveSlaDueAt } from "./sort-rank";
 import { getSlaCutoffConfig } from "../warehouse/settings.resolver";
+import {
+  sweepWmsOrderSlaStatusesInWms,
+  updateWmsOrderByIdInWms,
+} from "../wms/wms-order-mutations.api";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -97,13 +101,10 @@ class SLAMonitorService {
 
     if (!dueAt) return;
 
-    await this.db
-      .update(orders)
-      .set({
-        slaDueAt: dueAt,
-        slaStatus: "on_time",
-      })
-      .where(eq(orders.id, orderId));
+    await updateWmsOrderByIdInWms(this.db, orderId, {
+      slaDueAt: dueAt,
+      slaStatus: "on_time",
+    });
   }
 
   /**
@@ -113,53 +114,9 @@ class SLAMonitorService {
   async updateSLAStatuses(): Promise<{ updated: number }> {
     const now = new Date();
     const twentyFourHoursFromNow = new Date(now.getTime() + 24 * 60 * 60 * 1000);
-    let updated = 0;
+    const updated = 0;
 
-    // 1. Mark shipped/completed orders as "met" if they were shipped before SLA due
-    const metResult = await this.db.execute(sql`
-      UPDATE wms.orders SET sla_status = 'met'
-      WHERE sla_due_at IS NOT NULL
-        AND sla_status NOT IN ('met')
-        AND warehouse_status IN ('shipped', 'completed')
-        AND (completed_at IS NULL OR completed_at <= sla_due_at)
-    `);
-
-    // 2. Mark shipped orders as "overdue" if they shipped after SLA due
-    await this.db.execute(sql`
-      UPDATE wms.orders SET sla_status = 'overdue'
-      WHERE sla_due_at IS NOT NULL
-        AND sla_status NOT IN ('met', 'overdue')
-        AND warehouse_status IN ('shipped', 'completed')
-        AND completed_at > sla_due_at
-    `);
-
-    // 3. Mark active (non-terminal) orders past due as "overdue"
-    await this.db.execute(sql`
-      UPDATE wms.orders SET sla_status = 'overdue'
-      WHERE sla_due_at IS NOT NULL
-        AND sla_status NOT IN ('met', 'overdue')
-        AND warehouse_status NOT IN ('shipped', 'completed', 'cancelled')
-        AND sla_due_at < ${now}
-    `);
-
-    // 4. Mark active orders within 24h of due as "at_risk"
-    await this.db.execute(sql`
-      UPDATE wms.orders SET sla_status = 'at_risk'
-      WHERE sla_due_at IS NOT NULL
-        AND sla_status NOT IN ('met', 'overdue', 'at_risk')
-        AND warehouse_status NOT IN ('shipped', 'completed', 'cancelled')
-        AND sla_due_at >= ${now}
-        AND sla_due_at < ${twentyFourHoursFromNow}
-    `);
-
-    // 5. Mark remaining active orders as "on_time"
-    await this.db.execute(sql`
-      UPDATE wms.orders SET sla_status = 'on_time'
-      WHERE sla_due_at IS NOT NULL
-        AND sla_status IS DISTINCT FROM 'on_time'
-        AND warehouse_status NOT IN ('shipped', 'completed', 'cancelled')
-        AND sla_due_at >= ${twentyFourHoursFromNow}
-    `);
+    await sweepWmsOrderSlaStatusesInWms(this.db, now, twentyFourHoursFromNow);
 
     return { updated };
   }

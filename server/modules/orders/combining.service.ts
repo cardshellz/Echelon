@@ -15,6 +15,11 @@ import {
   updateDefaultOrderCombiningSettingInInventory,
   insertDefaultOrderCombiningSettingInInventory,
 } from "../inventory/cross-module-inventory-mutations.api";
+import {
+  dissolveWmsOrderCombinedGroupInWms,
+  updateWmsOrderCombinedGroupByIdInWms,
+  updateWmsOrdersWarehouseStatusByCombinedGroupInWms,
+} from "../wms/wms-order-mutations.api";
 import type {
   CombinedOrderGroup,
   Order,
@@ -541,10 +546,10 @@ class OrderCombiningService {
 
       // Add new orders as children
       for (const order of newOrders) {
-        await this.db
-          .update(orders)
-          .set({ combinedGroupId: groupId, combinedRole: "child" })
-          .where(eq(orders.id, order.id));
+        await updateWmsOrderCombinedGroupByIdInWms(this.db, order.id, {
+          combinedGroupId: groupId,
+          combinedRole: "child",
+        });
       }
 
       // Recalculate group counts from all member orders
@@ -583,10 +588,7 @@ class OrderCombiningService {
     if (existingGroupIds.size > 1) {
       // Dissolve all old groups
       for (const gid of Array.from(existingGroupIds)) {
-        await this.db
-          .update(orders)
-          .set({ combinedGroupId: null, combinedRole: null })
-          .where(eq(orders.combinedGroupId, gid));
+        await dissolveWmsOrderCombinedGroupInWms(this.db, gid);
         await this.db
           .delete(combinedOrderGroups)
           .where(eq(combinedOrderGroups.id, gid));
@@ -658,13 +660,10 @@ class OrderCombiningService {
       .returning();
 
     for (let i = 0; i < ordersToGroup.length; i++) {
-      await this.db
-        .update(orders)
-        .set({
-          combinedGroupId: group.id,
-          combinedRole: i === 0 ? "parent" : "child",
-        })
-        .where(eq(orders.id, ordersToGroup[i].id));
+      await updateWmsOrderCombinedGroupByIdInWms(this.db, ordersToGroup[i].id, {
+        combinedGroupId: group.id,
+        combinedRole: i === 0 ? "parent" : "child",
+      });
     }
 
     return {
@@ -779,10 +778,7 @@ class OrderCombiningService {
         if (o.combined_group_id) existingGroupIds.add(o.combined_group_id);
       }
       for (const gid of Array.from(existingGroupIds)) {
-        await this.db
-          .update(orders)
-          .set({ combinedGroupId: null, combinedRole: null })
-          .where(eq(orders.combinedGroupId, gid));
+        await dissolveWmsOrderCombinedGroupInWms(this.db, gid);
         await this.db
           .delete(combinedOrderGroups)
           .where(eq(combinedOrderGroups.id, gid));
@@ -839,13 +835,10 @@ class OrderCombiningService {
         .returning();
 
       for (let i = 0; i < grpOrders.length; i++) {
-        await this.db
-          .update(orders)
-          .set({
-            combinedGroupId: group.id,
-            combinedRole: i === 0 ? "parent" : "child",
-          })
-          .where(eq(orders.id, grpOrders[i].id));
+        await updateWmsOrderCombinedGroupByIdInWms(this.db, grpOrders[i].id, {
+          combinedGroupId: group.id,
+          combinedRole: i === 0 ? "parent" : "child",
+        });
       }
 
       groupsCreated++;
@@ -885,10 +878,10 @@ class OrderCombiningService {
       const removedRole = orderResult[0].combinedRole;
 
       // Remove order from group
-      await tx
-        .update(orders)
-        .set({ combinedGroupId: null, combinedRole: null })
-        .where(eq(orders.id, orderId));
+      await updateWmsOrderCombinedGroupByIdInWms(tx, orderId, {
+        combinedGroupId: null,
+        combinedRole: null,
+      });
 
       // Check remaining
       const remaining: Order[] = await tx
@@ -899,10 +892,10 @@ class OrderCombiningService {
       if (remaining.length < 2) {
         // Dissolve the group
         for (const o of remaining) {
-          await tx
-            .update(orders)
-            .set({ combinedGroupId: null, combinedRole: null })
-            .where(eq(orders.id, o.id));
+          await updateWmsOrderCombinedGroupByIdInWms(tx, o.id, {
+            combinedGroupId: null,
+            combinedRole: null,
+          });
         }
         await tx
           .delete(combinedOrderGroups)
@@ -923,10 +916,9 @@ class OrderCombiningService {
 
       // If the parent was removed, promote first remaining
       if (removedRole === "parent") {
-        await tx
-          .update(orders)
-          .set({ combinedRole: "parent" })
-          .where(eq(orders.id, remaining[0].id));
+        await updateWmsOrderCombinedGroupByIdInWms(tx, remaining[0].id, {
+          combinedRole: "parent",
+        });
       }
 
       return { dissolved: false, orderId, remainingCount: remaining.length };
@@ -1052,10 +1044,7 @@ class OrderCombiningService {
       .set({ status: "packed", updatedAt: new Date() })
       .where(eq(combinedOrderGroups.id, groupId));
 
-    await this.db
-      .update(orders)
-      .set({ warehouseStatus: "packed" })
-      .where(eq(orders.combinedGroupId, groupId));
+    await updateWmsOrdersWarehouseStatusByCombinedGroupInWms(this.db, groupId, "packed");
   }
 
   async markGroupShipped(
@@ -1078,10 +1067,7 @@ class OrderCombiningService {
       .set({ status: "shipped", updatedAt: new Date() })
       .where(eq(combinedOrderGroups.id, groupId));
 
-    await this.db
-      .update(orders)
-      .set({ warehouseStatus: "shipped" })
-      .where(eq(orders.combinedGroupId, groupId));
+    await updateWmsOrdersWarehouseStatusByCombinedGroupInWms(this.db, groupId, "shipped");
   }
 }
 

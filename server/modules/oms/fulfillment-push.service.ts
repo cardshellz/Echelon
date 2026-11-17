@@ -22,6 +22,10 @@ import {
   sqlBigintArray,
   sqlTextArray,
 } from "../../infrastructure/postgres-array";
+import {
+  clearDeadShopifyFulfillmentIdsOnOutboundShipmentInWms,
+  persistShopifyFulfillmentIdOnLegacyOutboundShipmentsInWms,
+} from "../wms/outbound-shipment-mutations.api";
 import type { EbayApiClient } from "../channels/ebay-connector.api";
 import type { ChannelFulfillmentProviderClients, ShopifyFulfillmentAccount } from "../channels/channel-fulfillment-provider-clients.service";
 import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
@@ -2568,13 +2572,11 @@ export function createFulfillmentPushService(
         );
       }
       if (providerPackageState.kind === "present") {
-        await db.execute(sql`
-          UPDATE wms.outbound_shipments
-             SET shopify_fulfillment_id = ${providerPackageState.fulfillmentId},
-                 updated_at = NOW()
-           WHERE id = ANY(${sqlBigintArray(command.legacyWmsShipmentIds)})
-             AND (shopify_fulfillment_id IS NULL OR shopify_fulfillment_id = '')
-        `);
+        await persistShopifyFulfillmentIdOnLegacyOutboundShipmentsInWms(
+          db,
+          sqlBigintArray(command.legacyWmsShipmentIds),
+          providerPackageState.fulfillmentId,
+        );
         await recordShopifyWritebackEvidence({
           eventType: "shopify_fulfillment_reconciled",
           order,
@@ -2961,13 +2963,11 @@ export function createFulfillmentPushService(
     // Additional repair fulfillments are append-only in OMS event evidence;
     // the live quantity clamp and order-scoped advisory lock provide mutation
     // idempotency. A rowCount of zero never means package coverage is complete.
-    const persistResult: any = await db.execute(sql`
-      UPDATE wms.outbound_shipments
-         SET shopify_fulfillment_id = ${fulfillmentGid},
-             updated_at = NOW()
-       WHERE id = ANY(${sqlBigintArray(legacyWmsShipmentIds)})
-         AND (shopify_fulfillment_id IS NULL OR shopify_fulfillment_id = '')
-    `);
+    const persistResult: any = await persistShopifyFulfillmentIdOnLegacyOutboundShipmentsInWms(
+      db,
+      sqlBigintArray(legacyWmsShipmentIds),
+      fulfillmentGid,
+    );
 
     const persistRowCount = persistResult?.rowCount ?? null;
     if (persistRowCount === 0) {
@@ -3926,12 +3926,11 @@ export function createFulfillmentPushService(
 
     // Clear the backward-compatible handle only if that specific fulfillment
     // is dead. A different live fulfillment may share this physical package.
-    await db.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET shopify_fulfillment_id = NULL, updated_at = NOW()
-      WHERE id = ${shipmentId}
-        AND shopify_fulfillment_id = ANY(${sqlTextArray(deadFulfillmentIds)})
-    `);
+    await clearDeadShopifyFulfillmentIdsOnOutboundShipmentInWms(
+      db,
+      shipmentId,
+      sqlTextArray(deadFulfillmentIds),
+    );
 
     const created = await pushShopifyFulfillment(shipmentId);
     if (!created.writebackComplete) {

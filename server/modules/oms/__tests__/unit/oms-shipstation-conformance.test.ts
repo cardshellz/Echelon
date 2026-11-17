@@ -23,6 +23,8 @@ function sourceBlock(source: string, startMarker: string, endMarker?: string): s
 
 const SHIPSTATION_SRC = readSource("../../shipstation.service.ts");
 const FULFILLMENT_PUSH_SRC = readSource("../../fulfillment-push.service.ts");
+const WMS_SHIPMENTS_REPO_SRC = readSource("../../../wms/outbound-shipments-mutations.repository.ts");
+const WMS_SHIPMENT_ITEMS_REPO_SRC = readSource("../../../wms/outbound-shipment-items-mutations.repository.ts");
 const SHIP_NOTIFY_TEST_SRC = readSource("ship-notify-v2.test.ts");
 const WRITEBACK_GUARDS_TEST_SRC = readSource("c7-writeback-guards.test.ts");
 const PUSH_SHOPIFY_FULFILLMENT_TEST_SRC = readSource(
@@ -46,8 +48,8 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(WRITEBACK_GUARDS_TEST_SRC).toContain(
       'it("uses conditional UPDATE with NULL guard when persisting fulfillment ID"',
     );
-    expect(persistBlock).toContain("UPDATE wms.outbound_shipments");
-    expect(persistBlock).toContain("shopify_fulfillment_id IS NULL");
+    expect(persistBlock).toContain("persistShopifyFulfillmentIdOnLegacyOutboundShipmentsInWms(");
+    expect(WMS_SHIPMENTS_REPO_SRC).toContain("shopify_fulfillment_id IS NULL");
     expect(persistBlock).toContain("persistResult?.rowCount");
     expect(persistBlock).toContain("recorded additional fulfillment");
     expect(persistBlock).not.toContain("alreadyPushed: true");
@@ -74,8 +76,8 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(SHIP_NOTIFY_TEST_SRC).toContain(
       "expect(sqlText).not.toMatch(/shipstation_split/)",
     );
-    expect(duplicateRepairBlock).toContain("UPDATE wms.outbound_shipments");
-    expect(duplicateRepairBlock).toContain("shipstation_duplicate_order_key_repaired");
+    expect(duplicateRepairBlock).toContain("adoptDriftedShipStationOrderMappingOnOutboundShipmentInWms(");
+    expect(WMS_SHIPMENTS_REPO_SRC).toContain("shipstation_duplicate_order_key_repaired");
     expect(duplicateRepairBlock).toContain("Repair/adopt the mapping");
     expect(duplicateRepairBlock).toContain(
       "row: { ...parent, shipstation_order_id: adoptedSsOrderId }",
@@ -111,19 +113,22 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     );
     expect(splitResolutionBlock).toContain("SELECT pg_advisory_xact_lock");
     expect(splitResolutionBlock).toContain("hasSameShipmentItemSet");
-    expect(splitResolutionBlock).toContain("${SHIPSTATION_SPLIT_SOURCE}, 'queued'");
+    expect(splitResolutionBlock).toContain("insertShipStationChildOutboundShipmentInWms(");
+    expect(splitResolutionBlock).toContain("source: SHIPSTATION_SPLIT_SOURCE");
     expect(splitResolutionBlock).toContain("db.transaction(createSplit)");
     expect(splitResolutionBlock).not.toContain("SELECT pg_advisory_unlock");
     expect(splitResolutionBlock).toContain("if (sourceQty === item.qty)");
-    expect(splitResolutionBlock).toContain("SET shipment_id = ${row.id}");
-    expect(splitResolutionBlock).toContain("AND qty > ${item.qty}");
+    expect(splitResolutionBlock).toContain("moveWholeShipmentItemToPhysicalSplitInWms(");
+    expect(splitResolutionBlock).toContain("reduceParentShipmentItemAfterPhysicalSplitInWms(");
+    expect(WMS_SHIPMENT_ITEMS_REPO_SRC).toContain("SET shipment_id = ${input.splitShipmentId}");
+    expect(WMS_SHIPMENT_ITEMS_REPO_SRC).toContain("AND qty > ${input.splitQty}");
     expect(SHIPSTATION_SRC).toContain("parseExactPositiveWmsShipmentItems");
     expect(SHIPSTATION_SRC).toContain("shipstation_package_contents_missing");
     expect(itemSyncBlock).toContain("shipstation_split_items_unmapped");
     expect(itemSyncBlock).toContain("shipstation_split_source_item_missing");
     expect(itemSyncBlock).toContain("shipstation_split_commercial_quantity_unmapped");
-    expect(itemSyncBlock).toContain("UPDATE wms.outbound_shipment_items");
-    expect(itemSyncBlock).toContain("tracking_id = ${String(shipment.shipmentId)}");
+    expect(itemSyncBlock).toContain("syncOriginalShipmentItemFromShipStationInWms(");
+    expect(itemSyncBlock).toContain("trackingId: String(shipment.shipmentId)");
     expect(itemSyncBlock).not.toContain("SET qty = 0");
     expect(itemSyncBlock).toContain("the remaining demand was preserved for review");
     expect(itemSyncWrapperBlock).toContain('typeof db.transaction === "function"');

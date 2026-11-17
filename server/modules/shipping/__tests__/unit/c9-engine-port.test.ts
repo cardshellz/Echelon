@@ -78,14 +78,22 @@ describe("D-NOENGINE: migration adds engine columns", () => {
 
 describe("D-NOENGINE: pushShipment writes engine columns", () => {
   const ssSrc = readSrc("server/modules/oms/shipstation.service.ts");
+  const wmsShipmentsRepoSrc = readSrc("server/modules/wms/outbound-shipments-mutations.repository.ts");
 
   it("writes shipping_engine in the same UPDATE as shipstation_order_id", () => {
     const start = ssSrc.indexOf("Mark shipment queued + persist engine refs");
     const end = ssSrc.indexOf("recomputeOrderStatusFromShipments", start);
     const pushBlock = ssSrc.substring(start, end);
-    expect(pushBlock).toContain("shipping_engine = 'shipstation'");
-    expect(pushBlock).toContain("engine_order_ref");
-    expect(pushBlock).toContain("engine_shipment_ref");
+    expect(pushBlock).toContain("markOutboundShipmentQueuedAfterShipStationPushInWms(");
+
+    const repoFn = sourceBetween(
+      wmsShipmentsRepoSrc,
+      "export async function markOutboundShipmentQueuedAfterShipStationPushInWms(",
+      "WHERE id = ${input.shipmentId}",
+    );
+    expect(repoFn).toContain("shipping_engine = 'shipstation'");
+    expect(repoFn).toContain("engine_order_ref");
+    expect(repoFn).toContain("engine_shipment_ref");
   });
 });
 
@@ -93,27 +101,33 @@ describe("D-NOENGINE: pushShipment writes engine columns", () => {
 
 describe("D-NOENGINE: split/combined shipment creation includes engine columns", () => {
   const ssSrc = readSrc("server/modules/oms/shipstation.service.ts");
+  const wmsShipmentsRepoSrc = readSrc("server/modules/wms/outbound-shipments-mutations.repository.ts");
 
   it("split shipment INSERT includes engine triple", () => {
     const insertStart = ssSrc.indexOf("ensureSplitShipmentFromShipStation");
-    const splitInsert = ssSrc.substring(
-      ssSrc.indexOf("INSERT INTO wms.outbound_shipments", insertStart),
-      ssSrc.indexOf("RETURNING id", insertStart),
+    const splitBlock = ssSrc.substring(
+      insertStart,
+      ssSrc.indexOf("Failed to create WMS split shipment", insertStart),
     );
-    expect(splitInsert).toContain("shipping_engine");
-    expect(splitInsert).toContain("engine_order_ref");
-    expect(splitInsert).toContain("engine_shipment_ref");
+    expect(splitBlock).toContain("insertShipStationChildOutboundShipmentInWms(");
+
+    const repoInsert = sourceBetween(
+      wmsShipmentsRepoSrc,
+      "export async function insertShipStationChildOutboundShipmentInWms(",
+      "RETURNING id, order_id, status, shipstation_order_id",
+    );
+    expect(repoInsert).toContain("shipping_engine");
+    expect(repoInsert).toContain("engine_order_ref");
+    expect(repoInsert).toContain("engine_shipment_ref");
   });
 
   it("combined child INSERT includes engine triple", () => {
     const combStart = ssSrc.indexOf("resolveCombinedShipmentGroupsFromShipStationItems");
-    const combInsert = ssSrc.substring(
-      ssSrc.indexOf("INSERT INTO wms.outbound_shipments", combStart),
-      ssSrc.indexOf("RETURNING id", combStart),
+    const combBlock = ssSrc.substring(
+      combStart,
+      ssSrc.indexOf("applying shared tracking to each order shipment", combStart),
     );
-    expect(combInsert).toContain("shipping_engine");
-    expect(combInsert).toContain("engine_order_ref");
-    expect(combInsert).toContain("engine_shipment_ref");
+    expect(combBlock).toContain("insertShipStationChildOutboundShipmentInWms(");
   });
 });
 
@@ -291,7 +305,9 @@ describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
     expect(v2Block).toContain("orderIsCancelled");
     // An engine-side cancel of a LIVE order is flagged for review, never applied.
     expect(v2Block).toContain('event.kind === "review"');
-    expect(v2Block).toContain("requires_review = true");
+    expect(v2Block).toContain("flagOutboundShipmentReconcileReviewIfUnsetInWms(");
+    const wmsShipmentsRepoSrc = readSrc("server/modules/wms/outbound-shipments-mutations.repository.ts");
+    expect(wmsShipmentsRepoSrc).toContain("requires_review = true");
     expect(v2Block).toContain("engine_cancel_flagged_for_review");
   });
 

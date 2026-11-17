@@ -6,6 +6,10 @@ const OMS_WEBHOOKS_SRC = readFileSync(
   resolve(__dirname, "../../oms-webhooks.ts"),
   "utf-8",
 );
+const WMS_ORDER_MUTATIONS_SRC = readFileSync(
+  resolve(__dirname, "../../../wms/wms-order-mutations.repository.ts"),
+  "utf-8",
+);
 
 describe("Shopify orders/updated WMS reconciliation", () => {
   it("reconciles WMS after processing Shopify line item changes", () => {
@@ -43,7 +47,8 @@ describe("Shopify orders/updated WMS reconciliation", () => {
 
   it("syncs WMS address from canonical Shopify shipping fields and handles existing shipments", () => {
     expect(OMS_WEBHOOKS_SRC).toMatch(/canonicalShipToFromShopifyUpdate\(shopifyOrder, existing\)/);
-    expect(OMS_WEBHOOKS_SRC).toMatch(/shipping_address = \$\{nextShipTo\.address1\}/);
+    expect(OMS_WEBHOOKS_SRC).toMatch(/shippingAddress:\s*nextShipTo\.address1/);
+    expect(WMS_ORDER_MUTATIONS_SRC).toMatch(/shipping_address = \$\{input\.shippingAddress\}/);
     expect(OMS_WEBHOOKS_SRC).toMatch(/if \(didWmsAddressChange && !isFinalOmsState\)/);
     expect(OMS_WEBHOOKS_SRC).toMatch(/handleWmsAddressChange\(/);
     expect(OMS_WEBHOOKS_SRC).toMatch(/handleAddressChangeOnShipment/);

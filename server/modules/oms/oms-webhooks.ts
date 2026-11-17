@@ -31,6 +31,7 @@ import {
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
 import { guardOrderEditShopifyIngress } from "../order-edits/oms-coordination.api";
+import { syncWmsOrderAddressAndFinancialFromShopifyWebhookInWms } from "../wms/wms-order-mutations.api";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 import {
   applyShopifyRefundCascade,
@@ -1336,26 +1337,21 @@ export function registerOmsWebhooks(
 
       if (wmsOrderRows.length > 0) {
         const isPaidNow = shopifyOrder.financial_status === "paid" || shopifyOrder.financial_status === "partially_paid";
-        await db.execute(sql`
-          UPDATE wms.orders SET
-            shipping_name = ${nextShipTo.name},
-            shipping_company = ${nextShipTo.company},
-            shipping_address = ${nextShipTo.address1},
-            shipping_address2 = ${nextShipTo.address2},
-            shipping_city = ${nextShipTo.city},
-            shipping_state = ${nextShipTo.state},
-            shipping_postal_code = ${nextShipTo.zip},
-            shipping_country = ${nextShipTo.country},
-            financial_status = ${shopifyOrder.financial_status || "paid"},
-            warehouse_status = CASE
-              WHEN warehouse_status = 'pending' AND ${isPaidNow} THEN 'ready'
-              ELSE warehouse_status
-            END,
-            customer_name = ${nextShipTo.name || existing.customerName || null},
-            customer_email = ${shopifyOrder.email || existing.customerEmail || null}
-          WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
-             OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
-        `);
+        await syncWmsOrderAddressAndFinancialFromShopifyWebhookInWms(db, {
+          omsOrderIdText: String(existing.id),
+          shippingName: nextShipTo.name,
+          shippingCompany: nextShipTo.company,
+          shippingAddress: nextShipTo.address1,
+          shippingAddress2: nextShipTo.address2,
+          shippingCity: nextShipTo.city,
+          shippingState: nextShipTo.state,
+          shippingPostalCode: nextShipTo.zip,
+          shippingCountry: nextShipTo.country,
+          financialStatus: shopifyOrder.financial_status || "paid",
+          isPaidNow,
+          customerName: nextShipTo.name || existing.customerName || null,
+          customerEmail: shopifyOrder.email || existing.customerEmail || null,
+        });
 
         if (isCancelledByChannel) {
           await cancelOrderCascade(db, existing.id, {

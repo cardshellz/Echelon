@@ -10,6 +10,10 @@ const ORDER_ITEM_COMMANDS_SRC = readFileSync(
   resolve(__dirname, "../../../wms/order-item-commands.ts"),
   "utf8",
 );
+const WMS_ORDER_MUTATIONS_SRC = readFileSync(
+  resolve(__dirname, "../../../wms/wms-order-mutations.repository.ts"),
+  "utf8",
+);
 
 describe("wms-sync existing order reconciliation", () => {
   it("does not return before reconciling missing WMS lines", () => {
@@ -144,24 +148,14 @@ describe("wms-sync existing order reconciliation", () => {
   });
 
   it("reopens WMS work when reconciliation adds shippable demand", () => {
-    expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.orders[\s\S]*THEN 'ready'/);
+    expect(WMS_SYNC_SRC).toContain("recomputeWmsOrderStatusAndCountsAfterLineSyncInWms(");
+    expect(WMS_ORDER_MUTATIONS_SRC).toMatch(/UPDATE wms\.orders[\s\S]*THEN 'ready'/);
   });
 
   it("cancels an order with no items, and otherwise leaves the status alone", () => {
-    // This used to assert `ELSE 'completed'`. That branch answered "finished"
-    // for an order that merely had nothing pickable - which is how #62269 and
-    // #62226 were marked done while sitting unpicked with zero units, and
-    // 'completed' is terminal, so neither could be repaired afterwards.
-    //
-    // The rollup cannot see picks or shipments and never stamps completed_at,
-    // so it has no evidence to complete anything: in the 30 days before the
-    // change it produced no legitimate completion at all, while all 13 real
-    // ones came from completeOrder()/updateOrderStatus() with a timestamp.
-    // No items at all is still safely cancellable; everything else it leaves
-    // to the writers that can actually evidence a transition.
-    expect(WMS_SYNC_SRC).toMatch(/THEN 'cancelled'/);
-    expect(WMS_SYNC_SRC).toMatch(/ELSE w\.warehouse_status/);
-    expect(WMS_SYNC_SRC).not.toMatch(/ELSE 'completed'/);
+    expect(WMS_ORDER_MUTATIONS_SRC).toMatch(/THEN 'cancelled'/);
+    expect(WMS_ORDER_MUTATIONS_SRC).toMatch(/ELSE w\.warehouse_status/);
+    expect(WMS_ORDER_MUTATIONS_SRC).not.toMatch(/ELSE 'completed'/);
   });
 
   it("syncs item cancellations and quantity changes from OMS to WMS", () => {
@@ -211,16 +205,16 @@ describe("wms-sync existing order reconciliation", () => {
   });
 
   it("recomputes WMS aggregate counts after reconciliation changes order items", () => {
-    expect(WMS_SYNC_SRC).toMatch(/item_count = agg\.item_count/);
-    expect(WMS_SYNC_SRC).toMatch(/unit_count = agg\.unit_count/);
-    expect(WMS_SYNC_SRC).toMatch(/picked_count = agg\.picked_count/);
-    expect(WMS_SYNC_SRC).toMatch(/COUNT\(\*\)::int AS item_count/);
-    expect(WMS_SYNC_SRC).toMatch(/COALESCE\(SUM\(quantity\), 0\)::int AS unit_count/);
+    expect(WMS_ORDER_MUTATIONS_SRC).toMatch(/item_count = agg\.item_count/);
+    expect(WMS_ORDER_MUTATIONS_SRC).toMatch(/unit_count = agg\.unit_count/);
+    expect(WMS_ORDER_MUTATIONS_SRC).toMatch(/picked_count = agg\.picked_count/);
+    expect(WMS_ORDER_MUTATIONS_SRC).toMatch(/COUNT\(\*\)::int AS item_count/);
+    expect(WMS_ORDER_MUTATIONS_SRC).toMatch(/COALESCE\(SUM\(quantity\), 0\)::int AS unit_count/);
   });
 
   it("refreshes aggregate counts even when no new shipment item is needed", () => {
     expect(WMS_SYNC_SRC).toMatch(/if \(shippableShipmentItems\.length === 0\)[\s\S]*return \{ insertedItems: insertedItems\.length, updatedShipments: 0 \};/);
-    expect(WMS_SYNC_SRC).toMatch(/UPDATE wms\.orders w[\s\S]*if \(shippableShipmentItems\.length === 0\)/);
+    expect(WMS_SYNC_SRC).toMatch(/recomputeWmsOrderStatusAndCountsAfterLineSyncInWms\(db, wmsOrderId\)[\s\S]*if \(shippableShipmentItems\.length === 0\)/);
   });
 
   it("refreshes existing WMS item pricing through the WMS-owned command", () => {

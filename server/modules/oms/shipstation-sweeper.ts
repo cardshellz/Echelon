@@ -1,6 +1,10 @@
 import { db } from "../../../server/db";
 import { sql } from "drizzle-orm";
 import { enqueueShipStationShipmentPushRetry } from "./webhook-retry.worker";
+import {
+  clearResolvedShipStationQueueReviewFlagsInWms,
+  setOutboundShipmentReviewFlagInWms,
+} from "../wms/outbound-shipment-mutations.api";
 
 interface ShipStationQueueOrder {
   orderId?: number | null;
@@ -84,13 +88,7 @@ async function flagWmsShipmentForShipStationReview(
   shipmentId: number,
   reason: string,
 ): Promise<void> {
-  await db.execute(sql`
-    UPDATE wms.outbound_shipments
-    SET requires_review = true,
-        review_reason = ${reason},
-        updated_at = NOW()
-    WHERE id = ${shipmentId}
-  `);
+  await setOutboundShipmentReviewFlagInWms(db, shipmentId, reason);
 }
 
 async function getWmsShipmentFinality(
@@ -179,19 +177,7 @@ async function enqueueMissingShipStationLinkRecovery(
 async function clearResolvedQueueReviewFlags(
   activeCanonicalShipmentIds: Set<number>,
 ): Promise<void> {
-  const activeIds = [...activeCanonicalShipmentIds];
-  const activePredicate = activeIds.length > 0
-    ? sql`AND id NOT IN (${sql.join(activeIds.map((id) => sql`${id}`), sql`, `)})`
-    : sql``;
-  await db.execute(sql`
-    UPDATE wms.outbound_shipments
-    SET requires_review = false,
-        review_reason = NULL,
-        updated_at = NOW()
-    WHERE requires_review = true
-      AND review_reason = 'shipstation_queue_review_required'
-      ${activePredicate}
-  `);
+  await clearResolvedShipStationQueueReviewFlagsInWms(db, [...activeCanonicalShipmentIds]);
 }
 
 async function isOmsOrderFinal(orderId: number): Promise<boolean> {

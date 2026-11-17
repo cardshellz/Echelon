@@ -30,8 +30,13 @@ describe("engine-cancel divergence P2 — clear-review-and-push override", () =>
   });
 
   it("overrideReview clears the review flag after a successful push", () => {
+    const wmsShipmentsRepoSrc = readFileSync(
+      resolve(__dirname, "../../../wms/outbound-shipments-mutations.repository.ts"),
+      "utf8",
+    );
     expect(SHIPSTATION_SRC).toMatch(/if \(opts\.overrideReview\)/);
-    expect(SHIPSTATION_SRC).toMatch(/SET requires_review = false, review_reason = NULL/);
+    expect(SHIPSTATION_SRC).toContain("clearOutboundShipmentReviewFlagByReasonInWms(");
+    expect(wmsShipmentsRepoSrc).toMatch(/SET requires_review = false, review_reason = NULL/);
   });
 
   it("the push endpoint gates overrideReview on the orders:hold permission", () => {

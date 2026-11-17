@@ -41,6 +41,14 @@ import { engineRefFromRow } from "../shipping/engine-and-reconcile.api";
 import type { EngineCancelResult, EngineRef } from "../shipping/engine-and-reconcile.api";
 import { deriveWmsShippingProgress } from "@shared/wms-shipping-progress";
 import { shippingProgressLine, wmsShippingProgressQuery, type WmsShippingProgressRow } from "../wms/shipment-execution-and-projection.api";
+import { applyWmsOrderShippingRollupStatusInWms } from "../wms/wms-order-mutations.api";
+import {
+  cancelStaleFullyCoveredOutboundShipmentsInWms,
+  flagOutboundShipmentAddressChangedAfterLabelInWms,
+  markOutboundShipmentCancelledRowInWms,
+  markOutboundShipmentShippedRowInWms,
+  markOutboundShipmentVoidedRowInWms,
+} from "../wms/outbound-shipment-mutations.api";
 
 // ─── Public types ────────────────────────────────────────────────────
 
@@ -321,29 +329,18 @@ export async function markShipmentShipped(
   }
 
   const trackingUrl = meta.trackingUrl ?? null;
-  await db.execute(sql`
-    UPDATE wms.outbound_shipments SET
-      status = 'shipped',
-      carrier = ${meta.carrier},
-      service_code = COALESCE(${serviceCode}, service_code),
-      tracking_number = ${meta.trackingNumber},
-      tracking_url = ${trackingUrl},
-      shipped_at = ${meta.shipDate},
-      carrier_cost_cents = CASE
-        WHEN ${hasCarrierCost} THEN ${meta.carrierCostCents ?? null}
-        ELSE carrier_cost_cents
-      END,
-      carrier_cost_source = CASE
-        WHEN ${hasCarrierCost} THEN ${carrierCostSource || null}
-        ELSE carrier_cost_source
-      END,
-      carrier_cost_recorded_at = CASE
-        WHEN ${hasCarrierCost} THEN ${now}
-        ELSE carrier_cost_recorded_at
-      END,
-      updated_at = ${now}
-    WHERE id = ${shipmentId}
-  `);
+  await markOutboundShipmentShippedRowInWms(db, {
+    shipmentId,
+    carrier: meta.carrier,
+    serviceCode,
+    trackingNumber: meta.trackingNumber,
+    trackingUrl,
+    shipDate: meta.shipDate,
+    hasCarrierCost,
+    carrierCostCents: meta.carrierCostCents ?? null,
+    carrierCostSource: carrierCostSource || null,
+    now,
+  });
 
   // Shopify fulfillment convergence (void→re-ship heal; supersedes the
   // §6 Commit 24 re-label-only hook). Fires whenever incoming tracking
@@ -524,17 +521,11 @@ export async function markShipmentCancelled(
     };
   }
 
-  const updateResult: any = await db.execute(sql`
-    UPDATE wms.outbound_shipments SET
-      status = 'cancelled',
-      cancelled_at = ${now},
-      voided_reason = ${safeReason},
-      updated_at = ${now}
-    WHERE id = ${shipmentId}
-      AND status NOT IN ('cancelled', 'shipped', 'returned', 'lost')
-      AND shipped_at IS NULL
-    RETURNING id
-  `);
+  const updateResult: any = await markOutboundShipmentCancelledRowInWms(db, {
+    shipmentId,
+    now,
+    safeReason,
+  });
 
   const updatedRows = Array.isArray(updateResult?.rows) ? updateResult.rows : [];
   if (updatedRows.length > 0) {
@@ -627,14 +618,7 @@ export async function handleAddressChangeOnShipment(
 
     case "labeled":
     case "shipped": {
-      await db.execute(sql`
-        UPDATE wms.outbound_shipments SET
-          requires_review = true,
-          review_reason = 'address_changed_after_label',
-          address_changed_after_label = true,
-          updated_at = ${now}
-        WHERE id = ${shipmentId}
-      `);
+      await flagOutboundShipmentAddressChangedAfterLabelInWms(db, { shipmentId, now });
       return { mode: "requires_review", shipmentId };
     }
 
@@ -848,16 +832,11 @@ export async function markShipmentVoided(
     }
   }
 
-  await db.execute(sql`
-    UPDATE wms.outbound_shipments SET
-      status = 'voided',
-      voided_at = ${now},
-      voided_reason = ${safeReason},
-      tracking_number = NULL,
-      tracking_url = NULL,
-      updated_at = ${now}
-    WHERE id = ${shipmentId}
-  `);
+  await markOutboundShipmentVoidedRowInWms(db, {
+    shipmentId,
+    now,
+    safeReason,
+  });
 
   // Shopify fulfillment cancel hook (§6 Commit 17). Guarded so callers
   // that do not wire `fulfillmentPush` (tests, pre-Group-E paths) skip
@@ -945,72 +924,12 @@ async function recomputeLockedOrderShippingStatus(
   const now = opts.now ?? new Date();
   const stampCompletedAt = derived === "shipped" && !orderRow.completed_at;
 
-  if (stampCompletedAt) {
-    await db.execute(sql`
-      WITH updated_order AS (
-        UPDATE wms.orders SET
-          warehouse_status = ${derived},
-          completed_at = ${now},
-          updated_at = ${now}
-        WHERE id = ${wmsOrderId}
-        RETURNING id
-      ),
-      closed_blockers AS (
-        UPDATE wms.allocation_exceptions
-        SET
-          status = CASE WHEN ${derived}::text = 'cancelled' THEN 'cancelled' ELSE 'resolved' END,
-          resolution = CONCAT('order_', ${derived}::text, '_shipment_rollup'),
-          resolved_at = ${now},
-          updated_at = ${now},
-          metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-            'closedBy', 'shipment_rollup',
-            'closedByOrderStatus', ${derived}::text,
-            'closedAt', ${now}::timestamptz
-          )
-        WHERE order_id = ${wmsOrderId}
-          AND ${derived}::text IN ('shipped', 'cancelled')
-          AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
-          AND (
-            status = 'blocked'
-            OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
-          )
-        RETURNING id
-      )
-      SELECT id FROM updated_order
-    `);
-  } else {
-    await db.execute(sql`
-      WITH updated_order AS (
-        UPDATE wms.orders SET
-          warehouse_status = ${derived},
-          updated_at = ${now}
-        WHERE id = ${wmsOrderId}
-        RETURNING id
-      ),
-      closed_blockers AS (
-        UPDATE wms.allocation_exceptions
-        SET
-          status = CASE WHEN ${derived}::text = 'cancelled' THEN 'cancelled' ELSE 'resolved' END,
-          resolution = CONCAT('order_', ${derived}::text, '_shipment_rollup'),
-          resolved_at = ${now},
-          updated_at = ${now},
-          metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-            'closedBy', 'shipment_rollup',
-            'closedByOrderStatus', ${derived}::text,
-            'closedAt', ${now}::timestamptz
-          )
-        WHERE order_id = ${wmsOrderId}
-          AND ${derived}::text IN ('shipped', 'cancelled')
-          AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
-          AND (
-            status = 'blocked'
-            OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
-          )
-        RETURNING id
-      )
-      SELECT id FROM updated_order
-    `);
-  }
+  await applyWmsOrderShippingRollupStatusInWms(db, {
+    wmsOrderId,
+    derived,
+    now,
+    stampCompletedAt,
+  });
 
   return { warehouseStatus: derived, changed: true };
 }
@@ -1115,16 +1034,7 @@ export async function cancelStaleShipmentsIfFullyCovered(
   );
   if (!allCovered) return false;
 
-  const cancelResult: any = await db.execute(sql`
-    UPDATE wms.outbound_shipments
-    SET status = 'cancelled',
-        cancelled_at = NOW(),
-        updated_at = NOW()
-    WHERE order_id = ${wmsOrderId}
-      AND status IN ('planned', 'queued')
-      AND shipped_at IS NULL
-    RETURNING id
-  `);
+  const cancelResult: any = await cancelStaleFullyCoveredOutboundShipmentsInWms(db, wmsOrderId);
 
   const cancelledCount = cancelResult?.rows?.length ?? 0;
   if (cancelledCount > 0) {
