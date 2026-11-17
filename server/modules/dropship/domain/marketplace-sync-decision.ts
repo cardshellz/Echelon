@@ -57,6 +57,8 @@ export const MARKETPLACE_IDENTITY_ISSUE_CODES: readonly MarketplaceIssueCode[] =
 export const MARKETPLACE_SYNC_NOTICE_KINDS = {
   price_below_cost: { critical: false },
   policy_incompatible: { critical: true },
+  // A policy the vendor was told about works again (owner report): good news, so never critical.
+  policy_fixed: { critical: false },
   sku_changed: { critical: true },
   offer_missing: { critical: true },
   variation_unsupported: { critical: false },
@@ -150,17 +152,33 @@ export function isLivePolicyIncompatibilityTolerated(input: {
     && !input.issueCodes.includes("verification_unavailable");
 }
 
-/** A shipping policy verdict's hash (§6.3): its issue codes, sorted, so the same verdict always hashes the same. */
-export function fulfillmentPolicyVerdictHash(issueCodes: readonly string[]): string {
-  return sha256Hex(JSON.stringify([...new Set(issueCodes)].sort()));
+/**
+ * The version of the policy notice's words. It is part of the verdict hash,
+ * so a policy that is still incompatible and was told in an older version's
+ * words is told once more, in the new words, on its next check: the stored
+ * notified_verdict_hash no longer matches, decideFulfillmentPolicyCheckNotice
+ * notifies and stores the new hash, and every later check matches again. A
+ * compatible policy is never told because of a version change: its decision
+ * looks only at whether anything was told (notified_verdict_hash non-null).
+ * Bump only when the incompatible notice's words change enough to resend.
+ * 1: the words before the owner's guided-fix report (an unversioned hash). 2: the guided fix.
+ */
+export const FULFILLMENT_POLICY_NOTICE_FORMAT_VERSION = 2;
+
+/** A shipping policy verdict's hash (§6.3): its issue codes, sorted, and the notice format version, so the same verdict always hashes the same. */
+export function fulfillmentPolicyVerdictHash(issueCodes: readonly string[],
+  formatVersion: number = FULFILLMENT_POLICY_NOTICE_FORMAT_VERSION): string {
+  const codes = [...new Set(issueCodes)].sort();
+  // Version 1 hashed the codes alone; kept as it was so the rule above stays provable against stored hashes.
+  return sha256Hex(JSON.stringify(formatVersion === 1 ? codes : { formatVersion, codes }));
 }
 
 export type FulfillmentPolicyNoticeDecision =
   | { kind: "none" }
   /** A newly incompatible verdict, or another one than last told: one critical notice, remembered by its hash. */
   | { kind: "notify_incompatible"; notifiedVerdictHash: string }
-  /** The policy works again after the vendor was told it did not: no notice (owner rule 7), and nothing remembered. */
-  | { kind: "forget_notified"; notifiedVerdictHash: null };
+  /** The policy works again after the vendor was told it did not: one "fixed" notice (owner report), and nothing remembered. */
+  | { kind: "notify_fixed"; notifiedVerdictHash: null };
 
 /**
  * The per-store policy check's notice (§6.3, SB27, owner rule 7b). A read
@@ -174,7 +192,7 @@ export function decideFulfillmentPolicyCheckNotice(input: {
     return input.notifiedVerdictHash === input.verdictHash ? { kind: "none" }
       : { kind: "notify_incompatible", notifiedVerdictHash: input.verdictHash };
   }
-  return input.notifiedVerdictHash === null ? { kind: "none" } : { kind: "forget_notified", notifiedVerdictHash: null };
+  return input.notifiedVerdictHash === null ? { kind: "none" } : { kind: "notify_fixed", notifiedVerdictHash: null };
 }
 
 export type PolicyField = "fulfillmentPolicyId" | "returnPolicyId" | "paymentPolicyId";
