@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
+import { marketplaceListingUrl, type MarketplaceEnvironment } from "../domain/marketplace-listing-url";
 
 /** Job statuses after which nothing more happens to the job's items. */
 export const FINISHED_LISTING_PUSH_JOB_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
@@ -28,8 +29,7 @@ export interface VendorListingPushItemRecord {
   automaticRetryPending: boolean;
 }
 
-/** Where the store's marketplace account lives; eBay's sandbox is a test site with its own item pages. */
-export type MarketplaceEnvironment = "sandbox" | "production";
+export type { MarketplaceEnvironment };
 
 export interface VendorListingPushJobRecord {
   jobId: number;
@@ -94,18 +94,5 @@ export class DropshipListingPushStatusService {
   }
 }
 
-/**
- * Only an eBay item id forms a public page a vendor can open; other platforms
- * keep the id alone. A sandbox listing lives on eBay's test site, where the
- * production page would say the item cannot be found.
- */
-export function marketplaceListingUrl(
-  platform: string,
-  externalListingId: string | null,
-  environment: MarketplaceEnvironment | null,
-): string | null {
-  if (externalListingId === null) return null;
-  if (platform !== "ebay" || !/^\d{6,20}$/.test(externalListingId)) return null;
-  const host = environment === "sandbox" ? "sandbox.ebay.com" : "www.ebay.com";
-  return `https://${host}/itm/${externalListingId}`;
-}
+// The URL rule lives in the domain so vendor notices build the same item pages (marketplace-sync-words.ts).
+export { marketplaceListingUrl };
