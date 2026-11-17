@@ -12,6 +12,7 @@ import { calculatePublicationVariantMappingDefinitionHash } from "../domain/inve
 import { inInventoryCutoverTransaction } from "./inventory-cutover-commit.repository";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { INITIAL_SCOPE_SOURCE_TABLES, readInitialPublicationScopeFacts } from "./inventory-publication-initial-scope.reader";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 
 export class PostgresInitialPublicationScopeStore implements InitialPublicationScopeStore {
   constructor(private readonly pool: Pick<Pool, "connect"> = defaultPool) {}
@@ -66,14 +67,18 @@ export class PostgresInitialPublicationScopeStore implements InitialPublicationS
           INSERT INTO inventory.publication_membership_heads(publication_target_id,product_variant_id,active_version_id)
           SELECT $1,$2,id FROM version`, [input.publicationTargetId, variantId, definitionHash, review.reviewHash, actor, now, included]);
       }
-      await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-        VALUES($1,'AUDIT',$2,'inventory_availability.publication_scope.initialized',$3,$4::jsonb,$5::jsonb)`,
-      [now, actor, `inventory.inventory_publication_target:${input.publicationTargetId}`,
-        JSON.stringify({ before: { mode: "whole_product", revision: review.targetRevision },
+      await insertAuditEventPgQuery(client, {
+        timestamp: now,
+        actor,
+        action: "inventory_availability.publication_scope.initialized",
+        target: `inventory.inventory_publication_target:${input.publicationTargetId}`,
+        changesJson: JSON.stringify({ before: { mode: "whole_product", revision: review.targetRevision },
           after: { mode: "explicit", revision: receipt.revision, includedVariantIds: receipt.includedVariantIds,
             excludedVariants: receipt.excludedVariants, deferredUnpublishedVariantIds: receipt.deferredUnpublishedVariantIds,
             mappingImports: review.mappingImports ?? [] } }),
-        JSON.stringify({ idempotencyKey: input.idempotencyKey, requestHash, reviewHash: review.reviewHash, receipt })]);
+        contextJson: JSON.stringify({ idempotencyKey: input.idempotencyKey, requestHash, reviewHash: review.reviewHash, receipt }),
+        inlineAction: true,
+      });
       return receipt;
     });
   }

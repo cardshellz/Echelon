@@ -12,6 +12,8 @@ import { createTransactionScopedInventoryPublicationService } from "./inventory-
 import { loadPublicationTargetScopes, PUBLICATION_TARGET_SCOPE_LOCK_SEED, type PublicationTargetScopeSource } from "./inventory-publication-target-stop.repository";
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
 import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
+import { insertIdempotencyKeyPgQuery } from "../../../infrastructure/idempotency-keys.repository";
 
 // Dedicated command namespace; do not reuse definition-head advisory locks.
 const IDEMPOTENCY_LOCK_NAMESPACE = 918450;
@@ -117,18 +119,24 @@ export class PostgresInventoryPublicationTargetEnableStore implements InventoryP
       const result = inventoryPublicationTargetEnableResultSchema.parse({ publicationTargetId: target.id,
         revision: updated.rows[0].revision, state: "live", publicationRows, initialDefinitionsApplied,
         alreadyApplied: false, runtimeAuthorityChanged: false, providerWriteAttempted: false });
-      await client.query(
-        `INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-         VALUES($1,'AUDIT',$2,'inventory_availability.publication_target.enabled',$3,$4::jsonb,$5::jsonb)`,
-        [command.occurredAt, command.actorId, `inventory.inventory_publication_target:${target.id}`,
-          JSON.stringify({ before: { state: target.state, revision: target.revision }, after: { state: "live", revision: result.revision } }),
-          JSON.stringify({ idempotencyKey: command.idempotencyKey, requestHash: command.requestHash,
-            initialDefinitions: selections, publicationRows, productIds: products,
-            ...(withheldVariantIds.length > 0
-              ? { withheldUnlinkedVariantIds: [...new Set(withheldVariantIds)].sort((a, b) => a - b) } : {}) })]);
-      await client.query(
-        "INSERT INTO public.idempotency_keys(key,request_hash,response_body,created_at,expires_at) VALUES($1,$2,$3::jsonb,$4,NULL)",
-        [receiptKey, command.requestHash, JSON.stringify(result), command.occurredAt]);
+      await insertAuditEventPgQuery(client, {
+        timestamp: command.occurredAt,
+        actor: command.actorId,
+        action: "inventory_availability.publication_target.enabled",
+        target: `inventory.inventory_publication_target:${target.id}`,
+        changesJson: JSON.stringify({ before: { state: target.state, revision: target.revision }, after: { state: "live", revision: result.revision } }),
+        contextJson: JSON.stringify({ idempotencyKey: command.idempotencyKey, requestHash: command.requestHash,
+          initialDefinitions: selections, publicationRows, productIds: products,
+          ...(withheldVariantIds.length > 0
+            ? { withheldUnlinkedVariantIds: [...new Set(withheldVariantIds)].sort((a, b) => a - b) } : {}) }),
+        inlineAction: true,
+      });
+      await insertIdempotencyKeyPgQuery(client, {
+        key: receiptKey,
+        requestHash: command.requestHash,
+        responseBodyJson: JSON.stringify(result),
+        createdAt: command.occurredAt,
+      });
       await client.query("COMMIT");
       return result;
     } catch (error) {

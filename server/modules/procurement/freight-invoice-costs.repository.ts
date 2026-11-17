@@ -10,6 +10,7 @@ import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import { readInvoiceSourceCapabilities } from "./shipment-billing-ownership.repository";
 import { hasInvoiceCreditHistory } from "./supplier-credit-settlement.repository";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 import { planFreightInvoiceCosts, FreightInvoiceCostError } from "./domain/freight-invoice-costs";
 
 const MAX_INVOICE_LINES = 1000;
@@ -146,9 +147,15 @@ export async function recordFreightInvoiceCostApproval(tx: AmendmentTransaction,
   actorId: string, reason: string, commandKey: string, at: Date, applications: unknown) {
   const poIds = source.purchaseOrders.map(row => costInteger(row.id, "purchaseOrderId", 1)).sort((a, b) => a - b);
   if (!poIds.length) throw new FreightInvoiceCostError("A linked purchase order is required to retain this approval.", "FREIGHT_INVOICE_PURCHASE_SCOPE_REVIEW");
-  const audit = (await tx.execute(sql`INSERT INTO public.audit_events(action,actor,target,changes,context,timestamp,level)
-    VALUES('procurement.freight_invoice_costs.approved',${actorId},${`vendor_invoice:${preview.invoiceId}`},
-      ${canonicalJson({ preview, applications })}::jsonb,${canonicalJson({ actorName: source.actorName, reason, commandKey, authority: source.actor })}::jsonb,${at},'AUDIT') RETURNING id`)).rows[0];
+  const audit = (await insertAuditEventSql(tx, {
+    timestamp: at,
+    actor: actorId,
+    action: "procurement.freight_invoice_costs.approved",
+    target: `vendor_invoice:${preview.invoiceId}`,
+    changesJson: canonicalJson({ preview, applications }),
+    contextJson: canonicalJson({ actorName: source.actorName, reason, commandKey, authority: source.actor }),
+    returningId: true,
+  })).rows[0];
   const auditEventId = costInteger(audit?.id, "auditEventId", 1);
   let approvalEventId: number | null = null;
   for (const poId of poIds) {

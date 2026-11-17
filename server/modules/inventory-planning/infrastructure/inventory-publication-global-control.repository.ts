@@ -8,6 +8,10 @@ import {
 
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
+import {
+  insertIdempotencyKeyDrizzle,
+  updateIdempotencyKeyDrizzle,
+} from "../../../infrastructure/idempotency-keys.repository";
 import type {
   InventoryPublicationGlobalControlCommand,
   InventoryPublicationGlobalControlStore,
@@ -108,7 +112,7 @@ export async function applyInventoryPublicationGlobalControlInsideTransaction(
     );
   }
 
-  await transaction.insert(idempotencyKeys).values({
+  await insertIdempotencyKeyDrizzle(transaction, {
     key: receiptKey,
     requestHash: command.requestHash,
     responseBody: null,
@@ -150,9 +154,9 @@ export async function applyInventoryPublicationGlobalControlInsideTransaction(
       requestHash: command.requestHash,
     },
   }, { timestamp: command.occurredAt, emitStructuredLog: false });
-  await transaction.update(idempotencyKeys).set({
+  await updateIdempotencyKeyDrizzle(transaction, receiptKey, {
     responseBody: { commandType: "inventory_publication_global_control_change", result },
-  }).where(eq(idempotencyKeys.key, receiptKey));
+  });
   return result;
 }
 

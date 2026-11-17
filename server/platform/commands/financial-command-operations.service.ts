@@ -257,28 +257,13 @@ export async function rearmDeadFinancialCommand(
         "FINANCIAL_COMMAND_RECOVERY_CONFLICT",
       );
     }
-    const updated = await client.query(
-      `UPDATE public.financial_command_results
-       SET status = 'retryable',
-           attempt_limit = attempt_limit + 1,
-           recovery_count = recovery_count + 1,
-           next_attempt_at = transaction_timestamp(),
-           completed_at = NULL,
-           updated_at = transaction_timestamp(),
-           expires_at = GREATEST(
-             expires_at,
-             transaction_timestamp() + ($2::text || ' days')::interval
-           )
-       WHERE id = $1
-       RETURNING
-         id,
-         status,
-         attempt_count AS "attemptCount",
-         attempt_limit AS "attemptLimit",
-         recovery_count AS "recoveryCount",
-         next_attempt_at AS "nextAttemptAt",
-         expires_at AS "expiresAt"`,
-      [input.commandId, FINANCIAL_COMMAND_TERMINAL_RETENTION_DAYS],
+    const { rearmDeadFinancialCommandResultInRepository } = await import(
+      "./command-results.repository"
+    );
+    const updated = await rearmDeadFinancialCommandResultInRepository(
+      client,
+      input.commandId,
+      FINANCIAL_COMMAND_TERMINAL_RETENTION_DAYS,
     );
     await client.query("COMMIT");
     return {
@@ -297,23 +282,10 @@ export async function purgeExpiredFinancialCommandResults(
   dbPool: Pool,
   batchSize: number,
 ): Promise<number> {
-  const result = await dbPool.query(
-    `WITH expired AS (
-       SELECT id
-       FROM public.financial_command_results
-       WHERE status IN ('succeeded', 'rejected')
-         AND expires_at <= transaction_timestamp()
-       ORDER BY expires_at ASC, id ASC
-       FOR UPDATE SKIP LOCKED
-       LIMIT $1
-     )
-     DELETE FROM public.financial_command_results command
-     USING expired
-     WHERE command.id = expired.id
-     RETURNING command.id`,
-    [batchSize],
+  const { purgeExpiredFinancialCommandResultsInRepository } = await import(
+    "./command-results.repository"
   );
-  return result.rowCount ?? 0;
+  return purgeExpiredFinancialCommandResultsInRepository(dbPool, batchSize);
 }
 
 function escapeLike(value: string): string {

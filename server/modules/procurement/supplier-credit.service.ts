@@ -8,6 +8,7 @@ import { recalculateInvoiceBalance, recomputeLinkedPurchaseOrders } from "./ap-l
 import { assertInvoiceSettlementEvidence } from "./supplier-credit-settlement.repository";
 import { approveSupplierCreditSources, validateSupplierCreditSourceLines, voidSupplierCreditSources, createSupplierCreditCostReadCache } from "./supplier-credit-source.service";
 import { creditHash, loadSupplierCredit, loadSupplierCreditSource, readSupplierCreditDetail, readSupplierCreditOptions, SupplierCreditError, type CreditTransaction } from "./supplier-credit.repository";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
 import { captureSupplierCreditCostReview, finishSupplierCreditCostReview } from "./supplier-credit-cost-review";
 export type SupplierCreditCommandInput = {
   command: SupplierCreditCommand;
@@ -242,7 +243,7 @@ export async function executeSupplierCreditCommand(tx: CreditTransaction, input:
   let credit = await readSupplierCreditDetail(tx, id, authority.permissions.includes("purchasing:approve"), authority.permissions.includes("purchasing:edit"));
   const costPreview = costReview ? await finishSupplierCreditCostReview(tx, input, costReview, credit) : undefined;
   if (costReview && input.costReviewExecution !== "preview") credit = await readSupplierCreditDetail(tx, id, true, authority.permissions.includes("purchasing:edit"));
-  await tx.insert(auditEvents).values({
+  await insertAuditEventDrizzle(tx, {
     actor: input.actorId,
     action: `ap_ledger.supplier_credit.${input.command}`,
     target: `supplier_credit:${id}`,

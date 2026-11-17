@@ -6,6 +6,7 @@ import type { PoVarianceContext } from "@shared/procurement/po-variance-approval
 import type { PurchaseApprovalSnapshot } from "./purchase-order-approval.policy";
 import { readQuantityAmendmentSource, type AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { PoVarianceApprovalError } from "./po-variance-approval.policy";
+import { insertAuditEventDrizzleReturningId } from "../../infrastructure/transactional-audit";
 export async function readPoVarianceSource(tx: AmendmentTransaction, id: number, actorId: string) {
   const [scope] = await tx.select({ poId: poExceptions.poId }).from(poExceptions).where(eq(poExceptions.id, id));
   if (!scope) throw new PoVarianceApprovalError("Exception not found.", "PO_VARIANCE_NOT_FOUND", 404);
@@ -27,9 +28,9 @@ export async function persistPoVarianceApproval(tx: AmendmentTransaction, loaded
   if (!after) throw new PoVarianceApprovalError("The reviewed exception could not be updated.", "PO_VARIANCE_UPDATE_FAILED");
   const evidence = { commandKey: key, reason, approvalConfirmed: true, reviewedSourceVersion: context.sourceVersion,
     sourceFingerprint: context.sourceFingerprint, approvalEvidence: approval, review: context, before: exception, after };
-  const [audit] = await tx.insert(auditEvents).values({ timestamp: at, level: "AUDIT", actor: actorId,
+  const [audit] = await insertAuditEventDrizzleReturningId(tx, { timestamp: at, level: "AUDIT", actor: actorId,
     action: "procurement.invoice.variance_approved", target: `po-exception:${exception.id}`,
-    changes: { before: exception, after }, context: evidence }).returning({ id: auditEvents.id });
+    changes: { before: exception, after }, context: evidence });
   await tx.insert(poEvents).values({ poId: exception.poId, eventType: "match_variance_approved", actorType: "user", actorId, createdAt: at,
     payloadJson: { contractVersion: 1, auditEventId: audit.id, ...evidence } });
   await tx.insert(poStatusHistory).values({ purchaseOrderId: exception.poId, fromStatus: source.facts.header.status, toStatus: source.facts.header.status,

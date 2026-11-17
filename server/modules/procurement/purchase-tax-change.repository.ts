@@ -8,6 +8,7 @@ import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { costInteger, costFingerprint, lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { readPurchaseApprovalActor } from "../identity/purchase-approval-authority.api";
 import { assertInvoiceQuantityAuthority } from "./invoice-quantity-correction.policy";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 import { readPoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import { readPoTaxEvidence, readInvoiceTaxEvidence, readPurchaseTaxTypes, readShipmentTaxEvidence } from "./purchase-tax-evidence.repository";
 import { readSupplierHeaderSources, supplierHeaderTargetKey } from "./supplier-header-cost-source.repository";
@@ -197,10 +198,15 @@ export async function persistPurchaseTaxChange(tx: AmendmentTransaction, source:
 
 export async function recordPurchaseTaxApproval(tx: AmendmentTransaction, source: Awaited<ReturnType<typeof readPurchaseTaxChangeSource>>,
   preview: unknown, actorId: string, reason: string, at: Date, commandKey: string, costApplications: unknown) {
-  const result = await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-    VALUES(${at},'AUDIT',${actorId},'procurement.tax.approved',${`${source.target.kind}:${source.target.id ?? "new"}`},
-    ${canonicalJson({ before: source.context.current, preview })}::jsonb,
-    ${canonicalJson({ reason, commandKey, authority: source.actor, sourceVersion: source.sourceVersion, costApplications })}::jsonb) RETURNING id`);
+  const result = await insertAuditEventSql(tx, {
+    timestamp: at,
+    actor: actorId,
+    action: "procurement.tax.approved",
+    target: `${source.target.kind}:${source.target.id ?? "new"}`,
+    changesJson: canonicalJson({ before: source.context.current, preview }),
+    contextJson: canonicalJson({ reason, commandKey, authority: source.actor, sourceVersion: source.sourceVersion, costApplications }),
+    returningId: true,
+  });
   const auditEventId = costInteger(result.rows[0].id, "auditEventId", 1);
   for (const header of source.headers) await tx.execute(sql`INSERT INTO procurement.po_events(po_id,event_type,actor_type,actor_id,created_at,payload_json)
     VALUES(${header.id},'tax_treatment_approved','user',${actorId},${at},${canonicalJson({ auditEventId, reason, preview })}::jsonb)`);

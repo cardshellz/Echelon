@@ -4,6 +4,7 @@ import { apInvoiceTransitionReceiptSchema, type ApInvoiceTransitionReceipt } fro
 import { costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import { ApLedgerError } from "./ap-ledger.service";
 import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 
 export async function readInvoiceTransitionHistory(tx: AmendmentTransaction, invoiceId: number) {
   const invoice = (await tx.execute(sql`SELECT id FROM procurement.vendor_invoices WHERE id=${invoiceId}`)).rows[0];
@@ -43,7 +44,12 @@ export async function retainInvoiceTransitionReview(tx: AmendmentTransaction, re
     await tx.execute(sql`INSERT INTO procurement.po_events(po_id,event_type,actor_type,actor_id,payload_json,created_at)
       VALUES(${poId},'invoice_transition_reviewed','user',${actorId},${canonicalJson(payload)}::jsonb,${new Date(approvedAt)})`);
   }
-  await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-    VALUES(${new Date(approvedAt)},'AUDIT',${actorId},'procurement.invoice.transition_reviewed',${`vendor_invoice:${preview.invoiceId}`},
-      ${canonicalJson(payload)}::jsonb,${canonicalJson({ commandKey, authority })}::jsonb)`);
+  await insertAuditEventSql(tx, {
+    timestamp: new Date(approvedAt),
+    actor: actorId,
+    action: "procurement.invoice.transition_reviewed",
+    target: `vendor_invoice:${preview.invoiceId}`,
+    changesJson: canonicalJson(payload),
+    contextJson: canonicalJson({ commandKey, authority }),
+  });
 }

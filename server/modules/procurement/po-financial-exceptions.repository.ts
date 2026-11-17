@@ -9,6 +9,7 @@ import {
 } from "@shared/schema";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
 import {
   PoFinancialEvidenceSourceError,
   readPoFinancialEvidenceSourcesWithClient,
@@ -127,7 +128,7 @@ export async function appendFinancialAlertAudit(
   });
   // Append-only before/after evidence is part of the same transaction. Failure
   // to record this final audit rolls back both the alert and status history.
-  await tx.insert(auditEvents).values({
+  await insertAuditEventDrizzle(tx, {
     actor: "system:financial-evidence",
     action: "po_financial_exception.synchronized",
     target: `po_exception:${after.id}`,

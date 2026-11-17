@@ -12,6 +12,7 @@ import { costInteger, costFingerprint, lockInventoryCostGraph, CostEvidenceError
 import { readSupplierHeaderSources, supplierHeaderTargetKey, headerReviewRecord } from "./supplier-header-cost-source.repository";
 import { proposedSupplierHeaderEntries, allocateSupplierHeader } from "./domain/supplier-header-costs";
 import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 
 export async function readSupplierHeaderHistory(tx: AmendmentTransaction, target: SupplierHeaderTarget) {
   const rows = (await tx.execute(sql`SELECT * FROM procurement.supplier_header_cost_reviews
@@ -98,7 +99,12 @@ export async function recordSupplierHeaderEffect(tx: AmendmentTransaction, sourc
     SELECT id,'supplier_header_costs_approved','user',${input.actorId},${canonicalJson(payload)}::jsonb,${input.at}::timestamp
     FROM procurement.purchase_orders WHERE id=ANY(${sql.param(source.purchaseOrderIds)}::int[]) RETURNING id`)).rows;
   if (events.length !== source.purchaseOrderIds.length) throw new Error("Supplier header approval lost a linked purchase history.");
-  await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-    VALUES(${input.at},'AUDIT',${input.actorId},'procurement.supplier_header_costs.approved',${supplierHeaderTargetKey(source.target)},
-      ${canonicalJson({ before: input.preview.before, after: input.preview.after })}::jsonb,${canonicalJson(payload)}::jsonb)`);
+  await insertAuditEventSql(tx, {
+    timestamp: input.at,
+    actor: input.actorId,
+    action: "procurement.supplier_header_costs.approved",
+    target: supplierHeaderTargetKey(source.target),
+    changesJson: canonicalJson({ before: input.preview.before, after: input.preview.after }),
+    contextJson: canonicalJson(payload),
+  });
 }

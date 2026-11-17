@@ -1464,8 +1464,6 @@
     "modules/procurement"
   ],
   "public.audit_events": [
-    "modules/inventory-planning",
-    "modules/procurement",
     "server/infrastructure/transactional-audit.ts"
   ],
   "public.auto_draft_runs": [
@@ -1475,13 +1473,10 @@
     "server/platform/commands/financial-command-operations.service.ts"
   ],
   "public.financial_command_results": [
-    "server/platform/commands/command-results.repository.ts",
-    "server/platform/commands/financial-command-operations.service.ts"
+    "server/platform/commands/command-results.repository.ts"
   ],
   "public.idempotency_keys": [
-    "modules/inventory-planning",
-    "modules/warehouse",
-    "server/middleware/idempotency.ts"
+    "server/infrastructure/idempotency-keys.repository.ts"
   ],
   "public.notification_preferences": [
     "modules/notifications"
@@ -1679,12 +1674,10 @@
     "modules/cartonization"
   ],
   "shipping.pack_plan_parcels": [
-    "modules/cartonization",
-    "modules/shipping-engine"
+    "modules/cartonization"
   ],
   "shipping.pack_plans": [
-    "modules/cartonization",
-    "modules/shipping-engine"
+    "modules/cartonization"
   ],
   "shipping.packaging_assignments": [
     "modules/shipping-engine"
@@ -1934,12 +1927,10 @@
     "modules/wms"
   ],
   "wms.picking_logs": [
-    "modules/orders",
     "modules/wms"
   ],
   "wms.reconciliation_exceptions": [
-    "modules/oms",
-    "modules/shipping"
+    "modules/oms"
   ],
   "wms.return_items": [
     "modules/wms"

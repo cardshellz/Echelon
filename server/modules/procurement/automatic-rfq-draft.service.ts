@@ -5,6 +5,7 @@ import { inspectPurchaseReceiptSupplyCapture } from "@shared/procurement/purchas
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
 import {
   auditEvents as auditEventsTable,
   purchaseRecommendationLines as purchaseRecommendationLinesTable,
@@ -386,7 +387,7 @@ export function createAutomaticRfqDraftService(database: any) {
           context: { recommendationRunId: input.recommendationRunId, idempotencyKey },
         });
       }
-      if (auditRows.length > 0) await tx.insert(auditEventsTable).values(auditRows);
+      if (auditRows.length > 0) await insertAuditEventDrizzle(tx, auditRows);
       return { rfqs: createdRfqs, lines: createdLines, skipped, reused };
     });
   }

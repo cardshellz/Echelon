@@ -15,6 +15,7 @@ import { zeroPublicationIntents, type ActivePublicationVariantMapping } from "..
 import { readPublicationStockSelection } from "./inventory-publication-selection.reader";
 import { loadPublicationTargetScopes, PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "./inventory-publication-target-stop.repository";
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 const id = z.number().int().positive();
 const targetSchema = z.object({ id, channel_id: id, channel_connection_id: id.nullable(), dropship_store_connection_id: id.nullable(),
     destination_kind: z.enum(["channel_connection", "dropship_store_connection"]), provider_key: z.string().min(1), provider_scope_type: z.enum(["location", "account"]),
@@ -252,6 +253,14 @@ export async function applyMappingPreparation(client: PoolClient, scopeKeys: str
     const receipt = publicationMappingPreparationReceiptSchema.parse({ publicationTargetId: target.id, revision: target.revision, reviewHash: evidence.review.reviewHash, changedProductVariantIds: [...changedVariantIds], publicationRows: result.publication.enqueuedRows, appliedAt: now.toISOString(), appliedBy: actor, alreadyApplied: false });
     await client.query(`INSERT INTO inventory.publication_mapping_preparations(idempotency_key,publication_target_id,request_hash,actor,occurred_at,review,receipt)
     VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)`, [input.idempotencyKey, target.id, requestHash, actor, now, JSON.stringify(evidence.review), JSON.stringify(receipt)]);
-    await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context) VALUES($1,'AUDIT',$2,'inventory_availability.listing_mapping.prepared',$3,$4::jsonb,$5::jsonb)`, [now, actor, `inventory.inventory_publication_target:${target.id}`, JSON.stringify(receipt), JSON.stringify({ idempotencyKey: input.idempotencyKey, requestHash, selectionFingerprint: evidence.review.selectionFingerprint })]);
+    await insertAuditEventPgQuery(client, {
+      timestamp: now,
+      actor,
+      action: "inventory_availability.listing_mapping.prepared",
+      target: `inventory.inventory_publication_target:${target.id}`,
+      changesJson: JSON.stringify(receipt),
+      contextJson: JSON.stringify({ idempotencyKey: input.idempotencyKey, requestHash, selectionFingerprint: evidence.review.selectionFingerprint }),
+      inlineAction: true,
+    });
     return receipt;
 }

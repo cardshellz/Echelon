@@ -9,24 +9,39 @@ const repositorySource = readFileSync(
   join(here, "..", "..", "historical-shipstation-contents-review.repository.ts"),
   "utf8",
 );
+const omsMutationsSource = readFileSync(
+  join(here, "..", "..", "..", "oms", "reconciliation-exceptions-mutations.repository.ts"),
+  "utf8",
+);
 
 describe("historical ShipStation contents review repository SQL contract", () => {
   it("gives polymorphic JSON builder parameters explicit PostgreSQL types", () => {
     const decisionStart = repositorySource.indexOf(
       "const history = persistedRecord.decisionHistory ?? [];",
     );
-    const updateStart = repositorySource.indexOf(
-      "UPDATE wms.reconciliation_exceptions",
+    const delegateCall = repositorySource.indexOf(
+      "acknowledgeHistoricalContentsReconciliationExceptionDecisionInTx(",
       decisionStart,
     );
-    const updateEnd = repositorySource.indexOf(
+
+    expect(decisionStart).toBeGreaterThan(-1);
+    expect(delegateCall).toBeGreaterThan(decisionStart);
+
+    const fnStart = omsMutationsSource.indexOf(
+      "export async function acknowledgeHistoricalContentsReconciliationExceptionDecisionInTx(",
+    );
+    const updateStart = omsMutationsSource.indexOf(
+      "UPDATE wms.reconciliation_exceptions",
+      fnStart,
+    );
+    const updateEnd = omsMutationsSource.indexOf(
       "RETURNING id::text AS id, status",
       updateStart,
     );
-    const decisionUpdate = repositorySource.slice(updateStart, updateEnd);
+    const decisionUpdate = omsMutationsSource.slice(updateStart, updateEnd);
 
-    expect(decisionStart).toBeGreaterThan(-1);
-    expect(updateStart).toBeGreaterThan(decisionStart);
+    expect(fnStart).toBeGreaterThan(-1);
+    expect(updateStart).toBeGreaterThan(fnStart);
     expect(updateEnd).toBeGreaterThan(updateStart);
     expect(decisionUpdate).toContain("$5::jsonb || jsonb_build_object(");
     expect(decisionUpdate).toContain("'decisionHash', $6::text");

@@ -445,6 +445,30 @@ describe("writer-ratchet (P2.1)", () => {
     expect(currentIncludingScripts[table]).toEqual([owner]);
   });
 
+  it.each([
+    ["public.audit_events", "server/infrastructure/transactional-audit.ts"],
+    ["public.financial_command_results", "server/platform/commands/command-results.repository.ts"],
+    ["public.idempotency_keys", "server/infrastructure/idempotency-keys.repository.ts"],
+    ["shipping.pack_plan_parcels", "modules/cartonization"],
+    ["shipping.pack_plans", "modules/cartonization"],
+    ["wms.picking_logs", "modules/wms"],
+    ["wms.reconciliation_exceptions", "modules/oms"],
+  ])("%s has only its sole runtime owning writer (P2-2C)", (table, owner) => {
+    expect(current[table]).toEqual([owner]);
+    expect(baseline[table]).toEqual([owner]);
+  });
+
+  it.each([
+    ["public.audit_events", "server/infrastructure/transactional-audit.ts"],
+    ["public.financial_command_results", "server/platform/commands/command-results.repository.ts"],
+    ["public.idempotency_keys", "server/infrastructure/idempotency-keys.repository.ts"],
+    ["shipping.pack_plan_parcels", "modules/cartonization"],
+    ["shipping.pack_plans", "modules/cartonization"],
+    ["wms.reconciliation_exceptions", "modules/oms"],
+  ])("%s has only its sole owning writer, including operational scripts (P2-2C)", (table, owner) => {
+    expect(currentIncludingScripts[table]).toEqual([owner]);
+  });
+
   it("blocks any new direct database writes in scripts/ or script/ outside the frozen baseline", () => {
     const addedScriptWrites: string[] = [];
     for (const [table, files] of Object.entries(currentScriptWriters)) {

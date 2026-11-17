@@ -13,6 +13,8 @@ import { createTransactionScopedInventoryPublicationService } from "./inventory-
 import { loadAndLockRuntimeAuthority } from "./inventory-availability-runtime-atp.repository";
 import { loadManagedSellableVariantIds } from "./inventory-channel-exposure-runtime.repository";
 import { executeInventoryPublicationCommand } from "./inventory-publication-command-transaction";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
+import { insertIdempotencyKeyPgQuery } from "../../../infrastructure/idempotency-keys.repository";
 
 const RECEIPT_PREFIX = "inventory-stock-send:";
 type Target = {
@@ -67,13 +69,21 @@ export class PostgresInventoryStockSendStore implements InventoryStockSendStore 
         rows: after.map(row => ({ ...review.rows.find(expected => expected.productVariantId === row.productVariantId)!,
           outboxId: row.outboxId, revision: row.revision })),
       });
-      await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-        VALUES($1,'AUDIT',$2,'inventory_availability.stock.sent',$3,$4::jsonb,$5::jsonb)`,
-      [now, actor, `inventory.inventory_publication_target:${target.id}`,
-        JSON.stringify({ before: { rows: before }, after: { rows: after } }),
-        JSON.stringify({ commandKey: command.idempotencyKey, requestHash, review, productId: command.productId, providerWriteAttempted: false })]);
-      await client.query("INSERT INTO public.idempotency_keys(key,request_hash,response_body,created_at,expires_at) VALUES($1,$2,$3::jsonb,$4,NULL)",
-        [receiptKey, requestHash, JSON.stringify(receipt), now]);
+      await insertAuditEventPgQuery(client, {
+        timestamp: now,
+        actor,
+        action: "inventory_availability.stock.sent",
+        target: `inventory.inventory_publication_target:${target.id}`,
+        changesJson: JSON.stringify({ before: { rows: before }, after: { rows: after } }),
+        contextJson: JSON.stringify({ commandKey: command.idempotencyKey, requestHash, review, productId: command.productId, providerWriteAttempted: false }),
+        inlineAction: true,
+      });
+      await insertIdempotencyKeyPgQuery(client, {
+        key: receiptKey,
+        requestHash,
+        responseBodyJson: JSON.stringify(receipt),
+        createdAt: now,
+      });
       return { receipt, replayed: false };
     });
   }

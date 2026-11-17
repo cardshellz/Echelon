@@ -18,6 +18,7 @@ import { assertShipmentReceiptCustodyAdmission } from "./shipment-receipt-custod
 import { assertPoDirectReceiptCustodyAdmission } from "./po-direct-receipt-custody.repository";
 import { PoDirectCustodySourceError } from "./domain/po-direct-receipt-custody";
 import { ShipmentReceiptCoverageError } from "./receiving-shipment-coverage";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 import { receivingQuarantineSourceVersion } from "./receiving-quarantine-receiving.port";
 import { ReceivingQuarantineError } from "./domain/receiving-quarantine";
 import type {
@@ -668,12 +669,14 @@ export class ReceivingService {
         );
       }
       const discardedAt = this.clock();
-      await tx.execute(sql`
-        INSERT INTO public.audit_events (timestamp, level, actor, action, target, changes, context)
-        VALUES (${discardedAt}, 'AUDIT', ${userId ?? null}, 'procurement.receiving.discard', ${`receiving-order:${receivingOrderId}`},
-          ${JSON.stringify({ before: { order, lines }, after: null })}::jsonb,
-          ${JSON.stringify({ receivingOrderId, purchaseOrderId: order.purchaseOrderId ?? null })}::jsonb)
-      `);
+      await insertAuditEventSql(tx, {
+        timestamp: discardedAt,
+        actor: userId ?? null,
+        action: "procurement.receiving.discard",
+        target: `receiving-order:${receivingOrderId}`,
+        changesJson: JSON.stringify({ before: { order, lines }, after: null }),
+        contextJson: JSON.stringify({ receivingOrderId, purchaseOrderId: order.purchaseOrderId ?? null }),
+      });
 
       // Explicit line deletion before order (defense-in-depth; the DB
       // schema also has ON DELETE CASCADE but we make the intent clear).
@@ -878,10 +881,14 @@ export class ReceivingService {
       status: this.receivingLineStatus(input.acceptedQty, line.expectedQty),
     }, tx);
     await this.updateReceivingOrderTotals(order.id, tx);
-    await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-      VALUES(${recordedAt},'AUDIT',${actorId},'procurement.receiving.quarantine_recount',${`receiving-line:${line.id}`},
-        ${JSON.stringify({ before: line, after: updated })}::jsonb,
-        ${JSON.stringify({ receivingOrderId: order.id, reviewedAcceptedQty: input.acceptedQty, reviewedHeldQty: input.heldQty })}::jsonb)`);
+    await insertAuditEventSql(tx, {
+      timestamp: recordedAt,
+      actor: actorId,
+      action: "procurement.receiving.quarantine_recount",
+      target: `receiving-line:${line.id}`,
+      changesJson: JSON.stringify({ before: line, after: updated }),
+      contextJson: JSON.stringify({ receivingOrderId: order.id, reviewedAcceptedQty: input.acceptedQty, reviewedHeldQty: input.heldQty }),
+    });
     return { order, lineBefore: line, lineAfter: updated, productId: variant.productId,
       productVariantId: variant.id, unitsPerVariantSnapshot: variant.unitsPerVariant };
   }
@@ -992,10 +999,14 @@ export class ReceivingService {
       createdAt: recordedAt, updatedAt: recordedAt,
     }, tx);
     await this.updateReceivingOrderTotals(target.id, tx);
-    await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-      VALUES(${recordedAt},'AUDIT',${actorId},'procurement.receiving.quarantine_acceptance_prepared',${`receiving-line:${line.id}`},
-        ${JSON.stringify({ before: null, after: line })}::jsonb,
-        ${JSON.stringify({ observationId: input.observationId, sourceReceivingOrderId: source.id, receivingOrderId: target.id })}::jsonb)`);
+    await insertAuditEventSql(tx, {
+      timestamp: recordedAt,
+      actor: actorId,
+      action: "procurement.receiving.quarantine_acceptance_prepared",
+      target: `receiving-line:${line.id}`,
+      changesJson: JSON.stringify({ before: null, after: line }),
+      contextJson: JSON.stringify({ observationId: input.observationId, sourceReceivingOrderId: source.id, receivingOrderId: target.id }),
+    });
     return { receivingOrderId: target.id, receivingLineId: line.id, productId: variant.productId,
       productVariantId: variant.id, unitsPerVariantSnapshot: variant.unitsPerVariant, acceptedVariantQty: input.acceptedVariantQty };
   }
@@ -1017,10 +1028,14 @@ export class ReceivingService {
       receivedQty: 0, expectedQty: 0, damagedQty: 0, status: "pending", updatedAt: recordedAt,
     }, tx);
     await this.updateReceivingOrderTotals(order.id, tx);
-    await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-      VALUES(${recordedAt},'AUDIT',${actorId},'procurement.receiving.quarantine_acceptance_cancelled',${`receiving-line:${line.id}`},
-        ${JSON.stringify({ before: line, after: updated })}::jsonb,
-        ${JSON.stringify({ acceptanceId: input.acceptanceId, receivingOrderId: order.id })}::jsonb)`);
+    await insertAuditEventSql(tx, {
+      timestamp: recordedAt,
+      actor: actorId,
+      action: "procurement.receiving.quarantine_acceptance_cancelled",
+      target: `receiving-line:${line.id}`,
+      changesJson: JSON.stringify({ before: line, after: updated }),
+      contextJson: JSON.stringify({ acceptanceId: input.acceptanceId, receivingOrderId: order.id }),
+    });
   }
 
   private assertQuarantineAuditContext(actorId: string, recordedAt: Date): void {
@@ -1176,10 +1191,14 @@ export class ReceivingService {
       }
       const updated = await this.storage.updateReceivingOrder(orderId, updates, tx);
       if (applyDefaultToUnassigned === true) {
-        await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-          VALUES(${this.clock()},'AUDIT',${actorId},'procurement.receiving.default_location_applied',${`receiving-order:${orderId}`},
-            ${JSON.stringify({ before: previousFields, after: Object.fromEntries(Object.keys(updates).map((key) => [key, updated[key]])), lines: assigned })}::jsonb,
-            ${JSON.stringify({ receivingOrderId: orderId })}::jsonb)`);
+        await insertAuditEventSql(tx, {
+          timestamp: this.clock(),
+          actor: actorId,
+          action: "procurement.receiving.default_location_applied",
+          target: `receiving-order:${orderId}`,
+          changesJson: JSON.stringify({ before: previousFields, after: Object.fromEntries(Object.keys(updates).map((key) => [key, updated[key]])), lines: assigned }),
+          contextJson: JSON.stringify({ receivingOrderId: orderId }),
+        });
       }
       return updated;
     });
@@ -1359,12 +1378,14 @@ export class ReceivingService {
       const updated = await this.storage.updateReceivingLine(lineId, updates, tx);
       await this.updateReceivingOrderTotals(line.receivingOrderId, tx);
       if (changesUnits || changesCost) {
-        await tx.execute(sql`
-          INSERT INTO public.audit_events (timestamp, level, actor, action, target, changes, context)
-          VALUES (${now}, 'AUDIT', ${actorId}, ${changesCost ? 'procurement.receiving.cost_override' : 'procurement.receiving.units'}, ${`receiving-line:${lineId}`},
-            ${JSON.stringify({ before: line, after: updated })}::jsonb,
-            ${JSON.stringify({ receivingOrderId: line.receivingOrderId, receivingLineId: lineId, legacyUnitConfirmed: confirmLegacyUnit === true })}::jsonb)
-        `);
+        await insertAuditEventSql(tx, {
+          timestamp: now,
+          actor: actorId,
+          action: changesCost ? "procurement.receiving.cost_override" : "procurement.receiving.units",
+          target: `receiving-line:${lineId}`,
+          changesJson: JSON.stringify({ before: line, after: updated }),
+          contextJson: JSON.stringify({ receivingOrderId: line.receivingOrderId, receivingLineId: lineId, legacyUnitConfirmed: confirmLegacyUnit === true }),
+        });
       }
       return withReceivingUnitVersion(updated);
     });
@@ -1611,9 +1632,14 @@ export class ReceivingService {
         const before = { purchaseOrderLineId: line.purchaseOrderLineId ?? null, inboundShipmentLineId: line.inboundShipmentLineId ?? null };
         const after = { purchaseOrderLineId: source.purchaseOrderLineId, inboundShipmentLineId: source.inboundShipmentLineId };
         await this.storage.updateReceivingLine(line.id, after, tx);
-        await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-          VALUES(${closeAt},'AUDIT',${userId || "system:receiving"},'procurement.receiving.source_resolved',${`receiving-line:${line.id}`},
-            ${JSON.stringify({ before, after })}::jsonb,${JSON.stringify({ receivingOrderId: orderId })}::jsonb)`);
+        await insertAuditEventSql(tx, {
+          timestamp: closeAt,
+          actor: userId || "system:receiving",
+          action: "procurement.receiving.source_resolved",
+          target: `receiving-line:${line.id}`,
+          changesJson: JSON.stringify({ before, after }),
+          contextJson: JSON.stringify({ receivingOrderId: orderId }),
+        });
       }
       // Re-read our persisted source assignments before cost origin and inventory
       // posting. No temporary DTO-only source can reach the physical owner.
@@ -1878,11 +1904,14 @@ export class ReceivingService {
       }
       const updatedLines = await this.updateReceivingOrderTotals(orderId, tx);
       const updatedOrder = await this.storage.getReceivingOrderById(orderId, tx);
-      await tx.execute(sql`
-        INSERT INTO public.audit_events (timestamp, level, actor, action, target, changes, context)
-        VALUES (${now}, 'AUDIT', ${actorId}, 'procurement.receiving.complete_counts', ${`receiving:${orderId}`},
-          ${JSON.stringify({ before: lines, after: updatedLines })}::jsonb, ${JSON.stringify({ receivingOrderId: orderId })}::jsonb)
-      `);
+      await insertAuditEventSql(tx, {
+        timestamp: now,
+        actor: actorId,
+        action: "procurement.receiving.complete_counts",
+        target: `receiving:${orderId}`,
+        changesJson: JSON.stringify({ before: lines, after: updatedLines }),
+        contextJson: JSON.stringify({ receivingOrderId: orderId }),
+      });
       return { updated, order: updatedOrder, updatedLines };
     });
     const vendor = result.order?.vendorId ? await this.storage.getVendorById(result.order.vendorId) : null;

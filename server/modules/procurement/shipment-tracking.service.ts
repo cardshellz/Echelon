@@ -1,4 +1,5 @@
 import { readIntegerCents, readIntegerMills } from "@shared/money-read";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
 import { readShipmentCostExclusions } from "./shipment-cost-exclusions.repository";
 import { readTaxedShipmentSupplierCosts } from "./purchase-tax-costs.repository";
 import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";
@@ -479,7 +480,7 @@ export function createShipmentTrackingService(
       .some(field => shipment[field] == null || !new Decimal(shipment[field]!).eq(summary[field]));
     if (!physicalChanges.length && !summaryChanged) return;
     await storage.updateInboundShipment(shipment.id, summary, tx, at);
-    await tx.insert(auditEvents).values({ timestamp: at, level: "AUDIT", actor: actorId ?? "system:shipment-costs",
+    await insertAuditEventDrizzle(tx, { timestamp: at, level: "AUDIT", actor: actorId ?? "system:shipment-costs",
       action: "procurement.shipment.physical_totals_materialized", target: `shipment:${shipment.id}`,
       changes: { lines: physicalChanges, before: { totalWeightKg: shipment.totalWeightKg, totalVolumeCbm: shipment.totalVolumeCbm,
         totalPieces: shipment.totalPieces, totalCartons: shipment.totalCartons }, after: summary },
@@ -1080,7 +1081,7 @@ export function createShipmentTrackingService(
       await refreshAllocationsForShipmentInTransaction(tx, shipmentId, shipment, now, actorId);
     }
     const targetId = after?.id ?? before!.id;
-    await tx.insert(auditEvents).values({
+    await insertAuditEventDrizzle(tx, {
       timestamp: now, level: "AUDIT", actor: actorId,
       action: `procurement.shipment_cost.${command.operation === "create" ? "created" : command.operation === "update" ? "amended" : "deleted"}`,
       target: `shipment_cost:${targetId}`,
@@ -1227,7 +1228,7 @@ export function createShipmentTrackingService(
         landedUnitCostCents: update.landedUnitCostCents,
       } as any, tx, at);
     }
-    if (allocationChanged || changedLines.length) await tx.insert(auditEvents).values({
+    if (allocationChanged || changedLines.length) await insertAuditEventDrizzle(tx, {
       timestamp: at, level: "AUDIT", actor: actorId ?? "system:shipment-allocation", action: "procurement.shipment.allocation_refreshed",
       target: `shipment:${shipmentId}`, changes: { before: savedAllocations, after: allNewAllocations, lines: changedLines },
       context: { shipmentId, pendingCostIds, source: "saved_shipment_line_measurements" },

@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { upsertLabelCommercialReconciliationExceptionInOms } from "../oms/reconciliation-exceptions.api";
 
 export const PACKAGE_ALLOCATION_LABEL_COMMERCIAL_REVIEW_RULE =
   "package_allocation_label_commercial_fulfillment_review";
@@ -86,49 +86,15 @@ export function createPackageAllocationLabelCommercialReviewRepository(
         sourceWmsShipmentItemIds,
       };
 
-      await db.execute(sql`
-        INSERT INTO wms.reconciliation_exceptions (
-          source,
-          classification,
-          rule,
-          status,
-          severity,
-          external_system,
-          external_order_ref,
-          external_shipment_ref,
-          external_order_key,
-          idempotency_key,
-          summary,
-          details
-        )
-        SELECT
-          'shipstation_label_commercial_fulfillment',
-          'manual_review',
-          ${PACKAGE_ALLOCATION_LABEL_COMMERCIAL_REVIEW_RULE},
-          'open',
-          'review',
-          'shipstation',
-          ${boundedText(rawInput.providerOrderId, 200)},
-          ${providerShipmentId},
-          ${boundedText(rawInput.providerOrderKey, 200)},
-          ${idempotencyKey},
-          ${summary},
-          ${JSON.stringify(details)}::jsonb
-        WHERE NOT EXISTS (
-          SELECT 1
-          FROM wms.reconciliation_exceptions AS existing
-          WHERE existing.idempotency_key = ${idempotencyKey}
-            AND existing.status IN ('resolved', 'ignored')
-        )
-        ON CONFLICT (idempotency_key)
-          WHERE status IN ('open', 'acknowledged')
-        DO UPDATE SET
-          last_seen_at = NOW(),
-          updated_at = NOW(),
-          occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
-          summary = EXCLUDED.summary,
-          details = wms.reconciliation_exceptions.details || EXCLUDED.details
-      `);
+      await upsertLabelCommercialReconciliationExceptionInOms(db, {
+        rule: PACKAGE_ALLOCATION_LABEL_COMMERCIAL_REVIEW_RULE,
+        externalOrderRef: boundedText(rawInput.providerOrderId, 200),
+        externalShipmentRef: providerShipmentId,
+        externalOrderKey: boundedText(rawInput.providerOrderKey, 200),
+        idempotencyKey,
+        summary,
+        detailsJson: JSON.stringify(details),
+      });
     },
   };
 }

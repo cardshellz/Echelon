@@ -9,6 +9,7 @@ import type { MappingPreparationTarget } from "./publication-mapping-preparation
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
 import { lockStockLinkCommandMembers } from "./stock-link-command";
 import { retireStockLinkMappingsInsideTransaction, type StockLinkRetiredMapping } from "./stock-link-retire";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 
 const fail = (code: string, message: string): never => { throw new InventoryPublicationMembershipError(code, message); };
 
@@ -99,14 +100,17 @@ export async function linkVerifiedStockMapping(client: PoolClient, scopeKeys: st
       definitionHash: saved.definitionHash }],
   }, { actor, reason, occurredAt: now });
   const change: VerifiedStockLinkChange = relink ? "relinked" : "linked";
-  await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-    VALUES($1,'AUDIT',$2,$3,$4,$5::jsonb,$6::jsonb)`,
-  [now, actor, `inventory_availability.stock_link.${change}`, `inventory.inventory_publication_target:${targetId}`,
-    JSON.stringify({
+  await insertAuditEventPgQuery(client, {
+    timestamp: now,
+    actor,
+    action: `inventory_availability.stock_link.${change}`,
+    target: `inventory.inventory_publication_target:${targetId}`,
+    changesJson: JSON.stringify({
       before: retired[0] ? { mappingId: retired[0].mappingId, itemId: retired[0].externalInventoryItemId, sku: retired[0].externalSku,
         retiredAt: retired[0].retiredAt } : null,
       after: { productVariantId: input.productVariantId, mappingId: saved.definitionId, itemId: input.sku, sku: input.sku,
         definitionHash: saved.definitionHash } }),
-    JSON.stringify({ requestHash, origin: input.setupOperationId ? "recreation" : "background", observation: input })]);
+    contextJson: JSON.stringify({ requestHash, origin: input.setupOperationId ? "recreation" : "background", observation: input }),
+  });
   return change;
 }

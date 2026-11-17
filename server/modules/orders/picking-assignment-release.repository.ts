@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm";
-import { orders, pickingLogs, type Order } from "@shared/schema";
+import { orders, type Order } from "@shared/schema";
 import type { db } from "../../db";
 import { readPickingReleaseActor } from "../identity";
+import { insertWmsPickingLogEventInTx } from "../wms/picking-logs.api";
 import type { PickingAssignmentReleaseRepository } from "./picking-assignment-release.service";
 
 type Database = Pick<typeof db, "transaction">;
@@ -31,7 +32,7 @@ export function createPickingAssignmentReleaseRepository(database: Database): Pi
         return order;
       },
       recordRelease: async (before, after, actor, command, now) => {
-        await tx.insert(pickingLogs).values({
+        await insertWmsPickingLogEventInTx(tx, {
           timestamp: now, actionType: "order_released",
           pickerId: actor.id, pickerName: actor.name, pickerRole: actor.role,
           orderId: before.id, orderNumber: before.orderNumber,

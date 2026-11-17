@@ -204,7 +204,7 @@ describe("WMS-2: Orders, WMS, and Cartonization internal API boundaries (CI-03) 
       string[]
     >;
 
-    expect(baseline["wms.picking_logs"]).toEqual(["modules/orders", "modules/wms"]);
+    expect(baseline["wms.picking_logs"]).toEqual(["modules/wms"]);
     expect(baseline["wms.orders"]).toEqual([
       "modules/oms",
       "modules/orders",

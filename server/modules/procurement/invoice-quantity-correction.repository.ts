@@ -10,6 +10,7 @@ import type { InvoiceQuantityPreview } from "@shared/procurement/invoice-quantit
 import { readQuantityAmendmentSource, type AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { InvoiceQuantityCorrectionError } from "./invoice-quantity-correction.policy";
 import { recalculateCorrectedInvoiceFinancialsInTransaction, recomputePurchaseOrderInvoiceMatchesInTransaction } from "./ap-ledger.service";
+import { insertAuditEventDrizzleReturningId } from "../../infrastructure/transactional-audit";
 import { replacePurchaseOrderMatchExceptions } from "./purchase-order-match-exceptions.repository";
 import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
 
@@ -104,11 +105,11 @@ export async function recordInvoiceQuantityCorrectionResult(
 ) {
   const { before, after, beforeInvoice, afterInvoice, afterInvoicePoLinks, moneyChanged, match, superseded } = saved;
   const lineCorrected = moneyChanged || preview.costComponentsReviewed === true;
-  const [audit] = await tx.insert(auditEvents).values({
+  const [audit] = await insertAuditEventDrizzleReturningId(tx, {
     timestamp: at, level: "AUDIT", actor: actorId, action: lineCorrected ? "procurement.invoice.line_corrected" : "procurement.invoice.quantity_corrected", target: `invoice-line:${before.id}`,
     changes: { before, after, ...(moneyChanged ? { beforeInvoice, afterInvoice, beforeInvoicePoLinks: source.invoicePoLinks, afterInvoicePoLinks } : {}) }, context: { commandKey, reason, preview, approvalAuthority: source.actor, approvalEvidence, closedPurchaseOrderConfirmed, reviewedSourceVersion: source.sourceVersion,
       supersededMatchExceptions: superseded, resultingMatchSourceFingerprint: match.sourceFingerprint, costApplication },
-  }).returning({ id: auditEvents.id });
+  });
   await tx.insert(poEvents).values({ poId: source.facts.header.id, eventType: lineCorrected ? "invoice_line_corrected" : "invoice_quantity_corrected", actorType: "user", actorId, createdAt: at,
     payloadJson: { auditEventId: audit.id, commandKey, invoiceId: before.vendorInvoiceId, invoiceLineId: before.id, reason, preview,
       contractVersion: 1, before, after, ...(moneyChanged ? { beforeInvoice, afterInvoice, beforeInvoicePoLinks: source.invoicePoLinks, afterInvoicePoLinks } : {}), approvalAuthority: source.actor, approvalEvidence, closedPurchaseOrderConfirmed, approvalConfirmed: true, reviewedSourceVersion: source.sourceVersion,

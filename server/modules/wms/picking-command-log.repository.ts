@@ -1,5 +1,10 @@
 import { eq } from "drizzle-orm";
-import { pickingLogs, insertPickingLogSchema } from "@shared/schema/orders.schema";
+import {
+  pickingLogs,
+  insertPickingLogSchema,
+  type InsertPickingLog,
+  type PickingLog,
+} from "@shared/schema/orders.schema";
 import type { db } from "../../db";
 
 /** A retry after logging cannot create a second action log. */
@@ -13,6 +18,21 @@ export async function createPickingCommandLog(
     .insert(pickingLogs)
     .values({ ...log, operationKey })
     .onConflictDoNothing();
+}
+
+export async function insertWmsPickingLogRecord(
+  client: Pick<typeof db, "insert">,
+  log: typeof pickingLogs.$inferInsert,
+): Promise<PickingLog> {
+  const result = await client.insert(pickingLogs).values(log).returning();
+  return result[0];
+}
+
+export async function insertWmsPickingLogEventInTx(
+  client: Pick<typeof db, "insert">,
+  values: typeof pickingLogs.$inferInsert,
+): Promise<void> {
+  await client.insert(pickingLogs).values(values);
 }
 
 export async function renameWmsPickingLogSku(

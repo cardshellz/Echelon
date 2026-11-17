@@ -19,6 +19,11 @@ import {
   PUBLICATION_TARGET_SCOPE_LOCK_SEED,
 } from "./inventory-publication-target-stop.repository";
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
+import {
+  completeIdempotencyKeyPgQuery,
+  insertIdempotencyKeyPgQuery,
+} from "../../../infrastructure/idempotency-keys.repository";
 
 /**
  * Applies a hold or a release to every live Echelon target of one destination
@@ -102,12 +107,11 @@ export class PostgresInventoryPublicationTargetHoldStore implements InventoryPub
           }
         }
 
-        await client.query(
-          `INSERT INTO public.idempotency_keys(
-             key, request_hash, response_body, created_at, expires_at
-           ) VALUES ($1,$2,NULL,$3,NULL)`,
-          [receiptKey, command.requestHash, command.occurredAt],
-        );
+        await insertIdempotencyKeyPgQuery(client, {
+          key: receiptKey,
+          requestHash: command.requestHash,
+          createdAt: command.occurredAt,
+        });
 
         const targetResults: InventoryPublicationTargetHoldResult["targets"] = [];
         for (const target of targets) {
@@ -151,31 +155,26 @@ export class PostgresInventoryPublicationTargetHoldStore implements InventoryPub
             publicationRows: republished.publicationRows,
             blockedProductIds: republished.blockedProductIds,
           });
-          await client.query(
-            `INSERT INTO public.audit_events(
-               timestamp, level, actor, action, target, changes, context
-             ) VALUES ($1,'AUDIT',$2,$3,$4,$5::jsonb,$6::jsonb)`,
-            [
-              command.occurredAt,
-              command.actorId,
-              wantsHold
-                ? "inventory_availability.publication_target.held"
-                : "inventory_availability.publication_target.released",
-              `inventory.inventory_publication_target:${target.id}`,
-              JSON.stringify({
-                before: { hold: wantsHold ? null : { reason: target.hold_reason }, revision: target.revision },
-                after: { hold: wantsHold ? { reason: command.reason } : null, revision: updated.rows[0]!.revision },
-              }),
-              JSON.stringify({
-                reason: command.reason,
-                destination: command.destination,
-                idempotencyKey: command.idempotencyKey,
-                requestHash: command.requestHash,
-                publicationRows: republished.publicationRows,
-                blockedProductIds: republished.blockedProductIds,
-              }),
-            ],
-          );
+          await insertAuditEventPgQuery(client, {
+            timestamp: command.occurredAt,
+            actor: command.actorId,
+            action: wantsHold
+              ? "inventory_availability.publication_target.held"
+              : "inventory_availability.publication_target.released",
+            target: `inventory.inventory_publication_target:${target.id}`,
+            changesJson: JSON.stringify({
+              before: { hold: wantsHold ? null : { reason: target.hold_reason }, revision: target.revision },
+              after: { hold: wantsHold ? { reason: command.reason } : null, revision: updated.rows[0]!.revision },
+            }),
+            contextJson: JSON.stringify({
+              reason: command.reason,
+              destination: command.destination,
+              idempotencyKey: command.idempotencyKey,
+              requestHash: command.requestHash,
+              publicationRows: republished.publicationRows,
+              blockedProductIds: republished.blockedProductIds,
+            }),
+          });
         }
 
         result = inventoryPublicationTargetHoldResultSchema.parse({
@@ -187,11 +186,10 @@ export class PostgresInventoryPublicationTargetHoldStore implements InventoryPub
           providerWriteAttempted: false,
           outboxEnqueued: targetResults.some((target) => target.publicationRows > 0),
         });
-        await client.query(
-          `UPDATE public.idempotency_keys
-           SET response_body=$2::jsonb
-           WHERE key=$1`,
-          [receiptKey, JSON.stringify({ commandType: `inventory_publication_target_${command.command}`, result })],
+        await completeIdempotencyKeyPgQuery(
+          client,
+          receiptKey,
+          JSON.stringify({ commandType: `inventory_publication_target_${command.command}`, result }),
         );
         await client.query("COMMIT");
         inTransaction = false;
