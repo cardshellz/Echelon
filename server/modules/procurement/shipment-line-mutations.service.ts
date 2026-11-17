@@ -13,6 +13,7 @@ import type { ShipmentLineCommand } from "./shipment-line-commands";
 import { shipmentLineVersion, versionShipmentLine } from "./shipment-line-version";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import { computeShipmentLinePhysicalTotals } from "./shipment-line-physical-values";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
 import { lockShipmentSourceCapacity } from "./shipment-source-capacity";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import type { ShipmentReceivingSetup } from "@shared/procurement/shipment-receiving-setup";
@@ -340,7 +341,7 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
       await dependencies.refreshAllocations(tx, shipmentId, shipment, now, actorId);
     }
     const after = await storage.getInboundShipmentLines(shipmentId, tx);
-    await tx.insert(auditEvents).values({
+    await insertAuditEventDrizzle(tx, {
       timestamp: now, level: "AUDIT", actor: actorId, action: `procurement.shipment_line.${command.operation}`,
       target: `shipment:${shipmentId}`, changes: { before, after }, context: { shipmentId, lineId: isLine ? command.resourceId : null },
     });

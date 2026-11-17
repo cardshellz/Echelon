@@ -2,6 +2,7 @@ import { eq, sql } from "drizzle-orm";
 import { inboundShipments, inboundShipmentLines, inboundShipmentStatusHistory, auditEvents, type InboundShipment, type InboundShipmentLine, type InsertInboundShipment } from "@shared/schema";
 import type { db } from "../../db";
 import { nextShipmentNumber, shipmentNumberPrefix, ShipmentCreateError } from "./domain/shipment-create";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
 
 export type ShipmentCreateTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -54,7 +55,7 @@ export async function readCreatedShipment(tx: ShipmentCreateTransaction, shipmen
 export async function recordShipmentCreation(tx: ShipmentCreateTransaction, input: {
   shipment: InboundShipment; lines: InboundShipmentLine[]; actorId: string; now: Date;
 }): Promise<void> {
-  await tx.insert(auditEvents).values({
+  await insertAuditEventDrizzle(tx, {
     timestamp: input.now, level: "AUDIT", actor: input.actorId, action: "procurement.shipment.create",
     target: `shipment:${input.shipment.id}`, changes: { before: null, after: { shipment: input.shipment, lines: input.lines } },
     context: { shipmentId: input.shipment.id, lineCount: input.lines.length },

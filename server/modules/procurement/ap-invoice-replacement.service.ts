@@ -10,6 +10,7 @@ import { costFingerprint, lockInventoryCostGraph } from "../inventory/infrastruc
 import { ApLedgerError, recomputeLinkedPurchaseOrders, type ApLedgerDbClient } from "./ap-ledger.service";
 import { evaluateInvoiceReplacement } from "./domain/invoice-replacement";
 import { readShipmentPurchaseOrders } from "./shipment-purchase-orders.repository";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
 
 const invoiceIdSchema = z.number().int().positive().max(2_147_483_647);
 
@@ -99,7 +100,7 @@ export async function replaceVoidedInvoiceInTransaction(client: ApLedgerDbClient
     .returning({ id: inboundFreightCosts.id });
   if (reassigned.length !== costIds.length) throw new ApLedgerError("The shipment charge assignment changed during replacement.", 409, { code: "AP_INVOICE_REPLACEMENT_STALE" });
   await recomputeLinkedPurchaseOrders(replacement.id, client, { actorId, now: at, reason: `Invoice ${invoice.id} replaced by ${replacement.id}.` });
-  await client.insert(auditEvents).values({ timestamp: at, level: "AUDIT", actor: actorId, action: "ap_ledger.invoice_replaced",
+  await insertAuditEventDrizzle(client, { timestamp: at, level: "AUDIT", actor: actorId, action: "ap_ledger.invoice_replaced",
     target: `invoice:${invoice.id}`, changes: { before: { invoice, lines: source.lines, poLinks: source.links, charges: source.costs },
       after: { invoice: replacement, chargeAssignments: costIds.map(costId => ({ costId, vendorInvoiceId: replacement.id })) } },
     context: { command: "replace_invoice", invoiceId: replacement.id, replacesInvoiceId: invoice.id,

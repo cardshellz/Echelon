@@ -3,6 +3,7 @@ import type { VerifiedStockListing } from "../application/verified-listing-stock
 import type { QuantityPublicationScope } from "../domain/quantity-publication-admission";
 import { QuantityPublicationAdmissionError } from "../domain/quantity-publication-admission";
 import { InventoryPublicationMembershipError } from "../application/inventory-publication-membership.service";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 
 const completedAttempt = `EXISTS(SELECT 1 FROM inventory.quantity_publication_attempts a
   LEFT JOIN inventory.quantity_publication_attempt_resolutions r ON r.attempt_id=a.id
@@ -154,18 +155,16 @@ export async function recordRecreationStockReceipt(
       "STOCK_RECREATION_QUEUE_MISSING",
       "Current stock was not queued. The saved recreation will retry the complete handoff.",
     );
-  await client.query(
-    `INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-    VALUES($1,'AUDIT',$2,'inventory_availability.listing_recreation.stock_queued',$3,$4::jsonb,$5::jsonb)`,
-    [
-      now,
-      actor,
-      `inventory.publication_listing_setup_scope:${scopeId}`,
-      JSON.stringify({ outboxId: saved.rows[0].outbox_id }),
-      JSON.stringify({
-        setupOperationId: input.setupOperationId,
-        observation: input,
-      }),
-    ],
-  );
+  await insertAuditEventPgQuery(client, {
+    timestamp: now,
+    actor,
+    action: "inventory_availability.listing_recreation.stock_queued",
+    target: `inventory.publication_listing_setup_scope:${scopeId}`,
+    changesJson: JSON.stringify({ outboxId: saved.rows[0].outbox_id }),
+    contextJson: JSON.stringify({
+      setupOperationId: input.setupOperationId,
+      observation: input,
+    }),
+    inlineAction: true,
+  });
 }

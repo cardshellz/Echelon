@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient, QueryResult } from "pg";
+import { insertAuditEventDefaultTimestampPgQuery } from "../../infrastructure/transactional-audit";
 
 const BACKFILL_CONTRACT_VERSION = 2;
 const BACKFILL_ADVISORY_LOCK = 1_947_206_126;
@@ -545,39 +546,32 @@ export async function applyHistoricalPoSupplierEvidence(input: {
       }
 
       if (action) {
-        await client.query(
-          `INSERT INTO public.audit_events (
-             level, actor, action, target, changes, context
-           ) VALUES (
-             'AUDIT', $1, $2, $3, $4::jsonb, $5::jsonb
-           )`,
-          [
-            `user:${actorId}`,
-            action,
-            `vendor_product:${vendorProductId}`,
-            JSON.stringify({ before, after }),
-            JSON.stringify({
-              contractVersion: BACKFILL_CONTRACT_VERSION,
-              source: "historical_completed_purchase_orders",
-              timestampSemantics: "database_wall_clock",
-              vendorProductId,
-              vendorId: target.vendorId,
-              productId: target.productId,
-              productVariantId: target.productVariantId,
-              sourcePurchaseOrderId: target.sourcePurchaseOrderId,
-              sourcePoNumber: target.sourcePoNumber,
-              sourceLineIds: target.sourceLineIds,
-              linkedLineIds: target.linesToLink,
-              conflictingLineIds: target.conflictingLineIds,
-              excludedVendorIds: preview.excludedVendorIds,
-              nonpositiveCostLinesExcluded:
-                preview.summary.nonpositiveCostLinesExcluded,
-              lastCostMills: target.lastCostMills,
-              lastCostCents: target.lastCostCents,
-              lastPurchasedAt: target.sourceCompletedAt,
-            }),
-          ],
-        );
+        await insertAuditEventDefaultTimestampPgQuery(client, {
+          actor: `user:${actorId}`,
+          action,
+          target: `vendor_product:${vendorProductId}`,
+          changesJson: JSON.stringify({ before, after }),
+          contextJson: JSON.stringify({
+            contractVersion: BACKFILL_CONTRACT_VERSION,
+            source: "historical_completed_purchase_orders",
+            timestampSemantics: "database_wall_clock",
+            vendorProductId,
+            vendorId: target.vendorId,
+            productId: target.productId,
+            productVariantId: target.productVariantId,
+            sourcePurchaseOrderId: target.sourcePurchaseOrderId,
+            sourcePoNumber: target.sourcePoNumber,
+            sourceLineIds: target.sourceLineIds,
+            linkedLineIds: target.linesToLink,
+            conflictingLineIds: target.conflictingLineIds,
+            excludedVendorIds: preview.excludedVendorIds,
+            nonpositiveCostLinesExcluded:
+              preview.summary.nonpositiveCostLinesExcluded,
+            lastCostMills: target.lastCostMills,
+            lastCostCents: target.lastCostCents,
+            lastPurchasedAt: target.sourceCompletedAt,
+          }),
+        });
       }
 
       if (!action && (linkResult.rowCount ?? 0) === 0) unchangedTargets++;

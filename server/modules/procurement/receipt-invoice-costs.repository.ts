@@ -11,6 +11,7 @@ import {
   type CostEvidenceTransaction,
 } from "../inventory/infrastructure/cost-evidence.repository";
 import type { ReceiptCostingEvidence } from "./domain/receipt-invoice-costs";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 
 const MAX_RECEIPT_ROOTS = 10_000;
 
@@ -25,9 +26,14 @@ export async function recordReceiptProvisionalAudit(
   at: Date,
 ) {
   if (!changes.length) return;
-  await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-    VALUES(${at},'AUDIT',${actorId},'inventory.receipt_cost_provisional.updated',${`purchase_order_line:${lineId}`},
-      ${canonicalJson({ before: changes.map((row) => ({ lotId: row.lotId, costProvisional: row.before })), after: changes.map((row) => ({ lotId: row.lotId, costProvisional: row.after })) })}::jsonb,${canonicalJson({ supplierApplied })}::jsonb)`);
+  await insertAuditEventSql(tx, {
+    timestamp: at,
+    actor: actorId,
+    action: "inventory.receipt_cost_provisional.updated",
+    target: `purchase_order_line:${lineId}`,
+    changesJson: canonicalJson({ before: changes.map((row) => ({ lotId: row.lotId, costProvisional: row.before })), after: changes.map((row) => ({ lotId: row.lotId, costProvisional: row.after })) }),
+    contextJson: canonicalJson({ supplierApplied }),
+  });
 }
 /** Frozen effective origins, including approved historical repairs, are the
  * quantity evidence. Current catalog pack sizes and stock balances are not. */
@@ -162,10 +168,15 @@ export async function recordReceiptInvoiceApproval(
   applications: unknown,
   authority: unknown,
 ) {
-  const audit =
-    await tx.execute(sql`INSERT INTO public.audit_events(action,actor,target,changes,context,timestamp,level)
-    VALUES ('procurement.receipt_invoice_costs.approved',${actorId},${`purchase_order_line:${lineId}`},
-      ${canonicalJson({ preview, applications })}::jsonb,${canonicalJson({ reason, actorName, commandKey, authority })}::jsonb,${at},'AUDIT') RETURNING id`);
+  const audit = await insertAuditEventSql(tx, {
+    timestamp: at,
+    actor: actorId,
+    action: "procurement.receipt_invoice_costs.approved",
+    target: `purchase_order_line:${lineId}`,
+    changesJson: canonicalJson({ preview, applications }),
+    contextJson: canonicalJson({ reason, actorName, commandKey, authority }),
+    returningId: true,
+  });
   const id = costInteger(audit.rows[0]?.id, "auditEventId", 1);
   await tx.execute(sql`INSERT INTO procurement.po_events(po_id,event_type,actor_type,actor_id,payload_json,created_at)
     VALUES (${poId},'receipt_invoice_costs_approved','user',${actorId},${canonicalJson({ auditEventId: id, reason, actorName, approvedAt: at.toISOString(), preview })}::jsonb,${at})`);

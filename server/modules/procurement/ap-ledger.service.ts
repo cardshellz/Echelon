@@ -1,4 +1,5 @@
 import { readIntegerCents, readIntegerMills } from "@shared/money-read";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
 import { hasInvoiceCreditHistory, SupplierCreditEvidenceError, assertInvoiceHasNoCreditHistory, assertInvoiceSettlementEvidence, readInvoiceCreditAmount, readVerifiedInvoiceSettlementProjections } from "./supplier-credit-settlement.repository";
 import { paymentApplicationInputSchema, paymentCalendarDateSchema, type PaymentApplicationInput } from "@shared/procurement/ap-payment-contract";
 import { readPaymentBalances } from "./ap-payment-balance.repository";
@@ -535,7 +536,7 @@ async function appendApLedgerCommandAudit(
   client: ApLedgerDbClient,
   at?: Date,
 ): Promise<void> {
-  await client.insert(auditEvents).values({
+  await insertAuditEventDrizzle(client, {
     ...(at ? { timestamp: at } : {}),
     level: "AUDIT",
     actor: actor ?? "system",
@@ -556,7 +557,7 @@ async function appendApMutationAudit(
   client: ApLedgerDbClient,
   recordedAt?: Date,
 ): Promise<void> {
-  await client.insert(auditEvents).values({
+  await insertAuditEventDrizzle(client, {
     ...(recordedAt ? { timestamp: recordedAt } : {}),
     level: "AUDIT",
     actor: actor ?? "system",

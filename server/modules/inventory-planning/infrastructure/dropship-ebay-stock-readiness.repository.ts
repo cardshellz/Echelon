@@ -15,6 +15,7 @@ import {
   dropshipEbayStockCommandKey, dropshipEbayStockPreparationKey, dropshipEbayStockRequestHash, normalizeDropshipEbayStockInput,
 } from "../domain/dropship-ebay-stock-readiness";
 import { logger as platformLogger } from "../../../platform/observability/logger";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 import { readCanonicalQuantityPublicationMember } from "./canonical-quantity-publication-member.reader";
 import { PublicationMappingPreparationStore, type MappingPreparationTarget } from "./publication-mapping-preparation.repository";
 import { applyExactEbaySkuMappingsInsideTransaction } from "./exact-ebay-sku-mapping.apply";
@@ -261,14 +262,19 @@ export async function ensureDropshipEbayStockReady(pool: ConnectionPool, raw: un
         },
       });
       // The statement text is byte-for-byte the pre-wrapper one (template indentation included).
-      await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-          VALUES($1,'AUDIT',$2,'inventory_availability.dropship_ebay_stock.linked',$3,$4::jsonb,$5::jsonb)`,
-      [now, actor, `inventory.inventory_publication_target:${target.id}`,
-        JSON.stringify({ before: { publicationTargetId: target.id, targetRevision: target.revision,
+      await insertAuditEventPgQuery(client, {
+        timestamp: now,
+        actor,
+        action: "inventory_availability.dropship_ebay_stock.linked",
+        target: `inventory.inventory_publication_target:${target.id}`,
+        changesJson: JSON.stringify({ before: { publicationTargetId: target.id, targetRevision: target.revision,
           variants: capture.variants.map(row => ({ productVariantId: row.productVariantId, sku: row.sku, mappingAction: row.mappingAction })) },
         after: preparation }),
-        JSON.stringify({ commandKey, requestHash, vendorId: source.vendorId, storeConnectionId: source.storeConnectionId,
-          productId: source.productId, origin: source.origin, requestedBy })]);
+        contextJson: JSON.stringify({ commandKey, requestHash, vendorId: source.vendorId, storeConnectionId: source.storeConnectionId,
+          productId: source.productId, origin: source.origin, requestedBy }),
+        inlineAction: true,
+        valuesIndent: "          ",
+      });
       return { targetId: target.id, preparation, actions: capture.variants };
     },
 

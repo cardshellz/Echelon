@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../../db";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 import {
   supplierReturnDetailSchema, supplierReturnListQuerySchema, supplierReturnOptionsQuerySchema,
   supplierReturnPreviewInputSchema, supplierReturnRecordInputSchema,
@@ -18,7 +20,6 @@ import { readSupplierReturnCreditStates } from "./supplier-return-credit.reposit
 import { projectSupplierReturnList } from "./supplier-return-read.domain";
 import { SupplierReturnError } from "./supplier-return.errors";
 import { createSupplierReturnReport, supplierReturnReportSchema } from "@shared/procurement/supplier-return-report";
-import { canonicalJson } from "@shared/utils/canonical-json";
 export type { SupplierReturnTransaction } from "./supplier-return.repository";
 
 export async function assertSupplierReturnAuthority(tx: SupplierReturnTransaction, actorId: string, mode: "read" | "record") {
@@ -99,10 +100,14 @@ export async function recordSupplierReturn(tx: SupplierReturnTransaction, input:
     const report = createSupplierReturnReport(document);
     await tx.execute(sql`INSERT INTO procurement.supplier_return_reporting_events(supplier_return_id,contract_version,payload,recorded_at)
       VALUES(${document.id},1,${canonicalJson(report)}::jsonb,${input.at})`);
-    await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-      VALUES(${input.at},'AUDIT',${input.actorId},'procurement.supplier_return.record',${`supplier-return:${document.id}`},
-        ${canonicalJson({ before: null, after: document })}::jsonb,
-        ${canonicalJson({ command: "record", commandKey: input.commandKey, request, inventoryReceipt: receipt })}::jsonb)`);
+    await insertAuditEventSql(tx, {
+      timestamp: input.at,
+      actor: input.actorId,
+      action: "procurement.supplier_return.record",
+      target: `supplier-return:${document.id}`,
+      changesJson: canonicalJson({ before: null, after: document }),
+      contextJson: canonicalJson({ command: "record", commandKey: input.commandKey, request, inventoryReceipt: receipt }),
+    });
   }
   return document;
 }

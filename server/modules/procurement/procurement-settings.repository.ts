@@ -4,6 +4,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { PROCUREMENT_SETTING_KEYS, procurementSettingsSnapshotSchema, type ProcurementSettingKey, type ProcurementSettingsSnapshot } from "@shared/procurement/procurement-settings";
 import { ProcurementSettingsError } from "./procurement-settings.policy";
 import { updateDefaultProcurementPolicySettingsWithCasInTx } from "../inventory/cross-module-inventory-mutations.api";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 
 export interface ProcurementSettingsTransaction { execute(query: SQL): Promise<{ rows: unknown[] }> }
 
@@ -57,10 +58,12 @@ export async function saveProcurementSettings(
     updatedAt: at,
   });
   if (result.rows.length !== 1) throw new Error("Locked procurement policy update did not affect its canonical row");
-  await tx.execute(sql`
-    INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-    VALUES (${at},'AUDIT',${actorId},'procurement.settings.updated',${`warehouse_settings:${record.id}`},
-      ${canonicalJson({ before: record.settings, after })}::jsonb,
-      ${canonicalJson({ commandKey, policy: "DEFAULT", previousRevision: record.settings.revision, revision: after.revision })}::jsonb)
-  `);
+  await insertAuditEventSql(tx, {
+    timestamp: at,
+    actor: actorId,
+    action: "procurement.settings.updated",
+    target: `warehouse_settings:${record.id}`,
+    changesJson: canonicalJson({ before: record.settings, after }),
+    contextJson: canonicalJson({ commandKey, policy: "DEFAULT", previousRevision: record.settings.revision, revision: after.revision }),
+  });
 }

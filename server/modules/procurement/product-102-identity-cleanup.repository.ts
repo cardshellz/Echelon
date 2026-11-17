@@ -1,4 +1,5 @@
 import type { PoolClient } from "pg";
+import { insertProduct102IdentityCleanupAuditPgQuery } from "../../infrastructure/transactional-audit";
 import {
   PRODUCT_102_CLEANUP_KEY,
   cleanupRequire,
@@ -47,19 +48,13 @@ export async function recordProduct102PurchasingCleanupAudit(
   const { command, requestHash, occurredAt, before, after } =
     product102CleanupAuditInputSchema.parse(input);
   const auditEventId = (
-    await client.query<{ id: string }>(
-      `INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-    VALUES($1,'AUDIT',$2,'catalog.product_identity_removed','product:102',
-      jsonb_build_object('sourceProductId',102,'targetProductId',5,'stateHash',$3::text),
-      jsonb_build_object('requestHash',$4::text,'commandKey',$5::text)) RETURNING id::text`,
-      [
-        occurredAt,
-        command.actorId,
-        command.expectedHash,
-        requestHash,
-        PRODUCT_102_CLEANUP_KEY,
-      ],
-    )
+    await insertProduct102IdentityCleanupAuditPgQuery(client, {
+      occurredAt,
+      actorId: command.actorId,
+      expectedHash: command.expectedHash,
+      requestHash,
+      commandKey: PRODUCT_102_CLEANUP_KEY,
+    })
   ).rows[0].id;
   const poEventIds: string[] = [];
   for (const [lineId, poId] of [

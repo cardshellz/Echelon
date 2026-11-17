@@ -7,6 +7,7 @@ import { assertSupplierReturnAuthority } from "./supplier-return.service";
 import { SupplierReturnError } from "./supplier-return.errors";
 import type { SupplierReturnTransaction } from "./supplier-return.repository";
 import { readSupplierReturnEntitlementReview, recordSupplierReturnCreditReview } from "./supplier-return-credit-review.service";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 
 export async function recordSupplierReturnDifferenceReview(tx: SupplierReturnTransaction, input: {
   entitlementId: number; raw: unknown; actorId: string; at: Date; commandKey: string;
@@ -20,9 +21,14 @@ export async function recordSupplierReturnDifferenceReview(tx: SupplierReturnTra
   await assertSupplierReturnAuthority(tx, input.actorId, "record");
   const before = await readSupplierReturnEntitlementReview(tx, input.entitlementId);
   const result = supplierReturnCreditReviewSchema.parse(await recordSupplierReturnCreditReview(tx, { ...input, raw: parsed.data }));
-  await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-    VALUES(${input.at},'AUDIT',${input.actorId},'procurement.supplier_return.review_credit_difference',${`supplier-return-entitlement:${input.entitlementId}`},
-      ${canonicalJson({ before, after: result })}::jsonb,${canonicalJson({ commandKey: input.commandKey, request: parsed.data })}::jsonb)`);
+  await insertAuditEventSql(tx, {
+    timestamp: input.at,
+    actor: input.actorId,
+    action: "procurement.supplier_return.review_credit_difference",
+    target: `supplier-return-entitlement:${input.entitlementId}`,
+    changesJson: canonicalJson({ before, after: result }),
+    contextJson: canonicalJson({ commandKey: input.commandKey, request: parsed.data }),
+  });
   return result;
 }
 

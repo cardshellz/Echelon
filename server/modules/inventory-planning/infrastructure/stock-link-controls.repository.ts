@@ -11,6 +11,7 @@ import type {
   StockLinkControlCommand, StockLinkControlOutcome, StockLinkControlSnapshot, StockLinkControlsStore, StockLinkUnsupportedStatus,
 } from "../application/stock-link-controls.service";
 import { stockLinkRetiresHeldCountText } from "./stock-link-health.sql";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 
 /**
  * The Channel Inventory stock-link controls over PostgreSQL (channels PR2, PLAN-CH2 v4.1 §7.3): the status read and
@@ -205,13 +206,16 @@ export class PostgresStockLinkControlsStore implements StockLinkControlsStore {
     const after = (await readDestination(client, publicationTargetId, ""))!;
     const beforeView = snapshot(before);
     const afterView = snapshot(after);
-    await client.query(`INSERT INTO public.audit_events(timestamp, level, actor, action, target, changes, context)
-      VALUES ($1, 'AUDIT', $2, $3, $4, $5::jsonb, $6::jsonb)`,
-    [now, command.actorId, STOCK_LINK_CONTROL_AUDIT_ACTIONS[command.request.kind], `inventory.inventory_publication_target:${publicationTargetId}`,
-      JSON.stringify({ before: beforeView, after: afterView }),
-      JSON.stringify({ reason: command.reason, expectedRevision: command.expectedRevision, retiresHeld,
+    await insertAuditEventPgQuery(client, {
+      timestamp: now,
+      actor: command.actorId,
+      action: STOCK_LINK_CONTROL_AUDIT_ACTIONS[command.request.kind],
+      target: `inventory.inventory_publication_target:${publicationTargetId}`,
+      changesJson: JSON.stringify({ before: beforeView, after: afterView }),
+      contextJson: JSON.stringify({ reason: command.reason, expectedRevision: command.expectedRevision, retiresHeld,
         releasedRetires: plan.releaseRetires, resumedPause: plan.resumePause, clearedHalt: plan.clearHalt,
-        rowsMadeDue: madeDue.length, productVariantIds: madeDue })]);
+        rowsMadeDue: madeDue.length, productVariantIds: madeDue }),
+    });
     return { kind: command.request.kind, changed: true, before: beforeView, after: afterView, productVariantIdsMadeDue: madeDue,
       status: await readSupportedStatus(client, publicationTargetId, after, now) };
   }

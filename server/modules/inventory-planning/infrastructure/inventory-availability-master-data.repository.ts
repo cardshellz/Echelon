@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
 import {
+  insertIdempotencyKeyDrizzle,
+  updateIdempotencyKeyDrizzle,
+} from "../../../infrastructure/idempotency-keys.repository";
+import {
   buildRecipeComponents,
   buildRecipes,
   idempotencyKeys,
@@ -387,7 +391,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
         assertReplayHash(replay.requestHash, command.requestHash);
         return { ...replay.result, alreadyApplied: true };
       }
-      await tx.insert(idempotencyKeys).values({
+      await insertIdempotencyKeyDrizzle(tx, {
         key: draftUpdateReceiptKey(command.idempotencyKey),
         requestHash: command.requestHash,
         responseBody: null,
@@ -481,15 +485,12 @@ implements InventoryAvailabilityMasterDataAdminStore {
         timestamp: command.occurredAt,
         emitStructuredLog: false,
       });
-      await tx
-        .update(idempotencyKeys)
-        .set({
-          responseBody: {
-            commandType: "transformation_model_draft_update",
-            result,
-          },
-        })
-        .where(eq(idempotencyKeys.key, draftUpdateReceiptKey(command.idempotencyKey)));
+      await updateIdempotencyKeyDrizzle(tx, draftUpdateReceiptKey(command.idempotencyKey), {
+        responseBody: {
+          commandType: "transformation_model_draft_update",
+          result,
+        },
+      });
       return result;
     }));
   }

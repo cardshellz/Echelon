@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import type { InvoiceCostComponentEvidence } from "@shared/procurement/invoice-cost-evidence";
 import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 
 export async function readInvoiceCostReviewLine(tx: AmendmentTransaction, lineId: number) {
   return (await tx.execute(sql`
@@ -21,11 +22,14 @@ export async function recordInvoiceCostReview(tx: AmendmentTransaction, input: {
   lineId: number; purchaseOrderLineId: number | null; actorId: string; at: Date;
   before: unknown; after: InvoiceCostComponentEvidence; context: Record<string, unknown>; retainApproval: boolean;
 }) {
-  await tx.execute(sql`
-    INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-    VALUES (${input.at},'AUDIT',${input.actorId},'procurement.invoice.cost_components',${`invoice-line:${input.lineId}`},
-      ${canonicalJson({ before: input.before, after: input.after })}::jsonb,${canonicalJson(input.context)}::jsonb)
-  `);
+  await insertAuditEventSql(tx, {
+    timestamp: input.at,
+    actor: input.actorId,
+    action: "procurement.invoice.cost_components",
+    target: `invoice-line:${input.lineId}`,
+    changesJson: canonicalJson({ before: input.before, after: input.after }),
+    contextJson: canonicalJson(input.context),
+  });
   if (input.retainApproval && input.purchaseOrderLineId !== null) {
     // Migration 227 protects PO events. The general audit row is an operational
     // copy; its removal must not erase a linked purchase's reviewed approval.

@@ -1,8 +1,13 @@
 import { Request, Response, NextFunction } from "express";
 import { db } from "../db";
 import { idempotencyKeys } from "@shared/schema";
-import { and, eq, isNull } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import crypto from "crypto";
+import {
+  deleteUnclaimedIdempotencyKeyDrizzle,
+  insertIdempotencyKeyDrizzle,
+  updateIdempotencyKeyDrizzle,
+} from "../infrastructure/idempotency-keys.repository";
 
 export const IDEMPOTENCY_IN_PROGRESS_LEASE_MS = 2 * 60 * 1000;
 export const IDEMPOTENCY_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
@@ -81,9 +86,7 @@ export function requireIdempotency() {
 
     const releaseUnclaimedKey = async () => {
       try {
-        await db
-          .delete(idempotencyKeys)
-          .where(and(eq(idempotencyKeys.key, idempotencyKey), isNull(idempotencyKeys.responseBody)));
+        await deleteUnclaimedIdempotencyKeyDrizzle(db, idempotencyKey);
       } catch (cleanupErr) {
         console.error(`[Idempotency] Failed to release unclaimed key ${idempotencyKey}:`, cleanupErr);
       }
@@ -138,7 +141,7 @@ export function requireIdempotency() {
       }
 
       try {
-        await db.insert(idempotencyKeys).values({
+        await insertIdempotencyKeyDrizzle(db, {
           key: idempotencyKey,
           requestHash,
           responseBody: null,
@@ -185,13 +188,10 @@ export function requireIdempotency() {
           body,
         };
 
-        void db
-          .update(idempotencyKeys)
-          .set({
-            responseBody: envelope,
-            expiresAt: new Date(Date.now() + IDEMPOTENCY_COMPLETED_TTL_MS),
-          })
-          .where(eq(idempotencyKeys.key, idempotencyKey))
+        void updateIdempotencyKeyDrizzle(db, idempotencyKey, {
+          responseBody: envelope,
+          expiresAt: new Date(Date.now() + IDEMPOTENCY_COMPLETED_TTL_MS),
+        })
           .catch(async (err) => {
             console.error(`[Idempotency] Failed to save response for key ${idempotencyKey}:`, err);
             await releaseUnclaimedKey();

@@ -26,6 +26,10 @@ import {
 
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
+import {
+  insertIdempotencyKeyDrizzle,
+  updateIdempotencyKeyDrizzle,
+} from "../../../infrastructure/idempotency-keys.repository";
 import { sqlIntegerArray } from "../../../infrastructure/postgres-array";
 import { assertCanonicalDemandDispatchEvidence, canonicalDemandDispatchInvalid, type DemandEvidenceExecutor } from "./inventory-demand-dispatch-evidence.repository";
 import type {
@@ -213,7 +217,7 @@ implements InventoryPromiseSafetyAdminStore {
       const replay = await loadPolicyUpdateReplay(tx, receiptKey, command.requestHash);
       if (replay) return replay;
       await assertPolicyUpdateKeyIsUnique(tx, command.idempotencyKey);
-      await tx.insert(idempotencyKeys).values({
+      await insertIdempotencyKeyDrizzle(tx, {
         key: receiptKey,
         requestHash: command.requestHash,
         responseBody: null,
@@ -319,12 +323,12 @@ implements InventoryPromiseSafetyAdminStore {
         timestamp: command.occurredAt,
         emitStructuredLog: false,
       });
-      await tx.update(idempotencyKeys).set({
+      await updateIdempotencyKeyDrizzle(tx, receiptKey, {
         responseBody: {
           commandType: "promise_safety_policy_draft_update",
           result,
         },
-      }).where(eq(idempotencyKeys.key, receiptKey));
+      });
       return result;
   }
 
@@ -343,7 +347,7 @@ implements InventoryPromiseSafetyAdminStore {
       const replay = await loadRefreshReplay(tx, receiptKey, command.requestHash);
       if (replay) return replay;
       await assertDemandRefreshKeyIsUnique(tx, command.idempotencyKey);
-      await tx.insert(idempotencyKeys).values({
+      await insertIdempotencyKeyDrizzle(tx, {
         key: receiptKey,
         requestHash: command.requestHash,
         responseBody: null,
@@ -473,12 +477,12 @@ implements InventoryPromiseSafetyAdminStore {
         timestamp: command.calculatedAt,
         emitStructuredLog: false,
       });
-      await tx.update(idempotencyKeys).set({
+      await updateIdempotencyKeyDrizzle(tx, receiptKey, {
         responseBody: {
           commandType: "inventory_demand_evidence_refresh",
           result,
         },
-      }).where(eq(idempotencyKeys.key, receiptKey));
+      });
       return result;
     });
   }
