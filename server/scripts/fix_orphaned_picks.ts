@@ -1,5 +1,6 @@
 import { db } from "../db";
 import { sql } from "drizzle-orm";
+import { repairOrphanedPickedInventoryLevelInTx } from "../modules/inventory/cross-module-inventory-mutations.api";
 
 async function run() {
   const levels = await db.execute(sql`
@@ -30,44 +31,13 @@ async function run() {
         const orphanQty = picked_qty - activeQty;
         console.log(`Fixing Variant ${product_variant_id} Loc ${warehouse_location_id}: Picked=${picked_qty}, Active=${activeQty}. Removing ${orphanQty} orphaned items.`);
         
-        // Update the inventory level to match reality
-        await tx.execute(sql`
-          UPDATE inventory.inventory_levels
-          SET picked_qty = ${activeQty},
-              updated_at = NOW()
-          WHERE id = ${id}
-        `);
-        
-        // Record an audit transaction to explain the sudden drop in picked_qty
-        await tx.execute(sql`
-          INSERT INTO inventory.inventory_transactions (
-            product_variant_id,
-            from_location_id,
-            transaction_type,
-            variant_qty_delta,
-            variant_qty_before,
-            variant_qty_after,
-            source_state,
-            target_state,
-            reference_type,
-            reference_id,
-            notes,
-            created_at
-          ) VALUES (
-            ${product_variant_id},
-            ${warehouse_location_id},
-            'ship',
-            0,
-            0,
-            0,
-            'picked',
-            'shipped',
-            'system_cleanup',
-            'script_fix_orphans',
-            ${`Backfilled ${orphanQty} orphaned picked items missing from ShipStation V2 webhook.`},
-            NOW()
-          )
-        `);
+        await repairOrphanedPickedInventoryLevelInTx(tx, {
+          levelId: id,
+          productVariantId: product_variant_id,
+          warehouseLocationId: warehouse_location_id,
+          activeQty,
+          orphanQty,
+        });
         
         fixedCount++;
       }

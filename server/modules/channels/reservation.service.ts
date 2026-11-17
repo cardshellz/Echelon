@@ -21,6 +21,7 @@ import {
   isCustomerSellableVariant,
   VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE,
 } from "@shared/catalog/variant-sales-eligibility";
+import { insertOrphanedReservationUnreserveTransactionInInventory } from "../inventory/cross-module-inventory-mutations.api";
 export type {
   AtpService,
   ChannelSync,
@@ -1178,14 +1179,11 @@ class ReservationService implements ReservationServiceContract {
       // Caller already adjusted the counter — record the ledger row here.
       // unreserve rows never change on-hand: variantQtyDelta must be 0
       // (the old -excess here corrupted on-hand ledger replay).
-      await dbh.insert(inventoryTransactions).values({
+      await insertOrphanedReservationUnreserveTransactionInInventory(dbh, {
         productVariantId,
-        fromLocationId: warehouseLocationId,
-        transactionType: "unreserve",
-        variantQtyDelta: 0,
-        reservedQtyDelta: -excess,
-        notes: `Orphaned reservation released: inventory count dropped below reserved amount`,
-        userId: userId || null,
+        warehouseLocationId,
+        excess,
+        userId,
       });
     }
 

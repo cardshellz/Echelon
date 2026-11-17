@@ -513,7 +513,6 @@
     "modules/identity"
   ],
   "inventory.adjustment_reasons": [
-    "modules/identity",
     "modules/inventory"
   ],
   "inventory.availability_activation_commands": [
@@ -694,10 +693,7 @@
     "modules/inventory"
   ],
   "inventory.inventory_levels": [
-    "modules/catalog",
-    "modules/channels",
-    "modules/inventory",
-    "server/scripts/fix_orphaned_picks.ts"
+    "modules/inventory"
   ],
   "inventory.inventory_lots": [
     "modules/inventory"
@@ -727,9 +723,7 @@
     "modules/inventory-planning"
   ],
   "inventory.inventory_transactions": [
-    "modules/channels",
-    "modules/inventory",
-    "server/scripts/fix_orphaned_picks.ts"
+    "modules/inventory"
   ],
   "inventory.location_promise_policy_heads": [
     "modules/inventory-planning"
@@ -906,8 +900,7 @@
     "modules/inventory"
   ],
   "inventory.replen_tasks": [
-    "modules/inventory",
-    "modules/orders"
+    "modules/inventory"
   ],
   "inventory.replen_tier_defaults": [
     "modules/inventory"
@@ -967,9 +960,7 @@
     "modules/inventory-planning"
   ],
   "inventory.warehouse_settings": [
-    "modules/inventory",
-    "modules/orders",
-    "modules/procurement"
+    "modules/inventory"
   ],
   "marketplace.channel_listing_drafts": [
     "modules/marketplace-listings"
@@ -1774,29 +1765,21 @@
     "modules/warehouse"
   ],
   "warehouse.echelon_settings": [
-    "modules/orders",
     "modules/warehouse"
   ],
   "warehouse.fulfillment_nodes": [
     "modules/warehouse"
   ],
   "warehouse.product_locations": [
-    "modules/catalog",
-    "modules/orders",
-    "modules/warehouse",
-    "server/seed.ts"
+    "modules/warehouse"
   ],
   "warehouse.warehouse_locations": [
-    "modules/channels",
-    "modules/inventory",
     "modules/warehouse"
   ],
   "warehouse.warehouse_zones": [
     "modules/warehouse"
   ],
   "warehouse.warehouses": [
-    "modules/channels",
-    "modules/inventory",
     "modules/warehouse"
   ],
   "warehouse.work_access_scopes": [

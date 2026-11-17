@@ -22,6 +22,7 @@ import {
 } from "../../oms/channel-order-intake.api";
 import { reassignWmsOrderItemVariant } from "../../wms/order-intake-and-items.api";
 import { mergePurchasingProductIdentity, readPurchasingMergeEvidence } from "../../procurement/catalog-identity-coordination.api";
+import { mergeVariantProductLocationsInTx } from "../../warehouse/cross-module-warehouse-mutations.api";
 import { productMethods as catalogStorage } from "../catalog.storage";
 import { renameDerivedVariantSkus } from "../application/product-sku-rename";
 import {
@@ -323,13 +324,14 @@ export class PostgresProductMergeRepository implements ProductMergeRepository {
           .where(eq(productLocations.productVariantId, targetId));
         const occupied = targetSlots.map(slot => slot.locationId).filter((id): id is number => id !== null);
         const targetVariant = snapshot.targetVariants.find(variant => variant.id === targetId)!;
-        if (occupied.length > 0) {
-          await tx.delete(productLocations).where(and(eq(productLocations.productVariantId, sourceId),
-            inArray(productLocations.warehouseLocationId, occupied)));
-        }
-        binAssignmentsMoved += (await tx.update(productLocations)
-          .set({ productVariantId: targetId, productId: run.targetProductId, sku: targetVariant.sku, updatedAt: now })
-          .where(eq(productLocations.productVariantId, sourceId)).returning({ id: productLocations.id })).length;
+        binAssignmentsMoved += await mergeVariantProductLocationsInTx(tx, {
+          sourceVariantId: sourceId,
+          targetVariantId: targetId,
+          targetProductId: run.targetProductId,
+          targetSku: targetVariant.sku,
+          occupiedLocationIds: occupied,
+          now,
+        });
       }
 
       // 3. Open order lines (their reservations were released in the previous step).

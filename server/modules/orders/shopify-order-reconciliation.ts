@@ -15,6 +15,7 @@ import type {
   WmsSyncService,
 } from "../oms/channel-order-intake.api";
 import { parseDecimalCents, sumCents } from "@shared/money-read";
+import { upsertSyncEchelonSettingInWarehouse } from "../warehouse/cross-module-warehouse-mutations.api";
 /**
  * Shopify Order Reconciliation Job
  *
@@ -515,11 +516,7 @@ async function getLastCheckTime(): Promise<Date> {
 
 async function setLastCheckTime(ts: Date): Promise<void> {
   const isoValue = ts.toISOString();
-  await db.execute(sql`
-    INSERT INTO warehouse.echelon_settings (key, value, type, category)
-    VALUES (${SETTINGS_KEY}, ${isoValue}, 'string', 'sync')
-    ON CONFLICT (key) DO UPDATE SET value = ${isoValue}, updated_at = NOW()
-  `);
+  await upsertSyncEchelonSettingInWarehouse(db, SETTINGS_KEY, isoValue);
 }
 async function getReadinessRecoveryCursor(): Promise<number> {
   const result = await db.execute<{ value: string | null }>(sql`
@@ -534,11 +531,7 @@ async function getReadinessRecoveryCursor(): Promise<number> {
 
 async function setReadinessRecoveryCursor(omsOrderId: number): Promise<void> {
   const value = String(omsOrderId);
-  await db.execute(sql`
-    INSERT INTO warehouse.echelon_settings (key, value, type, category)
-    VALUES (${READINESS_RECOVERY_CURSOR_KEY}, ${value}, 'string', 'sync')
-    ON CONFLICT (key) DO UPDATE SET value = ${value}, updated_at = NOW()
-  `);
+  await upsertSyncEchelonSettingInWarehouse(db, READINESS_RECOVERY_CURSOR_KEY, value);
 }
 
 // ---------------------------------------------------------------------------
