@@ -8,6 +8,11 @@ import {
   createLateEditResidualShipment,
   movePendingShipmentItemsToLateEditResidual,
 } from "../wms/shipment-execution-and-projection.api";
+import {
+  cancelEmptiedByLineHoldOutboundShipmentInWms,
+  flagOutboundShipmentPushRetryFailureReviewInWms,
+  setOutboundShipmentReviewFlagInWms,
+} from "../wms/outbound-shipment-mutations.api";
 // Stable error code for a deterministic, non-retryable ShipStation push
 // rejection (bad address/total/country, not-pushable status, finalized order).
 // Imported (not string-literal'd) so a rename stays in sync. shipstation.service
@@ -1226,19 +1231,12 @@ async function flagShipStationPushRetryExhausted(
   dbArg: any,
   shipmentId: number,
 ): Promise<void> {
-  await dbArg.execute(sql`
-    UPDATE wms.outbound_shipments
-    SET requires_review = true,
-        review_reason = CASE
-          WHEN review_reason IS NULL
-            OR review_reason = 'inventory_deduction_missing_item_data'
-          THEN 'shipstation_push_retry_exhausted'
-          ELSE review_reason
-        END,
-        updated_at = NOW()
-    WHERE id = ${shipmentId}
-      AND status NOT IN ('shipped', 'cancelled', 'voided')
-  `);
+  await flagOutboundShipmentPushRetryFailureReviewInWms(
+    dbArg,
+    shipmentId,
+    "shipstation_push_retry_exhausted",
+    true,
+  );
 }
 
 async function recordShipStationPushRetryFailure(
@@ -1414,13 +1412,7 @@ export async function dispatchShipStationShipmentCancelRetry(
       return "success";
     }
     if (currentStatus === "labeled") {
-      await dbArg.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = true,
-            review_reason = 'line_item_held_after_label',
-            updated_at = NOW()
-        WHERE id = ${shipmentId}
-      `);
+      await setOutboundShipmentReviewFlagInWms(dbArg, shipmentId, "line_item_held_after_label");
       await markRowSuccess(dbArg, item);
       return "success";
     }
@@ -1428,15 +1420,7 @@ export async function dispatchShipStationShipmentCancelRetry(
     const { engineRefFromRow } = await import("../shipping");
     const ref = engineRefFromRow(row as any);
     if (!ref) {
-      await dbArg.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET status = 'cancelled',
-            cancelled_at = NOW(),
-            voided_reason = 'emptied_by_line_item_hold',
-            updated_at = NOW()
-        WHERE id = ${shipmentId}
-          AND status NOT IN ('shipped', 'voided', 'cancelled')
-      `);
+      await cancelEmptiedByLineHoldOutboundShipmentInWms(dbArg, shipmentId);
       await markRowSuccess(dbArg, item);
       return "success";
     }
@@ -1446,23 +1430,13 @@ export async function dispatchShipStationShipmentCancelRetry(
       : await ssSvc!.cancelOrder!(Number(row.shipstation_order_id));
 
     if (cancelOutcome.state === "already_shipped") {
-      await dbArg.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = true,
-            review_reason = 'provider_already_shipped_held_line',
-            updated_at = NOW()
-        WHERE id = ${shipmentId}
-      `);
+      await setOutboundShipmentReviewFlagInWms(
+        dbArg,
+        shipmentId,
+        "provider_already_shipped_held_line",
+      );
     } else {
-      await dbArg.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET status = 'cancelled',
-            cancelled_at = NOW(),
-            voided_reason = 'emptied_by_line_item_hold',
-            updated_at = NOW()
-        WHERE id = ${shipmentId}
-          AND status NOT IN ('shipped', 'voided', 'cancelled')
-      `);
+      await cancelEmptiedByLineHoldOutboundShipmentInWms(dbArg, shipmentId);
     }
 
     await markRowSuccess(dbArg, item);
@@ -1478,13 +1452,11 @@ export async function dispatchShipStationShipmentCancelRetry(
       { topic: "shipstation_shipment_cancel", shipmentId },
     );
     if (status === "dead") {
-      await dbArg.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = true,
-            review_reason = 'shipstation_cancel_retry_exhausted',
-            updated_at = NOW()
-        WHERE id = ${shipmentId}
-      `);
+      await setOutboundShipmentReviewFlagInWms(
+        dbArg,
+        shipmentId,
+        "shipstation_cancel_retry_exhausted",
+      );
       console.error(
         `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
       );
@@ -2455,19 +2427,12 @@ async function markShopifyFulfillmentPushPermanentlyFailed(
   if (typeof dbArg?.execute === "function") {
     // Same review_reason preservation rules as the ShipStation twin: overwrite
     // the auto-cleared inventory reason, preserve any other manual reason.
-    await dbArg.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = true,
-          review_reason = CASE
-            WHEN review_reason IS NULL
-              OR review_reason = 'inventory_deduction_missing_item_data'
-            THEN ${`permanent_fulfillment_push_failure: ${reason}`}
-            ELSE review_reason
-          END,
-          updated_at = NOW()
-      WHERE id = ${shipmentId}
-        AND status NOT IN ('cancelled', 'voided')
-    `);
+    await flagOutboundShipmentPushRetryFailureReviewInWms(
+      dbArg,
+      shipmentId,
+      `permanent_fulfillment_push_failure: ${reason}`,
+      false,
+    );
   }
   await markRowDead(dbArg, item, reason);
 }
@@ -2487,19 +2452,12 @@ async function markShipmentPushPermanentlyFailed(
     //   - DO preserve any OTHER pre-existing manual reason (e.g.
     //     'refund_after_ship'): that context is still valid and shouldn't be lost.
     //   - When unset, record the namespaced permanent-push cause for ops.
-    await dbArg.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = true,
-          review_reason = CASE
-            WHEN review_reason IS NULL
-              OR review_reason = 'inventory_deduction_missing_item_data'
-            THEN ${`permanent_push_failure: ${reason}`}
-            ELSE review_reason
-          END,
-          updated_at = NOW()
-      WHERE id = ${shipmentId}
-        AND status NOT IN ('shipped', 'cancelled', 'voided')
-    `);
+    await flagOutboundShipmentPushRetryFailureReviewInWms(
+      dbArg,
+      shipmentId,
+      `permanent_push_failure: ${reason}`,
+      true,
+    );
   }
   await markRowDead(dbArg, item, reason);
 }

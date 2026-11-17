@@ -19,6 +19,10 @@ const shipStationService = readFileSync(
   resolve(process.cwd(), "server/modules/oms/shipstation.service.ts"),
   "utf8",
 );
+const wmsShipmentItemsRepo = readFileSync(
+  resolve(process.cwd(), "server/modules/wms/outbound-shipment-items-mutations.repository.ts"),
+  "utf8",
+);
 const integrationSetup = readFileSync(
   resolve(process.cwd(), "test/setup-integration.ts"),
   "utf8",
@@ -42,10 +46,12 @@ describe("ShipStation split-lineage migration contract", () => {
   });
 
   it("records split lineage in every normal split creation path", () => {
-    expect(shipStationService).toMatch(
-      /SET shipment_id = \$\{row\.id\},[\s\S]*split_root_shipment_item_id = COALESCE\([\s\S]*split_root_shipment_item_id,[\s\S]*id/,
+    expect(shipStationService).toContain("moveWholeShipmentItemToPhysicalSplitInWms(");
+    expect(shipStationService).toContain("copyPartialShipmentItemToPhysicalSplitInWms(");
+    expect(wmsShipmentItemsRepo).toMatch(
+      /SET shipment_id = \$\{input\.splitShipmentId\},[\s\S]*split_root_shipment_item_id = COALESCE\([\s\S]*split_root_shipment_item_id,[\s\S]*id/,
     );
-    expect(shipStationService).toMatch(
+    expect(wmsShipmentItemsRepo).toMatch(
       /INSERT INTO wms\.outbound_shipment_items[\s\S]*correction_for_shipment_item_id, split_root_shipment_item_id,[\s\S]*shipment_item_purpose/,
     );
     expect(shipStationService).toContain(

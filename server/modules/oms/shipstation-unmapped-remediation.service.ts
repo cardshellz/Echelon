@@ -30,6 +30,18 @@ import {
   isPositivePostgresInteger,
   parseExactPositiveWmsShipmentItems,
 } from "../shipping/shipstation-provider-reconciliation.api";
+import {
+  cancelProviderEchoCandidateOutboundShipmentInWms,
+  collapseHistoricalSplitGhostOutboundShipmentInWms,
+  finalizeAdoptedReshipOutboundShipmentReviewInWms,
+  insertClassifiedReplacementOutboundShipmentInWms,
+  insertUnmappedRemediationShipmentItemInWms,
+  markOriginalOutboundShipmentLostForReshipInWms,
+  reclassifyCandidateAsReplacementOutboundShipmentInWms,
+  restoreOriginalShipStationOutboundShipmentIdentityInWms,
+  voidAdditionalProviderLabelCandidateOutboundShipmentInWms,
+  voidSupersededCandidateOutboundShipmentInWms,
+} from "../wms/outbound-shipment-mutations.api";
 
 export interface ShipStationUnmappedLocator {
   exceptionId?: number;
@@ -1678,16 +1690,11 @@ async function retireSupersededCandidate(
   if (staleAuthority.itemCount > 0 || staleAuthority.inventoryShipCount > 0) {
     throw new Error("the superseded shipment already owns WMS or inventory authority");
   }
-  await tx.execute(sql`
-    UPDATE wms.outbound_shipments
-    SET status = 'voided',
-        tracking_number = ${identityRepair.supersededTrackingNumber},
-        voided_at = COALESCE(voided_at, ${new Date(identityRepair.supersededVoidDate)}),
-        requires_review = false,
-        review_reason = 'shipstation_superseded_label_reconciled',
-        updated_at = NOW()
-    WHERE id = ${identityRepair.supersededCandidateShipmentId}
-  `);
+  await voidSupersededCandidateOutboundShipmentInWms(tx, {
+    supersededCandidateShipmentId: identityRepair.supersededCandidateShipmentId,
+    supersededTrackingNumber: identityRepair.supersededTrackingNumber,
+    supersededVoidDate: new Date(identityRepair.supersededVoidDate),
+  });
 }
 
 async function restoreOriginalPackageIdentity(
@@ -1749,14 +1756,7 @@ async function restoreOriginalPackageIdentity(
     )) {
       throw new Error("the failed historical split items no longer match ShipStation evidence");
     }
-    await tx.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET external_fulfillment_id = NULL,
-          requires_review = false,
-          review_reason = 'shipstation_split_ghost_collapsed',
-          updated_at = NOW()
-      WHERE id = ${historicalGhostShipmentId}
-    `);
+    await collapseHistoricalSplitGhostOutboundShipmentInWms(tx, historicalGhostShipmentId);
   } else {
     const providerSignature = providerWmsItemSignature(providerShipment);
     const itemResult: any = await tx.execute(sql`
@@ -1772,19 +1772,13 @@ async function restoreOriginalPackageIdentity(
       throw new Error("the original ShipStation package items no longer match WMS authority");
     }
   }
-  await tx.execute(sql`
-    UPDATE wms.outbound_shipments
-    SET external_fulfillment_id = ${`shipstation_shipment:${identityRepair.providerShipmentId}`},
-        tracking_number = ${identityRepair.originalTrackingNumber},
-        shipstation_order_id = ${identityRepair.providerOrderId},
-        shipstation_order_key = ${identityRepair.providerOrderKey},
-        engine_order_ref = ${String(identityRepair.providerOrderId)},
-        engine_shipment_ref = ${identityRepair.providerOrderKey},
-        requires_review = false,
-        review_reason = 'shipstation_original_identity_restored',
-        updated_at = NOW()
-    WHERE id = ${identityRepair.wmsShipmentId}
-  `);
+  await restoreOriginalShipStationOutboundShipmentIdentityInWms(tx, {
+    wmsShipmentId: identityRepair.wmsShipmentId,
+    providerShipmentId: identityRepair.providerShipmentId,
+    originalTrackingNumber: identityRepair.originalTrackingNumber,
+    providerOrderId: identityRepair.providerOrderId,
+    providerOrderKey: identityRepair.providerOrderKey,
+  });
 }
 
 async function prepareMappedShipment(
@@ -1856,15 +1850,7 @@ async function prepareMappedShipment(
       );
     }
     if (reason === "lost" && String(original.status) !== "lost") {
-      await tx.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET status = 'lost',
-            lost_at = COALESCE(lost_at, NOW()),
-            lost_reason = COALESCE(lost_reason, 'operator_confirmed_lost_for_reship'),
-            updated_at = NOW()
-        WHERE id = ${originalShipmentId}
-          AND status = 'shipped'
-      `);
+      await markOriginalOutboundShipmentLostForReshipInWms(tx, originalShipmentId);
     }
 
     const existingResult: any = await tx.execute(sql`
@@ -1882,32 +1868,19 @@ async function prepareMappedShipment(
     }
 
     if (!candidate) {
-      const inserted: any = await tx.execute(sql`
-        INSERT INTO wms.outbound_shipments (
-          order_id, channel_id, external_fulfillment_id, source, status,
-          tracking_number, carrier, service_code,
-          shipstation_order_id, shipstation_order_key,
-          shipping_engine, engine_order_ref, engine_shipment_ref,
-          requires_review, review_reason,
-          shipment_purpose, replaces_shipment_id, replacement_reason,
-          replacement_authorized_at, replacement_authorized_by,
-          created_at, updated_at
-        )
-        SELECT
-          wms_order.id, wms_order.channel_id,
-          ${`shipstation_shipment:${context.externalShipmentRef}`},
-          'shipstation_reship_adopted',
-          'queued', ${shipment.trackingNumber}, ${shipment.carrierCode}, ${shipment.serviceCode},
-          ${shipment.orderId}, ${shipment.orderKey},
-          'shipstation', ${String(shipment.orderId)}, ${shipment.orderKey},
-          true, 'shipstation_reship_adoption_pending',
-          'replacement', ${originalShipmentId}, ${reason},
-          ${new Date()}, ${operator},
-          NOW(), NOW()
-        FROM wms.orders wms_order
-        WHERE wms_order.id = ${context.wmsOrderId}
-        RETURNING id, order_id, status, source, shipment_purpose
-      `);
+      const inserted: any = await insertClassifiedReplacementOutboundShipmentInWms(tx, {
+        wmsOrderId: context.wmsOrderId,
+        externalFulfillmentId: `shipstation_shipment:${context.externalShipmentRef}`,
+        trackingNumber: shipment.trackingNumber,
+        carrierCode: shipment.carrierCode,
+        serviceCode: shipment.serviceCode,
+        providerOrderId: shipment.orderId,
+        providerOrderKey: shipment.orderKey,
+        originalShipmentId,
+        reason,
+        authorizedAt: new Date(),
+        operator,
+      });
       candidate = resultRows(inserted)[0];
       if (!candidate) throw new Error("failed to create classified WMS shipment");
     } else {
@@ -1933,36 +1906,22 @@ async function prepareMappedShipment(
       }
       if (identityRepair) {
         await retireSupersededCandidate(tx, context, identityRepair);
-        await tx.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET status = 'queued',
-              tracking_number = ${shipment.trackingNumber},
-              voided_at = NULL,
-              source = 'shipstation_reship_adopted',
-              shipment_purpose = 'replacement',
-              replaces_shipment_id = ${originalShipmentId},
-              replacement_reason = ${reason},
-              replacement_authorized_at = ${new Date()},
-              replacement_authorized_by = ${operator},
-              requires_review = true,
-              review_reason = 'shipstation_reship_adoption_pending',
-              updated_at = NOW()
-          WHERE id = ${candidate.id}
-        `);
+        await reclassifyCandidateAsReplacementOutboundShipmentInWms(tx, {
+          candidateShipmentId: Number(candidate.id),
+          originalShipmentId,
+          reason,
+          authorizedAt: new Date(),
+          operator,
+          resetQueuedTracking: { trackingNumber: shipment.trackingNumber },
+        });
       } else {
-        await tx.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET source = 'shipstation_reship_adopted',
-              shipment_purpose = 'replacement',
-              replaces_shipment_id = ${originalShipmentId},
-              replacement_reason = ${reason},
-              replacement_authorized_at = ${new Date()},
-              replacement_authorized_by = ${operator},
-              requires_review = true,
-              review_reason = 'shipstation_reship_adoption_pending',
-              updated_at = NOW()
-          WHERE id = ${candidate.id}
-        `);
+        await reclassifyCandidateAsReplacementOutboundShipmentInWms(tx, {
+          candidateShipmentId: Number(candidate.id),
+          originalShipmentId,
+          reason,
+          authorizedAt: new Date(),
+          operator,
+        });
       }
     }
 
@@ -2000,21 +1959,16 @@ async function prepareMappedShipment(
         if (!same) throw new Error(`existing mapped line for SKU ${line.sku} differs from this request`);
         continue;
       }
-      await tx.execute(sql`
-        INSERT INTO wms.outbound_shipment_items (
-          shipment_id, order_item_id, replacement_for_order_item_id,
-          correction_for_shipment_item_id,
-          shipment_item_purpose, product_variant_id, qty,
-          from_location_id, tracking_id, created_at
-        )
-        VALUES (
-          ${candidateShipmentId}, NULL,
-          ${line.shipmentItemPurpose === "replacement" ? line.orderItemId : null},
-          ${line.correctionForShipmentItemId},
-          ${line.shipmentItemPurpose}, ${line.productVariantId},
-          ${line.quantity}, ${line.fromLocationId}, ${context.externalShipmentRef}, NOW()
-        )
-      `);
+      await insertUnmappedRemediationShipmentItemInWms(tx, {
+        shipmentId: candidateShipmentId,
+        replacementForOrderItemId: line.shipmentItemPurpose === "replacement" ? line.orderItemId : null,
+        correctionForShipmentItemId: line.correctionForShipmentItemId,
+        shipmentItemPurpose: line.shipmentItemPurpose,
+        productVariantId: line.productVariantId,
+        quantity: line.quantity,
+        fromLocationId: line.fromLocationId,
+        trackingId: context.externalShipmentRef,
+      });
     }
     return candidateShipmentId;
   });
@@ -2076,19 +2030,7 @@ async function finishMappedShipment(
     })),
   });
   await withOptionalTransaction(db, async (tx) => {
-    await tx.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = CASE
-            WHEN review_reason = 'historical_replacement_inventory_unproven' THEN true
-            ELSE false
-          END,
-          review_reason = CASE
-            WHEN review_reason = 'historical_replacement_inventory_unproven' THEN review_reason
-            ELSE 'shipstation_reship_adopted'
-          END,
-          updated_at = NOW()
-      WHERE id = ${candidateShipmentId}
-    `);
+    await finalizeAdoptedReshipOutboundShipmentReviewInWms(tx, candidateShipmentId);
     await tx.execute(sql`
       UPDATE wms.reconciliation_exceptions
       SET classification = 'manual_review',
@@ -2446,19 +2388,10 @@ async function retireProviderEchoPreparationShell(
     throw new Error("the provider-echo candidate already owns fulfillment or inventory authority");
   }
 
-  const updated: any = await tx.execute(sql`
-    UPDATE wms.outbound_shipments
-    SET status = 'cancelled',
-        cancelled_at = COALESCE(cancelled_at, NOW()),
-        requires_review = false,
-        review_reason = 'shipstation_provider_echo_reconciled',
-        updated_at = NOW()
-    WHERE id = ${candidateShipmentId}
-      AND status = 'queued'
-      AND requires_review = true
-      AND review_reason = 'shipstation_reship_adoption_pending'
-    RETURNING id
-  `);
+  const updated: any = await cancelProviderEchoCandidateOutboundShipmentInWms(
+    tx,
+    candidateShipmentId,
+  );
   if (resultRows(updated).length !== 1) {
     throw new Error("the provider-echo preparation shipment changed before cleanup");
   }
@@ -2740,16 +2673,10 @@ export async function resolveShipStationUnmappedPhysicalAsVoidedLabel(
       if (authority.itemCount > 0 || authority.inventoryShipCount > 0) {
         throw new Error("the voided provider label already owns WMS or inventory authority");
       }
-      await tx.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET status = 'voided',
-            voided_at = COALESCE(voided_at, ${voidDate}),
-            voided_reason = COALESCE(voided_reason, 'shipstation_provider_label_voided'),
-            requires_review = false,
-            review_reason = NULL,
-            updated_at = NOW()
-        WHERE id = ${initialContext.candidateShipmentId}
-      `);
+      await voidAdditionalProviderLabelCandidateOutboundShipmentInWms(tx, {
+        candidateShipmentId: initialContext.candidateShipmentId,
+        voidDate,
+      });
     }
 
     const resolution =

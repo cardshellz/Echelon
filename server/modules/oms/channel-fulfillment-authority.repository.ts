@@ -8,6 +8,7 @@ import { planPackageReconciliation } from "./package-reconciliation.domain";
 import { createHash } from "node:crypto";
 import { enqueueShopifyLabelReplacementRecovery } from "./shopify-label-void-intake.repository";
 import { PackageAllocationSourceIdentityError } from "../shipping/package-allocation-authority.api";
+import { flagOutboundShipmentsExceedingLineAuthorityInWms } from "../wms/outbound-shipment-mutations.api";
 
 import { sql } from "drizzle-orm";
 import { z } from "zod";
@@ -2382,16 +2383,7 @@ async function findLineWritebackDecisions(
           .map((candidate) => candidate.legacyWmsShipmentId),
       )];
       const affectedIds = buildIdList(affectedLegacyShipmentIds);
-      await tx.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = true,
-            review_reason = COALESCE(
-              NULLIF(BTRIM(review_reason), ''),
-              'physical_shipment_exceeds_current_line_authority'
-            ),
-            updated_at = NOW()
-        WHERE id IN (${affectedIds})
-      `);
+      await flagOutboundShipmentsExceedingLineAuthorityInWms(tx, affectedIds);
     }
   }
 

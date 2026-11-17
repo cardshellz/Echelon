@@ -55,6 +55,15 @@ import {
   runStartupZombieOrderRepair,
   startShopifyReconciliation,
 } from "./modules/orders/reconciliation-and-repair.api";
+import {
+  cancelDuplicateOutboundShipmentInWms,
+  cancelOutboundShipmentAfterEngineCascadeInWms,
+  flagOutboundShipmentPhysicalAuthorityRequiredInWms,
+  flagOutboundShipmentReconcileErrorInWms,
+  flagOutboundShipmentReconcileReviewIfUnsetInWms,
+  recordOutboundShipmentAlreadyShippedInEngineInWms,
+  touchOutboundShipmentLastReconciledInWms,
+} from "./modules/wms/outbound-shipment-mutations.api";
 import { db } from "./db";
 import { createServices } from "./services";
 import {
@@ -1265,22 +1274,13 @@ function startEchelonSyncScheduler(
                     // alreadyInState branch and got recorded as SHIPPED —
                     // resurrecting dead orders.
                     if (cancelResult?.state === "already_shipped") {
-                      await db.execute(sql`
-                        UPDATE wms.outbound_shipments
-                        SET status = 'shipped', updated_at = NOW()
-                        WHERE id = ${row.shipment_id}
-                          AND status NOT IN ('shipped', 'returned', 'lost')
-                      `);
+                      await recordOutboundShipmentAlreadyShippedInEngineInWms(db, row.shipment_id);
                       console.log(`[OMS<->WMS Reconcile] Engine order ${ref.engineOrderRef} already shipped — recorded shipped for shipment ${row.shipment_id}`);
                     } else {
                       // cancelled now, already_cancelled, or not_found: the
                       // shipment is dead. Status predicate so a concurrent
                       // SHIP_NOTIFY can never be clobbered post-network-call.
-                      await db.execute(sql`
-                        UPDATE wms.outbound_shipments SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
-                        WHERE id = ${row.shipment_id}
-                          AND status NOT IN ('shipped', 'returned', 'lost')
-                      `);
+                      await cancelOutboundShipmentAfterEngineCascadeInWms(db, row.shipment_id);
                       console.log(`[OMS<->WMS Reconcile] Cancelled engine order ${ref.engineOrderRef} for shipment ${row.shipment_id} (${cancelResult?.state ?? "cancelled"})`);
                     }
                   } catch (ssErr: any) {
@@ -1401,11 +1401,7 @@ function startEchelonSyncScheduler(
       if (dupes.rows.length > 0) {
         const engine = services.shippingEngine;
         for (const row of dupes.rows as any[]) {
-          await db.execute(sql`
-            UPDATE wms.outbound_shipments
-            SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
-            WHERE id = ${row.id}
-          `);
+          await cancelDuplicateOutboundShipmentInWms(db, row.id);
           const ref = engineRefFromRow(row);
           if (ref && engine?.isConfigured()) {
             try {
@@ -1534,11 +1530,7 @@ function startEchelonSyncScheduler(
                 });
                 if (hasShippedPackageFact) markedShipped += processed;
                 else markedVoided += processed;
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET last_reconciled_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
+                await touchOutboundShipmentLastReconciledInWms(db, shipmentId);
                 continue;
               }
 
@@ -1566,15 +1558,11 @@ function startEchelonSyncScheduler(
                   FROM wms.outbound_shipments WHERE id = ${shipmentId}
                 `);
                 const alreadyFlagged = already?.rows?.[0]?.rr === true;
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET requires_review = true,
-                      review_reason = CASE WHEN COALESCE(requires_review, false)
-                                           THEN review_reason ELSE 'engine_order_not_found' END,
-                      last_reconciled_at = NOW(),
-                      updated_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
+                await flagOutboundShipmentReconcileReviewIfUnsetInWms(
+                  db,
+                  shipmentId,
+                  "engine_order_not_found",
+                );
                 if (
                   !alreadyFlagged &&
                   row.oms_id &&
@@ -1602,11 +1590,7 @@ function startEchelonSyncScheduler(
                 console.warn(
                   `[Reconcile V2] Engine order ${ref.engineOrderRef} not found (shipment=${shipmentId}) — skipping`,
                 );
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET last_reconciled_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
+                await touchOutboundShipmentLastReconciledInWms(db, shipmentId);
               }
               continue;
             }
@@ -1633,14 +1617,7 @@ function startEchelonSyncScheduler(
                 const reason = !engine.applyInboundShipmentAuthority
                   ? "shipping_engine_missing_inbound_package_authority"
                   : "shipping_engine_inbound_package_missing_order_number";
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET requires_review = true,
-                      review_reason = COALESCE(NULLIF(review_reason, ''), ${reason}),
-                      last_reconciled_at = NOW(),
-                      updated_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
+                await flagOutboundShipmentPhysicalAuthorityRequiredInWms(db, shipmentId, reason);
                 console.error(JSON.stringify({
                   code: "SHIPPING_RECONCILE_PHYSICAL_AUTHORITY_REQUIRED",
                   shipmentId,
@@ -1657,11 +1634,7 @@ function startEchelonSyncScheduler(
               });
               if (event.kind === "shipped") markedShipped += processed;
               if (event.kind === "voided") markedVoided += processed;
-              await db.execute(sql`
-                UPDATE wms.outbound_shipments
-                SET last_reconciled_at = NOW()
-                WHERE id = ${shipmentId}
-              `);
+              await touchOutboundShipmentLastReconciledInWms(db, shipmentId);
               continue;
             }
 
@@ -1680,11 +1653,7 @@ function startEchelonSyncScheduler(
                 console.log(`[Reconcile V2] Outbound sync: marked engine order ${ref.engineOrderRef} shipped`);
                 markedShipped++;
 
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET last_reconciled_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
+                await touchOutboundShipmentLastReconciledInWms(db, shipmentId);
                 continue;
               } else if (
                 engineState.status !== "cancelled" &&
@@ -1695,22 +1664,15 @@ function startEchelonSyncScheduler(
                 // "already_cancelled" was previously conflated with it and
                 // resurrected dead orders.
                 if (cancelResult?.state === "already_shipped") {
-                  await db.execute(sql`
-                    UPDATE wms.outbound_shipments
-                    SET status = 'shipped', last_reconciled_at = NOW(), updated_at = NOW()
-                    WHERE id = ${shipmentId}
-                      AND status NOT IN ('shipped', 'returned', 'lost')
-                  `);
+                  await recordOutboundShipmentAlreadyShippedInEngineInWms(db, shipmentId, {
+                    stampReconciled: true,
+                  });
                   console.log(`[Reconcile V2] Outbound sync: engine order ${ref.engineOrderRef} already shipped — recorded shipped`);
                   markedShipped++;
                 } else {
                   console.log(`[Reconcile V2] Outbound sync: cancelled engine order ${ref.engineOrderRef} (${cancelResult?.state ?? "cancelled"})`);
                   markedCancelled++;
-                  await db.execute(sql`
-                    UPDATE wms.outbound_shipments
-                    SET last_reconciled_at = NOW()
-                    WHERE id = ${shipmentId}
-                  `);
+                  await touchOutboundShipmentLastReconciledInWms(db, shipmentId);
                 }
                 continue;
               }
@@ -1718,11 +1680,7 @@ function startEchelonSyncScheduler(
 
             if (!event) {
               // No divergence — stamp to prove we checked
-              await db.execute(sql`
-                UPDATE wms.outbound_shipments
-                SET last_reconciled_at = NOW()
-                WHERE id = ${shipmentId}
-              `);
+              await touchOutboundShipmentLastReconciledInWms(db, shipmentId);
               continue;
             }
 
@@ -1731,15 +1689,7 @@ function startEchelonSyncScheduler(
               // Flag for review (surfaces in the SHIPMENT_REQUIRES_REVIEW bucket);
               // do NOT cancel the shipment or let a push resurrect it
               // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md).
-              await db.execute(sql`
-                UPDATE wms.outbound_shipments
-                SET requires_review = true,
-                    review_reason = CASE WHEN COALESCE(requires_review, false)
-                                         THEN review_reason ELSE ${event.reason} END,
-                    last_reconciled_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = ${shipmentId}
-              `);
+              await flagOutboundShipmentReconcileReviewIfUnsetInWms(db, shipmentId, event.reason);
               if (row.oms_id && String(row.oms_id).match(/^[0-9]+$/)) {
                 try {
                   await recordOmsReconcileReviewEvent(
@@ -1816,11 +1766,7 @@ function startEchelonSyncScheduler(
             }
 
             // 7. Stamp last_reconciled_at
-            await db.execute(sql`
-              UPDATE wms.outbound_shipments
-              SET last_reconciled_at = NOW()
-              WHERE id = ${shipmentId}
-            `);
+            await touchOutboundShipmentLastReconciledInWms(db, shipmentId);
 
             // Rate limit — ShipStation allows ~40 req/min
             await new Promise(r => setTimeout(r, 1000));
@@ -1836,13 +1782,7 @@ function startEchelonSyncScheduler(
             // retries. Only a genuine reconcile failure gets a review flag.
             const isTransientDbError = /timeout exceeded when trying to connect|connection terminated|ECONNRESET|too many clients|Client has encountered a connection error/i.test(errMsg);
             if (!isTransientDbError) {
-              await db.execute(sql`
-                UPDATE wms.outbound_shipments
-                SET last_reconciled_at = NOW(),
-                    requires_review = true,
-                    review_reason = ${errMsg}
-                WHERE id = ${shipmentId}
-              `);
+              await flagOutboundShipmentReconcileErrorInWms(db, shipmentId, errMsg);
             }
           }
         }

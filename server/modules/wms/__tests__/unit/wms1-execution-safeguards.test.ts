@@ -37,8 +37,10 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
 
     it("removes dead setClauses string construction from order-status-core.ts", () => {
       const src = readRepoFile("server/modules/orders/order-status-core.ts");
-      expect(src).toContain("WITH prior AS (");
-      expect(src).toContain("RETURNING prior.warehouse_status AS previous_status");
+      const wmsOrderMutationsSrc = readRepoFile("server/modules/wms/wms-order-mutations.repository.ts");
+      expect(src).toContain("executeGuardedWmsOrderStatusTransitionInWms(");
+      expect(wmsOrderMutationsSrc).toContain("WITH prior AS (");
+      expect(wmsOrderMutationsSrc).toContain("RETURNING prior.warehouse_status AS previous_status");
       expect(src).not.toContain("let setClauses");
     });
   });
@@ -46,13 +48,15 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
   describe("PK-01 / OP-01 & PK-05: resolveException and terminal order status guards", () => {
     it("reopens short lines and returns 'resolved' exceptions to the pick queue while guarding terminal orders", () => {
       const storageSrc = readRepoFile("server/modules/orders/orders.storage.ts");
+      const wmsOrderMutationsSrc = readRepoFile("server/modules/wms/wms-order-mutations.repository.ts");
       const start = storageSrc.indexOf("async resolveException(");
       const nextAsync = storageSrc.indexOf("\n  async ", start + 1);
       const resolveBlock = storageSrc.slice(start, nextAsync);
 
       expect(resolveBlock).toContain("reopenShortWmsOrderItemsForRepick");
       expect(resolveBlock).toContain("order_terminal_status");
-      expect(resolveBlock).toContain('notInArray(orders.warehouseStatus, ["shipped", "cancelled"])');
+      expect(resolveBlock).toContain("updateActiveWmsOrderFieldsReturningInWms(");
+      expect(wmsOrderMutationsSrc).toContain('notInArray(orders.warehouseStatus, ["shipped", "cancelled"])');
       expect(resolveBlock).toContain('newStatus = allCompleted ? "ready_to_ship" : hasProgress ? "in_progress" : "ready"');
       expect(resolveBlock).toContain("updates.warehouseStatus = newStatus");
 
@@ -63,10 +67,12 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
 
     it("guards updateOrderStatus and PUT /api/wms/orders/:id against regressing shipped or cancelled orders", () => {
       const storageSrc = readRepoFile("server/modules/orders/orders.storage.ts");
+      const wmsOrderMutationsSrc = readRepoFile("server/modules/wms/wms-order-mutations.repository.ts");
       const updateStart = storageSrc.indexOf("async updateOrderStatus(");
       const updateEnd = storageSrc.indexOf("async resolveException(", updateStart);
       const updateBlock = storageSrc.slice(updateStart, updateEnd);
-      expect(updateBlock).toContain('notInArray(orders.warehouseStatus, ["shipped", "cancelled"])');
+      expect(updateBlock).toContain("updateActiveWmsOrderFieldsReturningInWms(");
+      expect(wmsOrderMutationsSrc).toContain('notInArray(orders.warehouseStatus, ["shipped", "cancelled"])');
 
       const channelsRoutesSrc = readRepoFile("server/modules/channels/channels.routes.ts");
       const putStart = channelsRoutesSrc.indexOf('app.put("/api/wms/orders/:id"');

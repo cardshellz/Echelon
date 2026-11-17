@@ -37,6 +37,23 @@ import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
 import { partitionCommercialRequestedQuantity } from "./shipstation-commercial-quantity.domain";
 import type { EngineShipmentItemAppendResult } from "../shipping/engine-and-reconcile.api";
 import { maybeGetPackInstruction } from "../cartonization/pack-plan.api";
+import {
+  adoptDriftedShipStationOrderMappingOnOutboundShipmentInWms,
+  clearOutboundShipmentReviewFlagByReasonInWms,
+  commitAmendedShipmentItemQuantityInWms,
+  copyPartialShipmentItemToPhysicalSplitInWms,
+  insertLegacySplitChildShipmentItemFromShipStationInWms,
+  insertShipStationChildOutboundShipmentInWms,
+  markAppendedShipmentItemsAuthoritativeInWms,
+  markOutboundShipmentQueuedAfterShipStationPushInWms,
+  moveWholeShipmentItemToPhysicalSplitInWms,
+  reduceParentShipmentItemAfterPhysicalSplitInWms,
+  repairLegacyTrackingOutboundShipmentRefsInWms,
+  setOutboundShipmentReviewFlagInWms,
+  syncOriginalShipmentItemFromShipStationInWms,
+  updateExistingSplitChildShipmentItemFromShipStationInWms,
+  updateReplacementShipmentItemLocationInWms,
+} from "../wms/outbound-shipment-mutations.api";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
 import { parseProviderAmountCents } from "../shipping/engine-and-reconcile.api";
 import {
@@ -1387,23 +1404,11 @@ export function createShipStationService(
           Number.isInteger(incomingSsOrderId) && incomingSsOrderId > 0
             ? incomingSsOrderId
             : null;
-        await db.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET external_fulfillment_id = COALESCE(
-                external_fulfillment_id,
-                ${externalFulfillmentId}
-              ),
-              shipstation_order_id = COALESCE(
-                ${validIncomingSsOrderId},
-                shipstation_order_id
-              ),
-              engine_order_ref = COALESCE(
-                ${validIncomingSsOrderId != null ? String(validIncomingSsOrderId) : null},
-                engine_order_ref
-              ),
-              updated_at = NOW()
-          WHERE id = ${parent.id}
-        `);
+        await repairLegacyTrackingOutboundShipmentRefsInWms(db, {
+          shipmentId: Number(parent.id),
+          externalFulfillmentId,
+          validIncomingSsOrderId,
+        });
         return {
           row: {
             ...parent,
@@ -1492,17 +1497,13 @@ export function createShipStationService(
               `Adopting incoming mapping and flagging for review (duplicate SS order).`,
           );
         }
-        await db.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET shipstation_order_id = ${adoptedSsOrderId},
-              engine_order_ref = ${adoptedSsOrderId != null ? String(adoptedSsOrderId) : null},
-              shipstation_order_key = COALESCE(${shipment.orderKey ?? null}, shipstation_order_key),
-              external_fulfillment_id = COALESCE(external_fulfillment_id, ${externalFulfillmentId}),
-              requires_review = CASE WHEN ${drifted} THEN true ELSE requires_review END,
-              review_reason = CASE WHEN ${drifted} THEN 'shipstation_duplicate_order_key_repaired' ELSE review_reason END,
-              updated_at = NOW()
-          WHERE id = ${shipmentId}
-        `);
+        await adoptDriftedShipStationOrderMappingOnOutboundShipmentInWms(db, {
+          shipmentId,
+          adoptedSsOrderId,
+          orderKey: shipment.orderKey ?? null,
+          externalFulfillmentId,
+          drifted,
+        });
       }
       return {
         row: { ...parent, shipstation_order_id: adoptedSsOrderId },
@@ -1553,20 +1554,14 @@ export function createShipStationService(
       }
 
       const ssOrderKey = shipment.orderKey || parent.shipstation_order_key;
-      const inserted: any = await tx.execute(sql`
-        INSERT INTO wms.outbound_shipments
-          (order_id, channel_id, external_fulfillment_id, source, status,
-           shipstation_order_id, shipstation_order_key,
-           shipping_engine, engine_order_ref, engine_shipment_ref,
-           created_at, updated_at)
-        VALUES
-          (${orderId}, ${parent.channel_id}, ${externalFulfillmentId},
-           ${SHIPSTATION_SPLIT_SOURCE}, 'queued',
-           ${shipment.orderId}, ${ssOrderKey},
-           'shipstation', ${String(shipment.orderId)}, ${ssOrderKey},
-           NOW(), NOW())
-        RETURNING id, order_id, status, shipstation_order_id
-      `);
+      const inserted: any = await insertShipStationChildOutboundShipmentInWms(tx, {
+        orderId,
+        channelId: parent.channel_id,
+        externalFulfillmentId,
+        source: SHIPSTATION_SPLIT_SOURCE,
+        shipstationOrderId: shipment.orderId,
+        shipstationOrderKey: ssOrderKey,
+      });
 
       const row = inserted?.rows?.[0];
       if (!row) {
@@ -1610,19 +1605,13 @@ export function createShipStationService(
           // Preserve the stable wms-item identity when the entire line moves to
           // the physical package. Copying and reducing would leave an illegal
           // zero-quantity placeholder on the parent shipment.
-          const moved: any = await tx.execute(sql`
-            UPDATE wms.outbound_shipment_items
-            SET shipment_id = ${row.id},
-                tracking_id = ${String(shipment.shipmentId)},
-                split_root_shipment_item_id = COALESCE(
-                  split_root_shipment_item_id,
-                  id
-                )
-            WHERE id = ${item.sourceShipmentItemId}
-              AND shipment_id = ${parent.id}
-              AND qty = ${item.qty}
-            RETURNING id
-          `);
+          const moved: any = await moveWholeShipmentItemToPhysicalSplitInWms(tx, {
+            sourceShipmentItemId: item.sourceShipmentItemId,
+            parentShipmentId: Number(parent.id),
+            splitShipmentId: Number(row.id),
+            qty: item.qty,
+            trackingId: String(shipment.shipmentId),
+          });
           if ((moved?.rows ?? []).length !== 1) {
             throw new Error(
               `WMS shipment item ${item.sourceShipmentItemId} could not be moved ` +
@@ -1646,25 +1635,15 @@ export function createShipStationService(
         const childCommercialQty = commercialPartition.childQuantity;
         const retainedCommercialQty = commercialPartition.retainedQuantity;
 
-        const insertedItem: any = await tx.execute(sql`
-          INSERT INTO wms.outbound_shipment_items
-            (shipment_id, order_item_id, replacement_for_order_item_id,
-             correction_for_shipment_item_id, split_root_shipment_item_id,
-             shipment_item_purpose, product_variant_id, qty,
-             commercial_requested_qty,
-             from_location_id, box_id, weight_oz, tracking_id, created_at)
-          SELECT
-            ${row.id}, order_item_id, replacement_for_order_item_id,
-            correction_for_shipment_item_id, ${rootSourceShipmentItemId},
-            shipment_item_purpose, product_variant_id, ${item.qty},
-            ${childCommercialQty},
-            from_location_id, box_id, weight_oz,
-            ${String(shipment.shipmentId)}, NOW()
-          FROM wms.outbound_shipment_items
-          WHERE id = ${item.sourceShipmentItemId}
-            AND shipment_id = ${parent.id}
-          RETURNING id
-        `);
+        const insertedItem: any = await copyPartialShipmentItemToPhysicalSplitInWms(tx, {
+          sourceShipmentItemId: item.sourceShipmentItemId,
+          parentShipmentId: Number(parent.id),
+          splitShipmentId: Number(row.id),
+          rootSourceShipmentItemId,
+          qty: item.qty,
+          childCommercialQty,
+          trackingId: String(shipment.shipmentId),
+        });
         if ((insertedItem?.rows ?? []).length !== 1) {
           throw new Error(
             `WMS shipment item ${item.sourceShipmentItemId} could not be copied ` +
@@ -1672,15 +1651,12 @@ export function createShipStationService(
           );
         }
 
-        const reduced: any = await tx.execute(sql`
-          UPDATE wms.outbound_shipment_items
-          SET qty = qty - ${item.qty},
-              commercial_requested_qty = ${retainedCommercialQty}
-          WHERE id = ${item.sourceShipmentItemId}
-            AND shipment_id = ${parent.id}
-            AND qty > ${item.qty}
-          RETURNING id
-        `);
+        const reduced: any = await reduceParentShipmentItemAfterPhysicalSplitInWms(tx, {
+          sourceShipmentItemId: item.sourceShipmentItemId,
+          parentShipmentId: Number(parent.id),
+          splitQty: item.qty,
+          retainedCommercialQty,
+        });
         if ((reduced?.rows ?? []).length !== 1) {
           throw new Error(
             `WMS shipment item ${item.sourceShipmentItemId} could not be reduced ` +
@@ -1803,18 +1779,12 @@ export function createShipStationService(
       }
 
       if (targetIsOriginal && targetItemIds.has(item.sourceShipmentItemId)) {
-        await executor.execute(sql`
-          UPDATE wms.outbound_shipment_items
-          SET qty = ${item.qty},
-              commercial_requested_qty = CASE
-                WHEN commercial_requested_qty IS NULL THEN NULL
-                ELSE LEAST(commercial_requested_qty, ${item.qty})
-              END,
-              from_location_id = COALESCE(from_location_id, ${sourceRow.from_location_id}),
-              tracking_id = ${String(shipment.shipmentId)},
-              provider_membership_state = 'authoritative'
-          WHERE id = ${item.sourceShipmentItemId}
-        `);
+        await syncOriginalShipmentItemFromShipStationInWms(executor, {
+          shipmentItemId: item.sourceShipmentItemId,
+          qty: item.qty,
+          fromLocationId: sourceRow.from_location_id,
+          trackingId: String(shipment.shipmentId),
+        });
         touchedOriginalIds.push(item.sourceShipmentItemId);
       } else {
         const orderItemId = Number(sourceRow.order_item_id);
@@ -1859,47 +1829,35 @@ export function createShipStationService(
         }
 
         if (existingChild) {
-          await executor.execute(sql`
-            UPDATE wms.outbound_shipment_items
-            SET product_variant_id = ${sourceRow.product_variant_id},
-                qty = ${item.qty},
-                commercial_requested_qty = CASE
-                  WHEN commercial_requested_qty IS NULL THEN NULL
-                  ELSE LEAST(commercial_requested_qty, ${item.qty})
-                END,
-                from_location_id = ${sourceRow.from_location_id},
-                box_id = ${sourceRow.box_id},
-                weight_oz = ${sourceRow.weight_oz},
-                tracking_id = ${String(shipment.shipmentId)},
-                split_root_shipment_item_id = COALESCE(
-                  split_root_shipment_item_id,
-                  ${splitRootShipmentItemId}
-                ),
-                provider_membership_state = 'authoritative'
-            WHERE id = ${existingChild.id}
-          `);
+          await updateExistingSplitChildShipmentItemFromShipStationInWms(executor, {
+            childItemId: Number(existingChild.id),
+            productVariantId: sourceRow.product_variant_id,
+            qty: item.qty,
+            fromLocationId: sourceRow.from_location_id,
+            boxId: sourceRow.box_id,
+            weightOz: sourceRow.weight_oz,
+            trackingId: String(shipment.shipmentId),
+            splitRootShipmentItemId,
+          });
           touchedChildIds.push(Number(existingChild.id));
         } else {
           // New splits reach this path with the parent quantity already
           // reduced and the physical child row already inserted atomically.
           // The insert below remains only for pre-hardening split rows.
-          const inserted: any = await executor.execute(sql`
-            INSERT INTO wms.outbound_shipment_items
-              (shipment_id, order_item_id, replacement_for_order_item_id,
-               correction_for_shipment_item_id, split_root_shipment_item_id,
-               shipment_item_purpose, product_variant_id, qty,
-               from_location_id, box_id, weight_oz, tracking_id)
-            VALUES
-              (${targetShipmentId}, ${targetIsReplacement ? null : sourceRow.order_item_id},
-               ${targetIsReplacement ? sourceRow.order_item_id : null},
-               ${targetIsReplacement ? null : sourceRow.correction_for_shipment_item_id},
-               ${splitRootShipmentItemId},
-               ${targetIsReplacement ? "replacement" : sourceRow.shipment_item_purpose},
-               ${sourceRow.product_variant_id},
-               ${item.qty}, ${sourceRow.from_location_id}, ${sourceRow.box_id},
-               ${sourceRow.weight_oz}, ${String(shipment.shipmentId)})
-            RETURNING id
-          `);
+          const inserted: any = await insertLegacySplitChildShipmentItemFromShipStationInWms(executor, {
+            targetShipmentId,
+            orderItemId: targetIsReplacement ? null : sourceRow.order_item_id,
+            replacementForOrderItemId: targetIsReplacement ? sourceRow.order_item_id : null,
+            correctionForShipmentItemId: targetIsReplacement ? null : sourceRow.correction_for_shipment_item_id,
+            splitRootShipmentItemId,
+            shipmentItemPurpose: targetIsReplacement ? "replacement" : sourceRow.shipment_item_purpose,
+            productVariantId: sourceRow.product_variant_id,
+            qty: item.qty,
+            fromLocationId: sourceRow.from_location_id,
+            boxId: sourceRow.box_id,
+            weightOz: sourceRow.weight_oz,
+            trackingId: String(shipment.shipmentId),
+          });
           const insertedId = Number(inserted?.rows?.[0]?.id);
           if (Number.isInteger(insertedId) && insertedId > 0) {
             touchedChildIds.push(insertedId);
@@ -2114,20 +2072,14 @@ export function createShipStationService(
             return existingRow;
           }
 
-          const inserted: any = await db.execute(sql`
-            INSERT INTO wms.outbound_shipments
-              (order_id, channel_id, external_fulfillment_id, source, status,
-               shipstation_order_id, shipstation_order_key,
-               shipping_engine, engine_order_ref, engine_shipment_ref,
-               created_at, updated_at)
-            VALUES
-              (${wmsOrderId}, ${wmsOrder.channel_id}, ${externalFulfillmentId},
-               ${SHIPSTATION_COMBINED_CHILD_SOURCE}, 'queued',
-               ${shipment.orderId}, ${shipment.orderKey},
-               'shipstation', ${String(shipment.orderId)}, ${shipment.orderKey},
-               NOW(), NOW())
-            RETURNING id, order_id, status, shipstation_order_id
-          `);
+          const inserted: any = await insertShipStationChildOutboundShipmentInWms(db, {
+            orderId: wmsOrderId,
+            channelId: wmsOrder.channel_id,
+            externalFulfillmentId,
+            source: SHIPSTATION_COMBINED_CHILD_SOURCE,
+            shipstationOrderId: shipment.orderId,
+            shipstationOrderKey: shipment.orderKey,
+          });
           return inserted?.rows?.[0] ?? null;
         });
       }
@@ -2405,13 +2357,11 @@ export function createShipStationService(
       Number(item.qty) <= 0
     );
     if (invalidItems.length > 0) {
-      await db.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = true,
-            review_reason = 'inventory_deduction_missing_item_data',
-            updated_at = NOW()
-        WHERE id = ${shipmentId}
-      `);
+      await setOutboundShipmentReviewFlagInWms(
+        db,
+        shipmentId,
+        "inventory_deduction_missing_item_data",
+      );
       const message = `Shipment ${shipmentId} has ${invalidItems.length} inventory source item(s) without a product variant or positive quantity; fulfillment requires review.`;
       console.error(JSON.stringify({
         level: "error", component: "shipstation", code: "SHIPMENT_INVENTORY_SOURCE_INVALID",
@@ -2431,15 +2381,10 @@ export function createShipStationService(
     // transient missing-data condition, clear it now — the SHIP_NOTIFY V2
     // repair cascade re-runs this path for already-shipped shipments, so a
     // replay after the catalog/bin data lands self-heals the review flag.
-    await db.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = false,
-          review_reason = NULL,
-          updated_at = NOW()
-      WHERE id = ${shipmentId}
-        AND requires_review = true
-        AND review_reason = 'inventory_deduction_missing_item_data'
-    `);
+    await clearOutboundShipmentReviewFlagByReasonInWms(db, {
+      shipmentId,
+      expectedReason: "inventory_deduction_missing_item_data",
+    });
     return rows;
   }
 
@@ -2497,13 +2442,11 @@ export function createShipStationService(
         occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
         details = wms.reconciliation_exceptions.details || EXCLUDED.details
     `);
-    await db.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = true,
-          review_reason = ${HISTORICAL_REPLACEMENT_INVENTORY_RULE},
-          updated_at = NOW()
-      WHERE id = ${shipmentId}
-    `);
+    await setOutboundShipmentReviewFlagInWms(
+      db,
+      shipmentId,
+      HISTORICAL_REPLACEMENT_INVENTORY_RULE,
+    );
     console.warn(JSON.stringify({
       level: "warn",
       component: "shipstation",
@@ -2681,12 +2624,12 @@ export function createShipStationService(
             });
             // Canonical operational receipts own their actual allocated bin.
             // Keep the old source hint immutable; only the legacy owner projects it.
-            if (!recorded.preserveSourceLocation) await db.execute(sql`
-              UPDATE wms.outbound_shipment_items
-              SET from_location_id = ${recorded.warehouseLocationId}
-              WHERE id = ${item.id}
-                AND from_location_id IS DISTINCT FROM ${recorded.warehouseLocationId}
-            `);
+            if (!recorded.preserveSourceLocation) {
+              await updateReplacementShipmentItemLocationInWms(db, {
+                shipmentItemId: Number(item.id),
+                warehouseLocationId: recorded.warehouseLocationId,
+              });
+            }
             console.log(
               `[ShipStation Webhook V2] Recorded replacement shipment for variant ${item.product_variant_id} ` +
               `qty ${item.qty} from location ${recorded.warehouseLocationId} (wmsOrder ${wmsOrderId})`,
@@ -2870,13 +2813,7 @@ export function createShipStationService(
     finality: Awaited<ReturnType<typeof getOmsFinalOrderBlockerForShipNotify>>,
   ): Promise<void> {
     const reason = finality.reason ?? "shipstation_shipped_after_cancel";
-    await db.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = true,
-          review_reason = ${reason},
-          updated_at = NOW()
-      WHERE id = ${shipmentId}
-    `);
+    await setOutboundShipmentReviewFlagInWms(db, shipmentId, reason);
 
     await db.insert(omsOrderEvents).values({
       orderId: omsOrderId,
@@ -5382,12 +5319,11 @@ export function createShipStationService(
 
       // The address is now correct in ShipStation — the advisory flag for
       // THIS reason is resolved. Other review reasons must survive.
-      await db.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = false, review_reason = NULL, updated_at = ${new Date()}
-        WHERE id = ${Number(row.id)}
-          AND review_reason = 'address_changed_after_push'
-      `);
+      await clearOutboundShipmentReviewFlagByReasonInWms(db, {
+        shipmentId: Number(row.id),
+        expectedReason: "address_changed_after_push",
+        updatedAt: new Date(),
+      });
     }
 
     return { updated, skipped };
@@ -5581,12 +5517,10 @@ export function createShipStationService(
         }
       }
 
-      await db.execute(sql`
-        UPDATE wms.outbound_shipment_items
-        SET provider_membership_state = 'authoritative'
-        WHERE shipment_id = ${shipmentId}
-          AND id = ANY(ARRAY[${sql.join(normalizedItemIds.map((id) => sql`${id}`), sql`, `)}]::int[])
-      `);
+      await markAppendedShipmentItemsAuthoritativeInWms(db, {
+        shipmentId,
+        normalizedItemIds,
+      });
 
       return {
         state: allPresent ? "already_applied" : "applied",
@@ -5705,13 +5639,11 @@ export function createShipStationService(
       const liveLine = liveItems.find((item: any) => String(item?.lineItemKey ?? "").trim() === lineItemKey);
 
       const commitLocalQuantity = async () => {
-        const updated: any = await db.execute(sql`
-          UPDATE wms.outbound_shipment_items
-          SET qty = ${targetQuantity}
-          WHERE id = ${shipmentItemId}
-            AND qty = ${currentQuantity}
-          RETURNING id
-        `);
+        const updated: any = await commitAmendedShipmentItemQuantityInWms(db, {
+          shipmentItemId,
+          targetQuantity,
+          currentQuantity,
+        });
         if ((updated?.rows?.length ?? 0) !== 1) {
           // Changed underneath us; the retry recomputes from fresh rows.
           throw new ShipStationPushError("shipment item changed during quantity amend", {
@@ -6308,19 +6240,12 @@ export function createShipStationService(
     // agnostic triple (C9) in a single atomic UPDATE.
     const now = new Date();
     await db.transaction(async (tx: any) => {
-      await tx.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET shipstation_order_id = ${result.orderId},
-            shipstation_order_key = ${orderKey},
-            shipping_engine = 'shipstation',
-            engine_order_ref = ${String(result.orderId)},
-            engine_shipment_ref = ${orderKey},
-            status = 'queued',
-            voided_at = NULL,
-            voided_reason = NULL,
-            updated_at = ${now}
-        WHERE id = ${shipmentId}
-      `);
+      await markOutboundShipmentQueuedAfterShipStationPushInWms(tx, {
+        shipmentId,
+        shipstationOrderId: result.orderId,
+        orderKey,
+        now,
+      });
 
       await resolveShipStationHandoffCommands(
         tx,
@@ -6332,11 +6257,10 @@ export function createShipStationService(
         // The operator explicitly resolved the review by re-pushing; clear the
         // flag so the shipment leaves the SHIPMENT_REQUIRES_REVIEW bucket
         // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md P2).
-        await tx.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET requires_review = false, review_reason = NULL, updated_at = ${now}
-          WHERE id = ${shipmentId} AND requires_review = true
-        `);
+        await clearOutboundShipmentReviewFlagByReasonInWms(tx, {
+          shipmentId,
+          updatedAt: now,
+        });
       }
     });
     await recomputeOrderStatusFromShipments(db, shipmentRow.order_id);

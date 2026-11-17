@@ -1,6 +1,10 @@
 import { sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import { OrderEditError, appendOrderEditAuditSql } from "../order-edits/oms-coordination.api";
+import {
+  consolidateOrderEditHeldOutboundShipmentsInWms,
+  consolidateOrderEditHeldShipmentItemsInWms,
+} from "../wms/outbound-shipment-mutations.api";
 
 type Transaction = { execute(statement: SQL): Promise<{ rows?: unknown[] }> };
 const item = z.object({ id: z.number().int().positive(), qty: z.number().int().positive(),
@@ -78,14 +82,15 @@ export async function prepareOrderEditHeldPartitions(tx: Transaction, input: {
   if (ids.length !== 1 || held.filter(row => row.shipment_id === ids[0]).length !== carried.length)
     throw new OrderEditError("ORDER_EDIT_HELD_PARTITION_UNVERIFIED", "We couldn’t verify which items are ready to ship. Contact us for help.");
   const heldShipmentId = ids[0];
-  await tx.execute(sql`UPDATE wms.outbound_shipment_items SET shipment_id=${input.shipmentId}
-    WHERE shipment_id=${heldShipmentId}`);
-  await tx.execute(sql`UPDATE wms.outbound_shipments parent SET held=true,
-    held_at=CASE WHEN parent.held THEN parent.held_at ELSE child.held_at END,
-    on_hold_reason=CASE WHEN parent.held THEN parent.on_hold_reason ELSE child.on_hold_reason END,updated_at=${input.now}
-    FROM wms.outbound_shipments child WHERE parent.id=${input.shipmentId} AND child.id=${heldShipmentId}`);
-  await tx.execute(sql`UPDATE wms.outbound_shipments SET status='cancelled',cancelled_at=${input.now},
-    voided_reason='order_edit_held_partition_consolidated',updated_at=${input.now} WHERE id=${heldShipmentId}`);
+  await consolidateOrderEditHeldShipmentItemsInWms(tx, {
+    targetShipmentId: input.shipmentId,
+    heldShipmentId,
+  });
+  await consolidateOrderEditHeldOutboundShipmentsInWms(tx, {
+    parentShipmentId: input.shipmentId,
+    heldShipmentId,
+    now: input.now,
+  });
   await appendOrderEditShippingAudit(tx, { operationId: input.operationId, action: "held_partition_membership_restored",
     before: { shipmentId: input.shipmentId, heldShipmentId, items: carried },
     after: { shipmentId: input.shipmentId, retiredShipmentIds: ids, manualHoldRetained: true }, now: input.now });

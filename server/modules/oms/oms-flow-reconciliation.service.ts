@@ -3,6 +3,8 @@ import { sql } from "drizzle-orm";
 import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
 import { channelMerchandiseCapabilitySql } from "./infrastructure/channel-merchandise-policy";
 import { cancelOrder } from "../orders/order-lifecycle-and-cancellation.api";
+import { clearWmsOrderAssignedPickerInWms } from "../wms/wms-order-mutations.api";
+import { flagShippedOutboundShipmentOmsTerminalReviewInWms } from "../wms/outbound-shipment-mutations.api";
 import type { OmsOpsIssue } from "./ops-health.service";
 import {
   enqueueShipStationShipmentPushRetry,
@@ -1797,7 +1799,7 @@ export async function remediateOmsFlowIssue(
 
       if (transResult.transitioned) {
         if (isCancelled) {
-          await tx.execute(sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${wmsOrderId}`);
+          await clearWmsOrderAssignedPickerInWms(tx, wmsOrderId);
           cancelledByThisRemediation = true;
         }
         await tx.execute(sql`
@@ -2012,14 +2014,11 @@ export async function remediateOmsFlowIssue(
         LIMIT 1
       `);
       if (firstRow<{ status: string }>(terminal)) {
-        await tx.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET requires_review = true,
-              review_reason = ${"shipped_but_oms_terminal: physical shipment shipped while OMS order is money-final"},
-              updated_at = NOW()
-          WHERE id = ${shipmentId}
-            AND COALESCE(requires_review, false) = false
-        `);
+        await flagShippedOutboundShipmentOmsTerminalReviewInWms(
+          tx,
+          shipmentId,
+          "shipped_but_oms_terminal: physical shipment shipped while OMS order is money-final",
+        );
         await tx.execute(sql`
           INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
           VALUES (

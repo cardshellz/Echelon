@@ -49,8 +49,15 @@ describe("P0.3 — engine-cancel discrimination", () => {
       INDEX_SRC.indexOf("[OMS<->WMS Reconcile] Engine order"),
       INDEX_SRC.indexOf("[OMS<->WMS Reconcile] Cancelled engine order"),
     );
-    expect(cascade).toContain("SET status = 'cancelled'");
-    expect(cascade).toContain("AND status NOT IN ('shipped', 'returned', 'lost')");
+    expect(cascade).toContain("cancelOutboundShipmentAfterEngineCascadeInWms(");
+    const wmsShipmentsRepoSrc = read("../../../wms/outbound-shipments-mutations.repository.ts");
+    const helperStart = wmsShipmentsRepoSrc.indexOf(
+      "export async function cancelOutboundShipmentAfterEngineCascadeInWms(",
+    );
+    const helperEnd = wmsShipmentsRepoSrc.indexOf("export async function cancelDuplicateOutboundShipmentInWms(", helperStart);
+    const helperBlock = wmsShipmentsRepoSrc.slice(helperStart, helperEnd);
+    expect(helperBlock).toContain("SET status = 'cancelled'");
+    expect(helperBlock).toContain("AND status NOT IN ('shipped', 'returned', 'lost')");
   });
 
   it("the V2 callback delegates finality to canonical fulfillment authority", () => {

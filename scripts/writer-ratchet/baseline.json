@@ -1791,7 +1791,7 @@
     "modules/warehouse"
   ],
   "wms.allocation_exceptions": [
-    "modules/orders"
+    "modules/wms"
   ],
   "wms.carrier_dispatch_attempts": [
     "modules/shipping"
@@ -1863,20 +1863,13 @@
     "modules/wms"
   ],
   "wms.orders": [
-    "modules/oms",
-    "modules/orders",
     "modules/wms"
   ],
   "wms.outbound_shipment_items": [
-    "modules/oms",
-    "modules/orders",
     "modules/wms"
   ],
   "wms.outbound_shipments": [
-    "modules/oms",
-    "modules/orders",
-    "modules/wms",
-    "server/index.ts"
+    "modules/wms"
   ],
   "wms.package_allocation_effect_intents": [
     "modules/shipping"

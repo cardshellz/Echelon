@@ -31,6 +31,11 @@ import { isMerchandiseOrderCancelled } from "./domain/order-merchandise-state";
 import { assertChannelMerchandiseDispatchQuantities } from "./domain/channel-merchandise-dispatch";
 import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
 import { registerStoppedRefundDeferredShipment } from "../order-edits/oms-coordination.api";
+import {
+  recomputeWmsOrderStatusAndCountsAfterLineSyncInWms,
+  updateWmsOrderAggregateCountsInWms,
+  updateWmsOrderSlaAndPromotionInWms,
+} from "../wms/wms-order-mutations.api";
 import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
 import { shopifyMerchandiseSnapshotSchema, type ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
 import {
@@ -2356,17 +2361,14 @@ export class WmsSyncService {
       return { updated: false, sortRankChanged: false, promoted: false };
     }
 
-    await db
-      .update(wmsOrders)
-      .set({
-        ...(promoted ? { warehouseStatus: "ready" } : {}),
-        channelShipByDate: nextChannelShipByDate,
-        slaDueAt: nextSlaDueAt,
-        slaStatus: slaStatusFor(nextSlaDueAt),
-        sortRank: nextSortRank,
-        updatedAt: new Date(),
-      })
-      .where(eq(wmsOrders.id, wmsOrderId));
+    await updateWmsOrderSlaAndPromotionInWms(db, wmsOrderId, {
+      promoted,
+      channelShipByDate: nextChannelShipByDate,
+      slaDueAt: nextSlaDueAt,
+      slaStatus: slaStatusFor(nextSlaDueAt),
+      sortRank: nextSortRank,
+      updatedAt: new Date(),
+    });
 
     if (promoted) {
       console.log(
@@ -2781,52 +2783,7 @@ export class WmsSyncService {
       }))
       .filter((item) => Number.isInteger(item.id) && item.id > 0 && item.quantity > 0);
 
-    await db.execute(sql`
-      UPDATE wms.orders w
-         SET warehouse_status = CASE
-               WHEN w.warehouse_status IN ('cancelled', 'pending', 'awaiting_3pl')
-                 THEN w.warehouse_status
-               WHEN EXISTS (
-                 SELECT 1
-                 FROM wms.order_items pending_items
-                 WHERE pending_items.order_id = w.id
-                   AND COALESCE(pending_items.requires_shipping, 1) <> 0
-                   AND COALESCE(pending_items.quantity, 0) > 0
-                   AND COALESCE(pending_items.quantity, 0) > COALESCE(pending_items.fulfilled_quantity, 0)
-                   AND pending_items.status NOT IN ('cancelled', 'completed')
-               ) THEN 'ready'
-               WHEN (
-                 SELECT COUNT(*) FROM wms.order_items all_items
-                 WHERE all_items.order_id = w.id
-               ) = 0 THEN 'cancelled'
-               -- Anything else means the order has lines but none of them are
-               -- pickable right now. That is not evidence of completion, and
-               -- this rollup has none: it cannot see picks or shipments, and it
-               -- never stamps completed_at. It used to answer 'completed' here,
-               -- which marked orders #62269 and #62226 done while they sat
-               -- unpicked with zero units - and 'completed' is terminal, so the
-               -- repair pass skipped them for three days. Completion is owned by
-               -- completeOrder() and updateOrderStatus(), which check the
-               -- transition is legal and record when it happened. Leave the
-               -- status alone and let the writers with evidence move it.
-               ELSE w.warehouse_status
-             END,
-             item_count = agg.item_count,
-             unit_count = agg.unit_count,
-             picked_count = agg.picked_count,
-             updated_at = NOW()
-        FROM (
-          SELECT
-            order_id,
-            COUNT(*)::int AS item_count,
-            COALESCE(SUM(quantity), 0)::int AS unit_count,
-            COALESCE(SUM(picked_quantity), 0)::int AS picked_count
-          FROM wms.order_items
-          WHERE order_id = ${wmsOrderId}
-          GROUP BY order_id
-        ) agg
-       WHERE w.id = agg.order_id
-    `);
+    await recomputeWmsOrderStatusAndCountsAfterLineSyncInWms(db, wmsOrderId);
 
     await this.refreshOmsLineMaterializedQuantities(omsOrderId);
 
@@ -3413,14 +3370,12 @@ export class WmsSyncService {
         0,
       );
 
-      await db.execute(sql`
-        UPDATE wms.orders SET
-          item_count = ${newItemCount},
-          unit_count = ${newUnitCount},
-          picked_count = ${newPickedCount},
-          updated_at = NOW()
-        WHERE id = ${wmsOrderId}
-      `);
+      await updateWmsOrderAggregateCountsInWms(db, {
+        wmsOrderId,
+        itemCount: newItemCount,
+        unitCount: newUnitCount,
+        pickedCount: newPickedCount,
+      });
 
       await this.refreshOmsLineMaterializedQuantities(omsOrderId);
     }

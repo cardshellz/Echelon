@@ -19,6 +19,13 @@ import {
   updateAutoFixedPickProductLocationInTx,
   insertAutoFixedPickProductLocationInTx,
 } from "../warehouse/cross-module-warehouse-mutations.api";
+import { backfillPlannedShipmentItemPickLocationInWms } from "../wms/outbound-shipment-mutations.api";
+import {
+  closeOrderShipmentBlockingAllocationExceptionsInWms,
+  insertWmsAllocationExceptionReturningInWms,
+  supersedePriorBlockingAllocationExceptionsInWms,
+  updateDuplicateBlockingAllocationExceptionInWms,
+} from "../wms/wms-order-mutations.api";
 import {
   inventoryLevels,
   warehouseLocations,
@@ -680,39 +687,22 @@ export class PickingUseCases {
             ...metadata,
             duplicateObservedAt: now.toISOString(),
           };
-          const updated = await tx.execute(sql`
-            UPDATE wms.allocation_exceptions
-            SET
-              requested_qty = ${params.requestedQty},
-              metadata = ${JSON.stringify(mergedMetadata)}::jsonb,
-              updated_at = ${now}
-            WHERE id = ${Number(exact.id)}
-            RETURNING *
-          `);
+          const updated = await updateDuplicateBlockingAllocationExceptionInWms(tx, {
+            exceptionId: Number(exact.id),
+            requestedQty: params.requestedQty,
+            mergedMetadataJson: JSON.stringify(mergedMetadata),
+            now,
+          });
           return { exception: updated.rows?.[0] ?? exact, created: false };
         }
 
-        await tx.execute(sql`
-          UPDATE wms.allocation_exceptions
-          SET
-            status = 'cancelled',
-            resolution = 'superseded_by_new_blocker',
-            resolved_at = ${now},
-            updated_at = ${now},
-            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-              'supersededBy', 'newer_blocking_exception',
-              'supersededAt', ${now}::timestamptz,
-              'supersededExceptionType', ${params.exceptionType}::text
-            )
-          WHERE order_item_id = ${params.item.id}
-            AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
-            AND (
-              status = 'blocked'
-              OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
-            )
-        `);
+        await supersedePriorBlockingAllocationExceptionsInWms(tx, {
+          orderItemId: params.item.id,
+          exceptionType: params.exceptionType,
+          now,
+        });
 
-        const [exception] = await tx.insert(allocationExceptions).values({
+        const [exception] = await insertWmsAllocationExceptionReturningInWms(tx, {
           orderId: params.item.orderId,
           orderItemId: params.item.id,
           orderNumber: params.order?.orderNumber ?? null,
@@ -729,7 +719,7 @@ export class PickingUseCases {
           resolvedBy: null,
           resolvedAt: null,
           metadata,
-        }).returning();
+        });
 
         return { exception, created: true };
       });
@@ -1033,7 +1023,7 @@ export class PickingUseCases {
         zone,
       });
 
-      const [exception] = await tx.insert(allocationExceptions).values({
+      const [exception] = await insertWmsAllocationExceptionReturningInWms(tx, {
         orderId: item.orderId,
         orderItemId: item.id,
         orderNumber: order.orderNumber,
@@ -1060,7 +1050,7 @@ export class PickingUseCases {
           })),
           enteredLocationCode: typedCode || null,
         },
-      }).returning();
+      });
 
       return { updatedItem, exception };
     });
@@ -2749,16 +2739,7 @@ export class PickingUseCases {
     db: Pick<DrizzleDb, "execute">,
     params: { orderItemId: number; productVariantId: number; locationId: number },
   ): Promise<void> {
-    await db.execute(sql`
-      UPDATE wms.outbound_shipment_items osi
-      SET from_location_id = ${params.locationId}
-      FROM wms.outbound_shipments os
-      WHERE osi.shipment_id = os.id
-        AND osi.order_item_id = ${params.orderItemId}
-        AND osi.product_variant_id = ${params.productVariantId}
-        AND osi.from_location_id IS NULL
-        AND os.status IN ('planned', 'queued')
-    `);
+    await backfillPlannedShipmentItemPickLocationInWms(db, params);
   }
 
   private async queueShortPickReplen(params: {
@@ -2835,38 +2816,42 @@ export class PickingUseCases {
   }): Promise<void> {
     const existing = async () => params.commandKey ? (await this.db.select().from(allocationExceptions).where(and(
       eq(allocationExceptions.orderItemId,params.item.id),sql`${allocationExceptions.metadata}->>'pickingCommandKey'=${params.commandKey}`)).limit(1))[0] : undefined;
-    const [inserted] = await this.db.insert(allocationExceptions).values({
-      orderId: params.item.orderId,
-      orderItemId: params.item.id,
-      orderNumber: params.order?.orderNumber ?? null,
-      sku: params.item.sku,
-      productVariantId: params.productVariantId,
-      exceptionType: "inventory_auto_resolved",
-      status: "needs_review",
-      requestedQty: params.resolution.pickedQty,
-      selectedLocationId: params.locationId,
-      selectedLocationCode: params.locationCode,
-      resolution: params.resolution.code === "picker_scan_bin_shortage"
-        ? "picker_scan_count_correction"
-        : "picker_confirmed_count_correction",
-      autoFixedSetup: false,
-      reviewReason: params.resolution.message,
-      resolvedBy: params.userId || null,
-      resolvedAt: this.clock(),
-      metadata: {
-        pickingCommandKey: params.commandKey,
-        pickerNonBlocking: true,
-        shipmentBlocking: false,
-        observation: params.resolution.code === "picker_scan_bin_shortage"
-          ? "validated_item_scan"
-          : "picker_confirmed_physical_stock",
-        adjustment: params.resolution.adjustment,
-        systemQtyBefore: params.resolution.systemQtyBefore,
-        pickedQty: params.resolution.pickedQty,
-        deviceType: params.deviceType || null,
-        sessionId: params.sessionId || null,
+    const [inserted] = await insertWmsAllocationExceptionReturningInWms(
+      this.db,
+      {
+        orderId: params.item.orderId,
+        orderItemId: params.item.id,
+        orderNumber: params.order?.orderNumber ?? null,
+        sku: params.item.sku,
+        productVariantId: params.productVariantId,
+        exceptionType: "inventory_auto_resolved",
+        status: "needs_review",
+        requestedQty: params.resolution.pickedQty,
+        selectedLocationId: params.locationId,
+        selectedLocationCode: params.locationCode,
+        resolution: params.resolution.code === "picker_scan_bin_shortage"
+          ? "picker_scan_count_correction"
+          : "picker_confirmed_count_correction",
+        autoFixedSetup: false,
+        reviewReason: params.resolution.message,
+        resolvedBy: params.userId || null,
+        resolvedAt: this.clock(),
+        metadata: {
+          pickingCommandKey: params.commandKey,
+          pickerNonBlocking: true,
+          shipmentBlocking: false,
+          observation: params.resolution.code === "picker_scan_bin_shortage"
+            ? "validated_item_scan"
+            : "picker_confirmed_physical_stock",
+          adjustment: params.resolution.adjustment,
+          systemQtyBefore: params.resolution.systemQtyBefore,
+          pickedQty: params.resolution.pickedQty,
+          deviceType: params.deviceType || null,
+          sessionId: params.sessionId || null,
+        },
       },
-    }).onConflictDoNothing().returning();
+      { onConflictDoNothing: true },
+    );
     const exception = inserted ?? await existing();
     if (!exception) throw new IntegrityError("Inline inventory review was not recorded", {commandKey:params.commandKey,orderItemId:params.item.id});
 
@@ -3977,22 +3962,12 @@ export class PickingUseCases {
     const resolutionLabel = `order_exception_${params.resolution}`;
     const blockerNote = `Closed by order exception resolution '${params.resolution}'${params.userId ? ` by ${params.userId}` : ""}${params.notes ? `: ${params.notes}` : ""}`;
 
-    const allocationResult = await this.db.execute(sql`
-      UPDATE wms.allocation_exceptions
-      SET
-        status = ${closedStatus},
-        resolution = ${resolutionLabel},
-        resolved_by = ${params.userId ?? null},
-        resolved_at = NOW(),
-        updated_at = NOW()
-      WHERE order_id = ${orderId}
-        AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
-        AND (
-          status = 'blocked'
-          OR COALESCE(metadata->>'shipmentBlocking', 'false') = 'true'
-        )
-      RETURNING id
-    `);
+    const allocationResult = await closeOrderShipmentBlockingAllocationExceptionsInWms(this.db, {
+      orderId,
+      closedStatus,
+      resolutionLabel,
+      resolvedBy: params.userId ?? null,
+    });
 
     const replenResult = await cancelShipmentBlockingReplenTasksForOrderInInventory(
       this.db,

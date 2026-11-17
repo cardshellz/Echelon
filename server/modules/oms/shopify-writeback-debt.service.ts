@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import { sqlIntegerArray } from "../../infrastructure/postgres-array";
+import { clearResolvedShopifyWritebackDebtReviewFlagsInWms } from "../wms/outbound-shipment-mutations.api";
 import { currentChannelPackageEvidenceSql, currentPushedShipmentItemQuantitySql, shipmentHasRetiredPackageSql } from "./channel-fulfillment-package-coverage.sql";
 import {
   evaluateShopifyWritebackDebt,
@@ -465,16 +466,12 @@ async function resolveWithExecutor(
     inboxRowsResolved = rowsOf(inboxResult).length;
   }
 
-  const reviewResult = await executor.execute(sql`
-    UPDATE wms.outbound_shipments
-    SET requires_review = false,
-        review_reason = NULL,
-        updated_at = ${resolvedAt}
-    WHERE id = ANY(${sqlIntegerArray(evaluation.resolvedShipmentIds)})
-      AND requires_review = true
-      AND review_reason LIKE ${`${REVIEW_REASON_PREFIX}%`}
-    RETURNING id
-  `);
+  const reviewResult = await clearResolvedShopifyWritebackDebtReviewFlagsInWms(
+    executor,
+    sqlIntegerArray(evaluation.resolvedShipmentIds),
+    REVIEW_REASON_PREFIX,
+    resolvedAt,
+  );
 
   const reconciliationKey = [
     "shopify-writeback-debt:v1",

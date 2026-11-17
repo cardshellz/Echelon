@@ -18,12 +18,17 @@ const read = (p: string) =>
   readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8");
 
 const SS_SRC = read("../../shipstation.service.ts");
+const WMS_SHIPMENTS_REPO_SRC = read("../../../wms/outbound-shipments-mutations.repository.ts");
 
 describe("P0.4 — SHIP_NOTIFY creation paths are closed", () => {
   it("every remaining outbound_shipments INSERT is a 918406-sanctioned child", () => {
-    const inserts = SS_SRC.match(/INSERT INTO wms\.outbound_shipments/g) ?? [];
+    const directInserts = SS_SRC.match(/INSERT INTO wms\.outbound_shipments/g) ?? [];
+    expect(directInserts.length).toBe(0);
+    const delegatedInserts = SS_SRC.match(/await insertShipStationChildOutboundShipmentInWms\(/g) ?? [];
     // split child + combined child — and nothing else (legacy INSERT removed)
-    expect(inserts.length).toBe(2);
+    expect(delegatedInserts.length).toBe(2);
+    expect(WMS_SHIPMENTS_REPO_SRC).toContain("export async function insertShipStationChildOutboundShipmentInWms(");
+    expect(WMS_SHIPMENTS_REPO_SRC).toContain("INSERT INTO wms.outbound_shipments");
     // Split child: transaction-scoped lock on the 918406 namespace. Combined
     // child: pinned-client session lock via withOrderShipmentLock, which binds
     // WMS_ORDER_SHIPMENT_LOCK_NAMESPACE (918406). The pooled
