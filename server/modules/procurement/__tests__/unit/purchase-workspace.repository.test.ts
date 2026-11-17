@@ -24,7 +24,7 @@ function setup(overrides: Record<string, unknown> = {}, receiptRows = [receipt])
     if (compiled.sql.includes("FROM procurement.receiving_orders ro")) return { rows: receiptRows };
     return { rows: [] };
   });
-  const transaction = vi.fn(async (callback: (executor: { execute: typeof execute }) => Promise<unknown>) => callback({ execute }));
+  const transaction = vi.fn(async (callback: (executor: { execute: typeof execute }) => Promise<unknown>, _config?: unknown) => callback({ execute }));
   // The fake implements the transaction/execute read boundary only; SQL is
   // compiled with the real PostgreSQL dialect for parameterization inspection.
   const repository = createPurchaseWorkspaceRepository({ transaction } as unknown as Parameters<typeof createPurchaseWorkspaceRepository>[0]);

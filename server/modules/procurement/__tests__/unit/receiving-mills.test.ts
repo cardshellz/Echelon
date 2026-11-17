@@ -140,7 +140,14 @@ interface LineFixture {
 
 function buildService(
   lines: LineFixture[],
-  poLines: Record<number, { unitCostMills?: number | null; unitCostCents?: number | null }> = {},
+  poLines: Record<number, {
+    unitCostMills?: number | null;
+    unitCostCents?: number | null;
+    orderQty?: number;
+    totalProductCostCents?: number;
+    packagingCostCents?: number;
+    lineType?: string;
+  }> = {},
   opts: {
     shipmentLandedCost?: number | null;
     shipmentLandedCostMills?: number | null;

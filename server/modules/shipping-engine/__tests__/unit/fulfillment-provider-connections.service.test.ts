@@ -355,7 +355,7 @@ function memoryStore(
       });
     }),
   };
-  const transaction = vi.fn(async <T>(work: (value: FulfillmentProviderConnectionTransaction) => Promise<T>) => work(tx));
+  const transaction = vi.fn(async (work: (value: FulfillmentProviderConnectionTransaction) => Promise<any>) => work(tx));
   const store: FulfillmentProviderConnectionStore & { transaction: ReturnType<typeof vi.fn> } = {
     listConnections: vi.fn(async () => state ? [{ ...state, credentialPresent: holder.credential !== null }] : []),
     getConnection: vi.fn(async () => state ? { ...state, credentialPresent: holder.credential !== null } : null),

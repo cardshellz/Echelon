@@ -200,7 +200,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       commandModule = commands;
       repositoryFactory = repositoryModule.createDrizzleFinancialCommandRepository;
       defaultModulePool = databaseModule.pool;
-      service = createService(database, storage as Parameters<typeof createService>[1], undefined, () => NOW);
+      service = createService(database, storage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     } finally {
       if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = previousDatabaseUrl;
@@ -468,7 +468,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       { sku: "MISSING-SKU" }, { purchaseOrderLineId: 999 },
       { productVariantId: "200" }, null, { productVariantId: 201, qtyShipped: 1 },
     ] });
-    expect(result.rows.map(({ row, units }) => ({ row, code: units.issue?.code }))).toEqual([
+    expect(result.rows.map(({ row, units }: { row: number; units: { issue?: { code: string } | null } }) => ({ row, code: units.issue?.code }))).toEqual([
       { row: 1, code: "SHIPMENT_UNIT_IDENTITY_CONFLICT" },
       { row: 2, code: "SHIPMENT_UNIT_IDENTITY_CONFLICT" },
       { row: 3, code: "SHIPMENT_UNIT_IDENTITY_CONFLICT" },
@@ -671,7 +671,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       await storage.bulkCreateInboundFreightCostAllocations(...args);
       throw new Error("Injected failure after selected-unit allocation insert");
     } };
-    const failingService = createService(database, failingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const failingService = createService(database, failingStorage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     const before = await state();
     await expect(execute(await patch({ unitSelection: { productVariantId: 201, unitsPerVariant: 1, quantity: 501 } }), failingService))
       .rejects.toThrow("Injected failure after selected-unit allocation insert");
@@ -805,7 +805,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       await storage.bulkCreateInboundFreightCostAllocations(...args);
       throw new Error("Injected failure after actual allocation insert");
     } };
-    const failingService = createService(database, failingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const failingService = createService(database, failingStorage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     const before = await state();
     await expect(execute(fromPo(), failingService)).rejects.toThrow("Injected failure after actual allocation insert");
     expect(await state()).toEqual(before);
@@ -940,7 +940,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       // This fixture proves procurement finalization; no inventory lots are posted.
       async getProvisionalLotsByShipment() { return []; },
     };
-    const closingService = createService(database, closingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const closingService = createService(database, closingStorage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     const closing = outcome(closingService.close(1, actorId, "Fixture close"));
     let editing: ReturnType<typeof startObserved> | undefined;
     try {
@@ -991,7 +991,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     await execute(await patch({ cartonCount: 2, dimensionBasis: "carton", weightKg: "3.000", lengthCm: "50.00", widthCm: "40.00", heightCm: "30.00" }));
     expect(await service.getShipment(1, database)).toMatchObject({ totalWeightKg: "6.000", totalVolumeCbm: "0.120000", totalPieces: 500, totalCartons: 2 });
     expect(await service.getAllocationStatus(1, database)).toMatchObject({ status: "allocated", allocatedCostCents: 500, unallocatedCents: 0 });
-    const closing = createService(database, { ...storage, async getProvisionalLotsByShipment() { return []; } } as Parameters<typeof createService>[1], undefined, () => NOW);
+    const closing = createService(database, { ...storage, async getProvisionalLotsByShipment() { return []; } } as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     expect(await closing.close(1, actorId)).toMatchObject({ status: "closed" });
     expect((await pool.query("SELECT freight_allocated_cents,qty FROM procurement.landed_cost_snapshots")).rows).toEqual([{ freight_allocated_cents: "500", qty: 500 }]);
     expect((await pool.query("SELECT * FROM procurement.inbound_freight_costs ORDER BY id")).rows).toEqual(charges);
@@ -1014,7 +1014,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     const chargesBefore = (await pool.query("SELECT * FROM procurement.inbound_freight_costs ORDER BY id")).rows;
     expect(await service.getShipment(1, database)).toMatchObject({ totalWeightKg: "7.000", totalVolumeCbm: "0.180000" });
     expect(await service.getAllocationStatus(1, database)).toMatchObject({ costs: [expect.objectContaining({ rawBasisTotal: 0.18 })] });
-    const closing = createService(database, { ...storage, async getProvisionalLotsByShipment() { return []; } } as Parameters<typeof createService>[1], undefined, () => NOW);
+    const closing = createService(database, { ...storage, async getProvisionalLotsByShipment() { return []; } } as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     expect(await closing.close(1, actorId)).toMatchObject({ status: "closed" });
     expect((await pool.query("SELECT inbound_shipment_line_id,allocated_cents,basis_evidence->>'usedFallback' AS fallback FROM procurement.inbound_freight_allocations ORDER BY inbound_shipment_line_id")).rows)
       .toEqual([{ inbound_shipment_line_id: 11, allocated_cents: "333", fallback: "false" }, { inbound_shipment_line_id: 12, allocated_cents: "167", fallback: "false" }]);
@@ -1033,7 +1033,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       total_weight_kg=999,total_volume_cbm=0,chargeable_weight_kg=0 WHERE id=11`);
     const before = await state();
     const closing = createService(database, { ...storage, async createInboundShipmentStatusHistory() { throw new Error("Injected close history failure"); }
-    } as Parameters<typeof createService>[1], undefined, () => NOW);
+    } as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     await expect(closing.close(1, actorId)).rejects.toThrow("Injected close history failure");
     expect(await state()).toEqual(before);
   });
@@ -1257,7 +1257,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       unitSelection: { productVariantId: 300, unitsPerVariant: 10, quantity: 2 } }] } });
     const setup = await service.getReceivingSetup(1);
     expect(setup.ready).toBe(true);
-    expect(setup.lines.map(line => line.purchaseOrderId).sort((left, right) => left! - right!)).toEqual([10, 19]);
+    expect(setup.lines.map((line: { purchaseOrderId: number | null }) => line.purchaseOrderId).sort((left: number | null, right: number | null) => left! - right!)).toEqual([10, 19]);
     await pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=300");
     const before = await state();
     await expect(service.book(1, actorId)).rejects.toMatchObject({ details: { receivingSetup: { issueCount: 1 } } });
@@ -1338,7 +1338,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     const entered = new Promise<void>(resolve => { enteredHistory = resolve; });
     const gated = createService(database, { ...storage, createInboundShipmentStatusHistory: async (entry: any, executor: any) => {
       enteredHistory(); await held; return storage.createInboundShipmentStatusHistory(entry, executor);
-    } } as Parameters<typeof createService>[1], undefined, () => NOW);
+    } } as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     const booking = gated.book(1, actorId);
     await entered;
     const catalogWriter = await pool.connect();

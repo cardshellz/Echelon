@@ -41,8 +41,12 @@ function buildApp(input: { verify: ReturnType<typeof vi.fn>; ingest: ReturnType<
     },
   }));
   registerShipStationTrackingWebhook(app, {
-    webhookVerifier: { verify: input.verify },
-    service: { ingestShipStationWebhook: input.ingest },
+    webhookVerifier: {
+      verify: input.verify as unknown as Parameters<typeof registerShipStationTrackingWebhook>[1]["webhookVerifier"]["verify"],
+    },
+    service: {
+      ingestShipStationWebhook: input.ingest as unknown as Parameters<typeof registerShipStationTrackingWebhook>[1]["service"]["ingestShipStationWebhook"],
+    },
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   });
   return app;

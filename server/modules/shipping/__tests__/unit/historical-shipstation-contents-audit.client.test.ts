@@ -34,7 +34,7 @@ function client(fetchImpl: typeof fetch) {
 
 describe("historical ShipStation contents audit client", () => {
   it("requests shipment items and returns only a normalized aggregate summary", async () => {
-    const fetchImpl = vi.fn(async () => jsonResponse({
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => jsonResponse({
       shipments: [{
         shipmentId: 44_001,
         trackingNumber: "SECRET-TRACKING",

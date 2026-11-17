@@ -6,7 +6,10 @@ import {
   reviewRetryIdempotencyKey,
   type ChannelFulfillmentReviewRetrySnapshot,
 } from "../../channel-fulfillment-review-retry.domain";
-import { createChannelFulfillmentReviewRetryRepository } from "../../channel-fulfillment-review-retry.repository";
+import {
+  createChannelFulfillmentReviewRetryRepository,
+  type ChannelFulfillmentReviewRetryDatabase,
+} from "../../channel-fulfillment-review-retry.repository";
 import { createChannelFulfillmentReviewRetryService } from "../../channel-fulfillment-review-retry.service";
 
 const NOW = new Date("2026-09-08T17:00:00.000Z");
@@ -59,12 +62,13 @@ function fixture(initial = snapshot(), failUpdate = false) {
     }
     throw new Error(`Unexpected owner query: ${text}`);
   });
-  const transaction = vi.fn(async <T>(work: (tx: { execute: typeof execute }) => Promise<T>): Promise<T> => {
+  const transactionImpl: ChannelFulfillmentReviewRetryDatabase["transaction"] = async (work) => {
     const before = structuredClone(current);
     const previousAudit = structuredClone(audit);
     try { return await work({ execute }); }
     catch (error) { current = before; audit = previousAudit; throw error; }
-  });
+  };
+  const transaction = vi.fn(transactionImpl) as unknown as ChannelFulfillmentReviewRetryDatabase["transaction"] & ReturnType<typeof vi.fn>;
   const repository = createChannelFulfillmentReviewRetryRepository({ execute, transaction });
   const clock = { now: vi.fn(() => NOW) };
   return {

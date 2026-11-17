@@ -71,6 +71,7 @@ describe("buildProcurementHealthSummary", () => {
           missingEta: 0,
           overdueEta: 2,
           arrivedNotReceiving: 1,
+          invalidConfirmedDeliveryDate: 0,
         },
       },
       generatedAt: new Date("2026-05-10T12:00:00.000Z"),

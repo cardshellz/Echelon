@@ -27,7 +27,7 @@ function dependencies(
     now: () => FIXED_NOW,
     loadCatalogShippingFactsBySku: vi.fn(async () => new Map()),
     quoteCartShipment: vi.fn(async () => ({
-      ok: false, code: "INVALID_SHIPMENT", errors: ["not configured"],
+      ok: false as const, code: "INVALID_SHIPMENT" as const, errors: ["not configured"],
     })),
     quoteShipmentRates: vi.fn(async () => ({
       rateBook: { id: 12, code: "shopify-retail-default" },
@@ -37,14 +37,20 @@ function dependencies(
         serviceLevelCode: "standard",
         displayName: "Standard Shipping",
         description: null,
-        fulfillmentMode: "parcel",
-        pricingBasis: "shipment_weight",
+        fulfillmentMode: "parcel" as const,
+        pricingBasis: "shipment_weight" as const,
         totalCents: 799,
         currency: "USD",
         promiseMinBusinessDays: 3,
         promiseMaxBusinessDays: 7,
         ratedMeasure: 454,
         maxShipmentWeightGrams: null,
+        chargeModel: "fixed_band" as const,
+        perStartedPoundCents: null,
+        billablePounds: null,
+        rateTableId: 1,
+        productPolicyApplied: false,
+        calculationTrace: [],
       }],
       warnings: [],
     })),
@@ -291,7 +297,7 @@ describe("runManualRateQuote", () => {
       ...VALID_INPUT,
       billableWeightGrams: undefined,
       lines: [{ sku: "UNKNOWN", quantity: 1 }],
-    }, deps)).rejects.toMatchObject<Partial<ManualRateQuoteError>>({
+    }, deps)).rejects.toMatchObject({
       code: "SHIPPING_RATE_TEST_SKU_NOT_FOUND",
       context: { skus: ["UNKNOWN"] },
     });
@@ -315,7 +321,7 @@ describe("runManualRateQuote", () => {
       ...VALID_INPUT,
       billableWeightGrams: undefined,
       lines: [{ sku: "MISSING-WEIGHT", quantity: 1 }],
-    }, deps)).rejects.toMatchObject<Partial<ManualRateQuoteError>>({
+    }, deps)).rejects.toMatchObject({
       code: "SHIPPING_RATE_TEST_SKU_WEIGHT_MISSING",
       context: { skus: ["MISSING-WEIGHT"] },
     });
@@ -331,7 +337,7 @@ describe("runManualRateQuote", () => {
       destinationCountry: "DK",
       destinationRegion: "Hovedstaden",
       destinationPostalCode: "2100",
-    }, deps)).rejects.toMatchObject<Partial<ManualRateQuoteError>>({
+    }, deps)).rejects.toMatchObject({
       code: "SHIPPING_RATE_TEST_US_ONLY",
     });
     expect(deps.quoteShipmentRates).not.toHaveBeenCalled();

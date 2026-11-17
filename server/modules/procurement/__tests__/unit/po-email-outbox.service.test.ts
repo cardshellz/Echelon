@@ -3,9 +3,13 @@ import { createHash } from "crypto";
 import { poEmailDocumentHash } from "../../po-email-document-contract";
 import {
   enqueuePurchaseOrderEmail,
-  PoEmailOutboxError,
+  type PoEmailOutboxDbPool,
   replayDeadLetterPurchaseOrderEmail,
 } from "../../po-email-outbox.service";
+
+function makePool(query: PoEmailOutboxDbPool["query"]): PoEmailOutboxDbPool {
+  return { query, connect: vi.fn() };
+}
 
 const delivery = {
   id: 42,
@@ -55,7 +59,7 @@ describe("PO email outbox enqueue", () => {
       message: " Please confirm ",
       idempotencyKey: "intent-123",
       createdBy: "user-1",
-    }, { dbPool: { query }, buildSnapshot });
+    }, { dbPool: makePool(query), buildSnapshot });
 
     expect(result).toEqual({ delivery, replayed: false });
     expect(buildSnapshot).toHaveBeenCalledWith({ poId: 7, message: "Please confirm" });
@@ -83,9 +87,9 @@ describe("PO email outbox enqueue", () => {
       toEmail: "vendor@example.com",
       idempotencyKey: "intent-123",
     }, {
-      dbPool: {
-        query: vi.fn().mockResolvedValue({ rows: [{ ...delivery, requestHash }] }),
-      },
+      dbPool: makePool(
+        vi.fn().mockResolvedValue({ rows: [{ ...delivery, requestHash }] }),
+      ),
       buildSnapshot: replayBuild,
     });
 
@@ -94,14 +98,14 @@ describe("PO email outbox enqueue", () => {
   });
 
   it("rejects reuse of an idempotency key for a different request", async () => {
-    const dbPool = {
-      query: vi.fn().mockResolvedValue({ rows: [{ ...delivery, requestHash: "different" }] }),
-    };
+    const dbPool = makePool(
+      vi.fn().mockResolvedValue({ rows: [{ ...delivery, requestHash: "different" }] }),
+    );
     await expect(enqueuePurchaseOrderEmail({
       purchaseOrderId: 7,
       toEmail: "other@example.com",
       idempotencyKey: "intent-123",
-    }, { dbPool, buildSnapshot: vi.fn() })).rejects.toMatchObject<Partial<PoEmailOutboxError>>({
+    }, { dbPool, buildSnapshot: vi.fn() })).rejects.toMatchObject({
       statusCode: 409,
       code: "IDEMPOTENCY_KEY_REUSED",
     });
@@ -120,7 +124,7 @@ describe("PO email dead-letter replay", () => {
       deliveryId: 42,
       idempotencyKey: "replay-intent-1",
       createdBy: "operator-1",
-      dbPool: { query },
+      dbPool: makePool(query),
     });
 
     expect(result).toEqual({ delivery: replay, replayed: false });
@@ -132,8 +136,8 @@ describe("PO email dead-letter replay", () => {
       purchaseOrderId: 7,
       deliveryId: 42,
       idempotencyKey: "replay-intent-1",
-      dbPool: { query: vi.fn().mockResolvedValue({ rows: [{ id: 42, status: "sent" }] }) },
-    })).rejects.toMatchObject<Partial<PoEmailOutboxError>>({
+      dbPool: makePool(vi.fn().mockResolvedValue({ rows: [{ id: 42, status: "sent" }] })),
+    })).rejects.toMatchObject({
       statusCode: 409,
       code: "DELIVERY_NOT_DEAD_LETTERED",
     });
@@ -144,8 +148,8 @@ describe("PO email dead-letter replay", () => {
       purchaseOrderId: 7,
       deliveryId: 42,
       idempotencyKey: "replay-accepted-1",
-      dbPool: {
-        query: vi.fn().mockResolvedValue({
+      dbPool: makePool(
+        vi.fn().mockResolvedValue({
           rows: [{
             ...delivery,
             status: "dead_letter",
@@ -154,8 +158,8 @@ describe("PO email dead-letter replay", () => {
             html: "<html>immutable PO</html>",
           }],
         }),
-      },
-    })).rejects.toMatchObject<Partial<PoEmailOutboxError>>({
+      ),
+    })).rejects.toMatchObject({
       statusCode: 409,
       code: "DELIVERY_ALREADY_ACCEPTED_BY_PROVIDER",
     });
@@ -177,7 +181,7 @@ describe("PO email verified document gate", () => {
     });
     await expect(enqueuePurchaseOrderEmail({
       purchaseOrderId: 7, toEmail: "vendor@example.com", idempotencyKey: "unsafe-new",
-    }, { dbPool: { query }, buildSnapshot })).rejects.toMatchObject({ statusCode: 409 });
+    }, { dbPool: makePool(query), buildSnapshot })).rejects.toMatchObject({ statusCode: 409 });
     expect(query).toHaveBeenCalledTimes(1);
   });
 
@@ -190,7 +194,7 @@ describe("PO email verified document gate", () => {
     const buildSnapshot = vi.fn();
     const result = await enqueuePurchaseOrderEmail({
       purchaseOrderId: 7, toEmail: "vendor@example.com", idempotencyKey: "existing-held",
-    }, { dbPool: { query }, buildSnapshot });
+    }, { dbPool: makePool(query), buildSnapshot });
     expect(result).toEqual({ delivery: held, replayed: true });
     expect(query).toHaveBeenCalledTimes(1);
     expect(buildSnapshot).not.toHaveBeenCalled();
@@ -207,7 +211,7 @@ describe("PO email verified document gate", () => {
       ...delivery, status: "dead_letter", html: "<html>immutable PO</html>", ...patch,
     }] });
     await expect(replayDeadLetterPurchaseOrderEmail({
-      purchaseOrderId: 7, deliveryId: 42, idempotencyKey: "unsafe-replay", dbPool: { query },
+      purchaseOrderId: 7, deliveryId: 42, idempotencyKey: "unsafe-replay", dbPool: makePool(query),
     })).rejects.toMatchObject({ statusCode: 409 });
     expect(query).toHaveBeenCalledTimes(1);
   });
@@ -221,7 +225,7 @@ describe("PO document rejection observability and hold races", () => {
       await expect(enqueuePurchaseOrderEmail({
         purchaseOrderId: 7, toEmail: "private@example.com", message: "Private note",
         idempotencyKey: "rejected", createdBy: "actor-7",
-      }, { dbPool: { query: vi.fn().mockResolvedValue({ rows: [] }) }, buildSnapshot: vi.fn().mockRejectedValue(failure) }))
+      }, { dbPool: makePool(vi.fn().mockResolvedValue({ rows: [] })), buildSnapshot: vi.fn().mockRejectedValue(failure) }))
         .rejects.toBe(failure);
       expect(warning).toHaveBeenCalledWith("[PO Email Outbox] Enqueue rejected", {
         code: "PURCHASE_ORDER_DOCUMENT_CANCELLED", purchaseOrderId: 7, actorId: "actor-7",
@@ -239,7 +243,7 @@ describe("PO document rejection observability and hold races", () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ ...source, documentHoldReason: "DOCUMENT_HASH_MISMATCH" }] });
     await expect(replayDeadLetterPurchaseOrderEmail({
-      purchaseOrderId: 7, deliveryId: 42, idempotencyKey: "racing-replay", dbPool: { query },
+      purchaseOrderId: 7, deliveryId: 42, idempotencyKey: "racing-replay", dbPool: makePool(query),
     })).rejects.toMatchObject({ code: "PURCHASE_ORDER_DOCUMENT_UNVERIFIED", statusCode: 409 });
     expect(query).toHaveBeenCalledTimes(5);
   });

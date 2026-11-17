@@ -37,7 +37,7 @@ const review: HistoricalShipStationContentsResolutionPreview = Object.freeze({
     "wms_confirmed",
     "provider_confirmed_pending_inventory_correction",
     "cannot_prove",
-  ]),
+  ] as const),
 });
 
 const facts: HistoricalShipStationContentsCorrectionFacts = Object.freeze({
@@ -47,8 +47,8 @@ const facts: HistoricalShipStationContentsCorrectionFacts = Object.freeze({
   reviewPreviewEvidenceHash: HASH_C,
   orderNumber: "1001",
   trackingNumber: "1Z-CORRECTION",
-  providerLines: Object.freeze([{ sku: "SKU-A", quantity: 1 }]),
-  wmsLines: Object.freeze([{
+  providerLines: [{ sku: "SKU-A", quantity: 1 }],
+  wmsLines: [{
     wmsShipmentItemId: 701,
     wmsShipmentId: 801,
     orderItemId: 901,
@@ -57,22 +57,22 @@ const facts: HistoricalShipStationContentsCorrectionFacts = Object.freeze({
     itemName: "Regular A",
     quantity: 2,
     fromLocationId: 301,
-    inventoryShipTransactions: Object.freeze([{
+    inventoryShipTransactions: [{
       inventoryTransactionId: 401,
       productVariantId: 101,
       fromLocationId: 301,
       quantity: 2,
-      evidenceKind: "exact_shipment_item",
-    }]),
-  }]),
-  catalogVariants: Object.freeze([{
+      evidenceKind: "exact_shipment_item" as const,
+    }],
+  }],
+  catalogVariants: [{
     productVariantId: 101,
     sku: "SKU-A",
     itemName: "Regular A",
     isActive: true,
     requiresShipping: true,
     trackInventory: true,
-  }]),
+  }],
 });
 
 describe("HistoricalShipStationContentsCorrectionService", () => {

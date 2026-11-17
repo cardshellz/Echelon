@@ -13,7 +13,7 @@ import type {
   HistoricalShipStationContentsAttestationTransaction,
 } from "../../historical-shipstation-contents-attestation.repository";
 import type {
-  HistoricalShipStationContentsRecoveryEvidence,
+  HistoricalShipStationContentsAutomaticRecoveryEvidence,
 } from "../../historical-shipstation-contents-recovery.domain";
 
 const candidate: HistoricalShipStationContentsCandidate = Object.freeze({
@@ -42,7 +42,7 @@ const reviewContext = Object.freeze({
   ]),
 });
 
-const recoveryEvidence: HistoricalShipStationContentsRecoveryEvidence = Object.freeze({
+const recoveryEvidence: HistoricalShipStationContentsAutomaticRecoveryEvidence = Object.freeze({
   contractVersion: 1,
   recoveryStatus: "provider_line_keys_authoritative",
   evidenceHash: "a".repeat(64),
@@ -59,7 +59,7 @@ const expectedPreviewEvidenceHash = historicalShipStationContentsAttestationPrev
 });
 
 function providerClient(
-  details: HistoricalShipStationContentsRecoveryEvidence | null = recoveryEvidence,
+  details: HistoricalShipStationContentsAutomaticRecoveryEvidence | null = recoveryEvidence,
 ): HistoricalShipStationContentsClient {
   return {
     loadShipmentContents: vi.fn(async () => Object.freeze({
@@ -80,6 +80,12 @@ function providerClient(
         }),
       }),
       recoveryEvidenceDetails: details,
+      providerObservation: Object.freeze({
+        evidenceHash: details?.evidenceHash ?? "0".repeat(64),
+        lines: details === null ? Object.freeze([]) : Object.freeze([
+          Object.freeze({ sku: "SKU-A", quantity: 2 }),
+        ]),
+      }),
     })),
   };
 }
@@ -279,6 +285,12 @@ describe("historical ShipStation contents lead attestation", () => {
             }),
           }),
           recoveryEvidenceDetails: recoveryEvidence,
+          providerObservation: Object.freeze({
+            evidenceHash: recoveryEvidence.evidenceHash,
+            lines: Object.freeze([
+              Object.freeze({ sku: "SKU-A", quantity: 2 }),
+            ]),
+          }),
         });
       },
     };

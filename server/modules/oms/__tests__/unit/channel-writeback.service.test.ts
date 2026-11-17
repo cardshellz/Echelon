@@ -113,7 +113,7 @@ describe("channel-writeback.service", () => {
   });
 
   it("joins WMS orders through a typed OMS id so the OMS primary key stays indexable", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
+    const execute = vi.fn(async (_query?: unknown) => ({ rows: [] }));
 
     await getChannelWritebackHealth({ execute }, { windowDays: 30, sampleLimit: 25 });
 
@@ -125,7 +125,7 @@ describe("channel-writeback.service", () => {
   });
 
   it("supports unbounded historical convergence and recognizes reconciled Shopify evidence", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
+    const execute = vi.fn(async (_query?: unknown) => ({ rows: [] }));
 
     await findChannelWritebackCandidates({ execute }, {
       minAgeMinutes: 60,
@@ -162,7 +162,7 @@ describe("channel-writeback.service", () => {
 
 describe("findDropshipWritebackCandidates", () => {
   it("finds shipped dropship packages with tracking and no dropship command", async () => {
-    const execute = vi.fn(async () => ({
+    const execute = vi.fn(async (_query?: unknown) => ({
       rows: [{
         shipment_id: "5501",
         wms_order_id: "3301",
@@ -202,7 +202,7 @@ describe("findDropshipWritebackCandidates", () => {
   });
 
   it("bounds its inputs and drops malformed rows", async () => {
-    const execute = vi.fn(async () => ({
+    const execute = vi.fn(async (_query?: unknown) => ({
       rows: [
         { shipment_id: null, wms_order_id: 1, oms_order_id: 2 },
         { shipment_id: "0", wms_order_id: 1, oms_order_id: 2 },

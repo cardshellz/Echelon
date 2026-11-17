@@ -335,7 +335,7 @@ describe("ReservationService :: dbOverride threading", () => {
     const overrideDb = makeDbSpy("override", overrideDbCalls);
 
     const inventoryCore = {
-      reserveForOrder: vi.fn(async () => true),
+      reserveForOrder: vi.fn(async (..._args: any[]) => true),
     };
 
     const channelSync = {

@@ -159,7 +159,7 @@ function rejectedPackageWithSentinel(sentinel: string): PersistedDeclaredPackage
       ...labelEvent,
       eventHash: "0".repeat(64),
       sanitizedPayload: {
-        ...labelEvent.sanitizedPayload,
+        ...(labelEvent.sanitizedPayload as Record<string, unknown>),
         diagnosticSentinel: sentinel,
       },
     }],
@@ -666,7 +666,7 @@ describe("package allocation authority readiness", () => {
           labelEvents: [{
             ...labelEvent,
             sanitizedPayload: {
-              ...labelEvent.sanitizedPayload,
+              ...(labelEvent.sanitizedPayload as Record<string, unknown>),
               [field]: value,
             },
           }],
@@ -736,7 +736,7 @@ describe("package allocation authority readiness", () => {
           labelEvents: [{
             ...labelEvent,
             sanitizedPayload: {
-              ...labelEvent.sanitizedPayload,
+              ...(labelEvent.sanitizedPayload as Record<string, unknown>),
               [field]: value,
             },
           }],
@@ -815,25 +815,26 @@ describe("package allocation authority readiness", () => {
       },
     };
 
+    const makeHostileProxy = <T extends object>(target: T): T =>
+      new Proxy(target, hostileHandler as ProxyHandler<T>);
+
     const packageArrayInput = validInput();
-    packageArrayInput.packages = new Proxy(packageArrayInput.packages, hostileHandler);
+    packageArrayInput.packages = makeHostileProxy(packageArrayInput.packages);
     const packageArrayError = errorFrom(
       () => assessPackageAllocationAuthorityReadiness(packageArrayInput),
     );
 
     const sourceRecordInput = validInput();
-    sourceRecordInput.sourceFacts[0] = new Proxy(
+    sourceRecordInput.sourceFacts[0] = makeHostileProxy(
       sourceRecordInput.sourceFacts[0]!,
-      hostileHandler,
     );
     const sourceRecordError = errorFrom(
       () => assessPackageAllocationAuthorityReadiness(sourceRecordInput),
     );
 
     const packageRecordInput = validInput();
-    packageRecordInput.packages[0] = new Proxy(
+    packageRecordInput.packages[0] = makeHostileProxy(
       packageRecordInput.packages[0]!,
-      hostileHandler,
     );
     const packageRecordError = errorFrom(
       () => assessPackageAllocationAuthorityReadiness(packageRecordInput),

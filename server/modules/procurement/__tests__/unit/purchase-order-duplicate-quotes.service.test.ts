@@ -82,7 +82,9 @@ function buildDb(context: {
   return { db, inserts, updates };
 }
 
-function baseSourceLine(overrides: Record<string, unknown> = {}) {
+function baseSourceLine<T extends Record<string, unknown> = Record<string, never>>(
+  overrides: T = {} as T,
+) {
   return {
     id: 10,
     lineNumber: 1,

@@ -1099,7 +1099,7 @@ describe("historical ShipStation split repair repository guards", () => {
         },
       },
     ];
-    const items = new Map([
+    const items = new Map<number, { shipmentId: number; orderItemId: number; trackingId: string | null }>([
       [9001, { shipmentId: 7001, orderItemId: 3001, trackingId: null }],
       [9002, { shipmentId: 7001, orderItemId: 3002, trackingId: null }],
     ]);

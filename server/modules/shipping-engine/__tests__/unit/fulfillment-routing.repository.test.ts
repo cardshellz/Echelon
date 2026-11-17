@@ -216,7 +216,7 @@ describe("PostgresFulfillmentRoutingStore", () => {
 
 function fakePool(results: Array<{ rows: unknown[]; rowCount: number | null }>) {
   let index = 0;
-  const query = vi.fn(async () => {
+  const query = vi.fn(async (_sql?: unknown, _params?: unknown[]) => {
     const result = results[index++];
     if (!result) throw new Error("Unexpected query.");
     return result;
