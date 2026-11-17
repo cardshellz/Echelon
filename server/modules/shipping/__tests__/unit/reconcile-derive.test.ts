@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import { deriveReconcileEvent } from "../../reconcile-derive";
 import type { EngineOrderState, CanonicalShipmentEvent } from "../../types";
 
+const DEFAULT_REF = { engine: "shipstation", engineOrderRef: "9999" };
+
 function makeInput(overrides: {
   engineState?: Partial<EngineOrderState>;
   currentWmsShipmentStatus?: string;
@@ -12,6 +14,7 @@ function makeInput(overrides: {
 } = {}) {
   return {
     engineState: {
+      engineRef: DEFAULT_REF,
       status: "awaiting_shipment",
       trackingNumber: null,
       carrier: null,
@@ -31,7 +34,10 @@ describe("deriveReconcileEvent", () => {
     const result = deriveReconcileEvent(makeInput({
       shipments: [{
         kind: "shipped",
+        shipmentId: 100,
+        engineRef: DEFAULT_REF,
         trackingNumber: "1Z999",
+        carrier: "UPS",
         carrierRaw: "ups",
         shipDate: new Date("2025-01-15"),
         items: [],
@@ -50,7 +56,10 @@ describe("deriveReconcileEvent", () => {
       currentWmsShipmentStatus: "shipped",
       shipments: [{
         kind: "shipped",
+        shipmentId: 100,
+        engineRef: DEFAULT_REF,
         trackingNumber: "1Z999",
+        carrier: "UPS",
         carrierRaw: "ups",
         shipDate: new Date("2025-01-15"),
         items: [],
@@ -62,7 +71,7 @@ describe("deriveReconcileEvent", () => {
   it("returns voided when all shipments are voided", () => {
     const result = deriveReconcileEvent(makeInput({
       shipments: [
-        { kind: "voided", voidedAt: new Date(), items: [] },
+        { kind: "voided", shipmentId: 100, engineRef: DEFAULT_REF },
       ],
     }));
     expect(result).toEqual({ kind: "voided", reason: "engine_label_void" });
@@ -72,7 +81,7 @@ describe("deriveReconcileEvent", () => {
     const result = deriveReconcileEvent(makeInput({
       currentWmsShipmentStatus: "voided",
       shipments: [
-        { kind: "voided", voidedAt: new Date(), items: [] },
+        { kind: "voided", shipmentId: 100, engineRef: DEFAULT_REF },
       ],
     }));
     expect(result).toBeNull();
@@ -107,8 +116,8 @@ describe("deriveReconcileEvent", () => {
   it("shipped wins over voided when mixed (replacement label)", () => {
     const result = deriveReconcileEvent(makeInput({
       shipments: [
-        { kind: "voided", voidedAt: new Date("2025-01-14"), items: [] },
-        { kind: "shipped", trackingNumber: "REPLACE1", carrierRaw: "fedex", shipDate: new Date("2025-01-15"), items: [] },
+        { kind: "voided", shipmentId: 100, engineRef: DEFAULT_REF },
+        { kind: "shipped", shipmentId: 101, engineRef: DEFAULT_REF, trackingNumber: "REPLACE1", carrier: "FEDEX", carrierRaw: "fedex", shipDate: new Date("2025-01-15"), items: [] },
       ],
     }));
     expect(result).toEqual({
@@ -130,7 +139,10 @@ describe("deriveReconcileEvent", () => {
       currentCarrier: "usps",
       shipments: [{
         kind: "shipped",
+        shipmentId: 100,
+        engineRef: DEFAULT_REF,
         trackingNumber: "",
+        carrier: "OTHER",
         carrierRaw: "",
         shipDate: new Date("2025-01-15"),
         items: [],
@@ -147,8 +159,8 @@ describe("deriveReconcileEvent", () => {
   it("uses latest shipped event for tracking number", () => {
     const result = deriveReconcileEvent(makeInput({
       shipments: [
-        { kind: "shipped", trackingNumber: "FIRST", carrierRaw: "ups", shipDate: new Date("2025-01-14"), items: [] },
-        { kind: "shipped", trackingNumber: "SECOND", carrierRaw: "fedex", shipDate: new Date("2025-01-15"), items: [] },
+        { kind: "shipped", shipmentId: 100, engineRef: DEFAULT_REF, trackingNumber: "FIRST", carrier: "UPS", carrierRaw: "ups", shipDate: new Date("2025-01-14"), items: [] },
+        { kind: "shipped", shipmentId: 101, engineRef: DEFAULT_REF, trackingNumber: "SECOND", carrier: "FEDEX", carrierRaw: "fedex", shipDate: new Date("2025-01-15"), items: [] },
       ],
     }));
     expect(result?.kind).toBe("shipped");

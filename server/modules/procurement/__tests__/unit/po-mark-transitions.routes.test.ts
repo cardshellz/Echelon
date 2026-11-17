@@ -98,7 +98,7 @@ function buildApp(purchasing: any): Express {
     shipmentTracking: {},
     receiving: {},
     poExceptions: {},
-  };
+  } as any;
   registerPurchasingRoutes(app);
   return app;
 }

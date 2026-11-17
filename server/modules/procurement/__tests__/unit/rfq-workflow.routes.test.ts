@@ -38,7 +38,7 @@ describe("RFQ workflow HTTP authority and durable command identity", () => {
       req.session = { user: req.header("X-Test-Actor") ? { id: req.header("X-Test-Actor") } : undefined } as never;
       next();
     });
-    app.locals.services = { purchasing: {} };
+    app.locals.services = { purchasing: {} } as any;
     registerRfqWorkflowRoutes(app);
     server = http.createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

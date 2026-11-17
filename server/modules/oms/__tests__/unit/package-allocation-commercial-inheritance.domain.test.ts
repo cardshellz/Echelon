@@ -8,7 +8,7 @@ function fixture() {
     effectType: "commercial_fulfillment",
     subjectKey: "commercial:12",
     wmsShipmentItemId: 12,
-    packageKey: null,
+    packageKey: null as string | null,
     quantity: 2,
   };
   const payloadHash = createHash("sha256")
@@ -32,8 +32,8 @@ function fixture() {
         payload,
         executable: false,
         sourceLineId: "7",
-        packageBindingId: null,
-        packageKey: null,
+        packageBindingId: null as string | null,
+        packageKey: null as string | null,
         sourceWmsShipmentItemId: 12,
         sourceQuantity: 2,
         quantity: 2,

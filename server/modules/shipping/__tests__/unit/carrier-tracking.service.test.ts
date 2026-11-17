@@ -131,6 +131,7 @@ function repositoryWithCandidates(candidates: Awaited<ReturnType<CarrierTracking
     }),
     claimTrackingSubscriptions: vi.fn().mockResolvedValue([]),
     finalizeTrackingSubscriptionAttempt: vi.fn().mockResolvedValue({ id: 501, inserted: true }),
+    requeueReviewedTrackingSubscriptions: vi.fn().mockResolvedValue({ selected: 0, requeued: 0 }),
     listEventsPendingReconciliation: vi.fn().mockResolvedValue([]),
     claimDispatchCommands: vi.fn().mockResolvedValue([]),
     finalizeDispatchAttempt: vi.fn().mockImplementation(async (input) => ({
@@ -138,6 +139,17 @@ function repositoryWithCandidates(candidates: Awaited<ReturnType<CarrierTracking
       inserted: true,
       outcome: input.outcome,
     })),
+    previewReviewedCarrierDispatchCommands: vi.fn().mockResolvedValue({
+      candidateCount: 0,
+      selectedCount: 0,
+      byCohort: {},
+      sample: [],
+    }),
+    requeueReviewedCarrierDispatchCommands: vi.fn().mockResolvedValue({
+      selected: 0,
+      requeued: 0,
+      byCohort: {},
+    }),
     transaction: async (work) => work(tx),
   };
   return {

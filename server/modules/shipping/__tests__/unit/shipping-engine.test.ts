@@ -13,6 +13,8 @@ function mockSsService(overrides: Partial<ShipStationServiceHandle> = {}): ShipS
   return {
     isConfigured: vi.fn().mockReturnValue(true),
     pushShipment: vi.fn().mockResolvedValue({ shipstationOrderId: 999, orderKey: "echelon-wms-shp-1" }),
+    appendShipmentItems: vi.fn().mockResolvedValue({ state: "applied", providerStatus: "awaiting_shipment" }),
+    setShipmentItemQuantity: vi.fn().mockResolvedValue({ state: "applied", providerStatus: "awaiting_shipment" }),
     cancelOrder: vi.fn().mockResolvedValue({ alreadyInState: false }),
     putOrderOnHold: vi.fn().mockResolvedValue(undefined),
     releaseOrderFromHold: vi.fn().mockResolvedValue(undefined),

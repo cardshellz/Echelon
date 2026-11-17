@@ -7,7 +7,7 @@ import {
   purchaseOrders,
   purchasingRecommendationPoHandoffs,
 } from "@shared/schema";
-import { createPurchasingService, PurchasingError } from "../../purchasing.service";
+import { createPurchasingService } from "../../purchasing.service";
 
 const VERSION = new Date("2026-07-13T12:00:00.000Z");
 
@@ -66,7 +66,7 @@ describe("recommendation PO handoff delete guards", () => {
     };
     const service = createPurchasingService(recommendationOwnedLineDb(91) as any, storage as any);
 
-    await expect(service.deletePO(41)).rejects.toMatchObject<PurchasingError>({
+    await expect(service.deletePO(41)).rejects.toMatchObject({
       statusCode: 409,
       message: "Cannot delete a recommendation-created PO; cancel it to preserve the handoff audit trail",
       details: { code: "RECOMMENDATION_PO_DELETE_BLOCKED", handoffId: 91 },
@@ -82,7 +82,7 @@ describe("recommendation PO handoff delete guards", () => {
       expectedPoUpdatedAt: VERSION.toISOString(),
       expectedLineUpdatedAt: VERSION.toISOString(),
       reason: "Operator requested removal",
-    }, "admin-user")).rejects.toMatchObject<PurchasingError>({
+    }, "admin-user")).rejects.toMatchObject({
       statusCode: 409,
       message: "Recommendation-created purchase orders must be cancelled and regenerated instead of edited",
       details: { code: "RECOMMENDATION_PO_LINE_AMEND_BLOCKED", handoffId: 92 },
@@ -97,7 +97,7 @@ describe("recommendation PO handoff delete guards", () => {
       expectedPoUpdatedAt: VERSION.toISOString(),
       expectedLineUpdatedAt: VERSION.toISOString(),
       notes: "Attempted edit",
-    }, "admin-user")).rejects.toMatchObject<PurchasingError>({
+    }, "admin-user")).rejects.toMatchObject({
       statusCode: 409,
       message: "Recommendation-created purchase orders must be cancelled and regenerated instead of edited",
       details: { code: "RECOMMENDATION_PO_LINE_AMEND_BLOCKED", handoffId: 92 },

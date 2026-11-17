@@ -35,7 +35,7 @@ describe("eBay tracking conflict reconciliation", () => {
   });
 
   it("persists a manual-review exception without mutating fulfillment", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
+    const execute = vi.fn(async (_query?: unknown) => ({ rows: [] }));
 
     await recordEbayTrackingConflict({ execute }, INPUT);
 

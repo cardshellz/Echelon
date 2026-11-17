@@ -22,7 +22,7 @@ vi.mock("../../../../routes/middleware", () => ({
   requirePermission: (resource: string, action: string) => {
     mocks.permissions.push([resource, action]);
     return (req: Request, _res: Response, next: NextFunction) => {
-      (req as Request & { session: { user: { id: string; role: string } } }).session = {
+      (req as any).session = {
         user: { id: "buyer-1", role: "admin" },
       };
       next();

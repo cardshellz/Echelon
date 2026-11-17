@@ -56,7 +56,7 @@ import { hashReceivingEntryCommandIdentity, receivingEntryCommandScope, RECEIVIN
 function buildApp(services: Record<string, any> = {}): Express {
   const app = express();
   app.use(express.json());
-  app.locals.services = services;
+  app.locals.services = services as any;
   registerReceivingRoutes(app);
   return app;
 }

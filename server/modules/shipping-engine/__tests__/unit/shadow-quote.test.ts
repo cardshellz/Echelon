@@ -10,7 +10,7 @@ import {
   type ShadowOrderItem,
 } from "../../application/shadow-quote.service";
 import type { CartonizeBox, CartonizeCandidate, CartonizeItem } from "../../../cartonization/domain/cartonize";
-import type { RateQuoteResult } from "../../application/rate-quote.service";
+import type { RateQuoteLine, RateQuoteResult } from "../../application/rate-quote.service";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -49,7 +49,7 @@ const BOX: CartonizeBox = {
   isActive: true,
 };
 
-const STANDARD_RATE = {
+const STANDARD_RATE: RateQuoteLine = {
   serviceLevelId: 1,
   serviceLevelCode: "standard",
   displayName: "Standard Shipping",
@@ -62,6 +62,12 @@ const STANDARD_RATE = {
   promiseMaxBusinessDays: 7,
   ratedMeasure: 500,
   maxShipmentWeightGrams: null,
+  chargeModel: "fixed_band",
+  perStartedPoundCents: null,
+  billablePounds: null,
+  rateTableId: 10,
+  productPolicyApplied: false,
+  calculationTrace: [],
 };
 
 function fakeDeps(input: {
@@ -300,7 +306,7 @@ describe("isPackingComplete", () => {
     items: [{ productVariantId: 101, sku: "SLV-100", quantity: 1, isRider: false }],
     placements: [{
       productVariantId: 101, sku: "SLV-100", unitSequence: 1,
-      orientation: "LWH",
+      orientation: "LWH" as const,
       xMm: 0, yMm: 0, zMm: 0, lengthMm: 1, widthMm: 1, heightMm: 1,
     }],
     estWeightGrams: 100, billableWeightGrams: 100,

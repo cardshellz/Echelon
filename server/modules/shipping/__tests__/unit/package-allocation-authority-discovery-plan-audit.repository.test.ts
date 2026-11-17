@@ -113,7 +113,10 @@ function clientWithEvidence(options: {
       return result([]);
     },
   };
-  return { client, queries };
+  return {
+    client: client as unknown as Parameters<typeof auditPackageAllocationAuthorityDiscoveryPlan>[0],
+    queries,
+  };
 }
 
 describe("package-allocation authority discovery plan audit repository", () => {

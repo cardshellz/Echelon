@@ -98,7 +98,7 @@ describe("ShipStation unmapped physical shipment evidence", () => {
   });
 
   it("records blocked fulfillment and inventory evidence as one open review exception", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
+    const execute = vi.fn(async (_query?: unknown) => ({ rows: [] }));
 
     await recordShipStationUnmappedPhysicalException({ execute }, {
       shipment: {
@@ -145,7 +145,7 @@ describe("ShipStation unmapped physical shipment evidence", () => {
   });
 
   it("resolves a return label without changing outbound shipment, inventory, or channel authority", async () => {
-    const execute = vi.fn(async () => ({ rows: [{ id: 572 }] }));
+    const execute = vi.fn(async (_query?: unknown) => ({ rows: [{ id: 572 }] }));
 
     const changed = await resolveShipStationUnmappedPhysicalExceptionForReturnLabel(
       { execute },
@@ -174,7 +174,7 @@ describe("ShipStation unmapped physical shipment evidence", () => {
   });
 
   it("resolves only the matching open exception for an exact package replay", async () => {
-    const execute = vi.fn(async () => ({ rows: [{ id: 328 }] }));
+    const execute = vi.fn(async (_query?: unknown) => ({ rows: [{ id: 328 }] }));
 
     const changed = await resolveShipStationUnmappedPhysicalExceptionForExactReplay(
       { execute },
@@ -210,7 +210,7 @@ describe("ShipStation unmapped physical shipment evidence", () => {
   });
 
   it("resolves an exact historical provider echo from legacy shipment authority", async () => {
-    const execute = vi.fn(async () => ({ rows: [{ id: 328 }] }));
+    const execute = vi.fn(async (_query?: unknown) => ({ rows: [{ id: 328 }] }));
 
     const changed = await resolveShipStationUnmappedPhysicalExceptionForProviderEcho(
       { execute },
@@ -241,7 +241,7 @@ describe("ShipStation unmapped physical shipment evidence", () => {
   });
 
   it("closes the exact exception when a later provider event proves the label was voided", async () => {
-    const execute = vi.fn(async () => ({ rows: [{ id: 62 }] }));
+    const execute = vi.fn(async (_query?: unknown) => ({ rows: [{ id: 62 }] }));
 
     const changed = await resolveShipStationUnmappedPhysicalExceptionForVoidedLabel(
       { execute },

@@ -827,7 +827,7 @@ describe("applyShopifyRefundCascade", () => {
       payload,
       helpers(),
       { channelId: 36, now: NOW },
-    )).rejects.toMatchObject<RefundsCreateBadPayloadError>({
+    )).rejects.toMatchObject({
       name: "RefundsCreateBadPayloadError",
       message: expect.stringContaining(expectedMessage),
     });

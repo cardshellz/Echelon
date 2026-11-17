@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { poEmailDocumentHash } from "../../po-email-document-contract";
+import type { PoEmailOutboxDbPool } from "../../po-email-outbox.service";
 import {
   claimDeliveries,
   classifyDeliveryError,
   computeNextAttemptAt,
   processPoEmailOutboxBatch,
 } from "../../po-email-outbox.worker";
+
+function makePool(query: PoEmailOutboxDbPool["query"]): PoEmailOutboxDbPool {
+  return { query, connect: vi.fn() };
+}
 
 const claimedDelivery = {
   id: 42,
@@ -76,7 +81,7 @@ describe("PO email outbox worker", () => {
     });
 
     const result = await processPoEmailOutboxBatch({
-      dbPool: { query: poolQuery },
+      dbPool: makePool(poolQuery),
       deliver: vi.fn().mockRejectedValue(smtpError),
       now: new Date("2026-07-14T12:00:00.000Z"),
     });
@@ -135,7 +140,7 @@ describe("PO email outbox worker", () => {
     });
 
     const result = await processPoEmailOutboxBatch({
-      dbPool: { query: poolQuery },
+      dbPool: makePool(poolQuery),
       deliver: vi.fn().mockRejectedValue(smtpError),
       now: new Date("2026-07-14T12:00:00.000Z"),
     });
@@ -157,7 +162,7 @@ describe("PO email outbox worker", () => {
       .mockResolvedValueOnce({ rowCount: 1, rows: [{ status: "queued" }] });
 
     const result = await processPoEmailOutboxBatch({
-      dbPool: { query: poolQuery },
+      dbPool: makePool(poolQuery),
       deliver: vi.fn().mockRejectedValue(Object.assign(new Error("timeout"), { code: "ETIMEDOUT", responseCode: 421 })),
       now: new Date("2026-07-14T12:00:00.000Z"),
     });
@@ -233,7 +238,7 @@ describe("PO email outbox worker", () => {
     });
 
     const result = await processPoEmailOutboxBatch({
-      dbPool: { query: poolQuery },
+      dbPool: makePool(poolQuery),
       deliver: vi.fn().mockRejectedValue(lostResponseError),
       now: new Date("2026-07-14T12:00:00.000Z"),
     });
@@ -282,7 +287,7 @@ describe("PO email worker content gate", () => {
       }], rowCount: 1 });
     const deliver = vi.fn();
     const result = await processPoEmailOutboxBatch({
-      dbPool: { query }, deliver, now: new Date("2026-10-12T12:00:00Z"),
+      dbPool: makePool(query), deliver, now: new Date("2026-10-12T12:00:00Z"),
     });
     expect(result).toEqual({ claimed: 1, sent: 0, retried: 0, deadLettered: 0, held: 1 });
     expect(deliver).not.toHaveBeenCalled();
@@ -310,8 +315,8 @@ describe("PO email document hold audit logging", () => {
         .mockResolvedValueOnce({ rows: [returnedHold, { ...returnedHold, deliveryId: 43, poId: 8 }], rowCount: 2 })
         .mockResolvedValue({ rows: [], rowCount: 0 });
       const input = { batchSize: 10, leaseSeconds: 120, now };
-      await claimDeliveries({ query }, input);
-      await claimDeliveries({ query }, input); // Already held rows are not returned or logged again.
+      await claimDeliveries(makePool(query), input);
+      await claimDeliveries(makePool(query), input); // Already held rows are not returned or logged again.
       expect(warning.mock.calls.map(([entry]) => JSON.parse(entry))).toEqual([
         expectedAudit, { ...expectedAudit, deliveryId: 43, poId: 8 },
       ]);
@@ -330,7 +335,7 @@ describe("PO email document hold audit logging", () => {
         .mockResolvedValueOnce({ rows: [{ ...claimedDelivery, htmlBody: "<html>Secret terms</html>" }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [returnedHold], rowCount: 1 });
       const deliver = vi.fn();
-      await processPoEmailOutboxBatch({ dbPool: { query }, deliver, now });
+      await processPoEmailOutboxBatch({ dbPool: makePool(query), deliver, now });
       expect(warning).toHaveBeenCalledExactlyOnceWith(JSON.stringify(expectedAudit));
       expect(deliver).not.toHaveBeenCalled();
       expect(JSON.stringify(warning.mock.calls)).not.toMatch(/private-vendor|Private subject|Secret terms|htmlBody|toEmail/);
@@ -345,7 +350,7 @@ describe("PO email document hold audit logging", () => {
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         .mockResolvedValueOnce({ rows: [{ ...claimedDelivery, contractVersion: null }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 0 });
-      await expect(processPoEmailOutboxBatch({ dbPool: { query }, deliver: vi.fn(), now }))
+      await expect(processPoEmailOutboxBatch({ dbPool: makePool(query), deliver: vi.fn(), now }))
         .rejects.toThrow("lost its lease while recording a document hold");
       expect(warning).not.toHaveBeenCalled();
     } finally { warning.mockRestore(); }

@@ -81,7 +81,7 @@ function fixture(
       },
     ]),
     finalizeLabelTrackingPollAttempt,
-    transaction: async (work) => work(transaction),
+    transaction: async <T>(work: (tx: CarrierTrackingTransaction) => Promise<T>) => work(transaction),
   } as unknown as CarrierTrackingRepository;
   const getLabelTrackingSnapshot = vi.fn().mockResolvedValue({
     httpStatus: 200 as const,

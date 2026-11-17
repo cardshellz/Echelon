@@ -3,108 +3,21 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * Guards the test-typecheck ratchet.
+ * Guards the test-typecheck ratchet (permanently locked at 0 excluded test files).
  *
- * `tsconfig.tests.json` holds the exclusion list: test files that were already
- * failing when tests were first type-checked. It is debt and must only ever
- * shrink — adding an entry silences a real type error instead of fixing it, and
- * hands back the protection every unlisted file has.
+ * `tsconfig.tests.json` previously held a grandfathered exclusion list of 252
+ * test files that failed when test type-checking was introduced. That debt has
+ * been burned down completely to 0 (`PRs #2113, #2115` + `P2-3C`). Never add an
+ * entry to `tsconfig.tests.json`: fix the type error in the test or contract.
  *
  * The check runs as two halves (server and client) because sources plus every
  * test file exhausts Node's default heap on a CI runner. Both halves inherit the
- * one exclusion list, and between them they must cover everything the base
+ * single shared config, and between them they must cover everything the base
  * tsconfig compiles, or a whole area could stop being checked unnoticed.
- *
- * If this fails because the count went UP, remove the entry you added and fix
- * the file. If it went DOWN, lower BASELINE — that is the ratchet working.
  */
-const BASELINE_EXCLUDED_TEST_FILES = 83;
+const BASELINE_EXCLUDED_TEST_FILES = 0;
 
-const LOCKED_EXCLUDED_TEST_FILES = Object.freeze([
-  "server/modules/oms/__tests__/integration/inventory-cutover-receipt-evidence.integration.test.ts",
-  "server/modules/oms/__tests__/unit/c2-tx-aware-pipeline.test.ts",
-  "server/modules/oms/__tests__/unit/canonical-fulfillment-origin-account.test.ts",
-  "server/modules/oms/__tests__/unit/channel-fulfillment-authority.service.test.ts",
-  "server/modules/oms/__tests__/unit/channel-fulfillment-conflict.test.ts",
-  "server/modules/oms/__tests__/unit/channel-fulfillment-receipt-retry.test.ts",
-  "server/modules/oms/__tests__/unit/channel-fulfillment-review-retry.test.ts",
-  "server/modules/oms/__tests__/unit/channel-writeback.service.test.ts",
-  "server/modules/oms/__tests__/unit/ebay-order-poll-recovery.test.ts",
-  "server/modules/oms/__tests__/unit/ebay-tracking-push-regression.test.ts",
-  "server/modules/oms/__tests__/unit/fulfillment-sweeper.scheduler.test.ts",
-  "server/modules/oms/__tests__/unit/get-external-order-id.test.ts",
-  "server/modules/oms/__tests__/unit/historical-shipstation-split-repair.repository.test.ts",
-  "server/modules/oms/__tests__/unit/historical-shipstation-split-repair.service.test.ts",
-  "server/modules/oms/__tests__/unit/ingest-risk.test.ts",
-  "server/modules/oms/__tests__/unit/oms-ops-alert.service.test.ts",
-  "server/modules/oms/__tests__/unit/package-allocation-commercial-inheritance.domain.test.ts",
-  "server/modules/oms/__tests__/unit/push-shipment.test.ts",
-  "server/modules/oms/__tests__/unit/push-shopify-fulfillment.test.ts",
-  "server/modules/oms/__tests__/unit/reconcile-v2.test.ts",
-  "server/modules/oms/__tests__/unit/refunds-create-cascade.test.ts",
-  "server/modules/oms/__tests__/unit/ship-notify-retry.test.ts",
-  "server/modules/oms/__tests__/unit/shipstation-physical-recovery.service.test.ts",
-  "server/modules/oms/__tests__/unit/shipstation-unmapped-physical.test.ts",
-  "server/modules/oms/__tests__/unit/shipstation-unmapped-remediation.service.test.ts",
-  "server/modules/procurement/__tests__/audit/receiving-cost-application.audit.test.ts",
-  "server/modules/procurement/__tests__/integration/invoice-cost-review.integration.test.ts",
-  "server/modules/procurement/__tests__/integration/purchase-approval-authority.integration.test.ts",
-  "server/modules/procurement/__tests__/integration/shipment-cost-commands.integration.test.ts",
-  "server/modules/procurement/__tests__/integration/shipment-line-commands.integration.test.ts",
-  "server/modules/procurement/__tests__/unit/demand-events.routes.test.ts",
-  "server/modules/procurement/__tests__/unit/po-create-send.routes.test.ts",
-  "server/modules/procurement/__tests__/unit/po-email-outbox.service.test.ts",
-  "server/modules/procurement/__tests__/unit/po-email-outbox.worker.test.ts",
-  "server/modules/procurement/__tests__/unit/po-mark-transitions.routes.test.ts",
-  "server/modules/procurement/__tests__/unit/po-receive-options.routes.test.ts",
-  "server/modules/procurement/__tests__/unit/procurement-health.routes.test.ts",
-  "server/modules/procurement/__tests__/unit/procurement-health.service.test.ts",
-  "server/modules/procurement/__tests__/unit/procurement-report.routes.test.ts",
-  "server/modules/procurement/__tests__/unit/purchase-order-duplicate-quotes.service.test.ts",
-  "server/modules/procurement/__tests__/unit/purchase-replacement-forecast.test.ts",
-  "server/modules/procurement/__tests__/unit/purchase-workspace.repository.test.ts",
-  "server/modules/procurement/__tests__/unit/purchasing-admin.routes.test.ts",
-  "server/modules/procurement/__tests__/unit/receiving-mills.test.ts",
-  "server/modules/procurement/__tests__/unit/receiving.routes.test.ts",
-  "server/modules/procurement/__tests__/unit/recommendation-po-handoff-delete-guards.service.test.ts",
-  "server/modules/procurement/__tests__/unit/rfq-workflow.routes.test.ts",
-  "server/modules/procurement/__tests__/unit/shipment-close-atomicity.test.ts",
-  "server/modules/procurement/__tests__/unit/shipment-cost-http.test.ts",
-  "server/modules/procurement/__tests__/unit/shipment-line-http.test.ts",
-  "server/modules/procurement/__tests__/unit/shipment-tracking-landed-cost.test.ts",
-  "server/modules/procurement/__tests__/unit/shippable-lines.routes.test.ts",
-  "server/modules/shipping-engine/__tests__/unit/carrier-callback.test.ts",
-  "server/modules/shipping-engine/__tests__/unit/fulfillment-provider-connections.service.test.ts",
-  "server/modules/shipping-engine/__tests__/unit/fulfillment-routing.repository.test.ts",
-  "server/modules/shipping-engine/__tests__/unit/fulfillment-routing.service.test.ts",
-  "server/modules/shipping-engine/__tests__/unit/manual-rate-quote.test.ts",
-  "server/modules/shipping-engine/__tests__/unit/rate-program-clone.routes.test.ts",
-  "server/modules/shipping-engine/__tests__/unit/rate-program-clone.service.test.ts",
-  "server/modules/shipping-engine/__tests__/unit/shadow-quote.test.ts",
-  "server/modules/shipping-engine/__tests__/unit/shipment-quote.test.ts",
-  "server/modules/shipping-engine/__tests__/unit/storefront-rate-preview.routes.test.ts",
-  "server/modules/shipping/__tests__/integration/package-allocation-ledger.repository.integration.test.ts",
-  "server/modules/shipping/__tests__/unit/c9-engine-port.test.ts",
-  "server/modules/shipping/__tests__/unit/carrier-tracking-label-poll.service.test.ts",
-  "server/modules/shipping/__tests__/unit/carrier-tracking.service.test.ts",
-  "server/modules/shipping/__tests__/unit/declared-package-lifecycle.domain.test.ts",
-  "server/modules/shipping/__tests__/unit/historical-shipstation-contents-attestation.service.test.ts",
-  "server/modules/shipping/__tests__/unit/historical-shipstation-contents-audit.client.test.ts",
-  "server/modules/shipping/__tests__/unit/historical-shipstation-contents-audit.repository.test.ts",
-  "server/modules/shipping/__tests__/unit/historical-shipstation-contents-correction.service.test.ts",
-  "server/modules/shipping/__tests__/unit/historical-shipstation-contents-review.service.test.ts",
-  "server/modules/shipping/__tests__/unit/historical-shipstation-contents-system-recovery.service.test.ts",
-  "server/modules/shipping/__tests__/unit/package-allocation-authority-discovery-execution-audit.repository.test.ts",
-  "server/modules/shipping/__tests__/unit/package-allocation-authority-discovery-plan-audit.repository.test.ts",
-  "server/modules/shipping/__tests__/unit/package-allocation-authority-readiness.domain.test.ts",
-  "server/modules/shipping/__tests__/unit/package-allocation-authority-resolution.domain.test.ts",
-  "server/modules/shipping/__tests__/unit/package-allocation-ledger.repository.test.ts",
-  "server/modules/shipping/__tests__/unit/package-allocation-planning.service.test.ts",
-  "server/modules/shipping/__tests__/unit/reconcile-derive.test.ts",
-  "server/modules/shipping/__tests__/unit/shipping-engine.test.ts",
-  "server/modules/shipping/__tests__/unit/shipstation-physical-recovery.client.test.ts",
-  "server/modules/shipping/__tests__/unit/shipstation-tracking-webhook.routes.test.ts",
-]);
+const LOCKED_EXCLUDED_TEST_FILES: readonly string[] = Object.freeze([]);
 const LOCKED_EXCLUDED_TEST_FILES_SET = new Set<string>(LOCKED_EXCLUDED_TEST_FILES);
 
 const FIXED_EXCLUSIONS = ["node_modules", "build", "dist"];
@@ -122,6 +35,11 @@ function ratchetExclusions(): string[] {
 }
 
 describe("test typecheck ratchet", () => {
+  it("permanently enforces zero excluded test files across the repository", () => {
+    expect(ratchetExclusions()).toEqual([]);
+    expect(readConfig("tsconfig.tests.json").exclude).toEqual(FIXED_EXCLUSIONS);
+  });
+
   it("never grows the exclusion list", () => {
     expect(ratchetExclusions().length).toBeLessThanOrEqual(BASELINE_EXCLUDED_TEST_FILES);
   });

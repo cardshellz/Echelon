@@ -192,7 +192,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       commandFactory = commandModule.createShipmentCostCommands;
       repositoryFactory = repositoryModule.createDrizzleFinancialCommandRepository;
       defaultModulePool = databaseModule.pool;
-      service = createService(database, storage as Parameters<typeof createService>[1]);
+      service = createService(database, storage as unknown as Parameters<typeof createService>[1]);
     } finally {
       if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = previousDatabaseUrl;
@@ -251,7 +251,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
   it("cancels an unreceived shipment with only estimated charges and records one transition", async () => {
     await prepareCancellableShipment();
     const before = await state();
-    const cancelling = createService(database, storage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const cancelling = createService(database, storage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     await expect(cancelling.cancel(1, actorId, "Supplier withdrew shipment")).resolves.toMatchObject({ status: "cancelled" });
     const after = await state();
     expect(after[0]).toEqual(before[0]);
@@ -357,7 +357,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
         reportPid(Number((await tx.execute(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid));
         return work(tx);
       }) };
-      cancellation = createService(cancellationDatabase, storage as Parameters<typeof createService>[1], undefined, () => NOW)
+      cancellation = createService(cancellationDatabase, storage as unknown as Parameters<typeof createService>[1], undefined, () => NOW)
         .cancel(1, actorId, "Concurrent cancellation")
         .then(value => ({ ok: true, value }), (error: unknown) => ({ ok: false, error }));
       await waitUntilBlocked(await ready);
@@ -567,7 +567,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       await storage.bulkCreateInboundFreightCostAllocations(...args);
       throw new Error("Injected failure after real allocation insert");
     } };
-    const failingService = createService(database, failingStorage as Parameters<typeof createService>[1]);
+    const failingService = createService(database, failingStorage as unknown as Parameters<typeof createService>[1]);
     const before = await state();
     await expect(execute(await patch({ actualCents: 777 }), failingService)).rejects.toThrow("Injected failure after real allocation insert");
     expect(await state()).toEqual(before);
@@ -633,7 +633,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
         throw new Error("Injected failure after parent deletion");
       }),
     };
-    const abortingService = createService(abortingDatabase, storage as Parameters<typeof createService>[1]);
+    const abortingService = createService(abortingDatabase, storage as unknown as Parameters<typeof createService>[1]);
     await expect(abortingService.deleteShipment(9)).rejects.toThrow("Injected failure after parent deletion");
     expect((await pool.query("SELECT status FROM procurement.inbound_shipments WHERE id=9")).rows).toEqual([{ status: "draft" }]);
     expect(await service.deleteShipment(9)).toBe(true);
@@ -676,7 +676,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       // with explicit cost review rather than inventing an inventory source.
       async getProvisionalLotsByShipment() { return []; },
     };
-    const closingService = createService(database, closingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const closingService = createService(database, closingStorage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     const closing = closingService.close(1, actorId, "Finalize fixture shipment")
       .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
     let editing: Promise<{ ok: true; value: unknown } | { ok: false; error: unknown }> | undefined;
@@ -704,7 +704,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
           return work(tx);
         }),
       };
-      const cancellingService = createService(cancellationDatabase, storage as Parameters<typeof createService>[1], undefined, () => NOW);
+      const cancellingService = createService(cancellationDatabase, storage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
       cancelling = cancellingService.cancel(1, actorId, "Concurrent cancellation")
         .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
       const [editingPid, cancellationPid] = await Promise.all([ready, cancelReady]);
@@ -738,7 +738,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       ...storage,
       async getProvisionalLotsByShipment() { provisionalLookups++; return []; },
     };
-    const closingService = createService(database, closingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const closingService = createService(database, closingStorage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     const before = await state();
     await pool.query("ALTER TABLE procurement.inbound_shipment_status_history ADD CONSTRAINT shipment_cost_test_reject_close CHECK(to_status <> 'closed')");
     try {
