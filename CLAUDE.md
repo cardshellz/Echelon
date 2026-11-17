@@ -223,6 +223,12 @@ non-idempotent financial operations · use `allowNegative: true` · commit secre
   structure at boot. The legacy fallback routine in `server/db.ts` has been deleted
   (REFACTOR-PLAN P4.1); tracked migrations are the only schema authority. Do not add
   DDL or DML to `server/db.ts`.
+- **Schema baseline:** the legacy migration files cannot build a database from nothing, so
+  an empty database is built from `migrations/baseline/` (a generated, structure-only
+  snapshot of production) plus the migrations it does not cover. CI builds one on every
+  PR (`scripts/ci/build-database-from-repository.ts`, PostgreSQL 17). Never hand-edit the
+  baseline; regenerate it with `scripts/migrations/generate-baseline.mjs`. It never runs
+  in production, which already has migration records.
 - **Shipping engine:** fully engine-agnostic via `shippingEngine.*` interface (C9 complete).
   ShipStation adapter is the only implementation. Legacy `shipstation_order_id` /
   `shipstation_order_key` columns remain on `oms.oms_orders` and `wms.outbound_shipments`
