@@ -11,7 +11,7 @@ function createSubject(clock: () => Date = () => new Date("2026-08-24T14:30:00.0
     cancelOrder: vi.fn(),
     reverseRun: vi.fn(),
   };
-  const changes = { listAffectedVariantIds: vi.fn(async () => []) };
+  const changes = { listAffectedVariantIds: vi.fn(async (): Promise<number[]> => []) };
   const queries = { listProductRelationships: vi.fn(), listRecipes: vi.fn(), listOrders: vi.fn(), getOrder: vi.fn() };
   return {
     subject: new BuildUseCases(repository as any, changes as any, queries as any, clock),

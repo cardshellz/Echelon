@@ -29,6 +29,8 @@ const group: ProgramDestinationGroup = {
   name: "Northeast",
   sortOrder: 1,
   lockVersion: 3,
+  sourceDestinationScopeId: null,
+  sourceDestinationScopeLockVersion: null,
   destinations: [destination],
   hasCurrentDefinition: true,
   appearsInLiveRevision: true,
@@ -134,13 +136,19 @@ describe("pricing program coverage cell", () => {
 });
 
 describe("add destination group", () => {
+  type AddDestinationGroupProps = Parameters<typeof AddDestinationGroupButton>[0];
+
+  function createCallbacks() {
+    return {
+      onContinueDraft: vi.fn<AddDestinationGroupProps["onContinueDraft"]>(),
+      onRequestCreateRevision: vi.fn<AddDestinationGroupProps["onRequestCreateRevision"]>(),
+      onStartRates: vi.fn<AddDestinationGroupProps["onStartRates"]>(),
+    };
+  }
+
   function clickAddDestinationGroup(
     option: ProgramOptionState,
-    callbacks: {
-      onContinueDraft: ReturnType<typeof vi.fn>;
-      onRequestCreateRevision: ReturnType<typeof vi.fn>;
-      onStartRates: ReturnType<typeof vi.fn>;
-    },
+    callbacks: ReturnType<typeof createCallbacks>,
   ): void {
     const button = AddDestinationGroupButton({
       options: [option],
@@ -154,11 +162,7 @@ describe("add destination group", () => {
 
   it("requests confirmation before cloning an active revision", () => {
     const active = rateTable(101, "active");
-    const callbacks = {
-      onContinueDraft: vi.fn(),
-      onRequestCreateRevision: vi.fn(),
-      onStartRates: vi.fn(),
-    };
+    const callbacks = createCallbacks();
 
     clickAddDestinationGroup(
       { serviceLevel, active, draft: null, history: [active] },
@@ -177,11 +181,7 @@ describe("add destination group", () => {
   it("opens an existing draft without requesting another revision", () => {
     const active = rateTable(101, "active");
     const draft = rateTable(102, "draft");
-    const callbacks = {
-      onContinueDraft: vi.fn(),
-      onRequestCreateRevision: vi.fn(),
-      onStartRates: vi.fn(),
-    };
+    const callbacks = createCallbacks();
 
     clickAddDestinationGroup(
       { serviceLevel, active, draft, history: [draft, active] },
@@ -194,11 +194,7 @@ describe("add destination group", () => {
   });
 
   it("starts unsaved setup when no revision exists", () => {
-    const callbacks = {
-      onContinueDraft: vi.fn(),
-      onRequestCreateRevision: vi.fn(),
-      onStartRates: vi.fn(),
-    };
+    const callbacks = createCallbacks();
 
     clickAddDestinationGroup(
       { serviceLevel, active: null, draft: null, history: [] },

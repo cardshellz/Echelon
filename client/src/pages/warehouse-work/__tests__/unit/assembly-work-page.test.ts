@@ -14,7 +14,7 @@ function view(overrides: Partial<AssemblyTaskView> = {}): AssemblyTaskView {
     inputs: [{ variantId: 101, sku: "EA", name: "Each", quantity: "10" }], outputLocationCode: "FINISHED", outputPickBlocker: null, ...overrides };
 }
 function renderJob(data: AssemblyTaskView, actorId = "assembler") {
-  return renderToStaticMarkup(createElement(QueryClientProvider, { client: new QueryClient() }, createElement(Router, { ssrPath: "/assembly" }, createElement(AssemblyJob, { view: data, actorId }))));
+  return renderToStaticMarkup(createElement(QueryClientProvider, { client: new QueryClient() }, createElement(Router, { ssrPath: "/assembly", children: createElement(AssemblyJob, { view: data, actorId }) })));
 }
 describe("assembly operator safeguards", () => {
   it("offers packing continuation to the responsible worker only after the output pick", () => {

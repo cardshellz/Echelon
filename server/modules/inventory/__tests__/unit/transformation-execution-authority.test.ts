@@ -143,8 +143,8 @@ describe("transformation execution authority", () => {
   it("parses exact runtime lineage and rejects a changed activation", () => {
     expect(parseTransformationRuntimeAuthority([{
       authority: "canonical",
-      revision: 7n,
-      activationRunId: 11n,
+      revision: BigInt(7),
+      activationRunId: BigInt(11),
     }])).toEqual(canonicalRuntime);
 
     expect(() => parseTransformationRuntimeAuthority([{

@@ -239,6 +239,7 @@ describe("PgMarketplaceListingReplacementExecutionRepository", () => {
         leaseToken: null,
         now: new Date("2026-08-04T12:00:00.000Z"),
         leaseDurationMs: 60_000,
+        recoveryAuthorized: false,
       }),
     ).rejects.toMatchObject({
       code: "MARKETPLACE_LISTING_REPLACEMENT_OWNER_BINDING_MISMATCH",

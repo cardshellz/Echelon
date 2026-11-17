@@ -94,7 +94,7 @@ databaseDescribe.sequential("quantity authority PostgreSQL hardening", () => {
   it("rejects a forged SQL opening even when it cites a genuine verified observation", async () => {
     const before = await context.state();
     const original = PostgresInventoryQuantityLedger.prototype.openInsideTransaction;
-    vi.spyOn(PostgresInventoryQuantityLedger.prototype, "openInsideTransaction").mockImplementationOnce(async function(client, command, receipt) {
+    vi.spyOn(PostgresInventoryQuantityLedger.prototype, "openInsideTransaction").mockImplementationOnce(async function(this: PostgresInventoryQuantityLedger, client, command, receipt) {
       // Tamper only at SQL persistence, after the application has validated the
       // genuine 20-unit observation. Both forged journal payload and entries say
       // 30, so only DB binding to the approved observation can reject this case.

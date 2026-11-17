@@ -99,6 +99,6 @@ describe("publication recovery operator panel", () => {
   it("does not submit even if a denied operator invokes the mutation directly", async () => {
     render({ canActivate: false });
     const options = vi.mocked(useMutation).mock.calls[0][0];
-    await expect(options.mutationFn!({} as never, {} as never)).rejects.toThrow("permission is required");
+    await expect(options.mutationFn!({} as never)).rejects.toThrow("permission is required");
   });
 });

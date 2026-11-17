@@ -5,7 +5,7 @@ import { runControlTowerProjectionJob } from "../../control-tower-v2.job";
 
 describe("Control Tower V2 projection job", () => {
   it("reports a source with invalid rows as failed in dry-run mode", async () => {
-    const adapter: ControlTowerSourceAdapter<{ id: number }> = {
+    const adapter: ControlTowerSourceAdapter<Record<string, unknown>> = {
       name: "invalid_source",
       sourceNamespace: "test.invalid_source",
       sourceType: "test_finding",

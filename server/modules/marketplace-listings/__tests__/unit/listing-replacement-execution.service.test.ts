@@ -136,6 +136,7 @@ function claim(
       targetProviderPublicationKey: null,
       targetExternalListingId: null,
       desiredStateHash: "b".repeat(64),
+      sourceProviderSnapshot: null,
       sourceMembers: [
         {
           productVariantId: 12,

@@ -1,12 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
-process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
-
-const {
+import {
   createAdvisoryLockRunner,
   DEFAULT_SCHEDULER_LOCK_POOL_MAX,
   resolveSchedulerLockPoolMax,
-} = await import("../scheduler-lock");
+} from "../scheduler-lock";
+
+process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
+
+type AdvisoryLockPoolArg = Parameters<typeof createAdvisoryLockRunner>[0];
+type AdvisoryLockLoggerArg = Parameters<typeof createAdvisoryLockRunner>[1];
+type AdvisoryLockClient = Awaited<ReturnType<AdvisoryLockPoolArg["connect"]>>;
 
 interface QueryResult {
   rows: Array<Record<string, unknown>>;
@@ -14,13 +17,24 @@ interface QueryResult {
 
 describe("createAdvisoryLockRunner", () => {
   let query: ReturnType<typeof vi.fn>;
-  let release: ReturnType<typeof vi.fn>;
-  let connect: ReturnType<typeof vi.fn>;
-  let logger: { log: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> };
+  let release: ReturnType<typeof vi.fn<(err?: Error | boolean) => void>>;
+  let connect: ReturnType<typeof vi.fn<() => Promise<AdvisoryLockClient>>>;
+  let logger: {
+    log: ReturnType<typeof vi.fn<AdvisoryLockLoggerArg["log"]>>;
+    error: ReturnType<typeof vi.fn<AdvisoryLockLoggerArg["error"]>>;
+  };
+
+  const poolClient = (): AdvisoryLockClient => ({
+    query: query as unknown as AdvisoryLockClient["query"],
+    release: release as unknown as AdvisoryLockClient["release"],
+  });
 
   beforeEach(() => {
-    release = vi.fn();
-    logger = { log: vi.fn(), error: vi.fn() };
+    release = vi.fn<(err?: Error | boolean) => void>();
+    logger = {
+      log: vi.fn<AdvisoryLockLoggerArg["log"]>(),
+      error: vi.fn<AdvisoryLockLoggerArg["error"]>(),
+    };
   });
 
   it("runs the job while tracking, holding, and releasing an acquired advisory lock", async () => {
@@ -33,7 +47,7 @@ describe("createAdvisoryLockRunner", () => {
       }
       throw new Error(`Unexpected query: ${statement}`);
     });
-    connect = vi.fn(async () => ({ query, release }));
+    connect = vi.fn(async () => poolClient());
     const activeLocks = new Set<number>();
 
     const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
@@ -52,7 +66,7 @@ describe("createAdvisoryLockRunner", () => {
 
   it("skips the job without tracking or unlocking when the advisory lock is already held", async () => {
     query = vi.fn(async (): Promise<QueryResult> => ({ rows: [{ acquired: false }] }));
-    connect = vi.fn(async () => ({ query, release }));
+    connect = vi.fn(async () => poolClient());
     const job = vi.fn(async () => "processed");
     const activeLocks = new Set<number>();
 
@@ -77,7 +91,7 @@ describe("createAdvisoryLockRunner", () => {
       }
       throw new Error(`Unexpected query: ${statement}`);
     });
-    connect = vi.fn(async () => ({ query, release }));
+    connect = vi.fn(async () => poolClient());
     const activeLocks = new Set<number>();
 
     const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
@@ -116,7 +130,7 @@ describe("createAdvisoryLockRunner", () => {
       }
       throw new Error(`Unexpected query: ${statement}`);
     });
-    connect = vi.fn(async () => ({ query, release }));
+    connect = vi.fn(async () => poolClient());
     const activeLocks = new Set<number>();
     const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
 
@@ -135,7 +149,7 @@ describe("createAdvisoryLockRunner", () => {
     query = vi.fn(async (): Promise<QueryResult> => {
       throw acquireError;
     });
-    connect = vi.fn(async () => ({ query, release }));
+    connect = vi.fn(async () => poolClient());
     const activeLocks = new Set<number>();
     const job = vi.fn(async () => "processed");
     const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
@@ -158,7 +172,7 @@ describe("createAdvisoryLockRunner", () => {
       }
       throw new Error(`Unexpected query: ${statement}`);
     });
-    connect = vi.fn(async () => ({ query, release }));
+    connect = vi.fn(async () => poolClient());
     const activeLocks = new Set<number>();
     const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
 

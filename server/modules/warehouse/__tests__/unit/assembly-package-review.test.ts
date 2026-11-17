@@ -64,7 +64,7 @@ describe("assembly bench package evidence", () => {
     expect(query).not.toHaveBeenCalled();
   });
   it("reads only exact order/warehouse sources, with a bounded parameterized SELECT", async () => {
-    const query = vi.fn(async () => ({ rows: input().sources }));
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: input().sources }));
     const client = { query } as unknown as PoolClient;
     expect(await readOrderPackingSources(client, 70, 1)).toEqual(input().sources);
     expect(query).toHaveBeenCalledWith(expect.stringContaining("parent.warehouse_id=$2"), [70, 1]);

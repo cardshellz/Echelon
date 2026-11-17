@@ -115,7 +115,7 @@ describe("final cutover operator controls", () => {
   it("rejects bypassed mutation handlers when permission is denied", async () => {
     render({ canActivate: false });
     for (const [options] of vi.mocked(useMutation).mock.calls) {
-      await expect(options.mutationFn!({} as never, {} as never)).rejects.toThrow("authorized operator");
+      await expect(options.mutationFn!({} as never)).rejects.toThrow("authorized operator");
     }
   });
 });

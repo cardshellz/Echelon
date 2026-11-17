@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { EbayApiClient } from "../../adapters/ebay/ebay-api.client";
+import type { EbayInventoryItem } from "../../adapters/ebay/ebay-types";
 import { classifyEbayQuantityResponse, ebayRetryNotBefore } from "../../adapters/ebay/ebay-quantity-http";
 import { QuantityProviderEvidenceCollector, observeEbayQuantityRequest,
   type QuantityProviderRequestStart, type QuantityProviderResponseEvidence } from "../../../inventory-planning/application/quantity-provider-request-evidence";
@@ -7,7 +8,7 @@ import { QuantityProviderEvidenceCollector, observeEbayQuantityRequest,
 const clock = () => new Date("2026-09-08T20:00:00.000Z");
 const daily = { errors: [{ errorId: 25001, category: "APPLICATION",
   message: "A system error has occurred. You have exceeded your maximum call limit of 250 for item per day. Try back after 1 day." }] };
-const item = { product: { title: "Test", imageUrls: [] }, condition: "NEW",
+const item: Omit<EbayInventoryItem, "sku"> = { product: { title: "Test", imageUrls: [] }, condition: "NEW",
   availability: { shipToLocationAvailability: { quantity: 4 } } };
 function setup(request: typeof fetch) {
   const starts: QuantityProviderRequestStart[] = [];

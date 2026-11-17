@@ -43,6 +43,7 @@ const conversionRecipe: TransformationAdminRecipe = {
     componentQty: 5,
     sku: "P5",
     name: "Five pack",
+    isActive: true,
   }],
 };
 
@@ -278,7 +279,7 @@ function variant(input: {
     sku: input.sku,
     name: input.sku,
     unitsPerVariant: input.unitsPerVariant,
-    uomType: "unit",
+    uomType: input.unitsPerVariant === 1 ? "each" : "pack",
     isActive: true,
   };
 }
@@ -316,6 +317,9 @@ function draftModel(): TransformationAdminModel {
     lifecycleStatus: "draft",
     buildToPromiseEnabled: false,
     definitionHash: "b".repeat(64),
+    origin: "operator",
+    originInputHash: null,
+    originResultHash: null,
     validationState: "valid",
     validationErrors: [],
     changeReason: "Initial authority",

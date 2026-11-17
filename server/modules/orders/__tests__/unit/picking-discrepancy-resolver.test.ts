@@ -26,7 +26,7 @@ function makeService(
       warehouseId: 1,
       assignedPickerId: "picker-1",
     })),
-    getPendingReplenTasksForLocation: vi.fn(async () => []),
+    getPendingReplenTasksForLocation: vi.fn(async (): Promise<Array<Record<string, unknown>>> => []),
     updateReplenTask: vi.fn(async () => ({})),
   };
 

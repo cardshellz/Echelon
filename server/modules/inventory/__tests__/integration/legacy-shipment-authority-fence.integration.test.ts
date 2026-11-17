@@ -29,7 +29,10 @@ describeDatabase.sequential("legacy shipment authority transaction fence Postgre
     const { InventoryUseCases } = await import("../../application/inventory.use-cases");
     const { createInventoryMethods } = await import("../../infrastructure/inventory.repository");
     const db = drizzle(pool, { schema });
-    inventory = new InventoryUseCases(db, createInventoryMethods(db));
+    inventory = new InventoryUseCases(
+      db as unknown as ConstructorParameters<typeof InventoryUseCases>[0],
+      createInventoryMethods(db),
+    );
   });
 
   beforeEach(async () => {

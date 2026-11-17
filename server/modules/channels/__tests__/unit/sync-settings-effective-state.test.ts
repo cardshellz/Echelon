@@ -8,7 +8,7 @@ function settings(globalEnabled: boolean) {
     singletonKey: true,
     globalEnabled,
     sweepIntervalMinutes: 15,
-    revision: 7n,
+    revision: BigInt(7),
     changedBy: "operator-1",
     changeReason: "Reviewed state",
     lastSweepAt: null,

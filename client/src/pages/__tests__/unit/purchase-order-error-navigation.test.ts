@@ -22,7 +22,8 @@ function renderFailure(path: string, status: number): string {
     return renderToStaticMarkup(createElement(Router, {
       ssrPath: path,
       ssrSearch: "?tab=shipments&purchase=purchase%3A17%3Ashipments&via=shipment%3A42%3Acosts",
-    }, createElement(QueryClientProvider, { client }, createElement(AuthProvider, { children: createElement(PurchaseOrderDetail) }))));
+      children: createElement(QueryClientProvider, { client }, createElement(AuthProvider, { children: createElement(PurchaseOrderDetail) })),
+    }));
   } finally {
     client.clear();
   }

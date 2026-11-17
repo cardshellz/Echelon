@@ -240,7 +240,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const { db, sourceLocation } = makeSourceResolutionDb();
     const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const findSourceLocation = vi.spyOn(service as any, "findSourceLocation")
-      .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
+      .mockImplementation(async (variantId: unknown) => variantId === 67 ? sourceLocation : null);
     vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
 
     const guidance = await service.checkReplenNeeded(66, 1, {
@@ -264,7 +264,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const { db, sourceLocation } = makeSourceResolutionDb({ missingPickLevel: true });
     const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service as any, "findSourceLocation")
-      .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
+      .mockImplementation(async (variantId: unknown) => variantId === 67 ? sourceLocation : null);
     vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
 
     const guidance = await service.checkReplenNeeded(66, 1);
@@ -284,7 +284,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const { db, sourceLocation } = makeSourceResolutionDb({ explicitSourceRule: true });
     const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const findSourceLocation = vi.spyOn(service as any, "findSourceLocation")
-      .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
+      .mockImplementation(async (variantId: unknown) => variantId === 67 ? sourceLocation : null);
 
     const guidance = await service.checkReplenNeeded(66, 1, {
       currentQtyOverride: 0,
@@ -306,7 +306,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const { db, sourceLocation } = makeSourceResolutionDb({ noSourceVariants: true });
     const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service as any, "findSourceLocation")
-      .mockImplementation(async (variantId: number) => variantId === 66 ? sourceLocation : null);
+      .mockImplementation(async (variantId: unknown) => variantId === 66 ? sourceLocation : null);
 
     const guidance = await service.checkReplenNeeded(66, 1, {
       currentQtyOverride: 0,
@@ -341,7 +341,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const { db, sourceLocation } = makeSourceResolutionDb({ activeTask: staleTask });
     const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     vi.spyOn(service as any, "findSourceLocation")
-      .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
+      .mockImplementation(async (variantId: unknown) => variantId === 67 ? sourceLocation : null);
     vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
 
     const guidance = await service.checkReplenNeeded(66, 1, {
@@ -377,7 +377,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     const { db, sourceLocation } = makeSourceResolutionDb({ activeTask: reviewOnlyTask });
     const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const findSourceLocation = vi.spyOn(service as any, "findSourceLocation")
-      .mockImplementation(async (variantId: number) => variantId === 67 ? sourceLocation : null);
+      .mockImplementation(async (variantId: unknown) => variantId === 67 ? sourceLocation : null);
     vi.spyOn(service as any, "getSourceSlotRank").mockResolvedValue(0);
 
     const guidance = await service.checkReplenNeeded(66, 1, {
@@ -914,7 +914,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
       update: vi.fn((table: unknown) => ({
         set: vi.fn((value: any) => {
           updates.push({ table, value });
-          return { where: vi.fn(() => ({returning: async () => [{...task,...value,revision:task.revision+1}]})) };
+          return { where: vi.fn(() => ({returning: async () => [{...blockedTask,...value,revision:blockedTask.revision+1}]})) };
         }),
       })),
       execute: vi.fn(async () => ({ rows: [{ is_pickable: 1, location_type: "pick" }] })),
@@ -1015,7 +1015,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
     };
     const service = new ReplenishmentUseCases(db as any, {} as any, () => new Date(0), legacyTransformationExecutionAuthority);
     const serviceAny = service as any;
-    vi.spyOn(serviceAny, "getAvailableInventoryQty").mockImplementation(async (variantId: number, locationId: number) => {
+    vi.spyOn(serviceAny, "getAvailableInventoryQty").mockImplementation(async (variantId: unknown, locationId: unknown) => {
       if (variantId === 438 && locationId === 111) return 0;
       if (variantId === 67 && locationId === 1232) return 36;
       return 0;
@@ -1320,7 +1320,7 @@ describe("ReplenishmentUseCases source-empty blockers", () => {
 
   it("reports a queued missing pick-bin replen even when the picker-safe trigger returns null", async () => {
     const db = {
-      execute: vi.fn(async () => ({
+      execute: vi.fn(async (_query: unknown) => ({
         rows: [{
           variant_id: 100,
           location_id: 1,

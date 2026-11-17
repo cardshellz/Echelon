@@ -376,11 +376,11 @@ function financialHarness(source: ReturnFinancialCaseSource) {
       return storedRefund(input.idempotencyKey, input.requestHash, input.quoteHash, input.quote, input.notifyCustomer, input.notes);
     }),
     complete: vi.fn(async (input) => ({
-      commandType: "issue_customer_refund",
+      commandType: "issue_customer_refund" as const,
       caseId: source.caseId,
       caseNumber: source.caseNumber,
       customerRefundId: 81,
-      provider: "shopify",
+      provider: "shopify" as const,
       providerRefundId: input.execution.providerRefundId,
       currency: input.source.currency,
       amountCents: customerQuote().amountCents,
