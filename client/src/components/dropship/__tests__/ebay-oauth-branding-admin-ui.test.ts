@@ -19,6 +19,17 @@ describe("eBay .ops OAuth branding admin UI", () => {
       join(process.cwd(), "client", "src", "pages", "Dropship.tsx"),
       "utf8",
     );
+    const storeConnectionsModule = readFileSync(
+      join(
+        process.cwd(),
+        "client",
+        "src",
+        "pages",
+        "dropship-admin",
+        "StoreConnectionOpsTab.tsx",
+      ),
+      "utf8",
+    );
     const shell = readFileSync(
       join(
         process.cwd(),
@@ -34,10 +45,13 @@ describe("eBay .ops OAuth branding admin UI", () => {
     expect(shell).toContain("Store Connections");
     expect(shell).not.toContain("/dropship?tab=oauth-branding");
     expect(page).not.toContain('<TabsContent value="oauth-branding"');
-    const storeConnectionsStart = page.indexOf(
+    expect(page).toContain('import("./dropship-admin/StoreConnectionOpsTab")');
+    expect(page).toContain('<TabsContent value="stores" className="m-0">');
+    expect(page).toContain("<StoreConnectionOpsTab />");
+    const storeConnectionsStart = storeConnectionsModule.indexOf(
       "function StoreConnectionOpsTab()",
     );
-    const brandingPanelRender = page.indexOf(
+    const brandingPanelRender = storeConnectionsModule.indexOf(
       "<EbayOAuthBrandingAdminPanel />",
       storeConnectionsStart,
     );
