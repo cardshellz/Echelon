@@ -1,6 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
-import { InventoryPublicationOutboxService } from "../../application/inventory-publication-outbox.service";
+import {
+  InventoryPublicationOutboxService,
+  type InventoryPublicationOutboxStore,
+} from "../../application/inventory-publication-outbox.service";
 import type {
   QuantityPublicationAdmission,
   QuantityPublicationOutboxClaim,
@@ -13,11 +16,11 @@ const NOW = new Date("2026-09-01T18:00:00.000Z");
 
 describe("InventoryPublicationOutboxService", () => {
   let store: {
-    finalizeFailedRuns: ReturnType<typeof vi.fn>;
-    claimDue: ReturnType<typeof vi.fn>;
-    runIfCurrent: ReturnType<typeof vi.fn>;
-    recordVerified: ReturnType<typeof vi.fn>;
-    recordFailure: ReturnType<typeof vi.fn>;
+    finalizeFailedRuns: Mock<InventoryPublicationOutboxStore["finalizeFailedRuns"]>;
+    claimDue: Mock<InventoryPublicationOutboxStore["claimDue"]>;
+    runIfCurrent: Mock<(claim: ClaimedInventoryPublication, work: () => Promise<any>) => Promise<any>>;
+    recordVerified: Mock<InventoryPublicationOutboxStore["recordVerified"]>;
+    recordFailure: Mock<InventoryPublicationOutboxStore["recordFailure"]>;
   };
   let admittedClaims: QuantityPublicationOutboxClaim[];
   let quantityAdmission: Pick<QuantityPublicationAdmission, "runOutbox">;

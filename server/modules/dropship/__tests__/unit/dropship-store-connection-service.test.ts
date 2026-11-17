@@ -1,5 +1,5 @@
 import { createHash } from "crypto";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import type { Pool } from "pg";
 import type {
   DropshipLogEvent,
@@ -351,7 +351,7 @@ describe("DropshipStoreConnectionService", () => {
   let shopifyOAuthProvider: FakeOAuthProvider;
   let logs: DropshipLogEvent[];
   let service: DropshipStoreConnectionService;
-  let dropshipOmsWarehouses: { enabledWarehouseIds: number[]; listEnabledWarehouseIds: ReturnType<typeof vi.fn> };
+  let dropshipOmsWarehouses: { enabledWarehouseIds: number[]; listEnabledWarehouseIds: Mock<() => Promise<number[]>> };
 
   beforeEach(() => {
     repository = new FakeStoreConnectionRepository();
@@ -1526,7 +1526,7 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
 
   async listForAdmin(
     input: Parameters<DropshipStoreConnectionRepository["listForAdmin"]>[0],
-  ): ReturnType<DropshipStoreConnectionRepository["listForAdmin"]> {
+  ): Promise<Awaited<ReturnType<DropshipStoreConnectionRepository["listForAdmin"]>>> {
     this.lastListForAdminInput = input;
     return {
       items: this.connections.map((connection) => ({
@@ -1538,6 +1538,16 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
           email: "vendor@cardshellz.test",
           status: "active",
           entitlementStatus: "active",
+        },
+        listingConfig: {
+          isConfigured: false,
+          isActive: false,
+          listingMode: null,
+          inventoryMode: null,
+          priceMode: null,
+          requiredConfigKeys: [],
+          requiredProductFields: [],
+          updatedAt: null,
         },
         setupCheckSummary: {
           openCount: 1,
@@ -1573,7 +1583,7 @@ class FakeStoreConnectionRepository implements DropshipStoreConnectionRepository
 
   async claimObservedProviderAccount(
     input: Parameters<DropshipStoreConnectionRepository["claimObservedProviderAccount"]>[0],
-  ): ReturnType<DropshipStoreConnectionRepository["claimObservedProviderAccount"]> {
+  ): Promise<Awaited<ReturnType<DropshipStoreConnectionRepository["claimObservedProviderAccount"]>>> {
     const existing = this.connections.find(
       (connection) => connection.storeConnectionId === input.storeConnectionId,
     );

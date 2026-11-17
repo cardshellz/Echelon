@@ -5,6 +5,7 @@ import {
   type DropshipOrderIntakeHealthRepositoryResult,
 } from "../../application/dropship-order-intake-health-service";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "../../application/dropship-notification-events";
+import type { DropshipNotificationSender } from "../../application/dropship-ports";
 import type {
   DropshipOrderIntakeHealthPolicy,
   DropshipOrderIntakeHealthStatus,
@@ -73,7 +74,7 @@ describe("DropshipOrderIntakeHealthService outage notifications", () => {
 
 function makeService(input: {
   repository: DropshipOrderIntakeHealthRepository;
-  notificationSender: { send: ReturnType<typeof vi.fn> };
+  notificationSender: DropshipNotificationSender;
 }) {
   return new DropshipOrderIntakeHealthService({
     ...input,
@@ -91,6 +92,7 @@ function fakeRepository(input: {
     recordPollSucceeded: vi.fn(async () => makeResult("healthy", "degraded", "poll_succeeded")),
     recordPollFailed: vi.fn(async () => input.failed ?? makeResult("warning", "healthy", "poll_failed")),
     recordStalePolls: vi.fn(async () => input.stale ?? []),
+    restoreStoresHeldOnlyByOrderIntakeHealth: vi.fn(async () => []),
   };
 }
 

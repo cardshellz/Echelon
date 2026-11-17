@@ -81,7 +81,10 @@ describe("InventoryChannelExposureAdminService", () => {
       changeReason: "Register exact destination",
       idempotencyKey: "target-1",
     };
-    await service.createPublicationTarget(targetRequest, "operator-1");
+    await service.createPublicationTarget(
+      targetRequest as unknown as Parameters<typeof service.createPublicationTarget>[0],
+      "operator-1",
+    );
     expect(store.createPublicationTarget).toHaveBeenCalledWith({
       ...targetRequest,
       destinationKind: "channel_connection",
@@ -147,7 +150,7 @@ describe("InventoryChannelExposureAdminService", () => {
       expectedDraftPolicyId: null,
       expectedDraftDefinitionHash: null,
       idempotencyKey: "channel-policy-no-note",
-    }, "operator-1");
+    } as unknown as Parameters<typeof service.savePolicyDraft>[0], "operator-1");
     expect(store.savePolicyDraft).toHaveBeenCalledWith(expect.objectContaining({
       changeReason: null,
       actorId: "operator-1",
@@ -177,7 +180,7 @@ describe("InventoryChannelExposureAdminService", () => {
       externalScopeId: "location-1",
       publicationAuthority: "echelon",
       idempotencyKey: "target-no-note",
-    }, "operator-1");
+    } as unknown as Parameters<typeof service.createPublicationTarget>[0], "operator-1");
     expect(store.createPublicationTarget).toHaveBeenCalledWith(expect.objectContaining({
       changeReason: null,
       destinationKind: "channel_connection",

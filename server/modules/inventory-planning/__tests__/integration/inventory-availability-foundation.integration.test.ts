@@ -657,7 +657,8 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     const connectionId = (await pool.query("INSERT INTO channels.channel_connections(channel_id) VALUES ($1) RETURNING id", [channelId])).rows[0].id;
     const exposure = new InventoryChannelExposureAdminService(new PostgresInventoryChannelExposureAdminStore(database));
     const target = await exposure.createPublicationTarget({
-      channelId, channelConnectionId: connectionId, legacyFulfillmentNodeId: saved.fulfillmentNodeId,
+      destinationKind: "channel_connection",
+      channelId, channelConnectionId: connectionId, dropshipStoreConnectionId: null, legacyFulfillmentNodeId: saved.fulfillmentNodeId,
       providerScopeType: "location", externalScopeId: "source-test-location", publicationAuthority: "echelon",
       changeReason: "Prepare disabled exact destination", idempotencyKey: "source-test-target",
     }, "operator");
@@ -680,9 +681,9 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     const channelId = (await pool.query("INSERT INTO channels.channels(name,provider) VALUES ('Supply override','shopify') RETURNING id")).rows[0].id;
     const exposure = new InventoryChannelExposureAdminService(new PostgresInventoryChannelExposureAdminStore(database));
     const inherited = { allocationSemantics: null, eligible: null, shareBps: null, holdbackSellableUnits: null, maxPublish: null, minPublishSellableUnits: null };
-    const command = { scope: { scopeType: "variant", channelId, productId: scope.productId, productVariantId: scope.variantIds[0] },
+    const command = { scope: { scopeType: "variant" as const, channelId, productId: scope.productId, productVariantId: scope.variantIds[0] },
       value: { ...inherited, sourceFulfillmentNodeIds: [source.fulfillmentNodeId] },
-      expectedHeadRevision: "0", expectedDraftPolicyId: null, expectedDraftDefinitionHash: null, idempotencyKey: "warehouse-only" };
+      expectedHeadRevision: "0", expectedDraftPolicyId: null, expectedDraftDefinitionHash: null, changeReason: null, idempotencyKey: "warehouse-only" };
     const saved = await exposure.savePolicyDraft(command, "operator");
     await expect(exposure.savePolicyDraft(command, "operator")).resolves.toEqual({ ...saved, alreadyApplied: true });
     expect((await pool.query("SELECT source_fulfillment_node_ids,inherit_all FROM inventory.channel_exposure_policy_versions WHERE id=$1", [saved.definitionId])).rows)
@@ -2154,7 +2155,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         HASH,
       ],
     );
-    expect(BigInt(result.rows[0].id)).toBeGreaterThan(0n);
+    expect(BigInt(result.rows[0].id)).toBeGreaterThan(BigInt(0));
     const safetyAdminStore = new PostgresInventoryPromiseSafetyAdminStore(
       drizzle(pool, { schema: databaseSchema }),
     );

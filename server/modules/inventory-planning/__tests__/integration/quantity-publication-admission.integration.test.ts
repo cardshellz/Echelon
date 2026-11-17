@@ -265,7 +265,7 @@ dbDescribe.sequential("durable external quantity admission with actual migration
     await suppress(); await expect(admission.run(target, async () => undefined)).rejects.toThrow(); await release();
     const claim = (await admission.listDue(100)).find(row => row.scope.externalInventoryItemId === target.externalInventoryItemId)!;
     await admission.run(target, async () => ({ currentQuantity: 14 }));
-    expect(await admission.complete({ ...claim, attemptBoundaryId: String(BigInt(claim.attemptBoundaryId) + 1n) })).toBe(false);
+    expect(await admission.complete({ ...claim, attemptBoundaryId: String(BigInt(claim.attemptBoundaryId) + BigInt(1)) })).toBe(false);
     expect(await admission.complete({ ...claim, scope: { ...claim.scope, externalScopeId: "different-account" } })).toBe(false);
     expect(await admission.complete(claim)).toBe(true);
   });

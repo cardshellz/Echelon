@@ -242,7 +242,7 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
     existingSnapshot: { match: "FROM dropship.dropship_order_economics_snapshots", rows: [] },
     existingLedger: { match: "FROM dropship.dropship_wallet_ledger", rows: [] },
   };
-  return Object.values({ ...defaults, ...overrides });
+  return Object.values({ ...defaults, ...overrides }).filter((handler): handler is RowHandler => handler !== undefined);
 }
 
 function listingCandidateRow(overrides: Record<string, unknown> = {}) {

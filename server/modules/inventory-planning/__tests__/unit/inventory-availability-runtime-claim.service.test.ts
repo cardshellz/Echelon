@@ -224,7 +224,7 @@ describe("AuthorityAwareReservationService", () => {
     const service = new AuthorityAwareReservationService(executor({
       authority: "canonical",
       canonical,
-      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active", plan })),
+      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active" as const, plan })),
     }));
 
     await expect(service.releaseOrderReservation(
@@ -255,7 +255,7 @@ describe("AuthorityAwareReservationService", () => {
       getLatestClaim: vi.fn(async () => ({
         claimId: "71",
         revision: 4,
-        status: "active",
+        status: "active" as const,
         plan,
       })),
     }));
@@ -309,7 +309,7 @@ describe("AuthorityAwareReservationService", () => {
       getLatestClaim: vi.fn(async () => ({
         claimId: "71",
         revision: 4,
-        status: "active",
+        status: "active" as const,
         plan,
       })),
     }));
@@ -406,7 +406,7 @@ describe("AuthorityAwareReservationService", () => {
       getLatestClaim: vi.fn(async () => ({
         claimId: "70",
         revision: 3,
-        status: "active",
+        status: "active" as const,
         plan: currentPlan,
       })),
       getVariantMetadata: vi.fn(async () => new Map([
@@ -481,7 +481,7 @@ describe("AuthorityAwareReservationService", () => {
       getLatestClaim: vi.fn(async () => ({
         claimId: "70",
         revision: 3,
-        status: "active",
+        status: "active" as const,
         plan: currentPlan,
       })),
       getVariantMetadata: vi.fn(async () => new Map([
@@ -536,7 +536,7 @@ describe("AuthorityAwareReservationService", () => {
     const service = new AuthorityAwareReservationService(executor({
       authority: "canonical",
       canonical,
-      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active", plan })),
+      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active" as const, plan })),
     }));
 
     await expect(service.reconcileOrderDemand({
@@ -592,7 +592,7 @@ describe("AuthorityAwareReservationService", () => {
     const service = new AuthorityAwareReservationService(executor({
       authority: "canonical",
       canonical,
-      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active", plan })),
+      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active" as const, plan })),
     }));
 
     await expect(service.reconcileRefundOrderDemand({
@@ -631,7 +631,7 @@ describe("AuthorityAwareReservationService", () => {
     const service = new AuthorityAwareReservationService(executor({
       authority: "canonical",
       canonical,
-      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active", plan })),
+      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active" as const, plan })),
     }));
 
     await expect(service.reconcileOrderDemand({
@@ -655,7 +655,7 @@ describe("AuthorityAwareReservationService", () => {
   it("records an unchanged canonical demand event without replacing or releasing", async () => {
     const plan = canonicalPlan();
     const canonical = {
-      claimOrder: vi.fn(async () => ({
+      claimOrder: vi.fn(async (_input: { idempotencyKey: string }) => ({
         outcome: "claimed" as const,
         claimId: "70",
         claimKey: plan.requestKey,
@@ -665,7 +665,7 @@ describe("AuthorityAwareReservationService", () => {
         plan,
         idempotentReplay: false,
       })),
-      replaceOrderClaim: vi.fn(async () => {
+      replaceOrderClaim: vi.fn(async (_input: { idempotencyKey: string }) => {
         throw Object.assign(new Error("demand unchanged"), { code: "ORDER_DEMAND_UNCHANGED" });
       }),
       releaseOrderClaim: vi.fn(),
@@ -673,7 +673,7 @@ describe("AuthorityAwareReservationService", () => {
     const service = new AuthorityAwareReservationService(executor({
       authority: "canonical",
       canonical,
-      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active", plan })),
+      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active" as const, plan })),
       getVariantMetadata: vi.fn(async () => new Map([
         [101, { productVariantId: 101, sku: "EA", unitsPerVariant: 1 }],
         [102, { productVariantId: 102, sku: "C25", unitsPerVariant: 25 }],
@@ -715,7 +715,7 @@ describe("AuthorityAwareReservationService", () => {
   it("reports zero released refund demand when the canonical plan is unchanged", async () => {
     const plan = canonicalPlan();
     const canonical = {
-      claimOrder: vi.fn(async () => ({
+      claimOrder: vi.fn(async (_input: { idempotencyKey: string }) => ({
         outcome: "claimed" as const,
         claimId: "70",
         claimKey: plan.requestKey,
@@ -725,7 +725,7 @@ describe("AuthorityAwareReservationService", () => {
         plan,
         idempotentReplay: false,
       })),
-      replaceOrderClaim: vi.fn(async () => {
+      replaceOrderClaim: vi.fn(async (_input: { idempotencyKey: string }) => {
         throw Object.assign(new Error("demand unchanged"), { code: "ORDER_DEMAND_UNCHANGED" });
       }),
       releaseOrderClaim: vi.fn(),
@@ -733,7 +733,7 @@ describe("AuthorityAwareReservationService", () => {
     const service = new AuthorityAwareReservationService(executor({
       authority: "canonical",
       canonical,
-      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active", plan })),
+      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active" as const, plan })),
       getVariantMetadata: vi.fn(async () => new Map([
         [101, { productVariantId: 101, sku: "EA", unitsPerVariant: 1 }],
         [102, { productVariantId: 102, sku: "C25", unitsPerVariant: 25 }],
@@ -771,7 +771,7 @@ describe("AuthorityAwareReservationService", () => {
       authority: "canonical",
       legacy,
       canonical,
-      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active", plan })),
+      getLatestClaim: vi.fn(async () => ({ claimId: "70", revision: 3, status: "active" as const, plan })),
     }));
 
     await expect(service.reconcileOrderDemand({
@@ -872,7 +872,10 @@ function executor(input: {
         getReservationStatus: vi.fn(),
         claimOrder: vi.fn(),
         replaceOrderClaim: vi.fn(),
+        displaceForConfirmedShipment: vi.fn(),
         releaseOrderClaim: vi.fn(),
+        pickClaimLine: vi.fn(),
+        unpickClaimLine: vi.fn(),
         reconcileCycleCount: vi.fn(),
         ...input.canonical,
       },
@@ -913,7 +916,7 @@ function fakeLegacy(): ReservationServiceContract {
     })),
     reconcileRefundOrderDemand: vi.fn(async (command) => ({
       releasedReservationQuantity: command.releaseTargets.reduce(
-        (total, target) => total + target.quantity,
+        (total: number, target: { quantity: number }) => total + target.quantity,
         0,
       ),
     })),

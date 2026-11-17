@@ -116,7 +116,7 @@ describe("cutover preflight repository transaction ownership", () => {
     [{ authority: "unknown", revision: "1" }],
     [{ authority: "legacy", revision: "0" }],
     [{ authority: "legacy", revision: "1" }, { authority: "canonical", revision: "2" }],
-  ])("rejects invalid authority evidence before owner reads: %j", async (authorityRows) => {
+  ])("rejects invalid authority evidence before owner reads: %j", async (...authorityRows) => {
     const { repository, query, release } = fixture({ authorityRows });
     await expect(repository.capture()).rejects.toHaveProperty("name", "ZodError");
     expect(readWmsCutoverDemand).not.toHaveBeenCalled();

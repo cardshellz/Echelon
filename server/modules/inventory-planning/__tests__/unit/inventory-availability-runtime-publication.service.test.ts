@@ -4,6 +4,7 @@ import type { InventoryChannelExposureRuntimePlan } from "@shared/types/inventor
 import {
   AuthorityAwareInventoryPublicationService,
   type ActiveInventoryPublicationTarget,
+  type CanonicalInventoryPublicationIntent,
   type InventoryAvailabilityRuntimePublicationContext,
   type InventoryAvailabilityRuntimePublicationExecutor,
 } from "../../application/inventory-availability-runtime-publication.service";
@@ -528,7 +529,7 @@ function runtimeContext(
     listActivePublicationProductIds: vi.fn(async () => [10]),
     planProduct: vi.fn(async () => runtimePlan(targets)),
     loadActivePublicationTargets: vi.fn(async () => targets),
-    enqueueFullPublications: vi.fn(async (_runId, intents) => ({
+    enqueueFullPublications: vi.fn(async (_runId: string, intents: readonly CanonicalInventoryPublicationIntent[]) => ({
       enqueuedRows: intents.length,
       coalescedRows: 0,
       enqueuedPublicationKeys: intents.map((row) =>
@@ -583,6 +584,7 @@ function runtimePlan(targets: ActiveInventoryPublicationTarget[]): InventoryChan
         externalScopeId: target.externalScopeId,
         publicationAuthority: "echelon" as const,
         publicationTargetState: "live" as const,
+        hold: null,
         sourceBinding: {
           bindingId: target.sourceBindingId ?? 7,
           version: 1,
@@ -629,6 +631,7 @@ function runtimePlan(targets: ActiveInventoryPublicationTarget[]): InventoryChan
             externalInventoryItemId: mapping.externalInventoryItemId,
             externalSku: mapping.externalSku,
           } : null,
+          hold: null,
           blockers: mapping ? [] : [{
             code: "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING",
             message: "The target has no active provider inventory identity for this SKU.",

@@ -259,8 +259,6 @@ class FakePasskeyRepository implements DropshipPasskeyRepository {
   }): Promise<DropshipPasskeyCredentialRecord> {
     const credential: DropshipPasskeyCredentialRecord = {
       id: this.deps.credentials.length + 1,
-      backupEligible: input.backupEligible,
-      backupState: input.backupState,
       ...input,
     };
     this.deps.credentials.push(credential);

@@ -101,7 +101,7 @@ describe("PgDropshipEbayManagedLocationProvider", () => {
   });
 
   it("does not mutate an already matching enabled managed location", async () => {
-    const fetchFn = vi.fn(async () => jsonResponse(matchingLocation()));
+    const fetchFn = vi.fn<typeof fetch>(async () => jsonResponse(matchingLocation()));
 
     await expect(providerWith({ fetchFn }).ensureWithAccessToken({
       accessToken: "access-token",
@@ -173,7 +173,7 @@ describe("PgDropshipEbayManagedLocationProvider", () => {
 
 function providerWith(input: {
   fetchFn: typeof fetch;
-  warehouseRow?: typeof warehouse;
+  warehouseRow?: Omit<typeof warehouse, "postal_code"> & { postal_code: string | null };
 }): PgDropshipEbayManagedLocationProvider {
   const client = new FakePgClient(rows([input.warehouseRow ?? warehouse]));
   return new PgDropshipEbayManagedLocationProvider({

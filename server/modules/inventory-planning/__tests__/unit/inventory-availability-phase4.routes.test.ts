@@ -3,7 +3,10 @@ import type { AddressInfo } from "node:net";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { registerInventoryAvailabilityPhase4Routes } from "../../interfaces/http/inventory-availability-phase4.routes";
+import {
+  registerInventoryAvailabilityPhase4Routes,
+  type InventoryAvailabilityPhase4RouteDependencies,
+} from "../../interfaces/http/inventory-availability-phase4.routes";
 import { InventoryAvailabilityShadowRepositoryError } from "../../infrastructure/inventory-availability-shadow.repository";
 
 const HASH = "a".repeat(64);
@@ -177,7 +180,7 @@ function buildApp(
     activationDryRunService,
     activationService,
     publicationReadbackService,
-  });
+  } as unknown as InventoryAvailabilityPhase4RouteDependencies);
   return app;
 }
 

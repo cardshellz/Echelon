@@ -1,4 +1,4 @@
-import type { Pool, PoolClient, QueryResult } from "pg";
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { describe, expect, it } from "vitest";
 import { PgDropshipCarrierProtectionRepository } from "../../infrastructure/dropship-carrier-protection.repository";
 
@@ -38,12 +38,12 @@ class DefaultConflictClient {
   readonly queries: string[] = [];
   released = false;
 
-  async query<T>(sql: string): Promise<QueryResult<T>> {
+  async query<T extends QueryResultRow>(sql: string): Promise<QueryResult<T>> {
     const normalized = sql.trim();
     this.queries.push(normalized);
-    if (normalized.includes("INSERT INTO dropship.dropship_admin_config_commands")) return result([{ id: 50 } as T]);
-    if (normalized.includes("FROM dropship.dropship_carrier_protection_policies WHERE id")) return result([policyRow() as T]);
-    if (normalized.includes("SELECT a.id AS assignment_id")) return result([{ assignment_id: 4, policy_id: 3 } as T]);
+    if (normalized.includes("INSERT INTO dropship.dropship_admin_config_commands")) return result([{ id: 50 } as unknown as T]);
+    if (normalized.includes("FROM dropship.dropship_carrier_protection_policies WHERE id")) return result([policyRow() as unknown as T]);
+    if (normalized.includes("SELECT a.id AS assignment_id")) return result([{ assignment_id: 4, policy_id: 3 } as unknown as T]);
     return result([]);
   }
 
@@ -66,6 +66,6 @@ function poolFor(client: DefaultConflictClient): Pool {
   return { connect: async () => client as unknown as PoolClient } as unknown as Pool;
 }
 
-function result<T>(rows: T[]): QueryResult<T> {
+function result<T extends QueryResultRow>(rows: T[]): QueryResult<T> {
   return { command: "SELECT", rowCount: rows.length, oid: 0, fields: [], rows };
 }

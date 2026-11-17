@@ -19,10 +19,10 @@ describe("private dropship listing media route", () => {
   async function start(authenticated: boolean, imageForMember: ReturnType<typeof vi.fn>) {
     const app = express();
     app.use((req: Request, _res: Response, next: NextFunction) => {
-      (req as Request & { session: Record<string, unknown> }).session = authenticated ? {
+      req.session = (authenticated ? {
         dropship: { authIdentityId: 1, memberId: "member-1", cardShellzEmail: "vendor@example.test",
           hasPasskey: false, authMethod: "password", entitlementStatus: "active", authenticatedAt: "2026-09-06T12:00:00Z" },
-      } : {};
+      } : {}) as unknown as Request["session"];
       next();
     });
     registerDropshipListingRoutes(app, { imageForMember } as unknown as DropshipListingPreviewService);
