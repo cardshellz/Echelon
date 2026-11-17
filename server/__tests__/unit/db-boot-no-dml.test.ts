@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 /**
  * P0.2 — boot must never mutate data (source invariant / writer-ratchet seed).
  *
- * The schema fallbacks in db.ts (once run at every boot, now once per
- * release) historically carried one-time data repairs that
+ * The schema fallbacks that used to live in db.ts (run at every boot, later
+ * once per release, deleted under REFACTOR-PLAN P4.1) carried one-time data
+ * repairs that
  * re-ran on EVERY deploy: an unledgered DELETE of inventory_levels rows, a
  * hold wipe that silently released every line-item hold on restart (audit
  * F2, CRITICAL), shipment status rewrites, engine-ref re-stamping, and a

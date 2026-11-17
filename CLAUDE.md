@@ -220,8 +220,9 @@ non-idempotent financial operations · use `allowNegative: true` · commit secre
 - **Money:** confirm the unit (cents vs decimal) of any financial column before computing.
 - **Migrations:** numbered SQL files in `migrations/`, applied in the release phase
   (`scripts/release.sh`). New schema goes there. The web process never changes table
-  structure at boot; `runReleaseSchemaFallbacks()` in `server/db.ts` holds legacy
-  idempotent fallbacks that also run only in the release phase. Do not add to it.
+  structure at boot. The legacy fallback routine in `server/db.ts` has been deleted
+  (REFACTOR-PLAN P4.1); tracked migrations are the only schema authority. Do not add
+  DDL or DML to `server/db.ts`.
 - **Shipping engine:** fully engine-agnostic via `shippingEngine.*` interface (C9 complete).
   ShipStation adapter is the only implementation. Legacy `shipstation_order_id` /
   `shipstation_order_key` columns remain on `oms.oms_orders` and `wms.outbound_shipments`

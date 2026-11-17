@@ -8,8 +8,10 @@ import { join, relative, resolve } from "node:path";
  * It used to: `server/index.ts` awaited about 170 `ALTER TABLE` / `CREATE
  * INDEX` fallbacks before listening. Those need exclusive locks on live
  * tables, so one session holding a table kept every dyno from starting
- * (outages on 2026-11-10 and 2026-11-11). Schema now changes only in the
- * release phase. These checks keep it that way.
+ * (outages on 2026-11-10 and 2026-11-11). Schema now changes only through the
+ * tracked migrations, in the release phase. The fallback routine itself was
+ * retired block by block and deleted (REFACTOR-PLAN-2026-07.md, P4.1). These
+ * checks keep it from coming back.
  */
 const ROOT = resolve(__dirname, "../../..");
 const read = (path: string) => readFileSync(join(ROOT, path), "utf8");
@@ -27,34 +29,31 @@ function productionFiles(directory: string): string[] {
 }
 
 describe("web boot does not change schema", () => {
+  const FALLBACK_NAMES = /runReleaseSchemaFallbacks|runStartupMigrations|SKIP_STARTUP_MIGRATIONS/;
+
   it("the web entry point does not reference the schema fallbacks", () => {
-    const entry = withoutComments(read("server/index.ts"));
-    expect(entry).not.toMatch(/runReleaseSchemaFallbacks|runStartupMigrations/);
-    expect(entry).not.toMatch(/SKIP_STARTUP_MIGRATIONS/);
+    expect(withoutComments(read("server/index.ts"))).not.toMatch(FALLBACK_NAMES);
   });
 
-  it("nothing under server/ calls the schema fallbacks; only the release script does", () => {
-    const callers = productionFiles(join(ROOT, "server"))
-      .filter((path) => relative(ROOT, path).replace(/\\/g, "/") !== "server/db.ts")
-      .filter((path) => /runReleaseSchemaFallbacks|runStartupMigrations/.test(withoutComments(readFileSync(path, "utf8"))))
+  it("no production code under server/ or scripts/ references the deleted fallback routine", () => {
+    const referrers = [...productionFiles(join(ROOT, "server")), ...productionFiles(join(ROOT, "scripts"))]
+      .filter((path) => FALLBACK_NAMES.test(withoutComments(readFileSync(path, "utf8"))))
       .map((path) => relative(ROOT, path).replace(/\\/g, "/"));
-    expect(callers).toEqual([]);
-    expect(withoutComments(read("scripts/release-schema-fallbacks.ts"))).toMatch(/runReleaseSchemaFallbacks\(\)/);
+    expect(referrers).toEqual([]);
   });
 
-  it("the release phase runs the fallbacks after tracked migrations and before the smoke check", () => {
+  it("the release phase runs tracked migrations, then the smoke check, and no schema fallback step", () => {
     const steps = read("scripts/release.sh").split("\n").filter((line) => !line.trim().startsWith("#")).join("\n");
     const migrations = steps.indexOf("migrations/run-migrations.ts");
-    const fallbacks = steps.indexOf("scripts/release-schema-fallbacks.ts");
     const smoke = steps.indexOf("scripts/release-smoke-order-edit.ts");
     expect(migrations).toBeGreaterThanOrEqual(0);
-    expect(fallbacks).toBeGreaterThan(migrations);
-    expect(smoke).toBeGreaterThan(fallbacks);
+    expect(smoke).toBeGreaterThan(migrations);
+    expect(steps).not.toMatch(/schema-fallbacks/);
   });
 
-  it("the fallbacks keep their lock and time limits", () => {
-    const routine = withoutComments(read("server/db.ts"));
-    expect(routine).toMatch(/await boundStartupMigrationClient\(connection\)/);
-    expect(routine).not.toMatch(/runStartupMigrations/);
+  it("server/db.ts runs no SQL of its own and contains no DDL", () => {
+    const source = withoutComments(read("server/db.ts"));
+    expect(source).not.toMatch(/\.query\(/);
+    expect(source).not.toMatch(/\b(?:CREATE|ALTER|DROP)\s+(?:TABLE|(?:UNIQUE\s+)?INDEX|SCHEMA|TYPE|SEQUENCE)\b/i);
   });
 });

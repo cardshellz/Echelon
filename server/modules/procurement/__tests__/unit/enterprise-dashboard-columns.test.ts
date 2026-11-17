@@ -63,9 +63,10 @@ describe("enterprise dashboard column names", () => {
  * "cannot be implemented". Because that block ran first, it aborted the routine
  * and every remaining schema fallback was skipped on every boot.
  *
- * The file's own comment already forbids this ("NEVER reintroduce membership.*
- * DDL in this startup routine") after a 2026-06 incident where boot-time DDL
- * dropped plans.tier_level. These assertions make that rule enforceable.
+ * The routine's own comment already forbade this after a 2026-06 incident where
+ * boot-time DDL dropped plans.tier_level. The routine has since been deleted
+ * (REFACTOR-PLAN P4.1); server/db.ts keeps the rule in a comment, and these
+ * assertions keep membership DDL from coming back into that file.
  */
 describe("startup schema routine stays out of the membership domain", () => {
   it("does not create the subscription engine tables", () => {
@@ -80,6 +81,6 @@ describe("startup schema routine stays out of the membership domain", () => {
   });
 
   it("keeps the rule that prompted this documented", () => {
-    expect(DB_SRC).toMatch(/NEVER reintroduce\s*\n?\s*\/\/\s*membership\.\* DDL in this startup routine/);
+    expect(DB_SRC).toMatch(/never\s*\n?\s*\/\/\s*run DDL against membership\.\* from Echelon/);
   });
 });
