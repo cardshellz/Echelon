@@ -441,8 +441,9 @@ function startEchelonSyncScheduler(
 
 (async () => {
   // The web process never changes table structure. Schema is applied in the
-  // release phase (scripts/release.sh) before this process starts; see
-  // runReleaseSchemaFallbacks() in ./db for why it must stay out of boot.
+  // release phase (scripts/release.sh) before this process starts. Schema
+  // changes at boot need exclusive locks on live tables, and one blocked lock
+  // kept every dyno from starting (outages on 2026-11-10 and 2026-11-11).
 
   // Create WMS service container and attach to app for route handlers
   const services = createServices(db, dbPool);

@@ -56,13 +56,14 @@ describe("database pool startup configuration", () => {
   });
 
   it("configures every pool before checkout without an async connect hook", () => {
-    // Three pools, each built from createDatabasePoolConfig so each sends the
-    // search_path in its startup packet: the shared pool, the side-channel pool
-    // (createSideChannelPool, the dropship process heartbeat's own connection,
-    // step 1 PR A verify V5) and the startup-migrations pool. The second count
-    // pins that no pool is constructed without that config.
-    expect(DATABASE_BOOT_SOURCE.match(/createDatabasePoolConfig\(\{/g)).toHaveLength(3);
-    expect(DATABASE_BOOT_SOURCE.match(/new Pool\(/g)).toHaveLength(3);
+    // Two pools, each built from createDatabasePoolConfig so each sends the
+    // search_path in its startup packet: the shared pool and the side-channel
+    // pool (createSideChannelPool, the dropship process heartbeat's own
+    // connection, step 1 PR A verify V5). The third, the schema fallback
+    // routine's pool, was deleted with that routine (REFACTOR-PLAN P4.1). The
+    // second count pins that no pool is constructed without that config.
+    expect(DATABASE_BOOT_SOURCE.match(/createDatabasePoolConfig\(\{/g)).toHaveLength(2);
+    expect(DATABASE_BOOT_SOURCE.match(/new Pool\(/g)).toHaveLength(2);
     expect(DATABASE_BOOT_SOURCE).not.toMatch(/pool\.on\(["']connect["']/);
     expect(DATABASE_BOOT_SOURCE).not.toMatch(/client\.query\([^)]*SET search_path/i);
   });

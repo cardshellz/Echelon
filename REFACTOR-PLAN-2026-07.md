@@ -359,6 +359,16 @@ scope (order/line), released_by; picking + push + release all consult it; boot w
   numbering series (renumber the 43 collisions); drizzle `tablesFilter` per the runbook; boot and
   release runner use the same env var. Fail-fast, no swallow-all.
 
+  **Status 2026-11-17: done.** Every block is retired and the routine, `startup-migration-guard.ts`,
+  `scripts/release-schema-fallbacks.ts`, its step in `scripts/release.sh`, the
+  `SKIP_STARTUP_MIGRATIONS` flag and `schema-fallbacks-only-shrink.test.ts` are deleted. Releases
+  v3571 to v3573 ran the emptied routine (`completed`, no statements) before it was deleted.
+  `server/db.ts` now changes no schema; `boot-does-not-change-schema.test.ts` and
+  `db-boot-no-dml.test.ts` keep it that way. What P4.1 still owes: the objects the Progress
+  table marks as having no tracked CREATE (the buildable-from-migrations baseline), the
+  numbering collisions and the drizzle `tablesFilter`. The text below is the record of how the
+  routine was retired.
+
   **Status 2026-11-11.** Step 0 is done: the routine (`runReleaseSchemaFallbacks()` in
   `server/db.ts`, formerly `runStartupMigrations()`) no longer runs when the web process boots.
   It runs once per release from `scripts/release.sh`. It still exists, and the end state is that
