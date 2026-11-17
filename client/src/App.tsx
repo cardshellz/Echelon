@@ -12,6 +12,7 @@ import { PURCHASING_DASHBOARD_READ_PERMISSIONS, PURCHASING_READ_PERMISSION, RECE
 import { VendorAuthProvider, useVendorAuth } from "@/lib/vendor-auth";
 import { DropshipAuthProvider, dropshipPortalPath, isDropshipPortalHost, useDropshipAuth } from "@/lib/dropship-auth";
 import { PWAUpdatePrompt } from "@/components/PWAUpdatePrompt";
+import { loadChunkWithRetry } from "@/lib/chunk-loading";
 import NotFound from "@/pages/not-found";
 import {
   CUSTOMER_RETURN_PORTAL_PATH,
@@ -20,112 +21,145 @@ import {
   isCustomerReturnPortalPath,
 } from "@shared/returns/customer-return-portal-paths";
 
-const Layout = React.lazy(() => import("@/components/layout/AppShell"));
-const Login = React.lazy(() => import("@/pages/Login"));
+// Every lazy page carries its own Suspense boundary. With only one boundary
+// around the whole <Switch>, a route change whose chunk is still loading does
+// not commit: React keeps the previous page mounted (hidden behind the
+// fallback). Going back before the chunk arrives then re-shows that page
+// without remounting it, so its on-mount reads never run again and it shows
+// stale data (a paid purchase order still reading as unpaid, for example).
+// A per-page boundary lets the route change commit at once: the old page
+// unmounts and the new page shows the fallback while its chunk loads.
+// React.lazy keeps a failed import for good, so every chunk loads through
+// loadChunkWithRetry: a page opened while offline loads once the connection
+// is back instead of staying broken until a full reload.
+function lazyWithRetry<T extends React.ComponentType<any>>(
+  load: () => Promise<{ default: T }>,
+): React.LazyExoticComponent<T> {
+  return React.lazy(() => loadChunkWithRetry(load));
+}
 
-const VendorLayout = React.lazy(() => import("@/components/vendor/VendorLayout"));
-const VendorLogin = React.lazy(() => import("@/pages/vendor/VendorLogin"));
-const VendorRegister = React.lazy(() => import("@/pages/vendor/VendorRegister"));
-const VendorDashboard = React.lazy(() => import("@/pages/vendor/VendorDashboard"));
-const VendorProducts = React.lazy(() => import("@/pages/vendor/VendorProducts"));
-const VendorOrders = React.lazy(() => import("@/pages/vendor/VendorOrders"));
-const VendorWallet = React.lazy(() => import("@/pages/vendor/VendorWallet"));
-const VendorSettings = React.lazy(() => import("@/pages/vendor/VendorSettings"));
-const DropshipPortalAuth = React.lazy(() => import("@/pages/dropship/DropshipPortalAuth"));
-const DropshipPortalPrivacy = React.lazy(() => import("@/pages/dropship/DropshipPortalPrivacy"));
-const DropshipPortalDashboard = React.lazy(() => import("@/pages/dropship/DropshipPortalDashboard"));
-const DropshipPortalHome = React.lazy(() => import("@/pages/dropship/DropshipPortalHome"));
-const DropshipPortalCatalog = React.lazy(() => import("@/pages/dropship/DropshipPortalCatalog"));
-const DropshipPortalNotifications = React.lazy(() => import("@/pages/dropship/DropshipPortalNotifications"));
-const DropshipPortalCostChanges = React.lazy(() => import("@/pages/dropship/DropshipPortalCostChanges"));
-const DropshipPortalOnboarding = React.lazy(() => import("@/pages/dropship/DropshipPortalOnboarding"));
-const DropshipPortalOrders = React.lazy(() => import("@/pages/dropship/DropshipPortalOrders"));
-const DropshipPortalReturns = React.lazy(() => import("@/pages/dropship/DropshipPortalReturns"));
-const DropshipPortalSettings = React.lazy(() => import("@/pages/dropship/DropshipPortalSettings"));
-const DropshipPortalWallet = React.lazy(() => import("@/pages/dropship/DropshipPortalWallet"));
-const Dashboard = React.lazy(() => import("@/pages/Dashboard"));
-const Inventory = React.lazy(() => import("@/pages/Inventory"));
-const Builds = React.lazy(() => import("@/pages/Builds"));
-const SupplyTransformations = React.lazy(() => import("@/pages/SupplyTransformations"));
-const InventoryCutover = React.lazy(() => import("@/pages/InventoryCutover"));
-const ProcurementPromiseSafetySettings = React.lazy(() => import("@/pages/ProcurementPromiseSafetySettings"));
-const ChannelInventory = React.lazy(() => import("@/pages/ChannelInventory"));
-const BuildRecipeCreate = React.lazy(() => import("@/pages/BuildRecipeCreate"));
-const Orders = React.lazy(() => import("@/pages/Orders"));
-const Dropship = React.lazy(() => import("@/pages/Dropship"));
-const Subscriptions = React.lazy(() => import("@/pages/Subscriptions"));
-const PickingPage = React.lazy(() => import("@/pages/PickingPage"));
-const PickPriority = React.lazy(() => import("@/pages/PickPriority"));
-const OrderHistory = React.lazy(() => import("@/pages/OrderHistory"));
-const WarehousePage = React.lazy(() => import("@/pages/WarehousePage"));
-const PickZones = React.lazy(() => import("@/pages/PickZones"));
-const WarehouseSettingsPage = React.lazy(() => import("@/pages/WarehouseSettingsPage"));
-const WorkConfigurationPage = React.lazy(() => import("@/pages/warehouse-work/WorkConfigurationPage"));
-const AssemblyWorkPage = React.lazy(() => import("@/pages/warehouse-work/AssemblyWorkPage"));
-const Integrations = React.lazy(() => import("@/pages/Integrations"));
-const Users = React.lazy(() => import("@/pages/Users"));
-const Roles = React.lazy(() => import("@/pages/Roles"));
-const ChannelsPage = React.lazy(() => import("@/pages/ChannelsPage"));
-const CatalogPage = React.lazy(() => import("@/pages/CatalogPage"));
-const ProductDetail = React.lazy(() => import("@/pages/ProductDetail"));
-const CycleCounts = React.lazy(() => import("@/pages/CycleCounts"));
-const Transfers = React.lazy(() => import("@/pages/Transfers"));
-const Suppliers = React.lazy(() => import("@/pages/Suppliers"));
-const PurchasingView = React.lazy(() => import("@/pages/PurchasingView"));
-const ReorderEngine = React.lazy(() => import("@/pages/ReorderEngine"));
-const ProcurementAutomation = React.lazy(() => import("@/pages/ProcurementAutomation"));
-const ProcurementRuns = React.lazy(() => import("@/pages/ProcurementRuns"));
-const ProcurementRfqs = React.lazy(() => import("@/pages/ProcurementRfqs"));
-const Receiving = React.lazy(() => import("@/pages/Receiving"));
-const InventoryHistory = React.lazy(() => import("@/pages/InventoryHistory"));
-const Replenishment = React.lazy(() => import("@/pages/Replenishment"));
-const SlottingSetup = React.lazy(() => import("@/pages/SlottingSetup"));
-const ChannelAllocation = React.lazy(() => import("@/pages/ChannelAllocation"));
-const ProductLines = React.lazy(() => import("@/pages/ProductLines"));
-const ShippingGroups = React.lazy(() => import("@/pages/ShippingGroups"));
-const PurchaseOrders = React.lazy(() => import("@/pages/PurchaseOrders"));
-const PurchaseOrderDetail = React.lazy(() => import("@/pages/PurchaseOrderDetail"));
-const PurchaseOrderEdit = React.lazy(() => import("@/pages/PurchaseOrderEdit"));
-const PurchasingDashboard = React.lazy(() => import("@/pages/PurchasingDashboard"));
-const Returns = React.lazy(() => import("@/pages/Returns"));
-const ReturnLabelSettings = React.lazy(() => import("@/pages/ReturnLabelSettings"));
-const ReturnCases = React.lazy(() => import("@/pages/ReturnCases"));
-const ReturnPolicies = React.lazy(() => import("@/pages/ReturnPolicies"));
-const CustomerReturnPortalPreview = React.lazy(() => import("@/pages/CustomerReturnPortalPreview"));
-const CustomerReturnCustomerPortal = React.lazy(() => import("@/pages/CustomerReturnCustomerPortal"));
-const CustomerReturnPortalAccess = React.lazy(() => import("@/pages/CustomerReturnPortalAccess"));
-const InboundShipments = React.lazy(() => import("@/pages/InboundShipments"));
-const OutboundShipments = React.lazy(() => import("@/pages/OutboundShipments"));
-const ShipmentOrderContext = React.lazy(() => import("@/pages/ShipmentOrderContext"));
-const InboundShipmentDetail = React.lazy(() => import("@/pages/InboundShipmentDetail"));
-const CostDashboard = React.lazy(() => import("@/pages/CostDashboard"));
-const APDashboard = React.lazy(() => import("@/pages/APDashboard"));
-const APInvoices = React.lazy(() => import("@/pages/APInvoices"));
-const APInvoiceDetail = React.lazy(() => import("@/pages/APInvoiceDetail"));
-const APPayments = React.lazy(() => import("@/pages/APPayments"));
-const SupplierCredits = React.lazy(() => import("@/pages/SupplierCredits"));
-const SupplierReturns = React.lazy(() => import("@/pages/SupplierReturns"));
-const StaffPasswordChange = React.lazy(() =>
+function lazyPage<T extends React.ComponentType<any>>(
+  load: () => Promise<{ default: T }>,
+): T {
+  const LazyComponent = lazyWithRetry(load);
+  function LazyPage(props: React.ComponentProps<T>) {
+    return (
+      <React.Suspense fallback={<RouteSuspenseFallback />}>
+        <LazyComponent {...props} />
+      </React.Suspense>
+    );
+  }
+  // Typed as the page itself, so every call site type-checks exactly as it
+  // did when the page was imported directly.
+  return LazyPage as unknown as T;
+}
+
+const Layout = lazyWithRetry(() => import("@/components/layout/AppShell"));
+const Login = lazyPage(() => import("@/pages/Login"));
+
+const VendorLayout = lazyWithRetry(() => import("@/components/vendor/VendorLayout"));
+const VendorLogin = lazyPage(() => import("@/pages/vendor/VendorLogin"));
+const VendorRegister = lazyPage(() => import("@/pages/vendor/VendorRegister"));
+const VendorDashboard = lazyPage(() => import("@/pages/vendor/VendorDashboard"));
+const VendorProducts = lazyPage(() => import("@/pages/vendor/VendorProducts"));
+const VendorOrders = lazyPage(() => import("@/pages/vendor/VendorOrders"));
+const VendorWallet = lazyPage(() => import("@/pages/vendor/VendorWallet"));
+const VendorSettings = lazyPage(() => import("@/pages/vendor/VendorSettings"));
+const DropshipPortalAuth = lazyPage(() => import("@/pages/dropship/DropshipPortalAuth"));
+const DropshipPortalPrivacy = lazyPage(() => import("@/pages/dropship/DropshipPortalPrivacy"));
+const DropshipPortalDashboard = lazyPage(() => import("@/pages/dropship/DropshipPortalDashboard"));
+const DropshipPortalHome = lazyPage(() => import("@/pages/dropship/DropshipPortalHome"));
+const DropshipPortalCatalog = lazyPage(() => import("@/pages/dropship/DropshipPortalCatalog"));
+const DropshipPortalNotifications = lazyPage(() => import("@/pages/dropship/DropshipPortalNotifications"));
+const DropshipPortalCostChanges = lazyPage(() => import("@/pages/dropship/DropshipPortalCostChanges"));
+const DropshipPortalOnboarding = lazyPage(() => import("@/pages/dropship/DropshipPortalOnboarding"));
+const DropshipPortalOrders = lazyPage(() => import("@/pages/dropship/DropshipPortalOrders"));
+const DropshipPortalReturns = lazyPage(() => import("@/pages/dropship/DropshipPortalReturns"));
+const DropshipPortalSettings = lazyPage(() => import("@/pages/dropship/DropshipPortalSettings"));
+const DropshipPortalWallet = lazyPage(() => import("@/pages/dropship/DropshipPortalWallet"));
+const Dashboard = lazyPage(() => import("@/pages/Dashboard"));
+const Inventory = lazyPage(() => import("@/pages/Inventory"));
+const Builds = lazyPage(() => import("@/pages/Builds"));
+const SupplyTransformations = lazyPage(() => import("@/pages/SupplyTransformations"));
+const InventoryCutover = lazyPage(() => import("@/pages/InventoryCutover"));
+const ProcurementPromiseSafetySettings = lazyPage(() => import("@/pages/ProcurementPromiseSafetySettings"));
+const ChannelInventory = lazyPage(() => import("@/pages/ChannelInventory"));
+const BuildRecipeCreate = lazyPage(() => import("@/pages/BuildRecipeCreate"));
+const Orders = lazyPage(() => import("@/pages/Orders"));
+const Dropship = lazyPage(() => import("@/pages/Dropship"));
+const Subscriptions = lazyPage(() => import("@/pages/Subscriptions"));
+const PickingPage = lazyPage(() => import("@/pages/PickingPage"));
+const PickPriority = lazyPage(() => import("@/pages/PickPriority"));
+const OrderHistory = lazyPage(() => import("@/pages/OrderHistory"));
+const WarehousePage = lazyPage(() => import("@/pages/WarehousePage"));
+const PickZones = lazyPage(() => import("@/pages/PickZones"));
+const WarehouseSettingsPage = lazyPage(() => import("@/pages/WarehouseSettingsPage"));
+const WorkConfigurationPage = lazyPage(() => import("@/pages/warehouse-work/WorkConfigurationPage"));
+const AssemblyWorkPage = lazyPage(() => import("@/pages/warehouse-work/AssemblyWorkPage"));
+const Integrations = lazyPage(() => import("@/pages/Integrations"));
+const Users = lazyPage(() => import("@/pages/Users"));
+const Roles = lazyPage(() => import("@/pages/Roles"));
+const ChannelsPage = lazyPage(() => import("@/pages/ChannelsPage"));
+const CatalogPage = lazyPage(() => import("@/pages/CatalogPage"));
+const ProductDetail = lazyPage(() => import("@/pages/ProductDetail"));
+const CycleCounts = lazyPage(() => import("@/pages/CycleCounts"));
+const Transfers = lazyPage(() => import("@/pages/Transfers"));
+const Suppliers = lazyPage(() => import("@/pages/Suppliers"));
+const PurchasingView = lazyPage(() => import("@/pages/PurchasingView"));
+const ReorderEngine = lazyPage(() => import("@/pages/ReorderEngine"));
+const ProcurementAutomation = lazyPage(() => import("@/pages/ProcurementAutomation"));
+const ProcurementRuns = lazyPage(() => import("@/pages/ProcurementRuns"));
+const ProcurementRfqs = lazyPage(() => import("@/pages/ProcurementRfqs"));
+const Receiving = lazyPage(() => import("@/pages/Receiving"));
+const InventoryHistory = lazyPage(() => import("@/pages/InventoryHistory"));
+const Replenishment = lazyPage(() => import("@/pages/Replenishment"));
+const SlottingSetup = lazyPage(() => import("@/pages/SlottingSetup"));
+const ChannelAllocation = lazyPage(() => import("@/pages/ChannelAllocation"));
+const ProductLines = lazyPage(() => import("@/pages/ProductLines"));
+const ShippingGroups = lazyPage(() => import("@/pages/ShippingGroups"));
+const PurchaseOrders = lazyPage(() => import("@/pages/PurchaseOrders"));
+const PurchaseOrderDetail = lazyPage(() => import("@/pages/PurchaseOrderDetail"));
+const PurchaseOrderEdit = lazyPage(() => import("@/pages/PurchaseOrderEdit"));
+const PurchasingDashboard = lazyPage(() => import("@/pages/PurchasingDashboard"));
+const Returns = lazyPage(() => import("@/pages/Returns"));
+const ReturnLabelSettings = lazyPage(() => import("@/pages/ReturnLabelSettings"));
+const ReturnCases = lazyPage(() => import("@/pages/ReturnCases"));
+const ReturnPolicies = lazyPage(() => import("@/pages/ReturnPolicies"));
+const CustomerReturnPortalPreview = lazyPage(() => import("@/pages/CustomerReturnPortalPreview"));
+const CustomerReturnCustomerPortal = lazyPage(() => import("@/pages/CustomerReturnCustomerPortal"));
+const CustomerReturnPortalAccess = lazyPage(() => import("@/pages/CustomerReturnPortalAccess"));
+const InboundShipments = lazyPage(() => import("@/pages/InboundShipments"));
+const OutboundShipments = lazyPage(() => import("@/pages/OutboundShipments"));
+const ShipmentOrderContext = lazyPage(() => import("@/pages/ShipmentOrderContext"));
+const InboundShipmentDetail = lazyPage(() => import("@/pages/InboundShipmentDetail"));
+const CostDashboard = lazyPage(() => import("@/pages/CostDashboard"));
+const APDashboard = lazyPage(() => import("@/pages/APDashboard"));
+const APInvoices = lazyPage(() => import("@/pages/APInvoices"));
+const APInvoiceDetail = lazyPage(() => import("@/pages/APInvoiceDetail"));
+const APPayments = lazyPage(() => import("@/pages/APPayments"));
+const SupplierCredits = lazyPage(() => import("@/pages/SupplierCredits"));
+const SupplierReturns = lazyPage(() => import("@/pages/SupplierReturns"));
+const StaffPasswordChange = lazyWithRetry(() =>
   import("@/components/identity/StaffPasswordChange").then((m) => ({ default: m.StaffPasswordChange })),
 );
-const Settings = React.lazy(() => import("@/pages/Settings"));
-const ProcurementSettings = React.lazy(() => import("@/pages/ProcurementSettings"));
-const ShippingSettings = React.lazy(() => import("@/pages/ShippingSettings"));
-const ShippingServiceLevels = React.lazy(() => import("@/pages/ShippingServiceLevels"));
-const ShippingServiceLevelDetail = React.lazy(() => import("@/pages/ShippingServiceLevelDetail"));
-const NotificationPreferences = React.lazy(() => import("@/pages/NotificationPreferences"));
-const EbayChannelPage = React.lazy(() => import("@/pages/EbayChannelPage"));
-const WalmartChannelRouteHost = React.lazy(() =>
+const Settings = lazyPage(() => import("@/pages/Settings"));
+const ProcurementSettings = lazyPage(() => import("@/pages/ProcurementSettings"));
+const ShippingSettings = lazyPage(() => import("@/pages/ShippingSettings"));
+const ShippingServiceLevels = lazyPage(() => import("@/pages/ShippingServiceLevels"));
+const ShippingServiceLevelDetail = lazyPage(() => import("@/pages/ShippingServiceLevelDetail"));
+const NotificationPreferences = lazyPage(() => import("@/pages/NotificationPreferences"));
+const EbayChannelPage = lazyPage(() => import("@/pages/EbayChannelPage"));
+const WalmartChannelRouteHost = lazyWithRetry(() =>
   import("@/pages/WalmartChannelPage").then((m) => ({ default: m.WalmartChannelRouteHost })),
 );
-const ShopifyChannelPage = React.lazy(() => import("@/pages/ShopifyChannelPage"));
-const SyncLogPage = React.lazy(() => import("@/pages/SyncLogPage"));
-const OmsOrders = React.lazy(() => import("@/pages/OmsOrders"));
-const OrderEdits = React.lazy(() => import("@/pages/OrderEdits"));
-const FlowMonitor = React.lazy(() => import("@/pages/FlowMonitor"));
-const VendorList = React.lazy(() => import("@/pages/VendorList"));
-const VendorDetail = React.lazy(() => import("@/pages/VendorDetail"));
-const DemandPlanner = React.lazy(() => import("@/pages/DemandPlanner"));
+const ShopifyChannelPage = lazyPage(() => import("@/pages/ShopifyChannelPage"));
+const SyncLogPage = lazyPage(() => import("@/pages/SyncLogPage"));
+const OmsOrders = lazyPage(() => import("@/pages/OmsOrders"));
+const OrderEdits = lazyPage(() => import("@/pages/OrderEdits"));
+const FlowMonitor = lazyPage(() => import("@/pages/FlowMonitor"));
+const VendorList = lazyPage(() => import("@/pages/VendorList"));
+const VendorDetail = lazyPage(() => import("@/pages/VendorDetail"));
+const DemandPlanner = lazyPage(() => import("@/pages/DemandPlanner"));
 
 function RouteSuspenseFallback({ fullScreen = false }: { fullScreen?: boolean }) {
   return (
