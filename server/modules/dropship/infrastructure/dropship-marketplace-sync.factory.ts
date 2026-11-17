@@ -6,6 +6,7 @@ import {
   DropshipMarketplaceSyncService,
   type MarketplaceSyncRestorePort,
 } from "../application/dropship-marketplace-sync-service";
+import { catalogSetupUrl } from "../domain/catalog-arrivals";
 import { DropshipError } from "../domain/errors";
 import { MARKETPLACE_SYNC_ACTOR } from "../domain/marketplace-sync-keys";
 import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./dropship-ebay-fulfillment-policy-guard.factory";
@@ -69,6 +70,8 @@ export function createDropshipMarketplaceSyncServiceFromEnv(): DropshipMarketpla
     clock: systemDropshipListingPreviewClock,
     // Legacy authority only (the service checks): a blocked restore of a live listing at 0 sends 0 instead.
     zeroQuantity: createDropshipLiveListingZeroQuantityServiceFromEnv(),
+    // The policy notice's link to Listing settings (`DROPSHIP_PORTAL_URL || VENDOR_PORTAL_URL`, as the catalog arrivals email).
+    listingSettingsUrl: catalogSetupUrl(process.env.DROPSHIP_PORTAL_URL || process.env.VENDOR_PORTAL_URL),
     logger: {
       debug: (action, data) => logger.debug(action, data),
       info: (action, data) => logger.info(action, data),

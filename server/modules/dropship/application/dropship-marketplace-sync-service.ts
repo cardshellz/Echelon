@@ -206,6 +206,12 @@ export interface MarketplaceSyncPolicyCheckWrite {
   issueCodes: string[];
   verdictHash: string;
   listingCount: number;
+  /** The policy's name on eBay, as the guard's evaluation read it; null when it has none (the words then say "your eBay shipping policy"). */
+  policyName: string | null;
+  /** Shipping services Card Shellz ships with for this store (the guard's capability), named in the words' "such as". */
+  supportedServiceNames: string[];
+  /** The handling time Card Shellz needs, in business days; null when unknown. */
+  requiredHandlingTimeBusinessDays: number | null;
   checkedAt: Date;
 }
 
@@ -331,6 +337,11 @@ export interface DropshipMarketplaceSyncServiceDependencies {
   zeroQuantity?: Pick<DropshipLiveListingZeroQuantityService, "publishZeroIfLive">;
   /** Tests shorten it; production uses MARKETPLACE_SYNC_TICK_BUDGET_MS. */
   tickBudgetMs?: number;
+  /**
+   * The portal's Listing settings page (catalogSetupUrl of DROPSHIP_PORTAL_URL), linked in the policy notice.
+   * Absent or null: the words name the page without a link.
+   */
+  listingSettingsUrl?: string | null;
 }
 
 export interface MarketplaceSyncTickResult {
@@ -1056,7 +1067,10 @@ export class DropshipMarketplaceSyncService {
         const issueCodes = [...new Set(preflight.issues.map((issue) => issue.code))].sort();
         const written = await this.deps.repository.applyPolicyCheck({ vendorId: store.vendorId, storeConnectionId: store.storeConnectionId,
           fulfillmentPolicyId: policy.fulfillmentPolicyId, compatible: preflight.compatible, issueCodes,
-          verdictHash: fulfillmentPolicyVerdictHash(issueCodes), listingCount: policy.listingCount, checkedAt: this.deps.clock.now() });
+          verdictHash: fulfillmentPolicyVerdictHash(issueCodes), listingCount: policy.listingCount,
+          // The guard's own read of the policy and capability: no second eBay call for the words.
+          policyName: preflight.policyName ?? null, supportedServiceNames: preflight.supportedServiceNames ?? [],
+          requiredHandlingTimeBusinessDays: preflight.requiredHandlingTimeBusinessDays ?? null, checkedAt: this.deps.clock.now() });
         result.policyChecks += 1;
         if (written.notified) {
           this.deps.logger.warn("dropship.marketplace_sync.policy_incompatible", { ...fields, outcome: "notified",
@@ -1089,7 +1103,8 @@ export class DropshipMarketplaceSyncService {
     }
     const batches = await this.deps.repository.listUnsentNoticeBatches(MARKETPLACE_SYNC_MAX_NOTICE_BATCHES_PER_TICK);
     for (const batch of batches) {
-      const words = describeMarketplaceSyncNoticeBatch(batch.kind, batch.payloads);
+      const words = describeMarketplaceSyncNoticeBatch(batch.kind, batch.payloads,
+        { listingSettingsUrl: this.deps.listingSettingsUrl ?? null });
       const fields = { vendor_id: batch.vendorId, store_connection_id: batch.storeConnectionId, batch_key: batch.batchKey, kind: batch.kind,
         notice_count: batch.payloads.length };
       try {

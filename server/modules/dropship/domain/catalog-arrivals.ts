@@ -32,6 +32,8 @@ export const CATALOG_JOB_FAILURE_ALERT_STREAK = 3;
 export const CATALOG_NEW_ITEMS_EMAIL_CATEGORIES_SHOWN = 20;
 /** The path of step 1 under the portal URL (client/src/lib/dropship-catalog-steps.ts catalogStepPath("choose")). */
 export const CATALOG_CHOOSE_PORTAL_PATH = "catalog/choose";
+/** The path of step 2, Listing settings, under the portal URL (dropship-catalog-steps.ts CATALOG_STEPS "setup"; App.tsx catalog/:step). */
+export const CATALOG_SETUP_PORTAL_PATH = "catalog/setup";
 
 /** §14 codes of the arrivals job, the conversion follow-up and the "Got it" refusal. */
 export const CATALOG_ARRIVALS_ERROR_CODES = {
@@ -278,6 +280,15 @@ export function marksNamedByStoredPayload(payload: unknown): Array<{ categoryId:
  * when unset or not an absolute http(s) URL: the words then name the portal.
  */
 export function catalogChooseUrl(portalBaseUrl: string | null | undefined): string | null {
+  return portalPageUrl(portalBaseUrl, CATALOG_CHOOSE_PORTAL_PATH);
+}
+
+/** Step 2's (Listing settings) address, by the same rule as catalogChooseUrl: null when the portal URL is unset or not http(s). */
+export function catalogSetupUrl(portalBaseUrl: string | null | undefined): string | null {
+  return portalPageUrl(portalBaseUrl, CATALOG_SETUP_PORTAL_PATH);
+}
+
+function portalPageUrl(portalBaseUrl: string | null | undefined, path: string): string | null {
   const trimmed = portalBaseUrl?.trim();
   if (!trimmed) return null;
   let base: URL;
@@ -289,7 +300,7 @@ export function catalogChooseUrl(portalBaseUrl: string | null | undefined): stri
   }
   if (base.protocol !== "https:" && base.protocol !== "http:") return null;
   if (!base.pathname.endsWith("/")) base.pathname = `${base.pathname}/`;
-  return new URL(CATALOG_CHOOSE_PORTAL_PATH, base).toString();
+  return new URL(path, base).toString();
 }
 
 function formatCount(value: number): string {

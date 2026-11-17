@@ -172,6 +172,7 @@ function harness(options: {
   sendError?: Error;
   guardError?: Error;
   tickBudgetMs?: number;
+  listingSettingsUrl?: string | null;
   stepMs?: number;
   restoreOutcome?: (input: { productVariantIds: number[]; idempotencyKey: string }, call: number) => MarketplaceSyncRestoreOutcome;
   /** The quantity authority the baselines reader answers; absent: the reader has no authority method (as before). */
@@ -232,13 +233,15 @@ function harness(options: {
       async evaluateForStoreConnection(input) {
         if (options.guardError) throw options.guardError;
         return { compatible: false, fulfillmentPolicyId: input.fulfillmentPolicyId, capabilityEvidenceHash: "h", originWarehouseId: 1,
-          issues: [{ code: "local_pickup_unsupported", message: "pickup" }] } as never;
+          issues: [{ code: "local_pickup_unsupported", message: "pickup" }], policyName: "Ship fast",
+          supportedServiceNames: ["USPS Ground Advantage"], requiredHandlingTimeBusinessDays: 2 } as never;
       },
     },
     notifications: { async send(input) { if (options.sendError) throw options.sendError; sent.push(input); return {}; } },
     clock: { now: () => new Date(now) },
     logger: { debug: log("debug"), info: log("info"), warn: log("warn"), error: log("error") },
     tickBudgetMs: options.tickBudgetMs,
+    listingSettingsUrl: options.listingSettingsUrl,
   });
   return { service, repository, reads, readSkus, restores, previewCalls, sent, lines, authorityReads, zeroSends, zeroSettlements };
 }
@@ -716,7 +719,9 @@ describe("shipping policies and vendor notices (owner rule 7)", () => {
     repository.policyNotified = true;
     await service.runSweepTick();
     expect(repository.policyChecks).toEqual([expect.objectContaining({ fulfillmentPolicyId: "F-1", compatible: false,
-      issueCodes: ["local_pickup_unsupported"], listingCount: 3, checkedAt: T })]);
+      issueCodes: ["local_pickup_unsupported"], listingCount: 3, checkedAt: T,
+      // The guard's own read of the policy, reused for the vendor's words (no second eBay call).
+      policyName: "Ship fast", supportedServiceNames: ["USPS Ground Advantage"], requiredHandlingTimeBusinessDays: 2 })]);
     expect(lines).toContainEqual(expect.objectContaining({ level: "warn", action: "dropship.marketplace_sync.policy_incompatible",
       data: expect.objectContaining({ error_code: "DROPSHIP_LISTING_POLICY_INCOMPATIBLE" }) }));
   });
@@ -746,6 +751,21 @@ describe("shipping policies and vendor notices (owner rule 7)", () => {
     ]);
     expect(repository.sent).toEqual(["ebay-sync:offer_missing:22:1-1", "ebay-sync:price_below_cost:22:2-2"]);
     expect(result.noticesSent).toBe(2);
+  });
+
+  it("sends a policy notice naming the policy, its listings' eBay pages and the Listing settings page", async () => {
+    const { service, repository, sent } = harness({ listingSettingsUrl: "https://cardshellz.io/catalog/setup" });
+    repository.batches = [{ batchKey: "ebay-sync:policy_incompatible:22:7-7", vendorId: 10, storeConnectionId: 22, kind: "policy_incompatible",
+      critical: true, payloads: [{ fulfillmentPolicyId: "F-1", policyName: "Ship fast", listingCount: 1, reasons: ["local_pickup_unsupported"],
+        marketplaceEnvironment: "production", listings: [{ externalListingId: "123456789012", title: "Toploaders", sku: "TL-1" }] }] }];
+    await service.runSweepTick();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ eventType: DROPSHIP_NOTIFICATION_EVENTS.EBAY_LISTING_ACTION_NEEDED,
+      title: "Card Shellz can't ship under an eBay shipping policy" });
+    expect(sent[0].message).toContain('your eBay shipping policy "Ship fast"');
+    expect(sent[0].message).toContain("- Toploaders (SKU TL-1), eBay item 123456789012: https://www.ebay.com/itm/123456789012");
+    expect(sent[0].message).toContain("Catalog > Listing settings: https://cardshellz.io/catalog/setup");
+    expect(sent[0].message).not.toContain("F-1");
   });
 
   it("ARCH-8: sends order and wallet notices under the order event types, never the listing ones", async () => {

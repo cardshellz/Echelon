@@ -54,7 +54,8 @@ const T2 = new Date("2026-10-22T12:15:00.000Z");
 
 /** The columns the sweep reads that the reduced base fixture does not carry, and the IP outbox the reader reads. */
 const SWEEP_FIXTURE_SQL = `
-  ALTER TABLE dropship.dropship_store_connections ADD COLUMN access_token_ref text, ADD COLUMN refresh_token_ref text;
+  ALTER TABLE dropship.dropship_store_connections ADD COLUMN access_token_ref text, ADD COLUMN refresh_token_ref text,
+    ADD COLUMN provider_environment varchar(30), ADD COLUMN config jsonb;
   ALTER TABLE dropship.dropship_store_listing_configs ADD COLUMN marketplace_config jsonb NOT NULL DEFAULT '{}';
   ALTER TABLE dropship.dropship_listing_push_jobs ADD COLUMN idempotency_key varchar(200),
     ADD COLUMN created_at timestamptz NOT NULL DEFAULT now();
@@ -535,8 +536,27 @@ describeDatabase.sequential("eBay sync-back sweep persistence (PostgreSQL)", () 
     const check = (compatible: boolean, checkedAt: Date) => {
       const issueCodes = compatible ? [] : ["local_pickup_unsupported"];
       return { vendorId: VENDOR, storeConnectionId: STORE, fulfillmentPolicyId: "F-9", compatible, issueCodes,
-        verdictHash: fulfillmentPolicyVerdictHash(issueCodes), listingCount: 2, checkedAt };
+        verdictHash: fulfillmentPolicyVerdictHash(issueCodes), listingCount: 2, policyName: "Ship fast",
+        supportedServiceNames: ["USPS Ground Advantage"], requiredHandlingTimeBusinessDays: 2, checkedAt };
     };
+
+    it("puts the policy's name and its first live listings (item number, title, SKU) on the notice, with the store's environment", async () => {
+      await pool.query(`UPDATE dropship.dropship_store_connections SET provider_environment = 'sandbox' WHERE id = $1`, [STORE]);
+      await pool.query(`UPDATE catalog.products SET name = 'Toploaders' WHERE id = 20`);
+      await pool.query(`UPDATE catalog.product_variants SET name = '100 pack' WHERE id = 101`);
+      // Live under F-9: the read listing and the one read earlier; the pushing one is outside the sweep's predicate.
+      await pool.query(`UPDATE dropship.dropship_vendor_listings SET observed_fulfillment_policy_id = 'F-9' WHERE id = ANY($1::int[])`,
+        [[ids.live, ids.readEarlier, ids.pushing]]);
+      expect(await repository.applyPolicyCheck(check(false, T1))).toEqual({ notified: true });
+      const [notice] = (await pool.query<{ payload: Record<string, unknown> }>(
+        `SELECT payload FROM dropship.dropship_marketplace_sync_notices ORDER BY id`)).rows;
+      expect(notice!.payload).toEqual({ fulfillmentPolicyId: "F-9", policyName: "Ship fast", listingCount: 2,
+        reasons: ["local_pickup_unsupported"], supportedServiceNames: ["USPS Ground Advantage"], requiredHandlingTimeBusinessDays: 2,
+        marketplaceEnvironment: "sandbox", listings: [
+          { externalListingId: READ_LISTING_ID, title: "Toploaders · 100 pack", sku: "CS-101" },
+          { externalListingId: "110000000005", title: "Toploaders · Size", sku: "CS-105" },
+        ] });
+    });
 
     it("tells a newly incompatible policy once, forgets it when it works again, and tells it again when it breaks again", async () => {
       expect(await repository.applyPolicyCheck(check(false, T1))).toEqual({ notified: true });
