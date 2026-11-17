@@ -25,6 +25,8 @@ import {
   MARKETPLACE_SYNC_ACTOR,
 } from "../domain/marketplace-sync-keys";
 import { hasUnsettledPushAttempt, MARKETPLACE_ATTEMPT_EVENT_TYPE } from "../domain/marketplace-sync-history";
+import { parseMarketplaceEnvironment } from "../domain/marketplace-listing-url";
+import { MARKETPLACE_POLICY_NOTICE_LISTINGS_SHOWN, type MarketplacePolicyNoticeListing } from "../domain/marketplace-sync-words";
 import {
   decisionWithoutPriceAdoption,
   MARKETPLACE_QUANTITY_UNAVAILABLE_BLOCKER,
@@ -383,7 +385,12 @@ export class PgDropshipMarketplaceSyncRepository implements MarketplaceSyncRepos
         notified = await enqueueMarketplaceSyncNoticesWithClient(client, { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId,
           notices: [marketplaceSyncNotice("policy_incompatible",
             marketplacePolicySubjectKey(input.fulfillmentPolicyId, input.verdictHash, input.checkedAt),
-            { fulfillmentPolicyId: input.fulfillmentPolicyId, listingCount: input.listingCount, reasons: input.issueCodes })],
+            { fulfillmentPolicyId: input.fulfillmentPolicyId, policyName: boundedText(input.policyName, MAX_POLICY_NAME_CHARS),
+              listingCount: input.listingCount, reasons: input.issueCodes,
+              supportedServiceNames: input.supportedServiceNames.slice(0, MAX_SUPPORTED_SERVICE_NAMES)
+                .map((name) => boundedText(name, MAX_SERVICE_NAME_CHARS)).filter((name): name is string => name !== null),
+              requiredHandlingTimeBusinessDays: input.requiredHandlingTimeBusinessDays,
+              ...await readPolicyNoticeListingsWithClient(client, input) })],
           createdAt: input.checkedAt }) > 0;
       }
       await setFulfillmentPolicyNotifiedVerdictWithClient(client, { storeConnectionId: input.storeConnectionId,
@@ -437,6 +444,59 @@ export class PgDropshipMarketplaceSyncRepository implements MarketplaceSyncRepos
       client.release();
     }
   }
+}
+
+/**
+ * The first listings a policy notice names (the vendor's own live listings on
+ * this store under that observed policy, by the same predicate
+ * listObservedPolicies counts), and the store's eBay environment for their
+ * item pages. Read in the notice's own transaction; listingCount stays the
+ * total.
+ */
+async function readPolicyNoticeListingsWithClient(client: Client,
+  input: Pick<MarketplaceSyncPolicyCheckWrite, "vendorId" | "storeConnectionId" | "fulfillmentPolicyId">):
+  Promise<{ marketplaceEnvironment: "sandbox" | "production" | null; listings: MarketplacePolicyNoticeListing[] }> {
+  const store = await client.query<{ provider_environment: string | null }>(`
+    SELECT COALESCE(sc.provider_environment, sc.config -> 'tokenMetadata' ->> 'environment') AS provider_environment
+    FROM dropship.dropship_store_connections sc WHERE sc.id = $1 AND sc.vendor_id = $2`, [input.storeConnectionId, input.vendorId]);
+  const rows = await client.query<{ external_listing_id: string; sku: string | null; product_name: string | null; variant_name: string | null }>(`
+    SELECT l.external_listing_id, pv.sku, p.name AS product_name, pv.name AS variant_name
+    FROM dropship.dropship_vendor_listings l
+    JOIN catalog.product_variants pv ON pv.id = l.product_variant_id
+    JOIN catalog.products p ON p.id = pv.product_id
+    WHERE ${SWEPT_LISTING_PREDICATE} AND l.status <> 'ended' AND l.vendor_id = $3 AND l.observed_fulfillment_policy_id = $4
+    ORDER BY l.id ASC LIMIT $5`,
+  [input.storeConnectionId, MARKETPLACE_SYNC_SWEPT_STATUSES, input.vendorId, input.fulfillmentPolicyId, MARKETPLACE_POLICY_NOTICE_LISTINGS_SHOWN]);
+  return {
+    marketplaceEnvironment: parseMarketplaceEnvironment(store.rows[0]?.provider_environment ?? null),
+    listings: rows.rows.map((row) => ({ externalListingId: row.external_listing_id.trim(),
+      title: boundedText(listingTitle(row.product_name, row.variant_name), MAX_LISTING_TITLE_CHARS), sku: boundedText(row.sku, MAX_SKU_CHARS) })),
+  };
+}
+
+/**
+ * Bounds on what a policy notice keeps, so its payload stays far inside
+ * MAX_NOTICE_PAYLOAD_JSON_LENGTH (a larger row is refused and would undo the
+ * whole check). The policy name is eBay's text, the rest is the catalog's.
+ */
+const MAX_POLICY_NAME_CHARS = 200;
+const MAX_SUPPORTED_SERVICE_NAMES = 10;
+const MAX_SERVICE_NAME_CHARS = 60;
+const MAX_LISTING_TITLE_CHARS = 120;
+const MAX_SKU_CHARS = 100;
+
+function boundedText(value: string | null, maxChars: number): string | null {
+  const text = value?.trim() ?? "";
+  if (!text) return null;
+  return text.length > maxChars ? `${text.slice(0, maxChars - 1)}…` : text;
+}
+
+/** "Product · Size" as the catalog names them; the size alone repeats nothing the product already says. */
+function listingTitle(productName: string | null, variantName: string | null): string | null {
+  const product = productName?.trim() ?? "";
+  const variant = variantName?.trim() ?? "";
+  if (product && variant && variant !== product) return `${product} · ${variant}`;
+  return product || variant || null;
 }
 
 /**
