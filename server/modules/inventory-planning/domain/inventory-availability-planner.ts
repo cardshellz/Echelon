@@ -35,7 +35,7 @@ import { resolvePromiseWarehouseIds } from "./inventory-warehouse-scope";
 const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
 const MILLI_UNITS_SQUARED = BigInt(1_000_000);
 const PROMISE_ELIGIBLE_LOCATION_TYPES = new Set(["pick", "reserve"]);
-const HARD_INELIGIBLE_LOCATION_TYPES = new Set(["receiving", "staging", "quarantine"]);
+const HARD_INELIGIBLE_LOCATION_TYPES = new Set(["receiving", "staging", "quarantine", "in_transit"]);
 
 type Scope = AtpProjectionRequestDto["scope"];
 type Variant = SupplySnapshotDto["variants"][number];

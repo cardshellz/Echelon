@@ -959,6 +959,15 @@
   "inventory.tracking_stop_history": [
     "modules/inventory"
   ],
+  "inventory.interwarehouse_transfer_events": [
+    "modules/inventory"
+  ],
+  "inventory.interwarehouse_transfer_lines": [
+    "modules/inventory"
+  ],
+  "inventory.interwarehouse_transfers": [
+    "modules/inventory"
+  ],
   "inventory.transfer_followups": [
     "modules/inventory"
   ],

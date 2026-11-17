@@ -919,6 +919,7 @@ function startEchelonSyncScheduler(
           recoverPendingPickingCommands: () => services.picking.recoverPendingPickingCommands(),
           recoverReplenishmentFollowups: () => services.replenishment.recoverReplenishmentFollowups(),
           recoverInventoryTransfers: () => services.inventoryTransfers.recoverPending(),
+          recoverInterwarehouseTransfers: () => services.interwarehouseTransfers.recoverPending(),
           recoverSupplierReturns: () => services.supplierReturnFollowups.recoverPending(),
         });
         httpServer.once("close", () => worker.stop());

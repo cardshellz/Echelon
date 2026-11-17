@@ -74,7 +74,6 @@ export class ManualInventoryTransferService {
           userId: actor,
           notes: input.notes,
           moveReserved: input.moveReserved,
-          crossWarehouseArrivalConfirmed: input.crossWarehouseArrivalConfirmed,
           deferUntilCommit: () => {
             /* The receipt outbox below owns publication and task credit. */
           },

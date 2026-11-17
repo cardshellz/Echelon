@@ -88,7 +88,7 @@ export function registerWarehouseRoutes(app: Express) {
   app.get("/api/warehouses", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const warehouses = await storage.getAllWarehouses();
-      res.json(warehouses);
+      res.json(warehouses.filter((warehouse) => warehouse.warehouseType !== "system_transit"));
     } catch (error) {
       console.error("Error fetching warehouses:", error);
       res.status(500).json({ error: "Failed to fetch warehouses" });
@@ -490,7 +490,7 @@ export function registerWarehouseRoutes(app: Express) {
       const locations = await storage.getAllWarehouseLocations();
       const primarySkuMap = await storage.getSkusByWarehouseLocation();
 
-      const enriched = locations.map(loc => ({
+      const enriched = locations.filter((loc) => loc.locationType !== "in_transit").map(loc => ({
         ...loc,
         primarySku: primarySkuMap.get(loc.id) || null,
       }));

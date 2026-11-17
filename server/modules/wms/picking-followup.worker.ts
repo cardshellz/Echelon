@@ -3,6 +3,7 @@ export function startPickingFollowupWorker(service: {
   recoverPendingPickingCommands(): Promise<void>;
   recoverReplenishmentFollowups(): Promise<void>;
   recoverInventoryTransfers(): Promise<void>;
+  recoverInterwarehouseTransfers(): Promise<void>;
   recoverSupplierReturns(): Promise<void>;
 }): { stop(): void } {
   let running = false;
@@ -15,6 +16,7 @@ export function startPickingFollowupWorker(service: {
         "recoverPendingPickingCommands",
         "recoverReplenishmentFollowups",
         "recoverInventoryTransfers",
+        "recoverInterwarehouseTransfers",
         "recoverSupplierReturns",
       ] as const) {
         try {

@@ -184,6 +184,7 @@ export class RecipeCapacityService {
         ON location.id = level.warehouse_location_id
        AND location.is_active = 1
        AND location.cycle_count_freeze_id IS NULL
+       AND location.location_type <> 'in_transit'
       WHERE level.product_variant_id IN (${variantSql})
         AND (${warehouseId ?? null}::int IS NULL OR location.warehouse_id = ${warehouseId ?? null})
       ORDER BY location.warehouse_id, level.product_variant_id, level.warehouse_location_id

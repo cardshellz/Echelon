@@ -249,12 +249,23 @@ describe("inventory availability canonical planner", () => {
           id: 14, warehouseId: 1, code: "FROZEN", locationType: "pick", isPickable: true,
           isActive: true, isFrozen: true, promisePolicy: null,
         },
+        {
+          id: 15, warehouseId: 1, code: "TRANSIT", locationType: "in_transit", isPickable: false,
+          isActive: true, isFrozen: false, promisePolicy: {
+            policyId: 15,
+            version: 1,
+            lifecycleSelection: "active_head",
+            eligibilityMode: "eligible",
+            definitionHash: HASH,
+          },
+        },
       ],
       inventoryPositions: [
         position({ id: 1, locationId: 11, variantId: 101, physical: 2 }),
         position({ id: 2, locationId: 12, variantId: 101, physical: 10 }),
         position({ id: 3, locationId: 13, variantId: 101, physical: 20 }),
         position({ id: 4, locationId: 14, variantId: 101, physical: 30 }),
+        position({ id: 5, locationId: 15, variantId: 101, physical: 40 }),
       ],
     }));
 

@@ -1,4 +1,5 @@
 import { inventoryTransferRejectionReceiptSchema } from "@shared/types/inventory-transfer";
+import { interwarehouseTransferRejectionReceiptSchema } from "@shared/types/interwarehouse-transfer";
 import { useMemo } from "react";
 import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -20,6 +21,9 @@ const pendingSchema = z.object({
 }).strict();
 const rejectedTransferResponseSchema = z.object({
   context: z.object({ transferCommandReceipt: inventoryTransferRejectionReceiptSchema }),
+});
+const rejectedInterwarehouseResponseSchema = z.object({
+  context: z.object({ interwarehouseCommandReceipt: interwarehouseTransferRejectionReceiptSchema }),
 });
 const savedSchema = z.object({ version: z.literal(1), pending: z.array(pendingSchema) }).strict();
 type PendingIntent = z.infer<typeof pendingSchema>;
@@ -87,6 +91,13 @@ export function createInventoryCommandRequester(
         && error.status !== null && error.status >= 400 && error.status < 500 && !error.ambiguous) {
         const rejection = rejectedTransferResponseSchema.safeParse(error.responseBody);
         if (rejection.success && rejection.data.context.transferCommandReceipt.commandKey === intent.commandKey) {
+          write(read().filter(entry => entry.commandKey !== intent.commandKey));
+        }
+      }
+      if (intent.url.startsWith("/api/inventory/interwarehouse-transfers") && error instanceof FinancialCommandRequestError
+        && error.status !== null && error.status >= 400 && error.status < 500 && !error.ambiguous) {
+        const rejection = rejectedInterwarehouseResponseSchema.safeParse(error.responseBody);
+        if (rejection.success && rejection.data.context.interwarehouseCommandReceipt.commandKey === intent.commandKey) {
           write(read().filter(entry => entry.commandKey !== intent.commandKey));
         }
       }

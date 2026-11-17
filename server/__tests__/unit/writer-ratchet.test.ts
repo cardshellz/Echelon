@@ -54,6 +54,9 @@ describe("writer-ratchet (P2.1)", () => {
     ["inventory.replen_followups", "modules/inventory"],
     ["inventory.replen_transfer_credits", "modules/inventory"],
     ["inventory.replen_trigger_receipts", "modules/inventory"],
+    ["inventory.interwarehouse_transfer_events", "modules/inventory"],
+    ["inventory.interwarehouse_transfer_lines", "modules/inventory"],
+    ["inventory.interwarehouse_transfers", "modules/inventory"],
     ["inventory.transfer_followups", "modules/inventory"],
   ])("%s has only its warehouse operation owner, including scripts", (table, owner) => {
     expect(current[table]).toEqual([owner]);

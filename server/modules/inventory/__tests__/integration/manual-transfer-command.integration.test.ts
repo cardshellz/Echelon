@@ -129,8 +129,8 @@ suite(
       const effects = { deliver: vi.fn() };
       const core = { withTx: vi.fn() };
       const transfer = vi.fn(async () => {
-        throw new InventoryQuantityError("TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED",
-          "Confirm arrival", { fromWarehouseId: 2, toWarehouseId: 1 });
+        throw new InventoryQuantityError("INTERWAREHOUSE_TRANSFER_WORKFLOW_REQUIRED",
+          "Create a warehouse transfer", { fromWarehouseId: 2, toWarehouseId: 1 });
       });
       core.withTx.mockReturnValue({ transfer });
       const service = new ManualInventoryTransferService(orm, core as unknown as InventoryUseCases, effects, clock);
@@ -139,7 +139,7 @@ suite(
       for (let attempt = 0; attempt < 2; attempt++) {
         await expect(service.transfer(input, "picker")).rejects.toMatchObject({
           statusCode: 409,
-          code: "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED", context: { fromWarehouseId: 2, toWarehouseId: 1, transferCommandReceipt: {contractVersion:"inventory_transfer_v1",commandKey:input.commandKey,outcome:"rejected"} }
+          code: "INTERWAREHOUSE_TRANSFER_WORKFLOW_REQUIRED", context: { fromWarehouseId: 2, toWarehouseId: 1, transferCommandReceipt: {contractVersion:"inventory_transfer_v1",commandKey:input.commandKey,outcome:"rejected"} }
         });
       }
       expect(transfer).toHaveBeenCalledTimes(1);
@@ -147,7 +147,7 @@ suite(
       expect(await context.state()).toEqual(before);
       expect(await receipts()).toHaveLength(0);
       expect((await context.pool.query("SELECT status,http_status,last_error_code FROM public.financial_command_results")).rows)
-        .toEqual([{ status: "rejected", http_status: 409, last_error_code: "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED" }]);
+        .toEqual([{ status: "rejected", http_status: 409, last_error_code: "INTERWAREHOUSE_TRANSFER_WORKFLOW_REQUIRED" }]);
     });
 
     it("keeps a server-side application failure retryable rather than recording an invalid terminal response", async () => {
@@ -419,11 +419,9 @@ suite(
       const service = new ManualInventoryTransferService(orm, inventory, {
         deliver: vi.fn()
       }, clock);
-      await expect(service.transfer({
-        ...request(), quantity: 1, moveReserved: true, crossWarehouseArrivalConfirmed: true
-      }, "operator"))
+      await expect(service.transfer({ ...request(), quantity: 1, moveReserved: true }, "operator"))
         .rejects.toMatchObject({
-          code: "TRANSFER_RESERVED_WAREHOUSE_MISMATCH", statusCode: 409
+          code: "INTERWAREHOUSE_TRANSFER_WORKFLOW_REQUIRED", statusCode: 409
         });
       expect(await context.state()).toEqual(before);
       expect(await reservationState()).toEqual(claims);
