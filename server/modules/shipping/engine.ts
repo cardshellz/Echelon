@@ -21,6 +21,7 @@ import type {
   EngineRef,
   EngineShipmentItemAppendResult,
   ShipmentItemAppendPayload,
+  ShipmentItemQuantityPayload,
   ShipmentPushPayload,
   CanonicalShipmentEvent,
 } from "./types";
@@ -47,6 +48,16 @@ export interface ShippingEngine {
    */
   appendShipmentItems(
     payload: ShipmentItemAppendPayload,
+  ): Promise<EngineShipmentItemAppendResult>;
+
+  /**
+   * Raise an existing engine line to the current demand for its order item
+   * (a quantity edit after push). Same contract as appendShipmentItems: verify
+   * after write, `not_editable` only on a positively locked order, throw on
+   * transport errors or unknown state so the caller retries.
+   */
+  setShipmentItemQuantity(
+    payload: ShipmentItemQuantityPayload,
   ): Promise<EngineShipmentItemAppendResult>;
 
   /**

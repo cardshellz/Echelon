@@ -9,6 +9,7 @@ import {
   recordChannelAuthorityGap,
   deriveShopifyChannelPaymentSettled,
 } from "../oms/shopify-intake.api";
+import { enqueueOmsWmsSyncRetry } from "../oms/webhook-retry.api";
 import type {
   OmsService,
   WmsSyncService,
@@ -367,7 +368,15 @@ async function reconcileExistingOmsOrderReadiness(
   }
 
   if (readiness.wmsSyncRequired) {
-    await wmsSyncService.syncOmsOrderToWms(omsOrderId);
+    try {
+      await wmsSyncService.syncOmsOrderToWms(omsOrderId);
+    } catch (error) {
+      // Authority was already raised in its own committed transaction, so this
+      // order no longer looks like a readiness candidate: without a durable
+      // retry the WMS/shipping-engine half of the change is stranded (#65696).
+      await enqueueOmsWmsSyncRetry(db, omsOrderId, error);
+      throw error;
+    }
   }
 
   // Safety net: every reconciler pass re-states any units Shopify sold that

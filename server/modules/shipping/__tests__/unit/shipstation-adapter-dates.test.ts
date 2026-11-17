@@ -8,7 +8,7 @@ function fixture(shipDate: string, holdUntilDate: string) {
   const unexpected = async (): Promise<never> => { throw new Error("Unexpected provider mutation"); };
   const handle: ShipStationServiceHandle = {
     isConfigured: () => true,
-    pushShipment: unexpected, appendShipmentItems: unexpected, cancelOrder: unexpected,
+    pushShipment: unexpected, appendShipmentItems: unexpected, setShipmentItemQuantity: unexpected, cancelOrder: unexpected,
     putOrderOnHold: unexpected, releaseOrderFromHold: unexpected, markAsShipped: unexpected,
     updateSortRank: unexpected, updateSortRankSingle: unexpected,
     getOrderById: vi.fn(async () => ({ orderStatus: "shipped", shipDate, holdUntilDate })),

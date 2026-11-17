@@ -2,12 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { paidReplayFixture } from "../../../oms/__tests__/fixtures/shopify-paid-replay.fixture";
 
-const ports = vi.hoisted(() => ({ execute: vi.fn(), select: vi.fn(), readiness: vi.fn(), replay: vi.fn(), sync: vi.fn(), gap: vi.fn() }));
+const ports = vi.hoisted(() => ({ execute: vi.fn(), select: vi.fn(), readiness: vi.fn(), replay: vi.fn(), sync: vi.fn(), gap: vi.fn(), wmsRetry: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: ports }));
 vi.mock("../../../oms/shopify-bridge", () => ({ bridgeShopifyOrderToOms: vi.fn() }));
 vi.mock("../../../oms/shopify-line-readiness.service", () => ({ reconcileShopifyLineReadiness: ports.readiness }));
 vi.mock("../../../oms/shopify-paid-event-replay", () => ({ queueOmsPaidEventReplay: ports.replay }));
 vi.mock("../../../oms/infrastructure/channel-authority-gap.repository", () => ({ recordChannelAuthorityGap: ports.gap }));
+vi.mock("../../../oms/webhook-retry.api", () => ({ enqueueOmsWmsSyncRetry: ports.wmsRetry }));
 import { initReconciliation, runReconciliationNow } from "../../shopify-order-reconciliation";
 
 const dialect = new PgDialect();
@@ -75,6 +76,17 @@ describe("bounded Shopify paid recovery sweep", () => {
     });
     expect(ports.sync).toHaveBeenCalledExactlyOnceWith(10);
     expect(ports.replay).not.toHaveBeenCalled();
+  });
+  // #65696: authority is already committed when the sync runs, so a failed
+  // sync must leave a durable retry or the WMS/engine half is stranded.
+  it("queues a durable WMS sync retry when the reconciler's WMS sync fails", async () => {
+    needsReplay = false;
+    ports.readiness.mockResolvedValueOnce({ advancedQuantity: 2, wmsSyncRequired: true });
+    const failure = new Error('duplicate key value violates unique constraint "uq_wms_outbound_shipment_items_shipment_order_item"');
+    ports.sync.mockRejectedValueOnce(failure);
+
+    expect(await runReconciliationNow()).toMatchObject({ failed: 1 });
+    expect(ports.wmsRetry).toHaveBeenCalledExactlyOnceWith(expect.anything(), 10, failure);
   });
   it("does not replay a cancelled live Shopify order", async () => {
     providerOrder.cancelled_at = "2026-10-30T12:00:45Z";

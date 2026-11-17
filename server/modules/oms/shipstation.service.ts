@@ -5594,6 +5594,189 @@ export function createShipStationService(
       };
     });
   }
+  /**
+   * Raise one existing ShipStation line to the current WMS demand for its
+   * order item, after the order was already pushed (a channel edit added
+   * units to a line the package already carries).
+   *
+   * Why: a package holds one row per order item, and appendShipmentItems only
+   * adds new lines by key. #65696 (2026-11-16) grew 8 -> 10 units on a queued
+   * shipment; the append path tried to insert a second row, hit
+   * uq_wms_outbound_shipment_items_shipment_order_item, and ShipStation kept 8.
+   *
+   * The target is recomputed here from current WMS rows (order item quantity
+   * minus coverage on the order's other active packages), so replays and later
+   * edits converge. Only increases are applied; reductions have other owners.
+   * The local row changes only after ShipStation verifies the new quantity, so
+   * it never claims more than the engine holds. Same per-shipment pinned lock as
+   * pushShipment/appendShipmentItems.
+   */
+  async function setShipmentItemQuantity(
+    shipmentId: number,
+    shipmentItemId: number,
+  ): Promise<EngineShipmentItemAppendResult> {
+    for (const [field, value] of [["shipmentId", shipmentId], ["shipmentItemId", shipmentItemId]] as const) {
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new ShipStationPushError(`${field} must be a positive integer`, {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field,
+          value,
+        });
+      }
+    }
+
+    return withShipmentPushLock<EngineShipmentItemAppendResult>(shipmentId, async () => {
+      const shipmentResult: any = await db.execute(sql`
+        SELECT os.id, os.requires_review, os.review_reason, os.shipstation_order_id,
+               wo.order_edit_operation_id
+        FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id
+        WHERE os.id = ${shipmentId}
+        LIMIT 1
+      `);
+      const shipment = shipmentResult?.rows?.[0];
+      if (!shipment) {
+        throw new ShipStationPushError("shipment not found", {
+          code: SS_PUSH_INVALID_SHIPMENT, shipmentId, field: "shipment", value: null,
+        });
+      }
+      if (shipment.requires_review === true) {
+        throw new ShipStationPushError(
+          `shipment requires review and cannot be amended (${shipment.review_reason ?? "review_required"})`,
+          { code: SS_PUSH_INVALID_SHIPMENT, shipmentId, field: "shipment.requires_review", value: shipment.review_reason ?? true },
+        );
+      }
+      const shipstationOrderId = Number(shipment.shipstation_order_id);
+      if (!Number.isInteger(shipstationOrderId) || shipstationOrderId <= 0) {
+        throw new ShipStationPushError("shipment has no ShipStation order identity for quantity amend", {
+          code: SS_PUSH_INVALID_SHIPMENT, shipmentId, field: "shipment.shipstation_order_id", value: shipment.shipstation_order_id ?? null,
+        });
+      }
+
+      const rowResult: any = await db.execute(sql`
+        SELECT
+          osi.id,
+          osi.qty,
+          osi.provider_membership_state,
+          osi.order_item_id,
+          oi.quantity AS order_item_quantity,
+          oi.status AS order_item_status,
+          COALESCE((
+            SELECT SUM(other.qty)
+            FROM wms.outbound_shipment_items other
+            JOIN wms.outbound_shipments other_shipment ON other_shipment.id = other.shipment_id
+            WHERE other.order_item_id = osi.order_item_id
+              AND other.id <> osi.id
+              AND other_shipment.status NOT IN ('voided', 'cancelled')
+          ), 0)::int AS other_coverage
+        FROM wms.outbound_shipment_items osi
+        JOIN wms.order_items oi ON oi.id = osi.order_item_id
+        WHERE osi.id = ${shipmentItemId}
+          AND osi.shipment_id = ${shipmentId}
+          AND osi.shipment_item_purpose = 'customer_fulfillment'
+        LIMIT 1
+      `);
+      const row = rowResult?.rows?.[0];
+      if (!row) {
+        throw new ShipStationPushError("shipment item is missing, foreign, or not a customer line", {
+          code: SS_PUSH_INVALID_SHIPMENT, shipmentId, field: "shipmentItemId", value: shipmentItemId,
+        });
+      }
+      const currentQuantity = Number(row.qty);
+      const targetQuantity = Number(row.order_item_quantity) - Number(row.other_coverage);
+      if (!Number.isSafeInteger(currentQuantity) || !Number.isSafeInteger(targetQuantity)) {
+        throw new ShipStationPushError("shipment item quantities are not integers", {
+          code: SS_PUSH_INVALID_SHIPMENT, shipmentId, field: "qty", value: { currentQuantity, targetQuantity },
+        });
+      }
+      if (row.order_item_status === "cancelled" || targetQuantity <= currentQuantity) {
+        // Nothing to grow: already applied, or demand fell (a reduction owner decides).
+        return { state: "already_applied", providerStatus: "not_checked" };
+      }
+
+      // Strict read: transport errors and unknown state throw and retry.
+      const liveOrder = await apiRequest<any>("GET", `/orders/${shipstationOrderId}`);
+      const providerStatus = String(liveOrder?.orderStatus ?? "unknown").toLowerCase();
+      if (shipment.order_edit_operation_id != null && providerStatus !== "on_hold") {
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_HOLD_MISSING", "ShipStation must remain held while edited lines synchronize.");
+      }
+      const lineItemKey = `wms-item-${shipmentItemId}`;
+      const liveItems: any[] = Array.isArray(liveOrder?.items) ? liveOrder.items : [];
+      const liveLine = liveItems.find((item: any) => String(item?.lineItemKey ?? "").trim() === lineItemKey);
+
+      const commitLocalQuantity = async () => {
+        const updated: any = await db.execute(sql`
+          UPDATE wms.outbound_shipment_items
+          SET qty = ${targetQuantity}
+          WHERE id = ${shipmentItemId}
+            AND qty = ${currentQuantity}
+          RETURNING id
+        `);
+        if ((updated?.rows?.length ?? 0) !== 1) {
+          // Changed underneath us; the retry recomputes from fresh rows.
+          throw new ShipStationPushError("shipment item changed during quantity amend", {
+            code: "SS_PUSH_QUANTITY_AMEND_CONFLICT", shipmentId, field: "qty", value: currentQuantity,
+          });
+        }
+      };
+
+      if (!liveLine) {
+        if (row.provider_membership_state === "pending_append") {
+          // Not in ShipStation yet; the pending append (serialized by this
+          // lock) will send the row with its new quantity.
+          await commitLocalQuantity();
+          return { state: "applied", providerStatus };
+        }
+        throw new ShipStationPushError(
+          `ShipStation order ${shipstationOrderId} has no line ${lineItemKey} to amend`,
+          { code: "SS_PUSH_QUANTITY_AMEND_LINE_MISSING", shipmentId, field: "lineItemKey", value: lineItemKey },
+        );
+      }
+
+      if (Number(liveLine.quantity) === targetQuantity) {
+        // ShipStation already has it (an earlier attempt wrote it, then failed locally).
+        await commitLocalQuantity();
+        return { state: "already_applied", providerStatus };
+      }
+      if (providerStatus === "shipped" || providerStatus === "cancelled") {
+        return { state: "not_editable", providerStatus };
+      }
+      if (providerStatus !== "awaiting_shipment" && providerStatus !== "on_hold") {
+        throw new ShipStationPushError(
+          `ShipStation amendment state is not recognized as editable or terminal (${providerStatus})`,
+          { code: "SS_PUSH_AMENDMENT_STATE_UNKNOWN", shipmentId, field: "orderStatus", value: providerStatus },
+        );
+      }
+
+      await apiRequest("POST", "/orders/createorder", {
+        ...liveOrder,
+        items: liveItems.map((item: any) =>
+          String(item?.lineItemKey ?? "").trim() === lineItemKey ? { ...item, quantity: targetQuantity } : item),
+      }, { replaySafe: true });
+
+      const verifiedOrder = await apiRequest<any>("GET", `/orders/${shipstationOrderId}`);
+      const verifiedLine = (Array.isArray(verifiedOrder?.items) ? verifiedOrder.items : [])
+        .find((item: any) => String(item?.lineItemKey ?? "").trim() === lineItemKey);
+      if (!verifiedLine || Number(verifiedLine.quantity) !== targetQuantity) {
+        throw new ShipStationPushError(
+          `ShipStation quantity amendment verification failed for ${lineItemKey}`,
+          { code: "SS_PUSH_AMENDMENT_VERIFICATION_FAILED", shipmentId, field: "quantity", value: targetQuantity },
+        );
+      }
+      await commitLocalQuantity();
+      console.log(JSON.stringify({
+        level: "info",
+        action: "shipstation_line_quantity_amended",
+        outcome: "applied",
+        shipment_id: shipmentId,
+        shipment_item_id: shipmentItemId,
+        engine_ref: shipstationOrderId,
+        before: currentQuantity,
+        after: targetQuantity,
+      }));
+      return { state: "applied", providerStatus };
+    });
+  }
   // -------------------------------------------------------------------------
   // pushShipment — WMS-only reader (Commit 11 — §6 refactor plan).
   // -------------------------------------------------------------------------
@@ -6168,6 +6351,7 @@ export function createShipStationService(
   return {
     pushShipment,
     appendShipmentItems,
+    setShipmentItemQuantity,
     getShipments,
     getShipmentById,
     getOrderById,
