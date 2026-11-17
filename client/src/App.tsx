@@ -12,115 +12,146 @@ import { PURCHASING_DASHBOARD_READ_PERMISSIONS, PURCHASING_READ_PERMISSION, RECE
 import { VendorAuthProvider, useVendorAuth } from "@/lib/vendor-auth";
 import { DropshipAuthProvider, dropshipPortalPath, isDropshipPortalHost, useDropshipAuth } from "@/lib/dropship-auth";
 import { PWAUpdatePrompt } from "@/components/PWAUpdatePrompt";
-import Layout from "@/components/layout/AppShell";
-import VendorLayout from "@/components/vendor/VendorLayout";
-import VendorLogin from "@/pages/vendor/VendorLogin";
-import VendorRegister from "@/pages/vendor/VendorRegister";
-import VendorDashboard from "@/pages/vendor/VendorDashboard";
-import VendorProducts from "@/pages/vendor/VendorProducts";
-import VendorOrders from "@/pages/vendor/VendorOrders";
-import VendorWallet from "@/pages/vendor/VendorWallet";
-import VendorSettings from "@/pages/vendor/VendorSettings";
-import DropshipPortalAuth from "@/pages/dropship/DropshipPortalAuth";
-import DropshipPortalPrivacy from "@/pages/dropship/DropshipPortalPrivacy";
-import DropshipPortalDashboard from "@/pages/dropship/DropshipPortalDashboard";
-import DropshipPortalHome from "@/pages/dropship/DropshipPortalHome";
-import DropshipPortalCatalog from "@/pages/dropship/DropshipPortalCatalog";
-import DropshipPortalNotifications from "@/pages/dropship/DropshipPortalNotifications";
-import DropshipPortalCostChanges from "@/pages/dropship/DropshipPortalCostChanges";
-import DropshipPortalOnboarding from "@/pages/dropship/DropshipPortalOnboarding";
-import DropshipPortalOrders from "@/pages/dropship/DropshipPortalOrders";
-import DropshipPortalReturns from "@/pages/dropship/DropshipPortalReturns";
-import DropshipPortalSettings from "@/pages/dropship/DropshipPortalSettings";
-import DropshipPortalWallet from "@/pages/dropship/DropshipPortalWallet";
-import Dashboard from "@/pages/Dashboard";
-import Inventory from "@/pages/Inventory";
-import Builds from "@/pages/Builds";
-import SupplyTransformations from "@/pages/SupplyTransformations";
-import InventoryCutover from "@/pages/InventoryCutover";
-import ProcurementPromiseSafetySettings from "@/pages/ProcurementPromiseSafetySettings";
-import ChannelInventory from "@/pages/ChannelInventory";
-import BuildRecipeCreate from "@/pages/BuildRecipeCreate";
-import Orders from "@/pages/Orders";
-import Dropship from "@/pages/Dropship";
-import Subscriptions from "@/pages/Subscriptions";
-import PickingPage from "@/pages/PickingPage";
-import PickPriority from "@/pages/PickPriority";
-import Packing from "@/pages/Packing";
-import OrderHistory from "@/pages/OrderHistory";
-import WarehousePage from "@/pages/WarehousePage";
-import PickZones from "@/pages/PickZones";
-import WarehouseSettingsPage from "@/pages/WarehouseSettingsPage";
-import WorkConfigurationPage from "@/pages/warehouse-work/WorkConfigurationPage";
-import AssemblyWorkPage from "@/pages/warehouse-work/AssemblyWorkPage";
-import Integrations from "@/pages/Integrations";
-import Users from "@/pages/Users";
-import Roles from "@/pages/Roles";
-import ChannelsPage from "@/pages/ChannelsPage";
-import CatalogPage from "@/pages/CatalogPage";
-import ProductDetail from "@/pages/ProductDetail";
-import CycleCounts from "@/pages/CycleCounts";
-import Transfers from "@/pages/Transfers";
-import Suppliers from "@/pages/Suppliers";
-import PurchasingView from "@/pages/PurchasingView";
-import ReorderEngine from "@/pages/ReorderEngine";
-import ProcurementAutomation from "@/pages/ProcurementAutomation";
-import ProcurementRuns from "@/pages/ProcurementRuns";
-import ProcurementRfqs from "@/pages/ProcurementRfqs";
-import Receiving from "@/pages/Receiving";
-import InventoryHistory from "@/pages/InventoryHistory";
-import Replenishment from "@/pages/Replenishment";
-import SlottingSetup from "@/pages/SlottingSetup";
-import ChannelAllocation from "@/pages/ChannelAllocation";
-import ProductLines from "@/pages/ProductLines";
-import ShippingGroups from "@/pages/ShippingGroups";
-import PurchaseOrders from "@/pages/PurchaseOrders";
-import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
-import PurchaseOrderEdit from "@/pages/PurchaseOrderEdit";
-import PurchasingDashboard from "@/pages/PurchasingDashboard";
-import Returns from "@/pages/Returns";
-import ReturnLabelSettings from "@/pages/ReturnLabelSettings";
-import ReturnCases from "@/pages/ReturnCases";
-import ReturnPolicies from "@/pages/ReturnPolicies";
-import CustomerReturnPortalPreview from "@/pages/CustomerReturnPortalPreview";
-import CustomerReturnCustomerPortal from "@/pages/CustomerReturnCustomerPortal";
-import CustomerReturnPortalAccess from "@/pages/CustomerReturnPortalAccess";
+import NotFound from "@/pages/not-found";
 import {
   CUSTOMER_RETURN_PORTAL_PATH,
   CUSTOMER_RETURN_PORTAL_ACCESS_PATH,
   CUSTOMER_RETURN_PORTAL_LEGACY_PATH,
   isCustomerReturnPortalPath,
 } from "@shared/returns/customer-return-portal-paths";
-import InboundShipments from "@/pages/InboundShipments";
-import OutboundShipments from "@/pages/OutboundShipments";
-import ShipmentOrderContext from "@/pages/ShipmentOrderContext";
-import InboundShipmentDetail from "@/pages/InboundShipmentDetail";
-import CostDashboard from "@/pages/CostDashboard";
-import APDashboard from "@/pages/APDashboard";
-import APInvoices from "@/pages/APInvoices";
-import APInvoiceDetail from "@/pages/APInvoiceDetail";
-import APPayments from "@/pages/APPayments";
-import SupplierCredits from "@/pages/SupplierCredits";
-import SupplierReturns from "@/pages/SupplierReturns";
-import { StaffPasswordChange } from "@/components/identity/StaffPasswordChange";
-import Login from "@/pages/Login";
-import Settings from "@/pages/Settings";
-import ProcurementSettings from "@/pages/ProcurementSettings";
-import ShippingSettings from "@/pages/ShippingSettings";
-import ShippingServiceLevels from "@/pages/ShippingServiceLevels";
-import ShippingServiceLevelDetail from "@/pages/ShippingServiceLevelDetail";
-import NotificationPreferences from "@/pages/NotificationPreferences";
-import EbayChannelPage from "@/pages/EbayChannelPage";
-import { WalmartChannelRouteHost } from "@/pages/WalmartChannelPage";
-import ShopifyChannelPage from "@/pages/ShopifyChannelPage";
-import SyncLogPage from "@/pages/SyncLogPage";
-import OmsOrders from "@/pages/OmsOrders";
-import OrderEdits from "@/pages/OrderEdits";
-import FlowMonitor from "@/pages/FlowMonitor";
-import VendorList from "@/pages/VendorList";
-import VendorDetail from "@/pages/VendorDetail";
-import DemandPlanner from "@/pages/DemandPlanner";
-import NotFound from "@/pages/not-found";
+
+const Layout = React.lazy(() => import("@/components/layout/AppShell"));
+const Login = React.lazy(() => import("@/pages/Login"));
+
+const VendorLayout = React.lazy(() => import("@/components/vendor/VendorLayout"));
+const VendorLogin = React.lazy(() => import("@/pages/vendor/VendorLogin"));
+const VendorRegister = React.lazy(() => import("@/pages/vendor/VendorRegister"));
+const VendorDashboard = React.lazy(() => import("@/pages/vendor/VendorDashboard"));
+const VendorProducts = React.lazy(() => import("@/pages/vendor/VendorProducts"));
+const VendorOrders = React.lazy(() => import("@/pages/vendor/VendorOrders"));
+const VendorWallet = React.lazy(() => import("@/pages/vendor/VendorWallet"));
+const VendorSettings = React.lazy(() => import("@/pages/vendor/VendorSettings"));
+const DropshipPortalAuth = React.lazy(() => import("@/pages/dropship/DropshipPortalAuth"));
+const DropshipPortalPrivacy = React.lazy(() => import("@/pages/dropship/DropshipPortalPrivacy"));
+const DropshipPortalDashboard = React.lazy(() => import("@/pages/dropship/DropshipPortalDashboard"));
+const DropshipPortalHome = React.lazy(() => import("@/pages/dropship/DropshipPortalHome"));
+const DropshipPortalCatalog = React.lazy(() => import("@/pages/dropship/DropshipPortalCatalog"));
+const DropshipPortalNotifications = React.lazy(() => import("@/pages/dropship/DropshipPortalNotifications"));
+const DropshipPortalCostChanges = React.lazy(() => import("@/pages/dropship/DropshipPortalCostChanges"));
+const DropshipPortalOnboarding = React.lazy(() => import("@/pages/dropship/DropshipPortalOnboarding"));
+const DropshipPortalOrders = React.lazy(() => import("@/pages/dropship/DropshipPortalOrders"));
+const DropshipPortalReturns = React.lazy(() => import("@/pages/dropship/DropshipPortalReturns"));
+const DropshipPortalSettings = React.lazy(() => import("@/pages/dropship/DropshipPortalSettings"));
+const DropshipPortalWallet = React.lazy(() => import("@/pages/dropship/DropshipPortalWallet"));
+const Dashboard = React.lazy(() => import("@/pages/Dashboard"));
+const Inventory = React.lazy(() => import("@/pages/Inventory"));
+const Builds = React.lazy(() => import("@/pages/Builds"));
+const SupplyTransformations = React.lazy(() => import("@/pages/SupplyTransformations"));
+const InventoryCutover = React.lazy(() => import("@/pages/InventoryCutover"));
+const ProcurementPromiseSafetySettings = React.lazy(() => import("@/pages/ProcurementPromiseSafetySettings"));
+const ChannelInventory = React.lazy(() => import("@/pages/ChannelInventory"));
+const BuildRecipeCreate = React.lazy(() => import("@/pages/BuildRecipeCreate"));
+const Orders = React.lazy(() => import("@/pages/Orders"));
+const Dropship = React.lazy(() => import("@/pages/Dropship"));
+const Subscriptions = React.lazy(() => import("@/pages/Subscriptions"));
+const PickingPage = React.lazy(() => import("@/pages/PickingPage"));
+const PickPriority = React.lazy(() => import("@/pages/PickPriority"));
+const OrderHistory = React.lazy(() => import("@/pages/OrderHistory"));
+const WarehousePage = React.lazy(() => import("@/pages/WarehousePage"));
+const PickZones = React.lazy(() => import("@/pages/PickZones"));
+const WarehouseSettingsPage = React.lazy(() => import("@/pages/WarehouseSettingsPage"));
+const WorkConfigurationPage = React.lazy(() => import("@/pages/warehouse-work/WorkConfigurationPage"));
+const AssemblyWorkPage = React.lazy(() => import("@/pages/warehouse-work/AssemblyWorkPage"));
+const Integrations = React.lazy(() => import("@/pages/Integrations"));
+const Users = React.lazy(() => import("@/pages/Users"));
+const Roles = React.lazy(() => import("@/pages/Roles"));
+const ChannelsPage = React.lazy(() => import("@/pages/ChannelsPage"));
+const CatalogPage = React.lazy(() => import("@/pages/CatalogPage"));
+const ProductDetail = React.lazy(() => import("@/pages/ProductDetail"));
+const CycleCounts = React.lazy(() => import("@/pages/CycleCounts"));
+const Transfers = React.lazy(() => import("@/pages/Transfers"));
+const Suppliers = React.lazy(() => import("@/pages/Suppliers"));
+const PurchasingView = React.lazy(() => import("@/pages/PurchasingView"));
+const ReorderEngine = React.lazy(() => import("@/pages/ReorderEngine"));
+const ProcurementAutomation = React.lazy(() => import("@/pages/ProcurementAutomation"));
+const ProcurementRuns = React.lazy(() => import("@/pages/ProcurementRuns"));
+const ProcurementRfqs = React.lazy(() => import("@/pages/ProcurementRfqs"));
+const Receiving = React.lazy(() => import("@/pages/Receiving"));
+const InventoryHistory = React.lazy(() => import("@/pages/InventoryHistory"));
+const Replenishment = React.lazy(() => import("@/pages/Replenishment"));
+const SlottingSetup = React.lazy(() => import("@/pages/SlottingSetup"));
+const ChannelAllocation = React.lazy(() => import("@/pages/ChannelAllocation"));
+const ProductLines = React.lazy(() => import("@/pages/ProductLines"));
+const ShippingGroups = React.lazy(() => import("@/pages/ShippingGroups"));
+const PurchaseOrders = React.lazy(() => import("@/pages/PurchaseOrders"));
+const PurchaseOrderDetail = React.lazy(() => import("@/pages/PurchaseOrderDetail"));
+const PurchaseOrderEdit = React.lazy(() => import("@/pages/PurchaseOrderEdit"));
+const PurchasingDashboard = React.lazy(() => import("@/pages/PurchasingDashboard"));
+const Returns = React.lazy(() => import("@/pages/Returns"));
+const ReturnLabelSettings = React.lazy(() => import("@/pages/ReturnLabelSettings"));
+const ReturnCases = React.lazy(() => import("@/pages/ReturnCases"));
+const ReturnPolicies = React.lazy(() => import("@/pages/ReturnPolicies"));
+const CustomerReturnPortalPreview = React.lazy(() => import("@/pages/CustomerReturnPortalPreview"));
+const CustomerReturnCustomerPortal = React.lazy(() => import("@/pages/CustomerReturnCustomerPortal"));
+const CustomerReturnPortalAccess = React.lazy(() => import("@/pages/CustomerReturnPortalAccess"));
+const InboundShipments = React.lazy(() => import("@/pages/InboundShipments"));
+const OutboundShipments = React.lazy(() => import("@/pages/OutboundShipments"));
+const ShipmentOrderContext = React.lazy(() => import("@/pages/ShipmentOrderContext"));
+const InboundShipmentDetail = React.lazy(() => import("@/pages/InboundShipmentDetail"));
+const CostDashboard = React.lazy(() => import("@/pages/CostDashboard"));
+const APDashboard = React.lazy(() => import("@/pages/APDashboard"));
+const APInvoices = React.lazy(() => import("@/pages/APInvoices"));
+const APInvoiceDetail = React.lazy(() => import("@/pages/APInvoiceDetail"));
+const APPayments = React.lazy(() => import("@/pages/APPayments"));
+const SupplierCredits = React.lazy(() => import("@/pages/SupplierCredits"));
+const SupplierReturns = React.lazy(() => import("@/pages/SupplierReturns"));
+const StaffPasswordChange = React.lazy(() =>
+  import("@/components/identity/StaffPasswordChange").then((m) => ({ default: m.StaffPasswordChange })),
+);
+const Settings = React.lazy(() => import("@/pages/Settings"));
+const ProcurementSettings = React.lazy(() => import("@/pages/ProcurementSettings"));
+const ShippingSettings = React.lazy(() => import("@/pages/ShippingSettings"));
+const ShippingServiceLevels = React.lazy(() => import("@/pages/ShippingServiceLevels"));
+const ShippingServiceLevelDetail = React.lazy(() => import("@/pages/ShippingServiceLevelDetail"));
+const NotificationPreferences = React.lazy(() => import("@/pages/NotificationPreferences"));
+const EbayChannelPage = React.lazy(() => import("@/pages/EbayChannelPage"));
+const WalmartChannelRouteHost = React.lazy(() =>
+  import("@/pages/WalmartChannelPage").then((m) => ({ default: m.WalmartChannelRouteHost })),
+);
+const ShopifyChannelPage = React.lazy(() => import("@/pages/ShopifyChannelPage"));
+const SyncLogPage = React.lazy(() => import("@/pages/SyncLogPage"));
+const OmsOrders = React.lazy(() => import("@/pages/OmsOrders"));
+const OrderEdits = React.lazy(() => import("@/pages/OrderEdits"));
+const FlowMonitor = React.lazy(() => import("@/pages/FlowMonitor"));
+const VendorList = React.lazy(() => import("@/pages/VendorList"));
+const VendorDetail = React.lazy(() => import("@/pages/VendorDetail"));
+const DemandPlanner = React.lazy(() => import("@/pages/DemandPlanner"));
+
+function RouteSuspenseFallback({ fullScreen = false }: { fullScreen?: boolean }) {
+  return (
+    <div className={`flex items-center justify-center ${fullScreen ? "min-h-screen" : "min-h-[50vh]"}`}>
+      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+    </div>
+  );
+}
+
+function DeferredWalmartChannelRouteHost() {
+  const [location] = useLocation();
+  const isWalmartRoute = /^\/channels\/walmart\/[1-9]\d*(?:\/listings\/bulk)?$/.test(location);
+  const [activated, setActivated] = React.useState(isWalmartRoute);
+
+  React.useEffect(() => {
+    if (isWalmartRoute) setActivated(true);
+  }, [isWalmartRoute]);
+
+  if (!activated && !isWalmartRoute) return null;
+
+  return (
+    <React.Suspense fallback={null}>
+      <WalmartChannelRouteHost />
+    </React.Suspense>
+  );
+}
 
 // Reorder Engine feature-flag switch (design spec §4.6, PR 2). Reads the
 // procurement settings and renders the new cockpit when `useNewReorderCockpit`
@@ -386,7 +417,8 @@ function Router() {
 
   return (
     <Layout>
-      <WalmartChannelRouteHost key={user.id} />
+      <DeferredWalmartChannelRouteHost key={user.id} />
+      <React.Suspense fallback={<RouteSuspenseFallback />}>
       <Switch>
         <Route path="/">
           {hasPermission("inventory", "view") ? <Dashboard /> : landingPath ? <Redirect to={landingPath} /> : <StaffAccessNotice />}
@@ -697,6 +729,7 @@ function Router() {
         <Route path="/warehouses"><Redirect to="/warehouse" /></Route>
         <Route component={NotFound} />
       </Switch>
+      </React.Suspense>
     </Layout>
   );
 }
@@ -716,7 +749,9 @@ function App() {
           <TooltipProvider>
             <Toaster />
             <StaffPWAUpdatePrompt />
-            <Router />
+            <React.Suspense fallback={<RouteSuspenseFallback fullScreen />}>
+              <Router />
+            </React.Suspense>
           </TooltipProvider>
         </SettingsProvider>
       </AuthProvider>
