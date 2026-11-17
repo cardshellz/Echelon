@@ -36,8 +36,21 @@ function observedValues(value: EbayPackageWeightAndSize | undefined): ListingPac
     heightMm: p.dimensions ? new Decimal(p.dimensions.height).mul(lengthUnits[p.dimensions.unit]).toNumber() : null };
 }
 
+/** eBay keeps package dimensions to two decimal places. Observed in production on 2026-11-17: a PUT of
+ * height 0.635 CENTIMETER was stored and read back as 0.64, so the exact read-back check after every update
+ * failed for GLV-MAG-180PT-P50 (6.35 mm) and could never succeed. eBay does not document this precision. */
+const EBAY_DIMENSION_DECIMAL_PLACES = 2;
+const MILLIMETERS_PER_CENTIMETER = 10;
+
+/** Send what eBay will store. Round up, like weight's whole ounces, so a package is never understated. */
+function publishedCentimeters(millimeters: number | string): number {
+  return new Decimal(millimeters).div(MILLIMETERS_PER_CENTIMETER)
+    .toDecimalPlaces(EBAY_DIMENSION_DECIMAL_PLACES, Decimal.ROUND_UP).toNumber();
+}
+
 /** Transport translation only. The shared package owner selects facts and
- * enforces requirements. Weight uses shared publication precision; preserved
+ * enforces requirements. Weight uses shared publication precision and catalog
+ * dimensions use eBay's stored precision; preserved
  * dimensions, flags and provider extensions retain their original values. */
 export function resolveEbayListingPackage(input: { source: EbayPackageSource; sku: string;
   observed?: EbayPackageWeightAndSize }): { payload: EbayPackageWeightAndSize; plan: ChannelPackagePlan } {
@@ -53,9 +66,9 @@ export function resolveEbayListingPackage(input: { source: EbayPackageSource; sk
     value: prepareChannelPublicationWeight({ value: plan.values.weightGrams, unit: "GRAM" }).ounces, unit: "OUNCE",
   };
   if (plan.sources.dimensions === "catalog") payload.dimensions = {
-    length: new Decimal(plan.values.lengthMm!).div(10).toNumber(),
-    width: new Decimal(plan.values.widthMm!).div(10).toNumber(),
-    height: new Decimal(plan.values.heightMm!).div(10).toNumber(), unit: "CENTIMETER",
+    length: publishedCentimeters(plan.values.lengthMm!),
+    width: publishedCentimeters(plan.values.widthMm!),
+    height: publishedCentimeters(plan.values.heightMm!), unit: "CENTIMETER",
   };
   // packageType is optional in the Inventory API contract. It remains provider-owned:
   // preserve an observed value, but never infer one or replay a retired catalog override.
