@@ -153,7 +153,7 @@ describe("ShopifyCustomerRefundProvider", () => {
       idempotencyKey: "return-refund-command-2",
       notifyCustomer: false,
       notes: null,
-    })).rejects.toMatchObject<CustomerRefundProviderError>({
+    })).rejects.toMatchObject({
       code: "RETURN_CUSTOMER_REFUND_TOTAL_MISMATCH",
       retryable: true,
       context: {
@@ -180,7 +180,7 @@ describe("ShopifyCustomerRefundProvider", () => {
       idempotencyKey: "return-refund-command-3",
       notifyCustomer: false,
       notes: null,
-    })).rejects.toMatchObject<CustomerRefundProviderError>({
+    })).rejects.toMatchObject({
       code: "RETURN_CUSTOMER_REFUND_REJECTED",
       retryable: false,
     });
@@ -198,7 +198,7 @@ describe("ShopifyCustomerRefundProvider", () => {
       idempotencyKey: "return-refund-command-truncated",
       notifyCustomer: false,
       notes: null,
-    })).rejects.toMatchObject<CustomerRefundProviderError>({
+    })).rejects.toMatchObject({
       code: "RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID",
       retryable: true,
       context: {
@@ -235,7 +235,7 @@ describe("ShopifyCustomerRefundProvider", () => {
       idempotencyKey: "return-refund-command-stalled",
       notifyCustomer: false,
       notes: null,
-    })).rejects.toMatchObject<CustomerRefundProviderError>({
+    })).rejects.toMatchObject({
       code: "RETURN_CUSTOMER_REFUND_PROVIDER_UNAVAILABLE",
       retryable: true,
       context: {
@@ -255,7 +255,7 @@ describe("ShopifyCustomerRefundProvider", () => {
       idempotencyKey: "return-refund-command-graphql-busy",
       notifyCustomer: false,
       notes: null,
-    })).rejects.toMatchObject<CustomerRefundProviderError>({
+    })).rejects.toMatchObject({
       code: "RETURN_CUSTOMER_REFUND_PROVIDER_BUSY",
       retryable: true,
       context: {
@@ -273,7 +273,7 @@ describe("ShopifyCustomerRefundProvider", () => {
       idempotencyKey: "return-refund-command-graphql-ambiguous",
       notifyCustomer: false,
       notes: null,
-    })).rejects.toMatchObject<CustomerRefundProviderError>({
+    })).rejects.toMatchObject({
       code: "RETURN_CUSTOMER_REFUND_PROVIDER_GRAPHQL_ERROR",
       retryable: true,
       context: {
@@ -294,7 +294,7 @@ describe("ShopifyCustomerRefundProvider", () => {
       idempotencyKey: "return-refund-command-graphql-validation",
       notifyCustomer: false,
       notes: null,
-    })).rejects.toMatchObject<CustomerRefundProviderError>({
+    })).rejects.toMatchObject({
       code: "RETURN_CUSTOMER_REFUND_PROVIDER_GRAPHQL_ERROR",
       retryable: false,
     });
@@ -316,15 +316,22 @@ function source(): ReturnFinancialCaseSource {
     channelId: 36,
     channelProvider: "shopify",
     vendorId: null,
+    storeConnectionId: null,
     omsOrderId: 653408,
     externalOrderId: "1001",
     externalOrderNumber: "#61694",
     currency: "USD",
-    customerRefundStatus: "pending",
-    vendorSettlementStatus: "not_applicable",
     policyVersion: 2,
     updatedAt: new Date("2026-08-23T12:00:00.000Z"),
-    items: [{ returnCaseItemId: 41, externalLineItemId: "2001", quantity: 1 }],
+    items: [{
+      returnCaseItemId: 41,
+      omsOrderLineId: 201,
+      externalLineItemId: "2001",
+      productVariantId: 301,
+      quantity: 1,
+      sku: "SKU-41",
+      title: "Item 41",
+    }],
     actionContext: {} as ReturnFinancialCaseSource["actionContext"],
   };
 }

@@ -29,7 +29,7 @@ describe("order COGS HTTP read contract", () => {
     vi.resetAllMocks();
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     const app = express();
-    app.locals.services = { cogs };
+    app.locals.services = { cogs } as unknown as typeof app.locals.services;
     registerInventoryRoutes(app);
     server = createServer(app);
     await new Promise<void>((resolve, reject) => {

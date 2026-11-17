@@ -223,7 +223,9 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       INSERT INTO inventory.build_component_reservations(build_order_component_id,inventory_lot_id,reserved_qty)
         VALUES (11,101,2),(11,102,3);
     `);
-    const repository = new BuildExecutionRepository(database, {
+    const repository = new BuildExecutionRepository(
+      database as unknown as ConstructorParameters<typeof BuildExecutionRepository>[0],
+      {
       loadActiveBuildVariantFacts: async () => new Map([
         [101, { variantId: 101, productId: 90, unitsPerVariant: 1 }],
         [105, { variantId: 105, productId: 95, unitsPerVariant: 1 }],
@@ -250,7 +252,7 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
     if (exact) {
       await repository.reverseRun({buildOrderId:10,buildRunId:result.buildRunId,idempotencyKey:"reverse-exact-build",actorId:"integration-test",reason:"Void untouched output"});
       const {readUnallocatedLotCosts}=await import("../../infrastructure/cost-quantity.repository");
-      const restored=await database.transaction(async tx=>readUnallocatedLotCosts(tx,(await tx.execute(sql`SELECT * FROM inventory.inventory_lots WHERE id=102`)).rows));
+      const restored=await database.transaction(async tx=>readUnallocatedLotCosts(tx,(await tx.execute<{ id: number } & Record<string, unknown>>(sql`SELECT * FROM inventory.inventory_lots WHERE id=102`)).rows));
       expect(restored.get(102)).toMatchObject({quantity:3,costs:{totalMills:BigInt(376)}});
       expect((await pool.query("SELECT qty_on_hand,qty_reserved FROM inventory.inventory_lots WHERE id=102")).rows[0]).toEqual({qty_on_hand:3,qty_reserved:3});
     }

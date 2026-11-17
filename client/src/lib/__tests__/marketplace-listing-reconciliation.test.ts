@@ -16,6 +16,7 @@ const registration = (
   providerPublicationKey: "ARM-ENV-SGL",
   externalListingId,
   registeredVariantIds: [...registeredVariantIds],
+  registeredVariants: [],
   registeredAt: "2026-08-05T17:00:00.000Z",
 });
 

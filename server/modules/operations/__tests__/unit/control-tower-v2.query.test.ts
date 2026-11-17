@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { QueryClient } from "../../control-tower-v2.domain";
 import {
   getControlTowerV2Sources,
   loadControlTowerV2Groups,
@@ -88,7 +89,7 @@ describe("Control Tower V2 request validation", () => {
         }
         return { rows: [{ group_count: "20", affected_records: "27715" }] };
       },
-    };
+    } as unknown as QueryClient;
 
     const result = await loadControlTowerV2Groups({
       client,
@@ -146,7 +147,7 @@ describe("Control Tower V2 request validation", () => {
           last_changed_at: "2026-07-10T00:00:00.000Z",
         }] };
       },
-    };
+    } as unknown as QueryClient;
 
     const result = await getControlTowerV2Sources(client);
     expect(result.sources.find((source) => source.name === "inventory_integrity")).toMatchObject({

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   assemblyTaskCommandSchema, assemblyWorkFenceSchema, assemblyWorkRouteSchema, workEvidenceIdSchema,
+  type AssemblyTaskCommand,
 } from "@shared/warehouse-assembly-work";
 import { completeAssemblyTask, cancelUnstartedAssembly, requireAssemblyRoute, requireAssemblyScope, transitionAssemblyTask } from "../../work/domain/assembly-work";
 import { validateConfigurationReferences } from "../../work/domain/work-configuration";
@@ -60,7 +61,8 @@ describe("assembly work contracts and ownership", () => {
     expect(() => transitionAssemblyTask(started, { ...start(), expectedVersion: 2 }, "other", TIME)).toThrow("taken responsibility");
   });
   it("does not interpret a tracking barcode or a different build ticket as receipt", () => {
-    expect(() => transitionAssemblyTask(task(), { ...start(), receivedBuildSystemNumber: "TRACKING-123" }, "assembler", TIME)).toThrow("does not match");
+    const invalidStart = { ...(start() as Extract<AssemblyTaskCommand, { action: "start" }>), receivedBuildSystemNumber: "TRACKING-123" };
+    expect(() => transitionAssemblyTask(task(), invalidStart, "assembler", TIME)).toThrow("does not match");
   });
   it("retains ownership and routing while blocked; only the owner can resume", () => {
     const started = transitionAssemblyTask(task(), start(), "assembler", TIME);

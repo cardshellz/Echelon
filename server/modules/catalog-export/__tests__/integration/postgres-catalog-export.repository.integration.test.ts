@@ -60,11 +60,13 @@ const CATALOG_EXPORT_CHANNEL_TABLES_SQL = `
   );
 `;
 
+type CatalogExportDatabase = NonNullable<ConstructorParameters<typeof PostgresCatalogExportRepository>[0]>;
+
 describeWithDisposableDb("catalog export PostgreSQL repository", () => {
-  let db: ReturnType<typeof getTestDb>;
+  let db: CatalogExportDatabase;
 
   beforeAll(async () => {
-    db = getTestDb();
+    db = getTestDb() as unknown as CatalogExportDatabase;
     await runMigrations();
     await db.execute(sql.raw(CATALOG_EXPORT_CHANNEL_TABLES_SQL));
   });

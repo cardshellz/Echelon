@@ -28,7 +28,8 @@ function renderAt(href: string, component: ReactElement): string {
   return renderToStaticMarkup(createElement(Router, {
     ssrPath: url.pathname,
     ssrSearch: url.search,
-  }, component));
+    children: component,
+  }));
 }
 
 function navigationAt(href: string, destination = "/shipments/42") {

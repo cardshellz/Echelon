@@ -35,7 +35,7 @@ function queryText(query: any): string {
 describe("recordOmsWmsAuthorityCleanupAudit", () => {
   it("appends the audit through the caller's transaction handle", async () => {
     const tx = {
-      execute: vi.fn(async () => ({ rows: [] })),
+      execute: vi.fn(async (_query: unknown) => ({ rows: [] })),
     };
 
     await recordOmsWmsAuthorityCleanupAudit(tx, VALID_INPUT);
@@ -56,7 +56,7 @@ describe("recordOmsWmsAuthorityCleanupAudit", () => {
     [{ operator: " " }, "operator is required"],
     [{ createdAt: new Date("invalid") }, "createdAt must be a valid Date"],
     [{ beforeRow: [] }, "beforeRow must be an object"],
-    [{ beforeRow: { invalid: 1n } }, "beforeRow must be JSON serializable"],
+    [{ beforeRow: { invalid: BigInt(1) } }, "beforeRow must be JSON serializable"],
   ])("rejects invalid audit input before writing: %#", async (override, message) => {
     const tx = {
       execute: vi.fn(async () => ({ rows: [] })),

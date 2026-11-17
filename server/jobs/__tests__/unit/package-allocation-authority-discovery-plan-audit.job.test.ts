@@ -106,8 +106,8 @@ describe("package-allocation authority discovery plan audit job", () => {
     let poolEnded = false;
     let observedSourceId: number | undefined;
     const client = {
-      query: async () => ({ rows: [] }),
-      release: (error?: Error | boolean) => releaseArguments.push(error),
+      query: (async () => ({ rows: [] })) as unknown as Awaited<ReturnType<PackageAllocationDiscoveryPlanAuditPool["connect"]>>["query"],
+      release: (error?: Error | boolean) => { releaseArguments.push(error); },
     };
     const pool: PackageAllocationDiscoveryPlanAuditPool = {
       connect: async () => client,
@@ -151,7 +151,7 @@ describe("package-allocation authority discovery plan audit job", () => {
     let releaseArgument: unknown;
     const pool: PackageAllocationDiscoveryPlanAuditPool = {
       connect: async () => ({
-        query: async () => ({ rows: [] }),
+        query: (async () => ({ rows: [] })) as unknown as Awaited<ReturnType<PackageAllocationDiscoveryPlanAuditPool["connect"]>>["query"],
         release: (error?: Error | boolean) => {
           releaseArgument = error;
           throw releaseFailure;

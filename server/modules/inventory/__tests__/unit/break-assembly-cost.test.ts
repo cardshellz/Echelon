@@ -70,7 +70,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
         }
         return { orphanedQty: 0, consumedCostCents: 0, consumedQty: 0 };
       }),
-      withTx: vi.fn(function () { return this; }),
+      withTx: vi.fn(function (this: unknown) { return this; }),
     };
 
     const db = makeVariantDb([sourceVariant, targetVariant, { inventoryStrategy: "physical_fungible" }]);
@@ -117,7 +117,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
         }
         return { orphanedQty: 0, consumedCostCents: 0, consumedQty: 0 };
       }),
-      withTx: vi.fn(function () { return this; }),
+      withTx: vi.fn(function (this: unknown) { return this; }),
     };
 
     const db = makeVariantDb([sourceVariant, targetVariant, { inventoryStrategy: "physical_fungible" }]);
@@ -157,7 +157,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
       };
       const inventoryUseCases = {
         adjustInventory: vi.fn(),
-        withTx: vi.fn(function () { return this; }),
+        withTx: vi.fn(function (this: unknown) { return this; }),
       };
       const db = makeVariantDb([sourceVariant, targetVariant, { inventoryStrategy }]);
       const svc = new BreakAssemblyUseCases(db, inventoryUseCases as any, () => new Date(0), legacyTransformationExecutionAuthority);

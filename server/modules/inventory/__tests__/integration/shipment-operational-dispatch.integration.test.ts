@@ -60,7 +60,7 @@ databaseSuite.sequential("operational shipment exact available-stock owner Postg
     return result;
   }
   async function readQuantity() {
-    const query = new PgDialect().sqlToQuery(sql`SELECT ${shipmentQuantityEvidenceProjection(sql.identifier("ledger"))} AS evidence
+    const query = new PgDialect().sqlToQuery(sql`SELECT ${shipmentQuantityEvidenceProjection(sql`${sql.identifier("ledger")}`)} AS evidence
       FROM inventory.inventory_transactions ledger WHERE ledger.shipment_item_id=103`);
     const evidence = (await pool.query(query.sql, query.params)).rows[0].evidence;
     return { evidence, quantity: interpretInventoryShipmentQuantity(evidence) };

@@ -9,6 +9,21 @@ import {
 } from "../../database-pool-config";
 
 const { Pool } = pg;
+
+interface InternalPgPool extends pg.Pool {
+  options: pg.PoolConfig & {
+    options?: string;
+    statement_timeout?: number;
+    query_timeout?: number;
+  };
+  Client: new (config: unknown) => {
+    connectionParameters: {
+      options?: string;
+      statement_timeout?: number;
+    };
+  };
+}
+
 const DATABASE_BOOT_SOURCE = readFileSync(
   fileURLToPath(new URL("../../db.ts", import.meta.url)),
   "utf8",
@@ -44,7 +59,7 @@ describe("database pool startup configuration", () => {
       connectionString: "postgresql://user:password@localhost:5432/echelon_test",
       max: 0,
     });
-    const pool = new Pool(config);
+    const pool = new Pool(config) as InternalPgPool;
 
     try {
       expect(pool.options.options).toBe(DATABASE_SESSION_OPTIONS);
@@ -76,7 +91,7 @@ describe("database pool startup configuration", () => {
       queryTimeoutMs: 8_000,
       connectionTimeoutMs: 5_000,
       idleTimeoutMs: 60_000,
-    });
+    }) as InternalPgPool;
 
     try {
       expect(pool.options.options).toBe(DATABASE_SESSION_OPTIONS);

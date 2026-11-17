@@ -156,8 +156,17 @@ describe("PostgresCanonicalClaimBuildRepository", () => {
 
   it("posts one full claim-owned build run and preserves exact lot ownership", async () => {
     const inventoryWriter = {
+      assertCountableCustody: vi.fn(),
+      ensureInventoryLevel: vi.fn(),
       reserveResource: vi.fn(),
       releaseResources: vi.fn(),
+      reconcilePickResource: vi.fn(),
+      reconcileObservedPickResource: vi.fn(),
+      pickResources: vi.fn(),
+      unpickResources: vi.fn(),
+      applyCycleCountAdjustment: vi.fn(),
+      recordCycleCountNoop: vi.fn(),
+      approveCycleCountItem: vi.fn(),
       executePackageOperation: vi.fn(),
       executeBuildOperation: vi.fn(async () => ({
         outputInventoryLevelId: 31,
@@ -172,7 +181,7 @@ describe("PostgresCanonicalClaimBuildRepository", () => {
         totalInputCostMills: BigInt(625),
       })),
     };
-    const query = vi.fn(async (text: string) => {
+    const query = vi.fn(async (text: string, _values?: unknown[]) => {
       if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
       if (text.includes("FROM inventory.build_orders")) {
         return { rows: [{
@@ -356,8 +365,17 @@ describe("PostgresCanonicalClaimBuildRepository", () => {
       throw new Error(`Unexpected query: ${text}`);
     });
     const repository = new PostgresCanonicalClaimBuildRepository({
+      assertCountableCustody: vi.fn(),
+      ensureInventoryLevel: vi.fn(),
       reserveResource: vi.fn(),
       releaseResources: vi.fn(),
+      reconcilePickResource: vi.fn(),
+      reconcileObservedPickResource: vi.fn(),
+      pickResources: vi.fn(),
+      unpickResources: vi.fn(),
+      applyCycleCountAdjustment: vi.fn(),
+      recordCycleCountNoop: vi.fn(),
+      approveCycleCountItem: vi.fn(),
       executePackageOperation: vi.fn(),
       executeBuildOperation: vi.fn(),
     });

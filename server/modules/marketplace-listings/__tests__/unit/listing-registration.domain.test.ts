@@ -140,7 +140,7 @@ describe("marketplace listing registration plan", () => {
       providerAccount: {
         ...input.observation.providerAccount,
         identityScheme: "username",
-      } as typeof input.observation.providerAccount,
+      } as unknown as typeof input.observation.providerAccount,
     };
 
     expect(() => buildListingRegistrationPlan(input)).toThrowError(

@@ -115,7 +115,11 @@ describe("ReservationService build-aware order status", () => {
       {},
     );
 
-    const [status] = await service.getOrderReservationStatus(13);
+    const statuses = await service.getOrderReservationStatus(13);
+    if (!Array.isArray(statuses)) {
+      throw new Error("Expected legacy order reservation status array");
+    }
+    const [status] = statuses;
 
     expect(status).toMatchObject({
       reservedQty: 3,

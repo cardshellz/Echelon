@@ -143,7 +143,7 @@ describe("marketplace listing connectors", () => {
       createOrReplaceInventoryItem: vi.fn(async () => {
         calls.push("put_inventory");
       }),
-      getOffers: vi.fn(async () => ({ offers: [{ offerId: "known-offer", status: "UNPUBLISHED", sku: "SKU-1", marketplaceId: "EBAY_US", format: "FIXED_PRICE", availableQuantity: 1, categoryId: "123", listingPolicies: { fulfillmentPolicyId: "fulfillment", paymentPolicyId: "payment", returnPolicyId: "return" }, merchantLocationKey: "warehouse", pricingSummary: { price: { value: "9.99", currency: "USD" } }, listingId: "listing-1" }] })),
+      getOffers: vi.fn<EbayListingConnectorClient["getOffers"]>(async () => ({ offers: [{ offerId: "known-offer", status: "UNPUBLISHED", sku: "SKU-1", marketplaceId: "EBAY_US", format: "FIXED_PRICE", availableQuantity: 1, categoryId: "123", listingPolicies: { fulfillmentPolicyId: "fulfillment", paymentPolicyId: "payment", returnPolicyId: "return" }, merchantLocationKey: "warehouse", pricingSummary: { price: { value: "9.99", currency: "USD" } }, listingId: "listing-1" }] })),
       createOffer: vi.fn(async () => "new-offer"),
       updateOffer: vi.fn(async () => {
         calls.push("update_offer");
@@ -215,7 +215,7 @@ describe("marketplace listing connectors", () => {
       createOrReplaceInventoryItem: vi.fn(async () => {
         calls.push("put_inventory");
       }),
-      getOffers: vi.fn(async () => {
+      getOffers: vi.fn<EbayListingConnectorClient["getOffers"]>(async () => {
         calls.push("get_offers");
         return {
           offers: [
@@ -1553,7 +1553,7 @@ describe("eBay grouped publish consistency", () => {
       .mockRejectedValueOnce(new Error("eBay error 25604: Offer not found"))
       .mockRejectedValueOnce(new Error("eBay error 25703: offer not ready"))
       .mockResolvedValueOnce({ listingId: "listing-new" });
-    const delay = vi.fn(async () => undefined);
+    const delay = vi.fn(async (_ms: number) => undefined);
     const connector = new EbayMarketplaceListingConnector({
       delay,
       groupPublishRetryDelaysMs: [10, 20],
@@ -1579,7 +1579,7 @@ describe("eBay grouped publish consistency", () => {
     });
     vi.mocked(client.publishOfferByInventoryItemGroup)
       .mockRejectedValue(new Error("Invalid fulfillment policy"));
-    const delay = vi.fn(async () => undefined);
+    const delay = vi.fn(async (_ms: number) => undefined);
     const connector = new EbayMarketplaceListingConnector({
       delay,
       groupPublishRetryDelaysMs: [10, 20],

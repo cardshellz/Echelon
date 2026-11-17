@@ -60,7 +60,7 @@ describe("metrics.incr — structured log emit", () => {
   });
 
   it("JSON-stringifies object label values inline", () => {
-    incr("ss_reconcile_v2_divergence", 1, { evidence: { ssStatus: "shipped", wmsStatus: "queued" } });
+    incr("ss_reconcile_v2_divergence", 1, { evidence: { ssStatus: "shipped", wmsStatus: "queued" } as any });
     // The object stringification produces `{"ssStatus":"shipped","wmsStatus":"queued"}`
     // which has no whitespace to begin with; assert the line shape.
     const line = logSpy.mock.calls[0][0] as string;

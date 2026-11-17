@@ -106,8 +106,8 @@ describe("package-allocation authority discovery execution audit job", () => {
     let observedSourceId: number | undefined;
     const pool: PackageAllocationDiscoveryPlanAuditPool = {
       connect: async () => ({
-        query: async () => ({ rows: [] }),
-        release: (error?: Error | boolean) => releaseArguments.push(error),
+        query: (async () => ({ rows: [] })) as unknown as Awaited<ReturnType<PackageAllocationDiscoveryPlanAuditPool["connect"]>>["query"],
+        release: (error?: Error | boolean) => { releaseArguments.push(error); },
       }),
       end: async () => { poolEnded = true; },
     };
@@ -148,7 +148,7 @@ describe("package-allocation authority discovery execution audit job", () => {
     const endFailure = new Error("end failed");
     const pool: PackageAllocationDiscoveryPlanAuditPool = {
       connect: async () => ({
-        query: async () => ({ rows: [] }),
+        query: (async () => ({ rows: [] })) as unknown as Awaited<ReturnType<PackageAllocationDiscoveryPlanAuditPool["connect"]>>["query"],
         release: () => { throw releaseFailure; },
       }),
       end: async () => { throw endFailure; },

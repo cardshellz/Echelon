@@ -79,11 +79,15 @@ describe("marketplace listing replacement canonical plan", () => {
       "compensation:1:compensate.ensure_target_not_sellable",
       "compensation:2:compensate.ensure_source_live",
     ]);
-    expect(first.steps.every((step) => step.phase !== "complete")).toBe(true);
+    expect(
+      first.steps.every(
+        (step) => (step.phase as ListingReplacementPhase) !== "complete",
+      ),
+    ).toBe(true);
     expect(
       first.steps.every((step) =>
         step.executionPath === "forward"
-          ? step.phase !== "compensate"
+          ? (step.phase as ListingReplacementPhase) !== "compensate"
           : step.phase === "compensate",
       ),
     ).toBe(true);

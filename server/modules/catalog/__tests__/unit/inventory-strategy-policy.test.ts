@@ -13,7 +13,7 @@ describe("product inventory strategy policy", () => {
 
   it("rejects unknown values with a boundary error", () => {
     expect(() => parseProductInventoryStrategy("build", { useDefaultWhenMissing: false })).toThrowError(
-      expect.objectContaining<ProductInventoryStrategyError>({
+      expect.objectContaining<Pick<ProductInventoryStrategyError, "code" | "statusCode">>({
         code: "INVALID_INVENTORY_STRATEGY",
         statusCode: 400,
       }),
@@ -27,7 +27,7 @@ describe("product inventory strategy policy", () => {
       requested: "physical_fungible",
       hasBuildRecipes: true,
     })).toThrowError(
-      expect.objectContaining<ProductInventoryStrategyError>({
+      expect.objectContaining<Pick<ProductInventoryStrategyError, "code" | "statusCode">>({
         code: "INVENTORY_STRATEGY_HAS_RECIPES",
         statusCode: 409,
       }),

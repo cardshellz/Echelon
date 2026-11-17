@@ -113,6 +113,7 @@ const PLAN_ROW: ShippingPackPlan = {
   status: "active",
   engineVersion: "cardshellz-cartonizer@3.1.0",
   inputHash: "stale-hash",
+  packagingSnapshot: null,
   warnings: [],
   createdAt: new Date("2026-07-01T00:00:00Z"),
   updatedAt: new Date("2026-07-01T00:00:00Z"),

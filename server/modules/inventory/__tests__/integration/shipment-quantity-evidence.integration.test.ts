@@ -59,7 +59,7 @@ describeDatabase.sequential("shipment quantity evidence PostgreSQL read contract
 
   async function readEvidence(client: PoolClient, transactionId: number) {
     const query = dialect.sqlToQuery(sql`
-      SELECT ${shipmentQuantityEvidenceProjection(sql.identifier("shipment_tx"))} AS evidence,
+      SELECT ${shipmentQuantityEvidenceProjection(sql`${sql.identifier("shipment_tx")}`)} AS evidence,
              shipment_tx.voided_at AS "voidedAt"
       FROM inventory.inventory_transactions AS shipment_tx
       WHERE shipment_tx.id = ${transactionId}

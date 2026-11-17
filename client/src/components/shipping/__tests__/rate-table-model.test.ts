@@ -78,6 +78,8 @@ function group(overrides: Partial<RateGroup> = {}): RateGroup {
     id: "group-1",
     destinationGroupId: null,
     destinationGroupLockVersion: null,
+    sourceDestinationScopeId: null,
+    sourceDestinationScopeLockVersion: null,
     name: "",
     originWarehouseId: null,
     regions: ["PA"],

@@ -52,7 +52,7 @@ describe("CentsSchema", () => {
   });
 
   it("rejects non-number types", () => {
-    for (const v of ["123", "0", null, undefined, true, false, {}, [], 123n]) {
+    for (const v of ["123", "0", null, undefined, true, false, {}, [], BigInt(123)]) {
       expect(CentsSchema.safeParse(v).success).toBe(false);
     }
   });

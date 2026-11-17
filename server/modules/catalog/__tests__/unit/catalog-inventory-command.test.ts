@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { CatalogInventoryCommandService, type CatalogInventoryCommand, type CatalogInventoryUnitOfWork,
-  type CatalogInventoryPosting } from "../../application/catalog-inventory-command.service";
+import { CatalogInventoryCommandService, type CatalogInventoryCommand, type CatalogInventoryCommandRepository,
+  type CatalogInventoryUnitOfWork, type CatalogInventoryPosting } from "../../application/catalog-inventory-command.service";
 
 const now = new Date("2026-09-10T16:00:00Z");
 const command: CatalogInventoryCommand = { commandKey: "archive:1", operation: "product_archive",
@@ -37,7 +37,7 @@ function harness() {
     catch (error) { events.push("rollback"); throw error; }
   });
   const log = vi.fn();
-  return { unit, posting, events, transaction, log, service: new CatalogInventoryCommandService({ transaction }, () => now, log) };
+  return { unit, posting, events, transaction, log, service: new CatalogInventoryCommandService({ transaction: transaction as CatalogInventoryCommandRepository["transaction"] }, () => now, log) };
 }
 
 describe("catalog inventory parent command", () => {

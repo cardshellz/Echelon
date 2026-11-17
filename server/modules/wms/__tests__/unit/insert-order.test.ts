@@ -166,7 +166,7 @@ describe("insertWmsOrder", () => {
 
   it("type-level: required fields cannot be null", () => {
     // @ts-expect-error — omsFulfillmentOrderId is required
-    const bad: WmsOrderInsert = { channelId: 1 } as any;
+    const bad: WmsOrderInsert = { channelId: 1 };
     expect(bad).toBeDefined();
   });
 });
