@@ -36,6 +36,8 @@ import { AppError } from "@shared/errors";
 import { ZodError } from "zod";
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { ReturnRestockError, CostEvidenceError, LotCostError } from "./return-inventory.api";
+import { InventoryQuantityError } from "./domain/quantity-ledger";
+import { inventoryQuantityErrorStatus } from "./application/inventory-quantity-error-status";
 
 type InventoryRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -166,6 +168,88 @@ export function registerInventoryRoutes(app: Express) {
         return res.status(400).json({ code: "TRANSFER_INPUT_INVALID", error: "Invalid transfer request", issues: error.issues });
       }
       res.status(500).json({ code: "INVENTORY_TRANSFER_FAILED", error: "Failed to transfer inventory" });
+    }
+  });
+
+  // Cross-building inventory has a durable two-leg lifecycle. Dispatch removes
+  // source ATP into isolated transit custody; receive is a separate atomic post.
+  const sendInterwarehouseError = (res: any, error: any, commandKey?: unknown) => {
+    console.error("Inter-warehouse transfer error:", error);
+    const receipt = typeof commandKey === "string" && commandKey.trim().length >= 8 && commandKey.trim().length <= 120
+      ? { interwarehouseCommandReceipt: { contractVersion: "interwarehouse_transfer_v1", commandKey: commandKey.trim(), outcome: "rejected" } }
+      : {};
+    if (error instanceof AppError) {
+      res.status(error.statusCode).json({ code: error.code, error: error.message, context: { ...error.context, ...receipt } });
+      return;
+    }
+    if (error instanceof InventoryQuantityError) {
+      res.status(inventoryQuantityErrorStatus(error))
+        .json({ code: error.code, error: error.message, context: { ...error.context, ...receipt } });
+      return;
+    }
+    if (error instanceof ZodError) {
+      res.status(400).json({ code: "INTERWAREHOUSE_INPUT_INVALID", error: "Invalid warehouse transfer request", issues: error.issues, context: receipt });
+      return;
+    }
+    res.status(500).json({ code: "INTERWAREHOUSE_TRANSFER_FAILED", error: "The warehouse transfer could not be completed" });
+  };
+
+  app.get("/api/inventory/interwarehouse-transfers", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const limit = req.query.limit == null ? 50 : Number(req.query.limit);
+      res.json(await req.app.locals.services.interwarehouseTransfers.list(limit));
+    } catch (error) {
+      sendInterwarehouseError(res, error);
+    }
+  });
+
+  app.get("/api/inventory/interwarehouse-transfers/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      res.json(await req.app.locals.services.interwarehouseTransfers.getById(Number(req.params.id)));
+    } catch (error) {
+      sendInterwarehouseError(res, error);
+    }
+  });
+
+  app.post("/api/inventory/interwarehouse-transfers", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
+    try {
+      const result = await req.app.locals.services.interwarehouseTransfers.createAndDispatch(
+        req.body,
+        req.session.user?.id || "system",
+      );
+      res.status(201).json(result);
+    } catch (error) {
+      sendInterwarehouseError(res, error, req.body?.commandKey);
+    }
+  });
+
+  app.post("/api/inventory/interwarehouse-transfers/:id/receive", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
+    try {
+      res.json(await req.app.locals.services.interwarehouseTransfers.receive(
+        Number(req.params.id), req.body, req.session.user?.id || "system",
+      ));
+    } catch (error) {
+      sendInterwarehouseError(res, error, req.body?.commandKey);
+    }
+  });
+
+  app.post("/api/inventory/interwarehouse-transfers/:id/reconcile", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
+    try {
+      res.json(await req.app.locals.services.interwarehouseTransfers.reconcileMissing(
+        Number(req.params.id), req.body, req.session.user?.id || "system",
+      ));
+    } catch (error) {
+      sendInterwarehouseError(res, error, req.body?.commandKey);
+    }
+  });
+
+  app.post("/api/inventory/interwarehouse-transfers/:id/cancel", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
+    try {
+      res.json(await req.app.locals.services.interwarehouseTransfers.cancel(
+        Number(req.params.id), req.body, req.session.user?.id || "system",
+      ));
+    } catch (error) {
+      sendInterwarehouseError(res, error, req.body?.commandKey);
     }
   });
 
