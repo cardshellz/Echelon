@@ -189,7 +189,7 @@ test("keeps selection on Escape and resets search and destination when the wareh
   await locationSearch(page, "to").press("ArrowDown");
   await locationSearch(page, "to").press("Enter");
   await expect(destination).toContainText("FLOOR-02");
-  await expect(page.getByRole("button", { name: "Transfer", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Move inventory", exact: true })).toBeEnabled();
 
   await destination.click();
   await expect(locationSearch(page, "to")).toHaveValue("");
@@ -203,7 +203,7 @@ test("keeps selection on Escape and resets search and destination when the wareh
   await page.getByLabel("To Warehouse", { exact: true }).click();
   await page.getByRole("option", { name: "LEON — 20 Leonberg", exact: true }).click();
   await expect(destination).toContainText("Select location");
-  await expect(page.getByRole("button", { name: "Transfer", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Move inventory", exact: true })).toBeDisabled();
   await destination.click();
   await expect(locationSearch(page, "to")).toHaveValue("");
   await expect(locationOption(page, "FLOOR-02")).toHaveCount(0);
@@ -211,8 +211,8 @@ test("keeps selection on Escape and resets search and destination when the wareh
   await locationSearch(page, "to").press("ArrowDown");
   await locationSearch(page, "to").press("Enter");
   await expect(destination).toContainText("FLOOR-03");
-  await expect(page.getByLabel("The stock has arrived at the destination location.")).not.toBeChecked();
-  await expect(page.getByRole("button", { name: "Transfer", exact: true })).toBeDisabled();
+  await expect(page.getByLabel("The stock has arrived at the destination location.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Dispatch transfer", exact: true })).toBeEnabled();
   expect(state.writes).toEqual([]);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
