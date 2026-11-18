@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { sha256Hex } from "../../domain/marketplace-listing-observation";
 import {
   DropshipMarketplaceSyncService,
+  marketplaceSyncNoticeEventType,
   type MarketplaceListingSyncWrite,
   type MarketplaceListingSyncWriteResult,
   type MarketplaceLiveListingRaw,
@@ -173,6 +174,7 @@ function harness(options: {
   guardError?: Error;
   tickBudgetMs?: number;
   listingSettingsUrl?: string | null;
+  guardCompatible?: boolean;
   stepMs?: number;
   restoreOutcome?: (input: { productVariantIds: number[]; idempotencyKey: string }, call: number) => MarketplaceSyncRestoreOutcome;
   /** The quantity authority the baselines reader answers; absent: the reader has no authority method (as before). */
@@ -232,6 +234,10 @@ function harness(options: {
     policyGuard: {
       async evaluateForStoreConnection(input) {
         if (options.guardError) throw options.guardError;
+        if (options.guardCompatible) {
+          return { compatible: true, fulfillmentPolicyId: input.fulfillmentPolicyId, capabilityEvidenceHash: "h", originWarehouseId: 1,
+            issues: [], policyName: "Ship fast", supportedServiceNames: [], requiredHandlingTimeBusinessDays: 2 } as never;
+        }
         return { compatible: false, fulfillmentPolicyId: input.fulfillmentPolicyId, capabilityEvidenceHash: "h", originWarehouseId: 1,
           issues: [{ code: "local_pickup_unsupported", message: "pickup" }], policyName: "Ship fast",
           supportedServiceNames: ["USPS Ground Advantage"], requiredHandlingTimeBusinessDays: 2 } as never;
@@ -726,6 +732,21 @@ describe("shipping policies and vendor notices (owner rule 7)", () => {
       data: expect.objectContaining({ error_code: "DROPSHIP_LISTING_POLICY_INCOMPATIBLE" }) }));
   });
 
+  it("logs a fixed policy the vendor is told about at INFO, never as an incompatibility", async () => {
+    const { service, repository, lines } = harness({ guardCompatible: true });
+    repository.policies = [{ fulfillmentPolicyId: "F-1", listingCount: 3 }];
+    repository.policyNotified = true;
+    await service.runSweepTick();
+    expect(repository.policyChecks).toEqual([expect.objectContaining({ compatible: true, issueCodes: [], policyName: "Ship fast" })]);
+    expect(lines).toContainEqual(expect.objectContaining({ level: "info", action: "dropship.marketplace_sync.policy_fixed" }));
+    expect(lines).not.toContainEqual(expect.objectContaining({ action: "dropship.marketplace_sync.policy_incompatible" }));
+  });
+
+  it("sends the fixed notice as a listing update, not a warning", () => {
+    expect(marketplaceSyncNoticeEventType("policy_fixed", false)).toBe(DROPSHIP_NOTIFICATION_EVENTS.EBAY_LISTING_UPDATE);
+    expect(marketplaceSyncNoticeEventType("policy_incompatible", true)).toBe(DROPSHIP_NOTIFICATION_EVENTS.EBAY_LISTING_ACTION_NEEDED);
+  });
+
   it("keeps the previous verdict when a check gets no answer", async () => {
     const { service, repository } = harness({ guardError: new DropshipError("X", "down", { status: 503 }) });
     repository.policies = [{ fulfillmentPolicyId: "F-1", listingCount: 3 }];
@@ -762,9 +783,9 @@ describe("shipping policies and vendor notices (owner rule 7)", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toMatchObject({ eventType: DROPSHIP_NOTIFICATION_EVENTS.EBAY_LISTING_ACTION_NEEDED,
       title: "Card Shellz can't ship under an eBay shipping policy" });
-    expect(sent[0].message).toContain('your eBay shipping policy "Ship fast"');
+    expect(sent[0].message).toContain('Your eBay shipping policy "Ship fast"');
     expect(sent[0].message).toContain("- Toploaders (SKU TL-1), eBay item 123456789012: https://www.ebay.com/itm/123456789012");
-    expect(sent[0].message).toContain("Catalog > Listing settings: https://cardshellz.io/catalog/setup");
+    expect(sent[0].message).toContain("Catalog > Listing settings (https://cardshellz.io/catalog/setup)");
     expect(sent[0].message).not.toContain("F-1");
   });
 

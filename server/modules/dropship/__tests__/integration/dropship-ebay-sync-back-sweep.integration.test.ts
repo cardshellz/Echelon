@@ -558,13 +558,31 @@ describeDatabase.sequential("eBay sync-back sweep persistence (PostgreSQL)", () 
         ] });
     });
 
-    it("tells a newly incompatible policy once, forgets it when it works again, and tells it again when it breaks again", async () => {
+    it("tells a newly incompatible policy once, tells once that it works again, and tells it again when it breaks again", async () => {
       expect(await repository.applyPolicyCheck(check(false, T1))).toEqual({ notified: true });
       expect(await repository.applyPolicyCheck(check(false, T2))).toEqual({ notified: false });
-      expect(await repository.applyPolicyCheck(check(true, new Date(T2.getTime() + 60_000)))).toEqual({ notified: false });
+      expect(await repository.applyPolicyCheck(check(true, new Date(T2.getTime() + 60_000)))).toEqual({ notified: true });
+      expect(await repository.applyPolicyCheck(check(true, new Date(T2.getTime() + 90_000)))).toEqual({ notified: false });
       expect(await repository.applyPolicyCheck(check(false, new Date(T2.getTime() + 120_000)))).toEqual({ notified: true });
-      expect((await pool.query(`SELECT kind, critical FROM dropship.dropship_marketplace_sync_notices ORDER BY id`)).rows)
-        .toEqual([{ kind: "policy_incompatible", critical: true }, { kind: "policy_incompatible", critical: true }]);
+      expect((await pool.query(`SELECT kind, critical, payload ->> 'policyName' AS name FROM dropship.dropship_marketplace_sync_notices
+        ORDER BY id`)).rows).toEqual([{ kind: "policy_incompatible", critical: true, name: "Ship fast" },
+        { kind: "policy_fixed", critical: false, name: "Ship fast" }, { kind: "policy_incompatible", critical: true, name: "Ship fast" }]);
+    });
+
+    it("resends an incompatible policy told in the old words exactly once, and sends a compatible one nothing", async () => {
+      // Rows as the release before the guided fix left them: version 1 hashes, one told incompatible, one compatible.
+      const oldIncompatible = fulfillmentPolicyVerdictHash(["local_pickup_unsupported"], 1);
+      const oldCompatible = fulfillmentPolicyVerdictHash([], 1);
+      await pool.query(`INSERT INTO dropship.dropship_ebay_fulfillment_policy_checks (store_connection_id, fulfillment_policy_id, compatible,
+        issue_codes, verdict_hash, notified_verdict_hash, checked_at) VALUES ($1, 'F-9', false, '{local_pickup_unsupported}', $2, $2, $4),
+        ($1, 'F-1', true, '{}', $3, NULL, $4)`, [STORE, oldIncompatible, oldCompatible, T0]);
+      expect(await repository.applyPolicyCheck(check(false, T1))).toEqual({ notified: true });
+      expect(await repository.applyPolicyCheck(check(false, T2))).toEqual({ notified: false });
+      const compatible = { ...check(true, T1), fulfillmentPolicyId: "F-1" };
+      expect(await repository.applyPolicyCheck(compatible)).toEqual({ notified: false });
+      expect(await repository.applyPolicyCheck({ ...compatible, checkedAt: T2 })).toEqual({ notified: false });
+      expect((await pool.query(`SELECT kind, payload ->> 'fulfillmentPolicyId' AS policy FROM dropship.dropship_marketplace_sync_notices
+        ORDER BY id`)).rows).toEqual([{ kind: "policy_incompatible", policy: "F-9" }]);
     });
 
     it("lists the store's live policies, the one checked longest ago first", async () => {

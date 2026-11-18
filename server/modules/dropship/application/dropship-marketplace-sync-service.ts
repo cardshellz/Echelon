@@ -1072,9 +1072,12 @@ export class DropshipMarketplaceSyncService {
           policyName: preflight.policyName ?? null, supportedServiceNames: preflight.supportedServiceNames ?? [],
           requiredHandlingTimeBusinessDays: preflight.requiredHandlingTimeBusinessDays ?? null, checkedAt: this.deps.clock.now() });
         result.policyChecks += 1;
-        if (written.notified) {
+        if (written.notified && !preflight.compatible) {
           this.deps.logger.warn("dropship.marketplace_sync.policy_incompatible", { ...fields, outcome: "notified",
             error_code: "DROPSHIP_LISTING_POLICY_INCOMPATIBLE", error_class: "permanent", issue_codes: issueCodes });
+        } else if (written.notified) {
+          // A state transition the vendor is told about ("fixed"), not an anomaly: INFO (CLAUDE.md §10).
+          this.deps.logger.info("dropship.marketplace_sync.policy_fixed", { ...fields, outcome: "notified" });
         }
       } catch (error) {
         const classified = classifyMarketplaceSyncError(error);
@@ -1193,6 +1196,8 @@ const ORDER_NOTICE_KINDS: ReadonlySet<MarketplaceSyncNoticeKind> = new Set(["ord
 
 /** The notification event type of one notice batch: its side (listing or order), and whether it is critical. */
 export function marketplaceSyncNoticeEventType(kind: MarketplaceSyncNoticeKind, critical: boolean): string {
+  // Good news about a listing (a policy works again) is an update, never a "warning".
+  if (kind === "policy_fixed") return DROPSHIP_NOTIFICATION_EVENTS.EBAY_LISTING_UPDATE;
   if (ORDER_NOTICE_KINDS.has(kind)) {
     return critical ? DROPSHIP_NOTIFICATION_EVENTS.EBAY_ORDER_ACTION_NEEDED : DROPSHIP_NOTIFICATION_EVENTS.EBAY_ORDER_UPDATE;
   }

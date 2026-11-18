@@ -44,6 +44,14 @@ describe("SmtpDropshipNotificationEmailSender", () => {
     expect(sent[0].html).toContain('<a href="https://cardshellz.io/catalog/setup?a=1&amp;b=2">https://cardshellz.io/catalog/setup?a=1&amp;b=2</a>.</p>');
   });
 
+  it("links a URL in parentheses without the closing bracket or comma (the policy notice's steps)", async () => {
+    const message = "1. Open Business policies (https://www.ebay.com/sh/sell-preferences/business-policies), and find \"X\" in the list.";
+    await new SmtpDropshipNotificationEmailSender().send({ toEmail: "v@example.com", eventType: "x", title: "T", message, payload: {} });
+    expect(sent[0].text).toBe(`T\n\n${message}`);
+    expect(sent[0].html).toContain('(<a href="https://www.ebay.com/sh/sell-preferences/business-policies">'
+      + "https://www.ebay.com/sh/sell-preferences/business-policies</a>), and find &quot;X&quot; in the list.");
+  });
+
   it("never turns markup in a message into a link or a tag", async () => {
     await new SmtpDropshipNotificationEmailSender().send({ toEmail: "v@example.com", eventType: "x", title: "T",
       message: 'See https://evil.example/"><script>x</script> now', payload: {} });

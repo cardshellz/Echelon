@@ -66,4 +66,23 @@ describe("vendor portal wording", () => {
         .map((entry) => `${relative(pagesRoot, path)}:${entry.line}: ${entry.text.trim()}`));
     expect(offenders).toEqual([]);
   });
+
+  /**
+   * The eBay sync notices are written on the server but read by vendors in
+   * their email and on the Alerts page (owner report: the shipping policy
+   * alert). Their words get the same guard, plus the internal words that
+   * reached a vendor before: a raw "Event:" line and the "you chose" fallback.
+   */
+  it("never shows engineering words in the eBay notices vendors read by email and on the Alerts page", () => {
+    const repoRoot = join(__dirname, "..", "..", "..", "..", "..");
+    const notices = [
+      "server/modules/dropship/domain/marketplace-sync-words.ts",
+      "server/modules/dropship/infrastructure/dropship-notification-email.sender.ts",
+    ];
+    const offenders = notices.flatMap((path) =>
+      visibleTextOf(readFileSync(join(repoRoot, path), "utf8"), path)
+        .filter((entry) => BANNED_VENDOR_WORDS.test(entry.text) || /\bEvent:|you chose|\bpolicy id\b|fulfillment policy/i.test(entry.text))
+        .map((entry) => `${path}:${entry.line}: ${entry.text.trim()}`));
+    expect(offenders).toEqual([]);
+  });
 });
