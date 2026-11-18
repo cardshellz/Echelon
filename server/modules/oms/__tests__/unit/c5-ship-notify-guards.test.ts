@@ -8,15 +8,24 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
-const SHIPSTATION_SRC = readFileSync(
-  fileURLToPath(new URL("../../shipstation.service.ts", import.meta.url)),
-  "utf8",
-);
+function readShipStationSource(): string {
+  const omsDir = fileURLToPath(new URL("../..", import.meta.url));
+  const subDir = resolve(omsDir, "shipstation");
+  const subFiles = existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(subDir, f), "utf8"))
+    : [];
+  return [readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"), ...subFiles].join("\n");
+}
+
+const SHIPSTATION_SRC = readShipStationSource();
 const PROJECTION_SRC = readFileSync(
   fileURLToPath(new URL("../../../wms/channel-fulfillment-projection.repository.ts", import.meta.url)),
   "utf8",

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -17,7 +18,19 @@ import { fileURLToPath } from "node:url";
 const read = (p: string) =>
   readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8");
 
-const SS_SRC = read("../../shipstation.service.ts");
+function readShipStationSource(): string {
+  const omsDir = fileURLToPath(new URL("../..", import.meta.url));
+  const subDir = resolve(omsDir, "shipstation");
+  const subFiles = existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(subDir, f), "utf8"))
+    : [];
+  return [read("../../shipstation.service.ts"), ...subFiles].join("\n");
+}
+
+const SS_SRC = readShipStationSource();
 const WMS_SHIPMENTS_REPO_SRC = read("../../../wms/outbound-shipments-mutations.repository.ts");
 
 describe("P0.4 — SHIP_NOTIFY creation paths are closed", () => {

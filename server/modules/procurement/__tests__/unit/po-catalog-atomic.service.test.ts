@@ -1,11 +1,18 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const source = readFileSync(
-  join(process.cwd(), "server", "modules", "procurement", "purchasing.service.ts"),
-  "utf8",
-);
+const procurementDir = join(process.cwd(), "server", "modules", "procurement");
+const purchasingSubDir = join(procurementDir, "purchasing");
+const source = [
+  readFileSync(join(procurementDir, "purchasing.service.ts"), "utf8"),
+  ...(existsSync(purchasingSubDir)
+    ? readdirSync(purchasingSubDir)
+        .filter((name) => name.endsWith(".ts"))
+        .sort()
+        .map((name) => readFileSync(join(purchasingSubDir, name), "utf8"))
+    : []),
+].join("\n");
 
 function section(start: string, end: string): string {
   const startPosition = source.indexOf(start);

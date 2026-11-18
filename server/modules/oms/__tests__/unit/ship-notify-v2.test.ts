@@ -31,8 +31,23 @@ import {
   beforeEach,
   afterEach,
 } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+
+function readShipStationSource(): string {
+  const omsDir = resolve(__dirname, "../..");
+  const subDir = resolve(omsDir, "shipstation");
+  const subFiles = existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(subDir, f), "utf-8"))
+    : [];
+  return [
+    readFileSync(resolve(__dirname, "../../shipstation.service.ts"), "utf-8"),
+    ...subFiles,
+  ].join("\n");
+}
 
 import {
   createShipStationService,
@@ -1773,10 +1788,7 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
       }),
       { executeImmediately: false },
     );
-    const source = readFileSync(
-      resolve(__dirname, "../../shipstation.service.ts"),
-      "utf-8",
-    );
+    const source = readShipStationSource();
     expect(source).not.toContain("__fulfillmentPush");
   });
 
@@ -2442,10 +2454,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
   );
 
   it("shipment creation is unreachable for terminal or unknown parents (source invariants)", async () => {
-    const src = readFileSync(
-      resolve(__dirname, "../../shipstation.service.ts"),
-      "utf-8",
-    );
+    const src = readShipStationSource();
     const wmsShipmentsRepoSrc = readFileSync(
       resolve(__dirname, "../../../wms/outbound-shipments-mutations.repository.ts"),
       "utf-8",
@@ -2491,10 +2500,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
   });
 
   it("routes legacy ShipStation order-id matches through package parity resolution", () => {
-    const src = readFileSync(
-      resolve(__dirname, "../../shipstation.service.ts"),
-      "utf-8",
-    );
+    const src = readShipStationSource();
     const fnStart = src.indexOf(
       "async function resolveWmsShipmentForShipNotify(",
     );
@@ -2518,10 +2524,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
   });
 
   it("repairs a terminal same-tracking replay before split-package logic can run", () => {
-    const src = readFileSync(
-      resolve(__dirname, "../../shipstation.service.ts"),
-      "utf-8",
-    );
+    const src = readShipStationSource();
     const fnStart = src.indexOf("async function resolveShipmentByOrderKey(");
     const fnBlock = src.slice(
       fnStart,
@@ -2563,8 +2566,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
 //     items back to the owning WMS order(s) and shipping each, so tracking +
 //     the marketplace fulfillment push still flow to every merged order.
 describe("processShipNotify V2 :: combined/merged shipment recovery (source invariants)", () => {
-  const readSrc = () =>
-    readFileSync(resolve(__dirname, "../../shipstation.service.ts"), "utf-8");
+  const readSrc = () => readShipStationSource();
 
   it("recovers a shipped notify whose keyed shipment is dead by fanning out over shipment items", () => {
     const src = readSrc();

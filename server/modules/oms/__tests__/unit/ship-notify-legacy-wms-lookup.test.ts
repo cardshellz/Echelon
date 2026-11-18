@@ -14,14 +14,21 @@
  * lookup in the codebase.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const SHIPSTATION_SRC = readFileSync(
-  resolve(__dirname, "../../shipstation.service.ts"),
-  "utf-8",
-);
+const omsDir = resolve(__dirname, "../..");
+const subDir = resolve(omsDir, "shipstation");
+const SHIPSTATION_SRC = [
+  readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf-8"),
+  ...(existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(subDir, f), "utf-8"))
+    : []),
+].join("\n");
 
 describe("SHIP_NOTIFY legacy WMS-order lookup :: source/link dual-match", () => {
   // The compatibility resolver may identify existing rows, but it delegates

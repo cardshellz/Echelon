@@ -406,11 +406,22 @@ describe("shipment and fulfillment hardening conformance matrix", () => {
 });
 
 describe("shipment and fulfillment hardening target runtime behavior", () => {
+  const shipStationSubmodules = fs.existsSync(
+    path.resolve(process.cwd(), "server/modules/oms/shipstation"),
+  )
+    ? fs
+        .readdirSync(path.resolve(process.cwd(), "server/modules/oms/shipstation"))
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => `server/modules/oms/shipstation/${f}`)
+    : [];
+
   it("prevents orchestration paths from calling legacy channel write APIs directly", () => {
     const orchestrationFiles = [
       "server/index.ts",
       "server/routes/oms.routes.ts",
       "server/modules/oms/shipstation.service.ts",
+      ...shipStationSubmodules,
       "server/modules/oms/webhook-retry.worker.ts",
       "server/modules/oms/fulfillment-sweeper.scheduler.ts",
       "server/modules/oms/oms-flow-reconciliation.service.ts",
@@ -438,6 +449,7 @@ describe("shipment and fulfillment hardening target runtime behavior", () => {
       "server/index.ts",
       "server/services/index.ts",
       "server/modules/oms/shipstation.service.ts",
+      ...shipStationSubmodules,
       "server/modules/oms/webhook-retry.worker.ts",
       "server/modules/oms/fulfillment-sweeper.scheduler.ts",
       "server/modules/oms/oms-flow-reconciliation.service.ts",
