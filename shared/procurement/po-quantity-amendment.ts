@@ -39,19 +39,35 @@ export const poLineAdditionSchema = z.object({
   pricing: poCorrectionPricingSchema, packagingCostCents: money, discountCents: money, taxCents: money,
   vendorSku: z.string().trim().max(100).optional(), description: z.string().trim().max(20000).optional(),
 }).strict();
+/** Corrects which catalog product, receiving unit and supplier item an existing,
+ * untouched PO line buys. Every identity field is explicit: the reviewed values
+ * are saved as sent, and nothing is carried over or inferred from the old product. */
+export const poLineProductChangeSchema = z.object({
+  lineId: poAmendmentIdSchema,
+  productId: poAmendmentIdSchema,
+  expectedReceiveVariantId: poAmendmentIdSchema,
+  expectedReceiveUnitsPerVariant: poAmendmentIdSchema,
+  vendorProductId: poAmendmentIdSchema.nullable(),
+  vendorSku: z.string().trim().min(1).max(100).nullable(),
+}).strict();
 const requestShape = {
   sourceVersion: poAmendmentVersionSchema,
   changes: poQuantityChangesSchema,
   additions: z.array(poLineAdditionSchema).max(100).optional(),
   removals: z.array(poAmendmentIdSchema).max(100).optional(),
+  productChanges: z.array(poLineProductChangeSchema).max(100).optional(),
   closedPurchaseOrderConfirmed: z.literal(true).optional(),
   reason: z.string().trim().min(10).max(2000),
 };
-function validateOperations(value: { changes: { lineId: number }[]; additions?: { clientKey: string }[]; removals?: number[] }, ctx: z.RefinementCtx) {
-  const additions = value.additions ?? [], removals = value.removals ?? [];
-  if (value.changes.length + additions.length + removals.length === 0) ctx.addIssue({ code: "custom", message: "Add, remove or edit at least one line." });
+function validateOperations(value: { changes: { lineId: number }[]; additions?: { clientKey: string }[]; removals?: number[]; productChanges?: { lineId: number }[] }, ctx: z.RefinementCtx) {
+  const additions = value.additions ?? [], removals = value.removals ?? [], productChanges = value.productChanges ?? [];
+  if (value.changes.length + additions.length + removals.length + productChanges.length === 0) ctx.addIssue({ code: "custom", message: "Add, remove or edit at least one line." });
   if (new Set(additions.map(line => line.clientKey)).size !== additions.length || new Set(removals).size !== removals.length
     || value.changes.some(line => removals.includes(line.lineId))) ctx.addIssue({ code: "custom", message: "Each line can only be added, edited or removed once." });
+  // A line may change product and economics in one review, but only once each,
+  // and a removed line keeps the product it was ordered as.
+  if (new Set(productChanges.map(change => change.lineId)).size !== productChanges.length
+    || productChanges.some(change => removals.includes(change.lineId))) ctx.addIssue({ code: "custom", message: "Change each line's product once, and not on a line being removed." });
 }
 export const poQuantityPreviewRequestSchema = z.object(requestShape).strict().superRefine(validateOperations);
 // Optional in stored retry receipts from earlier releases; new approvals require
@@ -75,9 +91,25 @@ export const poQuantityLineViewSchema = z.object({
   status: z.string(),
   blockedReason: z.string().nullable(),
   removalBlockedReason: z.string().nullable().optional(),
+  // Optional only for receipts of earlier releases; new responses always carry
+  // the line's current product identity and whether it may still change.
+  sku: z.string().nullable().optional(),
+  productId: poAmendmentIdSchema.nullable().optional(),
+  receiveVariantId: poAmendmentIdSchema.nullable().optional(),
+  receiveUnitsPerVariant: z.number().int().nonnegative().safe().nullable().optional(),
+  vendorProductId: poAmendmentIdSchema.nullable().optional(),
+  vendorSku: z.string().nullable().optional(),
+  productChangeBlockedReason: z.string().nullable().optional(),
 });
+export const poLineProductIdentitySchema = z.object({
+  productId: poAmendmentIdSchema.nullable(), sku: z.string().nullable(), name: z.string(),
+  receiveVariantId: poAmendmentIdSchema.nullable(), receiveVariantSku: z.string().nullable(), receiveVariantName: z.string().nullable(),
+  receiveUnitsPerVariant: z.number().int().nonnegative().safe().nullable(),
+  vendorProductId: poAmendmentIdSchema.nullable(), vendorSku: z.string().nullable(),
+}).strict();
 export const poQuantityAmendmentContextSchema = z.object({
   purchaseOrderId: poAmendmentIdSchema,
+  vendorId: poAmendmentIdSchema.nullable().optional(),
   currency: z.string(),
   sourceVersion: poAmendmentVersionSchema,
   canApprove: z.boolean(),
@@ -108,6 +140,14 @@ export const poQuantityAmendmentPreviewSchema = z.object({
     discountCents: money, taxCents: money, lineTotalCents: money, sourceFingerprint: poAmendmentVersionSchema,
   }).strict()).optional(),
   removedLines: z.array(poQuantityLineViewSchema).optional(),
+  productChanges: z.array(z.object({
+    lineId: poAmendmentIdSchema, lineNumber: poAmendmentIdSchema,
+    before: poLineProductIdentitySchema, after: poLineProductIdentitySchema,
+    // Supplier documents keep their recorded description and stay matched by line.
+    invoiceLines: z.array(z.object({ invoiceId: poAmendmentIdSchema, invoiceNumber: z.string(), invoiceLineId: poAmendmentIdSchema,
+      description: z.string().nullable() }).strict()),
+    sourceFingerprint: poAmendmentVersionSchema,
+  }).strict()).optional(),
   lines: z.array(z.object({
     before: poQuantityLineViewSchema,
     after: poQuantityLineViewSchema,
@@ -134,6 +174,8 @@ export const poQuantityAmendmentResultSchema = z.object({
 });
 export type PoQuantityChange = z.infer<typeof poQuantityChangeSchema>;
 export type PoLineAddition = z.infer<typeof poLineAdditionSchema>;
+export type PoLineProductChange = z.infer<typeof poLineProductChangeSchema>;
+export type PoLineProductIdentity = z.infer<typeof poLineProductIdentitySchema>;
 export type PoQuantityPreviewRequest = z.infer<typeof poQuantityPreviewRequestSchema>;
 export type PoQuantityApprovalRequest = z.infer<typeof poQuantityApprovalRequestSchema>;
 export type PoQuantityAmendmentContext = z.infer<typeof poQuantityAmendmentContextSchema>;

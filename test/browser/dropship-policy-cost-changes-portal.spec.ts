@@ -128,6 +128,8 @@ test("says when nothing is coming, and says a failed read failed", async ({ page
   expect(quiet.pageErrors).toEqual([]);
 
   const failed = await mount(page, { announced: [], recent: [], fail: true });
-  await expect(page.getByRole("alert")).toContainText("Dropship cost schedule tables do not exist yet.");
+  // The vendor reads what to do, never the server's own message.
+  await expect(page.getByRole("alert")).toContainText("We couldn't load cost changes. Reload the page to try again.");
+  await expect(page.getByRole("alert")).not.toContainText("Dropship cost schedule tables do not exist yet.");
   expect(failed.pageErrors).toEqual([]);
 });

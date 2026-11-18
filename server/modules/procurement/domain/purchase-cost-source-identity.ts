@@ -121,8 +121,11 @@ function normalizedConfirmedProposal(proposal: CostSourceProposal): NormalizedCo
 }
 
 export function retainEquivalentPurchaseCostSource(current: CostSourceProposal, saved: StoredCostSource | undefined): CostSourceProposal {
+  // Receipt intervals are financial authority. The legacy whole-line proof
+  // cannot discard them just because aggregate money happens to be equal.
+  if (current.input.receiptCostSegments) return current;
   const previous = verifiedStoredCostSource(saved);
-  if (!previous) return current;
+  if (!previous || previous.input.receiptCostSegments) return current;
   const before = normalizedConfirmedProposal(previous);
   const after = normalizedConfirmedProposal(current);
   return before !== null && after !== null && canonicalJson(before) === canonicalJson(after) ? previous : current;

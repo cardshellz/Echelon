@@ -9,6 +9,21 @@ import {
 } from "../../database-pool-config";
 
 const { Pool } = pg;
+
+interface InternalPgPool extends pg.Pool {
+  options: pg.PoolConfig & {
+    options?: string;
+    statement_timeout?: number;
+    query_timeout?: number;
+  };
+  Client: new (config: unknown) => {
+    connectionParameters: {
+      options?: string;
+      statement_timeout?: number;
+    };
+  };
+}
+
 const DATABASE_BOOT_SOURCE = readFileSync(
   fileURLToPath(new URL("../../db.ts", import.meta.url)),
   "utf8",
@@ -44,7 +59,7 @@ describe("database pool startup configuration", () => {
       connectionString: "postgresql://user:password@localhost:5432/echelon_test",
       max: 0,
     });
-    const pool = new Pool(config);
+    const pool = new Pool(config) as InternalPgPool;
 
     try {
       expect(pool.options.options).toBe(DATABASE_SESSION_OPTIONS);
@@ -56,13 +71,14 @@ describe("database pool startup configuration", () => {
   });
 
   it("configures every pool before checkout without an async connect hook", () => {
-    // Three pools, each built from createDatabasePoolConfig so each sends the
-    // search_path in its startup packet: the shared pool, the side-channel pool
-    // (createSideChannelPool, the dropship process heartbeat's own connection,
-    // step 1 PR A verify V5) and the startup-migrations pool. The second count
-    // pins that no pool is constructed without that config.
-    expect(DATABASE_BOOT_SOURCE.match(/createDatabasePoolConfig\(\{/g)).toHaveLength(3);
-    expect(DATABASE_BOOT_SOURCE.match(/new Pool\(/g)).toHaveLength(3);
+    // Two pools, each built from createDatabasePoolConfig so each sends the
+    // search_path in its startup packet: the shared pool and the side-channel
+    // pool (createSideChannelPool, the dropship process heartbeat's own
+    // connection, step 1 PR A verify V5). The third, the schema fallback
+    // routine's pool, was deleted with that routine (REFACTOR-PLAN P4.1). The
+    // second count pins that no pool is constructed without that config.
+    expect(DATABASE_BOOT_SOURCE.match(/createDatabasePoolConfig\(\{/g)).toHaveLength(2);
+    expect(DATABASE_BOOT_SOURCE.match(/new Pool\(/g)).toHaveLength(2);
     expect(DATABASE_BOOT_SOURCE).not.toMatch(/pool\.on\(["']connect["']/);
     expect(DATABASE_BOOT_SOURCE).not.toMatch(/client\.query\([^)]*SET search_path/i);
   });
@@ -75,7 +91,7 @@ describe("database pool startup configuration", () => {
       queryTimeoutMs: 8_000,
       connectionTimeoutMs: 5_000,
       idleTimeoutMs: 60_000,
-    });
+    }) as InternalPgPool;
 
     try {
       expect(pool.options.options).toBe(DATABASE_SESSION_OPTIONS);

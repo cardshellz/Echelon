@@ -5,6 +5,7 @@ import {
   publicationMappingPreparationReceiptSchema, type PublicationMappingPreparationReceipt,
 } from "@shared/types/inventory-publication-mapping-preparation";
 import { logger as platformLogger } from "../../../platform/observability/logger";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 import type { StockLinkSource } from "../application/stock-link.ports";
 import { FENCE_HOLD_WARN_MS } from "../domain/dropship-ebay-stock-readiness";
 import {
@@ -331,10 +332,12 @@ export async function runShopifyStockLinkCommand(pool: Pick<Pool, "connect" | "q
       });
       const action = stockLinkCommandAction(members);
       // Step 9: one stock_link audit row beside the draft writer's and the preparation's own (C15).
-      await client.query(`INSERT INTO public.audit_events(timestamp, level, actor, action, target, changes, context)
-        VALUES($1, 'AUDIT', $2, $3, $4, $5::jsonb, $6::jsonb)`,
-      [now, STOCK_LINK_ACTOR, `inventory_availability.stock_link.${action}`, `inventory.inventory_publication_target:${targetId}`,
-        JSON.stringify({ before, after: members.map(member => ({ productVariantId: member.productVariantId, change: member.change,
+      await insertAuditEventPgQuery(client, {
+        timestamp: now,
+        actor: STOCK_LINK_ACTOR,
+        action: `inventory_availability.stock_link.${action}`,
+        target: `inventory.inventory_publication_target:${targetId}`,
+        changesJson: JSON.stringify({ before, after: members.map(member => ({ productVariantId: member.productVariantId, change: member.change,
           status: member.status, code: member.code, rule: member.rule, itemId: member.link?.itemId ?? null,
           storeSku: member.link?.storeSku ?? null, mappingAction: member.link?.mappingAction ?? null,
           replacedMappingId: member.replacesMappingId, replacedDraftMappingId: member.link?.mappingAction === "replace_draft"
@@ -342,12 +345,13 @@ export async function runShopifyStockLinkCommand(pool: Pick<Pool, "connect" | "q
         retired: change.retired.map(row => ({ productVariantId: row.productVariantId, mappingId: row.mappingId,
           itemId: row.externalInventoryItemId, retiredAt: row.retiredAt, supersededOutboxIds: row.supersededOutboxIds })),
         preparation: change.preparation }),
-        JSON.stringify({ commandKey: identity.commandKey, requestHash: identity.requestHash, originKey: identity.originKey,
+        contextJson: JSON.stringify({ commandKey: identity.commandKey, requestHash: identity.requestHash, originKey: identity.originKey,
           lookupHash: identity.lookupHash, productId: command.productId, purpose: command.purpose, evidence: input.evidence,
           destination: { destinationKind: destination.destinationKind, providerKey: destination.providerKey,
             channelId: destination.channelId, channelConnectionId: destination.channelConnectionId,
             externalScopeId: destination.externalScopeId, targetRevision: destination.targetRevision },
-          freedItemIds: command.freedItemIds })]);
+          freedItemIds: command.freedItemIds }),
+      });
       // Step 10: the receipt, the freed-item wake (SAF-5) and the members' rows, ending their claim.
       await insertStockLinkReceipt(client, { key: identity.preparationKey, requestHash: identity.requestHash, now, result: {
         action, preparation: change.preparation, retiredMappingIds: change.retired.map(row => row.mappingId),

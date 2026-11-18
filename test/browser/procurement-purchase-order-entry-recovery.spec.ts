@@ -141,8 +141,10 @@ test("actor-scoped recovery cannot be submitted by a different operator", async 
 test("revoked permission keeps recovery but blocks dispatch until restored", async ({ page }) => {
   const { commands, state, submit, failures } = await setup(page, "save-draft", "lost");
   await submit.click(); await expect(recover(page)).toBeEnabled();
+  const editorUrl = page.url();
   state.allowed = false; await page.reload();
-  await expect(page).toHaveURL(/\/picking$/);
+  await expect(page).toHaveURL(editorUrl);
+  await expect(page.getByTestId("staff-access-notice")).toContainText("Your assigned roles do not provide access to this page.");
   // Revocation removes editor access; the read-authorized detail still owns
   // recovery of the original request without granting mutation authority.
   await page.goto("/purchase-orders/17");

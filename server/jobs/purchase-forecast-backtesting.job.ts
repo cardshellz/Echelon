@@ -1,11 +1,11 @@
 import { db } from "../db";
-import { createPurchaseForecastBacktestingService } from "../modules/procurement/purchase-forecast-backtesting.service";
-import { purchasePipelineJobRunLifecycleRepository } from "../modules/procurement/purchase-pipeline-job-run-lifecycle.repository";
 import {
+  createPurchaseForecastBacktestingService,
   createPurchasePipelineJobRunLifecycleService,
+  purchasePipelineJobRunLifecycleRepository,
   sanitizePurchasePipelineJobError,
   type PurchasePipelineJobRunLifecycleService,
-} from "../modules/procurement/purchase-pipeline-job-run-lifecycle.service";
+} from "../modules/procurement/planning-and-pipeline-jobs.api";
 
 type ForecastBacktestingService = Pick<
   ReturnType<typeof createPurchaseForecastBacktestingService>,

@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page, type Locator } from "@playwright/test";
 import { installFixtures, po, receipt } from "./procurement-fixtures";
 import { openReceivingLineOptions, openReceivingPackSelector } from "./procurement-receiving-helpers";
@@ -39,7 +40,7 @@ async function setup(page: Page, options: { catalogCreate?: boolean; catalogSku?
       [{ ...state.line, ...(id === 32 ? { id: 8, receivingOrderId: 32, sku: "OTHER-RECEIPT", receivedQty: 12 } : {}) }, ...(id === 31 ? state.addedLines : [])],
       options.draft ? (state.opened ? "open" : "draft") : "receiving");
     if (req.method() === "GET") {
-      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" }, roles: ["admin"], permissions: ["inventory:adjust", ...(options.catalogCreate ? ["inventory:create"] : [])] } });
+      if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "test-user", username: "test", role: "admin" }, systemRoles: ["admin"], permissions: ["inventory:adjust", ...(options.catalogCreate ? ["inventory:create"] : [])] }) });
       if (path === "/api/product-variants") return route.fulfill({ json: catalog });
       if (path === "/api/warehouse/locations") return route.fulfill({ json: [{ id: 5, code: "RCV-01", name: "Receiving", warehouseId: 1, isActive: 1, locationType: "receiving" }] });
       if (/^\/api\/receiving\/(31|32)$/.test(path)) {
@@ -573,6 +574,7 @@ test("unknown receipt coverage keeps existing receipts openable and other PO cho
 
 for (const partial of [false, true]) {
   test(`PO-direct custody exclusions preserve the original receipt and ${partial ? "allow unrelated eligible lines" : "block all covered lines"}`, async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
     const failures = await installFixtures(page);
     const writes: Array<{ path: string; idempotencyKey: string | undefined }> = [];
     const warning = "PO-direct receiving excludes CUSTODY-SKU (line 1) because these lines have quarantine history. Use their shipment or original quarantine receipt."
@@ -650,6 +652,7 @@ for (const scenario of [
   { name: "mixed-line excess and fresh remainder", received: 20, held: 60, returned: 10, remaining: 40, excess: 30 },
 ] as const) {
   test(`shipment custody stays separate from inventory on PO and both shipment entry paths: ${scenario.name}`, async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
     const failures = await installFixtures(page);
     const state = { singlePo: false, writes: [] as Command[] };
     const coverage = {

@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
 import { PurchasePlanningPolicyEditor } from "./PurchasePlanningPolicyEditor";
+import {
+  DEFAULT_STALE_PO_THRESHOLDS,
+  STALE_PO_THRESHOLD_ROWS,
+  validateCandidateScoreThresholds,
+  validateStalePoThresholds,
+  type AutoDraftStalePoThresholds,
+} from "@/features/purchasing/autoDraftSettingsValidation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, Plus, Filter } from "lucide-react";
 import {
@@ -82,23 +89,6 @@ const DEFAULT_FORECAST_POLICY: PurchasingForecastPolicy = {
   automationMinimumActiveDays: 2,
 };
 
-interface AutoDraftStalePoThresholds {
-  reviewPendingWarningDays: number;
-  reviewPendingCriticalDays: number;
-  supplierSendWarningDays: number;
-  supplierSendCriticalDays: number;
-  supplierFollowupWarningDays: number;
-  supplierFollowupCriticalDays: number;
-  receivingWarningDays: number;
-  receivingCriticalDays: number;
-  apCloseoutWarningDays: number;
-  apCloseoutCriticalDays: number;
-  exceptionBlockedWarningDays: number;
-  exceptionBlockedCriticalDays: number;
-  closeoutWarningDays: number;
-  closeoutCriticalDays: number;
-}
-
 const FIELD_LABELS: Record<string, string> = {
   category: "Category",
   brand: "Brand",
@@ -107,37 +97,6 @@ const FIELD_LABELS: Record<string, string> = {
   sku_exact: "SKU (exact)",
   tag: "Tag",
 };
-
-const DEFAULT_STALE_PO_THRESHOLDS: AutoDraftStalePoThresholds = {
-  reviewPendingWarningDays: 2,
-  reviewPendingCriticalDays: 5,
-  supplierSendWarningDays: 2,
-  supplierSendCriticalDays: 5,
-  supplierFollowupWarningDays: 7,
-  supplierFollowupCriticalDays: 14,
-  receivingWarningDays: 3,
-  receivingCriticalDays: 10,
-  apCloseoutWarningDays: 7,
-  apCloseoutCriticalDays: 21,
-  exceptionBlockedWarningDays: 1,
-  exceptionBlockedCriticalDays: 3,
-  closeoutWarningDays: 7,
-  closeoutCriticalDays: 14,
-};
-
-const STALE_PO_THRESHOLD_ROWS: Array<{
-  label: string;
-  warningKey: keyof AutoDraftStalePoThresholds;
-  criticalKey: keyof AutoDraftStalePoThresholds;
-}> = [
-  { label: "Review", warningKey: "reviewPendingWarningDays", criticalKey: "reviewPendingCriticalDays" },
-  { label: "Send", warningKey: "supplierSendWarningDays", criticalKey: "supplierSendCriticalDays" },
-  { label: "Supplier", warningKey: "supplierFollowupWarningDays", criticalKey: "supplierFollowupCriticalDays" },
-  { label: "Receiving", warningKey: "receivingWarningDays", criticalKey: "receivingCriticalDays" },
-  { label: "AP", warningKey: "apCloseoutWarningDays", criticalKey: "apCloseoutCriticalDays" },
-  { label: "Exceptions", warningKey: "exceptionBlockedWarningDays", criticalKey: "exceptionBlockedCriticalDays" },
-  { label: "Closeout", warningKey: "closeoutWarningDays", criticalKey: "closeoutCriticalDays" },
-];
 
 function thresholdInputDefaults(): Record<keyof AutoDraftStalePoThresholds, string> {
   return Object.fromEntries(
@@ -276,24 +235,22 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
   };
 
   const saveCandidateThresholds = () => {
-    const strongThreshold = Number(candidateScoreStrongThreshold);
-    const reviewThreshold = Number(candidateScoreReviewThreshold);
-    if (!Number.isInteger(strongThreshold) || strongThreshold < 0 || strongThreshold > 100) {
-      toast({ title: "Invalid strong threshold", description: "Use a whole number from 0 to 100.", variant: "destructive" });
-      return;
-    }
-    if (!Number.isInteger(reviewThreshold) || reviewThreshold < 0 || reviewThreshold > 100) {
-      toast({ title: "Invalid review threshold", description: "Use a whole number from 0 to 100.", variant: "destructive" });
-      return;
-    }
-    if (reviewThreshold > strongThreshold) {
+    const result = validateCandidateScoreThresholds(
+      candidateScoreStrongThreshold,
+      candidateScoreReviewThreshold,
+    );
+    if (!result.ok) {
       toast({
-        title: "Invalid thresholds",
-        description: "Review threshold must be less than or equal to the strong threshold.",
+        title: result.error.title,
+        description: result.error.description,
         variant: "destructive",
       });
       return;
     }
+    const {
+      candidateScoreStrongThreshold: strongThreshold,
+      candidateScoreReviewThreshold: reviewThreshold,
+    } = result.value;
     updateSettingsMutation.mutate({
       candidateScoreStrongThreshold: strongThreshold,
       candidateScoreReviewThreshold: reviewThreshold,
@@ -301,25 +258,16 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
   };
 
   const saveStalePoThresholds = () => {
-    const parsed = {} as AutoDraftStalePoThresholds;
-    for (const key of Object.keys(DEFAULT_STALE_PO_THRESHOLDS) as Array<keyof AutoDraftStalePoThresholds>) {
-      const value = Number(stalePoThresholdInputs[key]);
-      if (!Number.isInteger(value) || value < 0 || value > 365) {
-        toast({ title: "Invalid stale PO threshold", description: "Use whole days from 0 to 365.", variant: "destructive" });
-        return;
-      }
-      parsed[key] = value;
+    const result = validateStalePoThresholds(stalePoThresholdInputs);
+    if (!result.ok) {
+      toast({
+        title: result.error.title,
+        description: result.error.description,
+        variant: "destructive",
+      });
+      return;
     }
-    for (const row of STALE_PO_THRESHOLD_ROWS) {
-      if (parsed[row.warningKey] > parsed[row.criticalKey]) {
-        toast({
-          title: "Invalid stale PO thresholds",
-          description: `${row.label} warning days must be less than or equal to critical days.`,
-          variant: "destructive",
-        });
-        return;
-      }
-    }
+    const parsed = result.value;
     updateSettingsMutation.mutate({ stalePoThresholds: parsed });
   };
 

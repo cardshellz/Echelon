@@ -19,5 +19,7 @@ export async function installStockSelectionFixture(pool: Pick<Pool,"query">):Pro
     CREATE SCHEMA IF NOT EXISTS ebay;
     CREATE TABLE IF NOT EXISTS ebay.ebay_category_mappings(channel_id integer,product_type_slug text,listing_enabled boolean);
     CREATE TABLE IF NOT EXISTS channels.ebay_listing_sync_jobs(id uuid PRIMARY KEY,channel_id integer,connection_id integer,product_id integer,operation text,state text,
-      identity jsonb,identity_hash text,provider_identity jsonb,error_code text,created_at timestamptz DEFAULT now());`);
+      identity jsonb,identity_hash text,provider_identity jsonb,error_code text,created_at timestamptz DEFAULT now());
+    CREATE TABLE IF NOT EXISTS channels.ebay_listing_change_intents(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer,connection_id integer,product_id integer,product_variant_id integer,kind text,external_listing_id text,sku text,review_token text,actor text,opened_at timestamptz,closed_at timestamptz,close_reason text);
+    CREATE UNIQUE INDEX IF NOT EXISTS ebay_listing_change_intents_open_variant_idx ON channels.ebay_listing_change_intents(channel_id,product_variant_id) WHERE closed_at IS NULL;`);
 }

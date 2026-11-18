@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { CheckCircle2, Circle, CircleDashed } from "lucide-react";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { formatStatus } from "@/lib/dropship-ops-surface";
+import { vendorPlatformName } from "@/lib/dropship-vendor-labels";
 import { GuardedLink } from "./UnsavedChangesGuard";
 import {
   CATALOG_STEPS,
@@ -192,5 +192,5 @@ function CatalogStoreSelect({
 }
 
 function describeUnsupported(option: CatalogStoreOption): string {
-  return `${option.name} (${formatStatus(option.platform)})`;
+  return `${option.name} (${vendorPlatformName(option.platform)})`;
 }

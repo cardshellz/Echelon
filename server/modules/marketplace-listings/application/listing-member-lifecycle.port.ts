@@ -1,4 +1,4 @@
-import type { ListingMemberIdentity, ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
+import type { ListingMemberConflictList, ListingMemberIdentity, ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 
 export interface ListingMemberObservation {
   identity: ListingMemberIdentity;
@@ -23,12 +23,15 @@ export interface ListingMemberRecoveryAuthorization {
 }
 export interface ListingMemberLifecycleSession {
   current: ListingMemberRetirement;
+  /** The retained source needs correction; discovery wakes its replacement. */
+  retryDeferred?: boolean;
   isCurrent(): Promise<boolean>;
   save(state: ListingMemberRetirement["state"], code: string | null, message: string, now: Date, progress?: ListingMemberProgress): Promise<ListingMemberRetirement>;
   recoveryCommand?(commandKey: string): Promise<{ operationId: string; actor: string; reviewHash: string } | null>;
   authorizeRecovery?(input: ListingMemberRecoveryAuthorization, now: Date): Promise<ListingMemberRetirement>;
 }
 export interface ListingMemberLifecycleStore {
+  listConflictsForChannel?(channelId: number, offset: number): Promise<ListingMemberConflictList>;
   listForChannel(channelId: number, productId: number, limit: number): Promise<ListingMemberRetirement[]>;
   listForDropship?(connectionId: number, vendorId: number, productId: number, limit: number): Promise<ListingMemberRetirement[]>;
   discover(now: Date, limit: number): Promise<void>;

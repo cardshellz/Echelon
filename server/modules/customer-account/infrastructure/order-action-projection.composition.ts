@@ -1,15 +1,19 @@
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 import { customerReturnCustomerOrderSchema } from "@shared/returns/customer-return-access.contract";
-import type { OrderEditService } from "../../order-edits/application/order-edit.service";
+import {
+  OrderEditError,
+  PostgresOrderEditStore,
+  type OrderEditService,
+} from "../../order-edits/customer-account.api";
 import { CustomerOrderEditService } from "../application/customer-order-edit.service";
-import { CustomerReturnOrderAccessService } from "../../returns/application/customer-return-order-access.service";
-import { PostgresCustomerReturnOrderAccessRepository } from "../../returns/infrastructure/customer-return-order-access.repository";
-import { PostgresOrderEditStore } from "../../order-edits/infrastructure/postgres-order-edit.store";
-import { createCustomerReturnLiveService } from "../../returns/infrastructure/customer-return-live.composition";
-import { PostgresCustomerReturnBoxMeasurements } from "../../returns/infrastructure/customer-return-box-measurements.repository";
-import { PostgresCustomerReturnSettingsStore } from "../../returns/infrastructure/customer-return-label-settings.repository";
-import { OrderEditError } from "../../order-edits/domain/order-edit-error";
+import { CustomerReturnOrderAccessService } from "../../returns/customer-return-access-contracts.api";
+import {
+  PostgresCustomerReturnOrderAccessRepository,
+  createCustomerReturnLiveService,
+  PostgresCustomerReturnBoxMeasurements,
+  PostgresCustomerReturnSettingsStore,
+} from "../../returns/customer-account-composition.api";
 import { OrderActionProjectionWorker } from "../application/order-action-projection.worker";
 import { OrderActionProjectionInspectorService } from "../application/order-action-projection.inspector";
 import type { OrderActionScope } from "../application/order-action-projection.ports";
@@ -17,7 +21,7 @@ import { PostgresOrderActionProjectionStore } from "./order-action-projection.re
 import { readCustomerAccountStagingConfig } from "../domain/customer-account-staging";
 
 export type OrderActionProjectionReport = (event: {
-  action: string; outcome: string; omsOrderId?: number; code?: string; durationMs?: number;
+  action: string; outcome: string; omsOrderId?: number; code?: string; causeCode?: string; durationMs?: number;
 }) => void;
 const SWEEP_INTERVAL_MS = 5_000;
 

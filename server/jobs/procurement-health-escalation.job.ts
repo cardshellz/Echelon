@@ -3,11 +3,11 @@ import { catalogStorage } from "../modules/catalog";
 import { inventoryStorage } from "../modules/inventory";
 import { createShipmentTrackingService, procurementStorage } from "../modules/procurement";
 import {
+  loadProcurementHealthSummary,
   sendProcurementHealthCriticalEscalation,
   type ProcurementHealthEscalationResult,
-} from "../modules/procurement/procurement-health-escalation.service";
-import { loadProcurementHealthSummary } from "../modules/procurement/procurement-health-summary.service";
-import type { ProcurementHealthSummary } from "../modules/procurement/procurement-health.service";
+  type ProcurementHealthSummary,
+} from "../modules/procurement/health-and-observability.api";
 
 type ProcurementHealthDatabase = NonNullable<Parameters<typeof loadProcurementHealthSummary>[0]["db"]>;
 

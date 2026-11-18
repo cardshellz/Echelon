@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 
@@ -22,11 +23,11 @@ async function setup(page: Page, canEdit = true) {
   const failures = await installFixtures(page);
   const saved = settingsFixture();
   const reads: string[] = [];
-  await page.route("**/api/auth/me", (route) => route.fulfill({ json: {
+  await page.route("**/api/auth/me", (route) => route.fulfill({ json: staffAuthorityFixture({
     user: { id: "settings-operator", username: "test", role: "admin" },
     permissions: canEdit ? ["purchasing:view", "settings:edit"] : ["purchasing:view", "inventory:adjust"],
-    roles: ["admin"],
-  } }));
+    systemRoles: ["admin"],
+  }) }));
   await page.route("**/api/settings/procurement", (route) => {
     if (route.request().method() !== "GET") return route.fallback();
     reads.push(route.request().url());
@@ -156,9 +157,9 @@ test("malformed settings never appear as default off controls and can be reloade
 
 test("an independently granted settings editor can open the page and navigation without an admin role", async ({ page }) => {
   const { failures } = await setup(page);
-  await page.route("**/api/auth/me", route => route.fulfill({ json: {
-    user: { id: "settings-operator", username: "test", role: "picker" }, permissions: ["settings:edit"], roles: ["custom-policy-editor"],
-  } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({
+    user: { id: "settings-operator", username: "test", role: "picker" }, permissions: ["settings:edit"], systemRoles: [], assignedRoles: [{ id: 101, name: "custom-policy-editor", isSystem: false }],
+  }) }));
   await page.goto("/settings/procurement");
   await expect(page.getByRole("switch", { name: "Require approval", exact: true })).toBeEnabled();
   await page.getByTestId("button-settings-menu").click();

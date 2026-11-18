@@ -26,6 +26,11 @@ export class PgMarketplaceQuantityBaselineReader implements MarketplaceQuantityB
     private readonly readPublished: typeof readDropshipEbayPublishedQuantities = readDropshipEbayPublishedQuantities,
   ) {}
 
+  /** The same authority read readPublishBaselines decides B under; the sweep asks it only for a blocked restore. */
+  async readQuantityAuthority(): Promise<"legacy" | "canonical"> {
+    return this.readAuthority(this.pool);
+  }
+
   async readPublishBaselines(input: {
     storeConnectionId: number; listings: readonly MarketplaceSyncListing[];
   }): Promise<Map<number, QuantityBaseline | null>> {

@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { rfqWorkListResponseSchema, type RfqWorkListItem } from "../../shared/procurement/rfq-work-list";
 import { installFixtures } from "./procurement-fixtures";
@@ -22,7 +23,7 @@ function item(id: number): RfqWorkListItem {
 
 async function setup(page: Page) {
   const failures = await installFixtures(page);
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: "purchasing-reader", username: "reader", role: "admin" }, permissions: ["purchasing:view"], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: "purchasing-reader", username: "reader", role: "admin" }, permissions: ["purchasing:view"], systemRoles: ["admin"] }) }));
   await page.route("**/api/purchasing/rfq-queue", route => route.fulfill({ json: { run: null, items: [], summary: { open: 0, partiallyAllocated: 0, fullyAllocated: 0, supplierAssignmentRequired: 0, activeRfqs: 0 } } }));
   return failures;
 }

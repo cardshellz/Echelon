@@ -27,6 +27,24 @@ CREATE TABLE identity.users (
   last_login_at timestamp
 );
 
+-- Current assigned-role authority, matching shared/schema/identity.schema.ts.
+-- No grants or memberships are inferred from users.role in this fixture.
+CREATE TABLE identity.auth_roles (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name varchar(100) NOT NULL UNIQUE,
+  description text,
+  is_system integer NOT NULL DEFAULT 0,
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now()
+);
+CREATE TABLE identity.auth_user_roles (
+  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  user_id varchar NOT NULL REFERENCES identity.users(id) ON DELETE CASCADE,
+  role_id integer NOT NULL REFERENCES identity.auth_roles(id) ON DELETE CASCADE,
+  created_at timestamp NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX auth_user_roles_user_role_idx ON identity.auth_user_roles(user_id, role_id);
+
 CREATE OR REPLACE FUNCTION wms.reject_shipping_evidence_ledger_mutation()
 RETURNS trigger
 LANGUAGE plpgsql

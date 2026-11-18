@@ -10,7 +10,7 @@ import { pool } from "./db";
 import { ListingIntentPropagationService } from "./modules/marketplace-listings/application/listing-intent-propagation.service";
 import { PostgresListingIntentPropagationRepository } from "./modules/marketplace-listings/infrastructure/pg-listing-intent-propagation.repository";
 import { ExistingListingIntentHandoff } from "./modules/marketplace-listings/infrastructure/existing-listing-intent-handoff";
-import { createDropshipListingPreviewServiceFromEnv } from "./modules/dropship/infrastructure/dropship-listing-preview.factory";
+import { createDropshipListingPreviewServiceFromEnv } from "./modules/dropship/listing-preview.api";
 
 export const listingIntentPropagationRepository =
   new PostgresListingIntentPropagationRepository(pool);

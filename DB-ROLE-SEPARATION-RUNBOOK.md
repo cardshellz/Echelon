@@ -41,10 +41,15 @@ heroku pg:psql -a <db-owner-app> -c "SELECT tableowner, count(*) FROM pg_tables 
 
 ## Phase 1 — Strip Echelon's cross-ownership DDL (MUST precede Phase 3)
 
+**Status 2026-11-17: done.** The fallback routine in `server/db.ts`
+(`runStartupMigrations()`, later `runReleaseSchemaFallbacks()`) was deleted under
+REFACTOR-PLAN P4.1, so `server/db.ts` no longer runs any DDL. The text below is kept as
+the record of why this phase had to come first.
+
 After the flip, any Echelon statement that does DDL on transferred objects throws
-`permission denied` — and `runStartupMigrations()` is one big try/catch, so the
-first failure **silently skips every later statement**, breaking Echelon's own
-bootstraps. Remove from `server/db.ts` before flipping:
+`permission denied` — and the fallback routine was one big try/catch, so the
+first failure **silently skipped every later statement**, breaking Echelon's own
+bootstraps. These had to be removed from `server/db.ts` before flipping:
 
 1. The whole "Migration 052 Subscription Engine" membership block:
    every `ALTER TABLE membership.plans|member_subscriptions|members ADD COLUMN ...`

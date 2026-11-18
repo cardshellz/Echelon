@@ -1,4 +1,5 @@
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
+import type {} from "../../platform/http/raw-body-request";
 
 import type { CarrierTrackingLogger, CarrierTrackingService } from "./carrier-tracking.service";
 import {

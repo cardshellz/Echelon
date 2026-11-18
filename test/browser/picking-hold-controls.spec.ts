@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -29,7 +30,7 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
   failReleaseAssignment?: boolean;
   orderHold?: boolean;
   userId?: string;
-  role?: string;
+  role?: "admin" | "lead" | "picker";
   permissions?: string[];
   combinedPickerId?: string;
   failChildReleaseOnce?: boolean;
@@ -69,8 +70,7 @@ async function mount(page: Page, warehouseStatus: "ready" | "in_progress", optio
     const path = new URL(request.url()).pathname;
     if (request.method() === "GET") {
       const replies: Record<string, unknown> = {
-        "/api/auth/me": { user: { id: options.userId ?? "picker", username: "picker", displayName: "Test picker", role: options.role ?? "picker" },
-          permissions: options.permissions ?? ["orders:hold", "picking:view", "picking:perform"], roles: [] },
+        "/api/auth/me": staffAuthorityFixture({ user: { id: options.userId ?? "picker", username: "picker", displayName: "Test picker", role: options.role ?? "picker" }, permissions: options.permissions ?? ["orders:hold", "picking:view", "picking:perform"], systemRoles: [options.role ?? "picker"] }),
         "/api/picking/queue": child ? [order, child] : [order],
         "/api/orders/exceptions": [],
         "/api/warehouses/1/fifo": { enabled: false },

@@ -2,7 +2,7 @@
 
 Tracker: [purchase costing cleanup](procurement-costing-cleanup-plan.md). Baseline findings and pinned source links: [authority audit](procurement-costing-authority-audit-2026-10-30.md).
 
-Stage 1 delivery: additive contract and pure projection merged in PR #1964; the user reports deployment. Receipt allocation and supplier tax policy answers remain pending. This document records that foundation and its activation boundaries. The [first S2 compatibility integration](procurement-costing-stage-2-compatibility.md) now uses the model to prove unchanged recorded authority; replacing the active pricing selection and all monetary consumers remains later work.
+Stage 1 delivery: additive contract and pure projection merged in PR #1964; the user reports deployment. On 2026-11-01 the user confirmed that each receipt keeps its own invoice cost; the explicit allocation adapter remains to be built. Supplier tax policy is unanswered. This document records the foundation and its activation boundaries. The [first S2 compatibility integration](procurement-costing-stage-2-compatibility.md) now uses the model to prove unchanged recorded authority; replacing active pricing selection and all monetary consumers remains later work.
 
 ## Implemented contract
 
@@ -115,9 +115,9 @@ Decision for later implementation: preserve the distinction between updating an 
 
 ## Pending decisions and limits
 
-Two questions were sent to the user during Stage 1 and are still unanswered:
+Policy decisions and activation status:
 
-1. For multiple invoice lines linked only to a PO line, require receipt allocation where costs differ, or blend actual supplier cost across that PO line? Until answered, the model calculates known money but returns `INVOICE_RECEIPT_ALLOCATION_REQUIRED` rather than choosing lots.
+1. **Confirmed 2026-11-01: keep each receipt's invoice cost.** Where invoice prices differ, use explicit receipt allocation rather than a PO-line average. The model calculates known money but returns `INVOICE_RECEIPT_ALLOCATION_REQUIRED` without an allocation. The [S2 correction integration](procurement-costing-stage-2-invoice-corrections.md) rejects new confirmed aggregate corrections until the adapter exists; this is not activation of receipt-specific posting.
 2. Classify each supplier tax charge, include all supplier tax, or exclude all supplier tax? Until answered, only an explicitly supplied treatment is modeled; no global tax inclusion rule is activated.
 
 Header-level and non-product adjustments still need a proven, stable allocation into these line source facts. The new adjustment schema supports their exact signed money and disposition, but an arbitrary residual is not evidence of a header allocation. The existing header/line writers are not changed in Stage 1.

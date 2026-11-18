@@ -51,9 +51,9 @@ describe("warehouse work configuration domain", () => {
     expect(previewWorkContext(config(), 2, actor, { capability: "replenishment", stationId: null, locationId: 2 }, locations)).toEqual({ eligible: true, reason: "eligible", revision: 2, executionAllowed: false });
   });
   it.each([
-    ["inactive_user", { ...actor, active: false }],
-    ["missing_permission", { ...actor, permissions: ["warehouse_work:configure"] }],
-  ] as const)("denies %s", (reason, employee) => {
+    ["inactive_user" as const, { ...actor, active: false }],
+    ["missing_permission" as const, { ...actor, permissions: ["warehouse_work:configure"] }],
+  ])("denies %s", (reason, employee) => {
     expect(previewWorkContext(config(), 1, employee, request, locations).reason).toBe(reason);
   });
   it("requires a matching role capability AND employee scope", () => {

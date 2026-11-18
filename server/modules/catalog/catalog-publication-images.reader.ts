@@ -1,9 +1,10 @@
 import type { Pool, PoolClient } from "pg";
 import type { CatalogPublicationMediaPlan } from "@shared/types/catalog-publication-media";
 import { resolveCatalogPublicationMediaPlan } from "./catalog-publication-media";
-import { resolveCatalogPublicationImage, type CatalogPublicationImage, type CatalogPublicationPhotoSelection } from "./catalog-publication-image";
+import { resolveCatalogPublicationImage, usesStoredCatalogPublicationImage, type CatalogPublicationImage, type CatalogPublicationPhotoSelection } from "./catalog-publication-image";
 import { ProductAssetError } from "./product-asset-errors";
 import { CATALOG_IMAGE_HASH_PATTERN, type CatalogPublicImageUrl } from "./catalog-public-image";
+import { catalogRenditionProfile } from "./catalog-publication-rendition";
 import {
   MAX_PRODUCT_IMAGE_BYTES,
   validateProductImage,
@@ -29,12 +30,12 @@ export async function readCatalogPublicationImages(
   const result = await database.query<CatalogPublicationImage>(`
     SELECT id, product_id AS "productId", product_variant_id AS "productVariantId", position,
       url, storage_type AS "storageType", mime_type AS "mimeType",
-      CASE WHEN storage_type IN ('file', 'both') AND url IS NULL
+      CASE WHEN storage_type IN ('file', 'both')
         THEN octet_length(file_data) END AS "fileBytes",
-      CASE WHEN storage_type IN ('file', 'both') AND url IS NULL
+      CASE WHEN storage_type IN ('file', 'both')
         AND octet_length(file_data) BETWEEN 1 AND $2
         THEN encode(sha256(file_data), 'hex') END AS "fileHash",
-      CASE WHEN storage_type IN ('file', 'both') AND url IS NULL
+      CASE WHEN storage_type IN ('file', 'both')
         AND octet_length(file_data) BETWEEN 1 AND $2
         THEN substring(file_data FROM 1 FOR 12) END AS "fileHeader"
     FROM catalog.product_assets
@@ -72,7 +73,7 @@ export function resolveCatalogPublicationPhotos(
   for (const image of images) {
     try {
       const url = resolveCatalogPublicationImage(image, publicUrl);
-      if (url !== null) photos.push({ assetId: image.id, url, position: image.publicationPosition ?? image.position, uploaded: image.url === null });
+      if (url !== null) photos.push({ assetId: image.id, url, position: image.publicationPosition ?? image.position, uploaded: usesStoredCatalogPublicationImage(image) });
     } catch (error) {
       if (!(error instanceof ProductAssetError)) throw error;
       issues.push({ assetId: image.id, code: error.code, message: error.message });
@@ -127,6 +128,7 @@ export async function readCatalogVariantPublicationImages(
   database: Pick<PoolClient, "query">,
   input: CatalogPublicationPhotoSelection,
 ): Promise<Map<number, CatalogPublicationImage[]>> {
+  const renditionProfile = catalogRenditionProfile(input.minimumLongestSide);
   if (input.productVariantIds.some((id) => !Number.isInteger(id) || id <= 0 || id > MAX_CATALOG_ID)
     || !Number.isSafeInteger(input.maxPhotosPerVariant) || input.maxPhotosPerVariant <= 0
     || (input.maxGroupPhotos !== undefined && (!Number.isSafeInteger(input.maxGroupPhotos) || input.maxGroupPhotos <= 0))) {
@@ -172,12 +174,12 @@ export async function readCatalogVariantPublicationImages(
       SELECT pa.id, pa.product_id, pa.product_variant_id, COALESCE(o.position_override, pa.position) AS position, pa.storage_type, pa.mime_type,
         pa.is_primary = 1 AS is_primary, COALESCE(o.included, true) AS included,
         COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) AS url,
-        CASE WHEN COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) IS NULL AND pa.storage_type IN ('file', 'both')
+        CASE WHEN o.url_override IS NULL AND pa.storage_type IN ('file', 'both')
           THEN octet_length(pa.file_data) END AS file_bytes,
-        CASE WHEN COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) IS NULL AND pa.storage_type IN ('file', 'both')
+        CASE WHEN o.url_override IS NULL AND pa.storage_type IN ('file', 'both')
           AND octet_length(pa.file_data) BETWEEN 1 AND $3
           THEN encode(sha256(pa.file_data), 'hex') END AS file_hash,
-        CASE WHEN COALESCE(o.url_override, NULLIF(BTRIM(pa.url), '')) IS NULL AND pa.storage_type IN ('file', 'both')
+        CASE WHEN o.url_override IS NULL AND pa.storage_type IN ('file', 'both')
           AND octet_length(pa.file_data) BETWEEN 1 AND $3
           THEN substring(pa.file_data FROM 1 FOR 12) END AS file_header
       FROM catalog.product_assets pa
@@ -190,12 +192,18 @@ export async function readCatalogVariantPublicationImages(
       photos.is_primary AS "isPrimary", photos.included,
       photos.storage_type AS "storageType", photos.mime_type AS "mimeType",
       photos.file_bytes AS "fileBytes", photos.file_hash AS "fileHash", photos.file_header AS "fileHeader"
+      ${renditionProfile ? ', rendition.rendition_hash AS "renditionHash", rendition_version.mime_type AS "renditionMimeType"' : ''}
     FROM kept
     INNER JOIN photos ON photos.id = kept.asset_id
+    ${renditionProfile ? `LEFT JOIN catalog.product_asset_renditions rendition ON rendition.asset_id=photos.id
+      AND rendition.source_hash=photos.file_hash AND rendition.profile=$6 AND rendition.source_longest_side < $7::int
+      LEFT JOIN catalog.product_asset_versions rendition_version ON rendition_version.asset_id=rendition.asset_id
+        AND rendition_version.content_hash=rendition.rendition_hash` : ''}
     ORDER BY kept.variant_id, kept.photo_rank
   `, [productVariantIds, input.maxPhotosPerVariant, MAX_PRODUCT_IMAGE_BYTES,
     JSON.stringify(overrides.map(override => ({ asset_id: override.assetId, included: override.included,
-      url_override: override.urlOverride, position_override: override.positionOverride }))), input.productId ?? null]);
+      url_override: override.urlOverride, position_override: override.positionOverride }))), input.productId ?? null,
+    ...(renditionProfile ? [renditionProfile, input.minimumLongestSide] : [])]);
   for (const { forProductVariantId, ...image } of result.rows) {
     byVariantId.get(forProductVariantId)?.push(image);
   }

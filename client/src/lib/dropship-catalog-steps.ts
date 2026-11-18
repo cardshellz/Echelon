@@ -5,7 +5,8 @@
  * which only touch the browser storage they are handed.
  */
 import type { ListingSettingsPolicyKind, ListingSettingsSummary } from "@shared/dropship/listing-settings";
-import { formatStatus, type DropshipStoreConnectionSummary } from "./dropship-ops-surface";
+import type { DropshipStoreConnectionSummary } from "./dropship-ops-surface";
+import { vendorPlatformName } from "./dropship-vendor-labels";
 
 export const CATALOG_STEPS = ["choose", "setup", "publish"] as const;
 export type CatalogStep = (typeof CATALOG_STEPS)[number];
@@ -255,13 +256,13 @@ export interface CatalogStoreOption {
 export function catalogStoreName(
   connection: Pick<DropshipStoreConnectionSummary, "externalDisplayName" | "shopDomain" | "platform">,
 ): string {
-  return connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} store name pending`;
+  return connection.externalDisplayName || connection.shopDomain || `${vendorPlatformName(connection.platform)} store`;
 }
 
 /**
  * The store's own name, or null when it has none yet. For words that tell the
  * vendor which Settings button to choose: without a name the button reads the
- * placeholder catalogStoreName gives ("Reconnect Ebay store name pending"), so
+ * placeholder catalogStoreName gives ("Reconnect eBay store"), so
  * those words name "the store's Reconnect button" instead
  * (dropship-listing-push-status unverifiedAccountWords).
  */

@@ -1,9 +1,13 @@
 import type { Pool } from "pg";
 import { z } from "zod";
-import type { CustomerReturnShopifySnapshotReader } from "../returns/application/customer-return-shopify-snapshot.ports";
-import { CustomerReturnShopifySnapshotError } from "../returns/application/customer-return-shopify-snapshot.ports";
-import { createShipStationLabelReconciliationClient } from "../oms/shipstation-label-reconciliation.client";
-import type { ShipStationApiRequester } from "../oms/shipstation-api-request";
+import {
+  CustomerReturnShopifySnapshotError,
+  type CustomerReturnShopifySnapshotReader,
+} from "../returns/shopify-snapshot-contracts.api";
+import {
+  createShipStationLabelReconciliationClient,
+  type ShipStationApiRequester,
+} from "../oms/shipstation-execution.api";
 import { readBoundedResponseText } from "./shipstation-tracking-http";
 import { normalizeShipStationLabelObservation } from "./carrier-tracking.domain";
 import { ShippingPackageDimensionsReader } from "./package-dimensions.reader";

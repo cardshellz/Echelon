@@ -81,7 +81,7 @@ export function presentEbayListingJob(job: EbayListingSyncJob): EbayListingJobPr
     case "needs_attention": summary = issue?.title ?? "Update stopped"; break;
     case "completed": summary = job.operation === "withdraw"
       ? "Removed from eBay. The provider's listing state is verified."
-      : job.operation === "publish" ? "Published. Listing and pictures verified." : "Listing and pictures verified.";
+      : job.operation === "publish" ? "Published on eBay." : "Listing sync completed.";
   }
   if (job.state === "completed") return { summary, phase: null, verification: null, activity: null, times: [], inventory };
 

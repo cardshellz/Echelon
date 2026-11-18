@@ -33,6 +33,13 @@ const reviewRepository = readFileSync(
   ),
   "utf8",
 );
+const wmsAllocationExceptionsRepository = readFileSync(
+  resolve(
+    process.cwd(),
+    "server/modules/wms/allocation-exceptions-mutations.repository.ts",
+  ),
+  "utf8",
+);
 
 describe("canonical claim picker-observation contract", () => {
   it("accepts a bounded short reason only on canonical short progress", () => {
@@ -148,7 +155,8 @@ describe("canonical claim picker-observation contract", () => {
     expect(claimRepository).toContain("CLAIM_PICK_OBSERVATION_REVIEW_WRITER_MISSING");
     expect(claimRepository).toContain("observationReviewWriter.recordReview");
     expect(claimRepository).not.toContain("INSERT INTO wms.allocation_exceptions");
-    expect(reviewRepository).toContain("INSERT INTO wms.allocation_exceptions");
+    expect(reviewRepository).toContain("insertPickerObservationReviewAllocationExceptionInWms(input.client");
+    expect(wmsAllocationExceptionsRepository).toContain("INSERT INTO wms.allocation_exceptions");
     expect(claimRepository).toContain("\"pick_observation\" as const");
     expect(inventoryRepository).toContain("'availability_claim_observation'");
     expect(inventoryRepository).toContain("'reserve_move'");

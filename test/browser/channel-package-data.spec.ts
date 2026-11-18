@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { test, expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import { setupEbayChannelPage } from "./fixtures/ebay-channel-page.fixture";
@@ -11,8 +12,7 @@ async function catalog(page: Page) {
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
     if (path.startsWith("/api/ebay/")) return route.fallback();
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", username: "operator", role: "staff" },
-      permissions: ["inventory:view", "inventory:edit"], roles: [] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator", username: "operator", role: "staff" }, permissions: ["inventory:view", "inventory:edit"], systemRoles: [], assignedRoles: [{ id: 101, name: "Catalog operator", isSystem: false }] }) });
     if (path === "/api/products/1") return route.fulfill({ json: { id: 1, productId: 1, sku: "PACKAGE", name: "Package test product",
       isActive: true, status: "active", baseUnit: "piece", inventoryTrackingDefault: true, inventoryStrategy: "physical_only",
       variants: [state.variant], assets: [] } });

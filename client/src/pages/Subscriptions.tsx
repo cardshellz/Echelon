@@ -53,9 +53,21 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
-
-const API = "/api/subscriptions";
-const MEMBERSHIP_API = "/api/membership";
+import {
+  SUBSCRIPTIONS_API as API,
+  SubscriptionRequestError,
+  subscriptionJsonRequest,
+  cancelSubscriptionCommand,
+  retrySubscriptionBillingCommand,
+  pauseSubscriptionCommand,
+  changeSubscriptionPlanCommand,
+  setupSellingPlansCommand,
+  registerSubscriptionWebhooksCommand,
+  runManualBillingPassCommand,
+  presentSubscriptionCancelFeedback,
+  presentSubscriptionCommandError,
+  presentManualBillingFeedback,
+} from "@/lib/subscriptions-api";
 
 function formatCents(cents: number): string {
   return `$${(cents / 100).toFixed(2)}`;
@@ -103,19 +115,23 @@ function StatusBadge({ status }: { status: string }) {
 
 function DashboardTab() {
   const [stats, setStats] = useState<any>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [recentEvents, setRecentEvents] = useState<any[]>([]);
 
   const loadStats = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const [statsRes, eventsRes] = await Promise.all([
-        fetch(`${API}/dashboard`).then(r => r.json()),
-        fetch(`${API}/events/list?limit=10`).then(r => r.json()),
+        subscriptionJsonRequest<any>(`${API}/dashboard`),
+        subscriptionJsonRequest<any[]>(`${API}/events/list?limit=10`),
       ]);
       setStats(statsRes);
-      setRecentEvents(eventsRes);
+      setRecentEvents(Array.isArray(eventsRes) ? eventsRes : []);
     } catch (err) {
+      setStats(null);
+      setLoadError(err instanceof Error ? err.message : "Failed to load dashboard");
       console.error("Failed to load dashboard", err);
     }
     setLoading(false);
@@ -124,7 +140,13 @@ function DashboardTab() {
   useEffect(() => { loadStats(); }, [loadStats]);
 
   if (loading) return <div className="p-8 text-center text-muted-foreground">Loading dashboard...</div>;
-  if (!stats) return <div className="p-8 text-center text-muted-foreground">Failed to load</div>;
+  if (!stats) {
+    return (
+      <div className="p-8 text-center text-muted-foreground">
+        {loadError || "Failed to load"}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -223,10 +245,14 @@ function SubscriberListTab({ onSelectSubscription }: { onSelectSubscription: (id
     params.set("offset", String(page * limit));
 
     try {
-      const res = await fetch(`${API}/list?${params}`).then(r => r.json());
-      setSubs(res.rows);
-      setTotal(res.total);
+      const res = await subscriptionJsonRequest<{ rows?: any[]; total?: number }>(
+        `${API}/list?${params}`,
+      );
+      setSubs(Array.isArray(res.rows) ? res.rows : []);
+      setTotal(typeof res.total === "number" ? res.total : 0);
     } catch (err) {
+      setSubs([]);
+      setTotal(0);
       console.error("Failed to load subscribers", err);
     }
     setLoading(false);
@@ -371,11 +397,16 @@ function SubscriptionDetail({ subscriptionId, onBack }: { subscriptionId: number
   const loadDetail = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API}/${subscriptionId}`).then(r => r.json());
+      const res = await subscriptionJsonRequest<{
+        subscription: any;
+        billingLogs?: any[];
+        events?: any[];
+      }>(`${API}/${subscriptionId}`);
       setDetail(res.subscription);
-      setBillingLogs(res.billingLogs || []);
-      setEvents(res.events || []);
+      setBillingLogs(Array.isArray(res.billingLogs) ? res.billingLogs : []);
+      setEvents(Array.isArray(res.events) ? res.events : []);
     } catch (err) {
+      setDetail(null);
       console.error("Failed to load detail", err);
     }
     setLoading(false);
@@ -385,69 +416,70 @@ function SubscriptionDetail({ subscriptionId, onBack }: { subscriptionId: number
 
   const handleCancel = async () => {
     try {
-      await fetch(`${API}/${subscriptionId}/cancel`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason: cancelReason || "Admin cancelled" }),
-      });
-      toast({ title: "Subscription cancelled" });
+      const res = await cancelSubscriptionCommand(
+        subscriptionId,
+        cancelReason || "Admin cancelled",
+      );
+      toast(presentSubscriptionCancelFeedback(res));
       setShowCancelDialog(false);
-      loadDetail();
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      setCancelReason("");
+      await loadDetail();
+    } catch (err: unknown) {
+      toast(presentSubscriptionCommandError(err, "Cancellation failed"));
+      if (err instanceof SubscriptionRequestError && err.uncertain) {
+        await loadDetail();
+      }
     }
   };
 
   const handleRetryBilling = async () => {
     try {
-      const res = await fetch(`${API}/${subscriptionId}/retry-billing`, { method: "POST" }).then(r => r.json());
-      if (res.success) {
-        toast({ title: "Billing retry initiated" });
-      } else {
-        toast({ title: "Retry failed", description: res.error, variant: "destructive" });
-      }
-      loadDetail();
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      await retrySubscriptionBillingCommand(subscriptionId);
+      toast({
+        title: "Billing retry dispatched",
+        description: "Attempt is pending Shopify webhook confirmation.",
+      });
+      await loadDetail();
+    } catch (err: unknown) {
+      toast(presentSubscriptionCommandError(err, "Retry failed"));
+      await loadDetail();
     }
   };
 
   const handlePause = async (paused: boolean) => {
     try {
-      await fetch(`${API}/${subscriptionId}/pause`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paused }),
-      });
+      await pauseSubscriptionCommand(subscriptionId, paused);
       toast({ title: paused ? "Subscription paused" : "Subscription unpaused" });
-      loadDetail();
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      await loadDetail();
+    } catch (err: unknown) {
+      toast(presentSubscriptionCommandError(err, paused ? "Pause failed" : "Unpause failed"));
+      if (err instanceof SubscriptionRequestError && err.uncertain) {
+        await loadDetail();
+      }
     }
   };
 
   const handleChangePlan = async () => {
     if (!selectedPlanId) return;
     try {
-      await fetch(`${API}/${subscriptionId}/change-plan`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ plan_id: selectedPlanId }),
-      });
+      await changeSubscriptionPlanCommand(subscriptionId, selectedPlanId);
       toast({ title: "Plan changed" });
       setShowPlanDialog(false);
-      loadDetail();
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      await loadDetail();
+    } catch (err: unknown) {
+      toast(presentSubscriptionCommandError(err, "Plan change failed"));
+      if (err instanceof SubscriptionRequestError && err.uncertain) {
+        await loadDetail();
+      }
     }
   };
 
   const loadPlans = async () => {
     try {
-      const res = await fetch(`${API}/plans/list`).then(r => r.json());
-      setPlans(res.plans || []);
+      const res = await subscriptionJsonRequest<{ plans?: any[] }>(`${API}/plans/list`);
+      setPlans(Array.isArray(res.plans) ? res.plans : []);
     } catch (err) {
-      console.error("Failed to load plans", err);
+      toast(presentSubscriptionCommandError(err, "Failed to load plans"));
     }
   };
 
@@ -700,10 +732,15 @@ function PlansTab() {
   const loadPlans = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API}/plans/list`).then(r => r.json());
-      setPlans(res.plans || []);
-      setSellingPlanMap(res.sellingPlanMap || []);
+      const res = await subscriptionJsonRequest<{
+        plans?: any[];
+        sellingPlanMap?: any[];
+      }>(`${API}/plans/list`);
+      setPlans(Array.isArray(res.plans) ? res.plans : []);
+      setSellingPlanMap(Array.isArray(res.sellingPlanMap) ? res.sellingPlanMap : []);
     } catch (err) {
+      setPlans([]);
+      setSellingPlanMap([]);
       console.error("Failed to load plans", err);
     }
     setLoading(false);
@@ -714,25 +751,35 @@ function PlansTab() {
   const handleSetupSellingPlans = async () => {
     setSetupLoading(true);
     try {
-      const res = await fetch(`${MEMBERSHIP_API}/setup-selling-plans`, { method: "POST" }).then(r => r.json());
-      if (res.error) {
-        toast({ title: "Error", description: res.error, variant: "destructive" });
-      } else {
-        toast({ title: "Selling plans created", description: `Group: ${res.sellingPlanGroupGid}` });
-        loadPlans();
-      }
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      const res = await setupSellingPlansCommand();
+      toast({
+        title: "Selling plans created",
+        description: res.sellingPlanGroupGid ? `Group: ${res.sellingPlanGroupGid}` : undefined,
+      });
+      await loadPlans();
+    } catch (err: unknown) {
+      toast(presentSubscriptionCommandError(err, "Setup selling plans failed"));
+    } finally {
+      setSetupLoading(false);
     }
-    setSetupLoading(false);
   };
 
   const handleRegisterWebhooks = async () => {
     try {
-      const res = await fetch(`${MEMBERSHIP_API}/register-webhooks`, { method: "POST" }).then(r => r.json());
-      toast({ title: "Webhooks registered", description: `Registered: ${(res.registered || []).join(", ")}` });
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      const res = await registerSubscriptionWebhooksCommand();
+      if (res.disabled) {
+        toast({
+          title: "Webhooks managed by Shellz Club",
+          description: res.message || "Subscription webhooks are disabled in Echelon.",
+        });
+      } else {
+        toast({
+          title: "Webhooks registered",
+          description: `Registered: ${(res.registered || []).join(", ")}`,
+        });
+      }
+    } catch (err: unknown) {
+      toast(presentSubscriptionCommandError(err, "Webhook registration failed"));
     }
   };
 
@@ -859,10 +906,14 @@ function BillingLogTab() {
     params.set("offset", String(page * limit));
 
     try {
-      const res = await fetch(`${API}/billing/log?${params}`).then(r => r.json());
-      setLogs(res.rows || []);
-      setTotal(res.total || 0);
+      const res = await subscriptionJsonRequest<{ rows?: any[]; total?: number }>(
+        `${API}/billing/log?${params}`,
+      );
+      setLogs(Array.isArray(res.rows) ? res.rows : []);
+      setTotal(typeof res.total === "number" ? res.total : 0);
     } catch (err) {
+      setLogs([]);
+      setTotal(0);
       console.error("Failed to load billing logs", err);
     }
     setLoading(false);
@@ -872,14 +923,12 @@ function BillingLogTab() {
 
   const handleManualRun = async () => {
     try {
-      const res = await fetch(`${API}/billing/run`, { method: "POST" }).then(r => r.json());
-      toast({
-        title: "Billing run complete",
-        description: `Processed: ${res.processed}, Succeeded: ${res.succeeded}, Failed: ${res.failed}`,
-      });
-      loadLogs();
-    } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      const res = await runManualBillingPassCommand();
+      toast(presentManualBillingFeedback(res));
+      await loadLogs();
+    } catch (err: unknown) {
+      toast(presentSubscriptionCommandError(err, "Billing run failed"));
+      await loadLogs();
     }
   };
 

@@ -22,6 +22,7 @@ import type { DropshipMarketplaceListingIntent, DropshipStoreListingConfig } fro
 import type { MarketplacePrePushInput, MarketplacePrePushResult } from "../../application/dropship-marketplace-sync-service";
 import type { MarketplacePushGuard } from "../../domain/marketplace-sync-decision";
 import { marketplaceSyncError, MARKETPLACE_SYNC_CODES } from "../../domain/marketplace-sync-errors";
+import { DropshipLiveListingZeroQuantityService } from "../../application/dropship-live-listing-zero-quantity-service";
 import {
   LISTING_END_FENCE_CODES,
   LISTING_END_FENCE_WORDS,
@@ -133,7 +134,7 @@ describe("DropshipListingPushWorkerService", () => {
       eventType: "dropship_listing_push_failed",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship listing push failed",
+      title: "Some listings couldn't be sent to your store",
       idempotencyKey: "listing-push:30:failed",
       payload: {
         jobId: 30,
@@ -306,7 +307,7 @@ describe("DropshipListingPushWorkerService", () => {
       },
     });
     expect(notificationSender.sent[0]?.message).toBe(
-      "1 of 1 listing could not be sent to your store (job 30). First reason: eBay listing push failed with HTTP 400: 25002 Invalid value for aspect (aspect: Brand)",
+      "1 of 1 listing could not be sent to your store. First reason: eBay listing push failed with HTTP 400: 25002 Invalid value for aspect (aspect: Brand)",
     );
   });
 
@@ -470,7 +471,7 @@ describe("DropshipListingPushWorkerService", () => {
       message: "A listing push item is blocked until an operator resolves it.",
       context: { jobId: 30, itemId: 1, errorCode: code, inventoryCode: refusal.inventoryCode, outcome: "requires_review" } });
     expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_ITEM_NEEDS_STOCK_SETUP")).toBeUndefined();
-    expect(notificationSender.sent[0]?.message).toBe(`1 of 1 listing could not be sent to your store (job 30). First reason: ${refusal.message}`);
+    expect(notificationSender.sent[0]?.message).toBe(`1 of 1 listing could not be sent to your store. First reason: ${refusal.message}`);
   });
 
   // Review TW-3: the vendor's email for a code the push sweep re-queues by itself says so; while an automatic
@@ -489,7 +490,7 @@ describe("DropshipListingPushWorkerService", () => {
       await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-1" });
       expect(notificationSender.sent).toHaveLength(1);
       expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed",
-        message: "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment. Card Shellz will try it again automatically." });
+        message: "1 of 1 listing could not be sent to your store. First reason: Card Shellz stock for this item was being updated at the same moment. Card Shellz will try it again automatically." });
       // Asked with the sweep's own guards, once the job is final (review V2-2).
       expect(outlook.calls).toEqual([30]);
     });
@@ -502,7 +503,7 @@ describe("DropshipListingPushWorkerService", () => {
       await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-guards" });
       expect(notificationSender.sent).toHaveLength(1);
       expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed",
-        message: "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment." });
+        message: "1 of 1 listing could not be sent to your store. First reason: Card Shellz stock for this item was being updated at the same moment." });
     });
 
     it("sends the final email when the guards exclude an item that was already re-queued", async () => {
@@ -512,7 +513,7 @@ describe("DropshipListingPushWorkerService", () => {
       await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-guards-2" });
       expect(notificationSender.sent).toHaveLength(1);
       expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed:after-automatic-retry",
-        message: "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment." });
+        message: "1 of 1 listing could not be sent to your store. First reason: Card Shellz stock for this item was being updated at the same moment." });
     });
 
     it("promises nothing, and logs a WARN, when the pending items cannot be read", async () => {
@@ -520,7 +521,7 @@ describe("DropshipListingPushWorkerService", () => {
       marketplacePush.error = busy();
       await service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: "process-email-outlook-failed" });
       expect(notificationSender.sent[0]?.message).toBe(
-        "1 of 1 listing could not be sent to your store (job 30). First reason: Card Shellz stock for this item was being updated at the same moment.");
+        "1 of 1 listing could not be sent to your store. First reason: Card Shellz stock for this item was being updated at the same moment.");
       expect(logs.find((event) => event.code === "DROPSHIP_LISTING_PUSH_AUTOMATIC_REQUEUE_OUTLOOK_FAILED")).toMatchObject({
         context: { jobId: 30, itemIds: [1], outcome: "no_automatic_retry_promised", error: "connection reset" } });
     });
@@ -550,7 +551,7 @@ describe("DropshipListingPushWorkerService", () => {
       expect(outlook.calls).toEqual([]);
       expect(notificationSender.sent).toHaveLength(1);
       expect(notificationSender.sent[0]).toMatchObject({ idempotencyKey: "listing-push:30:failed:after-automatic-retry",
-        message: `1 of 1 listing could not be sent to your store (job 30). First reason: ${reason}` });
+        message: `1 of 1 listing could not be sent to your store. First reason: ${reason}` });
     });
 
     // Rebase of PR A onto Fix PR 2a: a publish run's chunk job sends no email of its own (its run sends one when it
@@ -1286,6 +1287,19 @@ class FakeListingPushWorkerRepository implements DropshipListingPushWorkerReposi
     return this.items[index];
   }
 
+  zeroInputs: Array<Parameters<DropshipListingPushWorkerRepository["completeItemAtZeroQuantity"]>[0]> = [];
+
+  /** As the real repository: the item completes (only from processing) and the listing settles at 0, in one write. */
+  async completeItemAtZeroQuantity(input: Parameters<DropshipListingPushWorkerRepository["completeItemAtZeroQuantity"]>[0]) {
+    this.zeroInputs.push(input);
+    const index = this.items.findIndex((item) => item.itemId === input.item.itemId);
+    if (this.items[index].status === "processing") {
+      this.items[index] = { ...this.items[index], status: "completed", externalListingId: input.externalListingId, errorCode: null,
+        errorMessage: null };
+    }
+    return { pushedQuantityBefore: 4, lastPushedAtBefore: null };
+  }
+
   pauseInputs: Array<Parameters<DropshipListingPushWorkerRepository["pauseItem"]>[0]> = [];
   tripInputs: Array<Parameters<DropshipListingPushWorkerRepository["tripJobBreaker"]>[0]> = [];
   finalizeCalls = 0;
@@ -1384,3 +1398,187 @@ function makeQueuedItem(): DropshipListingPushWorkerItemRecord {
     },
   };
 }
+
+/**
+ * Stock ran out between queue and push: the push-time refresh refuses ONLY for want of stock
+ * (DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED with marketplace_quantity_unavailable alone). The item is decided at once,
+ * never a retry that fails the same way: 0 to a live listing (legacy), no write (canonical), or "waiting for stock"
+ * for a first publish. Any other refusal keeps today's failure.
+ */
+describe("DropshipListingPushWorkerService: stock gone at push time", () => {
+  const QUANTITY_ONLY = ["marketplace_quantity_unavailable"];
+  const blocked = (blockers: string[]) => new DropshipError("DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED",
+    "Current listing rules do not authorize this queued publication.", { productVariantId: 101, blockers, retryable: true });
+  const liveListing = { listingId: 100, productVariantId: 101, status: "active", externalListingId: "110100", externalOfferId: "OFFER-100",
+    lastPreviewHash: "preview-hash" };
+
+  function setup(input: { authority?: "legacy" | "canonical"; blockers?: string[]; live?: boolean; sendError?: Error } = {}) {
+    const repository = new FakeListingPushWorkerRepository();
+    if (input.live !== false) repository.items[0] = { ...repository.items[0], listing: { ...liveListing } };
+    const marketplacePush = new FakeMarketplacePushProvider();
+    const notificationSender = new FakeNotificationSender();
+    const logs: DropshipLogEvent[] = [];
+    const sends: Array<{ listingId: number; sku: string; externalOfferId: string }> = [];
+    const ownSettlements: unknown[] = [];
+    const zeroQuantity = new DropshipLiveListingZeroQuantityService({
+      sender: { async sendZeroQuantity(target) {
+        sends.push(target);
+        if (input.sendError) throw input.sendError;
+        return { sku: target.sku, offerId: target.externalOfferId };
+      } },
+      // The worker settles through its own repository (one transaction with the item): never this one.
+      repository: { async settleZeroQuantity(settlement) { ownSettlements.push(settlement); return { pushedQuantityBefore: 4, lastPushedAtBefore: null }; } },
+      clock: { now: () => now },
+      logger: { info: (event) => logs.push(event), warn: (event) => logs.push(event), error: (event) => logs.push(event) },
+    });
+    const service = new DropshipListingPushWorkerService({
+      repository, marketplacePush, notificationSender,
+      refreshListingIntent: async () => { throw blocked(input.blockers ?? QUANTITY_ONLY); },
+      zeroQuantity,
+      ...(input.authority ? { quantityAuthority: async () => input.authority! } : {}),
+      clock: { now: () => now },
+      logger: { debug: (event) => logs.push(event), info: (event) => logs.push(event), warn: (event) => logs.push(event),
+        error: (event) => logs.push(event) },
+    });
+    return { service, repository, marketplacePush, notificationSender, logs, sends, ownSettlements };
+  }
+  const run = (context: ReturnType<typeof setup>, key = "process-oos") =>
+    context.service.processJob({ jobId: 30, workerId: "worker-1", idempotencyKey: key });
+
+  it("legacy, live: sends 0 to the recorded offer and completes the item at 0, with no full push", async () => {
+    const context = setup({ authority: "legacy" });
+    const result = await run(context);
+    expect(context.sends).toEqual([{ vendorId: 10, storeConnectionId: 22, listingId: 100, productVariantId: 101, sku: "SKU-101",
+      externalOfferId: "OFFER-100" }]);
+    expect(context.marketplacePush.requests).toEqual([]);
+    expect(context.repository.zeroInputs).toEqual([expect.objectContaining({ externalListingId: "110100",
+      settlement: expect.objectContaining({ listingId: 100, externalOfferId: "OFFER-100", reason: "process-oos:1", now }) })]);
+    expect(context.ownSettlements).toEqual([]);
+    expect(context.repository.failInputs).toEqual([]);
+    expect(result.items[0]).toMatchObject({ status: "completed" });
+    expect(result.job.status).toBe("completed");
+    expect(context.notificationSender.sent).toEqual([]);
+    expect(context.logs).toContainEqual(expect.objectContaining({ code: "DROPSHIP_LISTING_PUSH_COMPLETED_AT_ZERO",
+      context: expect.objectContaining({ action: "dropship.listing_push.out_of_stock", outcome: "completed_at_zero" }) }));
+  });
+
+  it("canonical, live: writes nothing and closes the item quietly as skipped out of stock", async () => {
+    const context = setup({ authority: "canonical" });
+    const result = await run(context);
+    expect(context.sends).toEqual([]);
+    expect(context.marketplacePush.requests).toEqual([]);
+    expect(context.repository.zeroInputs).toEqual([]);
+    expect(context.repository.skipInputs).toEqual([expect.objectContaining({ code: "DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK" })]);
+    expect(result.items[0]).toMatchObject({ status: "cancelled", errorCode: "DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK" });
+    expect(result.job.status).toBe("completed");
+    expect(context.notificationSender.sent).toEqual([]);
+    expect(context.logs).toContainEqual(expect.objectContaining({ code: "DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK",
+      context: expect.objectContaining({ action: "dropship.listing_push.out_of_stock", outcome: "skipped_out_of_stock" }) }));
+  });
+
+  it.each(["legacy", "canonical"] as const)("not live yet (%s): the item and listing end waiting for stock, never retried", async (authority) => {
+    const context = setup({ authority, live: false });
+    const result = await run(context);
+    expect(context.sends).toEqual([]);
+    expect(context.marketplacePush.requests).toEqual([]);
+    expect(context.repository.blockInputs).toEqual([expect.objectContaining({ code: "DROPSHIP_LISTING_PREVIEW_BLOCKED",
+      message: "marketplace_quantity_unavailable", listingBlockers: ["marketplace_quantity_unavailable"] })]);
+    expect(context.repository.failInputs).toEqual([]);
+    expect(result.items[0]).toMatchObject({ status: "blocked", errorCode: "DROPSHIP_LISTING_PREVIEW_BLOCKED" });
+    expect(context.logs).toContainEqual(expect.objectContaining({ code: "DROPSHIP_LISTING_PUSH_WAITING_FOR_STOCK",
+      context: expect.objectContaining({ action: "dropship.listing_push.out_of_stock", outcome: "waiting_for_stock" }) }));
+  });
+
+  it.each([
+    ["another blocker", { authority: "legacy" as const, blockers: ["marketplace_quantity_unavailable", "variant_not_selected"] }],
+    ["another blocker only", { authority: "legacy" as const, blockers: ["listing_tier_not_on_sale"] }],
+    ["unknown authority", {}],
+  ])("keeps today's failure (%s)", async (_name, input) => {
+    const context = setup(input);
+    const result = await run(context);
+    expect(context.sends).toEqual([]);
+    expect(context.repository.zeroInputs).toEqual([]);
+    expect(context.repository.skipInputs).toEqual([]);
+    expect(context.repository.blockInputs).toEqual([]);
+    expect(context.repository.failInputs).toEqual([expect.objectContaining({ code: "DROPSHIP_CURRENT_LISTING_INTENT_BLOCKED" })]);
+    expect(result.items[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("a failed 0 send fails the item through today's classification, settling nothing", async () => {
+    const context = setup({ authority: "legacy", sendError: new DropshipError("DROPSHIP_EBAY_ZERO_QUANTITY_UNCONFIRMED", "unconfirmed",
+      { retryable: true }) });
+    const result = await run(context);
+    expect(context.repository.zeroInputs).toEqual([]);
+    expect(context.repository.failInputs).toEqual([expect.objectContaining({ code: "DROPSHIP_EBAY_ZERO_QUANTITY_UNCONFIRMED" })]);
+    expect(result.items[0]).toMatchObject({ status: "failed" });
+  });
+
+  it("is idempotent on replay: a replay of the processed job sends nothing more", async () => {
+    const context = setup({ authority: "legacy" });
+    await run(context);
+    const replay = await run(context);
+    expect(context.sends).toHaveLength(1);
+    expect(context.repository.zeroInputs).toHaveLength(1);
+    expect(replay.items[0]).toMatchObject({ status: "completed" });
+  });
+
+  describe("the failure notice leaves out items only waiting for stock", () => {
+    const failedFetch = (itemId: number, productVariantId: number) => ({
+      ...makeQueuedItem(), itemId, productVariantId, listingId: 100 + itemId, status: "failed",
+      errorCode: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR", errorMessage: "eBay listing push failed with HTTP 400.",
+      listing: { ...makeQueuedItem().listing!, listingId: 100 + itemId, productVariantId, status: "failed" },
+    });
+
+    const onEbay = (context: ReturnType<typeof setup>) => {
+      context.repository.job = { ...context.repository.job, platform: "ebay" };
+      context.repository.config = { ...context.repository.config, platform: "ebay" };
+      context.repository.items = context.repository.items.map((item) => ({ ...item,
+        result: { ...item.result, listingIntent: { ...(item.result?.listingIntent as object), platform: "ebay" } } }));
+    };
+
+    it("an eBay job whose only not-listed item waits for stock sends no notice, with a DEBUG line; statuses stay", async () => {
+      const context = setup({ authority: "legacy", live: false });
+      onEbay(context);
+      const result = await run(context);
+      expect(result.items[0]).toMatchObject({ status: "blocked", errorCode: "DROPSHIP_LISTING_PREVIEW_BLOCKED",
+        errorMessage: "marketplace_quantity_unavailable" });
+      expect(result.job.status).toBe("failed");
+      expect(context.notificationSender.sent).toEqual([]);
+      expect(context.logs).toContainEqual(expect.objectContaining({ code: "DROPSHIP_LISTING_PUSH_NOTICE_NOT_NEEDED_WAITING_FOR_STOCK",
+        context: expect.objectContaining({ jobId: 30, waitingForStockCount: 1, outcome: "skipped_waiting_for_stock" }) }));
+    });
+
+    it("a mixed eBay job sends the notice counting and naming only the real failure", async () => {
+      const context = setup({ authority: "legacy", live: false });
+      onEbay(context);
+      context.repository.items.push(failedFetch(2, 102));
+      const result = await run(context);
+      expect(result.items.map((item) => item.status)).toEqual(["blocked", "failed"]);
+      expect(context.notificationSender.sent).toHaveLength(1);
+      const notice = context.notificationSender.sent[0]!;
+      expect(notice.message).toBe("1 of 2 listings could not be sent to your store. First reason: eBay listing push failed with HTTP 400.");
+      expect(notice.payload).toMatchObject({ omittedFailureItemCount: 0, waitingForStockCount: 1,
+        summary: { total: 2, failed: 1, blocked: 1 } });
+      expect((notice.payload as { failedItems: Array<{ itemId: number }> }).failedItems.map((item) => item.itemId)).toEqual([2]);
+    });
+
+    it("keeps counting the stock-only block off eBay (the sweep relists eBay only)", async () => {
+      const context = setup({ authority: "legacy", live: false });
+      await run(context);
+      expect(context.notificationSender.sent).toHaveLength(1);
+      expect(context.notificationSender.sent[0]!.message).toBe(
+        "1 of 1 listing could not be sent to your store. First reason: marketplace_quantity_unavailable");
+    });
+  });
+
+  it("a requeued item whose 0 already went out sends the same 0 again to the same offer", async () => {
+    const context = setup({ authority: "legacy" });
+    await run(context, "process-first");
+    context.repository.job = { ...context.repository.job, status: "queued" };
+    context.repository.items[0] = { ...context.repository.items[0], status: "queued" };
+    await run(context, "process-first");
+    expect(context.sends).toHaveLength(2);
+    expect(context.sends[1]).toEqual(context.sends[0]);
+    expect(context.repository.zeroInputs[1]!.settlement).toEqual(context.repository.zeroInputs[0]!.settlement);
+  });
+});

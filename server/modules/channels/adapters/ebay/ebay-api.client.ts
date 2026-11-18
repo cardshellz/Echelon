@@ -11,6 +11,8 @@
 
 import { EbayApiRequestError, isMissingEbayInventoryResource, isMissingEbayOfferCollection } from "./ebay-api-error";
 import { readEbayNativePackage, type EbayNativePackageSnapshot } from "./ebay-native-package.reader";
+import { readEbayPublishedContent } from "./ebay-published-content.reader";
+import type { ChannelPublishedContent } from "../../../marketplace-listings/domain/channel-publication-content";
 import { normalizeEbayObservedOffers } from "./ebay-offer-observation";
 import type { EbayAuthService } from "./ebay-auth.service";
 import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
@@ -302,6 +304,11 @@ export class EbayApiClient {
       environment: this.baseUrl === API_BASE_URLS.production ? "production" : "sandbox", request: this.options.request });
   }
 
+  async getPublishedListingContent(listingId: string): Promise<ChannelPublishedContent> {
+    return readEbayPublishedContent({ listingId, accessToken: await this.authService.getAccessToken(this.channelId),
+      environment: this.environment, request: this.options.request });
+  }
+
   /** Complete, validated discovery is owned by the quantity protocol, not the legacy first-offer helper. */
   async getInventoryOffersPage(sku: string, marketplaceId: string, offset: number, limit: number): Promise<unknown> {
     return this.request({ method: "GET", path: ebayInventoryOffersPath(sku, marketplaceId, offset, limit),
@@ -424,6 +431,17 @@ export class EbayApiClient {
    * List every physical shipping fulfillment recorded for an order.
    * GET /sell/fulfillment/v1/order/{orderId}/shipping_fulfillment
    */
+  async getNotificationPublicKey(publicKeyId: string): Promise<{
+    key: string;
+    algorithm?: string;
+    digest?: string;
+  }> {
+    return await this.request({
+      method: "GET",
+      path: `/commerce/notification/v1/public_key/${encodeURIComponent(publicKeyId.trim())}`,
+    });
+  }
+
   async getShippingFulfillments(orderId: string): Promise<EbayShippingFulfillmentsResponse> {
     return await this.request({
       method: "GET",
@@ -1126,7 +1144,7 @@ export function createEbayApiClient(
     { quantityAdmission: async () => {
       const account = await authService.getVerifiedProviderAccount(channelId);
       if (!account) throw new Error("Provider-verified eBay account identity is required for quantity publication.");
-      const { createChannelEbayQuantityRequestAdmission } = await import("../../../inventory-planning/infrastructure/quantity-publication-runtime");
+      const { createChannelEbayQuantityRequestAdmission } = await import("../../../inventory-planning/quantity-publication-admission.api");
       return createChannelEbayQuantityRequestAdmission({ channelId, externalAccountId: account.externalAccountId,
         environment: providerEnvironment });
     } },

@@ -1,6 +1,5 @@
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
-import { DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES } from "./dropship-notification-service";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 import { STRIPE_BANK_BALANCE_PERMISSION_ENV } from "./dropship-wallet-service";
@@ -1557,11 +1556,12 @@ export function buildDropshipSettingsSections(input: {
       : "stripe_funding_method_required",
   ].filter((value): value is string => value !== null);
   const walletReady = walletBlockers.length === 0;
+  // Vendor-facing words (the portal's Settings page is the only reader of these sections).
   const walletAttentionSummary = !input.wallet.autoReloadEnabled
-    ? "Auto-reload needs setup."
+    ? "Turn on autopay in Wallet."
     : !input.wallet.autoReloadFundingMethodReady
-      ? "Auto-reload needs usable Stripe funding."
-      : "Wallet funding needs setup.";
+      ? "Choose a card or bank account for autopay in Wallet."
+      : "Add money or a payment method in Wallet.";
 
   return [
     {
@@ -1572,8 +1572,8 @@ export function buildDropshipSettingsSections(input: {
       summary: input.vendorStatus === "paused"
         ? "Selling is paused until the wallet is funded."
         : input.entitlementStatus === "active"
-          ? "Membership entitlement active."
-          : "Membership entitlement needs attention.",
+          ? "Your .ops membership is active."
+          : "Your .ops membership needs attention.",
       blockers: [
         input.vendorStatus === "paused" ? "vendor_paused" : null,
         input.entitlementStatus === "active" ? null : `entitlement_${input.entitlementStatus}`,
@@ -1593,7 +1593,7 @@ export function buildDropshipSettingsSections(input: {
       status: walletReady ? "ready" : "attention_required",
       comingSoon: false,
       summary: walletReady
-        ? "Wallet funding and auto-reload ready."
+        ? "Your wallet and autopay are set up."
         : walletAttentionSummary,
       blockers: walletBlockers,
     },
@@ -1602,7 +1602,9 @@ export function buildDropshipSettingsSections(input: {
       label: "Notifications",
       status: "ready",
       comingSoon: false,
-      summary: `${DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES.length} launch default notification preference(s) available; ${input.notificationPreferenceCount} vendor override(s) configured.`,
+      summary: input.notificationPreferenceCount === 0
+        ? "You get our standard alerts. Change them on the Alerts page."
+        : `You've changed ${input.notificationPreferenceCount} alert setting${input.notificationPreferenceCount === 1 ? "" : "s"}. Manage them on the Alerts page.`,
       blockers: [],
     },
     {
@@ -1623,10 +1625,10 @@ export function buildDropshipSettingsSections(input: {
     },
     {
       key: "return_contact",
-      label: "Return/contact display",
+      label: "Return contact",
       status: input.hasContactEmail ? "ready" : "attention_required",
       comingSoon: false,
-      summary: input.hasContactEmail ? "Contact email available." : "Contact email is missing.",
+      summary: input.hasContactEmail ? "Your contact email is set." : "Add a contact email.",
       blockers: input.hasContactEmail ? [] : ["contact_email_required"],
     },
   ];
@@ -1637,12 +1639,12 @@ function buildStoreConnectionSettingsSummary(
   launchReadyStoreCount: number,
 ): string {
   if (storeConnections.length === 0) {
-    return "No store connection configured.";
+    return "No store connected yet.";
   }
   if (launchReadyStoreCount > 0) {
-    return `${launchReadyStoreCount} launch-ready store connection configured.`;
+    return "Your store is connected and ready for orders.";
   }
-  return "Store connection needs launch-ready credentials.";
+  return "Reconnect your store so it can take orders.";
 }
 
 function requiresStoreRefreshTokenForLaunch(platform: string): boolean {

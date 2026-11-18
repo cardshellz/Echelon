@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { formatListingPreviewIssue } from "./dropship-listing-preview";
+import { isVendorWaitingForStock, VENDOR_WAITING_FOR_STOCK_LINE } from "./dropship-vendor-labels";
 import {
   EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_CODE,
   EBAY_PUBLICATION_ACCOUNT_UNVERIFIED_MESSAGE,
@@ -23,10 +24,14 @@ import {
  */
 const PREVIEW_BLOCKED_CODE = "DROPSHIP_LISTING_PREVIEW_BLOCKED";
 
+/** The blocker codes of a blocked item as stored, trimmed; empty when the list is blank. */
+export function listingPushBlockedCodes(errorMessage: string | null): string[] {
+  return (errorMessage ?? "").split(",").map((code) => code.trim()).filter((code) => code.length > 0);
+}
+
 /** The blocker codes of a blocked item, each in the vendor's words, once; empty when the list is blank. */
 export function listingPushBlockedReasons(errorMessage: string | null): string[] {
-  const codes = (errorMessage ?? "").split(",").map((code) => code.trim()).filter((code) => code.length > 0);
-  return [...new Set(codes.map(formatListingPreviewIssue))];
+  return [...new Set(listingPushBlockedCodes(errorMessage).map(formatListingPreviewIssue))];
 }
 
 const positiveInteger = z.number().int().positive();
@@ -122,6 +127,9 @@ export interface ListingPushOutcome {
 }
 
 const LIVE_ITEM_STATUSES = new Set(["completed"]);
+/** The server's code for a live listing's push skipped because stock ran out after it was queued (push worker). */
+export const PUSH_SKIPPED_OUT_OF_STOCK_CODE = "DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK";
+export const VENDOR_LIVE_OUT_OF_STOCK_LINE = "Out of stock right now. Your listing stays up at quantity 0 and updates by itself when stock comes back.";
 const FAILED_ITEM_STATUSES = new Set(["failed", "blocked", "cancelled"]);
 
 /** The store's name as the vendor sees it: eBay is a public marketplace, the rest are "your store". */
@@ -150,6 +158,20 @@ export function describeListingPushOutcome(job: DropshipListingPushJob, storeNam
         ...base, state: "live", line: sandbox ? `Live on ${store} (eBay sandbox).` : `Live on ${store}.`, nextStep: null,
         listingUrl: item.listingUrl, listingUrlLabel: item.listingUrl ? linkLabel : null,
       };
+    }
+    if (item.status === "cancelled" && item.errorCode === PUSH_SKIPPED_OUT_OF_STOCK_CODE) {
+      // Stock ran out after it was queued: the listing stays up and Card Shellz keeps its quantity at 0 until stock is
+      // back (server push worker settleOutOfStock). It is still live, so it is not counted as a failure.
+      return {
+        ...base, state: "live", line: VENDOR_LIVE_OUT_OF_STOCK_LINE, nextStep: null,
+        listingUrl: item.listingUrl, listingUrlLabel: item.listingUrl ? linkLabel : null,
+      };
+    }
+    if (item.status === "blocked" && item.errorCode === PREVIEW_BLOCKED_CODE
+      && isVendorWaitingForStock({ platform: job.platform, status: item.status, blockers: listingPushBlockedCodes(item.errorMessage) })) {
+      // Blocked only for want of stock: the eBay sync sweep lists it once stock is back (owner report). Still counted
+      // with the items that did not list now.
+      return { ...base, state: "failed", line: VENDOR_WAITING_FOR_STOCK_LINE, nextStep: null };
     }
     if (FAILED_ITEM_STATUSES.has(item.status)) {
       const gate = listingPushRefusalWords(item, storeName);

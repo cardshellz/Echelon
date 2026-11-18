@@ -1,7 +1,7 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { registerInventoryCutoverCompletionRoutes } from "../../interfaces/http/inventory-cutover-completion.routes";
 import { InventoryCutoverCompletionService } from "../../application/inventory-cutover-completion.service";
 import { InventoryCutoverCommitError } from "../../application/inventory-cutover-commit.service";
@@ -16,7 +16,10 @@ const actions = ["verification", "finish"] as const;
 describe("cutover verification and finish HTTP boundaries", () => {
   let server: Awaited<ReturnType<typeof startServer>>;
   let session: { user?: { id?: string } };
-  let service: { verify: ReturnType<typeof vi.fn>; finish: ReturnType<typeof vi.fn> };
+  let service: {
+    verify: Mock<(...args: any[]) => Promise<any>>;
+    finish: Mock<(...args: any[]) => Promise<any>>;
+  };
   beforeEach(async () => {
     hasPermission.mockReset().mockResolvedValue(true);
     vi.spyOn(console, "error").mockImplementation(() => undefined);

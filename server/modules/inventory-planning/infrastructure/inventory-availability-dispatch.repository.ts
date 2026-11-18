@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { assertNoOpenPickCorrectionPg } from "../../wms/pick-correction.repository";
+import { assertNoOpenPickCorrectionPg } from "../../wms/pick-corrections-and-holds.api";
 import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {

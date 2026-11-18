@@ -4,7 +4,7 @@ import { PgCatalogVariantMediaReader } from "../../catalog-media.reader";
 
 describe("catalog-owned variant media reader", () => {
   it("batch-loads only product-level or current variant images with publishing order preserved", async () => {
-    const query = vi.fn(async () => ({ rows: [
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [
       { variant_id: 7, id: 3, product_variant_id: 7, url: "https://images.test/variant.jpg", alt_text: "Variant", storage_type: "url", has_file: false },
       { variant_id: 7, id: 2, product_variant_id: null, url: null, alt_text: "Product", storage_type: "file", has_file: true },
     ] }));
@@ -21,7 +21,7 @@ describe("catalog-owned variant media reader", () => {
   });
 
   it("requires both asset and variant identities and rejects unsupported executable media", async () => {
-    const query = vi.fn(async () => ({ rows: [{ file_data: Buffer.from("<svg/>"), mime_type: "image/svg+xml" }] }));
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [{ file_data: Buffer.from("<svg/>"), mime_type: "image/svg+xml" }] }));
     const reader = new PgCatalogVariantMediaReader({ query } as unknown as Pool);
     await expect(reader.readImageFile({ productVariantId: 7, assetId: 99 })).resolves.toBeNull();
     const sql = String(query.mock.calls[0]?.[0]);

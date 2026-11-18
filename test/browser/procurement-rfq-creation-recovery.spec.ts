@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { rfqCreateIntentSchema, type RfqCreateReceipt } from "../../shared/procurement/rfq-create-command";
 import { rfqCreateIntent, rfqCreateReceipt } from "../fixtures/rfq-create-command";
@@ -13,7 +14,7 @@ async function setup(page: Page) {
     releaseResponse: null as (() => void) | null, status: 0, durable: false, demandUnavailable: false };
   const commands: Array<{ key: string; body: unknown; persisted: string | null }> = [];
   const receipts = new Map<string, RfqCreateReceipt>();
-  await page.route("**/api/auth/me", route => route.fulfill({ json: { user: { id: controls.actorId, username: "test", role: "admin" }, permissions: controls.canEdit ? ["purchasing:view", "purchasing:edit"] : ["purchasing:view"], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({ user: { id: controls.actorId, username: "test", role: "admin" }, permissions: controls.canEdit ? ["purchasing:view", "purchasing:edit", "inventory:view"] : ["purchasing:view", "inventory:view"], systemRoles: ["admin"] }) }));
   await page.route("**/api/purchasing/reorder-analysis", route => controls.demandUnavailable
     ? route.fulfill({ status: 503, json: { error: "Fictional demand unavailable" } }) : route.fulfill({ json: fixture.analysis }));
   await page.route("**/api/vendors", route => route.fulfill({ json: [{ id: 2, code: "TEST", name: "Test supplier", active: 1 }] }));

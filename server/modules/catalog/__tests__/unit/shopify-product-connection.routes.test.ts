@@ -6,8 +6,8 @@ import { ShopifyProductConnectionError } from "../../shopify-product-connection.
 import { registerShopifyProductConnectionRoutes } from "../../shopify-product-connection.routes";
 import { CONNECTION_COMMAND_KEY } from "../support/shopify-product-connection.fixture";
 
-const mocks = vi.hoisted(() => ({ context: vi.fn(), preview: vi.fn(), submit: vi.fn(), status: vi.fn(),
-  grants: new Set(["inventory:view", "inventory:edit", "channels:view", "channels:edit"]), authenticated: true }));
+const mocks = vi.hoisted(() => ({ context: vi.fn(), search: vi.fn(), preview: vi.fn(), submit: vi.fn(), status: vi.fn(),
+  grants: new Set(["inventory:view", "inventory:edit", "channels:view", "channels:edit", "inventory_planning:activate", "inventory_planning:view"]), authenticated: true }));
 vi.mock("../../../../services/shopify-product-connection", () => ({ createDefaultShopifyProductConnectionService: () => mocks }));
 vi.mock("../../../../routes/middleware", () => ({ requirePermission: (resource: string, action: string) =>
   (req: Request, res: Response, next: NextFunction) => {
@@ -23,7 +23,7 @@ describe("reviewed Shopify product command HTTP boundary", () => {
   const command = { ...intent, productId: 41, channelId: 7, mode: "link", state: "pending", remoteProductId: null,
     lastErrorCode: null, lastErrorMessage: null, retryable: true, completedAt: null };
   beforeEach(async () => {
-    vi.clearAllMocks(); mocks.authenticated = true; mocks.grants = new Set(["inventory:view", "inventory:edit", "channels:view", "channels:edit"]);
+    vi.clearAllMocks(); mocks.authenticated = true; mocks.grants = new Set(["inventory:view", "inventory:edit", "channels:view", "channels:edit", "inventory_planning:activate", "inventory_planning:view"]);
     const app = express(); app.use(express.json()); registerShopifyProductConnectionRoutes(app);
     server = http.createServer(app); await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/products/41/shopify-connection`;
@@ -37,6 +37,38 @@ describe("reviewed Shopify product command HTTP boundary", () => {
     mocks.grants.delete("channels:edit"); expect((await post("execute", intent)).status).toBe(403);
     mocks.grants.add("channels:edit"); mocks.authenticated = false; expect((await post("preview", request)).status).toBe(401);
     expect(mocks.submit).not.toHaveBeenCalled(); expect(mocks.preview).not.toHaveBeenCalled();
+  });
+  it("requires inventory activation permission before reviewing or admitting a linking sync", async () => {
+    mocks.grants.delete("inventory_planning:activate");
+    expect((await post("preview", request)).status).toBe(403);
+    expect((await post("execute", intent)).status).toBe(403);
+    expect(mocks.preview).not.toHaveBeenCalled(); expect(mocks.submit).not.toHaveBeenCalled();
+  });
+  it("serves bounded read-only search and strips private fields", async () => {
+    mocks.search.mockResolvedValue({ products: [{ id: "900", title: "Draft binder", status: "DRAFT", token: "private" }], nextCursor: "next", credentials: {} });
+    const response = await fetch(`${url}/search?channelId=7&query=PSA%20Binder&cursor=page`);
+    expect(response.status).toBe(200); expect(response.headers.get("Cache-Control")).toBe("no-store");
+    expect(await response.json()).toEqual({ products: [{ id: "900", title: "Draft binder", status: "DRAFT" }], nextCursor: "next" });
+    expect(mocks.search).toHaveBeenCalledWith(41, { channelId: 7, query: "PSA Binder", cursor: "page" });
+    expect(mocks.submit).not.toHaveBeenCalled();
+  });
+  it("rejects untrusted search scope, malformed queries and missing view grants", async () => {
+    for (const query of ["query=PSA", "channelId=0&query=PSA", "channelId=7&query=x", "channelId=7&query=PSA&query=Other",
+      "channelId=7&query=PSA&shopDomain=evil.com", `channelId=7&query=${"x".repeat(201)}`, `channelId=7&query=PSA&cursor=${"c".repeat(2049)}`]) {
+      expect((await fetch(`${url}/search?${query}`)).status).toBe(400);
+    }
+    for (const grant of ["inventory:view", "channels:view"]) {
+      mocks.grants.delete(grant);
+      expect((await fetch(`${url}/search?channelId=7&query=PSA`)).status).toBe(403);
+      mocks.grants.add(grant);
+    }
+    mocks.authenticated = false;
+    expect((await fetch(`${url}/search?channelId=7&query=PSA`)).status).toBe(401);
+    expect(mocks.search).not.toHaveBeenCalled();
+  });
+  it("fails closed on an invalid search result", async () => {
+    mocks.search.mockResolvedValue({ products: [{ id: "bad", title: "Draft", status: "DRAFT" }], nextCursor: null });
+    expect((await fetch(`${url}/search?channelId=7&query=PSA`)).status).toBe(503);
   });
   it("rejects spoofed authority, malformed IDs and missing review evidence", async () => {
     for (const body of [{ ...intent, actor: "admin" }, { ...intent, previewHash: "short" }, { ...intent, commandKey: "not-a-uuid" },

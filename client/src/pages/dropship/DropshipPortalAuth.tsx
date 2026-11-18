@@ -22,6 +22,7 @@ import {
   useDropshipAuth,
 } from "@/lib/dropship-auth";
 import { OPS_MEMBERSHIP_URL } from "@/lib/dropship-listing-access";
+import { vendorErrorMessage } from "@/lib/dropship-vendor-labels";
 
 type AuthStep = "email" | "returning" | "code" | "password" | "reset-password" | "ineligible";
 type PendingAction =
@@ -80,7 +81,8 @@ export default function DropshipPortalAuth() {
     try {
       await task();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Request failed");
+      // The server's message is written for Card Shellz staff; the vendor sees words for its code.
+      setError(vendorErrorMessage(caught));
     } finally {
       setPendingAction(null);
     }

@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { Settings2 } from "lucide-react";
+import { PurchaseTaxTypesSettings } from "@/features/purchasing/PurchaseTaxTypes";
 import { Link } from "wouter";
 
 type SettingsIntent = { key: ProcurementSettingKey; value: boolean; expectedRevision: number; idempotencyKey: string };
@@ -197,17 +198,24 @@ export default function ProcurementSettings() {
         {!canEdit && <p className="mt-2 text-sm">Your role has read-only access to these settings.</p>}
       </div>
 
+      <PurchaseTaxTypesSettings />
+
       {hasPermission("inventory_planning", "view") && (
         <Card>
           <CardContent className="space-y-2 p-4">
-            <h2 className="font-semibold">ATP promise safety</h2>
+            <h2 className="font-semibold">Stock held back from channels</h2>
             <p className="text-sm text-muted-foreground">
-              Review promise-safety floors and demand evidence. These controls are separate from
-              the purchasing reorder buffer (safetyStockDays).
+              How many units of each SKU are kept back from every sales channel. It is set in Channel
+              Inventory and is separate from the purchasing reorder buffer (safetyStockDays) on this page.
             </p>
-            <Button asChild variant="outline">
-              <Link href="/settings/procurement/promise-safety">Manage ATP promise safety</Link>
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button asChild variant="outline">
+                <Link href="/channels/inventory?view=available-stock">Open Available stock</Link>
+              </Button>
+              <Button asChild variant="ghost">
+                <Link href="/settings/procurement/promise-safety">Hold back by days of recent sales</Link>
+              </Button>
+            </div>
           </CardContent>
         </Card>
       )}

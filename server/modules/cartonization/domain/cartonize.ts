@@ -64,6 +64,8 @@ export interface CartonizeOptions {
   allowRiders?: boolean;
   /** Dimensional-weight divisor in cm³ per kg. Default 5000 (carrier-agnostic). */
   dimDivisorCm3PerKg?: number;
+  /** Maximum total non-SIOC physical units before degrading to fallback parcels. Default 500. */
+  maxTotalUnits?: number;
 }
 
 export interface CartonParcelItem {
@@ -117,6 +119,7 @@ export interface CartonizeResult {
 
 export const CARTONIZE_ENGINE = { name: "cardshellz-cartonizer", version: "3.1.0" } as const;
 export const MAX_MANUAL_CARTON_WEIGHT_GRAMS = 22_679;
+export const MAX_CARTONIZE_TOTAL_UNITS = 500;
 
 const DEFAULT_DIM_DIVISOR_CM3_PER_KG = 5000;
 
@@ -763,6 +766,17 @@ export function cartonize(
   const problems: string[] = [];
   const fallbacks: CartonParcel[] = [];
   const partitions = new Map<string, PackableItem[]>();
+  const maxTotalUnits = options.maxTotalUnits ?? MAX_CARTONIZE_TOTAL_UNITS;
+  const totalBoxedUnits = validItems.reduce(
+    (sum, item) => (item.shipsInOwnContainer ? sum : sum + item.quantity),
+    0,
+  );
+  const exceedsUnitBudget = totalBoxedUnits > maxTotalUnits;
+  if (exceedsUnitBudget) {
+    problems.push(
+      `order exceeds maximum 3D cartonization unit budget (${totalBoxedUnits} > ${maxTotalUnits}); boxed items degraded to fallback parcels`,
+    );
+  }
 
   for (const item of validItems) {
     if (item.shipsInOwnContainer) {
@@ -776,6 +790,10 @@ export function cartonize(
     }
     if (!hasCompleteDims(item)) {
       problems.push(`item ${item.sku ?? item.productVariantId} missing dims/weight; used fallback parcel`);
+      fallbacks.push(fallbackParcel(item, item.quantity, largestBox, dimDivisor));
+      continue;
+    }
+    if (exceedsUnitBudget) {
       fallbacks.push(fallbackParcel(item, item.quantity, largestBox, dimDivisor));
       continue;
     }

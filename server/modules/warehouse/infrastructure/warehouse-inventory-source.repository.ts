@@ -8,6 +8,7 @@ import {
 } from "@shared/types/warehouse-inventory-source";
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
+import { insertIdempotencyKeyDrizzle } from "../../../infrastructure/idempotency-keys.repository";
 import { logger } from "../../../platform/observability/logger";
 import type { PrepareWarehouseInventorySourceCommand, WarehouseInventorySourceStore } from "../application/warehouse-inventory-source.service";
 import { planWarehouseInventorySource, resolveConfiguredWarehouseSource, warehouseInventorySourceFingerprint, WarehouseInventorySourceError } from "../domain/warehouse-inventory-source";
@@ -106,7 +107,7 @@ export class PostgresWarehouseInventorySourceStore implements WarehouseInventory
             runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false,
           },
         }, { timestamp: command.occurredAt, emitStructuredLog: false });
-        await tx.insert(idempotencyKeys).values({
+        await insertIdempotencyKeyDrizzle(tx, {
           key: receiptKey, requestHash: command.requestHash, responseBody: result,
           createdAt: command.occurredAt, expiresAt: null,
         });

@@ -8,11 +8,12 @@ import type { SupplierCreditCommandResult } from "@shared/procurement/supplier-c
 
 const RECOVERY_CHANGED = "echelon:supplier-credit-recovery-changed";
 export function useSupplierCreditCommands() {
-  const { user, hasPermission } = useAuth();
+  const { user, hasPermission, roles } = useAuth();
   const userId = user?.id ?? null;
   const activeActor = useRef(userId); activeActor.current = userId;
   const canCreate = hasPermission("purchasing", "edit");
   const canApprove = hasPermission("purchasing", "approve");
+  const canApproveReceiptCosts = canApprove && roles.includes("Administrator");
   const store = useMemo(() => userId ? createSupplierCreditRecoveryStore(() => window.sessionStorage, userId) : null, [userId]);
   const queryClient = useQueryClient();
   const [recovery, setRecovery] = useState<SupplierCreditRecovery | null>(null);
@@ -43,7 +44,7 @@ export function useSupplierCreditCommands() {
     },
   });
   return {
-    userId, canCreate, canApprove, recovery, storageError, confirmed, pending: mutation.isPending, error: mutation.error?.message ?? null,
+    userId, canCreate, canApprove, canApproveReceiptCosts, recovery, storageError, confirmed, pending: mutation.isPending, error: mutation.error?.message ?? null,
     blocked: !store || mutation.isPending || recovery !== null || storageError !== null,
     recoverAllowed: recovery !== null && recovery.userId === userId && permitted(recovery.body), refresh: read,
     execute: (intent: SupplierCreditIntent) => mutation.mutateAsync({ intent }),

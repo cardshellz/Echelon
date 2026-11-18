@@ -1,5 +1,11 @@
 import { productMethods } from "../catalog/catalog.storage";
 import { createSharedProductPhotoImporter } from "../catalog";
+import {
+  updateProductFromShopifyBackfillInCatalog,
+  insertProductFromShopifyBackfillInCatalog,
+} from "../catalog/cross-module-product-mutations.api";
+import { insertShopifyBackfillInventoryLevelAndReceiptTxnInInventory } from "../inventory/cross-module-inventory-mutations.api";
+import { insertBackfillDefaultWarehouseLocationInWarehouse } from "../warehouse/cross-module-warehouse-mutations.api";
 import { parseDollarPriceToCents } from "./channel-pricing-resolver";
 import { createChannelPricingService } from "./channel-pricing.service";
 import { ChannelPricingError } from "./channel-pricing.domain";
@@ -402,21 +408,15 @@ class CatalogBackfillService {
 
       // Update existing product
       if (!isDryRun) {
-        const [updated] = await this.db
-          .update(products)
-          .set({
-            title: shopifyProduct.title,
-            description: shopifyProduct.body_html,
-            brand: shopifyProduct.vendor,
-            category: shopifyProduct.product_type,
-            tags: tags,
-            status: shopifyProduct.status === "active" ? "active" : shopifyProduct.status === "draft" ? "draft" : "archived",
-            shopifyProductId: mappingDecision.productId,
-            updatedAt: new Date(),
-          })
-          .where(eq(products.id, existing.id))
-          .returning();
-        echelonProduct = updated;
+        echelonProduct = await updateProductFromShopifyBackfillInCatalog(this.db, existing.id, {
+          title: shopifyProduct.title,
+          description: shopifyProduct.body_html,
+          brand: shopifyProduct.vendor,
+          category: shopifyProduct.product_type,
+          tags: tags,
+          status: shopifyProduct.status === "active" ? "active" : shopifyProduct.status === "draft" ? "draft" : "archived",
+          shopifyProductId: mappingDecision.productId,
+        });
       } else {
         echelonProduct = existing;
       }
@@ -425,22 +425,18 @@ class CatalogBackfillService {
     } else {
       // Create new product
       if (!isDryRun) {
-        const [created] = await this.db
-          .insert(products)
-          .values({
-            sku: baseSku,
-            name: shopifyProduct.title,
-            title: shopifyProduct.title,
-            description: shopifyProduct.body_html,
-            brand: shopifyProduct.vendor,
-            category: shopifyProduct.product_type,
-            tags: tags,
-            status: shopifyProduct.status === "active" ? "active" : shopifyProduct.status === "draft" ? "draft" : "archived",
-            shopifyProductId: shopifyProductId,
-            baseUnit: "EA",
-          })
-          .returning();
-        echelonProduct = created;
+        echelonProduct = await insertProductFromShopifyBackfillInCatalog(this.db, {
+          sku: baseSku,
+          name: shopifyProduct.title,
+          title: shopifyProduct.title,
+          description: shopifyProduct.body_html,
+          brand: shopifyProduct.vendor,
+          category: shopifyProduct.product_type,
+          tags: tags,
+          status: shopifyProduct.status === "active" ? "active" : shopifyProduct.status === "draft" ? "draft" : "archived",
+          shopifyProductId: shopifyProductId,
+          baseUnit: "EA",
+        });
       } else {
         echelonProduct = { id: -1 } as Product; // Placeholder for dry run
       }
@@ -912,30 +908,13 @@ class CatalogBackfillService {
         continue;
       }
 
-      // Create inventory record in Echelon
+      // Create inventory record in Echelon + audit transaction
       const qtyToImport = Math.max(0, shopifyQty); // Don't import negative quantities
-      await this.db.insert(inventoryLevels).values({
+      await insertShopifyBackfillInventoryLevelAndReceiptTxnInInventory(this.db, {
         warehouseLocationId: defaultLocation.locationId,
         productVariantId: vi.echelonVariantId,
-        variantQty: qtyToImport,
-        reservedQty: 0,
-        pickedQty: 0,
-        packedQty: 0,
-        backorderQty: 0,
-      });
-
-      // Log the transaction for audit trail
-      await this.db.insert(inventoryTransactions).values({
-        productVariantId: vi.echelonVariantId,
-        toLocationId: defaultLocation.locationId,
-        transactionType: "receipt",
-        variantQtyDelta: qtyToImport,
-        variantQtyBefore: 0,
-        variantQtyAfter: qtyToImport,
-        referenceType: "shopify_backfill",
-        referenceId: `shopify-inv-item-${vi.shopifyInventoryItemId}`,
-        notes: `Backfill from Shopify inventory level (${qtyToImport} units)`,
-        userId: "system:catalog-backfill",
+        qtyToImport,
+        shopifyInventoryItemId: vi.shopifyInventoryItemId,
       });
 
       console.log(
@@ -1065,16 +1044,7 @@ class CatalogBackfillService {
     }
 
     // Create a default virtual location for backfill
-    const [newLocation] = await this.db
-      .insert(warehouseLocations)
-      .values({
-        warehouseId: warehouse.id,
-        code: "BACKFILL-DEFAULT",
-        name: "Backfill Default Location",
-        locationType: "pick",
-        isActive: 1,
-      })
-      .returning();
+    const newLocation = await insertBackfillDefaultWarehouseLocationInWarehouse(this.db, warehouse.id);
 
     console.log(
       `[CatalogBackfill] Created default location BACKFILL-DEFAULT in warehouse ${warehouse.code} (ID ${warehouse.id})`,

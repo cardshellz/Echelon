@@ -84,7 +84,7 @@ function dependencies(
       repairableComponents: buildHistoricalSplitRepairComponents(packages),
       unsafe: Object.freeze([]),
     })),
-    applyComponent: vi.fn(async (component) => component.packages.map((plan) => ({
+    applyComponent: vi.fn(async (component) => component.packages.map((plan: HistoricalSplitRepairPackagePlan) => ({
       providerShipmentId: plan.providerPackage.providerShipmentId,
       legacyWmsShipmentIds: Object.freeze([7001]),
       wmsOrderIds: Object.freeze([8001]),

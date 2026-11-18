@@ -10,7 +10,7 @@ import { OrderEditService } from "../server/modules/order-edits/application/orde
 import { OrderEditError } from "../server/modules/order-edits/domain/order-edit-error";
 import { readShopifyMerchandiseSnapshot } from "../server/modules/oms/infrastructure/shopify-merchandise-snapshot";
 import { proveStoppedRefundEditRecovery } from "../server/modules/order-edits/infrastructure/order-edit-refund-warehouse-evidence";
-import { OrderCancellationService } from "../server/modules/customer-account/application/order-cancellation.service";
+import { OrderCancellationService } from "../server/modules/customer-account/order-cancellation-contracts.api";
 import type {
   OrderEditRecord,
   OrderEditStore,

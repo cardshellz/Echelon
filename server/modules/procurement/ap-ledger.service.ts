@@ -1,8 +1,9 @@
 import { readIntegerCents, readIntegerMills } from "@shared/money-read";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
 import { hasInvoiceCreditHistory, SupplierCreditEvidenceError, assertInvoiceHasNoCreditHistory, assertInvoiceSettlementEvidence, readInvoiceCreditAmount, readVerifiedInvoiceSettlementProjections } from "./supplier-credit-settlement.repository";
 import { paymentApplicationInputSchema, paymentCalendarDateSchema, type PaymentApplicationInput } from "@shared/procurement/ap-payment-contract";
 import { readPaymentBalances } from "./ap-payment-balance.repository";
-import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
+import { readCommandAuthorityActor } from "../identity/command-authority.api";
 import { readShipmentBillingOwnership, readInvoiceSourceCapabilities } from "./shipment-billing-ownership.repository";
 import { readPoFinancialEvidenceSourcesWithClient } from "./po-financial-evidence.repository";
 import { buildPoFinancialWorkflow } from "./domain/po-financial-workflow";
@@ -413,6 +414,7 @@ export type ApLedgerCommandInput = {
   payment?: RecordApPaymentInput;
   application?: PaymentApplicationInput;
   now?: Date;
+  transitionReview?: unknown;
 };
 
 export type ApPaymentCommandInput = ApLedgerCommandInput & { now: Date };
@@ -534,7 +536,7 @@ async function appendApLedgerCommandAudit(
   client: ApLedgerDbClient,
   at?: Date,
 ): Promise<void> {
-  await client.insert(auditEvents).values({
+  await insertAuditEventDrizzle(client, {
     ...(at ? { timestamp: at } : {}),
     level: "AUDIT",
     actor: actor ?? "system",
@@ -555,7 +557,7 @@ async function appendApMutationAudit(
   client: ApLedgerDbClient,
   recordedAt?: Date,
 ): Promise<void> {
-  await client.insert(auditEvents).values({
+  await insertAuditEventDrizzle(client, {
     ...(recordedAt ? { timestamp: recordedAt } : {}),
     level: "AUDIT",
     actor: actor ?? "system",
@@ -1426,13 +1428,18 @@ type InvoiceMutationResult = {
   value: any;
   affectedPoIds: number[];
   changed: boolean;
+  costReconciliations: ApprovedInvoiceVarianceReconciliationResult[];
 };
 
 async function approveInvoiceInTransaction(
   tx: ApLedgerDbClient,
   id: number,
   userId?: string,
+  approvedAt: Date = new Date(),
 ): Promise<InvoiceMutationResult> {
+  if (!(approvedAt instanceof Date) || !Number.isFinite(approvedAt.getTime())) {
+    throw new ApLedgerError("A valid invoice approval clock is required", 500, { code: "AP_INVOICE_APPROVAL_CLOCK_INVALID" });
+  }
   const [inv] = await tx
     .select()
     .from(vendorInvoices)
@@ -1443,11 +1450,12 @@ async function approveInvoiceInTransaction(
   }
   await assertInvoiceSourceCapability(tx, id, "approval");
   if (["approved", "partially_paid", "paid"].includes(inv.status)) {
-    await reconcileApprovedInvoiceVariance(id, tx, userId);
+    const costReconciliations = await reconcileApprovedInvoiceVariance(id, tx, userId, approvedAt);
     return {
       value: inv,
       affectedPoIds: await getPoIdsForInvoice(id, tx),
       changed: false,
+      costReconciliations,
     };
   }
   if (!["received", "disputed"].includes(inv.status)) {
@@ -1456,9 +1464,14 @@ async function approveInvoiceInTransaction(
     });
   }
 
+  const financialState = deriveInvoiceFinancialState({ status: "approved", invoiceAmountCents: inv.invoicedAmountCents,
+    paidAmountCents: inv.paidAmountCents, creditedAmountCents: inv.creditedAmountCents ?? 0 });
   const [invoice] = await tx
     .update(vendorInvoices)
-    .set({ status: "approved", approvedAt: new Date(), approvedBy: userId, updatedBy: userId, updatedAt: new Date() })
+    // Releasing a dispute restores authority, not the identity of the original
+    // approval. Settlement evidence and its derived status are retained.
+    .set({ status: financialState.status, approvedAt: inv.approvedAt ?? approvedAt,
+      approvedBy: inv.approvedBy ?? userId, updatedBy: userId, updatedAt: approvedAt })
     .where(eq(vendorInvoices.id, id))
     .returning();
   const affectedPoIds = await getPoIdsForInvoice(id, tx);
@@ -1466,16 +1479,18 @@ async function approveInvoiceInTransaction(
     actorId: userId,
     reason: `Vendor invoice ${id} approved.`,
     resolveDispute: true,
+    now: approvedAt,
   });
-  await reconcileApprovedInvoiceVariance(id, tx, userId);
-  return { value: invoice, affectedPoIds, changed: true };
+  const costReconciliations = await reconcileApprovedInvoiceVariance(id, tx, userId, approvedAt);
+  return { value: invoice, affectedPoIds, changed: true, costReconciliations };
 }
 
 async function reconcileApprovedInvoiceVariance(
   id: number,
   client: ApLedgerDbClient,
   actorId?: string,
-): Promise<void> {
+  at: Date = new Date(),
+): Promise<ApprovedInvoiceVarianceReconciliationResult[]> {
   const invoiceLines = await client
     .select({ purchaseOrderLineId: vendorInvoiceLines.purchaseOrderLineId })
     .from(vendorInvoiceLines)
@@ -1483,13 +1498,16 @@ async function reconcileApprovedInvoiceVariance(
   const purchaseOrderLineIds = uniqueNumbers(
     invoiceLines.map((line) => line.purchaseOrderLineId),
   ).sort((left, right) => left - right);
+  const results: ApprovedInvoiceVarianceReconciliationResult[] = [];
   for (const purchaseOrderLineId of purchaseOrderLineIds) {
-    await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(
+    results.push(await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(
       purchaseOrderLineId,
       client,
       actorId,
-    );
+      at,
+    ));
   }
+  return results;
 }
 
 export type ApprovedInvoiceVarianceReconciliationResult = Awaited<ReturnType<typeof reconcilePurchaseCostEvidence>> & {
@@ -1509,6 +1527,7 @@ export async function reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTran
   purchaseOrderLineId: number,
   client: ApLedgerDbClient,
   actorId?: string,
+  at: Date = new Date(),
 ): Promise<ApprovedInvoiceVarianceReconciliationResult> {
   const normalizedPoLineId = requireCommandId(purchaseOrderLineId, "purchaseOrderLineId");
   await lockInventoryCostGraph(client);
@@ -1550,7 +1569,7 @@ export async function reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTran
     return result;
   }
   const costResult = await reconcilePurchaseCostEvidence(client as any, normalizedPoLineId,
-    new COGSService(client as any), actorId || "system:ap", new Date());
+    new COGSService(client as any), actorId || "system:ap", at);
   const summary = summarizeInvoiceCostReconciliation(costResult);
   const result: ApprovedInvoiceVarianceReconciliationResult = { purchaseOrderLineId: normalizedPoLineId, ...summary,
     approvedInvoiceIds, approvedQty: approvedQty.toString(), quantityCoverage, ...costResult };
@@ -1573,6 +1592,7 @@ async function disputeInvoiceInTransaction(
   id: number,
   reason: string,
   userId?: string,
+  at: Date = new Date(),
 ): Promise<InvoiceMutationResult> {
   const [inv] = await tx
     .select()
@@ -1590,16 +1610,17 @@ async function disputeInvoiceInTransaction(
 
   const [invoice] = await tx
     .update(vendorInvoices)
-    .set({ status: "disputed", disputeReason: reason, updatedBy: userId, updatedAt: new Date() })
+    .set({ status: "disputed", disputeReason: reason, updatedBy: userId, updatedAt: at })
     .where(eq(vendorInvoices.id, id))
     .returning();
   const affectedPoIds = await getPoIdsForInvoice(id, tx);
   await recomputePoFinancialAggregatesForMany(affectedPoIds, tx, {
     actorId: userId,
     reason: `Vendor invoice ${id} disputed.`,
+    now: at,
   });
-  await reconcileApprovedInvoiceVariance(id, tx, userId);
-  return { value: invoice, affectedPoIds, changed: true };
+  const costReconciliations = await reconcileApprovedInvoiceVariance(id, tx, userId, at);
+  return { value: invoice, affectedPoIds, changed: true, costReconciliations };
 }
 
 export async function disputeInvoice(id: number, reason: string, userId?: string) {
@@ -1615,6 +1636,7 @@ async function voidInvoiceInTransaction(
   id: number,
   reason: string,
   userId?: string,
+  at: Date = new Date(),
 ): Promise<InvoiceMutationResult> {
   const [inv] = await tx
     .select()
@@ -1641,16 +1663,17 @@ async function voidInvoiceInTransaction(
   const affectedPoIds = await getPoIdsForInvoice(id, tx);
   const [invoice] = await tx
     .update(vendorInvoices)
-    .set({ status: "voided", internalNotes: `${inv.internalNotes ? inv.internalNotes + "\n" : ""}VOIDED: ${reason}`, updatedBy: userId, updatedAt: new Date() })
+    .set({ status: "voided", internalNotes: `${inv.internalNotes ? inv.internalNotes + "\n" : ""}VOIDED: ${reason}`, updatedBy: userId, updatedAt: at })
     .where(eq(vendorInvoices.id, id))
     .returning();
   await recomputePoFinancialAggregatesForMany(affectedPoIds, tx, {
     actorId: userId,
     reason: `Vendor invoice ${id} voided.`,
     resolveDispute: true,
+    now: at,
   });
-  await reconcileApprovedInvoiceVariance(id, tx, userId);
-  return { value: invoice, affectedPoIds, changed: true };
+  const costReconciliations = await reconcileApprovedInvoiceVariance(id, tx, userId, at);
+  return { value: invoice, affectedPoIds, changed: true, costReconciliations };
 }
 
 export async function voidInvoice(id: number, reason: string, userId?: string) {
@@ -2099,6 +2122,10 @@ async function recordPaymentInTransaction(
   }
 }
 
+/**
+ * @deprecated Legacy direct payment helper retained for test fixtures only.
+ * Production callers must use `createApPaymentCommands().recordPayment`.
+ */
 export async function recordPayment(data: RecordApPaymentInput, options: ApPaymentClockOptions = {}) {
   const at = requirePaymentCommandTime(options.now ?? new Date());
   validateRecordPaymentInput(data);
@@ -2252,17 +2279,22 @@ export async function executeApInvoiceCommandInTransaction(
   input: ApLedgerCommandInput,
   tx: ApLedgerDbClient,
 ) {
+  const suppliedTime = input.now ?? new Date();
+  if (!(suppliedTime instanceof Date) || !Number.isFinite(suppliedTime.getTime()))
+    throw new ApLedgerError("Invoice action clock is invalid", 500, { code: "AP_INVOICE_TRANSITION_CLOCK_INVALID" });
+  const at = new Date(suppliedTime.getTime());
   await lockInventoryCostGraph(tx as any);
   const invoiceId = requireCommandId(input.invoiceId, "invoiceId");
   let mutation: InvoiceMutationResult;
   if (command === "approve_invoice") {
-    mutation = await approveInvoiceInTransaction(tx, invoiceId, input.userId);
+    mutation = await approveInvoiceInTransaction(tx, invoiceId, input.userId, at);
   } else if (command === "dispute_invoice") {
     mutation = await disputeInvoiceInTransaction(
       tx,
       invoiceId,
       requireCommandReason(input.reason),
       input.userId,
+      at,
     );
   } else {
     mutation = await voidInvoiceInTransaction(
@@ -2270,6 +2302,7 @@ export async function executeApInvoiceCommandInTransaction(
       invoiceId,
       requireCommandReason(input.reason),
       input.userId,
+      at,
     );
   }
 
@@ -2283,8 +2316,8 @@ export async function executeApInvoiceCommandInTransaction(
     affectedInvoiceIds: [invoiceId],
     affectedPurchaseOrderIds,
   });
-  await appendApLedgerCommandAudit(outcome, input.userId, tx);
-  return attachApLedgerOutcome(mutation.value, outcome);
+  await appendApLedgerCommandAudit(outcome, input.userId, tx, at);
+  return attachApLedgerOutcome({ ...mutation.value, invoiceCostReconciliations: mutation.costReconciliations }, outcome);
 }
 
 export async function runApInvoiceCommandPostCommit(

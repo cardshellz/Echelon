@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
-import { readPackageAllocationSourceFacts } from "../shipping/package-allocation-source-facts.repository";
-import { PackageAllocationSourceIdentityError } from "../shipping/package-allocation-source-identity.domain";
+import { readPackageAllocationSourceFacts } from "../shipping/package-allocation-authority.api";
+import { PackageAllocationSourceIdentityError } from "../shipping/package-allocation-authority.api";
 import { sqlIntegerArray } from "../../infrastructure/postgres-array";
-import { projectPersistedDeclaredPackageLifecycleShadow } from "../shipping/declared-package-lifecycle-shadow.domain";
+import { projectPersistedDeclaredPackageLifecycleShadow } from "../shipping/declared-package-lifecycle.api";
 import { classifyAdditionalLabelPackage, planLabelReplacement } from "./label-replacement-plan.domain";
 import {
   MAX_LABEL_REPLACEMENT_CANDIDATES,
@@ -11,7 +11,7 @@ import {
   scopeLabelReplacementPredecessors,
 } from "./label-replacement-scope.domain";
 import { enqueueShopifyLabelVoids } from "./shopify-label-void-intake.repository";
-import { createPackageAllocationLabelCommercialReviewRepository } from "../shipping/package-allocation-label-commercial-review.repository";
+import { createPackageAllocationLabelCommercialReviewRepository } from "../shipping/package-allocation-authority.api";
 import type { MaterializePhysicalPackageInput, MaterializePhysicalPackageResult } from "./channel-fulfillment-authority.repository";
 
 type Transaction = { execute(query: ReturnType<typeof sql>): Promise<unknown> };

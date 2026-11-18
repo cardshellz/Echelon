@@ -152,11 +152,13 @@ export function SectionCard({ title, description, actions, children, className }
  * Optional note for the audit trail. Collapsed by default: routine saves must
  * never look like they require a justification.
  */
-export function NoteField({ id, value, onChange, disabled }: {
+export function NoteField({ id, value, onChange, disabled, maxLength = 1000 }: {
   id: string;
   value: string;
   onChange(value: string): void;
   disabled?: boolean;
+  /** The receiving contract's limit; the field never accepts a note the server would refuse. */
+  maxLength?: number;
 }) {
   const [open, setOpen] = useState(value.length > 0);
   return (
@@ -177,7 +179,7 @@ export function NoteField({ id, value, onChange, disabled }: {
           <Textarea
             id={id}
             value={value}
-            maxLength={1000}
+            maxLength={maxLength}
             rows={2}
             placeholder="Optional context for the audit trail"
             disabled={disabled}

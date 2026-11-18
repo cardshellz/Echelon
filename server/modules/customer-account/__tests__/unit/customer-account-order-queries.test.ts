@@ -1,3 +1,4 @@
+import type { AccountNativeObservation } from "../../application/account-native-summaries.ports";
 import { describe, expect, it, vi } from "vitest";
 import { CustomerAccountOrderQueriesService } from "../../application/customer-account-order-queries.service";
 import { PostgresCustomerAccountOrderContextReader } from "../../infrastructure/customer-account-order-context.repository";
@@ -63,6 +64,85 @@ function fixture() {
   return { service, edits, context, report };
 }
 describe("owned, query-only account history", () => {
+  it("preserves known native amounts when queuing a different cold order fails", async () => {
+    const h = fixture(); const now = new Date("2026-11-03T12:00:00Z");
+    const native = { read: vi.fn(async () => [{ ...identity, channelId: 2, connectionId: 4, shopDomain: principal.shopDomain,
+      externalCustomerId: "100", sourceUpdatedAt: now.toISOString(), freshThrough: now, currency: "USD" as const, totalCents: 0, financialStatus: "Refunded", cancelled: true }]),
+      request: vi.fn(async () => { throw new Error("Synthetic queue outage"); }) };
+    const service = new CustomerAccountOrderQueriesService({ principal, connection: async () => connection, edits: h.edits, context: h.context, native, now: () => now, report: h.report });
+    const result = await service.summaries({ orders: [identity, { externalOrderId: "100", orderReference: "#OTHER" }] }, { saved: true });
+    expect(result.orders[0].totalCents).toBe(0); expect(result.unavailableExternalOrderIds).toEqual(["100"]);
+    expect(h.report).toHaveBeenCalledWith({ code: "CUSTOMER_ACCOUNT_NATIVE_REFRESH_QUEUE_FAILED" });
+    expect(h.edits.orderSummaries).toHaveBeenCalledExactlyOnceWith(4, ["100"]);
+  });
+
+  it("keeps saved totals usable when only the options lookup fails", async () => {
+    const h = fixture();
+    const service = new CustomerAccountOrderQueriesService({ principal, connection: async () => connection, edits: h.edits, context: h.context,
+      actions: { read: async () => { throw new Error("Synthetic options outage"); } }, now: () => new Date("2026-11-03T12:00:00Z"), report: h.report });
+    expect(await service.actions({ orders: [identity] }, { allowUnavailable: true })).toEqual({ orders: [{ ...identity, omsOrderId: null, state: "failed", snapshot: null, verifiedAt: null, validUntil: null }] });
+    await expect(service.actions({ orders: [identity] })).rejects.toThrow("Synthetic options outage");
+    expect(h.report).toHaveBeenCalledWith({ code: "CUSTOMER_ACCOUNT_ACTIONS_UNAVAILABLE" });
+  });
+
+  it("uses saved native money for the new overview without a Shopify read, including no-OMS history", async () => {
+    const h = fixture();
+    const native = { read: vi.fn(async () => [{ ...summary, connectionId: 4, externalCustomerId: "100", freshThrough: new Date("2026-11-03T12:00:00Z"), sourceUpdatedAt: "2026-11-03T12:00:00Z" }]), request: vi.fn(async () => {}) };
+    // The cache port returns persisted native facts, not customerId/GID fields.
+    native.read.mockResolvedValue([{ externalOrderId: identity.externalOrderId, orderReference: identity.orderReference, channelId: 2, connectionId: 4,
+      shopDomain: principal.shopDomain, externalCustomerId: "100", freshThrough: new Date("2026-11-03T12:00:00Z"), sourceUpdatedAt: "2026-11-03T12:00:00Z", currency: "USD", totalCents: 0, financialStatus: "Refunded", cancelled: true }] as never);
+    const service = new CustomerAccountOrderQueriesService({ principal, connection: async () => connection, edits: h.edits, context: h.context,
+      native: native as never, now: () => new Date("2026-11-03T12:00:00Z"), report: h.report });
+    const result = await service.summaries({ orders: [identity] }, { saved: true });
+    expect(result.orders).toEqual([{ ...identity, totalCents: 0, currency: "USD", cancelled: true, financialStatus: "Refunded", omsOrderId: null }]);
+    expect(h.edits.orderSummaries).not.toHaveBeenCalled(); expect(h.edits.customerOrderDetails).not.toHaveBeenCalled();
+    expect(native.request).not.toHaveBeenCalled();
+  });
+  it("recovers a cold no-OMS purchase with one owned lookup instead of waiting for the store scan", async () => {
+    const h = fixture(); const now = new Date("2026-11-03T12:00:00Z");
+    const native = { read: vi.fn(async () => []), request: vi.fn(async () => {}) };
+    const service = new CustomerAccountOrderQueriesService({ principal, connection: async () => connection, edits: h.edits, context: h.context, native, now: () => now, report: h.report });
+    expect(await service.summaries({ orders: [identity] }, { saved: true })).toEqual({ orders: [{ ...identity, totalCents: 0, currency: "USD", cancelled: true, financialStatus: "Refunded", omsOrderId: null }], unavailableExternalOrderIds: [], statusUnavailable: false });
+    expect(native.request).not.toHaveBeenCalled();
+    expect(h.edits.orderSummaries).toHaveBeenCalledExactlyOnceWith(4, [identity.externalOrderId]);
+  });
+  it.each([
+    { customerId: "gid://shopify/Customer/101" }, { channelId: 3 },
+    { shopDomain: "other.myshopify.com" }, { orderReference: "#OTHER" }, { externalOrderId: "100" },
+  ])("never exposes a foreign or substituted cold purchase: %j", async changed => {
+    const h=fixture(), now=new Date("2026-11-03T12:00:00Z");
+    h.edits.orderSummaries.mockResolvedValue([{...summary,...changed}]);
+    const native={read:vi.fn(async()=>[]),request:vi.fn(async()=>{})};
+    const service=new CustomerAccountOrderQueriesService({principal,connection:async()=>connection,edits:h.edits,context:h.context,native,now:()=>now,report:h.report});
+    expect((await service.summaries({orders:[identity]},{saved:true})).orders).toEqual([]);
+    expect(native.request).toHaveBeenCalledExactlyOnceWith({channelId:2,externalCustomerId:"100",externalOrderIds:["99"]},now);
+  });
+  it("retains warm totals during a cold lookup failure, then recovers the missing total on retry", async()=>{
+    const h=fixture(), now=new Date("2026-11-03T12:00:00Z"), cold={externalOrderId:"100",orderReference:"#COLD"};
+    const native={read:vi.fn(async()=>[{...identity,channelId:2,connectionId:4,shopDomain:principal.shopDomain,externalCustomerId:"100",
+      sourceUpdatedAt:now.toISOString(),freshThrough:now,currency:"USD" as const,totalCents:0,financialStatus:"Refunded",cancelled:true}]),request:vi.fn(async()=>{})};
+    h.edits.orderSummaries.mockRejectedValueOnce(new Error("Synthetic provider outage")).mockResolvedValueOnce([{...summary,...cold,totalCents:897}]);
+    const service=new CustomerAccountOrderQueriesService({principal,connection:async()=>connection,edits:h.edits,context:h.context,native,now:()=>now,report:h.report});
+    const first=await service.summaries({orders:[identity,cold]},{saved:true});
+    expect(first.orders.map(order=>order.totalCents)).toEqual([0]);expect(first.unavailableExternalOrderIds).toEqual(["100"]);
+    expect(h.report).toHaveBeenCalledWith({code:"CUSTOMER_ACCOUNT_NATIVE_LOOKUP_FAILED"});
+    const retry=await service.summaries({orders:[identity,cold]},{saved:true});
+    expect(retry.orders.map(order=>order.totalCents)).toEqual([0,897]);expect(retry.unavailableExternalOrderIds).toEqual([]);
+    expect(h.edits.customerOrderDetails).not.toHaveBeenCalled();
+  });
+  it("explicit recovery queues only presentation work for the signed principal and rereads locally",async()=>{
+    const h=fixture();const actions={read:vi.fn(async()=>({orders:[]}))};
+    const actionRefresh={requestRefresh:vi.fn(async()=>{})};const connect=vi.fn(async()=>connection);
+    const now=new Date("2026-11-01T12:00:00Z");
+    const service=new CustomerAccountOrderQueriesService({principal,connection:connect,edits:h.edits,context:h.context,
+      actions,actionRefresh,now:()=>now,report:h.report});
+    await service.refreshActions({orders:[identity]});
+    expect(actionRefresh.requestRefresh).toHaveBeenCalledExactlyOnceWith({orders:[identity],channelId:2,externalCustomerId:"100"},now);
+    expect(actions.read).toHaveBeenCalledOnce();expect(connect).not.toHaveBeenCalled();
+    expect(h.edits.orderSummaries).not.toHaveBeenCalled();expect(h.context.read).not.toHaveBeenCalled();
+    await expect(service.refreshActions({orders:[{...identity,externalOrderId:"invalid"}]})).rejects.toThrow();
+    expect(actionRefresh.requestRefresh).toHaveBeenCalledOnce();
+  });
   it("reads action projections without a provider, connection, or warehouse inspection", async () => {
     const h = fixture();
     const actions = { read: vi.fn(async () => ({ orders: [] })) };
@@ -73,6 +153,25 @@ describe("owned, query-only account history", () => {
     await service.actions({ orders: [identity] });
     expect(actions.read).toHaveBeenCalledExactlyOnceWith({ orders: [identity], channelId: 2, externalCustomerId: "100" }, now);
     expect(connect).not.toHaveBeenCalled(); expect(h.edits.orderSummaries).not.toHaveBeenCalled(); expect(h.context.read).not.toHaveBeenCalled();
+  });
+  it("negotiates progress without changing native money or legacy strict responses", async () => {
+    const h=fixture();h.context.read.mockResolvedValue([{externalOrderId:"99",omsOrderId:10,warehouseStatuses:["shipped"],held:false}]);
+    const progress={read:vi.fn(async()=>new Map([[10,{unavailable:[],delivery:null,packages:[],returns:[],refunds:[]}]]))};
+    const service=new CustomerAccountOrderQueriesService({principal,connection:async()=>connection,edits:h.edits,context:h.context,progress,now:()=>new Date("2026-10-30T12:00:00Z"),report:h.report});
+    const legacy=await service.summaries({orders:[identity]});
+    expect(legacy.orders[0]).not.toHaveProperty("progress");expect(progress.read).not.toHaveBeenCalled();
+    const current=await service.summaries({orders:[identity]},{progress:true});
+    expect(current.orders[0]).toMatchObject({totalCents:0,financialStatus:"Refunded",progress:{returns:[],refunds:[]}});
+    expect(progress.read).toHaveBeenCalledWith({channelId:2,externalCustomerId:"100",orders:[{omsOrderId:10,externalOrderId:"99"}]},new Date("2026-10-30T12:00:00Z"));
+  });
+  it("keeps verified money readable when progress fails or returns an unrequested identity", async () => {
+    for(const failure of [new Error("owner unavailable"),new Map([[11,{delivery:null,packages:[],returns:[]}]])]){
+      const h=fixture();h.context.read.mockResolvedValue([{externalOrderId:"99",omsOrderId:10,warehouseStatuses:["shipped"],held:false}]);
+      const read=vi.fn(async()=>{if(failure instanceof Error)throw failure;return failure;});
+      const service=new CustomerAccountOrderQueriesService({principal,connection:async()=>connection,edits:h.edits,context:h.context,progress:{read:read as never},now:()=>new Date("2026-10-30T12:00:00Z"),report:h.report});
+      const current=await service.summaries({orders:[identity]},{progress:true});
+      expect(current.orders[0]).toMatchObject({totalCents:0,financialStatus:"Refunded",progress:null});expect(current.statusUnavailable).toBe(true);
+    }
   });
   it("returns an exact zero total for a historical purchase without an OMS order", async () => {
     const h = fixture();
@@ -238,7 +337,7 @@ describe("owned, query-only account history", () => {
 });
 
 describe("native summary adapter", () => {
-  function provider(nodes: unknown[]) {
+  function provider(nodes: unknown[], accountSummaries?: { retain(observation: AccountNativeObservation): Promise<void> }) {
     const fetch = vi.fn(
       async () =>
         new Response(JSON.stringify({ data: { nodes } }), { status: 200 }),
@@ -256,6 +355,7 @@ describe("native summary adapter", () => {
       credentials,
       provider: new ShopifyOrderEditProvider({
         credentials,
+        accountSummaries,
         fetch: fetch as typeof globalThis.fetch,
         clock: () => new Date("2026-10-22T12:00:00Z"),
       }),
@@ -268,6 +368,7 @@ describe("native summary adapter", () => {
   const node = (id: string, amount: string) => ({
     id: `gid://shopify/Order/${id}`,
     name: `#${id}`,
+    updatedAt: "2026-10-22T12:00:00Z",
     customer: { id: summary.customerId },
     cancelledAt: null,
     displayFinancialStatus: "PAID",
@@ -307,6 +408,25 @@ describe("native summary adapter", () => {
       ).rejects.toMatchObject({ code });
     },
   );
+  it("retains source-versioned totals through the canonical cache owner after verifying the full batch", async () => {
+    const retain=vi.fn(async()=>{}), h=provider([node("99","9.17"),node("100","0.00")],{retain});
+    await h.provider.readOrderSummaries(4,["99","100"]);
+    expect(retain).toHaveBeenCalledExactlyOnceWith({facts:[
+      expect.objectContaining({externalOrderId:"99",externalCustomerId:"100",connectionId:4,totalCents:917,sourceUpdatedAt:"2026-10-22T12:00:00Z"}),
+      expect.objectContaining({externalOrderId:"100",externalCustomerId:"100",connectionId:4,totalCents:0,sourceUpdatedAt:"2026-10-22T12:00:00Z"}),
+    ],startedAt:new Date("2026-10-22T12:00:00Z"),finishedAt:new Date("2026-10-22T12:00:00Z")});
+    expect(h.fetch).toHaveBeenCalledOnce();
+  });
+  it.each([[node("98","1.00")],[node("99","0.001")]])("does not retain an invalid or substituted summary batch",async invalid=>{
+    const retain=vi.fn(async()=>{}),h=provider([invalid],{retain});
+    await expect(h.provider.readOrderSummaries(4,["99"])).rejects.toThrow();
+    expect(retain).not.toHaveBeenCalled();
+  });
+  it("returns verified native amounts even when presentation-cache storage is unavailable",async()=>{
+    const retain=vi.fn(async()=>{throw new Error("Synthetic cache outage");});
+    expect((await provider([node("99","9.17")],{retain}).provider.readOrderSummaries(4,["99"]))[0].totalCents).toBe(917);
+    expect(retain).toHaveBeenCalledOnce();
+  });
   it("preserves missing native nodes as unavailable without assigning another total", async () => {
     expect(
       await provider([null, node("98", "0.00")]).provider.readOrderSummaries(

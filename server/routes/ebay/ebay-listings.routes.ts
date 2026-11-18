@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { db, pool } from "../../db";
 import { requireAuth, requireAuthOrInternalApiKey, requirePermission } from "../middleware";
+import { createStaffStreamObserver } from "../../modules/identity";
 import { getAuthService, getChannelConnection, EBAY_CHANNEL_ID, atpService } from "./ebay-utils";
 import { resolveChannelPrice } from "../../modules/channels/infrastructure/ebay-listing-helpers";
 import { createCatalogPublicImageUrl } from "../../modules/catalog/catalog-public-image";
@@ -33,6 +34,10 @@ import { queueVariantAvailabilityRepair } from "../../modules/channels/variant-a
 import {
   createEbayRouteListingClient,
 } from "./ebay-listing-connector-client";
+import {
+  markChannelListingReconcileDeleted,
+  markChannelListingReconcileEnded,
+} from "../../modules/channels/ebay-route-admin.api";
 
 export const router = express.Router();
 const EBAY_LISTING_DEFAULT_MARKETPLACE_ID = "EBAY_US";
@@ -124,7 +129,8 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
     res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive", "X-Accel-Buffering": "no" });
     let cancelled = false;
     res.on("close", () => { cancelled = true; });
-    const send = (event: unknown) => { if (!cancelled) res.write(`data: ${JSON.stringify(event)}\n\n`); };
+    const observer=createStaffStreamObserver(req,res,"channels:edit");
+    const send = (event: unknown) => observer.send(event);
     try {
       const result = await ebayListingPushService.push(parsed.data, {
         actor: String(req.session.user!.id),
@@ -135,7 +141,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
       });
       send({ type: "complete", summary: result.summary, cancelled: result.cancelled });
     } catch (error) { send({ type: "error", ...listingFailure(error) }); }
-    res.end();
+    await observer.flush();res.end();
   });
 
   // -----------------------------------------------------------------------
@@ -178,18 +184,18 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
     const parsed=z.object({productIds:z.string().regex(/^[1-9][0-9]*(,[1-9][0-9]*)*$/).optional()}).safeParse(req.query);
     if(!parsed.success) {res.status(400).json({error:'Invalid product selection.'});return;}
     res.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-cache',Connection:'keep-alive','X-Accel-Buffering':'no'});
-    let disconnected=false;res.on('close',()=>{disconnected=true;});
-    const send=(value:unknown)=>{if(!disconnected) res.write(`data: ${JSON.stringify(value)}\n\n`);};
+    const observer=createStaffStreamObserver(req,res,"channels:edit");
+    const send=(value:unknown)=>observer.send(value);
     try {
       // The canonical sync owner persists all work before provider I/O. Closing
       // this observer never cancels already accepted product updates.
       const result=await syncActiveListings(parsed.data.productIds?{productIds:parsed.data.productIds.split(',').map(Number)}:null,String(req.session.user!.id));
-      result.jobs.forEach((job,index)=>send({type:'progress',product:result.details.find(row=>row.productId===job.productId)?.productName??`Product ${job.productId}`,productId:job.productId,
+      for(const [index,job] of result.jobs.entries()){send({type:'progress',product:result.details.find(row=>row.productId===job.productId)?.productName??`Product ${job.productId}`,productId:job.productId,
         status:job.state==='completed'?'success':(job.state==='needs_attention'||job.state==='awaiting_evidence')?'error':'pending',error:job.message,code:job.code,jobId:job.id,
-        issue:job.code?resolveEbayListingIssue({code:job.code,message:job.message,productId:job.productId,jobId:job.id,state:job.state}):undefined,current:index+1,total:result.jobs.length}));
+        issue:job.code?resolveEbayListingIssue({code:job.code,message:job.message,productId:job.productId,jobId:job.id,state:job.state}):undefined,current:index+1,total:result.jobs.length});await observer.flush();}
       send({type:'complete',summary:{...result,total:result.jobs.length},cancelled:false});
     } catch(error) {send({type:'error',...listingFailure(error)});}
-    res.end();
+    await observer.flush();res.end();
   });
   router.get('/api/ebay/listings/sync-jobs',requireAuth,requirePermission('channels','view'),async(_req:Request,res:Response)=> {
     try {res.json((await ebayListingSyncService.list(EBAY_CHANNEL_ID)).map(job=>ebayListingSyncJobSchema.parse(job)));}
@@ -271,11 +277,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
 
             if (!inspection.inventoryItemExists) {
               // Inventory item gone — mark as deleted
-              await client.query(
-                `UPDATE channel_listings SET sync_status = 'deleted', sync_error = 'Inventory item not found on eBay', updated_at = NOW()
-                 WHERE id = $1`,
-                [listing.id],
-              );
+              await markChannelListingReconcileDeleted(listing.id, client);
               deleted++;
               changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "deleted" });
               continue;
@@ -302,11 +304,7 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
               active++;
             } else {
               // Offer ended/withdrawn
-              await client.query(
-                `UPDATE channel_listings SET sync_status = 'ended', sync_error = 'Offer no longer active on eBay', updated_at = NOW()
-                 WHERE id = $1`,
-                [listing.id],
-              );
+              await markChannelListingReconcileEnded(listing.id, client);
               ended++;
               changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "ended" });
             }

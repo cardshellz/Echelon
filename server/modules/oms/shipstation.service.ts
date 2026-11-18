@@ -13,7 +13,8 @@ import { readIntegerCents, centsToJsonDollars } from "@shared/money-read";
 
 import { eq, and, sql } from "drizzle-orm";
 import { z } from "zod";
-import { OrderEditError } from "../order-edits/domain/order-edit-error";
+import { OrderEditError } from "../order-edits/oms-coordination.api";
+import { prepareOrderEditHeldPartitions, verifyDeferredHeldPartition, providerCarriesManualHold, appendOrderEditShippingAudit } from "./order-edit-held-partitions";
 import type { ChannelMerchandiseCapabilityReader } from "./infrastructure/channel-merchandise-policy";
 import { verifyRefundedChannelMerchandise } from "./channel-merchandise-dispatch.service";
 import type { ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
@@ -26,18 +27,35 @@ import { buildTrackingUrl } from "./tracking-url.util";
 import { createShipStationLabelReconciliationClient } from "./shipstation-label-reconciliation.client";
 import type { ShipStationLabelSnapshot } from "./shipstation-label-reconciliation.service";
 import { createShipStationReplacementLabelRefresh } from "./shipstation-replacement-label-refresh.service";
-import type { ShipStationRelatedLabelReader } from "../shipping/shipstation-related-labels.reader";
+import type { ShipStationRelatedLabelReader } from "../shipping/shipstation-provider-reconciliation.api";
 import {
   dispatchShipmentEvent,
   recomputeOrderStatusFromShipments,
   type ShipmentEvent,
-} from "../orders/shipment-rollup";
+} from "../orders/shipment-rollup-and-context.api";
 import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
 import { partitionCommercialRequestedQuantity } from "./shipstation-commercial-quantity.domain";
-import type { EngineShipmentItemAppendResult } from "../shipping/types";
-import { maybeGetPackInstruction } from "../cartonization/application/wms-pack-plan.service";
+import type { EngineShipmentItemAppendResult } from "../shipping/engine-and-reconcile.api";
+import { maybeGetPackInstruction } from "../cartonization/pack-plan.api";
+import {
+  adoptDriftedShipStationOrderMappingOnOutboundShipmentInWms,
+  clearOutboundShipmentReviewFlagByReasonInWms,
+  commitAmendedShipmentItemQuantityInWms,
+  copyPartialShipmentItemToPhysicalSplitInWms,
+  insertLegacySplitChildShipmentItemFromShipStationInWms,
+  insertShipStationChildOutboundShipmentInWms,
+  markAppendedShipmentItemsAuthoritativeInWms,
+  markOutboundShipmentQueuedAfterShipStationPushInWms,
+  moveWholeShipmentItemToPhysicalSplitInWms,
+  reduceParentShipmentItemAfterPhysicalSplitInWms,
+  repairLegacyTrackingOutboundShipmentRefsInWms,
+  setOutboundShipmentReviewFlagInWms,
+  syncOriginalShipmentItemFromShipStationInWms,
+  updateExistingSplitChildShipmentItemFromShipStationInWms,
+  updateReplacementShipmentItemLocationInWms,
+} from "../wms/outbound-shipment-mutations.api";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
-import { parseProviderAmountCents } from "../shipping/types";
+import { parseProviderAmountCents } from "../shipping/engine-and-reconcile.api";
 import {
   SHIPSTATION_LEGACY_UNMAPPED_SPLIT_REASON,
   isExactShipStationPhysicalShipmentReplay,
@@ -47,19 +65,19 @@ import {
   resolveShipStationUnmappedPhysicalExceptionForVoidedLabel,
   shipStationShipmentRefFromExternalFulfillmentId,
 } from "./shipstation-unmapped-physical";
-import type { ShippingProviderLabelObserver } from "../shipping/carrier-tracking.service";
-import type { StoredShippingProviderLabelObservation } from "../shipping/carrier-tracking.repository";
+import type { ShippingProviderLabelObserver } from "../shipping/carrier-tracking-and-dispatch.api";
+import type { StoredShippingProviderLabelObservation } from "../shipping/carrier-tracking-and-dispatch.api";
 import type {
   PackageAllocationLabelCommercialFulfillmentService,
-} from "../shipping/package-allocation-label-commercial-fulfillment.service";
+} from "../shipping/package-allocation-authority.api";
 import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
-import { normalizeTrackingNumber } from "../shipping/carrier-tracking.domain";
+import { normalizeTrackingNumber } from "../shipping/carrier-tracking-and-dispatch.api";
 import {
   CarrierDispatchAuthorityError,
   type ConfirmCarrierDispatchInput,
   type ConfirmCarrierDispatchResult,
   type ReviewedCarrierDispatchRepairAuthorization,
-} from "../shipping/carrier-dispatch-authority";
+} from "../shipping/carrier-tracking-and-dispatch.api";
 import {
   adoptProvenShipStationOrder,
   proveShipStationOrderAdoption,
@@ -69,13 +87,13 @@ import {
   ReplacementInventoryUnavailableError,
   ShipmentInventoryUnavailableError,
   type InventoryUseCases,
-} from "../inventory/application/inventory.use-cases";
+} from "../inventory/shipment-evidence.api";
 import type { InventoryShipmentRuntimeInput } from "../inventory-planning/application/inventory-availability-runtime-shipment.service";
 import {
   type ExactWmsShipmentItem,
   isPositivePostgresInteger,
   parseExactPositiveWmsShipmentItems,
-} from "../shipping/shipstation-provider-contents.domain";
+} from "../shipping/shipstation-provider-reconciliation.api";
 import {
   createShipStationApiRequester,
   ShipStationRateLimitError,
@@ -92,7 +110,7 @@ import {
 import {
   WMS_ORDER_SHIPMENT_LOCK_NAMESPACE,
   WMS_SHIPMENT_PUSH_LOCK_NAMESPACE,
-} from "../wms/shipment-lock-namespaces";
+} from "../wms/shipment-execution-and-projection.api";
 
 export {
   ShipStationRateLimitError,
@@ -827,6 +845,7 @@ export function createShipStationService(
     sessionLock?: SessionAdvisoryLockRunner;
     /** Rate-limit back-off sleeper; injected by tests for determinism. */
     sleep?: (ms: number) => Promise<void>;
+    clock?: () => Date;
   } = {},
 ) {
   const baseUrl = "https://ssapi.shipstation.com";
@@ -974,17 +993,72 @@ export function createShipStationService(
   // Get order by orderKey
   // -------------------------------------------------------------------------
 
+  const MAX_ORDER_KEY_LOOKUP_PAGES = 10;
+
   async function getOrderByKey(
     orderKey: string,
     orderNumber: string,
   ): Promise<any> {
-    const result = await apiRequest<{ orders: any[] }>(
-      "GET",
-      `/orders?orderNumber=${encodeURIComponent(orderNumber)}`,
-    );
-    const exactMatches = (result.orders ?? []).filter(
-      (order) => String(order?.orderKey ?? "") === orderKey,
-    );
+    const exactMatches: any[] = [];
+    let page = 1;
+    let totalPages = 1;
+
+    while (page <= totalPages) {
+      const endpoint =
+        page === 1
+          ? `/orders?orderNumber=${encodeURIComponent(orderNumber)}`
+          : `/orders?orderNumber=${encodeURIComponent(orderNumber)}&page=${page}`;
+      const result = await apiRequest<{
+        orders?: any[];
+        page?: number;
+        pages?: number;
+      }>("GET", endpoint);
+
+      if (!result || !Array.isArray(result.orders)) {
+        throw new ShipStationPushError(
+          `ShipStation order lookup for ${orderNumber} returned a malformed orders response on page ${page}`,
+          {
+            code: SS_PUSH_INVALID_SHIPMENT,
+            field: "provider.orders",
+            value: result,
+          },
+        );
+      }
+
+      if (page === 1 && result.pages !== undefined && result.pages !== null) {
+        const parsedPages = Number(result.pages);
+        if (!Number.isInteger(parsedPages) || parsedPages < 0) {
+          throw new ShipStationPushError(
+            `ShipStation order lookup for ${orderNumber} returned an invalid page count (${String(result.pages)})`,
+            {
+              code: SS_PUSH_INVALID_SHIPMENT,
+              field: "provider.pages",
+              value: result.pages,
+            },
+          );
+        }
+        if (parsedPages > MAX_ORDER_KEY_LOOKUP_PAGES) {
+          throw new ShipStationPushError(
+            `ShipStation order lookup for ${orderNumber} spans ${parsedPages} pages (exceeds safe lookup bound ${MAX_ORDER_KEY_LOOKUP_PAGES})`,
+            {
+              code: SS_PUSH_INVALID_SHIPMENT,
+              field: "provider.pages",
+              value: parsedPages,
+            },
+          );
+        }
+        totalPages = Math.max(1, parsedPages);
+      }
+
+      for (const order of result.orders) {
+        if (String(order?.orderKey ?? "") === orderKey) {
+          exactMatches.push(order);
+        }
+      }
+
+      page += 1;
+    }
+
     if (exactMatches.length > 1) {
       throw new ShipStationPushError(
         `ShipStation returned ${exactMatches.length} orders for exact key ${orderKey}`,
@@ -1330,23 +1404,11 @@ export function createShipStationService(
           Number.isInteger(incomingSsOrderId) && incomingSsOrderId > 0
             ? incomingSsOrderId
             : null;
-        await db.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET external_fulfillment_id = COALESCE(
-                external_fulfillment_id,
-                ${externalFulfillmentId}
-              ),
-              shipstation_order_id = COALESCE(
-                ${validIncomingSsOrderId},
-                shipstation_order_id
-              ),
-              engine_order_ref = COALESCE(
-                ${validIncomingSsOrderId != null ? String(validIncomingSsOrderId) : null},
-                engine_order_ref
-              ),
-              updated_at = NOW()
-          WHERE id = ${parent.id}
-        `);
+        await repairLegacyTrackingOutboundShipmentRefsInWms(db, {
+          shipmentId: Number(parent.id),
+          externalFulfillmentId,
+          validIncomingSsOrderId,
+        });
         return {
           row: {
             ...parent,
@@ -1435,17 +1497,13 @@ export function createShipStationService(
               `Adopting incoming mapping and flagging for review (duplicate SS order).`,
           );
         }
-        await db.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET shipstation_order_id = ${adoptedSsOrderId},
-              engine_order_ref = ${adoptedSsOrderId != null ? String(adoptedSsOrderId) : null},
-              shipstation_order_key = COALESCE(${shipment.orderKey ?? null}, shipstation_order_key),
-              external_fulfillment_id = COALESCE(external_fulfillment_id, ${externalFulfillmentId}),
-              requires_review = CASE WHEN ${drifted} THEN true ELSE requires_review END,
-              review_reason = CASE WHEN ${drifted} THEN 'shipstation_duplicate_order_key_repaired' ELSE review_reason END,
-              updated_at = NOW()
-          WHERE id = ${shipmentId}
-        `);
+        await adoptDriftedShipStationOrderMappingOnOutboundShipmentInWms(db, {
+          shipmentId,
+          adoptedSsOrderId,
+          orderKey: shipment.orderKey ?? null,
+          externalFulfillmentId,
+          drifted,
+        });
       }
       return {
         row: { ...parent, shipstation_order_id: adoptedSsOrderId },
@@ -1496,20 +1554,14 @@ export function createShipStationService(
       }
 
       const ssOrderKey = shipment.orderKey || parent.shipstation_order_key;
-      const inserted: any = await tx.execute(sql`
-        INSERT INTO wms.outbound_shipments
-          (order_id, channel_id, external_fulfillment_id, source, status,
-           shipstation_order_id, shipstation_order_key,
-           shipping_engine, engine_order_ref, engine_shipment_ref,
-           created_at, updated_at)
-        VALUES
-          (${orderId}, ${parent.channel_id}, ${externalFulfillmentId},
-           ${SHIPSTATION_SPLIT_SOURCE}, 'queued',
-           ${shipment.orderId}, ${ssOrderKey},
-           'shipstation', ${String(shipment.orderId)}, ${ssOrderKey},
-           NOW(), NOW())
-        RETURNING id, order_id, status, shipstation_order_id
-      `);
+      const inserted: any = await insertShipStationChildOutboundShipmentInWms(tx, {
+        orderId,
+        channelId: parent.channel_id,
+        externalFulfillmentId,
+        source: SHIPSTATION_SPLIT_SOURCE,
+        shipstationOrderId: shipment.orderId,
+        shipstationOrderKey: ssOrderKey,
+      });
 
       const row = inserted?.rows?.[0];
       if (!row) {
@@ -1553,19 +1605,13 @@ export function createShipStationService(
           // Preserve the stable wms-item identity when the entire line moves to
           // the physical package. Copying and reducing would leave an illegal
           // zero-quantity placeholder on the parent shipment.
-          const moved: any = await tx.execute(sql`
-            UPDATE wms.outbound_shipment_items
-            SET shipment_id = ${row.id},
-                tracking_id = ${String(shipment.shipmentId)},
-                split_root_shipment_item_id = COALESCE(
-                  split_root_shipment_item_id,
-                  id
-                )
-            WHERE id = ${item.sourceShipmentItemId}
-              AND shipment_id = ${parent.id}
-              AND qty = ${item.qty}
-            RETURNING id
-          `);
+          const moved: any = await moveWholeShipmentItemToPhysicalSplitInWms(tx, {
+            sourceShipmentItemId: item.sourceShipmentItemId,
+            parentShipmentId: Number(parent.id),
+            splitShipmentId: Number(row.id),
+            qty: item.qty,
+            trackingId: String(shipment.shipmentId),
+          });
           if ((moved?.rows ?? []).length !== 1) {
             throw new Error(
               `WMS shipment item ${item.sourceShipmentItemId} could not be moved ` +
@@ -1589,25 +1635,15 @@ export function createShipStationService(
         const childCommercialQty = commercialPartition.childQuantity;
         const retainedCommercialQty = commercialPartition.retainedQuantity;
 
-        const insertedItem: any = await tx.execute(sql`
-          INSERT INTO wms.outbound_shipment_items
-            (shipment_id, order_item_id, replacement_for_order_item_id,
-             correction_for_shipment_item_id, split_root_shipment_item_id,
-             shipment_item_purpose, product_variant_id, qty,
-             commercial_requested_qty,
-             from_location_id, box_id, weight_oz, tracking_id, created_at)
-          SELECT
-            ${row.id}, order_item_id, replacement_for_order_item_id,
-            correction_for_shipment_item_id, ${rootSourceShipmentItemId},
-            shipment_item_purpose, product_variant_id, ${item.qty},
-            ${childCommercialQty},
-            from_location_id, box_id, weight_oz,
-            ${String(shipment.shipmentId)}, NOW()
-          FROM wms.outbound_shipment_items
-          WHERE id = ${item.sourceShipmentItemId}
-            AND shipment_id = ${parent.id}
-          RETURNING id
-        `);
+        const insertedItem: any = await copyPartialShipmentItemToPhysicalSplitInWms(tx, {
+          sourceShipmentItemId: item.sourceShipmentItemId,
+          parentShipmentId: Number(parent.id),
+          splitShipmentId: Number(row.id),
+          rootSourceShipmentItemId,
+          qty: item.qty,
+          childCommercialQty,
+          trackingId: String(shipment.shipmentId),
+        });
         if ((insertedItem?.rows ?? []).length !== 1) {
           throw new Error(
             `WMS shipment item ${item.sourceShipmentItemId} could not be copied ` +
@@ -1615,15 +1651,12 @@ export function createShipStationService(
           );
         }
 
-        const reduced: any = await tx.execute(sql`
-          UPDATE wms.outbound_shipment_items
-          SET qty = qty - ${item.qty},
-              commercial_requested_qty = ${retainedCommercialQty}
-          WHERE id = ${item.sourceShipmentItemId}
-            AND shipment_id = ${parent.id}
-            AND qty > ${item.qty}
-          RETURNING id
-        `);
+        const reduced: any = await reduceParentShipmentItemAfterPhysicalSplitInWms(tx, {
+          sourceShipmentItemId: item.sourceShipmentItemId,
+          parentShipmentId: Number(parent.id),
+          splitQty: item.qty,
+          retainedCommercialQty,
+        });
         if ((reduced?.rows ?? []).length !== 1) {
           throw new Error(
             `WMS shipment item ${item.sourceShipmentItemId} could not be reduced ` +
@@ -1746,18 +1779,12 @@ export function createShipStationService(
       }
 
       if (targetIsOriginal && targetItemIds.has(item.sourceShipmentItemId)) {
-        await executor.execute(sql`
-          UPDATE wms.outbound_shipment_items
-          SET qty = ${item.qty},
-              commercial_requested_qty = CASE
-                WHEN commercial_requested_qty IS NULL THEN NULL
-                ELSE LEAST(commercial_requested_qty, ${item.qty})
-              END,
-              from_location_id = COALESCE(from_location_id, ${sourceRow.from_location_id}),
-              tracking_id = ${String(shipment.shipmentId)},
-              provider_membership_state = 'authoritative'
-          WHERE id = ${item.sourceShipmentItemId}
-        `);
+        await syncOriginalShipmentItemFromShipStationInWms(executor, {
+          shipmentItemId: item.sourceShipmentItemId,
+          qty: item.qty,
+          fromLocationId: sourceRow.from_location_id,
+          trackingId: String(shipment.shipmentId),
+        });
         touchedOriginalIds.push(item.sourceShipmentItemId);
       } else {
         const orderItemId = Number(sourceRow.order_item_id);
@@ -1802,47 +1829,35 @@ export function createShipStationService(
         }
 
         if (existingChild) {
-          await executor.execute(sql`
-            UPDATE wms.outbound_shipment_items
-            SET product_variant_id = ${sourceRow.product_variant_id},
-                qty = ${item.qty},
-                commercial_requested_qty = CASE
-                  WHEN commercial_requested_qty IS NULL THEN NULL
-                  ELSE LEAST(commercial_requested_qty, ${item.qty})
-                END,
-                from_location_id = ${sourceRow.from_location_id},
-                box_id = ${sourceRow.box_id},
-                weight_oz = ${sourceRow.weight_oz},
-                tracking_id = ${String(shipment.shipmentId)},
-                split_root_shipment_item_id = COALESCE(
-                  split_root_shipment_item_id,
-                  ${splitRootShipmentItemId}
-                ),
-                provider_membership_state = 'authoritative'
-            WHERE id = ${existingChild.id}
-          `);
+          await updateExistingSplitChildShipmentItemFromShipStationInWms(executor, {
+            childItemId: Number(existingChild.id),
+            productVariantId: sourceRow.product_variant_id,
+            qty: item.qty,
+            fromLocationId: sourceRow.from_location_id,
+            boxId: sourceRow.box_id,
+            weightOz: sourceRow.weight_oz,
+            trackingId: String(shipment.shipmentId),
+            splitRootShipmentItemId,
+          });
           touchedChildIds.push(Number(existingChild.id));
         } else {
           // New splits reach this path with the parent quantity already
           // reduced and the physical child row already inserted atomically.
           // The insert below remains only for pre-hardening split rows.
-          const inserted: any = await executor.execute(sql`
-            INSERT INTO wms.outbound_shipment_items
-              (shipment_id, order_item_id, replacement_for_order_item_id,
-               correction_for_shipment_item_id, split_root_shipment_item_id,
-               shipment_item_purpose, product_variant_id, qty,
-               from_location_id, box_id, weight_oz, tracking_id)
-            VALUES
-              (${targetShipmentId}, ${targetIsReplacement ? null : sourceRow.order_item_id},
-               ${targetIsReplacement ? sourceRow.order_item_id : null},
-               ${targetIsReplacement ? null : sourceRow.correction_for_shipment_item_id},
-               ${splitRootShipmentItemId},
-               ${targetIsReplacement ? "replacement" : sourceRow.shipment_item_purpose},
-               ${sourceRow.product_variant_id},
-               ${item.qty}, ${sourceRow.from_location_id}, ${sourceRow.box_id},
-               ${sourceRow.weight_oz}, ${String(shipment.shipmentId)})
-            RETURNING id
-          `);
+          const inserted: any = await insertLegacySplitChildShipmentItemFromShipStationInWms(executor, {
+            targetShipmentId,
+            orderItemId: targetIsReplacement ? null : sourceRow.order_item_id,
+            replacementForOrderItemId: targetIsReplacement ? sourceRow.order_item_id : null,
+            correctionForShipmentItemId: targetIsReplacement ? null : sourceRow.correction_for_shipment_item_id,
+            splitRootShipmentItemId,
+            shipmentItemPurpose: targetIsReplacement ? "replacement" : sourceRow.shipment_item_purpose,
+            productVariantId: sourceRow.product_variant_id,
+            qty: item.qty,
+            fromLocationId: sourceRow.from_location_id,
+            boxId: sourceRow.box_id,
+            weightOz: sourceRow.weight_oz,
+            trackingId: String(shipment.shipmentId),
+          });
           const insertedId = Number(inserted?.rows?.[0]?.id);
           if (Number.isInteger(insertedId) && insertedId > 0) {
             touchedChildIds.push(insertedId);
@@ -2057,20 +2072,14 @@ export function createShipStationService(
             return existingRow;
           }
 
-          const inserted: any = await db.execute(sql`
-            INSERT INTO wms.outbound_shipments
-              (order_id, channel_id, external_fulfillment_id, source, status,
-               shipstation_order_id, shipstation_order_key,
-               shipping_engine, engine_order_ref, engine_shipment_ref,
-               created_at, updated_at)
-            VALUES
-              (${wmsOrderId}, ${wmsOrder.channel_id}, ${externalFulfillmentId},
-               ${SHIPSTATION_COMBINED_CHILD_SOURCE}, 'queued',
-               ${shipment.orderId}, ${shipment.orderKey},
-               'shipstation', ${String(shipment.orderId)}, ${shipment.orderKey},
-               NOW(), NOW())
-            RETURNING id, order_id, status, shipstation_order_id
-          `);
+          const inserted: any = await insertShipStationChildOutboundShipmentInWms(db, {
+            orderId: wmsOrderId,
+            channelId: wmsOrder.channel_id,
+            externalFulfillmentId,
+            source: SHIPSTATION_COMBINED_CHILD_SOURCE,
+            shipstationOrderId: shipment.orderId,
+            shipstationOrderKey: shipment.orderKey,
+          });
           return inserted?.rows?.[0] ?? null;
         });
       }
@@ -2348,13 +2357,11 @@ export function createShipStationService(
       Number(item.qty) <= 0
     );
     if (invalidItems.length > 0) {
-      await db.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = true,
-            review_reason = 'inventory_deduction_missing_item_data',
-            updated_at = NOW()
-        WHERE id = ${shipmentId}
-      `);
+      await setOutboundShipmentReviewFlagInWms(
+        db,
+        shipmentId,
+        "inventory_deduction_missing_item_data",
+      );
       const message = `Shipment ${shipmentId} has ${invalidItems.length} inventory source item(s) without a product variant or positive quantity; fulfillment requires review.`;
       console.error(JSON.stringify({
         level: "error", component: "shipstation", code: "SHIPMENT_INVENTORY_SOURCE_INVALID",
@@ -2374,15 +2381,10 @@ export function createShipStationService(
     // transient missing-data condition, clear it now — the SHIP_NOTIFY V2
     // repair cascade re-runs this path for already-shipped shipments, so a
     // replay after the catalog/bin data lands self-heals the review flag.
-    await db.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = false,
-          review_reason = NULL,
-          updated_at = NOW()
-      WHERE id = ${shipmentId}
-        AND requires_review = true
-        AND review_reason = 'inventory_deduction_missing_item_data'
-    `);
+    await clearOutboundShipmentReviewFlagByReasonInWms(db, {
+      shipmentId,
+      expectedReason: "inventory_deduction_missing_item_data",
+    });
     return rows;
   }
 
@@ -2440,13 +2442,11 @@ export function createShipStationService(
         occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
         details = wms.reconciliation_exceptions.details || EXCLUDED.details
     `);
-    await db.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = true,
-          review_reason = ${HISTORICAL_REPLACEMENT_INVENTORY_RULE},
-          updated_at = NOW()
-      WHERE id = ${shipmentId}
-    `);
+    await setOutboundShipmentReviewFlagInWms(
+      db,
+      shipmentId,
+      HISTORICAL_REPLACEMENT_INVENTORY_RULE,
+    );
     console.warn(JSON.stringify({
       level: "warn",
       component: "shipstation",
@@ -2624,12 +2624,12 @@ export function createShipStationService(
             });
             // Canonical operational receipts own their actual allocated bin.
             // Keep the old source hint immutable; only the legacy owner projects it.
-            if (!recorded.preserveSourceLocation) await db.execute(sql`
-              UPDATE wms.outbound_shipment_items
-              SET from_location_id = ${recorded.warehouseLocationId}
-              WHERE id = ${item.id}
-                AND from_location_id IS DISTINCT FROM ${recorded.warehouseLocationId}
-            `);
+            if (!recorded.preserveSourceLocation) {
+              await updateReplacementShipmentItemLocationInWms(db, {
+                shipmentItemId: Number(item.id),
+                warehouseLocationId: recorded.warehouseLocationId,
+              });
+            }
             console.log(
               `[ShipStation Webhook V2] Recorded replacement shipment for variant ${item.product_variant_id} ` +
               `qty ${item.qty} from location ${recorded.warehouseLocationId} (wmsOrder ${wmsOrderId})`,
@@ -2813,13 +2813,7 @@ export function createShipStationService(
     finality: Awaited<ReturnType<typeof getOmsFinalOrderBlockerForShipNotify>>,
   ): Promise<void> {
     const reason = finality.reason ?? "shipstation_shipped_after_cancel";
-    await db.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = true,
-          review_reason = ${reason},
-          updated_at = NOW()
-      WHERE id = ${shipmentId}
-    `);
+    await setOutboundShipmentReviewFlagInWms(db, shipmentId, reason);
 
     await db.insert(omsOrderEvents).values({
       orderId: omsOrderId,
@@ -4712,15 +4706,17 @@ export function createShipStationService(
    */
   async function synchronizeOrderEditShipment(input: {
     shipmentId: number; operationId: string; mode: "hold" | "verify" | "synchronize" | "release" | "verify_shipped" | "verify_cancelled" | "verify_retired" | "release_unsubmitted";
-  }): Promise<void> {
+  }): Promise<{ retiredShipmentIds: number[] }> {
     z.object({ shipmentId: z.number().int().positive(), operationId: z.string().uuid(),
       mode: z.enum(["hold", "verify", "synchronize", "release", "verify_shipped", "verify_cancelled", "verify_retired", "release_unsubmitted"]) }).strict().parse(input);
     const providerSchema = z.object({ orderId: z.number().int().positive(), orderNumber: z.string().min(1), orderStatus: z.string(),
       items: z.array(z.object({ lineItemKey: z.string(), quantity: z.number().int().nonnegative() }).passthrough()) }).passthrough();
     const itemSchema = z.object({ id: z.number().int().positive(), qty: z.number().int().positive(),
       sku: z.string(), name: z.string(), unit_price_cents: z.coerce.number().int().nonnegative().safe() });
+    const retiredShipmentIds: number[] = [];
     const headerSchema = z.object({ id: z.number().int().positive(), order_id: z.number().int().positive(),
       provider_order_id: z.number().int().positive().nullable(), order_edit_operation_id: z.string().uuid().nullable(),
+      source: z.string().nullable(), order_number: z.string().min(1),
       status: z.string(), warehouse_status: z.string(), on_hold: z.number().int(), held: z.boolean(), requires_review: z.boolean() });
     async function lock(tx: any) {
       const source = await tx.execute(sql`SELECT oo.id FROM oms.oms_orders oo JOIN oms.order_edit_operations operation
@@ -4743,7 +4739,7 @@ export function createShipStationService(
       const order = await tx.execute(sql`SELECT wo.id FROM wms.orders wo
         WHERE wo.id=(SELECT order_id FROM wms.outbound_shipments WHERE id=${input.shipmentId}) FOR UPDATE OF wo`);
       if (order.rows?.length !== 1) throw new OrderEditError("ORDER_EDIT_SHIPMENT_MISSING", "The warehouse shipment is unavailable.");
-      const result = await tx.execute(sql`SELECT os.id,os.order_id,os.status,os.held,os.requires_review,
+      const result = await tx.execute(sql`SELECT os.id,os.order_id,os.status,os.held,os.requires_review,os.source,wo.order_number,
         COALESCE(os.shipstation_order_id,CASE WHEN os.shipping_engine='shipstation' AND os.engine_order_ref ~ '^[0-9]+$'
           AND length(os.engine_order_ref)<10 THEN os.engine_order_ref::int END) AS provider_order_id,
         wo.order_edit_operation_id,wo.warehouse_status,wo.on_hold FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id=os.order_id
@@ -4755,24 +4751,35 @@ export function createShipStationService(
       }
       // A timed-out push may have created a remote order before its identity
       // was persisted. Absence of the local ID is not proof of provider absence.
-      if (row.provider_order_id === null) throw new OrderEditError("ORDER_EDIT_PROVIDER_IDENTITY_UNVERIFIED", "Wait for the warehouse shipment to finish linking to ShipStation before editing this order.");
-      return { ...row, provider_order_id: row.provider_order_id };
+      if (row.provider_order_id === null && !(row.source === "line_item_hold" && row.held && row.status === "planned"))
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_IDENTITY_UNVERIFIED", "We couldn’t verify that this order is ready for changes. Contact us for help.");
+      return row;
     }
-    async function readProvider(providerOrderId: number, terminal?: "shipped" | "cancelled") {
-      const fulfilled = terminal === "shipped";
-      const live = providerSchema.parse(await apiRequest<unknown>("GET", `/orders/${providerOrderId}`));
-      if (live.orderId !== providerOrderId || (terminal ? live.orderStatus !== terminal : !["awaiting_shipment", "on_hold"].includes(live.orderStatus))) {
-        throw new OrderEditError("ORDER_EDIT_PROVIDER_NOT_EDITABLE", "ShipStation no longer reports an editable shipment.");
-      }
-      // Provider splits can acquire a different orderId while keeping the
-      // orderNumber. Read the complete number scope so a child label blocks too.
-      const labels = z.object({ shipments: z.array(z.object({ orderId: z.number().int(), orderNumber: z.string(), voided: z.boolean() }).passthrough()),
-        pages: z.number().int().nonnegative() }).passthrough().parse(await apiRequest<unknown>("GET", `/shipments?orderNumber=${encodeURIComponent(live.orderNumber)}&page=1&pageSize=100`));
-      if (labels.pages > 1 || (!fulfilled && labels.shipments.some(label => label.orderNumber === live.orderNumber && !label.voided))) {
-        throw new OrderEditError("ORDER_EDIT_PROVIDER_LABEL_EXISTS", "A provider label exists or label verification is incomplete.");
-      }
+    async function readScope(orderNumber: string) {
+      // Independent provider reads share one bounded phase, rather than serial
+      // ten-second order lookups repeated for every confirmation.
+      const [orderResult, labelResult] = await Promise.all([
+        apiRequest<unknown>("GET", `/orders?orderNumber=${encodeURIComponent(orderNumber)}&page=1&pageSize=100`),
+        apiRequest<unknown>("GET", `/shipments?orderNumber=${encodeURIComponent(orderNumber)}&page=1&pageSize=100`),
+      ]);
       const related = z.object({ orders: z.array(z.object({ orderId: z.number().int().positive(), orderNumber: z.string(), orderStatus: z.string() }).passthrough()),
-        pages: z.number().int().nonnegative() }).passthrough().parse(await apiRequest<unknown>("GET", `/orders?orderNumber=${encodeURIComponent(live.orderNumber)}&page=1&pageSize=100`));
+        pages: z.number().int().nonnegative() }).passthrough().parse(orderResult);
+      const labels = z.object({ shipments: z.array(z.object({ orderId: z.number().int(), orderNumber: z.string(), voided: z.boolean() }).passthrough()),
+        pages: z.number().int().nonnegative() }).passthrough().parse(labelResult);
+      if (related.pages > 1 || labels.pages > 1)
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_SPLIT_UNVERIFIED", "We couldn’t verify every shipment for this order. Your order has not been changed. Contact us for help.");
+      return { related, labels };
+    }
+    async function readProvider(providerOrderId: number, orderNumber: string, terminal?: "shipped" | "cancelled") {
+      const fulfilled = terminal === "shipped";
+      const { related, labels } = await readScope(orderNumber);
+      const observed = related.orders.find(order => order.orderId === providerOrderId && order.orderNumber === orderNumber);
+      if (!observed) throw new OrderEditError("ORDER_EDIT_PROVIDER_IDENTITY_UNVERIFIED", "We couldn’t verify that this order is ready for changes. Contact us for help.");
+      const live = providerSchema.parse(observed);
+      if (terminal ? live.orderStatus !== terminal : !["awaiting_shipment", "on_hold"].includes(live.orderStatus))
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_NOT_EDITABLE", "Your order is already being shipped and can no longer be changed online. Contact us if you need help.");
+      if (!fulfilled && labels.shipments.some(label => label.orderNumber === live.orderNumber && !label.voided))
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_LABEL_EXISTS", "Your order is already being prepared for shipping and can no longer be changed online. Contact us if you need help.");
       if (terminal === "cancelled" && input.mode !== "verify_retired") {
         if (related.pages > 1 || !related.orders.some(order => order.orderId === live.orderId && order.orderNumber === live.orderNumber)
           || related.orders.some(order => order.orderNumber === live.orderNumber && order.orderStatus !== "cancelled"))
@@ -4788,15 +4795,17 @@ export function createShipStationService(
         }
         return live;
       }
+      await verifyKnownProviderScope(related.orders.filter(order => order.orderNumber === live.orderNumber));
+      return live;
+    }
+    async function verifyKnownProviderScope(related: readonly {orderId:number;orderStatus:string}[]) {
       const known = await db.execute(sql`SELECT COALESCE(os.shipstation_order_id,
         CASE WHEN os.shipping_engine='shipstation' AND os.engine_order_ref ~ '^[0-9]+$' AND length(os.engine_order_ref)<10 THEN os.engine_order_ref::int END) AS provider_order_id
         FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id=os.order_id WHERE wo.order_edit_operation_id=${input.operationId}::uuid`);
       const knownIds = new Set((known.rows ?? []).map((row: { provider_order_id: number | null }) => row.provider_order_id));
-      if (related.pages > 1 || !related.orders.some(order => order.orderId === live.orderId)
-        || related.orders.some(order => order.orderNumber === live.orderNumber && order.orderStatus !== "cancelled" && !knownIds.has(order.orderId))) {
+      if (related.some(order => order.orderStatus !== "cancelled" && !knownIds.has(order.orderId))) {
         throw new OrderEditError("ORDER_EDIT_PROVIDER_SPLIT_UNVERIFIED", "A related ShipStation shipment is not covered by this edit hold.");
       }
-      return live;
     }
     function verifyItems(live: z.infer<typeof providerSchema>, expected: Array<{ lineItemKey: string; quantity: number }>): void {
       const actual = new Map(live.items.map(item => [item.lineItemKey, item.quantity]));
@@ -4805,22 +4814,48 @@ export function createShipStationService(
       }
     }
     await withShipmentPushLock(input.shipmentId, async () => {
+      const deferred = await db.transaction(async (tx: any) => {
+        const row = await lock(tx);
+        if (row.provider_order_id !== null) return false;
+        if (!isConfigured()) throw new OrderEditError("ORDER_EDIT_SHIPPING_UNAVAILABLE", "Shipping verification is unavailable.");
+        const { related, labels } = await readScope(row.order_number);
+        if (labels.shipments.some(label => label.orderNumber === row.order_number && !label.voided))
+          throw new OrderEditError("ORDER_EDIT_PROVIDER_LABEL_EXISTS", "Your order is already being prepared for shipping and can no longer be changed online.");
+        await verifyKnownProviderScope(related.orders.filter(order => order.orderNumber === row.order_number));
+        await verifyDeferredHeldPartition(tx, { orderId: row.order_id, shipmentId: input.shipmentId,
+          providerOrders: related.orders.filter(order => order.orderNumber === row.order_number && order.orderStatus !== "cancelled").map(order => providerSchema.extend({ orderKey: z.string().optional() }).parse(order)) });
+        return true;
+      });
+      if (deferred) return;
       // Commit baseline hold ownership BEFORE calling holduntil. A timeout after
       // provider success must not be misclassified as somebody else's hold.
+      let acquiredLive: z.infer<typeof providerSchema> | undefined;
       if (input.mode === "hold") await db.transaction(async (tx: any) => {
         const row = await lock(tx);
         if (!isConfigured()) throw new OrderEditError("ORDER_EDIT_SHIPPING_UNAVAILABLE", "ShipStation is unavailable.");
-        const live = await readProvider(row.provider_order_id);
-        await tx.execute(sql`INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held)
+        const live = await readProvider(row.provider_order_id!, row.order_number);
+        acquiredLive = live;
+        const receipt = await tx.execute(sql`INSERT INTO oms.order_edit_provider_holds(operation_id,shipment_id,provider_order_id,was_held)
           VALUES(${input.operationId}::uuid,${input.shipmentId},${row.provider_order_id},${live.orderStatus === "on_hold"})
           ON CONFLICT(operation_id,shipment_id) DO UPDATE SET provider_order_id=EXCLUDED.provider_order_id,
-            was_held=EXCLUDED.was_held,released_at=NULL WHERE oms.order_edit_provider_holds.released_at IS NOT NULL`);
+            was_held=EXCLUDED.was_held,released_at=NULL WHERE oms.order_edit_provider_holds.released_at IS NOT NULL RETURNING shipment_id`);
+        if (receipt.rows?.length) await appendOrderEditShippingAudit(tx, { operationId:input.operationId,
+          action:"provider_hold_baseline_observed", before:{providerOrderId:row.provider_order_id,status:live.orderStatus,items:live.items},
+          after:{shipmentId:input.shipmentId,editHoldRequested:true},now:(dependencies.clock ?? (()=>new Date()))() });
       });
       await db.transaction(async (tx: any) => {
         const row = await lock(tx);
         if (!isConfigured()) throw new OrderEditError("ORDER_EDIT_SHIPPING_UNAVAILABLE", "ShipStation is unavailable.");
-        const proof = await tx.execute(sql`SELECT provider_order_id,was_held FROM oms.order_edit_provider_holds
-          WHERE operation_id=${input.operationId}::uuid AND shipment_id=${input.shipmentId} AND released_at IS NULL FOR UPDATE`);
+        const proof = await tx.execute(sql`SELECT provider_order_id,was_held,released_at FROM oms.order_edit_provider_holds
+          WHERE operation_id=${input.operationId}::uuid AND shipment_id=${input.shipmentId} FOR UPDATE`);
+        if (input.mode === "verify_cancelled" && proof.rows?.length === 0) {
+          // Historical shipments can lack a hold receipt. Verify the exact
+          // terminal provider state; never fabricate an earlier hold or send a write.
+          await readProvider(row.provider_order_id!, row.order_number, "cancelled");
+          return;
+        }
+        if (proof.rows?.[0]?.released_at != null)
+          throw new OrderEditError("ORDER_EDIT_PROVIDER_HOLD_RELEASED", "The saved provider hold was already released and needs review.");
         const baseline = z.object({ provider_order_id: z.coerce.number().int().positive().safe(), was_held: z.boolean() }).parse(proof.rows?.[0]);
         if (baseline.provider_order_id !== row.provider_order_id) throw new OrderEditError("ORDER_EDIT_PROVIDER_IDENTITY_CHANGED", "The provider shipment identity changed.");
         if (input.mode === "release_unsubmitted") {
@@ -4847,6 +4882,7 @@ export function createShipStationService(
             row.on_hold !== 0 ||
             row.held ||
             row.requires_review ||
+            await providerCarriesManualHold(tx, row.order_id, live) ||
             live.orderStatus !== "on_hold"
           )
             return;
@@ -4875,23 +4911,41 @@ export function createShipStationService(
           return;
         }
         if (input.mode === "verify_shipped") {
-          await readProvider(row.provider_order_id, "shipped");
+          await readProvider(row.provider_order_id!, row.order_number, "shipped");
           return;
         }
         if (input.mode === "verify_cancelled") {
-          await readProvider(row.provider_order_id, "cancelled");
+          await readProvider(row.provider_order_id!, row.order_number, "cancelled");
           return;
         }
         if (input.mode === "verify_retired") {
           // A retired shipment can belong to a resumed warehouse header. Verify
           // its remote cancellation without reopening it. Active replacements
           // must still belong to this edit; unknown provider splits block.
-          await readProvider(row.provider_order_id, "cancelled");
+          await readProvider(row.provider_order_id!, row.order_number, "cancelled");
           return;
         }
-        const live = await readProvider(row.provider_order_id);
+        const live = acquiredLive ?? await readProvider(row.provider_order_id!, row.order_number);
+        let providerChanged = false;
         if (input.mode === "hold") {
-          if (live.orderStatus !== "on_hold") await apiRequest("POST", "/orders/holduntil", { orderId: row.provider_order_id, holdUntilDate: ORDER_EDIT_PROVIDER_HOLD_UNTIL }, { replaySafe: true });
+          if (live.orderStatus !== "on_hold") {
+            await apiRequest("POST", "/orders/holduntil", { orderId: row.provider_order_id, holdUntilDate: ORDER_EDIT_PROVIDER_HOLD_UNTIL }, { replaySafe: true });
+            providerChanged = true;
+          }
+          const held = await prepareOrderEditHeldPartitions(tx, { operationId: input.operationId,
+            orderId: row.order_id, shipmentId: input.shipmentId, live, now: (dependencies.clock ?? (() => new Date()))() });
+          retiredShipmentIds.push(...held.retiredShipmentIds);
+          if (held.excludedItemKeys.length) {
+            const excluded = new Set(held.excludedItemKeys);
+            // Preserve the provider job and all unrelated fields; only remove
+            // the exact keys assigned to verified held local partitions.
+            await apiRequest("POST", "/orders/createorder", { ...live, orderStatus: "on_hold",
+              items: live.items.filter(item => !excluded.has(item.lineItemKey)) }, { replaySafe: true });
+            providerChanged = true;
+            await appendOrderEditShippingAudit(tx, {operationId:input.operationId,action:"held_partition_provider_membership_amended",
+              before:{shipmentId:input.shipmentId,items:live.items},after:{excludedItemKeys:held.excludedItemKeys,manualHoldsRetained:true},
+              now:(dependencies.clock ?? (()=>new Date()))()});
+          }
         } else if (input.mode !== "release" && live.orderStatus !== "on_hold") {
           throw new OrderEditError("ORDER_EDIT_PROVIDER_HOLD_MISSING", "ShipStation no longer confirms the edit hold.");
         }
@@ -4917,12 +4971,14 @@ export function createShipStationService(
             }
           }
         }
-        const verified = await readProvider(row.provider_order_id);
+        const verified = input.mode === "verify" || (input.mode === "hold" && !providerChanged)
+          ? live : await readProvider(row.provider_order_id!, row.order_number);
         const retainedHold = input.mode !== "release" || baseline.was_held || row.on_hold !== 0 || row.held;
         if (verified.orderStatus !== (retainedHold ? "on_hold" : "awaiting_shipment")) throw new OrderEditError("ORDER_EDIT_PROVIDER_HOLD_NOT_VERIFIED", "ShipStation hold state was not verified.");
         if (expectedItems) verifyItems(verified, expectedItems);
       });
     });
+    return { retiredShipmentIds };
   }
 
   /**
@@ -5263,12 +5319,11 @@ export function createShipStationService(
 
       // The address is now correct in ShipStation — the advisory flag for
       // THIS reason is resolved. Other review reasons must survive.
-      await db.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = false, review_reason = NULL, updated_at = ${new Date()}
-        WHERE id = ${Number(row.id)}
-          AND review_reason = 'address_changed_after_push'
-      `);
+      await clearOutboundShipmentReviewFlagByReasonInWms(db, {
+        shipmentId: Number(row.id),
+        expectedReason: "address_changed_after_push",
+        updatedAt: new Date(),
+      });
     }
 
     return { updated, skipped };
@@ -5462,17 +5517,196 @@ export function createShipStationService(
         }
       }
 
-      await db.execute(sql`
-        UPDATE wms.outbound_shipment_items
-        SET provider_membership_state = 'authoritative'
-        WHERE shipment_id = ${shipmentId}
-          AND id = ANY(ARRAY[${sql.join(normalizedItemIds.map((id) => sql`${id}`), sql`, `)}]::int[])
-      `);
+      await markAppendedShipmentItemsAuthoritativeInWms(db, {
+        shipmentId,
+        normalizedItemIds,
+      });
 
       return {
         state: allPresent ? "already_applied" : "applied",
         providerStatus,
       };
+    });
+  }
+  /**
+   * Raise one existing ShipStation line to the current WMS demand for its
+   * order item, after the order was already pushed (a channel edit added
+   * units to a line the package already carries).
+   *
+   * Why: a package holds one row per order item, and appendShipmentItems only
+   * adds new lines by key. #65696 (2026-11-16) grew 8 -> 10 units on a queued
+   * shipment; the append path tried to insert a second row, hit
+   * uq_wms_outbound_shipment_items_shipment_order_item, and ShipStation kept 8.
+   *
+   * The target is recomputed here from current WMS rows (order item quantity
+   * minus coverage on the order's other active packages), so replays and later
+   * edits converge. Only increases are applied; reductions have other owners.
+   * The local row changes only after ShipStation verifies the new quantity, so
+   * it never claims more than the engine holds. Same per-shipment pinned lock as
+   * pushShipment/appendShipmentItems.
+   */
+  async function setShipmentItemQuantity(
+    shipmentId: number,
+    shipmentItemId: number,
+  ): Promise<EngineShipmentItemAppendResult> {
+    for (const [field, value] of [["shipmentId", shipmentId], ["shipmentItemId", shipmentItemId]] as const) {
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new ShipStationPushError(`${field} must be a positive integer`, {
+          code: SS_PUSH_INVALID_SHIPMENT,
+          shipmentId,
+          field,
+          value,
+        });
+      }
+    }
+
+    return withShipmentPushLock<EngineShipmentItemAppendResult>(shipmentId, async () => {
+      const shipmentResult: any = await db.execute(sql`
+        SELECT os.id, os.requires_review, os.review_reason, os.shipstation_order_id,
+               wo.order_edit_operation_id
+        FROM wms.outbound_shipments os JOIN wms.orders wo ON wo.id = os.order_id
+        WHERE os.id = ${shipmentId}
+        LIMIT 1
+      `);
+      const shipment = shipmentResult?.rows?.[0];
+      if (!shipment) {
+        throw new ShipStationPushError("shipment not found", {
+          code: SS_PUSH_INVALID_SHIPMENT, shipmentId, field: "shipment", value: null,
+        });
+      }
+      if (shipment.requires_review === true) {
+        throw new ShipStationPushError(
+          `shipment requires review and cannot be amended (${shipment.review_reason ?? "review_required"})`,
+          { code: SS_PUSH_INVALID_SHIPMENT, shipmentId, field: "shipment.requires_review", value: shipment.review_reason ?? true },
+        );
+      }
+      const shipstationOrderId = Number(shipment.shipstation_order_id);
+      if (!Number.isInteger(shipstationOrderId) || shipstationOrderId <= 0) {
+        throw new ShipStationPushError("shipment has no ShipStation order identity for quantity amend", {
+          code: SS_PUSH_INVALID_SHIPMENT, shipmentId, field: "shipment.shipstation_order_id", value: shipment.shipstation_order_id ?? null,
+        });
+      }
+
+      const rowResult: any = await db.execute(sql`
+        SELECT
+          osi.id,
+          osi.qty,
+          osi.provider_membership_state,
+          osi.order_item_id,
+          oi.quantity AS order_item_quantity,
+          oi.status AS order_item_status,
+          COALESCE((
+            SELECT SUM(other.qty)
+            FROM wms.outbound_shipment_items other
+            JOIN wms.outbound_shipments other_shipment ON other_shipment.id = other.shipment_id
+            WHERE other.order_item_id = osi.order_item_id
+              AND other.id <> osi.id
+              AND other_shipment.status NOT IN ('voided', 'cancelled')
+          ), 0)::int AS other_coverage
+        FROM wms.outbound_shipment_items osi
+        JOIN wms.order_items oi ON oi.id = osi.order_item_id
+        WHERE osi.id = ${shipmentItemId}
+          AND osi.shipment_id = ${shipmentId}
+          AND osi.shipment_item_purpose = 'customer_fulfillment'
+        LIMIT 1
+      `);
+      const row = rowResult?.rows?.[0];
+      if (!row) {
+        throw new ShipStationPushError("shipment item is missing, foreign, or not a customer line", {
+          code: SS_PUSH_INVALID_SHIPMENT, shipmentId, field: "shipmentItemId", value: shipmentItemId,
+        });
+      }
+      const currentQuantity = Number(row.qty);
+      const targetQuantity = Number(row.order_item_quantity) - Number(row.other_coverage);
+      if (!Number.isSafeInteger(currentQuantity) || !Number.isSafeInteger(targetQuantity)) {
+        throw new ShipStationPushError("shipment item quantities are not integers", {
+          code: SS_PUSH_INVALID_SHIPMENT, shipmentId, field: "qty", value: { currentQuantity, targetQuantity },
+        });
+      }
+      if (row.order_item_status === "cancelled" || targetQuantity <= currentQuantity) {
+        // Nothing to grow: already applied, or demand fell (a reduction owner decides).
+        return { state: "already_applied", providerStatus: "not_checked" };
+      }
+
+      // Strict read: transport errors and unknown state throw and retry.
+      const liveOrder = await apiRequest<any>("GET", `/orders/${shipstationOrderId}`);
+      const providerStatus = String(liveOrder?.orderStatus ?? "unknown").toLowerCase();
+      if (shipment.order_edit_operation_id != null && providerStatus !== "on_hold") {
+        throw new OrderEditError("ORDER_EDIT_PROVIDER_HOLD_MISSING", "ShipStation must remain held while edited lines synchronize.");
+      }
+      const lineItemKey = `wms-item-${shipmentItemId}`;
+      const liveItems: any[] = Array.isArray(liveOrder?.items) ? liveOrder.items : [];
+      const liveLine = liveItems.find((item: any) => String(item?.lineItemKey ?? "").trim() === lineItemKey);
+
+      const commitLocalQuantity = async () => {
+        const updated: any = await commitAmendedShipmentItemQuantityInWms(db, {
+          shipmentItemId,
+          targetQuantity,
+          currentQuantity,
+        });
+        if ((updated?.rows?.length ?? 0) !== 1) {
+          // Changed underneath us; the retry recomputes from fresh rows.
+          throw new ShipStationPushError("shipment item changed during quantity amend", {
+            code: "SS_PUSH_QUANTITY_AMEND_CONFLICT", shipmentId, field: "qty", value: currentQuantity,
+          });
+        }
+      };
+
+      if (!liveLine) {
+        if (row.provider_membership_state === "pending_append") {
+          // Not in ShipStation yet; the pending append (serialized by this
+          // lock) will send the row with its new quantity.
+          await commitLocalQuantity();
+          return { state: "applied", providerStatus };
+        }
+        throw new ShipStationPushError(
+          `ShipStation order ${shipstationOrderId} has no line ${lineItemKey} to amend`,
+          { code: "SS_PUSH_QUANTITY_AMEND_LINE_MISSING", shipmentId, field: "lineItemKey", value: lineItemKey },
+        );
+      }
+
+      if (Number(liveLine.quantity) === targetQuantity) {
+        // ShipStation already has it (an earlier attempt wrote it, then failed locally).
+        await commitLocalQuantity();
+        return { state: "already_applied", providerStatus };
+      }
+      if (providerStatus === "shipped" || providerStatus === "cancelled") {
+        return { state: "not_editable", providerStatus };
+      }
+      if (providerStatus !== "awaiting_shipment" && providerStatus !== "on_hold") {
+        throw new ShipStationPushError(
+          `ShipStation amendment state is not recognized as editable or terminal (${providerStatus})`,
+          { code: "SS_PUSH_AMENDMENT_STATE_UNKNOWN", shipmentId, field: "orderStatus", value: providerStatus },
+        );
+      }
+
+      await apiRequest("POST", "/orders/createorder", {
+        ...liveOrder,
+        items: liveItems.map((item: any) =>
+          String(item?.lineItemKey ?? "").trim() === lineItemKey ? { ...item, quantity: targetQuantity } : item),
+      }, { replaySafe: true });
+
+      const verifiedOrder = await apiRequest<any>("GET", `/orders/${shipstationOrderId}`);
+      const verifiedLine = (Array.isArray(verifiedOrder?.items) ? verifiedOrder.items : [])
+        .find((item: any) => String(item?.lineItemKey ?? "").trim() === lineItemKey);
+      if (!verifiedLine || Number(verifiedLine.quantity) !== targetQuantity) {
+        throw new ShipStationPushError(
+          `ShipStation quantity amendment verification failed for ${lineItemKey}`,
+          { code: "SS_PUSH_AMENDMENT_VERIFICATION_FAILED", shipmentId, field: "quantity", value: targetQuantity },
+        );
+      }
+      await commitLocalQuantity();
+      console.log(JSON.stringify({
+        level: "info",
+        action: "shipstation_line_quantity_amended",
+        outcome: "applied",
+        shipment_id: shipmentId,
+        shipment_item_id: shipmentItemId,
+        engine_ref: shipstationOrderId,
+        before: currentQuantity,
+        after: targetQuantity,
+      }));
+      return { state: "applied", providerStatus };
     });
   }
   // -------------------------------------------------------------------------
@@ -6006,19 +6240,12 @@ export function createShipStationService(
     // agnostic triple (C9) in a single atomic UPDATE.
     const now = new Date();
     await db.transaction(async (tx: any) => {
-      await tx.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET shipstation_order_id = ${result.orderId},
-            shipstation_order_key = ${orderKey},
-            shipping_engine = 'shipstation',
-            engine_order_ref = ${String(result.orderId)},
-            engine_shipment_ref = ${orderKey},
-            status = 'queued',
-            voided_at = NULL,
-            voided_reason = NULL,
-            updated_at = ${now}
-        WHERE id = ${shipmentId}
-      `);
+      await markOutboundShipmentQueuedAfterShipStationPushInWms(tx, {
+        shipmentId,
+        shipstationOrderId: result.orderId,
+        orderKey,
+        now,
+      });
 
       await resolveShipStationHandoffCommands(
         tx,
@@ -6030,11 +6257,10 @@ export function createShipStationService(
         // The operator explicitly resolved the review by re-pushing; clear the
         // flag so the shipment leaves the SHIPMENT_REQUIRES_REVIEW bucket
         // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md P2).
-        await tx.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET requires_review = false, review_reason = NULL, updated_at = ${now}
-          WHERE id = ${shipmentId} AND requires_review = true
-        `);
+        await clearOutboundShipmentReviewFlagByReasonInWms(tx, {
+          shipmentId,
+          updatedAt: now,
+        });
       }
     });
     await recomputeOrderStatusFromShipments(db, shipmentRow.order_id);
@@ -6049,6 +6275,7 @@ export function createShipStationService(
   return {
     pushShipment,
     appendShipmentItems,
+    setShipmentItemQuantity,
     getShipments,
     getShipmentById,
     getOrderById,

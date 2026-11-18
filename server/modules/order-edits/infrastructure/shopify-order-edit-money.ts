@@ -16,3 +16,11 @@ export function cents(value: string, signed = false): number {
     );
   }
 }
+
+/** Exact USD bag used by both order commands and saved account facts. */
+export function shopifyMoneyBagCents(value: { presentmentMoney: { amount: string; currencyCode: "USD" }; shopMoney: { amount: string; currencyCode: "USD" } }, signed = false): number {
+  const presentment = cents(value.presentmentMoney.amount, signed);
+  const shop = cents(value.shopMoney.amount, signed);
+  if (presentment !== shop) throw new OrderEditProviderError("CURRENCY_CONVERSION_UNSUPPORTED", "Shop and presentment amounts must match for this pilot.", "rejected");
+  return presentment;
+}

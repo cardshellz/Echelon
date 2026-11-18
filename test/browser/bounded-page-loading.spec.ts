@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { test, expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 
@@ -20,7 +21,7 @@ async function setup(page: Page, mode = "wms", fail = false) {
       return;
     }
     let body: unknown = [];
-    if (url.pathname === "/api/auth/me") body = { user: { id: "tester", username: "tester", role: "admin" }, permissions: ["orders:view"], roles: ["admin"] };
+    if (url.pathname === "/api/auth/me") body = staffAuthorityFixture({ user: { id: "tester", username: "tester", role: "admin" }, permissions: ["orders:view"], systemRoles: ["admin"] });
     if (url.pathname === "/api/wms/orders") {
       const offset = Number(url.searchParams.get("offset") ?? 0);
       const searching = !!url.searchParams.get("search");

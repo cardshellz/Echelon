@@ -474,7 +474,7 @@ describe("eBay tracking push regression (2026-04-14)", () => {
 
   it("routes dropship OMS orders to the dropship marketplace tracking service", async () => {
     const dropshipTracking = {
-      pushForOmsOrder: vi.fn(async () => ({ status: "succeeded" })),
+      pushForOmsOrder: vi.fn(async () => ({ status: "succeeded" as const })),
     };
     const { db } = makeMockDb({
       order: {
@@ -501,7 +501,7 @@ describe("eBay tracking push regression (2026-04-14)", () => {
 
   it("treats an in-flight dropship marketplace tracking push as idempotent", async () => {
     const dropshipTracking = {
-      pushForOmsOrder: vi.fn(async () => ({ status: "already_processing" })),
+      pushForOmsOrder: vi.fn(async () => ({ status: "already_processing" as const })),
     };
     const { db } = makeMockDb({
       order: {
@@ -527,7 +527,7 @@ describe("eBay tracking push regression (2026-04-14)", () => {
 
   it("does not invent shippedAt for dropship marketplace tracking", async () => {
     const dropshipTracking = {
-      pushForOmsOrder: vi.fn(async () => ({ status: "succeeded" })),
+      pushForOmsOrder: vi.fn(async () => ({ status: "succeeded" as const })),
     };
     const { db, insertedEvents } = makeMockDb({
       order: {

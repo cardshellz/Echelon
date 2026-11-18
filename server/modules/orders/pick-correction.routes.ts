@@ -3,7 +3,7 @@ import { ZodError } from "zod";
 import { requireAuth, requirePermission } from "../../routes/middleware";
 import { hasPermission } from "../identity";
 import { pickCorrectionListSchema, pickCorrectionSchema } from "@shared/pick-corrections";
-import { PickCorrectionError } from "../wms/pick-correction.repository";
+import { PickCorrectionError } from "../wms/pick-corrections-and-holds.api";
 import type { PickCorrectionService } from "./pick-correction.service";
 
 export function registerPickCorrectionRoutes(app: Express, service: PickCorrectionService): void {

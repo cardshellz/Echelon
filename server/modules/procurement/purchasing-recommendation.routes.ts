@@ -15,6 +15,8 @@ import { alias } from "drizzle-orm/pg-core";
 import { centsToMills, computeLineTotalCentsFromMills } from "@shared/utils/money";
 import { db } from "../../db";
 import { requireAnyPermission, requirePermission } from "../../routes/middleware";
+import { hasAssignedSystemRole, readCurrentStaffAccess } from "../identity";
+import { logger } from "../../platform/observability/logger";
 import { rfqWorkListQuerySchema } from "@shared/procurement/rfq-work-list";
 import { procurementStorage } from "../procurement";
 import { inventoryStorage } from "../inventory";
@@ -64,14 +66,29 @@ import {
 } from "./purchasing-forecast-policy";
 const storage = { ...procurementStorage, ...inventoryStorage };
 
-function requireManualAutoDraftAdmin(req: Request, res: Response, next: NextFunction): void {
-  // Both HTTP aliases start the same job. Use the session principal checked by
-  // requirePermission so the legacy alias cannot bypass the administrator rule.
-  if (req.session?.user?.role !== "admin") {
-    res.status(403).json({ error: "Admin role required", code: "AUTO_DRAFT_ADMIN_REQUIRED" });
-    return;
+async function requireManualAutoDraftAdmin(req: Request, res: Response, next: NextFunction): Promise<void> {
+  // Both aliases keep the extra administrator requirement as well as their
+  // inventory:adjust grant. A cached account label is not role assignment.
+  try {
+    const actorId = req.session?.user?.id;
+    const access = actorId ? await readCurrentStaffAccess(actorId) : undefined;
+    if (!access || !hasAssignedSystemRole(access, ["admin"])) {
+      res.status(403).json({ error: "Admin role required", code: "AUTO_DRAFT_ADMIN_REQUIRED" });
+      return;
+    }
+    next();
+  } catch {
+    try {
+      logger.error("procurement.auto_draft.authorize", {
+        module: "procurement", outcome: "failed", error_code: "AUTO_DRAFT_AUTHORITY_UNAVAILABLE",
+        dependency: "identity", actor_id: req.session?.user?.id,
+      });
+    } catch {
+      // Diagnostic delivery cannot turn a denied command into an unhandled
+      // error or leak the authority reader's database/provider diagnostics.
+    }
+    res.status(503).json({ error: "Current authorization could not be verified", code: "AUTO_DRAFT_AUTHORITY_UNAVAILABLE" });
   }
-  next();
 }
 
 // Entries in `items` keep forwardDemandBasis.contributions in the response: the

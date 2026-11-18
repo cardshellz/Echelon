@@ -1,4 +1,7 @@
-import { readIntegerCents } from "@shared/money-read";
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
+import { readShipmentCostExclusions } from "./shipment-cost-exclusions.repository";
+import { readTaxedShipmentSupplierCosts } from "./purchase-tax-costs.repository";
 import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";
 import { readShipmentReceivingSetup, shipmentReceivingUnitSource } from "./shipment-receiving-setup.service";
 import type { ShipmentReceivingSetup } from "@shared/procurement/shipment-receiving-setup";
@@ -171,13 +174,17 @@ interface Storage {
   getProvisionalLotsByShipment(inboundShipmentId: number, executor?: any): Promise<InventoryLot[]>;
   // PO references
   getPurchaseOrderById(id: number, executor?: any): Promise<any>;
+  getPurchaseOrdersByIds?(ids: number[], executor?: any): Promise<any[]>;
   getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<any[]>;
   getPurchaseOrderLineById(id: number, executor?: any): Promise<any>;
+  getPurchaseOrderLinesByIds?(ids: number[], executor?: any): Promise<any[]>;
   // Vendor product dimensions
   getVendorProducts(filters?: any, executor?: any): Promise<any[]>;
   // Product variant + product lookups
   getProductVariantById(id: number, executor?: any): Promise<any>;
+  getProductVariantsByIds?(ids: number[], executor?: any): Promise<any[]>;
   getProductById(id: number): Promise<any>;
+  getProductsByIds?(ids: number[], executor?: any): Promise<any[]>;
 }
 
 interface LotCostRevalueService {
@@ -265,7 +272,9 @@ function snapshotAllocatedCostCents(snapshot: any): number | null {
     if (cents === null) return null;
     total += cents;
   }
-  return total;
+  const recoverable = nonNegativeIntegerOrNull(snapshot?.recoverableTaxAllocatedCents ?? 0);
+  const excluded = readIntegerCents(snapshot?.excludedSupplierAllocatedCents ?? 0, "supplier header exclusion", true);
+  return recoverable === null || BigInt(recoverable) + BigInt(excluded) > BigInt(total) ? null : readIntegerCents(BigInt(total) - BigInt(recoverable) - BigInt(excluded), "inventory-valued shipment charges");
 }
 
 export type ShipmentTrackingService = ReturnType<typeof createShipmentTrackingService>;
@@ -471,7 +480,7 @@ export function createShipmentTrackingService(
       .some(field => shipment[field] == null || !new Decimal(shipment[field]!).eq(summary[field]));
     if (!physicalChanges.length && !summaryChanged) return;
     await storage.updateInboundShipment(shipment.id, summary, tx, at);
-    await tx.insert(auditEvents).values({ timestamp: at, level: "AUDIT", actor: actorId ?? "system:shipment-costs",
+    await insertAuditEventDrizzle(tx, { timestamp: at, level: "AUDIT", actor: actorId ?? "system:shipment-costs",
       action: "procurement.shipment.physical_totals_materialized", target: `shipment:${shipment.id}`,
       changes: { lines: physicalChanges, before: { totalWeightKg: shipment.totalWeightKg, totalVolumeCbm: shipment.totalVolumeCbm,
         totalPieces: shipment.totalPieces, totalCartons: shipment.totalCartons }, after: summary },
@@ -525,13 +534,16 @@ export function createShipmentTrackingService(
       }
     }
 
-    return { breakdowns, pendingCategories };
+    return { breakdowns, pendingCategories, costs };
   }
 
 
   async function getEnrichedLines(shipmentId: number) {
     const lines = await storage.getInboundShipmentLines(shipmentId);
-    const { breakdowns: allocationBreakdowns, pendingCategories } = await getAllocationBreakdownsByLine(shipmentId, lines);
+    const { breakdowns: allocationBreakdowns, pendingCategories, costs } = await getAllocationBreakdownsByLine(shipmentId, lines);
+    const exclusions = await readShipmentCostExclusions(db, shipmentId, costs);
+    const recoverableTaxes = exclusions.taxByLine;
+    const selectedTaxSupplierCosts = await readTaxedShipmentSupplierCosts(db, lines, costs.some(cost => cost.taxTypeId != null));
 
     // Batch-fetch unique variant IDs and PO line IDs
     const variantIds = Array.from(new Set(lines.map(l => l.productVariantId).filter(Boolean))) as number[];
@@ -542,31 +554,69 @@ export function createShipmentTrackingService(
     const poLineMap = new Map<number, any>();
     const purchaseOrderMap = new Map<number, { currency: string | null }>();
 
-    // Fetch variants
-    await Promise.all(variantIds.map(async (id) => {
-      const pv = await storage.getProductVariantById(id);
-      if (pv) variantMap.set(id, pv);
-    }));
+    // Batch-fetch variants
+    if (variantIds.length > 0) {
+      if (typeof storage.getProductVariantsByIds === "function") {
+        const variants = await storage.getProductVariantsByIds(variantIds);
+        for (const pv of variants) {
+          if (pv) variantMap.set(pv.id, pv);
+        }
+      } else {
+        await Promise.all(variantIds.map(async (id) => {
+          const pv = await storage.getProductVariantById(id);
+          if (pv) variantMap.set(id, pv);
+        }));
+      }
+    }
 
-    // Fetch products (for real product title) via variant.productId
+    // Batch-fetch products (for real product title) via variant.productId
     const productIds = Array.from(new Set(
       Array.from(variantMap.values()).map((pv: any) => pv.productId).filter(Boolean)
     )) as number[];
-    await Promise.all(productIds.map(async (id) => {
-      const product = await storage.getProductById(id);
-      if (product) productMap.set(id, product);
-    }));
+    if (productIds.length > 0) {
+      if (typeof storage.getProductsByIds === "function") {
+        const productsList = await storage.getProductsByIds(productIds);
+        for (const product of productsList) {
+          if (product) productMap.set(product.id, product);
+        }
+      } else {
+        await Promise.all(productIds.map(async (id) => {
+          const product = await storage.getProductById(id);
+          if (product) productMap.set(id, product);
+        }));
+      }
+    }
 
-    // Fetch PO lines
-    await Promise.all(poLineIds.map(async (id) => {
-      const pol = await storage.getPurchaseOrderLineById(id);
-      if (pol) poLineMap.set(id, pol);
-    }));
+    // Batch-fetch PO lines
+    if (poLineIds.length > 0) {
+      if (typeof storage.getPurchaseOrderLinesByIds === "function") {
+        const poLines = await storage.getPurchaseOrderLinesByIds(poLineIds);
+        for (const pol of poLines) {
+          if (pol) poLineMap.set(pol.id, pol);
+        }
+      } else {
+        await Promise.all(poLineIds.map(async (id) => {
+          const pol = await storage.getPurchaseOrderLineById(id);
+          if (pol) poLineMap.set(id, pol);
+        }));
+      }
+    }
+
+    // Batch-fetch PO headers
     const purchaseOrderIds = [...new Set(lines.flatMap((line) => line.purchaseOrderId == null ? [] : [line.purchaseOrderId]))];
-    await Promise.all(purchaseOrderIds.map(async (id) => {
-      const purchaseOrder = await storage.getPurchaseOrderById(id);
-      if (purchaseOrder) purchaseOrderMap.set(id, purchaseOrder);
-    }));
+    if (purchaseOrderIds.length > 0) {
+      if (typeof storage.getPurchaseOrdersByIds === "function") {
+        const purchaseOrdersList = await storage.getPurchaseOrdersByIds(purchaseOrderIds);
+        for (const purchaseOrder of purchaseOrdersList) {
+          if (purchaseOrder) purchaseOrderMap.set(purchaseOrder.id, purchaseOrder);
+        }
+      } else {
+        await Promise.all(purchaseOrderIds.map(async (id) => {
+          const purchaseOrder = await storage.getPurchaseOrderById(id);
+          if (purchaseOrder) purchaseOrderMap.set(id, purchaseOrder);
+        }));
+      }
+    }
 
     const shipmentUnitOptions = await readShipmentUnitOptions(db, lines.map((line) => ({ key: line.id,
       ...shipmentReceivingUnitSource(line, line.purchaseOrderLineId ? poLineMap.get(line.purchaseOrderLineId) : undefined),
@@ -586,7 +636,11 @@ export function createShipmentTrackingService(
           + allocationBreakdown.insuranceAllocatedCents
           + allocationBreakdown.otherAllocatedCents
         : null;
-      const allocatedCostCents = pendingCategories.size ? null : line.allocatedCostCents ?? breakdownTotalCents;
+      const savedAllocation = pendingCategories.size ? null : line.allocatedCostCents ?? breakdownTotalCents;
+      const allocatedCostCents = savedAllocation === null ? null : readIntegerCents(savedAllocation, "allocatedCents", true);
+      const recoverableTaxCents = recoverableTaxes.get(line.id) ?? 0;
+      const inventoryAllocatedCostCents = allocatedCostCents === null ? null
+        : readIntegerCents(BigInt(allocatedCostCents) - BigInt(recoverableTaxCents) - BigInt(exclusions.otherByLine.get(line.id) ?? 0), "inventory shipment share", true);
       let productValue: ReturnType<typeof projectShipmentProductValue> | null = null;
       let productValueIssue: { code: string; message: string } | null = null;
       try {
@@ -597,20 +651,26 @@ export function createShipmentTrackingService(
           totalVolumeCbm: null, totalWeightKg: null, chargeableWeightKg: null,
           poLineId: pol.id, poOrderQty: pol.orderQty, poTotalProductCostCents: pol.totalProductCostCents,
           poCurrency: line.purchaseOrderId == null ? null : purchaseOrderMap.get(line.purchaseOrderId)?.currency ?? null }], "by_value");
-        productValue = projectShipmentProductValue(buildShipmentAllocationEvidence(valueBasis, line.id), allocatedCostCents ?? 0);
+        productValue = projectShipmentProductValue(buildShipmentAllocationEvidence(valueBasis, line.id), inventoryAllocatedCostCents ?? 0);
       } catch (error) {
         // An invalid source remains visible as unknown in this read projection;
         // allocation/finalization revalidates it and rejects the command.
         productValueIssue = { code: "INVALID_SHIPMENT_PRODUCT_VALUE", message: error instanceof Error ? error.message : "Review shipment product value" };
       }
       const poUnitCostMills = productValue?.poUnitCostMills ?? null;
-      const totalAllocatedMillsPerUnit = allocatedCentsPerUnitMills(allocatedCostCents, line.qtyShipped);
-      const landedUnitCostMills =
+      const totalAllocatedMillsPerUnit = allocatedCentsPerUnitMills(inventoryAllocatedCostCents, line.qtyShipped);
+      const quotedLandedUnitCostMills =
         productValue !== null && totalAllocatedMillsPerUnit !== null ? productValue.landedUnitCostMills : null;
+      const selectedSupplier = selectedTaxSupplierCosts.get(line.id);
+      const landedUnitCostMills = selectedSupplier === undefined ? quotedLandedUnitCostMills
+        : selectedSupplier.unitCostMills === null || totalAllocatedMillsPerUnit === null ? null
+          : readIntegerMills(BigInt(selectedSupplier.unitCostMills) + BigInt(totalAllocatedMillsPerUnit), "selected landed cost per piece");
+      if (selectedSupplier?.reason) productValueIssue = { code: "PURCHASE_TAX_COST_REVIEW", message: selectedSupplier.reason };
       return {
         ...versionShipmentLine(line),
         ...readPhysicalLineProjection(line),
         allocatedCostCents,
+        recoverableTaxCents, inventoryAllocatedCostCents,
         allocationPending: pendingCategories.size > 0,
         freightAllocationPending: pendingCategories.has("freight"),
         sku: line.sku || pol?.sku || pv?.sku || product?.sku || null,
@@ -966,6 +1026,21 @@ export function createShipmentTrackingService(
     }
 
     const updates = command.operation === "delete" ? {} : await resolveCostPerformer(tx, costFields(data), before);
+    if (before && costFieldChanged(before, updates, "taxTypeId")) costError("Change a saved tax treatment through its administrator-approved tax review.", 409, "SHIPMENT_TAX_APPROVAL_REQUIRED");
+    if (before?.taxTypeId != null && updates.costType !== undefined && !["tax", "duty"].includes(updates.costType)) {
+      costError("This charge has an approved tax type. It must remain a tax or duty charge.", 409, "SHIPMENT_TAX_APPROVAL_REQUIRED");
+    }
+    if (before?.taxTypeId != null && [updates.actualCents, updates.estimatedCents].some(amount => amount != null && amount < 0)) {
+      costError("Record a supplier tax credit against its original charge; this editor cannot assume its refund allocation.", 422, "SHIPMENT_TAX_CREDIT_REVIEW");
+    }
+    if (updates.costType !== undefined && ["tax", "duty"].includes(updates.costType)
+      && updates.costType !== before?.costType && (updates.taxTypeId ?? before?.taxTypeId) == null) {
+      costError("Add this tax charge with a configured tax type, then review its cost changes.", 422, "SHIPMENT_TAX_TYPE_MISSING");
+    }
+    if (command.operation === "create" && updates.taxTypeId != null) {
+      const selected = await tx.execute(sqlTag`SELECT id FROM procurement.purchase_tax_types WHERE id=${updates.taxTypeId} FOR SHARE`);
+      if (!selected.rows.length) costError("The selected tax type no longer exists. Reload the tax settings.", 422, "SHIPMENT_TAX_TYPE_MISSING");
+    }
     const allocationFields = ["costType", "estimatedCents", "actualCents", "currency", "exchangeRate", "allocationMethod"] as const;
     const protectedFields = [...allocationFields, "vendorId", "invoiceDate"] as const;
     const affectsEconomics = command.operation !== "update" || allocationFields.some((field) => costFieldChanged(before!, updates, field));
@@ -1006,7 +1081,7 @@ export function createShipmentTrackingService(
       await refreshAllocationsForShipmentInTransaction(tx, shipmentId, shipment, now, actorId);
     }
     const targetId = after?.id ?? before!.id;
-    await tx.insert(auditEvents).values({
+    await insertAuditEventDrizzle(tx, {
       timestamp: now, level: "AUDIT", actor: actorId,
       action: `procurement.shipment_cost.${command.operation === "create" ? "created" : command.operation === "update" ? "amended" : "deleted"}`,
       target: `shipment_cost:${targetId}`,
@@ -1102,6 +1177,8 @@ export function createShipmentTrackingService(
 
     // Bulk insert all allocations
     let totalAllocated = 0;
+    const exclusions = await readShipmentCostExclusions(tx, shipmentId, costs, allNewAllocations.map(row => ({ shipment_cost_id: row.shipmentCostId, inbound_shipment_line_id: row.inboundShipmentLineId, allocated_cents: row.allocatedCents })));
+    const recoverableTaxes = exclusions.taxByLine;
     const resultLines: Awaited<ReturnType<typeof runAllocationInTransaction>>["allocations"] = [];
     const lineUpdates: Array<{ lineId: number; allocatedCostCents: number | null; landedUnitCostCents: number | null }> = [];
 
@@ -1110,7 +1187,8 @@ export function createShipmentTrackingService(
       const totalForLine = acc.freightCents + acc.dutyCents + acc.insuranceCents + acc.otherCents;
       totalAllocated += totalForLine;
 
-      const productValue = await projectLineProductValue(line, totalForLine, tx);
+      const inventoryChargeCents = readIntegerCents(BigInt(totalForLine) - BigInt(recoverableTaxes.get(line.id) ?? 0) - BigInt(exclusions.otherByLine.get(line.id) ?? 0), "inventory-valued allocation");
+      const productValue = await projectLineProductValue(line, inventoryChargeCents, tx);
       const poUnitCostCents = productValue?.amounts.poUnitCostCents ?? null;
       const landedUnitCostCents = pendingCostIds.length ? null : productValue?.amounts.landedUnitCostCents ?? null;
       lineUpdates.push({ lineId: line.id, allocatedCostCents: pendingCostIds.length ? null : totalForLine, landedUnitCostCents });
@@ -1150,7 +1228,7 @@ export function createShipmentTrackingService(
         landedUnitCostCents: update.landedUnitCostCents,
       } as any, tx, at);
     }
-    if (allocationChanged || changedLines.length) await tx.insert(auditEvents).values({
+    if (allocationChanged || changedLines.length) await insertAuditEventDrizzle(tx, {
       timestamp: at, level: "AUDIT", actor: actorId ?? "system:shipment-allocation", action: "procurement.shipment.allocation_refreshed",
       target: `shipment:${shipmentId}`, changes: { before: savedAllocations, after: allNewAllocations, lines: changedLines },
       context: { shipmentId, pendingCostIds, source: "saved_shipment_line_measurements" },
@@ -1608,7 +1686,7 @@ export function createShipmentTrackingService(
 
   function getCostCategory(costType: string): "freight" | "duty" | "insurance" | "other" {
     if (costType === "freight" || costType === "drayage" || costType === "port_handling" || costType === "dimensions_adjustment") return "freight";
-    if (costType === "duty" || costType === "brokerage") return "duty";
+    if (costType === "duty" || costType === "tax" || costType === "brokerage") return "duty";
     if (costType === "insurance") return "insurance";
     return "other";
   }
@@ -1654,6 +1732,8 @@ export function createShipmentTrackingService(
       sameNullableNumber(existing.dutyAllocatedCents, (next as any).dutyAllocatedCents) &&
       sameNullableNumber(existing.insuranceAllocatedCents, (next as any).insuranceAllocatedCents) &&
       sameNullableNumber(existing.otherAllocatedCents, (next as any).otherAllocatedCents) &&
+      sameNullableNumber(existing.recoverableTaxAllocatedCents ?? 0, (next as any).recoverableTaxAllocatedCents ?? 0) &&
+      sameNullableNumber(existing.excludedSupplierAllocatedCents ?? 0, next.excludedSupplierAllocatedCents ?? 0) &&
       sameNullableNumber(existing.totalLandedCostCents, (next as any).totalLandedCostCents) &&
       sameNullableNumber(existing.landedUnitCostCents, (next as any).landedUnitCostCents) &&
       sameNullableNumber(existing.qty, (next as any).qty)
@@ -1759,6 +1839,8 @@ export function createShipmentTrackingService(
 
     // Re-fetch lines after allocation
     const updatedLines = await storage.getInboundShipmentLines(shipmentId, tx);
+    const exclusions = await readShipmentCostExclusions(tx, shipmentId, await storage.getInboundFreightCosts(shipmentId, tx));
+    const recoverableTaxes = exclusions.taxByLine;
 
     // Fetch old snapshots before deleting
     const oldSnapshotsByLine = new Map<number, any>();
@@ -1788,7 +1870,11 @@ export function createShipmentTrackingService(
         else otherCents += cents;
       }
 
-      const productValue = await projectLineProductValue(line, freightCents + dutyCents + insuranceCents + otherCents, tx);
+      const recoverableTaxAllocatedCents = recoverableTaxes.get(line.id) ?? 0;
+      const excludedSupplierAllocatedCents = exclusions.otherByLine.get(line.id) ?? 0;
+      const inventoryChargeCents = readIntegerCents(BigInt(freightCents) + BigInt(dutyCents) + BigInt(insuranceCents) + BigInt(otherCents)
+        - BigInt(recoverableTaxAllocatedCents) - BigInt(excludedSupplierAllocatedCents), "inventory-valued finalized allocation");
+      const productValue = await projectLineProductValue(line, inventoryChargeCents, tx);
       const poUnitCostCents = productValue?.amounts.poUnitCostCents ?? null;
       const totalLandedCostCents = productValue?.amounts.totalLandedCostCents ?? null;
       const landedUnitCostCents = productValue?.amounts.landedUnitCostCents ?? null;
@@ -1846,6 +1932,8 @@ export function createShipmentTrackingService(
         dutyAllocatedCents: dutyCents,
         insuranceAllocatedCents: insuranceCents,
         otherAllocatedCents: otherCents,
+        recoverableTaxAllocatedCents,
+        excludedSupplierAllocatedCents,
         totalLandedCostCents,
         landedUnitCostCents,
         qty: line.qtyShipped,

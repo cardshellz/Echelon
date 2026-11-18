@@ -25,7 +25,7 @@ describe("resolveDropshipOmsChannelIdWithClient", () => {
 
   it("uses an explicitly configured active channel id", async () => {
     process.env.DROPSHIP_OMS_CHANNEL_ID = "42";
-    const query = vi.fn(async () => ({
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({
       rows: [{ id: 42, name: "Dropship OMS", status: "active", type: "internal", provider: "manual" }],
     }));
     const client = { query } as unknown as PoolClient;
@@ -50,7 +50,7 @@ describe("resolveDropshipOmsChannelIdWithClient", () => {
   });
 
   it("resolves the static internal Dropship OMS channel", async () => {
-    const query = vi.fn(async () => ({
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({
       rows: [{ id: 77, name: "Dropship OMS", status: "active", type: "internal", provider: "manual" }],
     }));
     const client = { query } as unknown as PoolClient;
@@ -85,7 +85,7 @@ describe("resolveDropshipOmsChannelIdWithClient", () => {
   it("does not fall back to legacy name/provider guesses", async () => {
     process.env.DROPSHIP_OMS_CHANNEL_NAME = "Dropship OMS";
     process.env.DROPSHIP_OMS_CHANNEL_PROVIDER = "manual";
-    const query = vi.fn(async () => ({ rows: [] }));
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] }));
     const client = { query } as unknown as PoolClient;
 
     await expect(resolveDropshipOmsChannelIdWithClient(client)).rejects.toMatchObject({

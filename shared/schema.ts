@@ -3,3 +3,4 @@
 // or directly from the domain schema file (e.g., "@shared/schema/inventory.schema")
 export * from "./schema/index";
 export * from "./schema/supplier-sourcing.schema";
+export * from "./schema/channel-oauth.schema";

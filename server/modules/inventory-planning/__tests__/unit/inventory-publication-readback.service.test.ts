@@ -1,7 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
+import type { InventoryPublicationReadbackRun } from "@shared/types/inventory-availability-phase4";
 import {
   InventoryPublicationReadbackService,
+  type InventoryPublicationReadbackStore,
   type PublicationReadbackTarget,
 } from "../../application/inventory-publication-readback.service";
 
@@ -9,18 +11,15 @@ const NOW = new Date("2026-09-01T18:00:00.000Z");
 
 describe("InventoryPublicationReadbackService", () => {
   let store: {
-    begin: ReturnType<typeof vi.fn>;
-    recordObserved: ReturnType<typeof vi.fn>;
-    recordFailure: ReturnType<typeof vi.fn>;
-    complete: ReturnType<typeof vi.fn>;
+    [K in keyof InventoryPublicationReadbackStore]: Mock<InventoryPublicationReadbackStore[K]>;
   };
 
   beforeEach(() => {
     store = {
-      begin: vi.fn(async () => ({ kind: "started" as const, readbackRunId: "5", targets: [target()] })),
-      recordObserved: vi.fn(async () => undefined),
-      recordFailure: vi.fn(async () => undefined),
-      complete: vi.fn(async (input) => result({
+      begin: vi.fn<InventoryPublicationReadbackStore["begin"]>(async () => ({ kind: "started" as const, readbackRunId: "5", targets: [target()] })),
+      recordObserved: vi.fn<InventoryPublicationReadbackStore["recordObserved"]>(async () => undefined),
+      recordFailure: vi.fn<InventoryPublicationReadbackStore["recordFailure"]>(async () => undefined),
+      complete: vi.fn<InventoryPublicationReadbackStore["complete"]>(async (input) => result({
         targetRows: input.targetRows,
         observedRows: input.targetRows - input.failures.length,
         failedRows: input.failures.length,
@@ -185,7 +184,7 @@ function target(overrides: Partial<PublicationReadbackTarget> = {}): Publication
   };
 }
 
-function result(overrides: Record<string, unknown>) {
+function result(overrides: Partial<InventoryPublicationReadbackRun>): InventoryPublicationReadbackRun {
   return {
     readbackRunId: "5",
     state: "completed",

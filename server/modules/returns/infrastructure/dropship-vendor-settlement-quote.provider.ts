@@ -1,14 +1,12 @@
 import { pool } from "../../../db";
 import {
-  createDropshipReturnPolicyServiceFromEnv,
-} from "../../dropship/infrastructure/dropship-return-policy.factory";
-import type { DropshipReturnPolicyService } from "../../dropship/application/dropship-return-policy-service";
-import {
   computeDropshipReturnSettlement,
+  createDropshipReturnPolicyServiceFromEnv,
   type DropshipReturnAcceptedLine,
   type DropshipReturnEngineFaultCategory,
   type DropshipReturnFeeScheduleRow,
-} from "../../dropship/domain/return-fee-engine";
+  type DropshipReturnPolicyService,
+} from "../../dropship/return-settlement.api";
 import {
   ReturnCaseFinancialError,
   type ReturnFinancialCaseSource,

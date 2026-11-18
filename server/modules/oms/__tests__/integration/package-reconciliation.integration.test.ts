@@ -22,6 +22,7 @@ describeWithDisposableDb("current package reconciliation owner", () => {
   beforeEach(async () => {
     await truncateTestData();
     await pool.query("INSERT INTO identity.users(id,username,password,role) VALUES($1::text,$1::text,'test-only','admin')", [actor]);
+    await pool.query("WITH role AS (INSERT INTO identity.auth_roles(name,is_system) VALUES('Administrator',1) RETURNING id) INSERT INTO identity.auth_user_roles(user_id,role_id) SELECT $1,id FROM role", [actor]);
     handler = new PackageAllocationLabelCommercialFulfillmentService({ enabled: true, logger,
       labelLinker: { reconcileShipStationLabel: vi.fn().mockResolvedValue({ linksInserted: 0, totalLinks: 0 }) }, reviewRepository: { record: vi.fn() },
       workflow: createPackageAllocationLabelCommercialWorkflow({ pool, clock: { now: () => now }, logger }) });

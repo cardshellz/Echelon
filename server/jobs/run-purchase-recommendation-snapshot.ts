@@ -1,7 +1,7 @@
 /** Standalone snapshot-only command for Heroku Scheduler. */
 
 import { runPurchaseRecommendationSnapshotJob } from "./purchase-recommendation-snapshot.job";
-import { sanitizePurchasePipelineJobError } from "../modules/procurement/purchase-pipeline-job-run-lifecycle.service";
+import { sanitizePurchasePipelineJobError } from "../modules/procurement/planning-and-pipeline-jobs.api";
 
 runPurchaseRecommendationSnapshotJob()
   .then((result) => {

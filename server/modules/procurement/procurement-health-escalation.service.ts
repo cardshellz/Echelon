@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { db as defaultDb } from "../../db";
-import { notify as defaultNotify } from "../notifications/notifications.service";
+import { notify as defaultNotify } from "../notifications/in-app-notifications.api";
 import type { ProcurementHealthSource, ProcurementHealthSummary } from "./procurement-health.service";
 
 export const PROCUREMENT_HEALTH_CRITICAL_NOTIFICATION_KEY = "procurement_health_critical";

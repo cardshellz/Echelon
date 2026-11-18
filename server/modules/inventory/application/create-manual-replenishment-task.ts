@@ -38,6 +38,89 @@ export const manualReplenishmentTaskSchema = z
     triggeredBy: z.literal("manual").optional(),
   })
   .strict();
+export type ManualReplenishmentIdentityRejection = {
+  code: string;
+  message: string;
+};
+
+/**
+ * Returns the first reason a manual replenishment's locations or variants are
+ * not usable, or null when they are. Each reason has its own code and message
+ * so the operator sees what to fix instead of one catch-all error.
+ *
+ * Source and destination may be the same location only for a case break: the
+ * output is a different SKU, so it lands in its own inventory row and lot at
+ * that location (the break/assembly flow already breaks in place this way).
+ * A transfer or pallet drop into its own location would move nothing, and the
+ * transfer path rejects it.
+ */
+export function manualReplenishmentIdentityRejection(input: {
+  replenMethod: "case_break" | "full_case" | "pallet_drop";
+  source: { isActive: boolean | null } | undefined;
+  destination: { isActive: boolean | null } | undefined;
+  from:
+    | {
+        id: number;
+        warehouseId: number | null;
+        isActive: number;
+        cycleCountFreezeId: number | null;
+      }
+    | undefined;
+  to:
+    | {
+        id: number;
+        warehouseId: number | null;
+        isActive: number;
+        isPickable: number;
+        cycleCountFreezeId: number | null;
+      }
+    | undefined;
+}): ManualReplenishmentIdentityRejection | null {
+  const { source, destination, from, to } = input;
+  if (!source || !destination)
+    return {
+      code: "MANUAL_REPLEN_VARIANT_NOT_FOUND",
+      message: "Manual replenishment SKU was not found",
+    };
+  if (source.isActive !== true || destination.isActive !== true)
+    return {
+      code: "MANUAL_REPLEN_VARIANT_INACTIVE",
+      message: "Manual replenishment SKUs must both be active",
+    };
+  if (!from || !to)
+    return {
+      code: "MANUAL_REPLEN_LOCATION_NOT_FOUND",
+      message: "Manual replenishment location was not found",
+    };
+  if (!from.warehouseId || from.warehouseId !== to.warehouseId)
+    return {
+      code: "MANUAL_REPLEN_CROSS_WAREHOUSE",
+      message: "Source and destination must be in the same warehouse",
+    };
+  if (from.id === to.id && input.replenMethod !== "case_break")
+    return {
+      code: "MANUAL_REPLEN_SAME_LOCATION",
+      message:
+        "Source and destination must be different locations (only a case break can stay in one location)",
+    };
+  if (from.isActive !== 1 || to.isActive !== 1)
+    return {
+      code: "MANUAL_REPLEN_LOCATION_INACTIVE",
+      message: "Source and destination locations must both be active",
+    };
+  if (to.isPickable !== 1)
+    return {
+      code: "MANUAL_REPLEN_DESTINATION_NOT_PICKABLE",
+      message: "Destination location must be pickable",
+    };
+  if (from.cycleCountFreezeId || to.cycleCountFreezeId)
+    return {
+      code: "MANUAL_REPLEN_LOCATION_FROZEN",
+      message: "A location in this task is frozen for a cycle count",
+    };
+  return null;
+}
+
 type Database = Pick<typeof db, "transaction" | "select">;
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -180,25 +263,27 @@ export async function createManualReplenishmentTask(
       .from(warehouseLocations)
       .where(eq(warehouseLocations.id, input.toLocationId))
       .limit(1);
-    if (
-      !source ||
-      !destination ||
-      source.isActive !== true ||
-      destination.isActive !== true ||
-      !from ||
-      !to ||
-      !from.warehouseId ||
-      from.warehouseId !== to.warehouseId ||
-      from.id === to.id ||
-      from.isActive !== 1 ||
-      to.isActive !== 1 ||
-      to.isPickable !== 1 ||
-      from.cycleCountFreezeId ||
-      to.cycleCountFreezeId
-    ) {
-      throw new IntegrityError(
-        "Manual replenishment requires exact active source, destination and variant identities in one warehouse",
-      );
+    const rejection = manualReplenishmentIdentityRejection({
+      replenMethod: input.replenMethod,
+      source,
+      destination,
+      from,
+      to,
+    });
+    if (rejection) {
+      throw new IntegrityError(rejection.message, {
+        code: rejection.code,
+        fromLocationId: input.fromLocationId,
+        toLocationId: input.toLocationId,
+        sourceVariantId: input.sourceVariantId,
+        pickVariantId: input.pickVariantId,
+        replenMethod: input.replenMethod,
+      });
+    }
+    if (!source || !destination || !from?.warehouseId || !to) {
+      // Unreachable: the rejection check above covers every missing identity.
+      // Kept so the compiler narrows the types for the code below.
+      throw new IntegrityError("Manual replenishment identities are missing");
     }
     const baseQuantity = input.qtySourceUnits * source.unitsPerVariant;
     id.parse(baseQuantity);

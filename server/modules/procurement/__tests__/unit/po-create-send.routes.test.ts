@@ -44,8 +44,8 @@ vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
 vi.mock("../../procurement", () => ({ procurementStorage: { getVendorById: vi.fn() } }));
 vi.mock("../../ap-ledger.service", () => ({}));
 vi.mock("../../po-document", () => ({ renderPoHtml: vi.fn() }));
-vi.mock("../../../notifications/email.service", () => ({}));
-vi.mock("../../../notifications/notifications.service", () => ({}));
+vi.mock("../../../notifications/email-delivery.api", () => ({}));
+vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
 const settingsCommandMocks = vi.hoisted(() => ({ update: vi.fn() }));
 vi.mock("../../procurement-settings.commands", async importOriginal => ({
@@ -111,7 +111,7 @@ function buildPurchasingMock(overrides: Record<string, any> = {}) {
 function buildApp(purchasing: any): Express {
   const app = express();
   app.use(express.json());
-  app.locals.services = { purchasing, shipmentTracking: {} };
+  app.locals.services = { purchasing, shipmentTracking: {} } as any;
   registerPurchasingRoutes(app);
   return app;
 }

@@ -47,6 +47,15 @@ integration("customer return order lookup against migration-defined PostgreSQL",
     expect(result).toHaveLength(1);
     expect(result[0]).toMatchObject({ omsOrderId: 1, channelId: 36, externalOrderId: "gid://shopify/Order/1" });
   });
+  it("reads the channel cancellation marker independently of refund/payment status", async () => {
+    await pool.query("UPDATE oms.oms_orders SET cancelled_at='2026-10-30 12:00:00',financial_status='paid' WHERE id=1");
+    await pool.query("UPDATE oms.oms_orders SET financial_status='refunded' WHERE id=2");
+    const rows = await repository.listOwnedOrders({ channelId: 36, externalCustomerId: "customer-a", pageSize: 10 });
+    expect(rows.find(row => row.omsOrderId === 1)?.cancelledAt).toBe("2026-10-30T12:00:00.000Z");
+    expect(rows.find(row => row.omsOrderId === 2)?.cancelledAt).toBeNull();
+    expect((await repository.findOwnedOrder({ channelId:36,omsOrderId:1,
+      scope:{kind:"customer",externalCustomerId:"customer-a"} }))[0].cancelledAt).toBe("2026-10-30T12:00:00.000Z");
+  });
   it("resolves owned canonical identity independently of reused order numbers", async () => {
     const input = { channelId: 36, scope: { kind: "customer" as const, externalCustomerId: "customer-a" }, omsOrderId: 1 };
     expect((await repository.findOwnedOrder(input)).map(row => row.omsOrderId)).toEqual([1]);

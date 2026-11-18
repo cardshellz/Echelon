@@ -69,6 +69,14 @@ import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { reorderAnalysisSearchParams } from "@/features/purchasing/reorderAnalysisDeepLink";
+import {
+  DEFAULT_STALE_PO_THRESHOLDS,
+  STALE_PO_THRESHOLD_ROWS,
+  invalidateRecommendationDecisionQueries,
+  validateCandidateScoreThresholds,
+  validateStalePoThresholds,
+  type AutoDraftStalePoThresholds,
+} from "@/features/purchasing/autoDraftSettingsValidation";
 
 // ---------------------------------------------------------------------------
 // Engine tab strip — same rev-1 single-entry strip as ReorderEngine.tsx with
@@ -83,23 +91,6 @@ import { reorderAnalysisSearchParams } from "@/features/purchasing/reorderAnalys
 
 // GET/PATCH /api/purchasing/auto-draft-settings
 // (procurement.storage.ts getAutoDraftSettings / purchasing-recommendation.routes.ts PATCH validation)
-interface AutoDraftStalePoThresholds {
-  reviewPendingWarningDays: number;
-  reviewPendingCriticalDays: number;
-  supplierSendWarningDays: number;
-  supplierSendCriticalDays: number;
-  supplierFollowupWarningDays: number;
-  supplierFollowupCriticalDays: number;
-  receivingWarningDays: number;
-  receivingCriticalDays: number;
-  apCloseoutWarningDays: number;
-  apCloseoutCriticalDays: number;
-  exceptionBlockedWarningDays: number;
-  exceptionBlockedCriticalDays: number;
-  closeoutWarningDays: number;
-  closeoutCriticalDays: number;
-}
-
 interface AutoDraftSettings {
   autoDraftMode: "draft_po" | "review_only";
   approvalPolicy: AutoDraftApprovalPolicy;
@@ -484,37 +475,6 @@ function autoDraftActionClass(severity: string): string {
 
 // Stale-PO aging rows — identical to ExclusionRulesModal (same defaults the
 // server COALESCEs to in getAutoDraftSettings).
-const DEFAULT_STALE_PO_THRESHOLDS: AutoDraftStalePoThresholds = {
-  reviewPendingWarningDays: 2,
-  reviewPendingCriticalDays: 5,
-  supplierSendWarningDays: 2,
-  supplierSendCriticalDays: 5,
-  supplierFollowupWarningDays: 7,
-  supplierFollowupCriticalDays: 14,
-  receivingWarningDays: 3,
-  receivingCriticalDays: 10,
-  apCloseoutWarningDays: 7,
-  apCloseoutCriticalDays: 21,
-  exceptionBlockedWarningDays: 1,
-  exceptionBlockedCriticalDays: 3,
-  closeoutWarningDays: 7,
-  closeoutCriticalDays: 14,
-};
-
-const STALE_PO_THRESHOLD_ROWS: Array<{
-  label: string;
-  warningKey: keyof AutoDraftStalePoThresholds;
-  criticalKey: keyof AutoDraftStalePoThresholds;
-}> = [
-  { label: "Review", warningKey: "reviewPendingWarningDays", criticalKey: "reviewPendingCriticalDays" },
-  { label: "Send", warningKey: "supplierSendWarningDays", criticalKey: "supplierSendCriticalDays" },
-  { label: "Supplier", warningKey: "supplierFollowupWarningDays", criticalKey: "supplierFollowupCriticalDays" },
-  { label: "Receiving", warningKey: "receivingWarningDays", criticalKey: "receivingCriticalDays" },
-  { label: "AP", warningKey: "apCloseoutWarningDays", criticalKey: "apCloseoutCriticalDays" },
-  { label: "Exceptions", warningKey: "exceptionBlockedWarningDays", criticalKey: "exceptionBlockedCriticalDays" },
-  { label: "Closeout", warningKey: "closeoutWarningDays", criticalKey: "closeoutCriticalDays" },
-];
-
 function thresholdInputDefaults(): Record<keyof AutoDraftStalePoThresholds, string> {
   return Object.fromEntries(
     Object.entries(DEFAULT_STALE_PO_THRESHOLDS).map(([key, value]) => [key, String(value)]),
@@ -728,9 +688,7 @@ export default function ProcurementAutomation() {
       return res.json();
     },
     onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-accepted-queue"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-decisions"] });
+      invalidateRecommendationDecisionQueries(queryClient);
       setDecisionDialog(null);
       setDecisionNote("");
       setReviewedControlCodes(new Set());
@@ -787,53 +745,40 @@ export default function ProcurementAutomation() {
     ) as Record<keyof AutoDraftStalePoThresholds, string>);
   }, [settings]);
 
-  // Validation identical to ExclusionRulesModal.saveCandidateThresholds.
   const saveCandidateThresholds = () => {
-    const strongThreshold = Number(candidateScoreStrongThreshold);
-    const reviewThreshold = Number(candidateScoreReviewThreshold);
-    if (!Number.isInteger(strongThreshold) || strongThreshold < 0 || strongThreshold > 100) {
-      toast({ title: "Invalid strong threshold", description: "Use a whole number from 0 to 100.", variant: "destructive" });
-      return;
-    }
-    if (!Number.isInteger(reviewThreshold) || reviewThreshold < 0 || reviewThreshold > 100) {
-      toast({ title: "Invalid review threshold", description: "Use a whole number from 0 to 100.", variant: "destructive" });
-      return;
-    }
-    if (reviewThreshold > strongThreshold) {
+    const result = validateCandidateScoreThresholds(
+      candidateScoreStrongThreshold,
+      candidateScoreReviewThreshold,
+    );
+    if (!result.ok) {
       toast({
-        title: "Invalid thresholds",
-        description: "Review threshold must be less than or equal to the strong threshold.",
+        title: result.error.title,
+        description: result.error.description,
         variant: "destructive",
       });
       return;
     }
+    const {
+      candidateScoreStrongThreshold: strongThreshold,
+      candidateScoreReviewThreshold: reviewThreshold,
+    } = result.value;
     updateSettingsMutation.mutate({
       candidateScoreStrongThreshold: strongThreshold,
       candidateScoreReviewThreshold: reviewThreshold,
     });
   };
 
-  // Validation identical to ExclusionRulesModal.saveStalePoThresholds.
   const saveStalePoThresholds = () => {
-    const parsed = {} as AutoDraftStalePoThresholds;
-    for (const key of Object.keys(DEFAULT_STALE_PO_THRESHOLDS) as Array<keyof AutoDraftStalePoThresholds>) {
-      const value = Number(stalePoThresholdInputs[key]);
-      if (!Number.isInteger(value) || value < 0 || value > 365) {
-        toast({ title: "Invalid stale PO threshold", description: "Use whole days from 0 to 365.", variant: "destructive" });
-        return;
-      }
-      parsed[key] = value;
+    const result = validateStalePoThresholds(stalePoThresholdInputs);
+    if (!result.ok) {
+      toast({
+        title: result.error.title,
+        description: result.error.description,
+        variant: "destructive",
+      });
+      return;
     }
-    for (const row of STALE_PO_THRESHOLD_ROWS) {
-      if (parsed[row.warningKey] > parsed[row.criticalKey]) {
-        toast({
-          title: "Invalid stale PO thresholds",
-          description: `${row.label} warning days must be less than or equal to critical days.`,
-          variant: "destructive",
-        });
-        return;
-      }
-    }
+    const parsed = result.value;
     updateSettingsMutation.mutate({ stalePoThresholds: parsed });
   };
 

@@ -150,4 +150,21 @@ describe("default-off staging access", () => {
       expect(() => requireCustomerAccountStaging({ ...input, ...override })).toThrow();
     }
   });
+  it("keeps legacy configuration unchanged and admits only explicitly added production themes", () => {
+    expect(readCustomerAccountStagingConfig(JSON.stringify(config))).toEqual(config);
+    const production = readCustomerAccountStagingConfig(JSON.stringify({ ...config, additionalThemeIds: ["174464958623"] }));
+    expect(() => requireCustomerAccountStaging({ ...input, config: production })).not.toThrow();
+    expect(() => requireCustomerAccountStaging({ ...input, config: production, themeId: "174464958623" })).not.toThrow();
+    for (const override of [{ themeId: "999" }, { expectedCustomerId: "101" }, { sessionKey: "b".repeat(43) },
+      { origin: "https://evil.test" }, { origin: undefined }, { commandHeader: undefined },
+      { principal: { ...principal, externalCustomerId: "101" } }])
+      expect(() => requireCustomerAccountStaging({ ...input, config: production, themeId: "174464958623", ...override })).toThrow();
+    expect(() => requireCustomerAccountStaging({ ...input, themeId: "174464958623" })).toThrow();
+    expect(() => requireCustomerAccountStaging({ ...input, themeId: "174464958623", config: { ...production!, shops: { [principal.shopDomain]: { enabled: false } } } })).toThrow();
+  });
+  it.each([null, "174464958623", ["0"], ["01"], ["1.2"], [true], ["9".repeat(31)],
+    ["174464958623", "174464958623"], [config.themeId], Array.from({length:11},(_,index)=>String(index+1))])(
+    "rejects malformed or ambiguous additional theme IDs: %j", additionalThemeIds => {
+      expect(() => readCustomerAccountStagingConfig(JSON.stringify({ ...config, additionalThemeIds }))).toThrow();
+    });
 });

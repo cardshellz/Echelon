@@ -9,7 +9,7 @@ import type {
   DropshipMarketplaceCredentialRepository,
   DropshipMarketplaceStoreCredentials,
 } from "./dropship-marketplace-credentials";
-import type { EbayOrder, EbayOrdersResponse } from "../../channels/adapters/ebay/ebay-types";
+import type { EbayOrder, EbayOrdersResponse } from "../../channels/ebay-connector.api";
 import {
   buildEbayDropshipOrderIntakeInput,
   isEbayOrderCancelled,

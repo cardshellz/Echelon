@@ -13,9 +13,9 @@ import type { Request, Response } from "express";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
 import type { ShipStationService } from "./shipstation.service";
 import type { WmsSyncService } from "./wms-sync.service";
-import type { EbayApiClient } from "../channels/adapters/ebay/ebay-api.client";
-import type { EbayAuthService } from "../channels/adapters/ebay/ebay-auth.service";
-import type { EbayOrder, EbayNotificationPayload } from "../channels/adapters/ebay/ebay-types";
+import type { EbayApiClient } from "../channels/ebay-connector.api";
+import type { EbayAuthService } from "../channels/ebay-connector.api";
+import type { EbayOrder, EbayNotificationPayload } from "../channels/ebay-connector.api";
 import type { ReservationResult } from "../../services";
 import { db } from "../../db";
 import { sql } from "drizzle-orm";
@@ -28,6 +28,7 @@ import {
 } from "./webhook-inbox.service";
 import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
 import { extractEbayShipByDate } from "./ebay-shipby";
+import { createEbayWebhookSignatureVerifier } from "./ebay-webhook-signature";
 import {
   ebayOrderIsShippable,
   recordChannelOrderFailure,
@@ -553,7 +554,7 @@ async function runEbayOrderPoll(
                   LIMIT 1
                 `);
                 if (wmsOrder.rows.length > 0) {
-                  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+                  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-lifecycle-and-cancellation.api");
                   await cancelWmsOrder(database, Number(wmsOrder.rows[0].id), "ebay_cancel");
                 }
               } catch (e: any) {
@@ -755,6 +756,7 @@ export function createEbayOrderWebhookHandler(
   ebayApiClient: EbayApiClient,
 ) {
   return async function handleEbayOrderWebhook(req: Request, res: Response) {
+    const verifySignature = ((handleEbayOrderWebhook as any).__verifier ??= createEbayWebhookSignatureVerifier(ebayApiClient));
     // eBay challenge validation — they send a GET with challenge_code
     if (req.method === "GET" && req.query.challenge_code) {
       const verificationToken = process.env.EBAY_VERIFICATION_TOKEN;
@@ -785,7 +787,14 @@ export function createEbayOrderWebhookHandler(
       // REAL order. Full cryptographic verification of x-ebay-signature
       // (eBay Notification SDK public-key flow) is tracked as follow-up.
       if (!req.headers["x-ebay-signature"]) {
-        return res.status(401).json({ error: "Missing notification signature" });
+        return res.status(401).json({ error: "Missing notification signature", code: "EBAY_SIGNATURE_MISSING" });
+      }
+      const signatureVerification = await verifySignature(req);
+      if (!signatureVerification.ok) {
+        return res.status(signatureVerification.statusCode).json({
+          error: signatureVerification.message,
+          code: signatureVerification.code,
+        });
       }
 
       const payload = req.body as EbayNotificationPayload;

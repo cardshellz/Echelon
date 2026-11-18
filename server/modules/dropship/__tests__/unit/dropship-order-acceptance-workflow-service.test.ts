@@ -356,6 +356,7 @@ class FakeShippingQuoteService {
       totalShippingCents: 1122,
       currency: "USD",
       carrierServices: [{ carrier: "USPS", service: "Ground Advantage" }],
+      warnings: [],
       internalBreakdown: {
         baseRateCents: 1000,
         markupCents: 100,
@@ -383,9 +384,11 @@ class FakeAcceptanceService {
       walletLedgerEntryId: 3001,
       economicsSnapshotId: 7001,
       totalDebitCents: 2722,
+      rewardsCents: 0,
       currency: "USD",
       paymentHoldExpiresAt: null,
       paymentHoldReason: null,
+      advance: null,
       idempotentReplay: false,
     };
   }
@@ -450,9 +453,11 @@ class SequencedCanonicalAcceptanceRepository implements DropshipOrderAcceptanceR
       walletLedgerEntryId: 3001,
       economicsSnapshotId: 7001,
       totalDebitCents: 2722,
+      rewardsCents: 0,
       currency: "USD",
       paymentHoldExpiresAt: null,
       paymentHoldReason: null,
+      advance: null,
       idempotentReplay: false,
     };
   }

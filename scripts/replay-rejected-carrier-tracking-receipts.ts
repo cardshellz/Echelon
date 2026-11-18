@@ -6,12 +6,12 @@ import {
   CARRIER_TRACKING_PARSER_VERSION,
   normalizeShipStationTrackingWebhook,
   type VerifiedCarrierWebhookReceipt,
-} from "../server/modules/shipping/carrier-tracking.domain";
+} from "../server/modules/shipping/carrier-tracking-and-dispatch.api";
 import type {
   CarrierTrackingIngestResult,
   CarrierTrackingService,
   CarrierTrackingWebhookReplayContext,
-} from "../server/modules/shipping/carrier-tracking.service";
+} from "../server/modules/shipping/carrier-tracking-and-dispatch.api";
 
 type Mode = "dry-run" | "execute";
 
@@ -411,8 +411,8 @@ async function main(): Promise<void> {
   }
   const [databaseModule, repositoryModule, serviceModule] = await Promise.all([
     import("../server/db"),
-    import("../server/modules/shipping/carrier-tracking.repository"),
-    import("../server/modules/shipping/carrier-tracking.service"),
+    import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
+    import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
   ]);
   const service = new serviceModule.CarrierTrackingService({
     repository: repositoryModule.createDrizzleCarrierTrackingRepository(databaseModule.db),

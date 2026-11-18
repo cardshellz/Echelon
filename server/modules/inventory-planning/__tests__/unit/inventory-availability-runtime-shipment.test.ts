@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import { describe, expect, it, vi } from "vitest";
 import { AuthorityAwareInventoryShipmentRecorder, type InventoryShipmentRuntimeContext,
-  type InventoryShipmentRuntimeInput } from "../../application/inventory-availability-runtime-shipment.service";
+  type InventoryShipmentRuntimeExecutor, type InventoryShipmentRuntimeInput } from "../../application/inventory-availability-runtime-shipment.service";
 import { PostgresInventoryShipmentRuntimeExecutor } from "../../infrastructure/inventory-availability-runtime-shipment.repository";
 
 const input: InventoryShipmentRuntimeInput = {
@@ -10,7 +10,7 @@ const input: InventoryShipmentRuntimeInput = {
 };
 function service(context: InventoryShipmentRuntimeContext) {
   const execute = vi.fn(async <T>(work: (context: InventoryShipmentRuntimeContext) => Promise<T>) => work(context));
-  return { execute, recorder: new AuthorityAwareInventoryShipmentRecorder({ execute }) };
+  return { execute, recorder: new AuthorityAwareInventoryShipmentRecorder({ execute: execute as InventoryShipmentRuntimeExecutor["execute"] }) };
 }
 
 describe("authority-aware shipment application", () => {
@@ -71,7 +71,7 @@ function executorFixture(authority: "legacy" | "canonical") {
   const connect = vi.fn(async () => client);
   const recordShipmentInsideTransaction = vi.fn(async () => { calls.push("legacy"); });
   const resolve = vi.fn();
-  const dispatchPrepared = vi.fn(async () => { calls.push("canonical"); return {} as never; });
+  const dispatchPrepared = vi.fn(async (_prepare: (client: PoolClient) => Promise<any>) => { calls.push("canonical"); return {} as never; });
   const executor = new PostgresInventoryShipmentRuntimeExecutor({ connect }, { recordShipmentInsideTransaction }, { dispatchPrepared }, { resolve });
   return { calls, client, query, release, connect, recordShipmentInsideTransaction, resolve, dispatchPrepared,
     recorder: new AuthorityAwareInventoryShipmentRecorder(executor) };

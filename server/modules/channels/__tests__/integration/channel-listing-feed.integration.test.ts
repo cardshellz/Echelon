@@ -1,4 +1,5 @@
 import pg from "pg";
+import { readFile } from "node:fs/promises";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { EbaySyncSelectionReader } from "../../infrastructure/ebay-sync-selection.reader";
@@ -11,7 +12,8 @@ import { createCatalogPublicImageUrl } from "../../../catalog/catalog-public-ima
 // Supporting read-model fixture. Durable queue/index tests live in the sync
 // recovery suite, which installs the actual production migrations unchanged.
 const schema = `
-CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA ebay;
+CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA ebay; CREATE SCHEMA marketplace;
+CREATE FUNCTION marketplace.capture_listing_intent_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
 CREATE TABLE catalog.products(id integer PRIMARY KEY,name text,sku text,product_type text,is_active boolean DEFAULT true,
  ebay_listing_excluded boolean DEFAULT false,ebay_browse_category_id text,ebay_browse_category_name text,
  ebay_fulfillment_policy_override text,ebay_return_policy_override text,ebay_payment_policy_override text);
@@ -30,6 +32,8 @@ CREATE TABLE channels.channel_variant_overrides(channel_id integer,product_varia
 CREATE TABLE channels.channel_listings(id integer PRIMARY KEY,channel_id integer,product_variant_id integer REFERENCES catalog.product_variants(id),
  external_product_id text,external_variant_id text,sync_status text,sync_error text,UNIQUE(channel_id,product_variant_id));
 CREATE TABLE channels.ebay_listing_sync_jobs(channel_id integer,product_id integer,state text);
+CREATE TABLE IF NOT EXISTS channels.ebay_listing_change_intents(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer,connection_id integer,product_id integer,product_variant_id integer,kind text,external_listing_id text,sku text,review_token text,actor text,opened_at timestamptz,closed_at timestamptz,close_reason text);
+CREATE UNIQUE INDEX IF NOT EXISTS ebay_listing_change_intents_open_variant_idx ON channels.ebay_listing_change_intents(channel_id,product_variant_id) WHERE closed_at IS NULL;
 CREATE TABLE channels.ebay_listing_sync_admission_failures(channel_id integer,product_id integer);
 CREATE TABLE ebay.ebay_category_aspects(category_id text,aspect_name text,aspect_required boolean);
 CREATE TABLE ebay.ebay_type_aspect_defaults(product_type_slug text,aspect_name text);
@@ -61,6 +65,8 @@ const configured = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_
   const publicUrl = createCatalogPublicImageUrl({ PUBLIC_APP_URL: "https://example.com" });
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(process.env.ECHELON_TEST_DATABASE_URL, true, schema);
+    for (const migration of ["900000017000018580001_catalog_publication_media_versions.sql", "900000047000019770001_catalog_publication_renditions.sql"])
+      await database.pool.query(await readFile(`migrations/${migration}`,"utf8"));
     pool = new pg.Pool({ connectionString: database.connectionString, max: 1, connectionTimeoutMillis: 250,
       options: "-c search_path=catalog,channels,ebay,public" });
   });

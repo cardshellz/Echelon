@@ -48,20 +48,32 @@ vi.mock("drizzle-orm", () => ({ eq: vi.fn() }));
 vi.mock("../../../../platform/observability/logger", () => ({
   logger: { error: fixture.logError },
 }));
-import { pushToMissionControl } from "../../mc-push";
+import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { missionControlConnection, pushToMissionControl } from "../../mc-push";
+
+// Made up for this run only. No real secret, old or new, is written in this file.
+const TEST_SECRET = randomBytes(24).toString("hex");
 
 describe("OMS to Archon acquisition payload", () => {
   const sent: Array<{ order: Record<string, unknown> }> = [];
+  const presented: Array<string | undefined> = [];
   beforeEach(() => {
     fixture.reads = 0;
     fixture.raw = {};
     fixture.logError.mockReset();
     sent.length = 0;
+    presented.length = 0;
+    vi.stubEnv("MC_WEBHOOK_SECRET", TEST_SECRET);
     vi.spyOn(console, "log").mockImplementation(() => {});
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_url: string, init: RequestInit) => {
         sent.push(JSON.parse(String(init.body)));
+        presented.push(
+          (init.headers as Record<string, string>)["x-webhook-secret"],
+        );
         return new Response(JSON.stringify({ action: "updated" }), {
           status: 200,
         });
@@ -69,8 +81,45 @@ describe("OMS to Archon acquisition payload", () => {
     );
   });
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+  it("presents the configured secret, trimmed, on every push", async () => {
+    await pushToMissionControl(42, "order.created");
+    vi.stubEnv("MC_WEBHOOK_SECRET", ` ${TEST_SECRET}\n`);
+    await pushToMissionControl(42, "order.updated");
+    expect(presented).toEqual([TEST_SECRET, TEST_SECRET]);
+    expect(missionControlConnection().secret).toBe(TEST_SECRET);
+  });
+  it.each([["unset", undefined], ["empty", ""], ["blank", "   "]])(
+    "sends nothing and reads nothing while the secret is %s",
+    async (_label, value) => {
+      vi.stubEnv("MC_WEBHOOK_SECRET", value as string);
+      await pushToMissionControl(42, "order.created");
+      expect(sent).toHaveLength(0);
+      expect(fixture.reads).toBe(0);
+      expect(fixture.logError).toHaveBeenCalledWith(
+        "oms.archon_push",
+        expect.objectContaining({
+          error_code: "ARCHON_SECRET_MISSING",
+          outcome: "not_sent",
+          oms_order_id: 42,
+        }),
+      );
+      // The durable delivery worker reads this and does not start without it.
+      expect(missionControlConnection().secret).toBe("");
+    },
+  );
+  it("has no built-in default for the secret", () => {
+    const source = readFileSync(
+      path.resolve(process.cwd(), "server/modules/oms/mc-push.ts"),
+      "utf8",
+    );
+    // A fallback written after the setting ("||" or "??") is how a default gets in.
+    expect(source).not.toMatch(
+      /MC_WEBHOOK_SECRET(\?\.trim\(\))?\s*(\|\||\?\?)/,
+    );
   });
   it("forwards exact acquisition evidence on each ordinary order push", async () => {
     const touch = {

@@ -43,6 +43,8 @@ export interface ShopifyConnectionSource {
     compareAtPriceCents: number | null;
     priceCurrency?: string | null;
     channelPrice?: { price: string; compareAtPrice: string | null; currency: string } | null;
+    /** Channel inventory uses this override before the catalog SKU. */
+    stockSku?: string | null;
   }>;
   images: Array<{ url: string; alt: string | null }>;
   mapping: ShopifyProductMappingSummary;
@@ -92,6 +94,17 @@ export interface ShopifyConnectionReviewEvidence {
   remoteProductId: string | null;
   remoteFingerprint: string | null;
   bindings: Array<{ variantId: number; remoteVariantId: string }>;
+  /** Absent on commands reviewed before SKU completion was introduced. */
+  skuAssignments?: ShopifyConnectionSkuAssignment[];
+  syncInventory?: boolean;
+}
+
+export interface ShopifyConnectionSkuAssignment {
+  variantId: number | null;
+  remoteVariantId: string;
+  inventoryItemId: string;
+  beforeSku: string | null;
+  sku: string;
 }
 
 export function resolveShopifyConnectionPrice(input: {

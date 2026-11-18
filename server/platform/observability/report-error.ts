@@ -1,6 +1,8 @@
 import { classify, type ErrorClass, AppError } from "./errors";
 import { getContext } from "./log-context";
-import { logger } from "./logger";
+import { logger, redactLogData } from "./logger";
+
+export const ALERT_WEBHOOK_TIMEOUT_MS = 10_000;
 
 interface ReportOptions {
   action?: string;
@@ -11,6 +13,10 @@ export async function reportError(err: unknown, opts?: ReportOptions): Promise<v
   const errClass = classify(err);
   const action = opts?.action ?? "unhandled_error";
   const ctx = getContext();
+  const safeContext = redactLogData({
+    ...(opts?.context ?? {}),
+    ...(ctx ?? {}),
+  });
 
   const errorCode = err instanceof AppError
     ? err.code
@@ -23,15 +29,11 @@ export async function reportError(err: unknown, opts?: ReportOptions): Promise<v
     error_code: errorCode,
     error_class: errClass,
     error_message: message,
-    ...opts?.context,
-    ...(ctx ?? {}),
+    ...safeContext,
   });
 
   if (errClass === "permanent" || errClass === "fatal") {
-    await sendAlert(errClass, errorCode, message, {
-      ...opts?.context,
-      ...(ctx ?? {}),
-    });
+    await sendAlert(errClass, errorCode, message, safeContext);
   }
 }
 
@@ -48,12 +50,13 @@ async function sendAlert(
   if (!webhookUrl) return;
 
   const severity = errClass === "fatal" ? "FATAL" : "PERMANENT";
+  const safeContext = redactLogData(context);
   const body = {
     content: [
       `**[${severity}]** \`${code}\``,
       message,
-      Object.keys(context).length > 0
-        ? "```json\n" + JSON.stringify(context, null, 2) + "\n```"
+      Object.keys(safeContext).length > 0
+        ? "```json\n" + JSON.stringify(safeContext, null, 2) + "\n```"
         : "",
     ]
       .filter(Boolean)
@@ -61,12 +64,27 @@ async function sendAlert(
   };
 
   try {
-    await fetch(webhookUrl, {
+    const response = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(ALERT_WEBHOOK_TIMEOUT_MS),
     });
-  } catch {
-    // Alert delivery is best-effort
+    if (!response.ok) {
+      logger.warn("alert.webhook_non_2xx", {
+        outcome: "degraded",
+        status: response.status,
+        error_code: code,
+        error_class: errClass,
+      });
+    }
+  } catch (alertErr) {
+    // Alert delivery is best-effort, but record bounded failure telemetry.
+    logger.warn("alert.webhook_failed", {
+      outcome: "degraded",
+      error_code: code,
+      error_class: errClass,
+      alert_error: alertErr instanceof Error ? alertErr.message : String(alertErr),
+    });
   }
 }

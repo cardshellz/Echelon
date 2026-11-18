@@ -1,3 +1,4 @@
+import { fixedImageInspector } from "../fixtures/catalog-image-inspector.fixture";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -20,7 +21,8 @@ vi.mock("../../../../db", () => ({ db: {} }));
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const fixture = `
-  CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA inventory;
+  CREATE SCHEMA catalog; CREATE SCHEMA channels; CREATE SCHEMA inventory; CREATE SCHEMA marketplace;
+  CREATE FUNCTION marketplace.capture_listing_intent_change() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
   CREATE TABLE catalog.products (id integer PRIMARY KEY, sku text NOT NULL);
   CREATE TABLE catalog.product_variants (
     id integer PRIMARY KEY, product_id integer NOT NULL REFERENCES catalog.products,
@@ -64,9 +66,11 @@ const defaultsSql = readFileSync(resolve(process.cwd(), "migrations", defaultsFi
   let ebay: ChannelEbayListingPhotoResolver;
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(url, disposable, fixture);
+    for (const migration of ["900000017000018580001_catalog_publication_media_versions.sql", "900000047000019770001_catalog_publication_renditions.sql"])
+      await database.pool.query(readFileSync(resolve(process.cwd(),"migrations",migration),"utf8"));
     service = createProductAssetScopeService(drizzle(database.pool, { schema }), () => now);
     reader = new PgCatalogVariantPublicationPhotoReader(database.pool, publicUrl);
-    ebay = new ChannelEbayListingPhotoResolver(database.pool, publicUrl);
+    ebay = new ChannelEbayListingPhotoResolver(database.pool, publicUrl, fixedImageInspector());
   });
   afterAll(async () => { await database?.close(); });
   beforeEach(async () => {

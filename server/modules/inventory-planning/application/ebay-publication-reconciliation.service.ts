@@ -5,6 +5,9 @@ import { InventoryPublicationTransportError, type AbsoluteInventoryReadRequest, 
 import { ebayReconciliationCommandKey } from "../domain/ebay-automatic-publication-recovery";
 import { QuantityPublicationAdmissionError, type QuantityPublicationScope } from "../domain/quantity-publication-admission";
 import { InventoryAvailabilityRuntimePublicationError } from "./inventory-availability-runtime-publication.service";
+import { reconciliationContentVerificationSchema, type ReconciliationContentVerification,
+  type RetainedPublicationEffectEvidence } from "../domain/publication-recovery-evidence";
+export type { ReconciliationContentVerification, RetainedPublicationEffectEvidence } from "../domain/publication-recovery-evidence";
 
 export const EBAY_RECONCILIATION_INTERVAL_MS = 15 * 60_000;
 export const EBAY_RECONCILIATION_LEASE_MS = 2 * 60_000;
@@ -29,13 +32,16 @@ export interface EbayPublicationReconciliationStore {
   renew(claim: EbayReconciliationClaim, now: Date): Promise<void>;
   plan(claim: EbayReconciliationClaim, now: Date): Promise<EbayReconciliationTarget[]>;
   recordStock(claim: EbayReconciliationClaim, observations: readonly EbayReconciliationObservation[], now: Date): Promise<EbayReconciliationStockResult>;
-  finish(claim: EbayReconciliationClaim, stock: EbayReconciliationStockResult, contentJobId: string, now: Date): Promise<void>;
+  readContentEffects(claim: EbayReconciliationClaim, now: Date): Promise<RetainedPublicationEffectEvidence[]>;
+  finish(claim: EbayReconciliationClaim, stock: EbayReconciliationStockResult, content: string | ReconciliationContentVerification, now: Date): Promise<void>;
   fail(claim: EbayReconciliationClaim, failure: { code: string; message: string; commandConsumed: boolean; contentJobId?: string }, now: Date): Promise<void>;
   readStatuses(syncJobIds: readonly string[]): Promise<Record<string, EbayPublicationReconciliationStatus>>;
 }
 export type RefreshRecoveredEbayContent = (input: {
-  productId: number; connectionId: number; accountId: string; commandKey: string;
-}) => Promise<{ jobId: string }>;
+  productId: number; connectionId: number; accountId: string; commandKey: string; forceSync?: boolean;
+  scopes?: readonly QuantityPublicationScope[];
+  effects?: readonly RetainedPublicationEffectEvidence[];
+}) => Promise<{ jobId: string } | { verified: ReconciliationContentVerification }>;
 
 /** Only a durable channel admission rejection permits a new cycle command key.
  * Transport/DB uncertainty must replay the same key to recover its saved result. */
@@ -62,6 +68,7 @@ export class EbayPublicationReconciliationService {
       let stock: EbayReconciliationStockResult | undefined;
       let failure: unknown;
       let contentJobId: string | undefined;
+      let contentVerification: ReconciliationContentVerification | undefined;
       try {
         const targets = await this.store.plan(claim, this.now());
         const observations: EbayReconciliationObservation[] = [];
@@ -87,14 +94,29 @@ export class EbayPublicationReconciliationService {
       if (!(failure instanceof QuantityPublicationAdmissionError && failure.code === "PUBLICATION_RECONCILIATION_SCOPE_CHANGED")) {
         try {
           await this.store.renew(claim, this.now());
+          let forceSync = failure !== undefined;
+          let effects: RetainedPublicationEffectEvidence[] = [];
+          if (!forceSync) {
+            try { effects = await this.store.readContentEffects(claim, this.now()); }
+            catch {
+              // This optimization must not turn missing evidence into a match
+              // or prevent the pre-existing saved Sync recovery path.
+              forceSync = true;
+              console.warn(JSON.stringify({ event: "publication_recovery_effect_evidence_unavailable",
+                watchId: claim.watchId, code: "PUBLICATION_RECOVERY_EFFECT_EVIDENCE_UNAVAILABLE" }));
+              await this.store.renew(claim, this.now());
+            }
+          }
           const content = await this.refreshContent({ productId: claim.productId, connectionId: claim.connectionId,
-            accountId: claim.accountId, commandKey: ebayReconciliationCommandKey(claim.watchId, claim.cycle) });
-          contentJobId = z.string().uuid().parse(content.jobId);
+            accountId: claim.accountId, commandKey: ebayReconciliationCommandKey(claim.watchId, claim.cycle),
+            forceSync, scopes: claim.scopes, effects });
+          if ("jobId" in content) contentJobId = z.string().uuid().parse(content.jobId);
+          else contentVerification = reconciliationContentVerificationSchema.parse(content.verified);
         } catch (error) { failure = error; }
       }
       try {
-        if (!failure && stock?.current && contentJobId) {
-          await this.store.finish(claim, stock, contentJobId, this.now());
+        if (!failure && stock?.current && (contentJobId || contentVerification)) {
+          await this.store.finish(claim, stock, contentJobId ?? contentVerification!, this.now());
           result.checked += 1;
           if (stock.repaired) result.repaired += 1;
           continue;

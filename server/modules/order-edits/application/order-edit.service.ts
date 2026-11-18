@@ -46,6 +46,7 @@ import type {
 } from "./order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
 import { sameOrderEditPlan } from "../domain/order-edit-plan-identity";
+import { resolveOrderEditLinePlan } from "../domain/order-edit-line-plan";
 import { orderEditHasSubmissionEvidence } from "./order-edit-submission";
 import type { OrderEditCodeRedemptions } from "./order-edit-code-redemptions";
 import { requiresOrderEditCodeReceipt } from "../domain/order-edit-coupon-boundary";
@@ -55,7 +56,7 @@ import {
   orderEditDiagnosticError,
   type OrderEditDiagnosticEvent,
 } from "./order-edit-diagnostics";
-import type { OrderCancellationService } from "../../customer-account/application/order-cancellation.service";
+import type { OrderCancellationService } from "../../customer-account/order-cancellation-contracts.api";
 import { orderCancellationEligibilityReasons } from "../domain/order-cancellation-eligibility";
 import { presentCustomerOrderLifecycle } from "@shared/customer-account/order-fulfillment";
 import { customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";
@@ -63,6 +64,11 @@ import { orderAddressEligibility } from "../domain/order-address-eligibility";
 import { canObserveOrderEditRefundReview } from "../domain/order-edit-refund-recovery";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
+// Reported when opening an order cannot read warehouse availability.
+const ORDER_EDIT_INSPECTION_UNAVAILABLE_CODE =
+  "ORDER_EDIT_WAREHOUSE_INSPECTION_UNAVAILABLE";
+const ORDER_EDIT_INSPECTION_UNAVAILABLE_REASON =
+  "Online changes are temporarily unavailable. Please try again shortly.";
 // Bound each scheduler pass so one store cannot monopolize the worker.
 const RECONCILIATION_BATCH_SIZE = 25;
 const MILLISECONDS_PER_MINUTE = 60_000;
@@ -273,9 +279,11 @@ export class OrderEditService {
         ? active.id
         : undefined;
     if (ownedOperationId) assertOrderEditIdentity(reference, active!.baseline);
-    const warehouse = await this.warehouse.inspect(
+    const warehouse = await this.inspectForDisplay(
+      connectionId,
       omsOrderId,
       ownedOperationId,
+      actorId,
     );
     const reasons = [
       ...warehouse.reasons,
@@ -313,7 +321,9 @@ export class OrderEditService {
         editable: warehouse.editable && reasons.length === 0,
         reasons,
       },
-      lines: snapshot.lines.map((line) => ({
+      // Removed Shopify lines remain in the source snapshot and audit evidence,
+      // but cannot be edited as current purchased units.
+      lines: snapshot.lines.filter((line) => line.quantity > 0).map((line) => ({
         lineItemId: line.id,
         variantId: line.variantId,
         title: line.title,
@@ -336,6 +346,40 @@ export class OrderEditService {
       warehouseStatus: fulfillment?.label ?? "Status unavailable",
       ...(fulfillment ? { fulfillment } : {}),
     });
+  }
+  /** Opening an order must not fail because warehouse availability could not be
+   * read. An unexpected inspection fault presents the order with every change
+   * closed and is reported for staff. Business refusals (OrderEditError) still
+   * propagate, and every command re-inspects under row locks, so this can only
+   * narrow what a customer may change, never widen it. */
+  private async inspectForDisplay(
+    connectionId: number,
+    omsOrderId: number,
+    ownedOperationId: string | undefined,
+    actorId: string | undefined,
+  ): Promise<Awaited<ReturnType<OrderEditWarehouse["inspect"]>>> {
+    try {
+      return await this.warehouse.inspect(omsOrderId, ownedOperationId);
+    } catch (error) {
+      if (error instanceof OrderEditError) throw error;
+      this.report({
+        ...(ownedOperationId ? { operationId: ownedOperationId } : {}),
+        code: ORDER_EDIT_INSPECTION_UNAVAILABLE_CODE,
+        phase: "order_read_warehouse_inspection",
+        omsOrderId,
+        connectionId,
+        ...(actorId
+          ? { actorFingerprint: orderEditActorFingerprint(actorId) }
+          : {}),
+        occurredAt: this.clock().toISOString(),
+        error: orderEditDiagnosticError(error),
+      });
+      return {
+        editable: false,
+        reasons: [ORDER_EDIT_INSPECTION_UNAVAILABLE_REASON],
+        wmsOrderIds: [],
+      };
+    }
   }
   /** Query-only account reads deliberately do not resolve OMS, inspect warehouse
    * eligibility, prepare calculated orders, or create an operation/hold. */
@@ -405,6 +449,15 @@ export class OrderEditService {
       const reasons = orderEditEligibilityReasons(baseline);
       if (reasons.length)
         throw new OrderEditError("ORDER_EDIT_INELIGIBLE", reasons.join(" "));
+      // Reject stale clients targeting historical removed lines before creating
+      // a saved attempt or asking Shopify to prepare a calculated order.
+      resolveOrderEditLinePlan({
+        originals: baseline.lines.filter(line => line.quantity > 0)
+          .map(({id, variantId, quantity}) => ({id, variantId, quantity})),
+        changes: input.changes,
+        additions: input.additions,
+        protectedLineIds: [],
+      });
       const now = this.clock();
       let record: OrderEditRecord = {
         id: this.uuid(),
@@ -618,10 +671,25 @@ export class OrderEditService {
     }
     return this.present(record, codeEntryVersion);
   }
-  async get(id: string, codeEntryVersion?: "v1") {
+  async get(id: string, codeEntryVersion?: "v1", observationVersion?: "v1") {
     const record = await this.store.get(id);
     this.requireEdit(record);
-    return this.present(record, codeEntryVersion);
+    if (!observationVersion) return this.present(record, codeEntryVersion);
+    try {
+      // Observe the same nonblocking order lock as submission. Reading a stale
+      // ready document while its command owns that lock must not re-enable Apply.
+      return await this.store.withOrderLock(record.omsOrderId, async () => ({
+        ...this.present(await this.store.get(id), codeEntryVersion),
+        commandInProgress: false,
+      }));
+    } catch (error) {
+      if (!(error instanceof OrderEditError) || error.code !== "ORDER_EDIT_BUSY")
+        throw error;
+      return {
+        ...this.present(await this.store.get(id), codeEntryVersion),
+        commandInProgress: true,
+      };
+    }
   }
   async commit(id: string, key: string, actorId: string) {
     return this.locked(id, async (initial) => {

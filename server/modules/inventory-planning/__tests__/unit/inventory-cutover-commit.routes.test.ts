@@ -39,7 +39,7 @@ describe("cutover review and commit routes", () => {
     vi.spyOn(console, "error").mockImplementation(() => undefined);
     session = { user: { id: "operator-1" } };
     service = { preview: vi.fn(async () => review()), commit: vi.fn(async () => result()) };
-    server = await startServer(service, () => session);
+    server = await startServer(service as unknown as Pick<InventoryCutoverCommitService, "preview" | "commit">, () => session);
   });
   afterEach(async () => { await server.close(); vi.restoreAllMocks(); });
 
@@ -128,8 +128,9 @@ describe("cutover review and commit routes", () => {
     service.preview.mockRejectedValue(new InventoryCutoverCaptureError("oms_demand_and_receipts", cause));
     const response = await request(server.url + ROOT + "/review", { activationRunId: "1" });
     expect(response).toMatchObject({ status, body: { error: { code, context: { stage: "oms_demand_and_receipts" } } } });
-    expect(response.body.error.message).toContain("sales-channel demand and shipment acknowledgments");
-    expect(response.body.error.message).toContain("No complete review");
+    const errorBody = response.body.error as { message: string };
+    expect(errorBody.message).toContain("sales-channel demand and shipment acknowledgments");
+    expect(errorBody.message).toContain("No complete review");
     expect(response.body).not.toHaveProperty("ready");
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(service.preview).toHaveBeenCalledTimes(1);

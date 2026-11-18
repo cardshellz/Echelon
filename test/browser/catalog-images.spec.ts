@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { test, expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -16,12 +17,12 @@ async function setup(page: Page, canEdit = true) {
     scopeCalls: [] as { assetId:number; command:ProductAssetScopeCommand; key:string }[], scopeWrites:0,
     rejectScope:false, loseScopeResponse:false, editAfterCommit:false,
     receipts:new Map<string,{ productId:number; assetId:number; productVariantId:number|null; changed:boolean }>(),
-    additions: [] as { path:string; body:unknown }[] };
+    additions: [] as { path:string; body:unknown }[], publicationWarning: null as null | {code:string;message:string} };
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("https://cdn.example.com/**", route => route.fulfill({ contentType:"image/png",body:photoBytes }));
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", role: "staff", username: "operator" }, permissions: canEdit ? ["inventory:view", "inventory:edit"] : ["inventory:view"], roles: [] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator", role: "staff", username: "operator" }, permissions: canEdit ? ["inventory:view", "inventory:edit"] : ["inventory:view"], systemRoles: [], assignedRoles: [{ id: 101, name: "Catalog operator", isSystem: false }] }) });
     if (path === "/api/products/1") return route.fulfill({ json: {
       id: 1, productId: 1, sku: "ESS-TOP-55PT-SLV-CLR", name: "55PT 3x4 Toploader Essentials Clear+ Easy Glide Combo Pack",
       title: null, description: null, brand: "Shellz", status: "active", isActive: true, inventoryTrackingDefault: true,
@@ -39,7 +40,7 @@ async function setup(page: Page, canEdit = true) {
         position:state.assets.length, productVariantId: uploaded ? null : body.productVariantId,
         storageType: uploaded ? "file" : "url" };
       state.assets.push(asset);
-      return route.fulfill({ status:201,json:asset });
+      return route.fulfill({ status:201,json:{...asset,...(state.publicationWarning ? {publicationWarning:state.publicationWarning} : {})} });
     }
     const scope = path.match(/^\/api\/products\/1\/assets\/(\d+)\/scope$/);
     if (scope) {
@@ -231,6 +232,28 @@ test("downloads URL and uploaded photos with original bytes and filenames", asyn
     expect(await readFile((await download.path())!)).toEqual(photoBytes);
   }
   expect(state.downloads).toEqual([1, 4]); expect(state.orders).toHaveLength(0); expect(state.errors).toEqual([]);
+});
+
+test("a recovered URL photo displays and downloads the saved Catalog source", async ({ page }) => {
+  const state = await setup(page);
+  state.assets = state.assets.map(asset => asset.id === 4
+    ? {...asset, storageType:"both", url:"https://cdn.example.com/old-thumbnail.jpg"} : asset);
+  await page.reload();
+  await expect(page.locator('[data-catalog-image="4"] img')).toHaveAttribute("src","/api/product-assets/4/file");
+  const pending = page.waitForEvent("download");
+  await page.getByRole("button",{name:"Download image 4",exact:true}).click();
+  expect(await readFile((await (await pending).path())!)).toEqual(photoBytes);
+  expect(state.downloads).toEqual([4]);
+  expect(state.errors).toEqual([]);
+});
+
+test("saving an original succeeds with an actionable publication warning", async ({ page }) => {
+  const state = await setup(page);
+  state.publicationWarning = {code:"CATALOG_IMAGE_RENDITION_FAILED",message:"A larger copy could not be prepared safely. Some sales channels may require a larger photo."};
+  await page.locator('input[type="file"]').setInputFiles({name:"photo.png",mimeType:"image/png",buffer:photoBytes});
+  await expect(page.getByRole("status").filter({hasText:"Image uploaded"})).toContainText(state.publicationWarning.message);
+  await expect(page.getByRole("combobox",{name:"Applies to image 5",exact:true})).toBeVisible();
+  expect(state.errors).toEqual([]);
 });
 
 test("a failed download shows the source error and supports retry", async ({ page }) => {

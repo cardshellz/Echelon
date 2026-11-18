@@ -24,7 +24,7 @@ const listKey = ["/api/supplier-credits", "limit=20&offset=0", null];
 
 function commands(overrides: Partial<SupplierCreditCommands> = {}): SupplierCreditCommands {
   return {
-    userId: actorId, canCreate: true, canApprove: true, recovery: null, storageError: null,
+    userId: actorId, canCreate: true, canApprove: true, canApproveReceiptCosts: true, recovery: null, storageError: null,
     confirmed: null, pending: false, error: null, blocked: false, recoverAllowed: false,
     refresh: () => { throw new Error("Rendering must not refresh recovery storage."); },
     recover: () => { throw new Error("Rendering must not execute a recovered command."); },

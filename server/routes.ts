@@ -2,11 +2,11 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons } from "./modules/identity";
 
-import { registerAuthRoutes } from "./modules/identity/identity.routes";
+import { registerAuthRoutes } from "./modules/identity/routes.api";
 import { registerLocationRoutes } from "./modules/warehouse/locations.routes";
-import { registerPickingRoutes } from "./modules/orders/picking.routes";
-import { registerOperationsDashboardRoutes } from "./modules/orders/operations-dashboard.routes";
-import { registerOperationsControlTowerRoutes } from "./modules/operations/control-tower.routes";
+import { registerPickingRoutes } from "./modules/orders/routes.api";
+import { registerOperationsDashboardRoutes } from "./modules/orders/routes.api";
+import { registerOperationsControlTowerRoutes } from "./modules/operations/routes.api";
 import { registerFinancialCommandOperationsRoutes } from "./platform/commands/financial-command-operations.routes";
 import { registerShopifyRoutes } from "./routes/shopify.routes";
 import { registerWarehouseRoutes } from "./modules/warehouse/warehouse.routes";
@@ -18,7 +18,7 @@ import { registerInventoryRoutes } from "./modules/inventory/inventory.routes";
 import { registerReplenishmentRoutes } from "./modules/inventory";
 import { registerBuildRoutes } from "./modules/inventory/build.routes";
 import { registerNotificationRoutes } from "./modules/notifications";
-import { registerFinanceAnalyticsRoutes } from "./modules/oms/finance-analytics.routes";
+import { registerFinanceAnalyticsRoutes } from "./modules/oms/channel-order-intake.api";
 import { registerWalmartChannelRoutes } from "./modules/channels/adapters/walmart/walmart.routes";
 import { registerChannelCatalogRoutes } from "./modules/channels/channel-catalog.routes";
 import { registerListingPublicationRoutes } from "./modules/marketplace-listings/interfaces/http/listing-publication.routes";
@@ -29,10 +29,12 @@ import { registerInventoryPublicationInitialScopeRoutes } from "./modules/invent
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
 import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
 import { registerPickZoneRoutes } from "./modules/warehouse/pick-zones.routes";
-import { registerPurchasingRoutes } from "./modules/procurement/procurement.routes";
-import { registerInboundTrackingRoutes } from "./modules/procurement/inbound-tracking.routes";
-import { registerCostReportingRoutes } from "./modules/procurement/cost-reporting.routes";
-import { registerSupplierSourcingRoutes } from "./modules/procurement/supplier-sourcing.routes";
+import {
+  registerCostReportingRoutes,
+  registerInboundTrackingRoutes,
+  registerPurchasingRoutes,
+  registerSupplierSourcingRoutes,
+} from "./modules/procurement/routes.api";
 import { registerEbayOAuthRoutes } from "./routes/ebay-oauth.routes";
 import { registerEbaySettingsRoutes } from "./routes/ebay-settings.routes";
 import { registerEbayListingRulesRoutes } from "./routes/ebay-listing-rules.routes";
@@ -43,8 +45,10 @@ import { router as ebayPricingRouter } from "./routes/ebay/ebay-pricing.routes";
 import { router as ebayPoliciesRouter } from "./routes/ebay/ebay-policies.routes";
 import { registerSyncControlRoutes } from "./modules/channels/sync-control.routes";
 import { registerOmsRoutes } from "./routes/oms.routes";
-import { registerSubscriptionWebhookRoutes } from "./modules/subscriptions/subscription.webhooks";
-import { registerSubscriptionRoutes } from "./modules/subscriptions/subscription.routes";
+import {
+  registerSubscriptionWebhookRoutes,
+  registerSubscriptionRoutes,
+} from "./modules/subscriptions/routes.api";
 import { registerDiagnosticsRoutes } from "./routes/diagnostics";
 import { registerPickPriorityRoutes } from "./routes/pick-priority.routes";
 import { createMarketplaceListingRegistrationResolverFromEnv } from "./marketplace-listing-registration.composition";
@@ -94,26 +98,28 @@ import { registerDropshipOrderRoutes } from "./modules/dropship/interfaces/http/
 import { registerDropshipNotificationRoutes } from "./modules/dropship/interfaces/http/dropship-notification.routes";
 import { registerDropshipCostChangeRoutes } from "./modules/dropship/interfaces/http/dropship-cost-change.routes";
 import { registerDropshipReturnRoutes } from "./modules/dropship/interfaces/http/dropship-return.routes";
-import { registerReturnPolicyAdminRoutes } from "./modules/returns/interfaces/http/return-policy-admin.routes";
-import { registerReturnCaseAdminRoutes } from "./modules/returns/interfaces/http/return-case-admin.routes";
-import { registerCustomerReturnPreviewRoutes } from "./modules/returns/interfaces/http/customer-return-preview.routes";
-import { registerCustomerReturnCustomerRoutes } from "./modules/returns/interfaces/http/customer-return-customer.routes";
+import {
+  registerReturnPolicyAdminRoutes,
+  registerReturnCaseAdminRoutes,
+  registerCustomerReturnPreviewRoutes,
+  registerCustomerReturnCustomerRoutes,
+} from "./modules/returns/routes.api";
 import { registerDropshipOpsSurfaceRoutes } from "./modules/dropship/interfaces/http/dropship-ops-surface.routes";
 import { registerDropshipMarketplaceOrderIntakeRoutes } from "./modules/dropship/interfaces/http/dropship-marketplace-order-intake.routes";
-import { registerShippingAdminRoutes } from "./modules/shipping-engine/shipping-admin.routes";
-import { registerOutboundShipmentRoutes } from "./modules/shipping-engine/outbound-shipments.routes";
-import { registerCarrierCallbackRoutes } from "./modules/shipping-engine/interfaces/http/carrier-callback.routes";
-import { registerShadowAdminRoutes } from "./modules/shipping-engine/interfaces/http/shadow-admin.routes";
-import { registerPackingRoutes } from "./modules/shipping-engine/interfaces/http/packing.routes";
-import { registerRateTableAdminRoutes } from "./modules/shipping-engine/interfaces/http/rate-table-admin.routes";
-import { registerRateBookAdminRoutes } from "./modules/shipping-engine/interfaces/http/rate-book-admin.routes";
-import { registerSharedConfigurationAdminRoutes } from "./modules/shipping-engine/interfaces/http/shared-configuration-admin.routes";
-import { registerRateProgramCloneRoutes } from "./modules/shipping-engine/interfaces/http/rate-program-clone.routes";
-import { registerProductRatePolicyAdminRoutes } from "./modules/shipping-engine/interfaces/http/product-rate-policy-admin.routes";
-import { registerManualRateQuoteRoutes } from "./modules/shipping-engine/interfaces/http/manual-rate-quote.routes";
-import { registerChannelShippingPolicyAdminRoutes } from "./modules/shipping-engine/interfaces/http/channel-shipping-policy-admin.routes";
-import { registerStorefrontRatePreviewRoutes } from "./modules/shipping-engine/interfaces/http/storefront-rate-preview.routes";
-import { registerDestinationScopeReaderRoutes } from "./modules/shipping-engine/interfaces/http/destination-scope-reader.routes";
+import { registerShippingAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerOutboundShipmentRoutes } from "./modules/shipping-engine/routes.api";
+import { registerCarrierCallbackRoutes } from "./modules/shipping-engine/routes.api";
+import { registerShadowAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerPackingRoutes } from "./modules/shipping-engine/routes.api";
+import { registerRateTableAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerRateBookAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerSharedConfigurationAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerRateProgramCloneRoutes } from "./modules/shipping-engine/routes.api";
+import { registerProductRatePolicyAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerManualRateQuoteRoutes } from "./modules/shipping-engine/routes.api";
+import { registerChannelShippingPolicyAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerStorefrontRatePreviewRoutes } from "./modules/shipping-engine/routes.api";
+import { registerDestinationScopeReaderRoutes } from "./modules/shipping-engine/routes.api";
 import { registerInventoryAvailabilityMasterDataRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-master-data.routes";
 import { registerInventoryAvailabilityShadowRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-shadow.routes";
 import { registerInventoryAvailabilityBackfillRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-backfill.routes";
@@ -123,6 +129,7 @@ import { registerInventoryRuntimeAuthorityRoutes } from "./modules/inventory-pla
 import { registerInventoryCutoverCommitRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-commit.routes";
 import { registerProductDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-product-definition.routes";
 import { registerChannelDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-channel-definition.routes";
+import { registerChannelRuleDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-channel-rule.routes";
 import { registerSafetyDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-safety-definition.routes";
 import { registerInventoryCutoverCompletionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-completion.routes";
 import { registerInventoryCutoverOpeningRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-opening.routes";
@@ -133,9 +140,9 @@ import { registerInventoryChannelExposureRoutes } from "./modules/inventory-plan
 import { registerInventoryStockSendRoutes } from "./modules/inventory-planning/interfaces/http/inventory-stock-send.routes";
 import { registerInventoryProductSyncRoutes } from "./modules/inventory-planning/interfaces/http/inventory-product-sync.routes";
 import { registerInventoryPublicationGlobalControlRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-global-control.routes";
-import { registerShippingDestinationNormalizationRoutes } from "./modules/shipping-engine/interfaces/http/shipping-destination-normalization.routes";
-import { registerFulfillmentRoutingAdminRoutes } from "./modules/shipping-engine/interfaces/http/fulfillment-routing-admin.routes";
-import { registerFulfillmentProviderConnectionAdminRoutes } from "./modules/shipping-engine/interfaces/http/fulfillment-provider-connections-admin.routes";
+import { registerShippingDestinationNormalizationRoutes } from "./modules/shipping-engine/routes.api";
+import { registerFulfillmentRoutingAdminRoutes } from "./modules/shipping-engine/routes.api";
+import { registerFulfillmentProviderConnectionAdminRoutes } from "./modules/shipping-engine/routes.api";
 
 export async function registerRoutes(
   httpServer: Server,
@@ -194,6 +201,7 @@ export async function registerRoutes(
   registerInventoryCutoverCommitRoutes(app);
   registerProductDefinitionRoutes(app);
   registerChannelDefinitionRoutes(app);
+  registerChannelRuleDefinitionRoutes(app);
   registerSafetyDefinitionRoutes(app);
   registerInventoryCutoverCompletionRoutes(app);
   registerInventoryCutoverOpeningRoutes(app);

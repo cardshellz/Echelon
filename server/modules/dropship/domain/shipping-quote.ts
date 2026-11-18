@@ -6,7 +6,7 @@ import {
   type CartonizeBox,
   type CartonizeItem,
   type CartonPlacement,
-} from "../../cartonization/domain/cartonize";
+} from "../../cartonization/cartonize-engine.api";
 
 export const DROPSHIP_DEFAULT_SHIPPING_CURRENCY = "USD";
 export const DROPSHIP_DEFAULT_SHIPPING_MARKUP_BPS = 0;

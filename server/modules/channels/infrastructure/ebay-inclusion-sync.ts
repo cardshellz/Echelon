@@ -1,5 +1,5 @@
 import type { Pool, PoolClient } from "pg";
-import { PostgresChannelSyncBatchRepository } from "../../marketplace-listings/infrastructure/pg-channel-sync-batch.repository";
+import { PostgresChannelSyncBatchRepository } from "../../marketplace-listings/channel-sync-batch.api";
 import { saveChannelSyncSelection, assertSyncSelection } from "../../marketplace-listings/application/save-channel-sync-selection";
 import type { SyncDestination } from "../../marketplace-listings/domain/channel-sync-batch";
 import { EbaySyncSelectionReader } from "./ebay-sync-selection.reader";

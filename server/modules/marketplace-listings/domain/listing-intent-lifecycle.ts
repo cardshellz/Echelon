@@ -96,7 +96,9 @@ export function resolveListingIntentLifecycle(input: {
             retired?.message ??
             "The listing lifecycle must confirm removal of this archived member.",
           references: retired ? [retired.operationId] : [],
-          nextActions: [{ owner: "listing_member_retirement", ...(retired ? { operationId: retired.operationId } : {}) }],
+          nextActions: retired?.code === "LISTING_MEMBER_IDENTITY_CONFLICT"
+            ? [{ owner: "listing_mapping" }]
+            : [{ owner: "listing_member_retirement", ...(retired ? { operationId: retired.operationId } : {}) }],
         };
       }
       if (member.action === "zero") {
@@ -152,6 +154,8 @@ export function resolveListingIntentLifecycle(input: {
       : "LISTING_INTENT_LIFECYCLE_PENDING",
     message: settled
       ? "No content update is required for these excluded members. Their remaining channel obligations were verified complete at the recorded check."
-      : "These members are excluded from content updates. Channel clearing or removal is still outstanding; automatic checks will continue. Open the listing workspace for the remaining work.",
+      : evidence.members.some(member => member.code === "LISTING_MEMBER_IDENTITY_CONFLICT")
+        ? "A saved listing link conflicts with another. Review the links; Echelon will check the affected removal after the links change."
+        : "These members are excluded from content updates. Channel clearing or removal is still outstanding; automatic checks will continue. Open the listing workspace for the remaining work.",
   };
 }

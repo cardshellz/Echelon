@@ -24,7 +24,7 @@ function rowsFor(fixture = cases[0]): ExistingEbayListingIdentityRow[] {
 }
 
 /** Real shared provider observer + transport responses matching the incident's GET contracts. */
-function provider(source: EbayListingSyncIdentity, groupKey: string | null, extraSku?: string) {
+function provider(source: EbayListingSyncIdentity, groupKey: string | null, extraSku?: string, extraSkuHasOffer = true) {
   const state = { accountId: source.accountId, groupKey, offerIds: source.variants.map(member => member.offerId!),
     skus: [...source.variants.map(member => member.sku), ...(extraSku ? [extraSku] : [])] };
   const get = vi.fn(async (request: EbayRegistrationReadRequest): Promise<EbayRegistrationReadResponse> => {
@@ -42,6 +42,8 @@ function provider(source: EbayListingSyncIdentity, groupKey: string | null, extr
     }
     if (url.pathname.endsWith("/offer")) {
       const sku = url.searchParams.get("sku")!;
+      // eBay answers "this SKU has no offer" with 404/25713, not an empty list.
+      if (sku === extraSku && !extraSkuHasOffer) return { status: 404, body: { errors: [{ errorId: 25713, message: "This Offer is not available." }] } };
       const index = state.skus.indexOf(sku);
       const offers = index < 0 ? [] : [{ offerId: state.offerIds[index] ?? "extra-offer", sku, marketplaceId: "EBAY_US", status: "PUBLISHED",
         listing: { listingId: source.variants[0].listingId, listingStatus: "OUT_OF_STOCK" } }];
@@ -223,6 +225,29 @@ describe("existing eBay identity composition", () => {
     const source = captureExistingEbayListingIdentity(rowsFor(), account);
     const remote = provider(source, cases[0].group, "UNMAPPED-SOLD-VARIANT");
     await expect(resolveExistingEbayListingIdentity(source, remote.observer, candidates(source))).rejects.toMatchObject({ code: "EBAY_SYNC_MEMBERSHIP_CHANGED" });
+  });
+
+  // Production: a refused update left GLV-MAG-180PT-C2500 in the live group of listing 298148420100 with no offer,
+  // and the next review failed with "The eBay group contains an unverified member...".
+  it.each([
+    ["has no offer yet", false],
+    ["was already published", true],
+  ])("reads the listing when the size a reviewed change is adding %s", async (_name, hasOffer) => {
+    const source = captureExistingEbayListingIdentity(rowsFor(), account);
+    const remote = provider(source, cases[0].group, "SHLZ-TOP-180PT-NEW", hasOffer);
+    const { identity } = await resolveExistingEbayListingIdentity(source, remote.observer, candidates(source), ["SHLZ-TOP-180PT-NEW"]);
+    expect(identity.groupKey).toBe(cases[0].group);
+    expect(identity.variants.map(member => member.sku)).toEqual(source.variants.map(member => member.sku));
+    expect(identity.retainedGroupSkus).toBeUndefined();
+  });
+
+  it("still refuses a group member with no offer that no reviewed change is adding", async () => {
+    const source = captureExistingEbayListingIdentity(rowsFor(), account);
+    const remote = provider(source, cases[0].group, "SHLZ-TOP-180PT-NEW", false);
+    await expect(resolveExistingEbayListingIdentity(source, remote.observer, candidates(source)))
+      .rejects.toMatchObject({ code: "EBAY_SYNC_MEMBERSHIP_CHANGED" });
+    await expect(resolveExistingEbayListingIdentity(source, remote.observer, candidates(source), ["SOME-OTHER-SKU"]))
+      .rejects.toMatchObject({ code: "EBAY_SYNC_MEMBERSHIP_CHANGED" });
   });
 
   it("fails before provider reads when saved members disagree on listing identity", async () => {

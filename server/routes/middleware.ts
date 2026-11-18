@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
-import { hasPermission } from "../modules/identity";
+import { readCurrentStaffAccess, hasAssignedSystemRole, hasPermission,
+  type CurrentStaffAccess, type StaffSystemRole } from "../modules/identity";
 import multer from "multer";
 
 /**
@@ -24,18 +25,48 @@ export const upload = multer({
   limits: { fileSize: UPLOAD_MAX_BYTES, files: 1 },
 });
 
+// Cache only for this HTTP request, never in the session or across requests. This
+// makes identity and system-role guards agree on one account/membership/grant snapshot. Commands
+// that require authority through commit must also use their transactional reader.
+const requestAccess = new WeakMap<Request, { userId: string; access: Promise<CurrentStaffAccess | undefined> }>();
+
+export function getRequestStaffAccess(req: Request): Promise<CurrentStaffAccess | undefined> {
+  const userId = req.session?.user?.id;
+  if (typeof userId !== "string" || userId.length === 0) return Promise.resolve(undefined);
+  const cached = requestAccess.get(req);
+  if (cached?.userId === userId) return cached.access;
+  const access = readCurrentStaffAccess(userId);
+  requestAccess.set(req, { userId, access });
+  return access;
+}
+
+async function requireCurrentIdentity(req: Request, res: Response, operational: boolean) {
+  const access = await getRequestStaffAccess(req);
+  if (!access) {
+    res.status(401).json({ error: "Authentication required" });
+    return undefined;
+  }
+  if (operational && access.roles.length === 0) {
+    res.status(403).json({ code: "IDENTITY_ACCESS_UNASSIGNED", error: "No staff roles are assigned" });
+    return undefined;
+  }
+  return access;
+}
+
 export function requirePermission(resource: string, action: string) {
   return async (req: Request, res: Response, next: NextFunction) => {
-    if (!req.session.user) {
-      return res.status(401).json({ error: "Authentication required" });
+    if (!req.session?.user) return res.status(401).json({ error: "Authentication required" });
+    try {
+      // The canonical capability reader already requires a current active account,
+      // assigned roles and an unrestricted grant. Preserve this public guard's
+      // existing 403 deny contract; no session role grants capability access.
+      if (!await hasPermission(req.session.user.id, resource, action)) {
+        return res.status(403).json({ error: `Permission denied: ${resource}:${action}` });
+      }
+      return next();
+    } catch (error) {
+      return next(error);
     }
-
-    const allowed = await hasPermission(req.session.user.id, resource, action);
-    if (!allowed) {
-      return res.status(403).json({ error: `Permission denied: ${resource}:${action}` });
-    }
-
-    next();
   };
 }
 
@@ -43,8 +74,8 @@ export type PermissionGrant = readonly [resource: string, action: string];
 
 /**
  * Allows the request when the session user holds ANY of the listed grants.
- * Grants are checked in order and evaluation stops at the first allow, so list
- * the most common grant first. Intended for read-only views that two operator
+ * Each grant uses the current Identity permission reader. Evaluation stops at
+ * the first allow. Intended for read-only views that two operator
  * roles legitimately share (for example the live inventory runtime authority
  * shown on both Channel Allocation and Channel Inventory). A permission-owner
  * failure is forwarded to the error handler instead of being treated as a deny
@@ -55,14 +86,10 @@ export function requireAnyPermission(...grants: PermissionGrant[]) {
     throw new Error("requireAnyPermission requires at least one grant");
   }
   return async (req: Request, res: Response, next: NextFunction) => {
-    if (!req.session.user) {
-      return res.status(401).json({ error: "Authentication required" });
-    }
+    if (!req.session?.user) return res.status(401).json({ error: "Authentication required" });
     try {
       for (const [resource, action] of grants) {
-        if (await hasPermission(req.session.user.id, resource, action)) {
-          return next();
-        }
+        if (await hasPermission(req.session.user.id, resource, action)) return next();
       }
     } catch (error) {
       return next(error);
@@ -72,11 +99,37 @@ export function requireAnyPermission(...grants: PermissionGrant[]) {
   };
 }
 
-export function requireAuth(req: Request, res: Response, next: NextFunction) {
-  if (!req.session.user) {
-    return res.status(401).json({ error: "Authentication required" });
+export async function requireAuth(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (await requireCurrentIdentity(req, res, true)) next();
+  } catch (error) {
+    next(error);
   }
-  next();
+}
+
+/** Authentication lifecycle may show an active identity with no operational access. */
+export async function requireActiveSessionIdentity(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (await requireCurrentIdentity(req, res, false)) next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+export function requireAssignedSystemRole(...roles: StaffSystemRole[]) {
+  if (roles.length === 0) throw new Error("requireAssignedSystemRole requires at least one role");
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const access = await requireCurrentIdentity(req, res, true);
+      if (!access) return;
+      if (!hasAssignedSystemRole(access, roles)) {
+        return res.status(403).json({ error: "An assigned system role is required" });
+      }
+      return next();
+    } catch (error) {
+      return next(error);
+    }
+  };
 }
 
 function requestHasInternalApiKey(req: Request): boolean {
@@ -94,9 +147,8 @@ export function requireInternalApiKey(req: Request, res: Response, next: NextFun
 }
 
 export function requireAuthOrInternalApiKey(req: Request, res: Response, next: NextFunction) {
-  if (requestHasInternalApiKey(req) || req.session.user) {
+  if (requestHasInternalApiKey(req)) {
     return next();
   }
-
-  return res.status(401).json({ error: "Authentication required" });
+  return requireAuth(req, res, next);
 }

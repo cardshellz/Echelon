@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 import type { ShipmentCostException } from "../../shared/procurement/shipment-cost-exception";
@@ -93,11 +94,11 @@ async function installReconciliation(
       path = new URL(req.url()).pathname;
     if (path === "/api/auth/me")
       return route.fulfill({
-        json: {
+        json: staffAuthorityFixture({
           user: { id: "test-user", username: "test", role: "admin" },
-          roles: ["admin"],
+          systemRoles: ["admin"],
           permissions: ["purchasing:view", "purchasing:approve"],
-        },
+        }),
       });
     if (path === "/api/purchase-orders/17") return route.fulfill({ json: po(17) });
     if (path === "/api/inbound-shipments/42")

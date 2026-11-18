@@ -115,5 +115,5 @@ export async function loadActiveBoxes(warehouseId?: number, channel: Fulfillment
   if (!warehouseId) throw new Error('SHIPPING_WAREHOUSE_REQUIRED');
   return (await new SharedShippingConfigurationRepository().loadPackaging(channel,warehouseId,channelId)).boxes;
 }
-import { SharedShippingConfigurationRepository } from '../../shipping-engine/infrastructure/shared-configuration.repository';
+import { SharedShippingConfigurationRepository } from '../../shipping-engine/shared-packaging-configuration.api';
 import type { FulfillmentChannel } from '@shared/shipping/configuration';

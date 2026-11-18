@@ -12,9 +12,17 @@ const PROJECTOR_LOCK_PREFIX = "operations_control_tower_projector:";
 const DEFAULT_SOURCE_PAGE_SIZE = 250;
 const MIN_SOURCE_PAGE_SIZE = 25;
 const MAX_SOURCE_PAGE_SIZE = 1_000;
+const DEFAULT_MAX_SOURCE_PAGES = 200;
+const MIN_MAX_SOURCE_PAGES = 1;
+const MAX_MAX_SOURCE_PAGES = 2_000;
+const DEFAULT_SOURCE_STATEMENT_TIMEOUT_MS = 30_000;
+const MIN_SOURCE_STATEMENT_TIMEOUT_MS = 5_000;
+const MAX_SOURCE_STATEMENT_TIMEOUT_MS = 120_000;
 const MAX_ERROR_SAMPLES = 10;
 
-type ProjectionScanSummary = Omit<ProjectionPreview, "items">;
+type ProjectionScanSummary = Omit<ProjectionPreview, "items"> & {
+  scanTruncated?: boolean;
+};
 
 export function resolveControlTowerSourcePageSize(
   rawValue: string | undefined = process.env.CONTROL_TOWER_PROJECTOR_BATCH_SIZE,
@@ -24,6 +32,36 @@ export function resolveControlTowerSourcePageSize(
   if (!Number.isSafeInteger(parsed) || parsed < MIN_SOURCE_PAGE_SIZE || parsed > MAX_SOURCE_PAGE_SIZE) {
     throw new Error(
       `CONTROL_TOWER_PROJECTOR_BATCH_SIZE must be an integer from ${MIN_SOURCE_PAGE_SIZE} through ${MAX_SOURCE_PAGE_SIZE}`,
+    );
+  }
+  return parsed;
+}
+
+export function resolveControlTowerMaxSourcePages(
+  rawValue: string | undefined = process.env.CONTROL_TOWER_MAX_PAGES_PER_SOURCE,
+): number {
+  if (rawValue === undefined || rawValue.trim() === "") return DEFAULT_MAX_SOURCE_PAGES;
+  const parsed = Number(rawValue);
+  if (!Number.isSafeInteger(parsed) || parsed < MIN_MAX_SOURCE_PAGES || parsed > MAX_MAX_SOURCE_PAGES) {
+    throw new Error(
+      `CONTROL_TOWER_MAX_PAGES_PER_SOURCE must be an integer from ${MIN_MAX_SOURCE_PAGES} through ${MAX_MAX_SOURCE_PAGES}`,
+    );
+  }
+  return parsed;
+}
+
+export function resolveControlTowerSourceStatementTimeoutMs(
+  rawValue: string | undefined = process.env.CONTROL_TOWER_SOURCE_STATEMENT_TIMEOUT_MS,
+): number {
+  if (rawValue === undefined || rawValue.trim() === "") return DEFAULT_SOURCE_STATEMENT_TIMEOUT_MS;
+  const parsed = Number(rawValue);
+  if (
+    !Number.isSafeInteger(parsed)
+    || parsed < MIN_SOURCE_STATEMENT_TIMEOUT_MS
+    || parsed > MAX_SOURCE_STATEMENT_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `CONTROL_TOWER_SOURCE_STATEMENT_TIMEOUT_MS must be an integer from ${MIN_SOURCE_STATEMENT_TIMEOUT_MS} through ${MAX_SOURCE_STATEMENT_TIMEOUT_MS}`,
     );
   }
   return parsed;
@@ -493,13 +531,22 @@ async function scanControlTowerSource<Row>(params: {
   adapter: ControlTowerSourceAdapter<Row>;
   now: Date;
   pageSize: number;
+  maxPages?: number;
   onItems?: (items: ProjectedControlTowerWorkItem[]) => Promise<void>;
 }): Promise<ProjectionScanSummary> {
   if (!Number.isSafeInteger(params.pageSize) || params.pageSize <= 0 || params.pageSize > MAX_SOURCE_PAGE_SIZE) {
     throw new Error(`Control Tower source page size must be an integer from 1 through ${MAX_SOURCE_PAGE_SIZE}`);
   }
+  const maxPages = params.maxPages ?? resolveControlTowerMaxSourcePages();
+  if (!Number.isSafeInteger(maxPages) || maxPages < MIN_MAX_SOURCE_PAGES || maxPages > MAX_MAX_SOURCE_PAGES) {
+    throw new Error(
+      `Control Tower max source pages must be an integer from ${MIN_MAX_SOURCE_PAGES} through ${MAX_MAX_SOURCE_PAGES}`,
+    );
+  }
 
   let cursor: string | null = null;
+  let pagesScanned = 0;
+  let scanTruncated = false;
   let rowsScanned = 0;
   let rowsValid = 0;
   let rowsFailed = 0;
@@ -512,6 +559,7 @@ async function scanControlTowerSource<Row>(params: {
       cursor,
       limit: params.pageSize,
     });
+    pagesScanned += 1;
     if (!Array.isArray(page.rows)) throw new Error(`${params.adapter.name} returned an invalid source page`);
     if (page.rows.length > params.pageSize) {
       throw new Error(`${params.adapter.name} returned ${page.rows.length} rows for a ${params.pageSize}-row page`);
@@ -542,6 +590,16 @@ async function scanControlTowerSource<Row>(params: {
     if (nextCursor === cursor || seenCursors.has(nextCursor)) {
       throw new Error(`${params.adapter.name} returned a non-advancing source cursor`);
     }
+    if (pagesScanned >= maxPages) {
+      scanTruncated = true;
+      if (errors.length < MAX_ERROR_SAMPLES) {
+        errors.push({
+          sourceKey: null,
+          message: `Source scan budget of ${maxPages} page(s) reached; unseen items preserved`,
+        });
+      }
+      break;
+    }
     seenCursors.add(nextCursor);
     cursor = nextCursor;
   }
@@ -554,7 +612,8 @@ async function scanControlTowerSource<Row>(params: {
     rowsScanned,
     rowsValid,
     rowsFailed,
-    completeScan: rowsFailed === 0,
+    completeScan: rowsFailed === 0 && !scanTruncated,
+    scanTruncated,
     sourceWatermark,
     errors,
   };
@@ -565,14 +624,36 @@ export async function previewControlTowerSource<Row>(params: {
   adapter: ControlTowerSourceAdapter<Row>;
   now?: Date;
   pageSize?: number;
+  maxPages?: number;
+  statementTimeoutMs?: number;
 }): Promise<ProjectionScanSummary> {
   const now = params.now ?? new Date();
-  return scanControlTowerSource({
-    client: params.client,
-    adapter: params.adapter,
-    now,
-    pageSize: params.pageSize ?? resolveControlTowerSourcePageSize(),
-  });
+  const statementTimeoutMs = params.statementTimeoutMs ?? resolveControlTowerSourceStatementTimeoutMs();
+  if (
+    !Number.isSafeInteger(statementTimeoutMs)
+    || statementTimeoutMs < MIN_SOURCE_STATEMENT_TIMEOUT_MS
+    || statementTimeoutMs > MAX_SOURCE_STATEMENT_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `Control Tower statement timeout must be an integer from ${MIN_SOURCE_STATEMENT_TIMEOUT_MS} through ${MAX_SOURCE_STATEMENT_TIMEOUT_MS}`,
+    );
+  }
+  await params.client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+  try {
+    await params.client.query(`SET LOCAL statement_timeout = '${statementTimeoutMs}ms'`);
+    const summary = await scanControlTowerSource({
+      client: params.client,
+      adapter: params.adapter,
+      now,
+      pageSize: params.pageSize ?? resolveControlTowerSourcePageSize(),
+      maxPages: params.maxPages,
+    });
+    await params.client.query("COMMIT");
+    return summary;
+  } catch (error) {
+    await params.client.query("ROLLBACK").catch(() => undefined);
+    throw error;
+  }
 }
 
 export async function runControlTowerSourceProjection<Row>(params: {
@@ -581,9 +662,21 @@ export async function runControlTowerSourceProjection<Row>(params: {
   clock?: () => Date;
   idGenerator?: () => string;
   pageSize?: number;
+  maxPages?: number;
+  statementTimeoutMs?: number;
 }): Promise<ProjectionPersistenceSummary> {
   const clock = params.clock ?? (() => new Date());
   const runId = (params.idGenerator ?? randomUUID)();
+  const statementTimeoutMs = params.statementTimeoutMs ?? resolveControlTowerSourceStatementTimeoutMs();
+  if (
+    !Number.isSafeInteger(statementTimeoutMs)
+    || statementTimeoutMs < MIN_SOURCE_STATEMENT_TIMEOUT_MS
+    || statementTimeoutMs > MAX_SOURCE_STATEMENT_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `Control Tower statement timeout must be an integer from ${MIN_SOURCE_STATEMENT_TIMEOUT_MS} through ${MAX_SOURCE_STATEMENT_TIMEOUT_MS}`,
+    );
+  }
   const startedAt = clock();
   await createSourceRun({
     client: params.client,
@@ -597,6 +690,7 @@ export async function runControlTowerSourceProjection<Row>(params: {
   try {
     await params.client.query("BEGIN ISOLATION LEVEL REPEATABLE READ");
     transactionOpen = true;
+    await params.client.query(`SET LOCAL statement_timeout = '${statementTimeoutMs}ms'`);
     const lockResult = await params.client.query<{ acquired: boolean }>(
       "SELECT pg_try_advisory_xact_lock(hashtext($1)) AS acquired",
       [`${PROJECTOR_LOCK_PREFIX}${params.adapter.name}`],
@@ -645,6 +739,7 @@ export async function runControlTowerSourceProjection<Row>(params: {
       adapter: params.adapter,
       now,
       pageSize: params.pageSize ?? resolveControlTowerSourcePageSize(),
+      maxPages: params.maxPages,
       onItems: (items) => appendProjectionStage(params.client, items),
     });
     const persisted = await persistProjectionStage({
@@ -656,6 +751,11 @@ export async function runControlTowerSourceProjection<Row>(params: {
     const completedAt = clock();
     const durationMs = elapsedMilliseconds(startedAt, completedAt);
     const status = preview.completeScan ? "succeeded" : "partial";
+    const partialErrorCode = preview.completeScan
+      ? null
+      : preview.scanTruncated && preview.rowsFailed === 0
+        ? "SOURCE_SCAN_BUDGET_EXCEEDED"
+        : "INVALID_SOURCE_ROWS";
     await finishSourceRun({
       client: params.client,
       runId,
@@ -669,7 +769,7 @@ export async function runControlTowerSourceProjection<Row>(params: {
       rowsResolved: persisted.resolved,
       rowsFailed: preview.rowsFailed,
       sourceWatermark: preview.sourceWatermark,
-      errorCode: preview.completeScan ? null : "INVALID_SOURCE_ROWS",
+      errorCode: partialErrorCode,
       errorMessage: preview.completeScan ? null : JSON.stringify(preview.errors.slice(0, 10)),
     });
     await params.client.query("COMMIT");

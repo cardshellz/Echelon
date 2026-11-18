@@ -7,7 +7,13 @@ import { EbayListingSyncError } from "../../../../modules/channels/ebay-listing-
 import { registerEbayListingMappingRoutes } from "../../ebay-listing-mapping.routes";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async (_user: string, _resource: string, _action: string) => true) }));
-vi.mock("../../../../modules/identity", () => ({ hasPermission }));
+// Resolve a current assigned identity through the real requireAuth middleware;
+// capability outcomes remain controlled by this suite's separate permission mock.
+vi.mock("../../../../modules/identity", () => ({ hasPermission, readCurrentStaffAccess: vi.fn(async (userId: string) => ({
+    user: { id: userId, username: "fixture", role: "picker", active: 1, displayName: null,
+      createdAt: new Date(0), lastLoginAt: null },
+    roles: [{ id: 101, name: "Fixture operator", isSystem: false }], permissions: [],
+  })) }));
 const commandKey = "655ca747-20b9-4940-9c61-019baf1c11c1";
 const now = "2026-10-10T12:00:00.000Z";
 const command = { reviewHash: "a".repeat(64), commandKey };

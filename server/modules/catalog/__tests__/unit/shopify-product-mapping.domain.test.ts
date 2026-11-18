@@ -231,6 +231,7 @@ describe("evaluateShopifyProductMappingRepair", () => {
         matchedBy: "existing_id",
         replacedVariantIds: [],
       }],
+      delistedVariants: [],
     });
   });
 
@@ -245,7 +246,7 @@ describe("evaluateShopifyProductMappingRepair", () => {
     if (!result.ok) expect(result.code).toBe("SHOPIFY_MAPPING_NOT_REPAIRABLE");
   });
 
-  it("rejects a repair when an active linked variant cannot be resolved on the live product", () => {
+  it("refuses to delist the only SKU when its linked Shopify variant was deleted", () => {
     const summary = buildShopifyProductMappingSummary(source());
     const result = evaluateShopifyProductMappingRepair({
       summary,
@@ -257,13 +258,90 @@ describe("evaluateShopifyProductMappingRepair", () => {
       expect(result.code).toBe("SHOPIFY_ACTIVE_VARIANTS_UNRESOLVED");
       expect(result.context).toMatchObject({
         targetProductId: "7626813735071",
-        issues: [{
-          code: "EXACT_SKU_NOT_FOUND",
-          variantId: 59,
-          sku: "SHLZ-MAG-STND-P5",
-        }],
+        issues: [{ code: "NO_ACTIVE_VARIANT_ON_SHOPIFY", delistedVariantIds: [59] }],
       });
     }
+  });
+
+  describe("a SKU whose Shopify variant was deleted", () => {
+    // Mirrors product 54: P50 is live, C5000 was deleted in Shopify, and
+    // C2500 was never mapped.
+    const p50 = {
+      variantId: 109, sku: "GLV-MAG-180PT-P50", isActive: true, catalogBarcode: null,
+      catalogVariantId: "44526560280735", catalogInventoryItemId: "46668579504287",
+      feedId: 1, feedIsActive: true, feedProductId: "9056298893471", feedVariantId: "44526560280735",
+      feedInventoryItemId: "46668579504287", listingId: 11, listingProductId: "9056298893471", listingVariantId: "44526560280735",
+    };
+    const c5000 = {
+      ...p50, variantId: 110, sku: "GLV-MAG-180PT-C5000",
+      catalogVariantId: "44526560313503", catalogInventoryItemId: "46668579537055",
+      feedId: 2, feedVariantId: "44526560313503", feedInventoryItemId: "46668579537055",
+      listingId: 12, listingVariantId: "44526560313503",
+    };
+    const c2500 = {
+      variantId: 779, sku: "GLV-MAG-180PT-C2500", isActive: true, catalogBarcode: null,
+      catalogVariantId: null, catalogInventoryItemId: null, feedId: null, feedIsActive: null, feedProductId: null,
+      feedVariantId: null, feedInventoryItemId: null, listingId: null, listingProductId: null, listingVariantId: null,
+    };
+    const summary = buildShopifyProductMappingSummary(source({
+      productId: 54, catalogProductId: "9056298893471", variants: [p50, c5000, c2500],
+    }));
+    const liveP50 = { id: "44526560280735", sku: "GLV-MAG-180PT-P50", inventoryItemId: "46668579504287" };
+
+    it("no longer blocks the repair, but a never-mapped SKU missing from Shopify still does", () => {
+      const result = evaluateShopifyProductMappingRepair({
+        summary, requestedProductId: "9056298893471",
+        verifiedRemoteVariants: [liveP50, { id: "62908211200159", sku: null, inventoryItemId: "5" }],
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.context).toMatchObject({
+          issues: [{ code: "EXACT_SKU_NOT_FOUND", variantId: 779, sku: "GLV-MAG-180PT-C2500" }],
+        });
+      }
+    });
+
+    it("is delisted while the other SKUs map once the live SKU is set", () => {
+      const result = evaluateShopifyProductMappingRepair({
+        summary, requestedProductId: "9056298893471",
+        verifiedRemoteVariants: [liveP50, { id: "62908211200159", sku: "GLV-MAG-180PT-C2500", inventoryItemId: "5" }],
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.variantMappings.map((mapping) => [mapping.variantId, mapping.remoteVariantId]))
+          .toEqual([[109, "44526560280735"], [779, "62908211200159"]]);
+        expect(result.delistedVariants).toEqual([
+          { variantId: 110, sku: "GLV-MAG-180PT-C5000", deletedVariantIds: ["44526560313503"] },
+        ]);
+        expect(result.mappedVariantIds).not.toContain("44526560313503");
+      }
+    });
+
+    it("is remapped instead of delisted when a live variant still carries its SKU", () => {
+      const result = evaluateShopifyProductMappingRepair({
+        summary, requestedProductId: "9056298893471",
+        verifiedRemoteVariants: [liveP50,
+          { id: "62908211200159", sku: "GLV-MAG-180PT-C2500", inventoryItemId: "5" },
+          { id: "70000000000001", sku: "glv-mag-180pt-c5000", inventoryItemId: "6" }],
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.delistedVariants).toEqual([]);
+        expect(result.variantMappings.find((mapping) => mapping.variantId === 110)).toMatchObject({
+          remoteVariantId: "70000000000001", matchedBy: "exact_sku", replacedVariantIds: ["44526560313503"],
+        });
+      }
+    });
+
+    it("still fails when the explicitly selected variant is the deleted one", () => {
+      const result = evaluateShopifyProductMappingRepair({
+        summary, requestedProductId: "9056298893471",
+        verifiedRemoteVariants: [liveP50, { id: "62908211200159", sku: "GLV-MAG-180PT-C2500", inventoryItemId: "5" }],
+        expectedVariant: { variantId: 110, remoteVariantId: "44526560313503" },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.context).toMatchObject({ issues: [{ code: "SELECTED_VARIANT_MISMATCH", variantId: 110 }] });
+    });
   });
 
   it("accepts a verified retry when the requested mapping is already consistent", () => {
@@ -292,6 +370,7 @@ describe("evaluateShopifyProductMappingRepair", () => {
         matchedBy: "existing_id",
         replacedVariantIds: [],
       }],
+      delistedVariants: [],
     });
   });
 
@@ -335,6 +414,7 @@ describe("evaluateShopifyProductMappingRepair", () => {
         matchedBy: "existing_id",
         replacedVariantIds: [],
       }],
+      delistedVariants: [],
     });
   });
 

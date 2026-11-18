@@ -1,9 +1,8 @@
-import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { z } from "zod";
 import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
-import { ChannelProviderReadError, providerHttpReadFailureKind, type ChannelProviderReadDiagnostic } from "@shared/channel-provider-read";
+import { ChannelProviderReadError, type ChannelProviderReadDiagnostic } from "@shared/channel-provider-read";
 
-const MAX_NATIVE_RESPONSE_BYTES = 256_000;
+import { readEbayNativeListing } from "./ebay-native-listing.transport";
 const packageTypes = { Letter: "LETTER", LargeEnvelope: "LARGE_ENVELOPE",
   PackageThickEnvelope: "PACKAGE_THICK_ENVELOPE", USPSLargePack: "USPS_LARGE_PACK" } as const;
 const text = z.string().min(1).max(100).refine(value => value.trim().length > 0);
@@ -37,22 +36,6 @@ const invalid = (kind: ChannelProviderReadDiagnostic["kind"] = "invalid_response
     { cause: new ChannelProviderReadError({ provider: "ebay", resource: "listing_package", method: "POST", kind,
       ...(httpStatus === undefined ? {} : { httpStatus }) }) });
 
-async function boundedText(response: Response): Promise<string> {
-  if (!response.body) throw invalid();
-  const reader = response.body.getReader(), decoder = new TextDecoder();
-  let result = "", size = 0;
-  try {
-    for (;;) {
-      const part = await reader.read();
-      if (part.done) break;
-      size += part.value.byteLength;
-      if (size > MAX_NATIVE_RESPONSE_BYTES) throw invalid();
-      result += decoder.decode(part.value, { stream: true });
-    }
-    return result + decoder.decode();
-  } finally { await reader.cancel(); reader.releaseLock(); }
-}
-
 /** Inventory GET can omit a package type which the published listing retains.
  * Read only that classification; listing measurements never become SKU facts. */
 export async function readEbayNativePackage(input: {
@@ -69,40 +52,17 @@ export async function readEbayNativePackage(input: {
   const listingId = offer.listingId ?? offer.listing?.listingId;
   if (!listingId || !/^\d{1,30}$/.test(listingId)
     || (offer.listingId && offer.listing?.listingId && offer.listingId !== offer.listing.listingId)) throw invalid();
-  const host = input.environment === "production" ? "api.ebay.com" : "api.sandbox.ebay.com";
-  let response: Response;
-  try { response = await (input.request ?? fetch)(`https://${host}/ws/api.dll`, {
-    method: "POST", redirect: "error", signal: AbortSignal.timeout(20_000),
-    headers: { "Content-Type": "text/xml", "X-EBAY-API-CALL-NAME": "GetItem", "X-EBAY-API-COMPATIBILITY-LEVEL": "1477",
-      "X-EBAY-API-SITEID": "0", "X-EBAY-API-IAF-TOKEN": input.accessToken },
-    body: `<?xml version="1.0" encoding="utf-8"?><GetItemRequest xmlns="urn:ebay:apis:eBLBaseComponents"><ItemID>${listingId}</ItemID>`
-      // GetItem omits native shipping values for leaf-only OutputSelectors.
-      // Request their containers, then return only the validated classification.
-      + ["ItemID", "SKU", "Variations", "ShippingPackageDetails", "ShippingDetails"]
-        .map(field => `<OutputSelector>${field}</OutputSelector>`).join("") + "</GetItemRequest>",
-  }); } catch (cause) { throw new EbayListingSyncError("EBAY_PACKAGE_READ_UNAVAILABLE", "eBay's package configuration could not be read. The saved Sync will retry.",
-    { cause: new ChannelProviderReadError({ provider: "ebay", resource: "listing_package", method: "POST", kind: "unavailable" }, { cause }) }); }
-  if (!response.ok) {
-    // Release the unread error body without replacing the provider's HTTP
-    // refusal with a secondary stream-cleanup error.
-    try { await response.body?.cancel(); }
-    finally { throw invalid(providerHttpReadFailureKind(response.status), response.status); }
-  }
-  let raw: string;
-  try { raw = await boundedText(response); }
-  catch (cause) { if (cause instanceof EbayListingSyncError) throw cause;
-    throw new EbayListingSyncError("EBAY_PACKAGE_READ_UNAVAILABLE", "eBay's package response did not finish. The saved Sync will retry.",
-      { cause: new ChannelProviderReadError({ provider: "ebay", resource: "listing_package", method: "POST", kind: "unavailable" }, { cause }) }); }
-  if (/<!DOCTYPE|<!ENTITY/i.test(raw) || XMLValidator.validate(raw) !== true) throw invalid();
-  // DTD/entity declarations are rejected above. Decode character references so
-  // a legitimate SKU is compared with its exact JSON identity.
-  const parsedXml = nativeResponseSchema.safeParse(new XMLParser({ parseTagValue: false, ignoreAttributes: true,
-    removeNSPrefix: true, processEntities: true, htmlEntities: true }).parse(raw));
+  const response = await readEbayNativeListing({
+    listingId, accessToken: input.accessToken, environment: input.environment, request: input.request,
+    resource: "listing_package", codePrefix: "EBAY_PACKAGE",
+    fields: ["ItemID", "SKU", "Variations", "ShippingPackageDetails", "ShippingDetails"],
+  });
+  const parsedXml = nativeResponseSchema.safeParse(response.body);
   if (!parsedXml.success) throw invalid();
   const result = parsedXml.data.GetItemResponse, item = result.Item;
   const errors = result.Errors ? (Array.isArray(result.Errors) ? result.Errors : [result.Errors]) : [];
   if (!["Success", "Warning"].includes(result.Ack) || errors.some(error => error.SeverityCode === "Error"))
-    throw invalid(errors.some(error => error.ErrorClassification === "SystemError") ? "unavailable" : "refused", response.status);
+    throw invalid(errors.some(error => error.ErrorClassification === "SystemError") ? "unavailable" : "refused", response.httpStatus);
   const variations = item?.Variations?.Variation;
   const members = variations ? (Array.isArray(variations) ? variations : [variations]) : [];
   if (item?.ItemID !== listingId || (members.length ? !members.some(member => member.SKU === sku) : item.SKU !== sku)) throw invalid();

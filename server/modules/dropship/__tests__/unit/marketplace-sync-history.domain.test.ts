@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   decideFulfillmentPolicyCheckNotice,
   fulfillmentPolicyVerdictHash,
+  FULFILLMENT_POLICY_NOTICE_FORMAT_VERSION,
 } from "../../domain/marketplace-sync-decision";
 import { sha256Hex } from "../../domain/marketplace-listing-observation";
 import {
@@ -140,11 +141,28 @@ describe("decideFulfillmentPolicyCheckNotice (§6.3, owner rule 7b)", () => {
     expect(decideFulfillmentPolicyCheckNotice({ compatible: false, verdictHash: other, notifiedVerdictHash: incompatible }))
       .toEqual({ kind: "notify_incompatible", notifiedVerdictHash: other });
   });
-  it("forgets the told verdict when the policy works again, with no notice, so a later problem is told again", () => {
+  it("tells the vendor once that a policy they were told about works again, and forgets the told verdict", () => {
     const ok = fulfillmentPolicyVerdictHash([]);
     expect(decideFulfillmentPolicyCheckNotice({ compatible: true, verdictHash: ok, notifiedVerdictHash: incompatible }))
-      .toEqual({ kind: "forget_notified", notifiedVerdictHash: null });
+      .toEqual({ kind: "notify_fixed", notifiedVerdictHash: null });
+    // Nothing told (never incompatible, or already told it is fixed): nothing to say.
     expect(decideFulfillmentPolicyCheckNotice({ compatible: true, verdictHash: ok, notifiedVerdictHash: null })).toEqual({ kind: "none" });
+  });
+
+  it("resends an incompatible policy told in the old words exactly once, and never sends a compatible one anything for the version change", () => {
+    const codes = ["domestic_shipping_service_required"];
+    const told = fulfillmentPolicyVerdictHash(codes, 1);
+    // Version 1 is the hash stored before the guided fix: the codes alone.
+    expect(told).toBe(sha256Hex(JSON.stringify(codes)));
+    const now = fulfillmentPolicyVerdictHash(codes);
+    expect(FULFILLMENT_POLICY_NOTICE_FORMAT_VERSION).toBe(2);
+    expect(now).not.toBe(told);
+    expect(decideFulfillmentPolicyCheckNotice({ compatible: false, verdictHash: now, notifiedVerdictHash: told }))
+      .toEqual({ kind: "notify_incompatible", notifiedVerdictHash: now });
+    expect(decideFulfillmentPolicyCheckNotice({ compatible: false, verdictHash: now, notifiedVerdictHash: now })).toEqual({ kind: "none" });
+    const okNow = fulfillmentPolicyVerdictHash([]);
+    expect(okNow).not.toBe(fulfillmentPolicyVerdictHash([], 1));
+    expect(decideFulfillmentPolicyCheckNotice({ compatible: true, verdictHash: okNow, notifiedVerdictHash: null })).toEqual({ kind: "none" });
   });
 });
 

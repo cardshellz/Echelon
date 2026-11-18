@@ -3,6 +3,7 @@ import {
   deriveReturnPolicyResolutionInput,
   isSameReturnPolicyResolutionInput,
   snapshotReturnPolicyResolutionInput,
+  type ReturnPolicyResolutionInput,
 } from "../return-policy-resolution";
 
 describe("return policy resolution input", () => {
@@ -48,7 +49,7 @@ describe("return policy resolution input", () => {
   });
 
   it("creates an immutable request snapshot", () => {
-    const input = { channelId: 103, vendorId: 1, storeConnectionId: 1 };
+    const input: ReturnPolicyResolutionInput = { channelId: 103, vendorId: 1, storeConnectionId: 1 };
     const snapshot = snapshotReturnPolicyResolutionInput(input);
 
     input.vendorId = null;

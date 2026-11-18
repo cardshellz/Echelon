@@ -49,7 +49,10 @@ function ListingIntentChangesPanel({ base, scope, canEdit, active = true, onRevi
   function review(row: ListingIntentChangeStatus) {
     if (row.state !== "waiting_lifecycle") { onReview(row); return; }
     const actions = remainingWorkActions(row);
-    if (actions.length === 1 && onOpenWork?.(row,actions[0])) return;
+    // Identity conflicts need their saved explanation before opening a mapping
+    // owner; the ordinary removal-recovery dialog cannot resolve them.
+    const identityConflict = row.lifecycle?.members.some(member => member.code === "LISTING_MEMBER_IDENTITY_CONFLICT");
+    if (!identityConflict && actions.length === 1 && onOpenWork?.(row,actions[0])) return;
     setRemainingWork(row);
   }
   const client = useQueryClient();
@@ -81,7 +84,7 @@ function ListingIntentChangesPanel({ base, scope, canEdit, active = true, onRevi
   async function refreshStatus() {
     setMessage(null);
     const result = await query.refetch();
-    if (!result.isError) setMessage("Latest saved status loaded. Pending channel work is checked automatically.");
+    if (!result.isError) setMessage("Latest saved status loaded. Open any item that needs attention.");
   }
 
   async function retry(row: ListingIntentChangeStatus) {

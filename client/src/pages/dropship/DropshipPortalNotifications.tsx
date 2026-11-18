@@ -15,10 +15,8 @@ import {
   buildNotificationPreferenceUpdateInput,
   fetchJson,
   formatDateTime,
-  formatStatus,
   postJson,
   putJson,
-  queryErrorMessage,
   type DropshipNotificationListItem,
   type DropshipNotificationListResponse,
   type DropshipNotificationMarkReadResponse,
@@ -27,6 +25,13 @@ import {
   type DropshipNotificationPreferenceUpdateResponse,
 } from "@/lib/dropship-ops-surface";
 import { isDropshipSensitiveProofActive, useDropshipAuth } from "@/lib/dropship-auth";
+import {
+  vendorErrorMessage,
+  vendorNotificationChannelLabel,
+  vendorNotificationEventLabel,
+  vendorNotificationStatusLabel,
+} from "@/lib/dropship-vendor-labels";
+import { splitVendorMessageLinks } from "@/lib/vendor-message-links";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingPreferenceAction = "send-code" | "verify-code" | "passkey-proof" | "save" | null;
@@ -141,7 +146,7 @@ export default function DropshipPortalNotifications() {
         ]);
         setEmailCodeSent(false);
         setVerificationCode("");
-        setMessage(`${formatStatus(response.preference.eventType)} preferences saved.`);
+        setMessage(`"${vendorNotificationEventLabel(response.preference.eventType)}" alerts saved.`);
       });
     } finally {
       setPendingPreferenceEventType(null);
@@ -203,7 +208,7 @@ export default function DropshipPortalNotifications() {
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/settings"] }),
       ]);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Alert update failed.");
+      setError(vendorErrorMessage(caught));
     } finally {
       setMarkingNotificationId(null);
     }
@@ -217,7 +222,7 @@ export default function DropshipPortalNotifications() {
       await task();
       return true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Notification preference update failed.");
+      setError(vendorErrorMessage(caught));
       return false;
     } finally {
       setPendingPreferenceAction(null);
@@ -233,7 +238,7 @@ export default function DropshipPortalNotifications() {
               <Bell className="h-6 w-6 text-[#C060E0]" />
               Alerts
             </h1>
-            <p className="mt-1 text-sm text-zinc-500">Dropship account, order, wallet, store, listing, and return notifications.</p>
+            <p className="mt-1 text-sm text-zinc-500">News about your account, orders, wallet, store, listings and returns.</p>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row">
             <Select value={view} onValueChange={(value) => setView(value === "unread" ? "unread" : "all")}>
@@ -262,7 +267,7 @@ export default function DropshipPortalNotifications() {
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {queryErrorMessage(notificationsQuery.error, "Unable to load dropship alerts.")}
+              {vendorErrorMessage(notificationsQuery.error, "We couldn't load your alerts. Reload the page to try again.")}
             </AlertDescription>
           </Alert>
         )}
@@ -270,7 +275,7 @@ export default function DropshipPortalNotifications() {
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {queryErrorMessage(preferencesQuery.error, "Unable to load notification preferences.")}
+              {vendorErrorMessage(preferencesQuery.error, "We couldn't load your alert settings. Reload the page to try again.")}
             </AlertDescription>
           </Alert>
         )}
@@ -317,7 +322,7 @@ export default function DropshipPortalNotifications() {
               <EmptyMedia variant="icon"><AlertCircle /></EmptyMedia>
               <EmptyHeader>
                 <EmptyTitle>Alerts unavailable</EmptyTitle>
-                <EmptyDescription>The alerts API request failed.</EmptyDescription>
+                <EmptyDescription>We couldn't load your alerts. Reload the page to try again.</EmptyDescription>
               </EmptyHeader>
             </Empty>
           ) : notifications.length ? (
@@ -334,12 +339,12 @@ export default function DropshipPortalNotifications() {
                         {!notification.readAt && (
                           <Badge variant="outline" className="border-[#C060E0]/30 bg-[#C060E0]/10 text-[#8c35aa]">Unread</Badge>
                         )}
-                        <Badge variant="outline" className={statusTone(notification.status)}>{formatStatus(notification.status)}</Badge>
+                        <Badge variant="outline" className={statusTone(notification.status)}>{vendorNotificationStatusLabel(notification.status)}</Badge>
                       </div>
                       {/* whitespace-pre-line: a publish run's notice lists its sizes one per line (review round 2 DUX13). */}
-                      {notification.message && <p className="mt-1 whitespace-pre-line text-sm text-zinc-600">{notification.message}</p>}
+                      {notification.message && <NotificationMessage message={notification.message} />}
                       <p className="mt-2 text-xs text-zinc-500">
-                        {formatStatus(notification.eventType)} via {formatStatus(notification.channel)}
+                        {vendorNotificationEventLabel(notification.eventType)} · {vendorNotificationChannelLabel(notification.channel)}
                         {notification.readAt ? ` | Read ${formatDateTime(notification.readAt)}` : ""}
                       </p>
                     </div>
@@ -368,7 +373,7 @@ export default function DropshipPortalNotifications() {
               <EmptyMedia variant="icon"><Bell /></EmptyMedia>
               <EmptyHeader>
                 <EmptyTitle>No alerts</EmptyTitle>
-                <EmptyDescription>No dropship notifications have been recorded.</EmptyDescription>
+                <EmptyDescription>You don't have any alerts yet.</EmptyDescription>
               </EmptyHeader>
             </Empty>
           )}
@@ -406,7 +411,7 @@ function NotificationPreferencesPanel({
             <SlidersHorizontal className="h-5 w-5 text-zinc-500" />
             Alert preferences
           </h2>
-          <p className="mt-1 text-sm text-zinc-500">Email and in-app delivery by event type.</p>
+          <p className="mt-1 text-sm text-zinc-500">Choose which alerts you get by email and in the portal.</p>
         </div>
         <Badge variant="outline">{rows.length} type{rows.length === 1 ? "" : "s"}</Badge>
       </div>
@@ -425,7 +430,7 @@ function NotificationPreferencesPanel({
               <div key={row.eventType} className="grid gap-4 p-4 lg:grid-cols-[1fr_360px] lg:items-center">
                 <div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <h3 className="font-semibold">{formatStatus(row.eventType)}</h3>
+                    <h3 className="font-semibold">{vendorNotificationEventLabel(row.eventType)}</h3>
                     {row.critical && (
                       <Badge variant="outline" className="border-rose-200 bg-rose-50 text-rose-800">Critical</Badge>
                     )}
@@ -438,7 +443,7 @@ function NotificationPreferencesPanel({
                     {row.updatedAt ? ` | Updated ${formatDateTime(row.updatedAt)}` : ""}
                   </p>
                 </div>
-                <div className="grid gap-3 sm:grid-cols-4">
+                <div className="grid gap-3 sm:grid-cols-2">
                   <PreferenceSwitch
                     checked={row.emailEnabled}
                     disabled={disabled || row.critical}
@@ -449,12 +454,10 @@ function NotificationPreferencesPanel({
                   <PreferenceSwitch
                     checked={row.inAppEnabled}
                     disabled={disabled || row.critical}
-                    label="In-app"
+                    label="In the portal"
                     pending={rowPending}
                     onCheckedChange={(checked) => onUpdatePreference(row, { inAppEnabled: checked })}
                   />
-                  <PreferenceSwitch checked={false} disabled label="SMS" pending={false} onCheckedChange={() => undefined} />
-                  <PreferenceSwitch checked={false} disabled label="Webhook" pending={false} onCheckedChange={() => undefined} />
                 </div>
               </div>
             );
@@ -464,8 +467,8 @@ function NotificationPreferencesPanel({
         <Empty className="mt-4 rounded-md border border-dashed p-8">
           <EmptyMedia variant="icon"><SlidersHorizontal /></EmptyMedia>
           <EmptyHeader>
-            <EmptyTitle>No preference event types</EmptyTitle>
-            <EmptyDescription>Preference controls appear after a notification event type exists.</EmptyDescription>
+            <EmptyTitle>No alert settings yet</EmptyTitle>
+            <EmptyDescription>Your alert settings show here once there's something to set.</EmptyDescription>
           </EmptyHeader>
         </Empty>
       )}
@@ -496,7 +499,7 @@ function PreferenceSwitch({
 
 function preferenceSourceLabel(source: NotificationPreferenceRow["source"]): string {
   if (source === "saved") return "Saved";
-  if (source === "default") return "Launch default";
+  if (source === "default") return "Default";
   return "Default";
 }
 
@@ -598,4 +601,27 @@ function statusTone(status: string): string {
   if (status === "pending") return "border-amber-200 bg-amber-50 text-amber-900";
   if (status === "failed") return "border-rose-200 bg-rose-50 text-rose-800";
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
+/**
+ * An alert's message, its allowed https links (eBay and the portal) as real
+ * links and everything else as text: React text nodes and anchors only, never
+ * HTML. eBay pages open in a new tab.
+ */
+export function NotificationMessage({ message }: { message: string }) {
+  const origin = typeof window === "undefined" ? null : window.location.origin;
+  return (
+    <p className="mt-1 whitespace-pre-line break-words text-sm text-zinc-600">
+      {splitVendorMessageLinks(message, origin).map((piece, index) => piece.kind === "text" ? piece.text : (
+        <a
+          key={index}
+          className="underline"
+          href={piece.href}
+          {...(piece.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+        >
+          {piece.text}
+        </a>
+      ))}
+    </p>
+  );
 }

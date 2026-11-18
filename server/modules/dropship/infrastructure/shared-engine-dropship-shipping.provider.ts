@@ -1,31 +1,31 @@
-import { SharedShippingConfigurationRepository } from "../../shipping-engine/infrastructure/shared-configuration.repository";
+import { SharedShippingConfigurationRepository } from "../../shipping-engine/shared-packaging-configuration.api";
 import type {
   ShipmentLineInput,
   ShipmentParcelPlan,
-} from "../../shipping-engine/domain/shipment";
+} from "../../shipping-engine/rate-quoting-and-policy.api";
 import {
   resolveRuntimeChannelShipping,
   type RuntimeChannelShippingResolution,
-} from "../../shipping-engine/application/channel-shipping-policy-runtime.service";
+} from "../../shipping-engine/rate-quoting-and-policy.api";
 import {
   quoteShipment,
   type ShipmentQuoteRequest,
   type ShipmentQuoteResult,
-} from "../../shipping-engine/application/shipment-quote.service";
+} from "../../shipping-engine/rate-quoting-and-policy.api";
 import type {
   ShipmentParcelProvider,
-} from "../../shipping-engine/application/shipment-parcel-provider";
+} from "../../shipping-engine/rate-quoting-and-policy.api";
 import {
   localRateTableShippingRateProvider,
   type ShippingRateProvider,
-} from "../../shipping-engine/application/shipping-rate-provider";
+} from "../../shipping-engine/rate-quoting-and-policy.api";
 import {
   loadCatalogShippingFactsByVariantIds,
   type CatalogShippingFactByVariant,
-} from "../../shipping-engine/infrastructure/catalog-weight.repository";
+} from "../../shipping-engine/rate-quoting-and-policy.api";
 import {
   PostgresChannelShippingPolicyRuntimeStore,
-} from "../../shipping-engine/infrastructure/channel-shipping-policy-runtime.repository";
+} from "../../shipping-engine/rate-quoting-and-policy.api";
 import type {
   DropshipSharedShippingQuoteProvider,
   DropshipSharedShippingQuoteRequest,

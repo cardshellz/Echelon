@@ -131,6 +131,7 @@ function repositoryWithCandidates(candidates: Awaited<ReturnType<CarrierTracking
     }),
     claimTrackingSubscriptions: vi.fn().mockResolvedValue([]),
     finalizeTrackingSubscriptionAttempt: vi.fn().mockResolvedValue({ id: 501, inserted: true }),
+    requeueReviewedTrackingSubscriptions: vi.fn().mockResolvedValue({ selected: 0, requeued: 0 }),
     listEventsPendingReconciliation: vi.fn().mockResolvedValue([]),
     claimDispatchCommands: vi.fn().mockResolvedValue([]),
     finalizeDispatchAttempt: vi.fn().mockImplementation(async (input) => ({
@@ -138,6 +139,17 @@ function repositoryWithCandidates(candidates: Awaited<ReturnType<CarrierTracking
       inserted: true,
       outcome: input.outcome,
     })),
+    previewReviewedCarrierDispatchCommands: vi.fn().mockResolvedValue({
+      candidateCount: 0,
+      selectedCount: 0,
+      byCohort: {},
+      sample: [],
+    }),
+    requeueReviewedCarrierDispatchCommands: vi.fn().mockResolvedValue({
+      selected: 0,
+      requeued: 0,
+      byCohort: {},
+    }),
     transaction: async (work) => work(tx),
   };
   return {
@@ -150,6 +162,28 @@ function repositoryWithCandidates(candidates: Awaited<ReturnType<CarrierTracking
 }
 
 describe("CarrierTrackingService", () => {
+  it("finishes normal reconciliation before historical capture and includes capture failures in the sweep result", async () => {
+    const {repository}=repositoryWithCandidates([]), log=logger();
+    const captureSavedLabels=vi.fn(async()=>{
+      expect(repository.listEventsPendingReconciliation).toHaveBeenCalled();
+      expect(repository.claimDispatchCommands).toHaveBeenCalled();
+      return {errors:2};
+    });
+    const service=new CarrierTrackingService({repository,clock:{now:()=>new Date(now)},logger:log,captureSavedLabels,
+      dispatchAuthority:{confirmDispatch:async()=>{throw new Error("Unexpected synthetic dispatch command");}}});
+    expect((await service.reconcileUnresolved()).errors).toBe(2);
+    captureSavedLabels.mockRejectedValueOnce(new Error("synthetic provider outage"));
+    expect((await service.reconcileUnresolved()).errors).toBe(1);
+    expect(log.error).toHaveBeenCalledWith(expect.objectContaining({code:"SAVED_LABEL_STATUS_SWEEP_FAILED"}));
+  });
+  it("cannot enqueue an outbound dispatch from status-only delivery evidence, even if the existing label has outbound links",async()=>{
+    const {repository,enqueueDispatchCommand,insertOrGetEvent}=repositoryWithCandidates([{shippingProviderLabelId:10,providerLabelId:"901",labelStatus:"active",labelDirection:"outbound",carrier:"ups",serviceCode:null,linkCount:1,orderNumbers:[]}]);
+    const service=new CarrierTrackingService({repository,clock:{now:()=>new Date(now)},logger:logger()});
+    const result=await service.ingestStatusSnapshot(payload().data,{providerLabelId:"901",carrierCode:"ups",trackingNumber:payload().data.tracking_number});
+    expect(result.matchStatus).toBe("matched");expect(result.dispatchCommandId).toBeNull();
+    expect(insertOrGetEvent.mock.calls[0][0]).toMatchObject({dispatchEvidence:"not_confirmed",sanitizedPayload:{statusOnly:true}});
+    expect(enqueueDispatchCommand).not.toHaveBeenCalled();
+  });
   it("does not prepare paid tracking subscriptions without an explicitly configured client", async () => {
     const { repository } = repositoryWithCandidates([]);
     const service = new CarrierTrackingService({

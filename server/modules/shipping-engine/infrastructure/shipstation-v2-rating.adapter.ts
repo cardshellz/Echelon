@@ -19,6 +19,7 @@ import { parseRoundedDecimalCents, sumCents } from "@shared/money-read";
 
 export const SHIPSTATION_V2_BASE_URL = "https://api.shipstation.com/v2";
 const REQUEST_TIMEOUT_MS = 10_000;
+export const SHIPSTATION_V2_MAX_RESPONSE_BYTES = 2_097_152;
 /** 429 backoff mirrors server/modules/oms/shipstation.service.ts apiRequest. */
 const DEFAULT_RETRY_AFTER_SECONDS = 2;
 const MAX_RETRY_AFTER_SECONDS = 30;
@@ -360,6 +361,90 @@ export interface ShipStationV2AdapterConfig {
   apiKey?: string;
   baseUrl?: string;
   fetchFn?: typeof fetch;
+  timeoutMs?: number;
+  maxResponseBytes?: number;
+}
+
+async function readBoundedResponseText(
+  response: Response,
+  maxResponseBytes: number,
+  signal: AbortSignal,
+  method: "GET" | "POST",
+  path: string,
+): Promise<string> {
+  const declaredLengthRaw = response.headers?.get?.("content-length");
+  if (declaredLengthRaw != null && declaredLengthRaw.trim() !== "") {
+    const declaredLength = Number(declaredLengthRaw);
+    if (Number.isFinite(declaredLength) && declaredLength > maxResponseBytes) {
+      await response.body?.cancel().catch(() => {});
+      throw new ShipStationV2Error(
+        "SHIPSTATION_V2_RESPONSE_TOO_LARGE",
+        `ShipStation v2 ${method} ${path} exceeded ${maxResponseBytes} bytes`,
+        { method, path, maxResponseBytes, contentLength: declaredLength },
+      );
+    }
+  }
+
+  const abortPromise = new Promise<never>((_, reject) => {
+    if (signal.aborted) {
+      const abortErr = new Error("The operation was aborted");
+      abortErr.name = "AbortError";
+      reject(abortErr);
+      return;
+    }
+    signal.addEventListener(
+      "abort",
+      () => {
+        const abortErr = new Error("The operation was aborted");
+        abortErr.name = "AbortError";
+        reject(abortErr);
+      },
+      { once: true },
+    );
+  });
+
+  if (response.body && typeof response.body.getReader === "function") {
+    const reader = response.body.getReader();
+    const onAbort = () => {
+      void reader.cancel().catch(() => {});
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      const decoder = new TextDecoder();
+      const chunks: string[] = [];
+      let totalBytes = 0;
+      while (true) {
+        const { done, value } = await Promise.race([reader.read(), abortPromise]);
+        if (done) break;
+        if (value) {
+          totalBytes += value.byteLength;
+          if (totalBytes > maxResponseBytes) {
+            await reader.cancel().catch(() => {});
+            throw new ShipStationV2Error(
+              "SHIPSTATION_V2_RESPONSE_TOO_LARGE",
+              `ShipStation v2 ${method} ${path} exceeded ${maxResponseBytes} bytes`,
+              { method, path, maxResponseBytes },
+            );
+          }
+          chunks.push(decoder.decode(value, { stream: true }));
+        }
+      }
+      chunks.push(decoder.decode());
+      return chunks.join("");
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  const text = await Promise.race([response.text(), abortPromise]);
+  if (Buffer.byteLength(text, "utf8") > maxResponseBytes) {
+    throw new ShipStationV2Error(
+      "SHIPSTATION_V2_RESPONSE_TOO_LARGE",
+      `ShipStation v2 ${method} ${path} exceeded ${maxResponseBytes} bytes`,
+      { method, path, maxResponseBytes },
+    );
+  }
+  return text;
 }
 
 export function createShipStationV2RatingAdapter(
@@ -368,6 +453,8 @@ export function createShipStationV2RatingAdapter(
   const apiKey = (config.apiKey ?? process.env.SHIPSTATION_V2_API_KEY ?? "").trim();
   const baseUrl = config.baseUrl ?? SHIPSTATION_V2_BASE_URL;
   const fetchFn = config.fetchFn ?? fetch;
+  const timeoutMs = config.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const maxResponseBytes = config.maxResponseBytes ?? SHIPSTATION_V2_MAX_RESPONSE_BYTES;
 
   function isConfigured(): boolean {
     return apiKey.length > 0;
@@ -379,8 +466,9 @@ export function createShipStationV2RatingAdapter(
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
       let response: Response;
+      let responseText = "";
       try {
         response = await fetchFn(url, {
           method,
@@ -391,12 +479,51 @@ export function createShipStationV2RatingAdapter(
           body: body === undefined ? undefined : JSON.stringify(body),
           signal: controller.signal,
         });
+
+        if (response.status === 429 && attempt < maxAttempts) {
+          await response.body?.cancel().catch(() => {});
+          clearTimeout(timer);
+          const waitSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
+          console.warn(
+            `[ShipStationV2] 429 on ${method} ${path}; waiting ${waitSeconds}s before the single retry`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
+          continue;
+        }
+
+        if (!response.ok) {
+          const errorBody = await readBoundedResponseText(
+            response,
+            Math.min(maxResponseBytes, 16_384),
+            controller.signal,
+            method,
+            path,
+          ).catch(() => "");
+          throw new ShipStationV2Error(
+            "SHIPSTATION_V2_HTTP_ERROR",
+            `ShipStation v2 ${method} ${path} failed (${response.status})`,
+            { method, path, status: response.status, body: errorBody.slice(0, 500) },
+          );
+        }
+
+        responseText = await readBoundedResponseText(
+          response,
+          maxResponseBytes,
+          controller.signal,
+          method,
+          path,
+        );
       } catch (error) {
-        const aborted = error instanceof Error && error.name === "AbortError";
+        if (error instanceof ShipStationV2Error) {
+          throw error;
+        }
+        const aborted =
+          controller.signal.aborted ||
+          (error instanceof Error && error.name === "AbortError");
         throw new ShipStationV2Error(
           aborted ? "SHIPSTATION_V2_TIMEOUT" : "SHIPSTATION_V2_NETWORK_ERROR",
           aborted
-            ? `ShipStation v2 ${method} ${path} timed out after ${REQUEST_TIMEOUT_MS}ms`
+            ? `ShipStation v2 ${method} ${path} timed out after ${timeoutMs}ms`
             : `ShipStation v2 ${method} ${path} network failure: ${error instanceof Error ? error.message : String(error)}`,
           { method, path },
         );
@@ -404,25 +531,15 @@ export function createShipStationV2RatingAdapter(
         clearTimeout(timer);
       }
 
-      if (response.status === 429 && attempt < maxAttempts) {
-        const waitSeconds = parseRetryAfterSeconds(response.headers.get("retry-after"));
-        console.warn(
-          `[ShipStationV2] 429 on ${method} ${path}; waiting ${waitSeconds}s before the single retry`,
-        );
-        await new Promise((resolve) => setTimeout(resolve, waitSeconds * 1000));
-        continue;
-      }
-
-      if (!response.ok) {
-        const errorBody = await response.text().catch(() => "");
+      try {
+        return JSON.parse(responseText) as T;
+      } catch (error) {
         throw new ShipStationV2Error(
-          "SHIPSTATION_V2_HTTP_ERROR",
-          `ShipStation v2 ${method} ${path} failed (${response.status})`,
-          { method, path, status: response.status, body: errorBody.slice(0, 500) },
+          "SHIPSTATION_V2_INVALID_JSON",
+          `ShipStation v2 ${method} ${path} returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+          { method, path },
         );
       }
-
-      return (await response.json()) as T;
     }
 
     // Unreachable: the loop either returns or throws.

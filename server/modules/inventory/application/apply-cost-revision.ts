@@ -1,3 +1,4 @@
+import { receiptSegmentCost } from "@shared/procurement/receipt-cost-segments";
 import { normalizeLotCosts, lotCostNeedsReview, lotCostTotals, hasExactLotCostTotals } from "../domain/lot-cost";
 import { costForQuantityIntervals, validateCostQuantityIntervals, type CostQuantityInterval } from "../domain/cost-quantity-intervals";
 import { ensureLotCostQuantityBasis } from "../infrastructure/cost-quantity.repository";
@@ -12,6 +13,7 @@ import { applyNoInventoryEffect } from "./apply-no-inventory-effect";
 import { projectCostForFrozenLot, replaceCostComponent } from "../domain/cost-application.domain";
 import { CostEvidenceError, costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../infrastructure/cost-evidence.repository";
 import type { SupplierReturnCostAdjustment } from "@shared/procurement/supplier-return";
+import { readReceivingLineCostProvenance } from "../../procurement/cost-source-evidence.api";
 
 const MAX_APPLICATION_LOTS = 10_000;
 const MAX_APPLICATION_EDGES = 100_000;
@@ -57,16 +59,27 @@ export async function applyCostRevision(
   const source = revision.contract;
   if (source.inventoryEffect) return applyNoInventoryEffect(tx, revision, actorId, now);
   const shipmentLineId = source.scope.kind === "shipment_line" ? source.scope.inboundShipmentLineId : null;
-  const rootsResult = await tx.execute(sql`
-    SELECT origin.*, line.cost_source_kind, line.cost_source_evidence,
-      EXISTS(SELECT 1 FROM procurement.receipt_reversals reversal WHERE reversal.receiving_line_id = origin.receiving_line_id) AS has_reversal
+  const originsResult = await tx.execute(sql`
+    SELECT origin.*
     FROM inventory.effective_lot_cost_origins origin
-    JOIN procurement.receiving_lines line ON line.id = origin.receiving_line_id
     WHERE origin.purchase_order_line_id = ${source.scope.purchaseOrderLineId}
       AND (${shipmentLineId}::integer IS NULL OR origin.inbound_shipment_line_id = ${shipmentLineId})
     ORDER BY origin.inventory_lot_id LIMIT ${MAX_APPLICATION_LOTS + 1}
   `);
-  const roots = rootsResult.rows;
+  const provenanceByReceivingLineId = await readReceivingLineCostProvenance(
+    tx,
+    originsResult.rows.map((origin) => costInteger(origin.receiving_line_id, "origin.receivingLineId", 1)),
+  );
+  const roots = originsResult.rows.flatMap((origin) => {
+    const provenance = provenanceByReceivingLineId.get(costInteger(origin.receiving_line_id, "origin.receivingLineId", 1));
+    if (!provenance) return [];
+    return [{
+      ...origin,
+      cost_source_kind: provenance.cost_source_kind,
+      cost_source_evidence: provenance.cost_source_evidence,
+      has_reversal: provenance.has_reversal,
+    }];
+  });
   const verifiedSalesOnly = roots.some(root => root.cost_source_evidence?.historicalCostLinks?.verifiedSalesOnly === true);
   if (verifiedSalesOnly && !writer.revalueExactComponent) {
     throw new CostEvidenceError("COST_EXACT_WRITER_REQUIRED", "Repaired history requires the exact costing owner with verified-sale protection.");
@@ -172,9 +185,14 @@ export async function applyCostRevision(
     for (const root of roots) {
       const lot = lots.get(Number(root.inventory_lot_id))!;
       try {
-        const projection = projectCostForFrozenLot({ totalMills: source.totalMills, basePieces: source.basePieces,
-          startBasePiece: costInteger(shipmentLineId === null ? root.purchase_start_base_piece : root.shipment_start_base_piece, "startBasePiece"),
-          lotQuantity: costInteger(root.received_variant_qty, "receivedVariantQty", 1), unitsPerVariantSnapshot: costInteger(root.units_per_variant_snapshot, "unitsPerVariantSnapshot", 1) });
+        const quantity = costInteger(root.received_variant_qty, "receivedVariantQty", 1);
+        const units = costInteger(root.units_per_variant_snapshot, "unitsPerVariantSnapshot", 1);
+        const pieces = costInteger((BigInt(quantity)*BigInt(units)).toString(), "root pieces", 1);
+        const start = costInteger(shipmentLineId === null ? root.purchase_start_base_piece : root.shipment_start_base_piece, "startBasePiece");
+        const receiptCost = source.receiptCostSegments ? receiptSegmentCost(source.receiptCostSegments, start, pieces, Number(root.receiving_line_id)) : null;
+        const projection = projectCostForFrozenLot({ totalMills: receiptCost?.totalMills ?? source.totalMills,
+          basePieces: receiptCost ? pieces : source.basePieces, startBasePiece: receiptCost ? 0 : start,
+          lotQuantity: quantity, unitsPerVariantSnapshot: units });
         projections.set(lot.id, { lot, unitMills: projection.unitMills, remainderMills: projection.remainderMills, allocatedMills: projection.allocatedMills, quantity: projection.lotQuantity });
       } catch (error) {
         issues.push({ code: "COST_SOURCE_INTERVAL_REVIEW", message: `Lot ${lot.id} is outside the captured source quantity: ${error instanceof Error ? error.message : "invalid interval"}` });

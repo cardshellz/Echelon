@@ -14,7 +14,7 @@ export { ChannelIdentityService } from "./channel-identity.service";
 export { ChannelIdentityError } from "./channel-identity.domain";
 export type { ChannelItemIdentity } from "./channel-identity.domain";
 export { type IChannelStorage, channelMethods } from "./channels.storage";
-export { type IChannelCatalogStorage, channelCatalogMethods } from "./channel-catalog.storage";
+export { type IChannelCatalogStorage } from "./channel-catalog.storage";
 
 import { type IChannelStorage, channelMethods } from "./channels.storage";
 import { type IChannelCatalogStorage, channelCatalogMethods } from "./channel-catalog.storage";
@@ -24,6 +24,12 @@ export const channelsStorage: ChannelsModuleStorage = {
   ...channelMethods,
   ...channelCatalogMethods,
 };
+
+// Internal API Facades (CI-03 / CHN-2)
+export * from "./product-identity.api";
+export * from "./ebay-maintenance-evidence.api";
+export * from "./shopify-identity.api";
+export * from "./ebay-connector.api";
 
 // Service types
 export type { SyncResult } from "./sync.service";

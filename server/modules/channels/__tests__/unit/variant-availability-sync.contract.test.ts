@@ -40,12 +40,19 @@ describe("inactive variant availability contracts", () => {
     }
     // The transactional owner now implements the archive, not route-local DB
     // mutations. Only an explicit correction target may move/delete source bins.
+    const channelFeedMutations = repoFile(
+      "server/modules/channels/infrastructure/channel-feed-listing-mutations.repository.ts",
+    );
     expect(owner).toContain("inventoryPreserved: command.targetVariantId === null ? initialOnHand : 0");
     expect(repository).toContain("if (command.targetVariantId !== null)");
     expect(repository).toContain("if (!posting) result.inventoryCleared");
     expect(repository).not.toContain("delete(channelFeeds)");
     expect(repository).not.toContain("delete(channelListings)");
-    expect(repository).toContain("tx.update(channelFeeds).set({ isActive: 0");
+    expect(repository).toContain("deactivateActiveChannelFeedsByVariantIdInChannels(tx, sourceId, now)");
+    expect(channelFeedMutations).not.toContain("delete(channelFeeds)");
+    expect(channelFeedMutations).not.toContain("delete(channelListings)");
+    expect(channelFeedMutations).toContain(".update(channelFeeds)");
+    expect(channelFeedMutations).toContain(".set({ isActive: 0, updatedAt: now })");
   });
 
   it("uses a lease and row locking so multiple app instances cannot own the same transition", () => {

@@ -26,6 +26,10 @@ import {
 
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
+import {
+  insertIdempotencyKeyDrizzle,
+  updateIdempotencyKeyDrizzle,
+} from "../../../infrastructure/idempotency-keys.repository";
 import { sqlIntegerArray } from "../../../infrastructure/postgres-array";
 import { assertCanonicalDemandDispatchEvidence, canonicalDemandDispatchInvalid, type DemandEvidenceExecutor } from "./inventory-demand-dispatch-evidence.repository";
 import type {
@@ -43,7 +47,9 @@ import {
   type DemandConsumptionEvent,
 } from "../domain/inventory-demand-evidence";
 
-type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+// Statements only. A handle bound to one pinned client (the one-step set command) satisfies it as well
+// as a real transaction, and it leaves no way to open or end a transaction from inside a writer.
+type Transaction = Pick<Parameters<Parameters<typeof db.transaction>[0]>[0], "execute" | "insert" | "update" | "delete" | "select">;
 const DEMAND_REFRESH_LOCK_NAMESPACE = 918424;
 const IDEMPOTENCY_LOCK_NAMESPACE = 918420;
 const DEMAND_REFRESH_RECEIPT_PREFIX = "inventory-demand-evidence:";
@@ -188,7 +194,19 @@ implements InventoryPromiseSafetyAdminStore {
   async updatePromiseSafetyPolicyDraft(
     command: UpdatePromiseSafetyPolicyDraftCommand,
   ) {
-    return this.database.transaction(async (tx) => {
+    return this.database.transaction((tx) => this.updatePromiseSafetyPolicyDraftInsideTransaction(tx, command));
+  }
+
+  /**
+   * The one writer that replaces a saved, unapplied promise-safety version. The
+   * one-step set command supplies its own transaction (see
+   * createPromiseSafetyPolicyDraftInsideTransaction). The caller owns
+   * BEGIN/COMMIT; nothing here opens or ends a transaction.
+   */
+  async updatePromiseSafetyPolicyDraftInsideTransaction(
+    tx: Transaction,
+    command: UpdatePromiseSafetyPolicyDraftCommand,
+  ) {
       const receiptKey = `${POLICY_UPDATE_RECEIPT_PREFIX}${command.idempotencyKey}`;
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(
@@ -199,7 +217,7 @@ implements InventoryPromiseSafetyAdminStore {
       const replay = await loadPolicyUpdateReplay(tx, receiptKey, command.requestHash);
       if (replay) return replay;
       await assertPolicyUpdateKeyIsUnique(tx, command.idempotencyKey);
-      await tx.insert(idempotencyKeys).values({
+      await insertIdempotencyKeyDrizzle(tx, {
         key: receiptKey,
         requestHash: command.requestHash,
         responseBody: null,
@@ -305,14 +323,13 @@ implements InventoryPromiseSafetyAdminStore {
         timestamp: command.occurredAt,
         emitStructuredLog: false,
       });
-      await tx.update(idempotencyKeys).set({
+      await updateIdempotencyKeyDrizzle(tx, receiptKey, {
         responseBody: {
           commandType: "promise_safety_policy_draft_update",
           result,
         },
-      }).where(eq(idempotencyKeys.key, receiptKey));
+      });
       return result;
-    });
   }
 
   async refreshDemandEvidence(
@@ -330,7 +347,7 @@ implements InventoryPromiseSafetyAdminStore {
       const replay = await loadRefreshReplay(tx, receiptKey, command.requestHash);
       if (replay) return replay;
       await assertDemandRefreshKeyIsUnique(tx, command.idempotencyKey);
-      await tx.insert(idempotencyKeys).values({
+      await insertIdempotencyKeyDrizzle(tx, {
         key: receiptKey,
         requestHash: command.requestHash,
         responseBody: null,
@@ -460,12 +477,12 @@ implements InventoryPromiseSafetyAdminStore {
         timestamp: command.calculatedAt,
         emitStructuredLog: false,
       });
-      await tx.update(idempotencyKeys).set({
+      await updateIdempotencyKeyDrizzle(tx, receiptKey, {
         responseBody: {
           commandType: "inventory_demand_evidence_refresh",
           result,
         },
-      }).where(eq(idempotencyKeys.key, receiptKey));
+      });
       return result;
     });
   }

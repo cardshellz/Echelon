@@ -16,6 +16,15 @@ export interface DropshipEbayFulfillmentPolicyPreflight {
   capabilityEvidenceHash: string;
   originWarehouseId: number | null;
   issues: DropshipEbayFulfillmentPolicyIssue[];
+  /**
+   * Facts the evaluation already read, for the vendor's words (no extra eBay
+   * call): the policy's own name on eBay, the names of the shipping services
+   * Card Shellz ships with for this store (capability.supportedServices), and
+   * the handling time it needs. Optional so stand-in guards may leave them out.
+   */
+  policyName?: string | null;
+  supportedServiceNames?: string[];
+  requiredHandlingTimeBusinessDays?: number | null;
 }
 
 export interface DropshipEbayFulfillmentPolicyGuard {
@@ -107,5 +116,8 @@ function evaluate(
     capabilityEvidenceHash: capability.evidenceHash,
     originWarehouseId: capability.source.originWarehouseId,
     issues: compatibility.issues,
+    policyName: policy.name.trim() || null,
+    supportedServiceNames: [...new Set(capability.supportedServices.map((service) => service.serviceName.trim()).filter(Boolean))],
+    requiredHandlingTimeBusinessDays: capability.requiredHandlingTimeBusinessDays,
   };
 }

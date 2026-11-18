@@ -15,7 +15,7 @@ import {
 import {
   receiveExpectedWmsReturn,
   WmsReturnReceiptCommandError,
-} from "../../wms/return-receipt-commands";
+} from "../../wms/returns-receipt.api";
 import {
   ReturnCaseOperationError,
   type ApplyReturnInventoryTreatmentResult,

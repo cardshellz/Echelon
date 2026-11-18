@@ -10,11 +10,11 @@ import {
   type ReturnLabelInput,
   type ReturnLabelProvider,
   type ReturnLabelRecord,
-} from "../../shipping-engine/application/return-label-provider.port";
+} from "../../shipping-engine/return-shipping-and-labels.api";
 import {
   type ReturnRateProvider,
   type ReturnRateInput,
-} from "../../shipping-engine/application/return-rate-provider.port";
+} from "../../shipping-engine/return-shipping-and-labels.api";
 import { quoteCustomerReturnShipment, customerReturnShippingQuoteError } from "./customer-return-shipping-quote";
 import { customerReturnPreflightShipments } from "./customer-return-shipping-plan";
 import type { PreparedCustomerReturnIntake } from "./customer-return-intake.ports";

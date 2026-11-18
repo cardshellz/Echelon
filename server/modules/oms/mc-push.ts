@@ -13,7 +13,18 @@ import { logger } from "../../platform/observability/logger";
 import { extractShopifyDiscountEvidence } from "./archon-discount-evidence";
 
 const MC_URL = process.env.MC_WEBHOOK_URL || "https://archon-os-20aa790cd70d.herokuapp.com";
-const MC_WEBHOOK_SECRET = process.env.MC_WEBHOOK_SECRET || "echelon-to-mc-sync-2026";
+
+/**
+ * Shared secret Archon checks on every order event (x-webhook-secret header).
+ *
+ * MC_WEBHOOK_SECRET is required and has deliberately no built-in default: a
+ * value written in the source protects nothing. Read on each use; an empty
+ * result means "not configured", and then nothing is sent.
+ */
+function missionControlSecret(): string {
+  const value = process.env.MC_WEBHOOK_SECRET;
+  return typeof value === "string" ? value.trim() : "";
+}
 
 const LOG_PREFIX = "[MC Push]";
 
@@ -41,6 +52,20 @@ export function extractDiscountCodes(rawPayload: unknown): ChannelDiscountCode[]
 
 export async function pushToMissionControl(orderId: number, eventType: string): Promise<void> {
   try {
+    const secret = missionControlSecret();
+    if (!secret) {
+      // Fail closed: Archon refuses an event without the secret, so nothing
+      // is read or sent. Logged at ERROR because this sender does not retry.
+      logger.error("oms.archon_push", {
+        outcome: "not_sent",
+        error_code: "ARCHON_SECRET_MISSING",
+        error_class: "fatal",
+        oms_order_id: orderId,
+        event_type: eventType,
+      });
+      return;
+    }
+
     // 1. Read the oms_orders row
     const [order] = await db
       .select()
@@ -170,7 +195,7 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "x-webhook-secret": MC_WEBHOOK_SECRET,
+        "x-webhook-secret": secret,
       },
       body: JSON.stringify(payload),
     });
@@ -189,5 +214,5 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
 
 /** Shared by the durable projection worker and the existing webhook sender. */
 export function missionControlConnection() {
-  return { url: MC_URL, secret: MC_WEBHOOK_SECRET };
+  return { url: MC_URL, secret: missionControlSecret() };
 }

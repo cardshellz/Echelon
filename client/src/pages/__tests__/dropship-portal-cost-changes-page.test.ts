@@ -126,7 +126,10 @@ describe("vendor portal cost changes page", () => {
   });
 
   it("says a failed read failed, and shows a loading state before the read answers", () => {
-    expect(render({ isError: true, error: new Error("Request failed with 503") })).toContain("Request failed with 503");
+    // The vendor sees what to do, never the server's words or an HTTP status.
+    const failed = render({ isError: true, error: new Error("Request failed with 503") });
+    expect(failed).toContain("We couldn&#x27;t load cost changes. Reload the page to try again.");
+    expect(failed).not.toContain("503");
     expect(render({ isLoading: true })).toContain('aria-label="Loading cost changes"');
   });
 });

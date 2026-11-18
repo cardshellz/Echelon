@@ -25,7 +25,7 @@ async function main() {
   const { db, pool } = await import("../server/db");
   try {
     const { PackageHistoryBackfillRepository } = await import(
-      "../server/modules/shipping/package-history-backfill.repository"
+      "../server/modules/shipping/package-history-and-delivery.api"
     );
     const repository = new PackageHistoryBackfillRepository(pool);
     if (options.mode === "seed")
@@ -44,7 +44,7 @@ async function main() {
       }
     if (options.mode === "run") {
       const { createPackageHistoryWorker } = await import(
-        "../server/modules/shipping/package-history.composition"
+        "../server/modules/shipping/package-history-and-delivery.api"
       );
       const worker = createPackageHistoryWorker(
         pool,

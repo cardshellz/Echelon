@@ -1,44 +1,52 @@
-// shopify.adapter.ts — Pure infrastructure adapter for Shopify GraphQL endpoints
-import { getShopifyConfig } from "../../integrations/shopify";
-import type { ShopifyGraphQLResponse } from "../subscription.types";
+// shopify.adapter.ts — Infrastructure adapter for Shopify subscription GraphQL operations
+import {
+  shopifyGraphQL,
+  type ShopifyGraphQLRequestOptions,
+} from "../../shopify/admin-gql-client";
 
-const SHOPIFY_API_VERSION = "2024-10";
+export { shopifyGraphQL, type ShopifyGraphQLRequestOptions };
 
-export interface ShopifyGraphQLRequestOptions {
-  apiVersion?: string;
-  timeoutMs?: number;
+const SUBSCRIPTION_GQL_OPTIONS: ShopifyGraphQLRequestOptions = {
+  timeoutMs: 15_000,
+};
+
+/**
+ * Raised when Shopify definitively rejects a subscription command before applying
+ * a remote state transition or billing attempt (e.g. validation `userErrors`).
+ */
+export class SubscriptionProviderRejectedError extends Error {
+  readonly definitive = true as const;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "SubscriptionProviderRejectedError";
+  }
 }
 
-export async function shopifyGraphQL<T = any>(query: string, variables?: Record<string, any>, options: ShopifyGraphQLRequestOptions = {}): Promise<T> {
-  const version = options.apiVersion ?? SHOPIFY_API_VERSION;
-  if (!/^\d{4}-(01|04|07|10)$/.test(version)) throw new Error("Invalid Shopify API version.");
-  if (options.timeoutMs !== undefined && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0))
-    throw new Error("Shopify request timeout must be a positive integer.");
-  const config = getShopifyConfig();
-  const url = `https://${config.domain}/admin/api/${version}/graphql.json`;
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": config.accessToken,
-    },
-    body: JSON.stringify({ query, variables }),
-    ...(options.timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(options.timeoutMs) }),
-  });
-
-  if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`Shopify GraphQL error ${response.status}: ${text}`);
+/**
+ * Classifies whether a remote Shopify failure proves no side effect was committed,
+ * as opposed to transport/timeout/5xx/rate-limit errors whose outcome is uncertain.
+ */
+export function isDefinitiveSubscriptionProviderRejection(err: unknown): boolean {
+  if (err instanceof SubscriptionProviderRejectedError) return true;
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    (err as { definitive?: unknown }).definitive === true
+  ) {
+    return true;
   }
-
-  const json = await response.json() as ShopifyGraphQLResponse<T>;
-
-  if (json.errors && json.errors.length > 0) {
-    throw new Error(`Shopify GraphQL errors: ${json.errors.map(e => e.message).join(", ")}`);
+  if (!(err instanceof Error)) return false;
+  if (/^Shopify GraphQL error (400|401|403|404|422):/.test(err.message)) {
+    return true;
   }
-
-  return json.data as T;
+  if (
+    err.message.includes("Missing SHOPIFY_SHOP_DOMAIN or SHOPIFY_ADMIN_ACCESS_TOKEN") ||
+    err.message.includes("Invalid Shopify API version")
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -63,7 +71,7 @@ export async function fetchContractSellingPlanLines(contractGid: string): Promis
     }
   `;
 
-  const data = await shopifyGraphQL<any>(query, { id: contractGid });
+  const data = await shopifyGraphQL<any>(query, { id: contractGid }, SUBSCRIPTION_GQL_OPTIONS);
   const contract = data.subscriptionContract;
   if (!contract) return null;
 
@@ -87,7 +95,7 @@ export async function getShopifyCustomer(customerGid: string): Promise<{ email: 
       }
     }
   `;
-  const data = await shopifyGraphQL<any>(query, { id: customerGid });
+  const data = await shopifyGraphQL<any>(query, { id: customerGid }, SUBSCRIPTION_GQL_OPTIONS);
   return data.customer || null;
 }
 
@@ -105,10 +113,16 @@ export async function cancelShopifyContract(contractGid: string): Promise<void> 
     }
   `;
 
-  const draftResult = await shopifyGraphQL<any>(draftMutation, { contractId: contractGid });
+  const draftResult = await shopifyGraphQL<any>(
+    draftMutation,
+    { contractId: contractGid },
+    SUBSCRIPTION_GQL_OPTIONS,
+  );
   const draft = draftResult.subscriptionDraftCreate;
-  if (draft.userErrors?.length > 0 || !draft.draft?.id) {
-    throw new Error(`Failed to create draft: ${draft.userErrors?.map((e: any) => e.message).join(", ")}`);
+  if (draft?.userErrors?.length > 0 || !draft?.draft?.id) {
+    throw new SubscriptionProviderRejectedError(
+      `Failed to create draft: ${draft?.userErrors?.map((e: any) => e.message).join(", ") || "missing draft id"}`,
+    );
   }
 
   const updateMutation = `
@@ -120,7 +134,17 @@ export async function cancelShopifyContract(contractGid: string): Promise<void> 
     }
   `;
 
-  await shopifyGraphQL(updateMutation, { draftId: draft.draft.id, input: { status: "CANCELLED" } });
+  const updateResult = await shopifyGraphQL<any>(
+    updateMutation,
+    { draftId: draft.draft.id, input: { status: "CANCELLED" } },
+    SUBSCRIPTION_GQL_OPTIONS,
+  );
+  const updated = updateResult.subscriptionDraftUpdate;
+  if (updated?.userErrors?.length > 0) {
+    throw new SubscriptionProviderRejectedError(
+      `Failed to update draft: ${updated.userErrors.map((e: any) => e.message).join(", ")}`,
+    );
+  }
 
   const commitMutation = `
     mutation subscriptionDraftCommit($draftId: ID!) {
@@ -131,7 +155,17 @@ export async function cancelShopifyContract(contractGid: string): Promise<void> 
     }
   `;
 
-  await shopifyGraphQL(commitMutation, { draftId: draft.draft.id });
+  const commitResult = await shopifyGraphQL<any>(
+    commitMutation,
+    { draftId: draft.draft.id },
+    SUBSCRIPTION_GQL_OPTIONS,
+  );
+  const committed = commitResult.subscriptionDraftCommit;
+  if (committed?.userErrors?.length > 0 || !committed?.contract?.id) {
+    throw new SubscriptionProviderRejectedError(
+      `Failed to commit draft: ${committed?.userErrors?.map((e: any) => e.message).join(", ") || "missing committed contract"}`,
+    );
+  }
 }
 
 /**
@@ -157,17 +191,23 @@ export async function createBillingAttempt(
     }
   `;
 
-  const data = await shopifyGraphQL<any>(mutation, {
-    subscriptionContractId: contractGid,
-    subscriptionBillingAttemptInput: { idempotencyKey, originTime },
-  });
+  const data = await shopifyGraphQL<any>(
+    mutation,
+    {
+      subscriptionContractId: contractGid,
+      subscriptionBillingAttemptInput: { idempotencyKey, originTime },
+    },
+    SUBSCRIPTION_GQL_OPTIONS,
+  );
 
   const result = data.subscriptionBillingAttemptCreate;
-  if (result.userErrors?.length > 0) {
-    throw new Error(`Billing attempt failed: ${result.userErrors.map((e: any) => e.message).join(", ")}`);
+  if (result?.userErrors?.length > 0) {
+    throw new SubscriptionProviderRejectedError(
+      `Billing attempt failed: ${result.userErrors.map((e: any) => e.message).join(", ")}`,
+    );
   }
 
-  return result.subscriptionBillingAttempt;
+  return result?.subscriptionBillingAttempt;
 }
 
 /**

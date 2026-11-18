@@ -1,4 +1,5 @@
 import { readIntegerCents, readIntegerMills } from "@shared/money-read";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
 import { captureDocumentNumberTime } from "../../platform/document-numbering/document-number";
 import { hasPoInvoiceHistory, readPoInvoiceHistory } from "./po-invoice-history.repository";
 import type { PurchaseOrderEntryAction, PurchaseOrderEntryCommand } from "@shared/procurement/purchase-order-entry-command";
@@ -2355,6 +2356,11 @@ export function createPurchasingService(
   }
 
   async function updateLine(lineId: number, updates: Record<string, any>, userId?: string) {
+    if ("receiptCostingEnabled" in updates || "receipt_costing_enabled" in updates) {
+      throw new PurchasingError("Receipt invoice costing policy cannot be changed by a PO line edit.", 400, {
+        code: "RECEIPT_COST_POLICY_NOT_EDITABLE",
+      });
+    }
     const line = await storage.getPurchaseOrderLineById(lineId);
     if (!line) throw new PurchasingError("PO line not found", 404);
 
@@ -3169,7 +3175,7 @@ export function createPurchasingService(
     }
 
     if (auditRows.length > 0) {
-      await tx.insert(auditEventsTable).values(auditRows);
+      await insertAuditEventDrizzle(tx, auditRows);
     }
   }
 
@@ -4561,7 +4567,7 @@ export function createPurchasingService(
         }));
         await storage.bulkCreateReceivingLines(receivingLinesToCreate as any, tx);
         if (selections.size > 0) {
-          await tx.insert(auditEventsTable).values({ timestamp: receiptCreatedAt, level: "AUDIT", actor: userId!,
+          await insertAuditEventDrizzle(tx, { timestamp: receiptCreatedAt, level: "AUDIT", actor: userId!,
             action: "procurement.shipment_receipt.receiving_configuration_selected", target: `receipt:${receivingOrder.id}`,
             changes: { before: receiptShipmentLines.map((line: any) => ({ shipmentLineId: line.id,
               productVariantId: line.productVariantId ?? poLineById.get(line.purchaseOrderLineId)?.expectedReceiveVariantId ?? null,
@@ -6014,7 +6020,7 @@ export function createPurchasingService(
       );
       const insertedLines = await tx
         .insert(purchaseOrderLinesTable)
-        .values(lineRows)
+        .values(lineRows.map(row => ({ ...row, receiptCostingEnabled: 1 })))
         .returning({
           id: purchaseOrderLinesTable.id,
           lineNumber: purchaseOrderLinesTable.lineNumber,
@@ -6316,7 +6322,7 @@ export function createPurchasingService(
         } else {
           const insertedRows = await tx
             .insert(purchaseOrderLinesTable)
-            .values({ ...values, createdAt: changedAt, updatedAt: changedAt })
+            .values({ ...values, receiptCostingEnabled: 1, createdAt: changedAt, updatedAt: changedAt })
             .returning();
           persisted = insertedRows[0];
           if (!persisted) {
@@ -7443,7 +7449,7 @@ export function createPurchasingService(
             productVariantId: row.productVariantId ?? null,
           },
         });
-        await tx.insert(auditEventsTable).values(auditRows);
+        await insertAuditEventDrizzle(tx, auditRows);
         return row;
       });
     } catch (error: any) {
@@ -7549,7 +7555,7 @@ export function createPurchasingService(
             productVariantId: row.productVariantId ?? null,
           },
         });
-        await tx.insert(auditEventsTable).values(auditRows);
+        await insertAuditEventDrizzle(tx, auditRows);
         return row;
       });
     } catch (error: any) {
@@ -7882,7 +7888,7 @@ export function createPurchasingService(
             } },
           });
         }
-        if (auditRows.length > 0) await tx.insert(auditEventsTable).values(auditRows.map(row => ({ ...row, timestamp: writeTime })));
+        if (auditRows.length > 0) await insertAuditEventDrizzle(tx, auditRows.map(row => ({ ...row, timestamp: writeTime })));
         return { rfqs: createdRfqs, lines: createdLines, reused: false };
       };
       return existingTransaction ? await work(existingTransaction) : await db.transaction(work);
@@ -8441,7 +8447,7 @@ export function createPurchasingService(
       // Audit persistence is deliberately atomic with the catalog changes.
       // A failed audit insert rolls back every row in the batch.
       if (auditRows.length > 0) {
-        await tx.insert(auditEventsTable).values(auditRows);
+        await insertAuditEventDrizzle(tx, auditRows);
       }
     };
 
@@ -8781,10 +8787,6 @@ export function createPurchasingService(
     recalculateTotals,
     computePoTotalsFromLines,
     computeAllocatedLineCosts,
-    getAllocatedLineCostsForPo: async (poId: number) => {
-      const lines = await storage.getPurchaseOrderLines(poId);
-      return computeAllocatedLineCosts(lines);
-    },
 
     // Receiving integration
     createReceiptFromPO,

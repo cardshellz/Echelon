@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test } from "@playwright/test";
 import { purchaseReceiptSupplyEvidenceSchema } from "../../shared/procurement/purchase-receipt-supply-evidence";
 import { rfqCreateReceipt } from "../fixtures/rfq-create-command";
@@ -259,9 +260,9 @@ for (const capability of ["read", "adjust", "edit"] as const) {
     const permissions = ["purchasing:view", "inventory:view",
       ...(capability === "adjust" ? ["inventory:adjust"] : []),
       ...(capability === "edit" ? ["purchasing:edit"] : [])];
-    await page.route("**/api/auth/me", route => route.fulfill({ json: {
-      user: { id: "test-user", username: "test", role: "lead" }, permissions, roles: ["lead"],
-    } }));
+    await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({
+      user: { id: "test-user", username: "test", role: "lead" }, permissions, systemRoles: ["lead"],
+    }) }));
     await page.route("**/api/purchasing/exclusion-rules", route => route.fulfill({ json: {
       rules: [{ id: 1, field: "tag", value: "fixture-exclusion", matchCount: 2, createdAt: "2026-09-07T12:00:00Z" }], totalExcluded: 2,
     } }));

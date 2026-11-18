@@ -67,7 +67,7 @@ function carrierTracking(overrides: Record<string, unknown> = {}) {
 
 describe("shipstation physical recovery service", () => {
   it("selects old completed pick lines until active label carrier evidence matches them", async () => {
-    const execute = vi.fn(async () => ({ rows: [candidateRow()] }));
+    const execute = vi.fn(async (_query?: unknown) => ({ rows: [candidateRow()] }));
 
     const candidates = await findShipStationPhysicalRecoveryCandidates(
       { execute },

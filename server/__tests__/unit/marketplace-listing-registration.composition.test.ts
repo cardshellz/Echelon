@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createMarketplaceListingRegistrationResolver,
   type MarketplaceListingRegistrationOwnerAdapters,
+  type MarketplaceListingRegistrationResolverDependencies,
 } from "../../marketplace-listing-registration.composition";
 import { createEbayAuthConfig } from "../../modules/channels/adapters/ebay/ebay-auth.service";
 import {
@@ -12,6 +13,7 @@ import {
   type ListingRegistrationStatus,
   type MarketplaceListingRegistrationRepository,
   type PersistListingRegistrationInput,
+  type PersistVerifiedListingInput,
   type PreviewListingRegistrationInput,
 } from "../../modules/marketplace-listings";
 
@@ -148,7 +150,7 @@ describe("marketplace listing registration composition", () => {
 
   it("classifies lazy adapter construction failures without exposing config", async () => {
     const harness = buildHarness({
-      createChannelAdapters: vi.fn(() => {
+      createChannelAdapters: vi.fn<MarketplaceListingRegistrationResolverDependencies["createChannelAdapters"]>(() => {
         throw new Error("secret-bearing constructor failure");
       }),
     });
@@ -218,14 +220,14 @@ function stoppingAdapters(code: string): MarketplaceListingRegistrationOwnerAdap
 }
 
 function buildHarness(overrides: {
-  createChannelAdapters?: ReturnType<typeof vi.fn>;
-  createDropshipAdapters?: ReturnType<typeof vi.fn>;
+  createChannelAdapters?: ReturnType<typeof vi.fn<MarketplaceListingRegistrationResolverDependencies["createChannelAdapters"]>>;
+  createDropshipAdapters?: ReturnType<typeof vi.fn<MarketplaceListingRegistrationResolverDependencies["createDropshipAdapters"]>>;
 } = {}) {
   const repository = new FakeRegistrationRepository();
   const createChannelAdapters = overrides.createChannelAdapters
-    ?? vi.fn(() => stoppingAdapters("TEST_CHANNEL_OWNER_READ_STOP"));
+    ?? vi.fn<MarketplaceListingRegistrationResolverDependencies["createChannelAdapters"]>(() => stoppingAdapters("TEST_CHANNEL_OWNER_READ_STOP"));
   const createDropshipAdapters = overrides.createDropshipAdapters
-    ?? vi.fn(() => stoppingAdapters("TEST_DROPSHIP_OWNER_READ_STOP"));
+    ?? vi.fn<MarketplaceListingRegistrationResolverDependencies["createDropshipAdapters"]>(() => stoppingAdapters("TEST_DROPSHIP_OWNER_READ_STOP"));
   const resolver = createMarketplaceListingRegistrationResolver({
     repository,
     clock: { now: () => new Date(FIXED_NOW.getTime()) },
@@ -266,5 +268,11 @@ class FakeRegistrationRepository
     _input: PersistListingRegistrationInput,
   ): Promise<never> {
     throw new Error("Registration persistence is outside this composition test.");
+  }
+
+  async verifyExistingPublication(
+    _input: PersistVerifiedListingInput,
+  ): Promise<never> {
+    throw new Error("Verification persistence is outside this composition test.");
   }
 }

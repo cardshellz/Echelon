@@ -3,11 +3,13 @@ import { db } from "../../db";
 import { auditEvents, supplierCredits, supplierCreditLines, supplierCreditApplications, supplierCreditApplicationReversals, vendorInvoices } from "@shared/schema";
 import { supplierCreditApplyInputSchema, supplierCreditCreateInputSchema, supplierCreditReviewInputSchema, supplierCreditIdSchema, supplierCreditLineSourceKey, supplierCreditListQuerySchema, supplierCreditListSchema, type SupplierCreditCommand, type SupplierCreditCreateInput, type SupplierCreditApplyInput, type SupplierCreditDetail } from "@shared/procurement/supplier-credit";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
-import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
+import { readCommandAuthorityActor } from "../identity/command-authority.api";
 import { recalculateInvoiceBalance, recomputeLinkedPurchaseOrders } from "./ap-ledger.service";
 import { assertInvoiceSettlementEvidence } from "./supplier-credit-settlement.repository";
 import { approveSupplierCreditSources, validateSupplierCreditSourceLines, voidSupplierCreditSources, createSupplierCreditCostReadCache } from "./supplier-credit-source.service";
 import { creditHash, loadSupplierCredit, loadSupplierCreditSource, readSupplierCreditDetail, readSupplierCreditOptions, SupplierCreditError, type CreditTransaction } from "./supplier-credit.repository";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
+import { captureSupplierCreditCostReview, finishSupplierCreditCostReview } from "./supplier-credit-cost-review";
 export type SupplierCreditCommandInput = {
   command: SupplierCreditCommand;
   raw: unknown;
@@ -15,6 +17,8 @@ export type SupplierCreditCommandInput = {
   creditId?: number;
   applicationId?: number;
   at: Date;
+  costReviewExecution?: "preview";
+  commandKey?: string;
 };
 const exactTotal = (values: readonly number[]) => Number(values.reduce((sum, value) => sum + BigInt(value), BigInt(0)));
 function assertSource(source: Awaited<ReturnType<typeof loadSupplierCreditSource>>) {
@@ -28,7 +32,7 @@ function assertSourceCapacity(source: Awaited<ReturnType<typeof loadSupplierCred
   for (const line of lines) requested.set(line.invoiceLineId, (requested.get(line.invoiceLineId) ?? BigInt(0)) + BigInt(line.amountCents));
   for (const [id, amount] of requested) {
     const line = source.lines.find(row => row.id === id);
-    if (!line || !Number.isSafeInteger(line.lineTotalCents) || line.lineTotalCents < 0 || amount + BigInt(source.credited.get(id) ?? 0) > BigInt(line.lineTotalCents)) throw new SupplierCreditError("SUPPLIER_CREDIT_SOURCE_EXCEEDED", "Credit exceeds the remaining documented amount on an original invoice line.");
+    if (!line || !Number.isSafeInteger(line.lineTotalCents) || line.lineTotalCents < 0 || amount + BigInt(source.credited.get(id) ?? 0) > BigInt(source.capacities.get(id)!)) throw new SupplierCreditError("SUPPLIER_CREDIT_SOURCE_EXCEEDED", "Credit exceeds the remaining documented amount on an original invoice line and its approved header share.");
   }
 }
 async function refreshInvoices(tx: CreditTransaction, ids: readonly number[], actorId: string, reason: string, at: Date) {
@@ -198,6 +202,7 @@ async function voidCredit(tx: CreditTransaction, input: SupplierCreditCommandInp
  * revisions and immutable audit share the durable command transaction. */
 export async function executeSupplierCreditCommand(tx: CreditTransaction, input: SupplierCreditCommandInput) {
   await lockInventoryCostGraph(tx);
+  const costReview = await captureSupplierCreditCostReview(tx, input);
   const authority = await readCommandAuthorityActor(tx, input.actorId);
   const permission = input.command === "create" ? "purchasing:edit" : "purchasing:approve";
   if (!authority.active || !authority.permissions.includes(permission)) throw new SupplierCreditError("SUPPLIER_CREDIT_AUTHORITY_REQUIRED", `Current ${permission} permission is required.`, 403);
@@ -235,8 +240,10 @@ export async function executeSupplierCreditCommand(tx: CreditTransaction, input:
     }
   }
   const id = supplierCreditIdSchema.parse(creditId);
-  const credit = await readSupplierCreditDetail(tx, id, authority.permissions.includes("purchasing:approve"), authority.permissions.includes("purchasing:edit"));
-  await tx.insert(auditEvents).values({
+  let credit = await readSupplierCreditDetail(tx, id, authority.permissions.includes("purchasing:approve"), authority.permissions.includes("purchasing:edit"));
+  const costPreview = costReview ? await finishSupplierCreditCostReview(tx, input, costReview, credit) : undefined;
+  if (costReview && input.costReviewExecution !== "preview") credit = await readSupplierCreditDetail(tx, id, true, authority.permissions.includes("purchasing:edit"));
+  await insertAuditEventDrizzle(tx, {
     actor: input.actorId,
     action: `ap_ledger.supplier_credit.${input.command}`,
     target: `supplier_credit:${id}`,
@@ -258,7 +265,8 @@ export async function executeSupplierCreditCommand(tx: CreditTransaction, input:
     request,
     applicationIds,
     reversedApplicationId,
-    credit
+    credit,
+    ...(costPreview ? { costPreview } : {}),
   };
 }
 export function createSupplierCreditReader(clock: () => Date = () => new Date()) {
@@ -310,3 +318,24 @@ export function createSupplierCreditReader(clock: () => Date = () => new Date())
   };
 }
 export const supplierCreditReader = createSupplierCreditReader();
+
+/** Execute the existing financial owner inside a rollback-only preview. */
+export function createSupplierCreditCostPreview(database: Pick<typeof db, "transaction">, clock: () => Date) {
+  return async (creditId: number, command: "approve" | "void" | "reconcile_costs", raw: unknown, actorId: string) => {
+    const request = supplierCreditReviewInputSchema.parse(raw);
+    if (request.previewVersion !== undefined) throw new SupplierCreditError("SUPPLIER_CREDIT_PREVIEW_INPUT_INVALID", "Start a new cost preview.", 400);
+    return database.transaction(async tx => {
+      await tx.execute(sql`SAVEPOINT supplier_credit_cost_preview`);
+      try {
+        const result = await executeSupplierCreditCommand(tx, { creditId: supplierCreditIdSchema.parse(creditId), command, raw: request,
+          actorId, at: clock(), costReviewExecution: "preview" });
+        if (!result.costPreview) throw new SupplierCreditError("SUPPLIER_CREDIT_PREVIEW_UNAVAILABLE", "This credit uses its existing document review.");
+        return result.costPreview;
+      } finally {
+        await tx.execute(sql`ROLLBACK TO SAVEPOINT supplier_credit_cost_preview`);
+        await tx.execute(sql`RELEASE SAVEPOINT supplier_credit_cost_preview`);
+      }
+    });
+  };
+}
+export const previewSupplierCreditCosts = createSupplierCreditCostPreview(db, () => new Date());

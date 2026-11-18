@@ -1,3 +1,4 @@
+import { effectiveStaffCapabilities } from "@shared/staff-capabilities";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { commandAuthorityActorSchema, type CommandAuthorityActor } from "../domain/command-authority";
@@ -30,7 +31,7 @@ export async function readCommandAuthorityActor(
     FOR SHARE OF role,assignment
   `);
   const grantsResult = await tx.execute(sql`
-    SELECT permission.resource,permission.action,grant_row.constraints
+    SELECT permission.resource,permission.action,(grant_row.constraints IS NULL) AS unscoped
     FROM identity.auth_user_roles assignment
     JOIN identity.auth_role_permissions grant_row ON grant_row.role_id=assignment.role_id
     JOIN identity.auth_permissions permission ON permission.id=grant_row.permission_id
@@ -39,17 +40,18 @@ export async function readCommandAuthorityActor(
     ${lock ? sql`FOR SHARE OF assignment,grant_row,permission` : sql``}
   `);
   const grants = z.array(z.object({
-    resource: z.string().min(1), action: z.string().min(1), constraints: z.unknown(),
+    resource: z.string().min(1), action: z.string().min(1), unscoped: z.boolean(),
   })).parse(grantsResult.rows);
   const permissionNames = (scoped: boolean) => [...new Set(grants
-    .filter((grant) => (grant.constraints !== null) === scoped)
+    .filter((grant) => grant.unscoped === !scoped)
     .map((grant) => `${grant.resource}:${grant.action}`))].sort();
 
   return commandAuthorityActorSchema.parse({
     userId: user.id, active: true,
-    permissions: permissionNames(false),
+    permissions: effectiveStaffCapabilities(permissionNames(false)),
     // Generic Identity constraints have no implemented command scope contract.
     // Preserve this evidence without turning a restricted grant into a global one.
+    // Decide in SQL: node-postgres decodes SQL NULL and JSONB null identically.
     scopedPermissions: permissionNames(true),
   });
 }

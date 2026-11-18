@@ -7,21 +7,21 @@ import { z } from "zod";
 import {
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES,
   type PackageAllocationAuthorityDiscoveryRelationshipType,
-} from "../modules/shipping/package-allocation-authority-discovery.query";
+} from "../modules/shipping/package-allocation-authority.api";
 import {
   auditPackageAllocationAuthorityDiscoveryPlan,
   type NormalizedPackageAllocationDiscoveryPlanAuditOptions,
   type PackageAllocationDiscoveryPlanAuditReport,
-} from "../modules/shipping/package-allocation-authority-discovery-plan-audit.repository";
+} from "../modules/shipping/package-allocation-authority.api";
 import {
   PackageAllocationAuthorityResolutionPreviewService,
   PackageAllocationAuthorityResolutionPreviewServiceError,
   type PackageAllocationAuthorityResolutionDiscoveryPreviewResultV1,
-} from "../modules/shipping/package-allocation-authority-resolution.service";
+} from "../modules/shipping/package-allocation-authority.api";
 import {
   PackageAllocationLedgerRepositoryError,
   PgPackageAllocationLedgerRepository,
-} from "../modules/shipping/package-allocation-ledger.repository";
+} from "../modules/shipping/package-allocation-authority.api";
 import {
   packageAllocationDiscoveryPlanAuditPoolConfig,
   parsePackageAllocationDiscoveryPlanAuditCliOptions,

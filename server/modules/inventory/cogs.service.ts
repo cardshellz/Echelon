@@ -33,6 +33,7 @@ import {
 import type { InventoryLot } from "@shared/schema";
 import { assertLegacyQuantityImportAllowed } from "./application/legacy-quantity-import";
 import { parseCostLotsReport, parseInventoryValuationReport } from "@shared/inventory/cost-report-read";
+import { updateVariantBackfillCostsInCatalog } from "../catalog/cross-module-product-mutations.api";
 import { revalueSupplierReturnAllocations } from "./infrastructure/supplier-return-cost.repository";
 import type { SupplierReturnCostAdjustment } from "@shared/procurement/supplier-return";
 import { buildOrderCOGSReport, type OrderCOGSResult } from "./domain/order-cogs-read";
@@ -252,6 +253,7 @@ export class COGSService {
     preserveExistingCostSourceUnlessPo?: boolean;
     clearProvisional?: boolean;
     requiredCostSource?: string;
+    requireFillMissingEligible?: boolean;
     exactComponent?: {component:CostComponent;totalMills:number;basisQuantity:number};
     excludedOrderCostIds?: readonly number[];
     recordedAt?: Date;
@@ -275,6 +277,14 @@ export class COGSService {
       }
 
       const current = normalizeLotCosts(lot);
+      if (params.requireFillMissingEligible) {
+        const isActive = lot.status === undefined || String(lot.status) === "active";
+        const hasOnHand = lot.qty_on_hand === undefined || Number(lot.qty_on_hand) > 0;
+        const isProvisionalOrZero = Number(lot.cost_provisional ?? 0) === 1 || current.totalMills === BigInt(0);
+        if (!isActive || !hasOnHand || !isProvisionalOrZero) {
+          return null;
+        }
+      }
       const currentProductMills = moneyToSafeNumber(current.poMills,"productCostMills");
       const currentPackagingMills = moneyToSafeNumber(current.packagingMills,"packagingCostMills");
       const currentLandedMills = moneyToSafeNumber(current.landedMills,"landedCostMills");
@@ -869,12 +879,14 @@ export class COGSService {
     lotId: number,
     productCostMills: number,
     reason: string = 'csv_cost_upload',
+    options?: { requireFillMissingEligible?: boolean },
   ): Promise<{ lotId: number; lotNumber: string; sku: string; oldCostCents: number; newCostCents: number } | null> {
     const revalue = await this.revalueLotCostMills({
       lotId,
       productCostMills,
       costSource: "manual",
       reason,
+      requireFillMissingEligible: options?.requireFillMissingEligible,
     });
     if (!revalue) return null;
     return {
@@ -944,7 +956,26 @@ export class COGSService {
       for (const lot of lots) {
         const upv = Number(lot.upv) || 1;
         const perVariantMills = parsed.costPerPieceMills * upv; // per-piece × pack size
-        if (apply) await this.setLotProductCostMills(Number(lot.id), perVariantMills);
+        if (apply) {
+          const updated = await this.setLotProductCostMills(
+            Number(lot.id),
+            perVariantMills,
+            "csv_cost_upload",
+            { requireFillMissingEligible: true },
+          );
+          if (!updated) {
+            results.push({
+              status: 'skipped',
+              sku: lot.sku,
+              upv,
+              lotNumber: lot.lot_number,
+              location: lot.loc,
+              qty: Number(lot.qty_on_hand),
+              message: 'lot was concurrently costed or is no longer eligible for fill-missing upload',
+            });
+            continue;
+          }
+        }
         results.push({
           status: apply ? 'applied' : 'preview',
           sku: lot.sku,
@@ -1133,17 +1164,7 @@ export class COGSService {
       }
 
       // Update variant catalog costs so future lots pick this up via the resolver
-      await this.db.execute(sql`
-        UPDATE catalog.product_variants
-        SET last_cost_cents = ${entry.unitCostCents},
-            standard_cost_cents = CASE
-              WHEN standard_cost_cents IS NULL OR standard_cost_cents = 0
-              THEN ${entry.unitCostCents}
-              ELSE standard_cost_cents
-            END,
-            updated_at = NOW()
-        WHERE id = ${variantId}
-      `);
+      await updateVariantBackfillCostsInCatalog(this.db, variantId, entry.unitCostCents);
 
       processed++;
     }

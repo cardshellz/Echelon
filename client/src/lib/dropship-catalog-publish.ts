@@ -39,7 +39,8 @@ import {
   isDropshipStockLinkRefusalCode,
   type DropshipStockLinkRefusalCode,
 } from "@shared/dropship/stock-link-refusals";
-import { isPausedStockRefusal, listingPushBlockedReasons, listingPushRefusalWords } from "./dropship-listing-push-status";
+import { isPausedStockRefusal, listingPushBlockedCodes, listingPushBlockedReasons, listingPushRefusalWords } from "./dropship-listing-push-status";
+import { isVendorWaitingForStock, VENDOR_WAITING_FOR_STOCK_LINE } from "./dropship-vendor-labels";
 import { PUBLISH_WORDS, type RunCountParts } from "./dropship-catalog-publish-words";
 
 // ---------------------------------------------------------------------------
@@ -478,6 +479,11 @@ function problemWords(problem: ListingPushRunProblem, storeOwnName: string | nul
   if (refusal) return { reason: asSentence(refusal.reason), nextStep: runRefusalStep(problem, storeOwnName) };
   if (problem.code?.startsWith(EBAY_CONNECTOR_CODE_PREFIX)) return ebayConnectorWords(problem);
   if (problem.code === PREVIEW_BLOCKED_CODE) {
+    // Blocked only for want of stock: the eBay sync sweep lists it once stock is back (owner report). The catalog's
+    // publish step runs on eBay stores only (DropshipPortalCatalog: "launch is eBay-only").
+    if (isVendorWaitingForStock({ platform: "ebay", status: problem.outcome, blockers: listingPushBlockedCodes(problem.message) })) {
+      return { reason: VENDOR_WAITING_FOR_STOCK_LINE, nextStep: null };
+    }
     const reasons = listingPushBlockedReasons(problem.message);
     if (reasons.length > 0) return { reason: reasons.join(" "), nextStep: PUBLISH_WORDS.blockedFixStep };
   }

@@ -75,7 +75,10 @@ function createHarness() {
     publishVariantAvailability: vi.fn(async (
       _input: unknown,
       legacyPublisher: () => Promise<unknown>,
-    ) => ({ authority: "legacy" as const, legacyResult: await legacyPublisher() })),
+    ): Promise<
+      | { authority: "legacy"; legacyResult: unknown }
+      | { authority: "canonical"; publication: Record<string, unknown> }
+    > => ({ authority: "legacy", legacyResult: await legacyPublisher() })),
   };
   const service = createVariantAvailabilitySyncService({
     dbPool: {} as never,

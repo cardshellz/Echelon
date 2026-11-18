@@ -31,6 +31,7 @@ vi.mock("../../../dropship/interfaces/http/dropship-auth.routes", () => ({
 describe("shared listing member recovery HTTP ownership", () => {
   const owner = {
     memberHistory: vi.fn(async () => []),
+    memberConflicts: vi.fn(async () => ({items:[],hasMore:false,offset:0})),
     memberRecoveryPreview: vi.fn(async () => ({ canResume: true })),
     resumeMemberRecovery: vi.fn(async () => ({ state: "pending" })),
   };
@@ -78,6 +79,14 @@ describe("shared listing member recovery HTTP ownership", () => {
       body: JSON.stringify(body),
     });
   const channel = "/api/channels/10/listing-lifecycle/members/recovery";
+
+  it("reads current conflicts through the shared channel lifecycle owner", async () => {
+    const response = await post("/api/channels/10/listing-lifecycle/members/conflicts", {});
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({items:[],hasMore:false,offset:0});
+    expect(owner.memberConflicts).toHaveBeenCalledWith(10, {});
+    expect(owner.resumeMemberRecovery).not.toHaveBeenCalled();
+  });
 
   it("allows a read-only review but requires edit permission to authorize recovery", async () => {
     expect(

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000066000020930001_legacy_performance_indexes.sql",
+  "generation": 66,
+  "pr": 2093,
+  "ordinal": 1,
+  "after": [
+    "900000065000020840001_ebay_listing_change_intents.sql"
+  ]
+}

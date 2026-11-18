@@ -1,0 +1,58 @@
+{
+  "date": "2026-11-02",
+  "scope": "Phase 2 web-dyno memory investigation; inventory ATP is separate",
+  "production": {
+    "release": "v3452",
+    "commit": "b0961153a2c028f7b40ac9fbb49fc66086815192",
+    "dyno": "web.1",
+    "dynoSize": "Basic",
+    "quotaMiB": 512,
+    "nodeVersion": "v24.22.2",
+    "source": "Authorized Heroku Exec inspection after one web-only restart; Linux smaps_rollup and V8 counters from the running process",
+    "launcher": {
+      "command": "npm run start",
+      "rssBytes": 84295680,
+      "proportionalSetBytes": 49115136,
+      "privateBytes": 29093888,
+      "note": "RSS includes shared pages. Neither RSS nor proportional set alone proves the exact savings from removing npm."
+    },
+    "application": {
+      "rssBytes": 525762560,
+      "heapLimitBytes": 603979776,
+      "heapUsedBytes": 197243464,
+      "youngSpaceBytes": 134217728,
+      "youngSpacePhysicalBytes": 133185536,
+      "youngSpaceUsedBytes": 24895616
+    },
+    "allocationSample": "A 30-second sampled allocation profile did not identify a single responsible job or establish the history of previously allocated objects."
+  },
+  "isolatedComparison": {
+    "source": "One-off Basic Heroku dyno with the production application bundle and Node v24.22.2; credentials scrubbed, schedulers disabled, database set to localhost, and outbound socket connections disabled",
+    "method": "One 30-second run per setting. After five seconds, every 200 milliseconds the probe generated and JSON-round-tripped 30 batches of 500 synthetic rows, retaining only the latest 20 batches. Measurements are for the Node process, not total dyno memory.",
+    "baseline": {
+      "oldSpaceMiB": 384,
+      "youngSpace": "V8 default",
+      "samples": 29,
+      "workUnits": 3750,
+      "peakRssBytes": 419078144,
+      "peakHeapUsedBytes": 149690584,
+      "peakHeapPhysicalBytes": 273862656,
+      "peakYoungPhysicalBytes": 128798720,
+      "heapLimitBytes": 603979776,
+      "eventLoopP99Ms": 32.178175
+    },
+    "bounded": {
+      "oldSpaceMiB": 384,
+      "semiSpaceMiB": 16,
+      "samples": 29,
+      "workUnits": 3750,
+      "peakRssBytes": 325373952,
+      "peakHeapUsedBytes": 149339424,
+      "peakHeapPhysicalBytes": 181239808,
+      "peakYoungPhysicalBytes": 33554432,
+      "heapLimitBytes": 452984832,
+      "eventLoopP99Ms": 38.535167
+    },
+    "limitations": "This single synthetic comparison is not a production workload or a statistical latency benchmark. It does not establish live savings or guarantee that total dyno memory stays below quota. Monitor memory, garbage collection, latency, errors and sync completion after deployment."
+  }
+}

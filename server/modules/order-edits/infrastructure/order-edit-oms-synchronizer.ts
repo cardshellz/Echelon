@@ -2,7 +2,7 @@ import type { Pool } from "pg";
 import { z } from "zod";
 import type { OrderEditSnapshot } from "../application/order-edit-provider";
 import { OrderEditError } from "../domain/order-edit-error";
-import { getOmsLineMaterializableQuantity } from "../../oms/oms-line-authority";
+import { getOmsLineMaterializableQuantity } from "../../oms/order-edit-coordination.api";
 import { canonicalAvailabilityReservationStatusProjectionSchema } from "@shared/types/inventory-availability-claims";
 import {
   assertOrderEditWarehouseItemIdentities,

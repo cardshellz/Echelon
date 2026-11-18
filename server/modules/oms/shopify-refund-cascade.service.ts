@@ -11,14 +11,20 @@ import {
 import {
   markShipmentCancelled,
   recomputeOrderStatusFromShipments,
-} from "../orders/shipment-rollup";
+} from "../orders/shipment-rollup-and-context.api";
 import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
-import { recordOmsWmsAuthorityCleanupAudit } from "../wms/oms-wms-authority-cleanup-audit.repository";
-import { applyRefundAuthorityToWmsOrderItem } from "../wms/order-item-commands";
-import { createExpectedWmsReturn } from "../wms/expected-return-commands";
+import { recordOmsWmsAuthorityCleanupAudit } from "../wms/shipment-execution-and-projection.api";
+import { applyRefundAuthorityToWmsOrderItem } from "../wms/order-intake-and-items.api";
+import { createExpectedWmsReturn } from "../wms/returns-receipt.api";
+import { refreshWmsOrderItemAggregateCountsOnRefundInWms } from "../wms/wms-order-mutations.api";
+import {
+  setOutboundShipmentReviewFlagInWms,
+  updateShipmentItemCommercialRequestedQtyInWms,
+} from "../wms/outbound-shipment-mutations.api";
 import { observeChannelMerchandiseQuantity } from "./domain/channel-merchandise-quantity";
 import { channelMerchandiseDemandReduction } from "./domain/channel-merchandise-demand";
 import { shopifyMerchandiseSnapshotSchema, type ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
+import type { EngineCancelResult } from "../shipping/engine-and-reconcile.api";
 
 const REFUND_LOCK_NAMESPACE = 918413;
 
@@ -67,13 +73,13 @@ export interface ShopifyRefundCascadeHelpers {
     reason: string;
     userId?: string;
   }) => Promise<RefundDemandReconciliationResult>;
-  shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
+  shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<EngineCancelResult | unknown> };
   shippingEngine?: {
     cancel: (ref: {
       engine: string;
       engineOrderRef: string;
       engineShipmentRef?: string;
-    }) => Promise<unknown>;
+    }) => Promise<EngineCancelResult | unknown>;
   };
   pushShipment?: (shipmentId: number) => Promise<unknown>;
   recordReturnCase?: (args: {
@@ -632,24 +638,10 @@ async function applyWmsLineState(
   }
 
   if (changed > 0) {
-    await tx.execute(sql`
-      UPDATE wms.orders o
-      SET item_count = agg.item_count,
-          unit_count = agg.unit_count,
-          picked_count = agg.picked_count,
-          updated_at = ${args.now}
-      FROM (
-        SELECT
-          order_id,
-          COUNT(*)::int AS item_count,
-          COALESCE(SUM(quantity), 0)::int AS unit_count,
-          COALESCE(SUM(CASE WHEN requires_shipping <> 0 THEN picked_quantity ELSE 0 END), 0)::int AS picked_count
-        FROM wms.order_items
-        WHERE order_id = ${args.wmsOrderId}
-        GROUP BY order_id
-      ) agg
-      WHERE o.id = agg.order_id
-    `);
+    await refreshWmsOrderItemAggregateCountsOnRefundInWms(tx, {
+      wmsOrderId: args.wmsOrderId,
+      now: args.now,
+    });
   }
 
   return { changed, items, releaseTargets };
@@ -711,12 +703,11 @@ async function reconcileActiveShipmentItems(
     changedShipmentIds.add(allocation.shipmentId);
     // qty is physical/provider source evidence and must remain positive and
     // addressable even if the line is no longer commercially requested.
-    await tx.execute(sql`
-      UPDATE wms.outbound_shipment_items
-      SET commercial_requested_qty = ${allocation.nextQuantity}
-      WHERE id = ${allocation.shipmentItemId}
-        AND shipment_id = ${allocation.shipmentId}
-    `);
+    await updateShipmentItemCommercialRequestedQtyInWms(tx, {
+      shipmentItemId: allocation.shipmentItemId,
+      shipmentId: allocation.shipmentId,
+      nextQuantity: allocation.nextQuantity,
+    });
   }
 
   const shipmentResult = await tx.execute(sql`
@@ -772,13 +763,7 @@ async function reconcileActiveShipmentItems(
     }
 
     if (reviewReason) {
-      await tx.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = true,
-            review_reason = ${reviewReason},
-            updated_at = ${args.now}
-        WHERE id = ${shipmentId}
-      `);
+      await setOutboundShipmentReviewFlagInWms(tx, shipmentId, reviewReason, args.now);
     }
 
     if (!contentsChanged && remainingQuantity > 0 && !reviewReason) continue;
@@ -1435,13 +1420,13 @@ export async function applyShopifyRefundCascade(
           now,
           skipEngineCancel: plan.skipEngineCancel,
           engineCancel: helpers.shippingEngine
-            ? async (ref) => { await helpers.shippingEngine!.cancel(ref); }
+            ? async (ref) =>
+                (await helpers.shippingEngine!.cancel(ref)) as EngineCancelResult | void
             : undefined,
           shipstation: helpers.shipstation
             ? {
-                removeFromList: async (shipstationOrderId: number) => {
-                  await helpers.shipstation!.cancelOrder(shipstationOrderId);
-                },
+                removeFromList: async (shipstationOrderId: number) =>
+                  (await helpers.shipstation!.cancelOrder(shipstationOrderId)) as EngineCancelResult | void,
               }
             : undefined,
         },

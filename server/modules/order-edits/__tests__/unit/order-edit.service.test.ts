@@ -31,6 +31,65 @@ import {
 } from "../fixtures/order-edit-service.fixture";
 
 describe("private order edit orchestration", () => {
+  it("excludes removed source lines from editable items without deleting audit evidence", async () => {
+    const h = serviceHarness();
+    const active = h.snapshot().lines[0];
+    const removed = { ...active, id: "gid://shopify/LineItem/removed", quantity: 0,
+      unfulfilledQuantity: 0, totalCents: 0, unsupported: true };
+    h.setCurrent({ lines: [active, removed] });
+    const before = structuredClone(h.snapshot());
+    const result = await h.service.order(4, 1);
+    expect(result.lines.map(line => line.lineItemId)).toEqual([active.id]);
+    expect(result.eligibility.editable).toBe(true);
+    expect(h.snapshot()).toEqual(before);
+    expect(h.snapshot().lines).toContainEqual(removed);
+    expect(h.provider.quote).not.toHaveBeenCalled();
+    expect(h.provider.commit).not.toHaveBeenCalled();
+  });
+  it("opens the order with every change closed when warehouse inspection fails unexpectedly", async () => {
+    const h = serviceHarness();
+    h.warehouse.inspect.mockRejectedValueOnce(
+      Object.assign(new Error('invalid input value for enum wms.shipment_status: "delivered"'), { code: "22P02" }),
+    );
+    const result = await h.service.order(4, 1, undefined, "customer:1");
+    expect(result.eligibility).toEqual({
+      editable: false,
+      reasons: ["Online changes are temporarily unavailable. Please try again shortly."],
+    });
+    expect(result.cancellation?.canReview).toBe(false);
+    expect(result.addressEligibility?.editable).toBe(false);
+    expect(result.warehouseStatus).toBe("Status unavailable");
+    expect(result.lines).toHaveLength(h.snapshot().lines.length);
+    expect(h.report).toHaveBeenCalledTimes(1);
+    expect(h.report.mock.calls[0][0]).toMatchObject({
+      code: "ORDER_EDIT_WAREHOUSE_INSPECTION_UNAVAILABLE",
+      phase: "order_read_warehouse_inspection",
+      omsOrderId: 1,
+      connectionId: 4,
+      occurredAt: expect.any(String),
+    });
+    expect(h.report.mock.calls[0][0]).not.toHaveProperty("operationId");
+    expect(h.events).toEqual([]);
+  });
+  it("still refuses to open the order when warehouse inspection reports a business refusal", async () => {
+    const h = serviceHarness();
+    h.warehouse.inspect.mockRejectedValueOnce(
+      new OrderEditError("ORDER_EDIT_CHANNEL_MISMATCH", "Warehouse and source channel identities differ."),
+    );
+    await expect(h.service.order(4, 1)).rejects.toMatchObject({ code: "ORDER_EDIT_CHANNEL_MISMATCH" });
+    expect(h.report).not.toHaveBeenCalled();
+  });
+  it("rejects a stale request targeting a removed line before saving or preparing an edit", async () => {
+    const h = serviceHarness();
+    const removed = { ...h.snapshot().lines[0], id: "gid://shopify/LineItem/2",
+      quantity: 0, unfulfilledQuantity: 0, totalCents: 0, unsupported: true };
+    h.setCurrent({ lines: [...h.snapshot().lines, removed] });
+    await expect(h.service.quote({...h.input, changes:[{lineItemId:removed.id,quantity:2}]},"staff"))
+      .rejects.toMatchObject({code:"EDIT_PLAN_INVALID"});
+    expect(h.provider.quote).not.toHaveBeenCalled();
+    expect(h.provider.commit).not.toHaveBeenCalled();
+    expect(h.events).toEqual([]);
+  });
   it("presents verified variant identities and marks only a new product added, keeping Shopify source lines intact", async () => {
     const h = serviceHarness();
     const originalQuote = await h.provider.quote.getMockImplementation()!();
@@ -335,6 +394,42 @@ describe("private order edit orchestration", () => {
       lines: [{ quantity: 2, totalCents: 2000 }],
       settlement: { outstandingCents: 0, netPaidCents: 2000 },
     });
+  });
+  it.each(["ORDER_EDIT_PROVIDER_NOT_EDITABLE", "ORDER_EDIT_PROVIDER_LABEL_EXISTS"])(
+    "retains a discardable draft without a commit intent after warehouse cutoff %s", async (code) => {
+      const h = serviceHarness();
+      await h.service.quote(h.input, "staff");
+      h.warehouse.acquire.mockRejectedValueOnce(new OrderEditError(code, "Internal provider detail"));
+      const rejected = await h.service.commit(OP, OP, "staff");
+      expect(rejected).toMatchObject({status:"review_required",canAbandon:true,error:{code}});
+      expect(h.record()).toMatchObject({commitStartedAt:null,commitKey:null,paymentDeadline:null});
+      expect(h.events.map(event=>event.action)).not.toContain("commit_intent");
+      expect(h.provider.commit).not.toHaveBeenCalled();
+      expect(h.provider.refund).not.toHaveBeenCalled();
+      expect(h.warehouse.releaseUnsubmitted).toHaveBeenCalledTimes(1);
+      expect((await h.service.abandon(OP,"staff")).status).toBe("expired");
+      expect(h.warehouse.releaseUnsubmitted).toHaveBeenCalledTimes(2);
+    },
+  );
+  it("handles shipping mid-edit and simultaneous Apply clicks without a Shopify command or a retrying submission", async () => {
+    const h=serviceHarness();
+    await h.service.quote(h.input,"staff");
+    let finish!:()=>void;
+    const fence=new Promise<void>(resolve=>{finish=resolve;});
+    h.warehouse.acquire.mockImplementationOnce(async()=>{
+      await fence;
+      throw new OrderEditError("ORDER_EDIT_PROVIDER_NOT_EDITABLE","Shipment crossed cutoff during acquisition");
+    });
+    const first=h.service.commit(OP,OP,"staff");
+    await vi.waitFor(()=>expect(h.warehouse.acquire).toHaveBeenCalledTimes(1));
+    await expect(h.service.commit(OP,OP,"staff")).rejects.toMatchObject({code:"ORDER_EDIT_BUSY"});
+    finish();
+    expect(await first).toMatchObject({status:"review_required",canAbandon:true,error:{code:"ORDER_EDIT_PROVIDER_NOT_EDITABLE"}});
+    await h.service.commit(OP,OP,"staff");
+    expect(h.warehouse.acquire).toHaveBeenCalledTimes(1);
+    expect(h.provider.commit).not.toHaveBeenCalled();
+    expect(h.provider.refund).not.toHaveBeenCalled();
+    expect((await h.service.abandon(OP,"staff")).status).toBe("expired");
   });
   it("allows safe cancellation only after an explicit not-submitted result", async () => {
     const h = serviceHarness();

@@ -11,6 +11,9 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { Shield, Plus, Edit, Trash2, Users, Lock } from "lucide-react";
+import { z } from "zod";
+import { accessReviewSchema, type AccessReview, missingCapabilityDependencies, staffCapabilityLabel } from "@shared/staff-capabilities";
+import { AccessReviewPanel } from "@/components/identity/AccessReviewPanel";
 
 interface Role {
   id: number;
@@ -28,8 +31,27 @@ interface Permission {
   category: string;
 }
 
+// Older responses omit restriction evidence. Reject those rather than presenting
+// a restricted role as editable during a partial deployment or stale response.
+const rolePermissionsSchema = z.array(z.object({
+  id: z.number().int().positive().safe(),
+  resource: z.string(),
+  action: z.string(),
+  description: z.string().nullable(),
+  category: z.string(),
+  isRestricted: z.boolean(),
+}));
+type RolePermission = z.infer<typeof rolePermissionsSchema>[number];
+const restrictedRoleMessage = "This role's permissions are read-only in this editor because some grants contain restrictions.";
+
+class RolePermissionsUpdateError extends Error {
+  constructor(readonly status: number, readonly code?: string) {
+    super(code === "IDENTITY_ROLE_RESTRICTIONS_UNSUPPORTED" ? restrictedRoleMessage : "Failed to update permissions. Reload the role before trying again.");
+  }
+}
+
 export default function Roles() {
-  const { hasPermission } = useAuth();
+  const { hasPermission, refetch: refetchAuthority } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
@@ -37,6 +59,9 @@ export default function Roles() {
   const [newRoleName, setNewRoleName] = useState("");
   const [newRoleDescription, setNewRoleDescription] = useState("");
   const [selectedPermissions, setSelectedPermissions] = useState<number[]>([]);
+  const [draftPermissions, setDraftPermissions] = useState<number[] | null>(null);
+  const [draftRevision, setDraftRevision] = useState<string | null>(null);
+  const [reviewed, setReviewed] = useState<{ review: AccessReview; ids: number[]; deleting: boolean; roleId: number } | null>(null);
 
   const canViewRoles = hasPermission("roles", "view");
   const canCreateRoles = hasPermission("roles", "create");
@@ -63,18 +88,19 @@ export default function Roles() {
     enabled: canViewRoles,
   });
 
-  const { data: rolePermissions = [] } = useQuery<Permission[]>({
+  const { data: rolePermissions, isFetching: rolePermissionsFetching, isError: rolePermissionsError } = useQuery<RolePermission[]>({
     queryKey: ["/api/roles", selectedRole?.id, "permissions"],
     queryFn: async () => {
       if (!selectedRole) return [];
       const res = await fetch(`/api/roles/${selectedRole.id}/permissions`, { credentials: "include" });
       if (!res.ok) throw new Error("Failed to fetch role permissions");
-      return res.json();
+      return rolePermissionsSchema.parse(await res.json());
     },
     enabled: !!selectedRole && canViewRoles,
   });
 
   const createRoleMutation = useMutation({
+    retry: false,
     mutationFn: async (data: { name: string; description: string; permissionIds: number[] }) => {
       const res = await fetch("/api/roles", {
         method: "POST",
@@ -85,48 +111,105 @@ export default function Roles() {
       if (!res.ok) throw new Error("Failed to create role");
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: async () => {
       queryClient.invalidateQueries({ queryKey: ["/api/roles"] });
       setIsCreateOpen(false);
       setNewRoleName("");
       setNewRoleDescription("");
       setSelectedPermissions([]);
       toast({ title: "Role created successfully" });
+      await refetchAuthority();
     },
   });
 
   const updatePermissionsMutation = useMutation({
-    mutationFn: async (data: { roleId: number; permissionIds: number[] }) => {
+    retry: false,
+    mutationFn: async (data: { roleId: number; permissionIds: number[]; expectedAccessRevision: string }) => {
       const res = await fetch(`/api/roles/${data.roleId}/permissions`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ permissionIds: data.permissionIds }),
+        body: JSON.stringify({ permissionIds: data.permissionIds, expectedAccessRevision: data.expectedAccessRevision }),
       });
-      if (!res.ok) throw new Error("Failed to update permissions");
+      if (!res.ok) {
+        const errorBody: unknown = await res.json().catch(() => null);
+        const code = typeof errorBody === "object" && errorBody !== null && "code" in errorBody
+          && typeof errorBody.code === "string" ? errorBody.code : undefined;
+        throw new RolePermissionsUpdateError(res.status, code);
+      }
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: async () => {
+      setDraftPermissions(null); setDraftRevision(null); setReviewed(null);
+      queryClient.invalidateQueries({ queryKey: ["access-review"] });
       queryClient.invalidateQueries({ queryKey: ["/api/roles"] });
       toast({ title: "Permissions updated successfully" });
+      await refetchAuthority();
+    },
+    onError: async (error: Error, data) => {
+      setDraftPermissions(null); setDraftRevision(null); setReviewed(null);
+      queryClient.invalidateQueries({ queryKey: ["access-review"] });
+      // A restriction can appear after the last read, or the response can be lost
+      // after a committed access change. Reread role and authority; never retry.
+      queryClient.invalidateQueries({ queryKey: ["/api/roles", data.roleId, "permissions"], exact: true });
+      toast({ title: error instanceof RolePermissionsUpdateError ? error.message : "Failed to update permissions. Reload the role before trying again.", variant: "destructive" });
+      await refetchAuthority();
     },
   });
 
   const deleteRoleMutation = useMutation({
-    mutationFn: async (roleId: number) => {
-      const res = await fetch(`/api/roles/${roleId}`, { method: "DELETE", credentials: "include" });
+    retry: false,
+    mutationFn: async (data: { roleId: number; expectedAccessRevision: string }) => {
+      const res = await fetch(`/api/roles/${data.roleId}`, { method: "DELETE", credentials: "include",
+        headers: { "Content-Type": "application/json" }, body: JSON.stringify({ expectedAccessRevision: data.expectedAccessRevision }) });
       if (!res.ok) {
         const data = await res.json();
         throw new Error(data.error || "Failed to delete role");
       }
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: async () => {
+      setDraftPermissions(null); setDraftRevision(null); setReviewed(null);
+      queryClient.invalidateQueries({ queryKey: ["access-review"] });
       queryClient.invalidateQueries({ queryKey: ["/api/roles"] });
       setSelectedRole(null);
       toast({ title: "Role deleted successfully" });
+      await refetchAuthority();
     },
-    onError: (error: Error) => {
+    onError: async (error: Error) => {
+      setDraftPermissions(null); setDraftRevision(null); setReviewed(null);
+      queryClient.invalidateQueries({ queryKey: ["access-review"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/roles"] });
+      toast({ title: error.message, variant: "destructive" });
+      await refetchAuthority();
+    },
+  });
+
+  const snapshot = useQuery({
+    queryKey: ["access-review", selectedRole?.id],
+    enabled: !!selectedRole && canViewRoles, staleTime: 0,
+    queryFn: async () => {
+      const res = await fetch(`/api/roles/${selectedRole!.id}/access-review`, {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: "{}" });
+      if (!res.ok) throw new Error("Access impact could not be verified.");
+      return accessReviewSchema.parse(await res.json());
+    },
+  });
+  const reviewMutation = useMutation({
+    retry: false,
+    mutationFn: async (data: { ids: number[]; deleting: boolean }) => {
+      if (!snapshot.data || !selectedRole) throw new Error("Reload access before reviewing.");
+      const res = await fetch(`/api/roles/${selectedRole.id}/access-review`, {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ permissionIds: data.ids, removeRole: data.deleting,
+          expectedAccessRevision: data.deleting ? snapshot.data.revision : draftRevision ?? snapshot.data.revision }) });
+      if (!res.ok) throw new Error("Access changed or could not be verified. Reload and review again.");
+      return { review: accessReviewSchema.parse(await res.json()), roleId: selectedRole.id, ...data };
+    },
+    onSuccess: setReviewed,
+    onError: async (error: Error) => {
+      setReviewed(null); setDraftPermissions(null); setDraftRevision(null);
+      await queryClient.invalidateQueries({ queryKey: ["access-review"] });
       toast({ title: error.message, variant: "destructive" });
     },
   });
@@ -137,15 +220,23 @@ export default function Roles() {
     return acc;
   }, {} as Record<string, Permission[]>);
 
-  const rolePermissionIds = rolePermissions.map(p => p.id);
+  const rolePermissionIds = draftPermissions ?? snapshot.data?.permissionIds ?? [];
+  const hasRestrictedPermissions = rolePermissions?.some(permission => permission.isRestricted) === true;
+  const roleRestrictionsVerified = rolePermissions?.every(permission => typeof permission.isRestricted === "boolean") === true;
+  const rolePermissionsVerified = !!selectedRole && canViewRoles && rolePermissions !== undefined
+    && roleRestrictionsVerified && !rolePermissionsFetching && !rolePermissionsError;
+  const canUpdatePermissions = canEditRoles && rolePermissionsVerified && !hasRestrictedPermissions
+    && snapshot.data !== undefined && !snapshot.isFetching && !snapshot.isError
+    && !snapshot.data.restricted && !updatePermissionsMutation.isPending && !reviewMutation.isPending && !deleteRoleMutation.isPending;
 
   const handlePermissionToggle = (permId: number) => {
+    if (!canUpdatePermissions) return;
     const newPermIds = rolePermissionIds.includes(permId)
       ? rolePermissionIds.filter(id => id !== permId)
       : [...rolePermissionIds, permId];
     
     if (selectedRole) {
-      updatePermissionsMutation.mutate({ roleId: selectedRole.id, permissionIds: newPermIds });
+      setDraftPermissions(newPermIds); setDraftRevision(draftRevision ?? snapshot.data!.revision); setReviewed(null);
     }
   };
 
@@ -232,7 +323,8 @@ export default function Roles() {
                                 onCheckedChange={() => handleCreatePermissionToggle(perm.id)}
                               />
                               <label htmlFor={`create-perm-${perm.id}`} className="text-sm capitalize cursor-pointer">
-                                {perm.action.replace(/_/g, ' ')}
+                                {staffCapabilityLabel(`${perm.resource}:${perm.action}`)}
+                                <span className="block text-xs text-muted-foreground">{perm.description}</span>
                               </label>
                             </div>
                           ))}
@@ -241,6 +333,10 @@ export default function Roles() {
                     ))}
                   </div>
                 </div>
+                  {missingCapabilityDependencies(permissions.filter(permission => selectedPermissions.includes(permission.id))
+                    .map(permission => `${permission.resource}:${permission.action}`)).map(missing => <p key={missing.capability + missing.required} className="text-sm">
+                    {missing.capability} requires {missing.required} in the user's combined roles. Creating a role does not grant it to anyone.
+                  </p>)}
                 <Button
                   onClick={() => createRoleMutation.mutate({
                     name: newRoleName,
@@ -275,7 +371,7 @@ export default function Roles() {
                 {roles.map(role => (
                   <div
                     key={role.id}
-                    onClick={() => setSelectedRole(role)}
+                    onClick={() => { if (updatePermissionsMutation.isPending || deleteRoleMutation.isPending || reviewMutation.isPending) return; setSelectedRole(role); setDraftPermissions(null); setDraftRevision(null); setReviewed(null); }}
                     className={`p-3 rounded-lg border cursor-pointer transition-colors ${
                       selectedRole?.id === role.id ? "border-primary bg-primary/5" : "hover:bg-muted"
                     }`}
@@ -307,23 +403,51 @@ export default function Roles() {
                 <Button
                   variant="destructive"
                   size="sm"
-                  onClick={() => deleteRoleMutation.mutate(selectedRole.id)}
+                  onClick={() => reviewMutation.mutate({ ids: [], deleting: true })}
+                  disabled={!snapshot.data || snapshot.isFetching || reviewMutation.isPending || deleteRoleMutation.isPending}
                   className="w-full sm:w-auto min-h-[44px]"
                   data-testid="button-delete-role"
                 >
                   <Trash2 className="h-4 w-4 mr-1" />
-                  Delete
+                  Review deletion
                 </Button>
               )}
             </CardTitle>
           </CardHeader>
           <CardContent>
+            {snapshot.data && <AccessReviewPanel review={reviewed?.review ?? snapshot.data} />}
+            {snapshot.isError && <p role="alert">Access impact could not be verified. Reload before editing.</p>}
+            {selectedRole && draftPermissions !== null && !reviewed && <Button
+              onClick={() => reviewMutation.mutate({ ids: rolePermissionIds, deleting: false })}
+              disabled={!canUpdatePermissions} data-testid="button-review-role-access">Review changes</Button>}
+            {selectedRole && reviewed && <div className="flex gap-2 my-3">
+              <Button disabled={updatePermissionsMutation.isPending || deleteRoleMutation.isPending || snapshot.isFetching || reviewed.roleId !== selectedRole.id
+                  || reviewed.review.revision !== snapshot.data?.revision || reviewed.review.blockingDependencies.length > 0
+                  || (reviewed.deleting ? !canDeleteRoles : !canUpdatePermissions)}
+                data-testid="button-save-reviewed-role" onClick={() => {
+                  if (reviewed.deleting) deleteRoleMutation.mutate({ roleId: selectedRole.id, expectedAccessRevision: reviewed.review.revision });
+                  else updatePermissionsMutation.mutate({ roleId: selectedRole.id, permissionIds: reviewed.ids, expectedAccessRevision: reviewed.review.revision });
+                }}>{reviewed.deleting ? "Confirm role deletion" : "Save reviewed changes"}</Button>
+              <Button variant="outline" onClick={() => { setReviewed(null); setDraftPermissions(null); setDraftRevision(null); }}>Discard changes</Button>
+            </div>}
+            {selectedRole && hasRestrictedPermissions && (
+              <p role="status" className="mb-3 text-sm text-muted-foreground" data-testid="role-permissions-read-only">
+                {restrictedRoleMessage}
+              </p>
+            )}
+            {selectedRole && !hasRestrictedPermissions && !rolePermissionsVerified && (
+              <p role="status" className="mb-3 text-sm text-muted-foreground" data-testid="role-permissions-unverified">
+                {rolePermissionsError || (rolePermissions !== undefined && !roleRestrictionsVerified)
+                  ? "Permissions could not be verified. Reload this role before editing."
+                  : "Loading verified permissions…"}
+              </p>
+            )}
             {!selectedRole ? (
               <p className="text-muted-foreground text-center py-6 md:py-8 text-sm md:text-base">
                 Select a role to view and edit its permissions
               </p>
             ) : (
-              <Tabs defaultValue="dashboard">
+              <Tabs defaultValue={Object.keys(groupedPermissions)[0] ?? "dashboard"}>
                 <TabsList className="mb-3 md:mb-4 flex-wrap h-auto gap-1 w-full justify-start">
                   {Object.keys(groupedPermissions).map(category => (
                     <TabsTrigger 
@@ -345,7 +469,7 @@ export default function Roles() {
                         >
                           <div className="min-w-0 flex-1">
                             <div className="font-medium capitalize text-sm md:text-base">
-                              {perm.action.replace(/_/g, ' ')}
+                              {staffCapabilityLabel(`${perm.resource}:${perm.action}`)}
                             </div>
                             {perm.description && (
                               <p className="text-xs md:text-sm text-muted-foreground line-clamp-2">{perm.description}</p>
@@ -354,7 +478,7 @@ export default function Roles() {
                           <Checkbox
                             checked={rolePermissionIds.includes(perm.id)}
                             onCheckedChange={() => handlePermissionToggle(perm.id)}
-                            disabled={!canEditRoles || updatePermissionsMutation.isPending}
+                            disabled={!canUpdatePermissions}
                             className="shrink-0 mt-0.5 sm:mt-0"
                             data-testid={`checkbox-perm-${perm.id}`}
                           />
@@ -368,6 +492,7 @@ export default function Roles() {
           </CardContent>
         </Card>
       </div>
+
     </div>
   );
 }

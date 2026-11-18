@@ -10,18 +10,16 @@
  *   - The interface (`ShopifyAdminGraphQLClient`) is what consumers depend
  *     on. Tests pass a mock that implements `request<T>()`. Production
  *     wires `createDefaultShopifyAdminClient()` which delegates to the
- *     existing `shopifyGraphQL` adapter (server/modules/subscriptions/
- *     infrastructure/shopify.adapter.ts) so we don't duplicate the
- *     fetch / auth / version logic.
- *
- *   - The wrapper does NOT duplicate fetch/header logic — it is purely a
- *     thin DI seam. If the underlying adapter changes (API version bump,
- *     retries, telemetry), one place to update.
+ *     neutral `shopifyGraphQL` transport owned by this module (COM-06 / C-B5).
  *
  *   - Production service wiring injects this client into the fulfillment
  *     push service; `SHOPIFY_FULFILLMENT_PUSH_ENABLED=false` disables the
  *     ShipStation hot path when needed.
  */
+
+import { getShopifyConfig } from "../integrations/shopify";
+
+export const SHOPIFY_API_VERSION = "2024-10";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -33,6 +31,21 @@
 export interface ShopifyUserError {
   field?: string[] | null;
   message: string;
+}
+
+export interface ShopifyGraphQLRequestOptions {
+  apiVersion?: string;
+  timeoutMs?: number;
+}
+
+export interface ShopifyGraphQLResponse<T> {
+  data?: T;
+  errors?: Array<{
+    message: string;
+    locations?: Array<{ line: number; column: number }>;
+    path?: string[];
+    extensions?: Record<string, unknown>;
+  }>;
 }
 
 /**
@@ -56,32 +69,76 @@ export interface ShopifyAdminGraphQLClient {
   ): Promise<T>;
 }
 
+/**
+ * Neutral Shopify Admin GraphQL transport execution.
+ */
+export async function shopifyGraphQL<T = any>(
+  query: string,
+  variables?: Record<string, any>,
+  options: ShopifyGraphQLRequestOptions = {},
+): Promise<T> {
+  const version = options.apiVersion ?? SHOPIFY_API_VERSION;
+  if (!/^\d{4}-(01|04|07|10)$/.test(version)) {
+    throw new Error("Invalid Shopify API version.");
+  }
+  if (
+    options.timeoutMs !== undefined &&
+    (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0)
+  ) {
+    throw new Error("Shopify request timeout must be a positive integer.");
+  }
+  const config = getShopifyConfig();
+  const url = `https://${config.domain}/admin/api/${version}/graphql.json`;
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": config.accessToken,
+    },
+    body: JSON.stringify({ query, variables }),
+    ...(options.timeoutMs === undefined
+      ? {}
+      : { signal: AbortSignal.timeout(options.timeoutMs) }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Shopify GraphQL error ${response.status}: ${text}`);
+  }
+
+  const json = (await response.json()) as ShopifyGraphQLResponse<T>;
+
+  if (json.errors && json.errors.length > 0) {
+    throw new Error(
+      `Shopify GraphQL errors: ${json.errors.map((e) => e.message).join(", ")}`,
+    );
+  }
+
+  return json.data as T;
+}
+
 // ---------------------------------------------------------------------------
-// Default factory — delegates to the existing subscriptions adapter so we
-// don't fork the auth / version / fetch logic.
+// Default factory
 // ---------------------------------------------------------------------------
 
 /**
  * Build the default Shopify Admin GraphQL client used in production.
  *
  * Reads credentials from `SHOPIFY_SHOP_DOMAIN` + `SHOPIFY_ACCESS_TOKEN`
- * via `getShopifyConfig()` — same path subscriptions already use.
+ * via `getShopifyConfig()`.
  *
  * Tests should NOT call this; pass an in-memory mock client to the
  * fulfillment-push service via `setShopifyClient(mock)` instead.
  */
-export function createDefaultShopifyAdminClient(options: import("../subscriptions/infrastructure/shopify.adapter").ShopifyGraphQLRequestOptions = {}): ShopifyAdminGraphQLClient {
+export function createDefaultShopifyAdminClient(
+  options: ShopifyGraphQLRequestOptions = {},
+): ShopifyAdminGraphQLClient {
   return {
     async request<T = unknown>(
       query: string,
       variables?: Record<string, unknown>,
     ): Promise<T> {
-      // Lazy import keeps this file free of circular import risk and
-      // means callers that never instantiate the default client do not
-      // pay the import cost.
-      const { shopifyGraphQL } = await import(
-        "../subscriptions/infrastructure/shopify.adapter"
-      );
       return shopifyGraphQL<T>(query, variables, options);
     },
   };

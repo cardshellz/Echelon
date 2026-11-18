@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000057000020100001_customer_account_scan_checkpoints.sql",
+  "generation": 57,
+  "pr": 2010,
+  "ordinal": 1,
+  "after": [
+    "900000056000020040001_staff_credential_state.sql"
+  ]
+}

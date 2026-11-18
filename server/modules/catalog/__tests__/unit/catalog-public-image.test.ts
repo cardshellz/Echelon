@@ -50,9 +50,15 @@ describe("catalog public image URL", () => {
   });
   it("preserves external URLs and missing URL-only images without requiring public hosting", () => {
     const url = vi.fn(createCatalogPublicImageUrl({}));
-    expect(resolveCatalogPublicationImage({ ...image, url: "https://cdn.example.com/existing.jpg" }, url)).toBe("https://cdn.example.com/existing.jpg");
+    expect(resolveCatalogPublicationImage({ ...image, storageType:"url",url: "https://cdn.example.com/existing.jpg" }, url)).toBe("https://cdn.example.com/existing.jpg");
     expect(resolveCatalogPublicationImage({ ...image, storageType: "url", fileHash: null }, url)).toBeNull();
     expect(url).not.toHaveBeenCalled();
+  });
+  it("publishes a retained original instead of its remote thumbnail while preserving the source URL", () => {
+    const asset = Object.freeze({...image,storageType:"both",url:"https://cdn.example.com/thumbnail.jpg"});
+    const publicUrl = createCatalogPublicImageUrl({CATALOG_PUBLIC_BASE_URL:"https://catalog.example.com"});
+    expect(resolveCatalogPublicationImage(asset,publicUrl)).toBe(publicUrl(asset.id,hash,"image/png"));
+    expect(asset.url).toBe("https://cdn.example.com/thumbnail.jpg");
   });
   it.each([
     { fileBytes: null }, { fileBytes: 0 }, { fileBytes: MAX_PRODUCT_IMAGE_BYTES + 1 }, { fileHash: null }, { fileHeader: null },
@@ -64,10 +70,10 @@ describe("catalog public image URL", () => {
   });
   it("retains usable images and reports each unavailable photo without mutating catalog assets", () => {
     const assets = Object.freeze([
-      Object.freeze({ ...image, id: 1, url: "https://cdn.example.com/first.jpg" }),
+      Object.freeze({ ...image, id: 1, storageType:"url",url: "https://cdn.example.com/first.jpg" }),
       Object.freeze(image),
       Object.freeze({ ...image, id: 43, fileBytes: 0 }),
-      Object.freeze({ ...image, id: 44, url: "https://cdn.example.com/last.jpg" }),
+      Object.freeze({ ...image, id: 44, storageType:"url",url: "https://cdn.example.com/last.jpg" }),
     ]);
     const resolved = resolveCatalogPublicationImages(assets, createCatalogPublicImageUrl({}));
     expect(resolved.images).toEqual(["https://cdn.example.com/first.jpg", "https://cdn.example.com/last.jpg"]);

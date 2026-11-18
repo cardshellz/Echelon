@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000047000019790001_receipt_invoice_cost_allocations.sql",
+  "generation": 47,
+  "pr": 1979,
+  "ordinal": 1,
+  "after": [
+    "900000046000019710001_purchase_tax_treatments.sql"
+  ]
+}

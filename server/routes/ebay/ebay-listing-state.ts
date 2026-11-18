@@ -1,10 +1,11 @@
-import { eq } from "drizzle-orm";
-import {
-  channelListings,
-  channelVariantOverrides,
-  productVariants,
-} from "@shared/schema";
 import { db, pool } from "../../db";
+import { setCatalogVariantEbayListingExcludedInTx } from "../../modules/catalog/ebay-product-metadata.api";
+import {
+  markChannelVariantListingPendingForRelist,
+  markChannelVariantListingSyncError,
+  markChannelVariantListingZeroed,
+  upsertChannelVariantListedOverrideInTx,
+} from "../../modules/channels/ebay-route-admin.api";
 import { EBAY_CHANNEL_ID, getAuthService } from "./ebay-utils";
 import { createEbayRouteListingLifecycleClient } from "./ebay-listing-connector-client";
 export {
@@ -49,74 +50,22 @@ export async function setEbayVariantListingIntent(
   const isListed = listed ? 1 : 0;
 
   await dbArg.transaction(async (tx: any) => {
-    await tx
-      .update(productVariants)
-      .set({ ebayListingExcluded: excluded })
-      .where(eq(productVariants.id, variantId));
-
-    await tx
-      .insert(channelVariantOverrides)
-      .values({
-        channelId: EBAY_CHANNEL_ID,
-        productVariantId: variantId,
-        isListed,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .onConflictDoUpdate({
-        target: [channelVariantOverrides.channelId, channelVariantOverrides.productVariantId],
-        set: {
-          isListed,
-          updatedAt: new Date(),
-        },
-      });
+    await setCatalogVariantEbayListingExcludedInTx(tx, variantId, excluded);
+    await upsertChannelVariantListedOverrideInTx(tx, EBAY_CHANNEL_ID, variantId, isListed);
   });
 }
 
 export async function markEbayVariantListingPendingForRelist(variantId: number): Promise<void> {
   assertPositiveId(variantId, "variantId");
-  await pool.query(
-    `
-      UPDATE channels.channel_listings
-      SET sync_status = 'pending',
-          sync_error = NULL,
-          updated_at = NOW()
-      WHERE channel_id = $1::integer
-        AND product_variant_id = $2::integer
-        AND sync_status IN ('ended', 'deleted')
-    `,
-    [EBAY_CHANNEL_ID, variantId],
-  );
+  await markChannelVariantListingPendingForRelist(EBAY_CHANNEL_ID, variantId, pool);
 }
 
 async function markVariantListingZeroed(variantId: number): Promise<void> {
-  await pool.query(
-    `
-      UPDATE channels.channel_listings
-      SET sync_status = 'synced',
-          sync_error = NULL,
-          last_synced_qty = 0,
-          last_synced_at = NOW(),
-          updated_at = NOW()
-      WHERE channel_id = $1::integer
-        AND product_variant_id = $2::integer
-    `,
-    [EBAY_CHANNEL_ID, variantId],
-  );
+  await markChannelVariantListingZeroed(EBAY_CHANNEL_ID, variantId, pool);
 }
 
 async function markVariantListingError(variantId: number, message: string): Promise<void> {
-  await pool.query(
-    `
-      UPDATE channels.channel_listings
-      SET sync_status = 'error',
-          sync_error = $3::text,
-          updated_at = NOW()
-      WHERE channel_id = $1::integer
-        AND product_variant_id = $2::integer
-    `,
-    [EBAY_CHANNEL_ID, variantId, message],
-  );
+  await markChannelVariantListingSyncError(EBAY_CHANNEL_ID, variantId, message, pool);
 }
 
 export async function zeroEbayVariantListing(variantId: number): Promise<EbayRemoteTransitionResult> {

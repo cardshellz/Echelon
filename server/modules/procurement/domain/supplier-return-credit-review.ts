@@ -50,6 +50,9 @@ export function projectReturnCreditReview(input: {
     const assignments = reviewCurrent ? validateReturnCreditAssignments(latestReview.assignments, active) : [];
     let product = BigInt(0), packaging = BigInt(0), landed = BigInt(0), unassigned = BigInt(0);
     for (const link of active) {
+        // Recoverable tax belongs outside inventory value. Its original credit
+        // and returned-quantity link remain visible and are still settled by AP.
+        if (link.taxTreatment === "recoverable") continue;
         const amount = BigInt(link.amountCents);
         if (link.component === "product")
             product += amount * BigInt(100);

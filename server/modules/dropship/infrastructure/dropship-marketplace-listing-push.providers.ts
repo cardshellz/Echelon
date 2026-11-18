@@ -11,7 +11,7 @@ import { ShopifyDropshipListingPushProvider } from "./dropship-shopify-listing-p
 import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./dropship-ebay-fulfillment-policy-guard.factory";
 import { createDropshipEbayRegistrationCredentialProviderFromEnv } from "./dropship-ebay-registration-credentials";
 import { PgDropshipEbayManagedLocationProvider } from "./dropship-ebay-managed-location.provider";
-import { createDropshipEbayQuantityRequestAdmission } from "../../inventory-planning/infrastructure/quantity-publication-runtime";
+import { createDropshipEbayQuantityRequestAdmission } from "../../inventory-planning/quantity-publication-admission.api";
 import { pool } from "../../../db";
 import { PostgresDropshipEbayPushPublicationReader } from "./dropship-ebay-push-publication.reader";
 import { createDropshipMarketplaceRegistrationOwnerAdaptersFromEnv } from "./dropship-marketplace-registration.factory";

@@ -6,11 +6,13 @@ import {
   DropshipMarketplaceSyncService,
   type MarketplaceSyncRestorePort,
 } from "../application/dropship-marketplace-sync-service";
+import { catalogSetupUrl } from "../domain/catalog-arrivals";
 import { DropshipError } from "../domain/errors";
 import { MARKETPLACE_SYNC_ACTOR } from "../domain/marketplace-sync-keys";
 import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./dropship-ebay-fulfillment-policy-guard.factory";
 import { EbayDropshipListingPushProvider } from "./dropship-ebay-listing-push.provider";
 import { createDropshipListingPreviewServiceFromEnv } from "./dropship-listing-preview.factory";
+import { createDropshipLiveListingZeroQuantityServiceFromEnv } from "./dropship-live-listing-zero-quantity.factory";
 import { createDropshipMarketplaceCredentialRepositoryFromEnv } from "./dropship-marketplace-credentials";
 import { PgMarketplaceQuantityBaselineReader } from "./dropship-marketplace-quantity-baseline.reader";
 import { PgDropshipMarketplaceSyncRepository } from "./dropship-marketplace-sync.repository";
@@ -20,7 +22,8 @@ import { createDropshipNotificationServiceFromEnv } from "./dropship-notificatio
  * The restore push (plan v4 §6.4): an ordinary one-step push job of the
  * current preview, queued by the system under the sweep's key, as the cost
  * change reprice queues one (dropship-cost-change-listing-action.factory.ts).
- * A store that cannot take a push now (its access rule names the step that
+ * The sweep also queues listings that were waiting for stock through it,
+ * under their own key (marketplaceWaitingForStockJobKey). A store that cannot take a push now (its access rule names the step that
  * lifts it) is reported as refused; anything else propagates.
  */
 export function createMarketplaceSyncRestorePort(
@@ -65,6 +68,10 @@ export function createDropshipMarketplaceSyncServiceFromEnv(): DropshipMarketpla
     policyGuard: createDropshipEbayFulfillmentPolicyGuardFromEnv(),
     notifications: createDropshipNotificationServiceFromEnv(),
     clock: systemDropshipListingPreviewClock,
+    // Legacy authority only (the service checks): a blocked restore of a live listing at 0 sends 0 instead.
+    zeroQuantity: createDropshipLiveListingZeroQuantityServiceFromEnv(),
+    // The policy notice's link to Listing settings (`DROPSHIP_PORTAL_URL || VENDOR_PORTAL_URL`, as the catalog arrivals email).
+    listingSettingsUrl: catalogSetupUrl(process.env.DROPSHIP_PORTAL_URL || process.env.VENDOR_PORTAL_URL),
     logger: {
       debug: (action, data) => logger.debug(action, data),
       info: (action, data) => logger.info(action, data),

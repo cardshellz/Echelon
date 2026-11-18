@@ -1,3 +1,4 @@
+import { returnOwnerPredicate } from "./customer-return-owner-predicate";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { customerReturnLabelSubmitInputSchema } from "@shared/returns/customer-return-label.contract";
@@ -11,7 +12,7 @@ export const RETURN_WORKFLOW_LEASE_MS = 300_000;
 const keySchema = z.string().uuid();
 const idSchema = z.number().int().positive().safe();
 const ownedScope = `o.id=w.oms_order_id AND o.channel_id=w.channel_id
-  AND o.external_customer_id=w.scope_snapshot->>'externalCustomerId'
+  AND o.external_customer_id IS NOT DISTINCT FROM w.scope_snapshot->>'externalCustomerId'
   AND regexp_replace(o.external_order_id,'^gid://shopify/Order/','')=regexp_replace(w.scope_snapshot->>'externalOrderId','^gid://shopify/Order/','')`;
 
 /** Stores only explicit customer intent. No source order or inventory writes. */
@@ -28,7 +29,7 @@ export class PostgresCustomerReturnWorkflowStore implements CustomerReturnWorkfl
     const hash = customerReturnSubmissionHash(request, scope.omsOrderId);
     return this.transaction(async client => {
       const source = await client.query(`SELECT id FROM oms.oms_orders WHERE id=$1 AND channel_id=$2
-        AND external_customer_id=$3 AND regexp_replace(external_order_id,'^gid://shopify/Order/','')=$4 FOR KEY SHARE`,
+        AND external_customer_id IS NOT DISTINCT FROM $3 AND regexp_replace(external_order_id,'^gid://shopify/Order/','')=$4 FOR KEY SHARE`,
       [scope.omsOrderId, scope.channelId, scope.externalCustomerId, scope.externalOrderId.replace(/^gid:\/\/shopify\/Order\//, "")]);
       if (source.rowCount !== 1) throw unavailable();
       const command = (await client.query(`SELECT oms_order_id,request_hash,authorization_id,status FROM returns.customer_return_submission_commands
@@ -57,34 +58,35 @@ export class PostgresCustomerReturnWorkflowStore implements CustomerReturnWorkfl
     const row = (await this.pool.query(`SELECT c.request_snapshot,a.oms_order_id,o.external_order_id FROM returns.customer_return_authorizations a
       JOIN oms.oms_orders o ON o.id=a.oms_order_id AND o.channel_id=a.channel_id
       JOIN returns.customer_return_submission_commands c ON c.authorization_id=a.id AND c.channel_id=a.channel_id AND c.status='accepted'
-      WHERE a.id=$1 AND a.channel_id=$2 AND o.external_customer_id=$3 ORDER BY c.created_at LIMIT 1`,
-    [authorizationId, principal.channelId, principal.externalCustomerId])).rows[0];
+      WHERE a.id=$1 AND a.channel_id=$2 AND ${returnOwnerPredicate(principal, 3).sql} ORDER BY c.created_at LIMIT 1`,
+    [authorizationId, principal.channelId, ...returnOwnerPredicate(principal, 3).values])).rows[0];
     return row ? { request: customerReturnLabelSubmitInputSchema.parse(row.request_snapshot),
-      scope: customerReturnCanonicalOrderScopeSchema.parse({ ...principal, omsOrderId: Number(row.oms_order_id), externalOrderId: row.external_order_id }) } : null;
+      scope: customerReturnCanonicalOrderScopeSchema.parse({ channelId: principal.channelId, externalCustomerId: principal.externalCustomerId,
+        ...(principal.verifiedPurchase ? { verifiedPurchase: principal.verifiedPurchase } : {}), omsOrderId: Number(row.oms_order_id), externalOrderId: row.external_order_id }) } : null;
   }
 
   async readOwned(rawPrincipal: CustomerReturnCustomerPrincipal, rawKey: string): Promise<ReturnWorkflowRecord | null> {
     const principal = customerReturnCustomerPrincipalSchema.parse(rawPrincipal);
     const key = keySchema.parse(rawKey);
     const row = (await this.pool.query(`SELECT w.* FROM returns.customer_return_workflows w JOIN oms.oms_orders o ON ${ownedScope}
-      WHERE w.channel_id=$1 AND w.request_key=$2 AND o.external_customer_id=$3`,
-    [principal.channelId, key, principal.externalCustomerId])).rows[0];
+      WHERE w.channel_id=$1 AND w.request_key=$2 AND ${returnOwnerPredicate(principal, 3).sql}`,
+    [principal.channelId, key, ...returnOwnerPredicate(principal, 3).values])).rows[0];
     return row ? parse(row) : null;
   }
 
   async readOwnedOrder(rawPrincipal: CustomerReturnCustomerPrincipal, rawOrderId: number): Promise<ReturnWorkflowRecord | null> {
     const principal = customerReturnCustomerPrincipalSchema.parse(rawPrincipal), omsOrderId = idSchema.parse(rawOrderId);
     const row = (await this.pool.query(`SELECT w.* FROM returns.customer_return_workflows w JOIN oms.oms_orders o ON ${ownedScope}
-      WHERE w.channel_id=$1 AND w.oms_order_id=$2 AND o.external_customer_id=$3 AND w.phase NOT IN ('ready','needs_input')
-      ORDER BY w.created_at DESC,w.request_key LIMIT 1`, [principal.channelId, omsOrderId, principal.externalCustomerId])).rows[0];
+      WHERE w.channel_id=$1 AND w.oms_order_id=$2 AND ${returnOwnerPredicate(principal, 3).sql} AND w.phase NOT IN ('ready','needs_input')
+      ORDER BY w.created_at DESC,w.request_key LIMIT 1`, [principal.channelId, omsOrderId, ...returnOwnerPredicate(principal, 3).values])).rows[0];
     return row ? parse(row) : null;
   }
 
   async readOwnedAuthorization(rawPrincipal: CustomerReturnCustomerPrincipal, rawAuthorizationId: number): Promise<ReturnWorkflowRecord | null> {
     const principal = customerReturnCustomerPrincipalSchema.parse(rawPrincipal), authorizationId = idSchema.parse(rawAuthorizationId);
     const row = (await this.pool.query(`SELECT w.* FROM returns.customer_return_workflows w JOIN oms.oms_orders o ON ${ownedScope}
-      WHERE w.channel_id=$1 AND w.authorization_id=$2 AND o.external_customer_id=$3`,
-    [principal.channelId, authorizationId, principal.externalCustomerId])).rows[0];
+      WHERE w.channel_id=$1 AND w.authorization_id=$2 AND ${returnOwnerPredicate(principal, 3).sql}`,
+    [principal.channelId, authorizationId, ...returnOwnerPredicate(principal, 3).values])).rows[0];
     return row ? parse(row) : null;
   }
 
@@ -93,15 +95,15 @@ export class PostgresCustomerReturnWorkflowStore implements CustomerReturnWorkfl
     const key = keySchema.parse(rawKey), now = z.date().parse(rawNow);
     return this.transaction(async client => {
       const row = (await client.query(`SELECT w.* FROM returns.customer_return_workflows w JOIN oms.oms_orders o ON ${ownedScope}
-        WHERE w.channel_id=$1 AND w.request_key=$2 AND o.external_customer_id=$3 FOR UPDATE OF w`,
-      [principal.channelId, key, principal.externalCustomerId])).rows[0];
+        WHERE w.channel_id=$1 AND w.request_key=$2 AND ${returnOwnerPredicate(principal, 3).sql} FOR UPDATE OF w`,
+      [principal.channelId, key, ...returnOwnerPredicate(principal, 3).values])).rows[0];
       if (!row) return null;
       if (row.phase !== "retryable_failure" && row.phase !== "needs_help") return parse(row);
       const phase = row.authorization_id == null ? "queued" : "labels";
       const saved = (await client.query(`UPDATE returns.customer_return_workflows SET phase=$3,reason=NULL,failures=0,
         explicit_retry=true,next_run_at=$4,lease_token=NULL,lease_until=NULL,last_error_code=NULL,updated_at=$4
         WHERE channel_id=$1 AND request_key=$2 RETURNING *`, [principal.channelId, key, phase, now])).rows[0];
-      await audit(client, principal.channelId, key, `customer:${principal.channelId}:${principal.externalCustomerId}`, row.phase, phase, null, now);
+      await audit(client, principal.channelId, key, principal.orderScope ? `guest-order:${principal.channelId}:${principal.orderScope.omsOrderId}` : `customer:${principal.channelId}:${principal.externalCustomerId}`, row.phase, phase, null, now);
       return parse(saved);
     });
   }
@@ -166,7 +168,9 @@ function parse(row: Record<string, unknown>): ReturnWorkflowRecord {
 }
 function sameScope(left: ReturnWorkflowRecord["scope"], right: ReturnWorkflowRecord["scope"]): boolean {
   return left.channelId === right.channelId && left.omsOrderId === right.omsOrderId
-    && left.externalCustomerId === right.externalCustomerId && left.externalOrderId === right.externalOrderId;
+    && left.externalCustomerId === right.externalCustomerId && left.externalOrderId === right.externalOrderId
+    && left.verifiedPurchase?.email === right.verifiedPurchase?.email
+    && left.verifiedPurchase?.customerId === right.verifiedPurchase?.customerId;
 }
 async function audit(client: PoolClient, channelId: number, key: string, actor: string, from: string | null, to: string, code: string | null, now: Date): Promise<void> {
   await client.query(`INSERT INTO returns.customer_return_workflow_events(channel_id,request_key,actor,from_phase,to_phase,error_code,occurred_at)

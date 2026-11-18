@@ -57,7 +57,9 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
       // identity table as production; retain the real column names and types.
       fixtureTable(schema.users, ["id", "username", "displayName"]),
       fixtureTable(schema.vendors, ["id", "name"]),
-      fixtureTable(schema.purchaseOrders, ["id", "poNumber", "vendorId", "status", "physicalStatus", "financialStatus", "currency", "totalCents", "invoicedTotalCents", "paidTotalCents", "outstandingCents", "expectedDeliveryDate", "confirmedDeliveryDate", "actualDeliveryDate"]),
+      fixtureTable(schema.purchaseTaxTypes, Object.keys(getTableColumns(schema.purchaseTaxTypes))),
+      fixtureTable(schema.vendorInvoiceLineTaxes, Object.keys(getTableColumns(schema.vendorInvoiceLineTaxes))),
+      fixtureTable(schema.purchaseOrders, ["id", "poNumber", "vendorId", "status", "physicalStatus", "financialStatus", "currency", "totalCents", "taxCents", "taxTypeId", "discountCents", "shippingCostCents", "invoicedTotalCents", "paidTotalCents", "outstandingCents", "expectedDeliveryDate", "confirmedDeliveryDate", "actualDeliveryDate"]),
       fixtureTable(schema.purchaseOrderLines, Object.keys(getTableColumns(schema.purchaseOrderLines))),
       fixtureTable(schema.receivingOrders, ["id", "receiptNumber", "status", "purchaseOrderId", "inboundShipmentId", "expectedDate", "receivedDate", "closedDate", "createdAt"]),
       fixtureTable(schema.receivingLines, Object.keys(getTableColumns(schema.receivingLines))),

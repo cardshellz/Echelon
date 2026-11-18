@@ -12,7 +12,7 @@ import {
 
 const BasisDecimal = Decimal.clone({ precision: 40 });
 const METHODS = new Set(["by_volume", "by_weight", "by_chargeable_weight", "by_value", "by_line_count"]);
-const TYPE_OVERRIDES: Record<string, string> = { duty: "by_value", brokerage: "by_line_count", inspection: "by_line_count", platform_fee: "by_line_count" };
+const TYPE_OVERRIDES: Record<string, string> = { duty: "by_value", tax: "by_value", brokerage: "by_line_count", inspection: "by_line_count", platform_fee: "by_line_count" };
 export const DIMENSIONAL_ALLOCATION_METHODS = new Set(["by_volume", "by_weight", "by_chargeable_weight"]);
 type Ratio = { numerator: bigint; denominator: bigint };
 const ZERO: Ratio = { numerator: BigInt(0), denominator: BigInt(1) };

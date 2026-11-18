@@ -39,6 +39,20 @@ export const listingMemberRetirementSchema = z.object({
 }).strict();
 export type ListingMemberRetirement = z.infer<typeof listingMemberRetirementSchema>;
 
+/** A current archived identity conflict, for channel workspaces. This is a
+ * read-only warning; it does not assert that provider removal was completed. */
+export const listingMemberConflictListSchema = z.object({
+  items: z.array(z.object({
+    productId: id,
+    productVariantId: id,
+    sku: z.string().max(255).nullable(),
+    operationId: z.string().uuid(),
+  }).strict()).max(100),
+  hasMore: z.boolean(),
+  offset: z.number().int().nonnegative().safe(),
+}).strict();
+export type ListingMemberConflictList = z.infer<typeof listingMemberConflictListSchema>;
+
 export const listingMemberObservationSchema = z.object({ identity: listingMemberIdentitySchema, retired: z.boolean() }).strict();
 export const listingMemberRecoveryReviewSchema = z.object({
   record: listingMemberRetirementSchema,

@@ -70,7 +70,9 @@ export function CustomerOrderDetails({
             <>
               <h3>Items in your order</h3>
               <ul className="csz-panel-items">
-                {details.lines.map((line) => (
+                {details.lines.filter(
+                  (line) => line.quantity > 0 || row.dataset.cancelled === "true",
+                ).map((line) => (
                   <li key={line.lineItemId}>
                     <strong>{line.title}</strong>
                     {line.variantTitle && <span>{line.variantTitle}</span>}

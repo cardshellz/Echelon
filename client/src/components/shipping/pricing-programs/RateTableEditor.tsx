@@ -58,12 +58,15 @@ import {
 import {
   assignmentLabel,
   findEditorRateGroup,
+  getJson,
   invalidateShippingAdmin,
+  rateTableDetailKey,
   saveDraft,
   type DestinationGroupTarget,
   type RateBookSummary,
   type ProgramDestinationGroup,
   type RateTableAnalysis,
+  type RateTableDetail,
   type RateTableSummary,
   type ServiceLevelOption,
   type WarehouseOption,
@@ -81,6 +84,7 @@ import {
 
 export interface EditorLaunch {
   draftId: number | null;
+  draftRevision?: string | null;
   rateBookCode: string | null;
   serviceLevelCode: string | null;
   /** Hydrated groups when resuming a draft or cloning a revision. */
@@ -133,6 +137,9 @@ export function RateTableEditor({
     launch.serviceLevelCode ?? "",
   );
   const [draftId, setDraftId] = useState<number | null>(launch.draftId);
+  const [draftRevision, setDraftRevision] = useState<string | null>(
+    launch.draftRevision ?? null,
+  );
   const [groups, setGroups] = useState<RateGroup[]>(
     cloneRateGroups(launch.groups ?? []),
   );
@@ -219,6 +226,7 @@ export function RateTableEditor({
   const saveMutation = useMutation({
     mutationFn: () => saveDraft({
       draftId,
+      expectedDraftRevision: draftRevision,
       rateBookCode,
       serviceLevelCode,
       pricingBasis,
@@ -229,6 +237,7 @@ export function RateTableEditor({
     onSuccess: (result) => {
       const saved = groupsWithSavedLayout(groups, result.draftLayout);
       setDraftId(result.rateTable.id);
+      setDraftRevision(result.draftRevision ?? null);
       setGroups(cloneRateGroups(saved));
       setSavedGroups(cloneRateGroups(saved));
       setSavedRateBookCode(rateBookCode);
@@ -441,11 +450,18 @@ export function RateTableEditor({
           savingDraft={saveMutation.isPending}
           availableDestinationGroups={launch.availableDestinationGroups}
           availableDestinationScopes={launch.availableDestinationScopes}
+          onProductRulesMutated={() => {
+            if (draftId === null) return;
+            void getJson<RateTableDetail>(rateTableDetailKey(draftId))
+              .then((detail) => setDraftRevision(detail.draftRevision ?? null))
+              .catch(() => {});
+          }}
         />
       )}
       {step === "review" && draftId !== null && (
         <ReviewStep
           draftId={draftId}
+          draftRevision={draftRevision}
           analysis={serverAnalysis}
           groups={groups}
           savedRows={draftRows}

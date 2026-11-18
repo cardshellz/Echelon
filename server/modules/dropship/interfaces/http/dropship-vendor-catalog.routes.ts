@@ -4,8 +4,10 @@ import rateLimit from "express-rate-limit";
 import type { z } from "zod";
 import { db, pool } from "../../../../db";
 import { createAllocationEngine } from "../../../channels/allocation-engine.service";
-import { createAuthorityAwareInventoryAtpService } from "../../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
-import { createInventoryChannelQuantityRuntimeService } from "../../../inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
+import {
+  createAuthorityAwareInventoryAtpService,
+  createInventoryChannelQuantityRuntimeService,
+} from "../../../inventory-planning/runtime-availability.api";
 import {
   DropshipSelectionAtpService,
   systemDropshipSelectionAtpClock,

@@ -197,6 +197,40 @@ export const productCleanupReceipts = catalogSchema.table("product_cleanup_recei
 ]);
 
 // ============================================================================
+// PRODUCT MERGE RUNS - durable, resumable "merge duplicate product" commands.
+// One row per idempotency key. `orders` records the release/re-reserve state
+// of every open order so a crash between steps resumes, never forgets a hold.
+// ============================================================================
+export const productMergeRuns = catalogSchema.table("product_merge_runs", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  idempotencyKey: varchar("idempotency_key", { length: 160 }).notNull().unique("product_merge_runs_idempotency_key_key"),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  sourceProductId: integer("source_product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+  targetProductId: integer("target_product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+  request: jsonb("request").notNull(),
+  status: varchar("status", { length: 30 }).notNull(),
+  orders: jsonb("orders").notNull().default(sql`'[]'::jsonb`),
+  result: jsonb("result"),
+  errorCode: varchar("error_code", { length: 100 }),
+  errorMessage: text("error_message"),
+  actor: varchar("actor", { length: 200 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  check("product_merge_runs_status_chk", sql`${table.status} IN ('releasing','merging','reclaiming','completed','completed_with_review','compensating','failed')`),
+  check("product_merge_runs_distinct_chk", sql`${table.sourceProductId} <> ${table.targetProductId}`),
+  check("product_merge_runs_request_hash_chk", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
+  check("product_merge_runs_orders_chk", sql`jsonb_typeof(${table.orders}) = 'array'`),
+  // One unfinished run per product, on either side, at a time.
+  uniqueIndex("product_merge_runs_active_source_uidx").on(table.sourceProductId)
+    .where(sql`${table.status} NOT IN ('completed','completed_with_review','failed')`),
+  uniqueIndex("product_merge_runs_active_target_uidx").on(table.targetProductId)
+    .where(sql`${table.status} NOT IN ('completed','completed_with_review','failed')`),
+  index("product_merge_runs_source_idx").on(table.sourceProductId, table.createdAt),
+]);
+export type ProductMergeRunRow = typeof productMergeRuns.$inferSelect;
+
+// ============================================================================
 // PRODUCT VARIANTS - Inventory identities and sellable/purchasable package configurations
 // ============================================================================
 export const productVariants = catalogSchema.table("product_variants", {

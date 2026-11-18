@@ -11,7 +11,7 @@ import {
   type QuantityCorrectionSummary,
   type QuantityCorrectionPurpose,
 } from "@shared/procurement/receipt-shipment-quantity-correction";
-import { readPurchaseApprovalActor } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor } from "../identity/purchase-approval-authority.api";
 import {
   costFingerprint,
   costInteger,

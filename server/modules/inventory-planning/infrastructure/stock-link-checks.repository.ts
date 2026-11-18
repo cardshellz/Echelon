@@ -6,6 +6,7 @@ import type { StockLinkCheckFacts, StockLinkCheckWrite } from "../domain/stock-l
 import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../domain/stock-link-errors";
 import { stockLinkRetiresWithoutReplacementCountText } from "./stock-link-health.sql";
 import { productSyncLinkScopeSchema, type ProductSyncLinkScope } from "@shared/types/inventory-product-sync-workflow";
+import { insertIdempotencyKeyPgQuery } from "../../../infrastructure/idempotency-keys.repository";
 
 /**
  * The stock-link check rows and destination state (inventory.stock_link_checks / stock_link_destinations, M1)
@@ -150,9 +151,12 @@ export async function readStockLinkReceipt(client: Queryable, key: string): Prom
 
 export async function insertStockLinkReceipt(client: Queryable, input: { key: string; requestHash: string; now: Date;
   result: unknown }): Promise<void> {
-  await client.query(`INSERT INTO public.idempotency_keys(key, request_hash, response_body, created_at, expires_at)
-    VALUES($1, $2, $3::jsonb, $4, NULL)`,
-  [input.key, input.requestHash, JSON.stringify({ commandType: STOCK_LINK_RECEIPT_COMMAND_TYPE, result: input.result }), input.now]);
+  await insertIdempotencyKeyPgQuery(client, {
+    key: input.key,
+    requestHash: input.requestHash,
+    responseBodyJson: JSON.stringify({ commandType: STOCK_LINK_RECEIPT_COMMAND_TYPE, result: input.result }),
+    createdAt: input.now,
+  });
 }
 
 /**

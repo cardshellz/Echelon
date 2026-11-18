@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 
@@ -6,10 +7,10 @@ async function closedShipment(page: Page, options: { loseFirstResponse?: boolean
   const state = { updated: false, keys: [] as string[] };
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: {
-      user: { id: "test-user", username: "test", role: options.viewer ? "lead" : "admin" }, roles: options.viewer ? ["lead"] : ["admin"],
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({
+      user: { id: "test-user", username: "test", role: options.viewer ? "lead" : "admin" }, systemRoles: options.viewer ? ["lead"] : ["admin"],
       permissions: options.viewer ? ["purchasing:view"] : ["purchasing:view", "purchasing:approve"],
-    } });
+    }) });
     if (request.method() === "GET" && path === "/api/inbound-shipments/42") return route.fulfill({ json: {
       id: 42, shipmentNumber: "TEST-CLOSED-42", status: "closed", mode: "sea_fcl", purchaseOrderId: 17,
       allocationMethodDefault: "by_value", statusHistory: [],

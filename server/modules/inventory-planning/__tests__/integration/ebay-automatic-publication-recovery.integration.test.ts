@@ -34,7 +34,8 @@ dbDescribe.sequential("automatic eBay recovery and continuing reconciliation on 
     database = await createInventoryCutoverTestDatabase(url, disposable, cutoverCompositionBaseSql);
     await installEbayPublicationInventoryFixture(database.pool, { includeQuantityRecoveryMigrations: true, seedPublicationJob: false });
     for (const file of ["0731_ebay_listing_sync_verification_checkpoint.sql", "0732_ebay_listing_sync_identity_admission.sql",
-      "0736_ebay_listing_mapping_repairs.sql", "0737_ebay_publication_completion.sql", MIGRATION])
+      "0736_ebay_listing_mapping_repairs.sql", "0737_ebay_publication_completion.sql", MIGRATION,
+      "900000050000019890001_recovery_content_observations.sql"])
       await database.pool.query(readFileSync(resolve("migrations", file), "utf8"));
     await database.pool.query("UPDATE channels.channel_listings SET external_sku='P5',external_product_id='listing-20'");
     now = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0]!.now;
@@ -91,6 +92,43 @@ dbDescribe.sequential("automatic eBay recovery and continuing reconciliation on 
     return f.repository.recordStock(claim, targets.map(target => ({ target, observedQuantity: Number(target.desiredQuantity),
       quantityConsistent: true, providerResponseHash: "a".repeat(64), observedAt: clock() })), clock());
   }
+
+  it("requires complete immutable content evidence for a cycle with no Sync job", async () => {
+    const f = fixture(); const saved = await start(f);
+    const insert = (verifiedAt: Date | null, intentHash: string | null, identityHash: string | null, jobId: string | null) =>
+      database.pool.query(`INSERT INTO inventory.ebay_publication_reconciliation_cycles
+        (watch_id,revision,cycle,command_key,stock_state,completed_at,content_check_kind,content_checked_at,content_evidence_hash,content_identity_hash,content_job_id)
+        VALUES($1,1,1,$2,'verified',$3,CASE WHEN $4::timestamptz IS NULL THEN NULL ELSE 'provider_match' END,$4,$5,$6,$7)`,
+      [saved.watchId, randomUUID(), clock(), verifiedAt, intentHash, identityHash, jobId]);
+    await expect(insert(null, null, null, null)).rejects.toMatchObject({ code: "23514" });
+    await expect(insert(clock(), null, null, null)).rejects.toMatchObject({ code: "23514" });
+    await expect(insert(clock(), "a".repeat(64), "b".repeat(64), randomUUID())).rejects.toMatchObject({ code: "23514" });
+    await expect(database.pool.query(`INSERT INTO inventory.ebay_publication_reconciliation_cycles
+      (watch_id,revision,cycle,command_key,stock_state,completed_at,content_check_kind,content_checked_at,content_evidence_hash,content_identity_hash)
+      VALUES($1,1,1,$2,'verified',$3,'stock_only',$3,$4,$5)`,
+    [saved.watchId, randomUUID(), clock(), "a".repeat(64), "b".repeat(64)])).rejects.toMatchObject({ code: "23514" });
+    await insert(clock(), "a".repeat(64), "b".repeat(64), null);
+    await expect(database.pool.query("DELETE FROM inventory.ebay_publication_reconciliation_cycles WHERE watch_id=$1", [saved.watchId]))
+      .rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("does not replay or rewind a verified cycle when its commit acknowledgement is lost", async () => {
+    const f = fixture(); const saved = await start(f);
+    f.content.mockResolvedValue({ verified: { kind: "provider_match", checkedAt: clock(), evidenceHash: "a".repeat(64),
+      identityHash: "b".repeat(64), proof: null } } as never);
+    const commit = f.repository.finish.bind(f.repository);
+    vi.spyOn(f.repository, "finish").mockImplementationOnce(async (...args) => {
+      await commit(...args);
+      throw new Error("Synthetic connection loss after commit");
+    });
+    expect((await f.watch.processDue(1)).blocked).toBe(1);
+    expect((await database.pool.query("SELECT cycle::text,state FROM inventory.ebay_publication_reconciliation_watches WHERE id=$1", [saved.watchId])).rows)
+      .toEqual([{ cycle: "2", state: "verified" }]);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.ebay_publication_reconciliation_cycles WHERE watch_id=$1", [saved.watchId])).rows[0].count).toBe(1);
+    advance();
+    expect((await f.watch.processDue(1)).checked).toBe(1);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.ebay_publication_reconciliation_cycles WHERE watch_id=$1", [saved.watchId])).rows[0].count).toBe(2);
+  });
 
   it("plans only the watch's exact target and members despite an archived link and an unrelated unmapped selected sibling", async () => {
     const f = fixture(); await start(f);

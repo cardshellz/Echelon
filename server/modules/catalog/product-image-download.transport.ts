@@ -28,7 +28,10 @@ function validateUrl(raw: string): URL {
   return url;
 }
 
-export async function fetchProductImage(rawUrl: string, dependencies: ProductImageTransportDependencies = defaults): Promise<DownloadableProductImage> {
+export async function fetchProductImage(rawUrl: string, dependencies: ProductImageTransportDependencies = defaults,
+  options: { acceptMimeType?: string } = {}): Promise<DownloadableProductImage> {
+  if (options.acceptMimeType && !Object.hasOwn(PRODUCT_IMAGE_EXTENSIONS, options.acceptMimeType))
+    throw new ProductAssetError("IMAGE_FORMAT_UNSUPPORTED", "The requested image format is unsupported.", 422);
   const controller = new AbortController();
   const timeoutError = new ProductAssetError("IMAGE_DOWNLOAD_TIMEOUT", "The image source took too long. Try again.", 504);
   const timer = setTimeout(() => controller.abort(), dependencies.timeoutMs);
@@ -55,7 +58,9 @@ export async function fetchProductImage(rawUrl: string, dependencies: ProductIma
           method: "GET", agent: false, family: 4, autoSelectFamily: false, rejectUnauthorized: true,
           signal: controller.signal,
           lookup: (_hostname, _options, callback) => callback(null, addresses[0].address, 4),
-          headers: { Accept: "image/jpeg,image/png,image/webp,image/gif", "Accept-Encoding": "identity" },
+          // Advertising WebP explicitly causes some CDNs to transcode a JPEG
+          // source. Ask for an image without preferring a replacement format.
+          headers: { Accept: options.acceptMimeType ?? "image/*", "Accept-Encoding": "identity" },
         }, response => {
           const status = response.statusCode ?? 0;
           if ([301, 302, 303, 307, 308].includes(status) && response.headers.location) {
@@ -65,6 +70,9 @@ export async function fetchProductImage(rawUrl: string, dependencies: ProductIma
             response.destroy(); reject(new ProductAssetError("IMAGE_SOURCE_UNAVAILABLE", "The image source could not provide the photo. Try again later.", 502)); return;
           }
           const mimeType = String(response.headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+          if (options.acceptMimeType && mimeType !== options.acceptMimeType) {
+            response.destroy(); reject(new ProductAssetError("IMAGE_SOURCE_FORMAT_CHANGED", "The image source returned a different format. Review the photo again.", 409)); return;
+          }
           if (!Object.hasOwn(PRODUCT_IMAGE_EXTENSIONS, mimeType)) {
             response.destroy(); reject(new ProductAssetError("IMAGE_FORMAT_UNSUPPORTED", "The source did not return a supported image.", 422)); return;
           }

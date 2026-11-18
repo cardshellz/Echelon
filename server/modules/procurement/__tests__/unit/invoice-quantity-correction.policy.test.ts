@@ -209,3 +209,56 @@ describe("supplier credit source preservation during invoice correction", () => 
     expect(source).toEqual(before);
   });
 });
+
+describe("supplier amounts included in one invoice correction", () => {
+  const current = { contractVersion: 1 as const, packagingTreatment: "separate" as const,
+    productMills: 60_000_000, packagingMills: 6_937_500, adjustmentMills: 0, source: "operator_review" as const };
+  const corrected = { packagingTreatment: "separate" as const, productMills: 120_000_000, packagingMills: 13_875_000, adjustmentMills: 0 };
+  it("keeps the saved supplier amounts on a quantity-only correction without changing its source facts", () => {
+    const source = facts(); source.invoiceLines[0].costComponentEvidence = current;
+    const before = structuredClone(source);
+    expect(planInvoiceQuantityCorrection(source, 72, request())).toMatchObject({
+      beforeCostComponents: current, afterCostComponents: current, costComponentsReviewed: false,
+    });
+    expect(source).toEqual(before);
+  });
+  it("accepts explicit reconciled supplier amounts with a billed-amount correction", () => {
+    const source = billingFacts(); source.invoiceLines[0].costComponentEvidence = current;
+    const before = structuredClone(source);
+    expect(planInvoiceQuantityCorrection(source, 72, financialRequest({ costComponents: corrected }))).toMatchObject({
+      beforeCostComponents: current, afterCostComponents: { ...corrected, contractVersion: 1, source: "operator_review" }, costComponentsReviewed: true,
+    });
+    expect(source).toEqual(before);
+  });
+  it("keeps a changed bill's unknown cost split explicit instead of silently preserving the old split", () => {
+    const source = billingFacts(); source.invoiceLines[0].costComponentEvidence = current;
+    expect(planInvoiceQuantityCorrection(source, 72, financialRequest())).toMatchObject({ beforeCostComponents: current, afterCostComponents: null,
+      warnings: expect.arrayContaining([expect.stringContaining("not confirmed")]) });
+  });
+  it("rejects costs that do not equal the corrected line amount exactly", () => {
+    expect(() => planInvoiceQuantityCorrection(billingFacts(), 72, financialRequest({ costComponents: { ...corrected, productMills: 1 } })))
+      .toThrow(expect.objectContaining({ code: "INVOICE_CORRECTION_COST_TOTAL_MISMATCH", statusCode: 422 }));
+  });
+  it("allows an explicit supplier-cost correction without editing otherwise correct invoice amounts", () => {
+    const source = billingFacts(); source.invoiceLines[0].costComponentEvidence = current;
+    const costComponents = { packagingTreatment: "separate", productMills: 59_999_900, packagingMills: 6_937_600, adjustmentMills: 0 };
+    expect(planInvoiceQuantityCorrection(source, 72, financialRequest({ quantityPieces: 12500, unitCostMills: 5023, lineTotalCents: 669375, costComponents })))
+      .toMatchObject({ beforeQuantity: 12500, afterQuantity: 12500, afterLineAmountCents: 669375, costComponentsReviewed: true });
+    const { packagingTreatment, productMills, packagingMills, adjustmentMills } = current;
+    expect(() => planInvoiceQuantityCorrection(source, 72, financialRequest({ quantityPieces: 12500, unitCostMills: 5023, lineTotalCents: 669375,
+      costComponents: { packagingTreatment, productMills, packagingMills, adjustmentMills } })))
+      .toThrow(expect.objectContaining({ code: "INVOICE_QUANTITY_NO_CHANGE" }));
+  });
+  it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, "0"])("rejects invalid supplier amount %s", value => {
+    expect(invoiceQuantityPreviewRequestSchema.safeParse({ ...financialRequest(), costComponents: { ...corrected, productMills: value } }).success).toBe(false);
+  });
+  it("rejects separately priced packaging when the operator says it is included", () => {
+    expect(invoiceQuantityPreviewRequestSchema.safeParse({ ...financialRequest(), costComponents: { ...corrected, packagingTreatment: "included_in_product" } }).success).toBe(false);
+  });
+  it("decodes committed legacy approvals while validating the new reviewed version", () => {
+    const legacy = { ...request(), reason: "Supplier invoice correction", approvalConfirmed: true };
+    expect(invoiceQuantityApprovalRequestSchema.safeParse(legacy).success).toBe(true);
+    expect(invoiceQuantityApprovalRequestSchema.safeParse({ ...legacy, previewVersion: "b".repeat(64) }).success).toBe(true);
+    expect(invoiceQuantityApprovalRequestSchema.safeParse({ ...legacy, previewVersion: "old" }).success).toBe(false);
+  });
+});

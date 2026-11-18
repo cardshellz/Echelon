@@ -127,6 +127,35 @@ describe("describeListingPushOutcome", () => {
   });
 });
 
+describe("a size published while out of stock (owner report)", () => {
+  it("says it is waiting for stock and lists by itself, only when stock is its one blocker on eBay", () => {
+    const waiting = item({ itemId: 2, status: "blocked", errorCode: "DROPSHIP_LISTING_PREVIEW_BLOCKED", errorMessage: "marketplace_quantity_unavailable",
+      externalListingId: null, published: null, listingUrl: null });
+    const outcome = describeListingPushOutcome(job({ status: "failed", items: [item(), waiting] }), "marz_cards");
+    expect(outcome.items[1]).toMatchObject({ state: "failed", line: "Waiting for stock. It lists by itself when stock comes back.", nextStep: null });
+    // Still counted with the items that did not list now.
+    expect(outcome.title).toBe("Of 2 listings on marz_cards: 1 live, 1 could not be listed.");
+
+    const priced = describeListingPushOutcome(job({ status: "failed", items: [{ ...waiting,
+      errorMessage: "marketplace_quantity_unavailable, vendor_retail_price_required" }] }), "marz_cards");
+    expect(priced.items[0]!.line).toMatch(/^Could not list: /);
+    expect(priced.items[0]!.line).not.toContain("Waiting for stock");
+    const shopify = describeListingPushOutcome(job({ platform: "shopify", status: "failed", items: [waiting] }), "my shop");
+    expect(shopify.items[0]!.line).not.toContain("Waiting for stock");
+  });
+
+  it("a live listing whose push was skipped because stock ran out stays live at 0, not a failure", () => {
+    const skipped = item({ itemId: 3, status: "cancelled", errorCode: "DROPSHIP_PUSH_SKIPPED_OUT_OF_STOCK", errorMessage: "out of stock" });
+    const outcome = describeListingPushOutcome(job({ items: [skipped] }), "marz_cards");
+    expect(outcome.items[0]).toMatchObject({ state: "live",
+      line: "Out of stock right now. Your listing stays up at quantity 0 and updates by itself when stock comes back.", nextStep: null });
+    expect(outcome.items[0]!.line).not.toContain("Could not list");
+    // Any other cancelled item is still a failure.
+    const stopped = describeListingPushOutcome(job({ status: "failed", items: [item({ status: "cancelled", errorCode: "DROPSHIP_PUSH_STOPPED" })] }), "marz_cards");
+    expect(stopped.items[0]!.state).toBe("failed");
+  });
+});
+
 describe("stock gate refusals", () => {
   it("tells the vendor an unresolved earlier stock update is Card Shellz's to confirm, not theirs to retry", () => {
     const outcome = describeListingPushOutcome(job({ status: "failed", items: [item({ status: "failed",

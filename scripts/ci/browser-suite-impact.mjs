@@ -26,7 +26,7 @@ export const BROWSER_SUITES = {
     tests: /^test\/browser\/(order-edits|customer-order-edit-(?:resume|rewards|payment)|customer-order-cancellation)\.spec\.ts$/,
     roots: ["client/src/customer-account/entry.tsx", "test/browser/fixtures/customer-order-edit-harness.tsx"],
     appRoutes: ["/order-edits", "/oms/orders"],
-    ownedPrefixes: ["server/modules/order-edits/", "client/src/pages/OrderEdits.tsx"],
+    ownedPrefixes: ["server/modules/order-edits/", "client/src/pages/OrderEdits.tsx", "client/src/components/order-edits/"],
   },
   procurement: {
     config: "playwright.procurement.config.ts",
@@ -63,7 +63,8 @@ export const BROWSER_SUITES = {
 const GLOBAL_PREFIXES = [
   "shared/", "client/src/components/ui/", "client/src/components/layout/",
   "client/src/hooks/", "client/src/lib/", "client/src/styles/", "client/public/",
-  "attached_assets/", "scripts/ci/",
+  "attached_assets/", "scripts/ci/browser-", "scripts/ci/dropship-browser-",
+  "scripts/ci/app-route-roots", "scripts/ci/test-impact", "scripts/ci/require-",
 ];
 const GLOBAL_FILES = new Set([
   "client/src/App.tsx", "client/src/main.tsx", "client/index.html", "client/src/index.css",
@@ -74,7 +75,7 @@ const GLOBAL_FILES = new Set([
 const ISOLATED_GLOBAL_FILES = new Set([
   "package.json", "package-lock.json", ".npmrc", ".nvmrc", "tsconfig.json", "vitest.config.ts",
 ]);
-const ISOLATED_GLOBAL_PREFIXES = ["client/public/", "attached_assets/", "scripts/ci/"];
+const ISOLATED_GLOBAL_PREFIXES = ["client/public/", "attached_assets/", "scripts/ci/browser-", "scripts/ci/dropship-browser-", "scripts/ci/app-route-roots", "scripts/ci/test-impact", "scripts/ci/require-"];
 const KNOWN_NON_BROWSER_PREFIXES = ["server/", "migrations/", "docs/", "scripts/", ".github/"];
 const KNOWN_FEATURE_PREFIXES = ["client/src/pages/", "client/src/features/", "client/src/components/"];
 

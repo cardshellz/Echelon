@@ -19,6 +19,26 @@ import type {
 const identity = "a".repeat(43);
 const commandKey = "dc9b329b-b250-46a1-9b20-3d3149a2846d";
 const storageKey = `customer-return-request:${identity}`;
+describe("optional history summaries during a rolling deployment", () => {
+  it("requests summaries explicitly and falls back once to the legacy read on an older server", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValueOnce(Response.json({ error: { code: "RETURN_CUSTOMER_INPUT_INVALID" } }, { status: 400 }))
+      .mockResolvedValueOnce(Response.json({ returns: [], nextBeforeAuthorizationId: null }));
+    expect(await createCustomerReturnTransport(request, identity).history(20, new AbortController().signal, true))
+      .toEqual({ returns: [], nextBeforeAuthorizationId: null });
+    expect(request.mock.calls.map(([url]) => url)).toEqual(["/api/returns/customer/returns?before=20&progress=1", "/api/returns/customer/returns?before=20"]);
+    expect(request.mock.calls.every(([,options]) => options?.method === "GET")).toBe(true);
+  });
+  it.each([401, 403, 503])("does not hide HTTP %s behind a legacy fallback", async status => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ error: { code: "SYNTHETIC_FAILURE" } }, { status }));
+    await expect(createCustomerReturnTransport(request, identity).history(null, new AbortController().signal, true)).rejects.toThrow();
+    expect(request).toHaveBeenCalledOnce();
+  });
+  it("retains the original history request for existing callers", async () => {
+    const request = vi.fn<typeof fetch>().mockResolvedValue(Response.json({ returns: [], nextBeforeAuthorizationId: null }));
+    await createCustomerReturnTransport(request, identity).history(null, new AbortController().signal);
+    expect(request.mock.calls[0][0]).toBe("/api/returns/customer/returns");
+  });
+});
 function input(): CustomerReturnCustomerSubmitInput {
   return {
     idempotencyKey: commandKey,
@@ -100,6 +120,24 @@ function begin(s: ReturnType<typeof setup>) {
 }
 
 describe("customer return transport", () => {
+  it("loads lightweight choices through the session-bound read endpoint", async () => {
+    const page = { orders: [{ omsOrderId: 10, orderReference: "TEST-1001", purchasedAt: null,
+      eligibleItemCount: null }], nextBeforeOmsOrderId: 10, unavailableOrderCount: 0 };
+    const request = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(page)));
+    expect(await createCustomerReturnTransport(request, identity).orderChoices(null, new AbortController().signal)).toEqual(page);
+    expect(request).toHaveBeenCalledExactlyOnceWith("/api/returns/customer/order-options", expect.objectContaining({
+      method: "GET", cache: "no-store", credentials: "include", headers: { "X-Return-Session": identity },
+    }));
+  });
+  it.each(["duplicate", "repeated-cursor", "out-of-page"])("rejects invalid chooser pagination: %s", async invalid => {
+    const choice = { omsOrderId: invalid === "out-of-page" ? 20 : 10,
+      orderReference: "TEST-1001", purchasedAt: null, eligibleItemCount: null };
+    const page = { orders: invalid === "duplicate" ? [choice, choice] : [choice],
+      nextBeforeOmsOrderId: invalid === "repeated-cursor" ? 20 : null, unavailableOrderCount: 0 };
+    const request = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(page)));
+    await expect(createCustomerReturnTransport(request, identity).orderChoices(20, new AbortController().signal)).rejects.toThrow();
+    expect(request.mock.calls[0][0]).toBe("/api/returns/customer/order-options?before=20");
+  });
   it("bounds a stalled observation without issuing any command", async () => {
     vi.useFakeTimers();
     try {

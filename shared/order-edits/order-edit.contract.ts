@@ -205,6 +205,8 @@ export const orderEditOperationSchema = z
     orderNumber: z.string(),
     currency: z.literal("USD"),
     canAbandon: z.boolean(),
+    // Opt-in observation metadata; older strict clients receive no extra field.
+    commandInProgress: z.boolean().optional(),
     previousTotalCents: money,
     updatedTotalCents: money,
     quoteAvailable: z.boolean().optional(),

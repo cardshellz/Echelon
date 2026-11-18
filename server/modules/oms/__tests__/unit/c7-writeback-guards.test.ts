@@ -170,8 +170,18 @@ describe("D-PUSHIDEM: legacy fulfillment handle persistence", () => {
       FULFILLMENT_PUSH_SRC.indexOf("D-PUSHIDEM"),
       FULFILLMENT_PUSH_SRC.indexOf("D-PUSHAUDIT"),
     );
-    expect(persistBlock).toContain("shopify_fulfillment_id IS NULL");
+    expect(persistBlock).toContain("persistShopifyFulfillmentIdOnLegacyOutboundShipmentsInWms(");
     expect(persistBlock).toContain("rowCount");
+
+    const wmsShipmentsRepoSrc = readFileSync(
+      fileURLToPath(new URL("../../../wms/outbound-shipments-mutations.repository.ts", import.meta.url)),
+      "utf8",
+    );
+    const repoBlock = wmsShipmentsRepoSrc.substring(
+      wmsShipmentsRepoSrc.indexOf("export async function persistShopifyFulfillmentIdOnLegacyOutboundShipmentsInWms("),
+      wmsShipmentsRepoSrc.indexOf("export async function clearDeadShopifyFulfillmentIdsOnOutboundShipmentInWms("),
+    );
+    expect(repoBlock).toContain("shopify_fulfillment_id IS NULL");
   });
 
   it("does not treat a preserved legacy handle as package completion", () => {

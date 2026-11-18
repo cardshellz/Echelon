@@ -979,6 +979,13 @@ const enabled = process.env.ECHELON_TEST_DATABASE_URL && process.env.ECHELON_TES
     const currentOffers=new Map<string,EbayObservedOffer>(draft.offers.map(offer=>[offer.sku,{...structuredClone(offer.payload),
       offerId:source.variants.find(member=>member.variantId===offer.variantId)!.offerId!,status:"UNPUBLISHED"}]));
     const client:EbayListingLifecycleClient={
+      getPublishedListingContent:async listingId=>{
+        if(!published || listingId!==final.variants[0].listingId || !providerState.group)throw new Error("Fake published listing is not available");
+        const policy=currentOffers.get(source.variants[0].sku)!.listingPolicies!;
+        return{listingId,skus:providerState.group.variantSKUs ?? [],policies:{shipping:policy.fulfillmentPolicyId!,
+          return:policy.returnPolicyId!,payment:policy.paymentPolicyId!},firstPhotoSource:providerState.group.imageUrls[0] ?? null,
+          photos:providerState.group.imageUrls.map(url=>({url,width:640,height:640}))};
+      },
       getInventoryItem:vi.fn(async sku=>structuredClone(currentItems.get(sku)??null)),
       getOffers:vi.fn(async sku=>({offers:[structuredClone(currentOffers.get(sku)!)]})),
       getInventoryItemGroup:vi.fn(async()=>structuredClone(providerState.group)),

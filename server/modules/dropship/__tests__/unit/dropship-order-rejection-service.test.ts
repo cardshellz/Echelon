@@ -82,7 +82,7 @@ describe("DropshipOrderRejectionService", () => {
       eventType: "dropship_order_rejected",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship order rejected",
+      title: "Order rejected",
       idempotencyKey: "order-rejected:42:reject-order-42",
       payload: {
         intakeId: 42,

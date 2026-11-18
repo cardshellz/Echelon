@@ -13,6 +13,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { ShopifyOwnershipReview } from "@/components/ShopifyOwnershipReview";
 import { InventoryProductSyncButton } from "@/features/channel-inventory/components/InventoryProductSync";
+import { ListingMemberConflictNotice } from "@/features/channel-listing-publication/ListingMemberConflictNotice";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -544,6 +545,8 @@ export default function ShopifyChannelPage() {
           </p>
         </div>
       </div>
+
+      {shopifyChannel && <ListingMemberConflictNotice key={shopifyChannel.id} channelId={shopifyChannel.id} enabled={hasPermission("channels", "view")} />}
 
       {/* Section 1: Store Setup */}
       <Card>

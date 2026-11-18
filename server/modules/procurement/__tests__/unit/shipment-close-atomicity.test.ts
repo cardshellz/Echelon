@@ -1,3 +1,5 @@
+// Packing/transaction tests isolate the source reader; real header/tax effects are covered by PostgreSQL flow tests.
+vi.mock("../../shipment-cost-exclusions.repository", () => ({ readShipmentCostExclusions: vi.fn(async () => ({ taxByLine: new Map(), otherByLine: new Map() })) }));
 import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../shipment-cost-application.service";
 vi.mock("../../shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
 import { describe, expect, it, vi } from "vitest";
@@ -94,7 +96,7 @@ function harness() {
   vi.mocked(applyShipmentCostRevisions).mockReset().mockImplementation(async (tx) => {
     expect(inTransaction(tx).shipment.status).toBe("closed");
     events.push("push");
-    return { updated: 0, total: 0, skipped: [], costApplications: [] };
+    return { updated: 0, total: 0, status: "applied" as const, skipped: [], costApplications: [] };
   });
   const clock = vi.fn(() => commandTime);
   const cogs = { withTx: vi.fn(), updateLotLandedCostMills: vi.fn() };
@@ -138,7 +140,8 @@ describe("shipment close transaction", () => {
 
   it("rejects an incomplete PO value before allocation, snapshot or close writes", async () => {
     const h = harness();
-    h.storage.getPurchaseOrderLineById.mockResolvedValue({ id: 21, purchaseOrderId: 1, lineType: "product",
+    h.storage.getPurchaseOrderLineById.mockResolvedValue({ id: 21, purchaseOrderId: 1, productId: 100,
+      productVariantId: 10, expectedReceiveVariantId: 10, expectedReceiveUnitsPerVariant: 1, lineType: "product",
       orderQty: 5, totalProductCostCents: undefined as unknown as number, unitCostCents: 100 });
     await expect(h.service.close(1, "operator-1")).rejects.toMatchObject({ statusCode: 409,
       details: { code: "INVALID_ALLOCATION_BASIS" } });

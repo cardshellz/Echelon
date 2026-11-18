@@ -14,7 +14,16 @@ import {
 } from "@/lib/dropship-ebay-category-rules";
 import { dropshipPortalPath } from "@/lib/dropship-auth";
 import { EBAY_CATEGORY_PICKER_PERMISSION_WORDS } from "@/lib/dropship-listing-settings-words";
-import { queryErrorCode, queryErrorMessage } from "@/lib/dropship-ops-surface";
+import { queryErrorCode } from "@/lib/dropship-ops-surface";
+import { vendorErrorMessage } from "@/lib/dropship-vendor-labels";
+
+const EBAY_CATEGORIES_UNAVAILABLE_WORDS = "eBay categories could not be loaded. Try again shortly.";
+/** The picker's own words for the category read's refusals (server dropship-ebay-taxonomy.directory.ts). */
+const EBAY_CATEGORY_ERROR_WORDS: Readonly<Record<string, string>> = Object.freeze({
+  DROPSHIP_EBAY_CATEGORIES_UNAVAILABLE: EBAY_CATEGORIES_UNAVAILABLE_WORDS,
+  DROPSHIP_EBAY_CATEGORIES_INVALID_RESPONSE: EBAY_CATEGORIES_UNAVAILABLE_WORDS,
+  DROPSHIP_EBAY_CATEGORIES_ACCESS_DENIED: "eBay won't share its categories with this store's connection. Contact Card Shellz support.",
+});
 import { GuardedLink } from "./catalog/UnsavedChangesGuard";
 
 /** The server refreshes eBay's tree once a day, so answers can be reused for the whole visit. */
@@ -279,7 +288,7 @@ function PickerError({ error, onRetry, portalHref = dropshipPortalPath }: {
   }
   return (
     <div role="alert" className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
-      <p>{queryErrorMessage(error, "eBay categories could not be loaded.")}</p>
+      <p>{vendorErrorMessage(error, EBAY_CATEGORIES_UNAVAILABLE_WORDS, EBAY_CATEGORY_ERROR_WORDS)}</p>
       <Button type="button" size="sm" variant="outline" className="mt-2" onClick={onRetry}>Try again</Button>
     </div>
   );

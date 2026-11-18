@@ -6,8 +6,8 @@ import {
   shipmentHistoryContextSchema, shipmentHistoryPostingSchema, type ShipmentHistoryReview,
 } from "@shared/procurement/shipment-history-correction";
 import { shipmentQuantityStage } from "@shared/procurement/purchase-line-shipping";
-import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
-import { SYSTEM_ROLES } from "../identity/domain/identity.domain";
+import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
+import { SYSTEM_ROLES } from "../identity/authority-contracts.api";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { ShipmentHistoryCorrectionError, historyCorrectionBlock, shipmentHistoryIssues } from "./domain/shipment-history-correction";

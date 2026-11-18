@@ -54,7 +54,8 @@ const T2 = new Date("2026-10-22T12:15:00.000Z");
 
 /** The columns the sweep reads that the reduced base fixture does not carry, and the IP outbox the reader reads. */
 const SWEEP_FIXTURE_SQL = `
-  ALTER TABLE dropship.dropship_store_connections ADD COLUMN access_token_ref text, ADD COLUMN refresh_token_ref text;
+  ALTER TABLE dropship.dropship_store_connections ADD COLUMN access_token_ref text, ADD COLUMN refresh_token_ref text,
+    ADD COLUMN provider_environment varchar(30), ADD COLUMN config jsonb;
   ALTER TABLE dropship.dropship_store_listing_configs ADD COLUMN marketplace_config jsonb NOT NULL DEFAULT '{}';
   ALTER TABLE dropship.dropship_listing_push_jobs ADD COLUMN idempotency_key varchar(200),
     ADD COLUMN created_at timestamptz NOT NULL DEFAULT now();
@@ -210,6 +211,41 @@ describeDatabase.sequential("eBay sync-back sweep persistence (PostgreSQL)", () 
         WHERE id = $1`, [ids.readEarlier, T1]);
       expect(await repository.listObservedListingIds({ storeConnectionId: STORE, limit: 50 })).toEqual([ids.readEarlier]);
       expect(await repository.listDueListingIds({ storeConnectionId: STORE, limit: 50 })).toEqual([ids.live]);
+    });
+
+    it("reads the store's listings waiting for stock (blocked for stock, never published) in id order, a rotating window at a time, read only", async () => {
+      await pool.query(`INSERT INTO catalog.product_variants (id, product_id, sku) VALUES (106, 20, 'CS-106'), (107, 20, 'CS-107'),
+        (108, 20, 'CS-108'), (109, 20, 'CS-109'), (110, 20, 'CS-110'), (111, 20, 'CS-111'), (112, 20, 'CS-112'), (113, 20, 'CS-113')`);
+      const blockedAt = new Date("2026-11-01T10:00:00.000Z");
+      const insert = async (store: number, vendor: number, variant: number, status: string, itemNumber: string | null, metadata: unknown) =>
+        (await pool.query<{ id: number }>(`INSERT INTO dropship.dropship_vendor_listings (vendor_id, store_connection_id, product_variant_id,
+          platform, external_listing_id, status, metadata, updated_at) VALUES ($1, $2, $3, 'ebay', $4, $5, $6::jsonb, $7) RETURNING id`,
+        [vendor, store, variant, itemNumber, status, metadata === null ? null : JSON.stringify(metadata), blockedAt])).rows[0]!.id;
+      const stock = "marketplace_quantity_unavailable";
+      const first = await insert(STORE, VENDOR, 106, "blocked", null, { lastPreviewStatus: "blocked", blockers: ["vendor_retail_price_required", stock] });
+      const second = await insert(STORE, VENDOR, 107, "blocked", " ", { blockers: [stock] });
+      await insert(STORE, VENDOR, 108, "blocked", "110000000008", { blockers: [stock] });
+      await insert(STORE, VENDOR, 109, "ended", null, { blockers: [stock] });
+      await insert(STORE, VENDOR, 110, "blocked", null, { blockers: ["vendor_retail_price_required"] });
+      await insert(STORE, VENDOR, 111, "blocked", null, null);
+      await insert(STORE, VENDOR, 112, "blocked", null, { blockers: stock });
+      await insert(23, 11, 113, "blocked", null, { blockers: [stock] });
+      const before = (await pool.query(`SELECT id, status, updated_at, metadata FROM dropship.dropship_vendor_listings ORDER BY id`)).rows;
+
+      const read = (limit: number, rotation: number) => repository.listWaitingForStockListings({ storeConnectionId: STORE, limit, rotation });
+      expect(await read(50, 0)).toEqual([
+        { listingId: first, productVariantId: 106, status: "blocked", externalListingId: null,
+          blockers: ["vendor_retail_price_required", stock], updatedAt: blockedAt },
+        { listingId: second, productVariantId: 107, status: "blocked", externalListingId: " ", blockers: [stock], updatedAt: blockedAt },
+      ]);
+      // One window per tick, wrapping: every waiting listing gets its turn however many are still at 0.
+      expect((await read(1, 0)).map((row) => row.listingId)).toEqual([first]);
+      expect((await read(1, 1)).map((row) => row.listingId)).toEqual([second]);
+      expect((await read(1, 2)).map((row) => row.listingId)).toEqual([first]);
+      // A window as large as the list starts at (rotation x limit) mod total = (1 x 50) mod 2 = 0: plain id order.
+      expect((await read(50, 1)).map((row) => row.listingId)).toEqual([first, second]);
+      expect(await repository.listWaitingForStockListings({ storeConnectionId: 24, limit: 50, rotation: 0 })).toEqual([]);
+      expect((await pool.query(`SELECT id, status, updated_at, metadata FROM dropship.dropship_vendor_listings ORDER BY id`)).rows).toEqual(before);
     });
 
     it("loads a listing in one snapshot: its sync events, its newest stored intent, and whether a push is in flight", async () => {
@@ -500,16 +536,53 @@ describeDatabase.sequential("eBay sync-back sweep persistence (PostgreSQL)", () 
     const check = (compatible: boolean, checkedAt: Date) => {
       const issueCodes = compatible ? [] : ["local_pickup_unsupported"];
       return { vendorId: VENDOR, storeConnectionId: STORE, fulfillmentPolicyId: "F-9", compatible, issueCodes,
-        verdictHash: fulfillmentPolicyVerdictHash(issueCodes), listingCount: 2, checkedAt };
+        verdictHash: fulfillmentPolicyVerdictHash(issueCodes), listingCount: 2, policyName: "Ship fast",
+        supportedServiceNames: ["USPS Ground Advantage"], requiredHandlingTimeBusinessDays: 2, checkedAt };
     };
 
-    it("tells a newly incompatible policy once, forgets it when it works again, and tells it again when it breaks again", async () => {
+    it("puts the policy's name and its first live listings (item number, title, SKU) on the notice, with the store's environment", async () => {
+      await pool.query(`UPDATE dropship.dropship_store_connections SET provider_environment = 'sandbox' WHERE id = $1`, [STORE]);
+      await pool.query(`UPDATE catalog.products SET name = 'Toploaders' WHERE id = 20`);
+      await pool.query(`UPDATE catalog.product_variants SET name = '100 pack' WHERE id = 101`);
+      // Live under F-9: the read listing and the one read earlier; the pushing one is outside the sweep's predicate.
+      await pool.query(`UPDATE dropship.dropship_vendor_listings SET observed_fulfillment_policy_id = 'F-9' WHERE id = ANY($1::int[])`,
+        [[ids.live, ids.readEarlier, ids.pushing]]);
+      expect(await repository.applyPolicyCheck(check(false, T1))).toEqual({ notified: true });
+      const [notice] = (await pool.query<{ payload: Record<string, unknown> }>(
+        `SELECT payload FROM dropship.dropship_marketplace_sync_notices ORDER BY id`)).rows;
+      expect(notice!.payload).toEqual({ fulfillmentPolicyId: "F-9", policyName: "Ship fast", listingCount: 2,
+        reasons: ["local_pickup_unsupported"], supportedServiceNames: ["USPS Ground Advantage"], requiredHandlingTimeBusinessDays: 2,
+        marketplaceEnvironment: "sandbox", listings: [
+          { externalListingId: READ_LISTING_ID, title: "Toploaders · 100 pack", sku: "CS-101" },
+          { externalListingId: "110000000005", title: "Toploaders · Size", sku: "CS-105" },
+        ] });
+    });
+
+    it("tells a newly incompatible policy once, tells once that it works again, and tells it again when it breaks again", async () => {
       expect(await repository.applyPolicyCheck(check(false, T1))).toEqual({ notified: true });
       expect(await repository.applyPolicyCheck(check(false, T2))).toEqual({ notified: false });
-      expect(await repository.applyPolicyCheck(check(true, new Date(T2.getTime() + 60_000)))).toEqual({ notified: false });
+      expect(await repository.applyPolicyCheck(check(true, new Date(T2.getTime() + 60_000)))).toEqual({ notified: true });
+      expect(await repository.applyPolicyCheck(check(true, new Date(T2.getTime() + 90_000)))).toEqual({ notified: false });
       expect(await repository.applyPolicyCheck(check(false, new Date(T2.getTime() + 120_000)))).toEqual({ notified: true });
-      expect((await pool.query(`SELECT kind, critical FROM dropship.dropship_marketplace_sync_notices ORDER BY id`)).rows)
-        .toEqual([{ kind: "policy_incompatible", critical: true }, { kind: "policy_incompatible", critical: true }]);
+      expect((await pool.query(`SELECT kind, critical, payload ->> 'policyName' AS name FROM dropship.dropship_marketplace_sync_notices
+        ORDER BY id`)).rows).toEqual([{ kind: "policy_incompatible", critical: true, name: "Ship fast" },
+        { kind: "policy_fixed", critical: false, name: "Ship fast" }, { kind: "policy_incompatible", critical: true, name: "Ship fast" }]);
+    });
+
+    it("resends an incompatible policy told in the old words exactly once, and sends a compatible one nothing", async () => {
+      // Rows as the release before the guided fix left them: version 1 hashes, one told incompatible, one compatible.
+      const oldIncompatible = fulfillmentPolicyVerdictHash(["local_pickup_unsupported"], 1);
+      const oldCompatible = fulfillmentPolicyVerdictHash([], 1);
+      await pool.query(`INSERT INTO dropship.dropship_ebay_fulfillment_policy_checks (store_connection_id, fulfillment_policy_id, compatible,
+        issue_codes, verdict_hash, notified_verdict_hash, checked_at) VALUES ($1, 'F-9', false, '{local_pickup_unsupported}', $2, $2, $4),
+        ($1, 'F-1', true, '{}', $3, NULL, $4)`, [STORE, oldIncompatible, oldCompatible, T0]);
+      expect(await repository.applyPolicyCheck(check(false, T1))).toEqual({ notified: true });
+      expect(await repository.applyPolicyCheck(check(false, T2))).toEqual({ notified: false });
+      const compatible = { ...check(true, T1), fulfillmentPolicyId: "F-1" };
+      expect(await repository.applyPolicyCheck(compatible)).toEqual({ notified: false });
+      expect(await repository.applyPolicyCheck({ ...compatible, checkedAt: T2 })).toEqual({ notified: false });
+      expect((await pool.query(`SELECT kind, payload ->> 'fulfillmentPolicyId' AS policy FROM dropship.dropship_marketplace_sync_notices
+        ORDER BY id`)).rows).toEqual([{ kind: "policy_incompatible", policy: "F-9" }]);
     });
 
     it("lists the store's live policies, the one checked longest ago first", async () => {

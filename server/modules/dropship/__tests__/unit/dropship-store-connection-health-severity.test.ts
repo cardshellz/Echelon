@@ -7,16 +7,13 @@ import { PgDropshipStoreConnectionRepository } from "../../infrastructure/dropsh
 describe("dropship admin setup-check severity", () => {
   it("counts both error and blocker checks as blocking readiness evidence", async () => {
     const pool = {
-      query: vi.fn(async () => ({ rows: [], rowCount: 0 })),
+      query: vi.fn(async (_sql: string) => ({ rows: [], rowCount: 0 })),
     };
     const repository = new PgDropshipStoreConnectionRepository(pool as any);
 
     await repository.listForAdmin({
       page: 1,
       limit: 25,
-      search: null,
-      platform: null,
-      status: null,
     });
 
     const sql = String(pool.query.mock.calls[0]?.[0]);

@@ -55,7 +55,7 @@ import { registerProcurementHealthRoutes } from "../../procurement-health.routes
 function buildApp(): Express {
   const app = express();
   app.use(express.json());
-  app.locals.services = { shipmentTracking: mocks.shipmentTracking };
+  app.locals.services = { shipmentTracking: mocks.shipmentTracking } as unknown as typeof app.locals.services;
   registerProcurementHealthRoutes(app);
   return app;
 }

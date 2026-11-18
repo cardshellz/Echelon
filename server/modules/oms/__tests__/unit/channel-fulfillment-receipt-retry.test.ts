@@ -239,7 +239,7 @@ describe("reviewed inbound channel fulfillment receipt retry", () => {
     const preview = previewChannelFulfillmentReceiptRetry(snapshot());
     const repository: ChannelFulfillmentReceiptRetryRepository = {
       preview: vi.fn(async () => preview),
-      requeue: vi.fn(async () => ({ ...preview, mode: "execute", replayed: false, requeued: true })),
+      requeue: vi.fn(async () => ({ ...preview, mode: "execute" as const, replayed: false, requeued: true })),
     };
     const clock = { now: vi.fn(() => NOW) };
     const service = createChannelFulfillmentReceiptRetryService({ repository, clock });

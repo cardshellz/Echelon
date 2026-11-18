@@ -55,13 +55,57 @@ describe("projectInventoryLevels", () => {
     expect(result[1]?.allowedConversions).toEqual([]);
   });
 
-  it("does not substitute parent links when the authority read fails", async () => {
-    await expect(projectInventoryLevels({
+  it("does not substitute parent links when the authority read fails; the product is marked unavailable", async () => {
+    const logger = { error: vi.fn() };
+    const result = await projectInventoryLevels({
       rows: [row({ variantId: 200, sku: "P5", unitsPerVariant: 5, variantQty: 1, reservedQty: 0, inventoryStrategy: "physical_fungible", parentVariantId: 300 })],
-      atp: { getAtpPerVariant: async () => [], getAtpPerVariantByWarehouse: async () => [] },
+      atp: { getAtpPerVariant: async () => [{ productVariantId: 200, atpUnits: 1 }], getAtpPerVariantByWarehouse: async () => [] },
       conversions: { getAllowedConversions: async () => { throw new Error("Model unavailable"); } },
-    })).rejects.toThrow("Model unavailable");
+      logger,
+    });
+    expect(result[0]).toMatchObject({ allowedConversions: [], atpUnavailable: true, atpUnits: 0, available: 0,
+      atpErrorCode: "INVENTORY_LEVEL_PRODUCT_READ_FAILED", variantQty: 1 });
+    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({
+      action: "inventory.levels.product_read_failed", product_id: 10, step: "conversions" }));
   });
+
+  it("isolates one product's ATP failure from every other product (one stale rule must not blank the list)", async () => {
+    const logger = { error: vi.fn() };
+    const stale = Object.assign(new Error("A path source unit snapshot does not match its captured variant."),
+      { code: "SUPPLY_SNAPSHOT_REFERENCE_INVALID" });
+    const result = await projectInventoryLevels({
+      rows: [
+        row({ variantId: 774, sku: "GLV-C2000", unitsPerVariant: 2000, variantQty: 25, reservedQty: 2, inventoryStrategy: "physical_only", productId: 324 }),
+        row({ variantId: 33, sku: "TOP-P25", unitsPerVariant: 25, variantQty: 98, reservedQty: 0, inventoryStrategy: "physical_only", productId: 17 }),
+      ],
+      atp: {
+        getAtpPerVariant: async (productId: number) => {
+          if (productId === 324) throw stale;
+          return [{ productVariantId: 33, atpUnits: 77 }];
+        },
+        getAtpPerVariantByWarehouse: async () => [],
+      },
+      conversions,
+      logger,
+    });
+    expect(result).toHaveLength(2);
+    expect(result[0]).toMatchObject({ variantId: 774, atpUnavailable: true, atpUnits: 0, atpErrorCode: "SUPPLY_SNAPSHOT_REFERENCE_INVALID",
+      variantQty: 25, reservedQty: 2 });
+    expect(result[1]).toMatchObject({ variantId: 33, atpUnavailable: false, atpUnits: 77, atpErrorCode: null });
+    expect(logger.error).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ product_id: 324, step: "atp",
+      error_code: "SUPPLY_SNAPSHOT_REFERENCE_INVALID", outcome: "failed" }));
+  });
+
+  it("isolates warehouse-scoped ATP failures the same way", async () => {
+    const result = await projectInventoryLevels({
+      rows: [row({ variantId: 774, sku: "GLV-C2000", unitsPerVariant: 2000, variantQty: 25, reservedQty: 0, inventoryStrategy: "physical_only", productId: 324 })],
+      atp: { getAtpPerVariant: async () => [], getAtpPerVariantByWarehouse: async () => { throw new Error("boom"); } },
+      conversions, warehouseId: 3, logger: { error: vi.fn() },
+    });
+    expect(result[0]).toMatchObject({ atpUnavailable: true, atpUnits: 0 });
+  });
+
   it("does not hide zero-physical warehouse rows based on the retired Catalog strategy", () => {
     const source = readFileSync(new URL("../../infrastructure/inventory.repository.ts", import.meta.url), "utf8");
     const query = source.slice(source.indexOf("async getInventoryLevelsSummary("), source.indexOf("async getInventoryByBin("));

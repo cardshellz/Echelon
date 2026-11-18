@@ -1,10 +1,12 @@
 import type { db as applicationDb } from "../db";
 import type { ChannelFulfillmentProviderClients } from "../modules/channels/channel-fulfillment-provider-clients.service";
-import { createChannelFulfillmentAuthorityRepository } from "../modules/oms/channel-fulfillment-authority.repository";
-import { createChannelFulfillmentProjector } from "../modules/oms/channel-fulfillment-projection.repository";
-import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
-import { PackageReconciliationService } from "../modules/oms/package-reconciliation.service";
-import { createShipStationPackageReconciliationClient, type ShipStationPackageReconciliationClient } from "../modules/shipping/shipstation-package-reconciliation.client";
+import {
+  createChannelFulfillmentAuthorityRepository,
+  createChannelFulfillmentProjector,
+  createFulfillmentPushService,
+  PackageReconciliationService,
+} from "../modules/oms/channel-fulfillment-authority.api";
+import { createShipStationPackageReconciliationClient, type ShipStationPackageReconciliationClient } from "../modules/shipping/shipstation-provider-reconciliation.api";
 
 export function createPackageReconciliationService(dependencies: {
   database: Pick<typeof applicationDb,"execute"|"transaction">;

@@ -18,7 +18,7 @@ CREATE TABLE catalog.product_assets(
  product_id integer NOT NULL REFERENCES catalog.products,product_variant_id integer REFERENCES catalog.product_variants,
  asset_type varchar(20) NOT NULL DEFAULT 'image',url text,alt_text varchar(500),position integer NOT NULL DEFAULT 0,
  is_primary integer NOT NULL DEFAULT 0,width integer,height integer,file_size integer,mime_type varchar(100),
- storage_type varchar(20) NOT NULL DEFAULT 'url',created_at timestamp NOT NULL DEFAULT now(),file_data bytea
+ storage_type varchar(20) NOT NULL DEFAULT 'url',created_at timestamp NOT NULL DEFAULT now(),updated_at timestamp NOT NULL DEFAULT now(),file_data bytea
 );
 CREATE TABLE public.audit_events(id bigserial PRIMARY KEY,timestamp timestamptz NOT NULL DEFAULT now(),level text NOT NULL DEFAULT 'AUDIT',
  actor text NOT NULL,action text NOT NULL,target text,changes jsonb,context jsonb);
@@ -29,19 +29,20 @@ const photos = [{ url: "https://cdn.example.com/shared.jpg", position: 0, altTex
 { url: "https://cdn.example.com/shared.jpg", position: 0 },
 { url: "https://cdn.example.com/detail.jpg", position: 1 }];
 const now = new Date("2026-10-08T12:00:00Z");
+const original = readFileSync(new URL("../fixtures/photos/original.png", import.meta.url));
 (url && disposable ? describe : describe.skip).sequential("shared Catalog import defaults (PostgreSQL)", () => {
   let database: InventoryCutoverTestDatabase;
   let importer: ReturnType<typeof createSharedProductPhotoImporter>;
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(url, disposable, fixture);
-    importer = createSharedProductPhotoImporter(drizzle(database.pool, { schema }), () => now);
+    importer = createSharedProductPhotoImporter(drizzle(database.pool, { schema }), () => now, async () => ({ data: original, mimeType: "image/png" }));
   });
   afterAll(async () => { await database?.close(); });
   beforeEach(async () => {
-    await database.pool.query(`TRUNCATE catalog.product_assets RESTART IDENTITY;TRUNCATE public.audit_events;
-    INSERT INTO catalog.product_assets(id,product_id,product_variant_id,url,position,is_primary,storage_type,mime_type,file_data)
-    VALUES(1,1,10,'https://cdn.example.com/manual.jpg',7,1,'both','image/png',decode('89504e470d0a1a0a0000000d49484452','hex')),
-    (2,2,NULL,'https://cdn.example.com/other.jpg',0,1,'url',NULL,NULL);`);
+    await database.pool.query("TRUNCATE catalog.product_assets RESTART IDENTITY;TRUNCATE public.audit_events");
+    await database.pool.query(`INSERT INTO catalog.product_assets(id,product_id,product_variant_id,url,position,is_primary,storage_type,mime_type,file_data)
+    VALUES(1,1,10,'https://cdn.example.com/manual.jpg',7,1,'both','image/png',$1),
+    (2,2,NULL,'https://cdn.example.com/other.jpg',0,1,'url',NULL,NULL);`, [original]);
   });
   async function rows() { return (await database.pool.query("SELECT * FROM catalog.product_assets ORDER BY id")).rows; }
   const append = (input = photos) => importer.append({ productId: 1, photos: input, actor: "service:shopify_content_sync" });
@@ -56,10 +57,12 @@ const now = new Date("2026-10-08T12:00:00Z");
       expect.objectContaining({ product_id: 1, product_variant_id: null, url: photos[0].url, position: 8, is_primary: 0 }),
       expect.objectContaining({ product_id: 1, product_variant_id: null, url: photos[2].url, position: 9, is_primary: 0 }),
     ]);
-    const selected = await new PgCatalogVariantPublicationPhotoReader(database.pool, createCatalogPublicImageUrl({}))
+    const selected = await new PgCatalogVariantPublicationPhotoReader(database.pool, createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https://catalog.example.com" }))
       .listPublicationPhotos({ productVariantIds: [10, 11], maxPhotosPerVariant: 12 });
-    expect(selected.get(10)!.photos.map(photo => photo.url)).toEqual(["https://cdn.example.com/manual.jpg", photos[0].url, photos[2].url]);
-    expect(selected.get(11)!.photos.map(photo => photo.url)).toEqual([photos[0].url, photos[2].url]);
+    expect(selected.get(10)!.photos.map(photo => photo.assetId)).toEqual([1, 100, 101]);
+    expect(selected.get(11)!.photos.map(photo => photo.assetId)).toEqual([100, 101]);
+    expect(selected.get(10)!.photos.every(photo => photo.uploaded && photo.url.startsWith("https://catalog.example.com/api/catalog/images/"))).toBe(true);
+    expect(after.slice(2).every(asset => asset.width === 640 && asset.height === 640 && asset.file_data.equals(original))).toBe(true);
     const audit = (await database.pool.query("SELECT * FROM public.audit_events")).rows;
     expect(audit).toEqual([expect.objectContaining({
       actor: "service:shopify_content_sync", action: "catalog.photos.imported_shared", timestamp: now,

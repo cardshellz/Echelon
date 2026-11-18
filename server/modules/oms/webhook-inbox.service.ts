@@ -48,6 +48,13 @@ const REPLAYABLE_SHOPIFY_OMS_TOPICS = new Set([
   "fulfillments/update",
 ]);
 
+const MUTABLE_SHOPIFY_FALLBACK_TOPICS = new Set([
+  "orders/updated",
+  "orders/fulfilled",
+  "fulfillments/create",
+  "fulfillments/update",
+]);
+
 function isReplayableWebhookInboxTopic(provider: string, topic: string): boolean {
   if (provider === "shopify") {
     return REPLAYABLE_SHOPIFY_OMS_TOPICS.has(topic);
@@ -86,13 +93,21 @@ function extractShopifyPayloadEventId(topic: string, payload: any): string | nul
     if (payload.id) return String(payload.id);
   }
 
-  return String(
-    payload.admin_graphql_api_id ??
-      payload.id ??
-      payload.order_id ??
-      payload.name ??
-      "",
-  ) || null;
+  const entityId =
+    String(
+      payload.admin_graphql_api_id ??
+        payload.id ??
+        payload.order_id ??
+        payload.name ??
+        "",
+    ) || null;
+  if (!entityId) return null;
+
+  if (MUTABLE_SHOPIFY_FALLBACK_TOPICS.has(topic)) {
+    return `${entityId}:payload:${sha256(stableJson(payload))}`;
+  }
+
+  return entityId;
 }
 
 export function buildWebhookIdempotencyKey(input: {

@@ -34,10 +34,11 @@ import type { Express, Request, Response } from "express";
 import { eq } from "drizzle-orm";
 import { z } from "zod";
 import {
-  shippingQuoteSnapshots,
   warehouses,
 } from "@shared/schema";
 import { db } from "../../../../db";
+import { incr } from "../../../../instrumentation/metrics";
+import { insertCheckoutQuoteSnapshot } from "../../infrastructure/quote-snapshot.repository";
 import { deliveryWindow, type DeliveryWindow } from "../../domain/eta";
 import type { RateQuoteLine, RateQuoteResult } from "../../application/rate-quote.service";
 import {
@@ -69,7 +70,9 @@ import {
 } from "../../infrastructure/channel-shipping-policy-runtime.repository";
 
 /** Respond by this deadline even if the quote pipeline is still running. */
-const RESPONSE_DEADLINE_MS = 2000;
+export const RESPONSE_DEADLINE_MS = 2000;
+/** Bound checkout line items per callback to prevent amplification on token endpoints. */
+export const MAX_CHECKOUT_CALLBACK_ITEMS = 250;
 
 /**
  * Origin warehouse for checkout quotes. Shopify sends an origin ADDRESS,
@@ -118,7 +121,7 @@ const shopifyRateRequestSchema = z.object({
       quantity: z.number().int().positive(),
       grams: z.number().nullish(),
       price: z.number().int().nonnegative().nullish(),
-    }).passthrough()).min(1),
+    }).passthrough()).min(1).max(MAX_CHECKOUT_CALLBACK_ITEMS),
   }).passthrough(),
 });
 
@@ -221,38 +224,105 @@ export function mapQuotesToShopifyRates(
     });
 }
 
+export type CheckoutWireDisposition =
+  | "delivered"
+  | "deadline_exceeded"
+  | "client_disconnected";
+
+export interface CheckoutWireDelivery {
+  deliveredRates: ShopifyRate[];
+  wireDisposition: CheckoutWireDisposition;
+  timedOut: boolean;
+}
+
+export interface CheckoutRateExecutionOptions {
+  /**
+   * Invoked as soon as checkout rates are computed (before snapshot DB I/O) so
+   * the HTTP wire response beats the 2s deadline and reports exact wire truth
+   * back to snapshot persistence.
+   */
+  deliverRates?: (computedRates: ShopifyRate[]) => CheckoutWireDelivery;
+}
+
 // ---------------------------------------------------------------------------
 // Route
 // ---------------------------------------------------------------------------
 
-export function registerCarrierCallbackRoutes(app: Express): void {
+export function registerCarrierCallbackRoutes(
+  app: Express,
+  dependencies: CheckoutRateDependencies = DEFAULT_CHECKOUT_RATE_DEPENDENCIES,
+): void {
   app.post("/api/shipping/rates-callback/:token", async (req: Request, res: Response) => {
     if (!isCallbackTokenAuthorized(process.env.SHIPPING_CALLBACK_TOKEN, req.params.token)) {
       return res.status(404).json({ error: { code: "NOT_FOUND" } });
     }
 
     // Respond by the deadline no matter what; the pipeline keeps running
-    // in the background so the snapshot still lands.
+    // in the background so the snapshot still lands with truthful wire vs
+    // computed metadata (SHIP-W02).
     let responded = false;
-    const respond = (rates: ShopifyRate[]): void => {
-      if (responded) return;
-      responded = true;
-      res.status(200).json({ rates });
+    let wireDelivery: CheckoutWireDelivery = {
+      deliveredRates: [],
+      wireDisposition: "delivered",
+      timedOut: false,
     };
-    const deadline = setTimeout(() => {
+    // Only the response side says whether the caller is still there. Do NOT
+    // consult req.destroyed: Node marks an incoming request destroyed as soon
+    // as its body has been fully read, which is always the case by the time a
+    // quote is computed, so it reported every connected checkout as gone and
+    // no rates were ever sent (2026-11-11 checkout-rates outage).
+    const isConnectionClosed = (): boolean =>
+      Boolean(res.destroyed || res.writableEnded);
+
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const respond = (
+      rates: ShopifyRate[],
+      fromTimeout = false,
+    ): CheckoutWireDelivery => {
+      if (responded) {
+        return wireDelivery;
+      }
+      responded = true;
+      if (deadline !== undefined) {
+        clearTimeout(deadline);
+        deadline = undefined;
+      }
+      if (isConnectionClosed()) {
+        wireDelivery = {
+          deliveredRates: [],
+          wireDisposition: "client_disconnected",
+          timedOut: fromTimeout,
+        };
+        return wireDelivery;
+      }
+      wireDelivery = {
+        deliveredRates: rates,
+        wireDisposition: fromTimeout ? "deadline_exceeded" : "delivered",
+        timedOut: fromTimeout,
+      };
+      res.status(200).json({ rates });
+      return wireDelivery;
+    };
+
+    deadline = setTimeout(() => {
       console.error("[CarrierCallback] deadline exceeded; returned empty rates");
-      respond([]);
+      incr("shipping_checkout_callback_deadline_exceeded", 1);
+      respond([], true);
     }, RESPONSE_DEADLINE_MS);
 
     try {
-      const rates = await computeCheckoutRates(req.body);
-      respond(rates);
+      const rates = await computeCheckoutRates(req.body, dependencies, {
+        deliverRates: (computed) => respond(computed, false),
+      });
+      respond(rates, false);
     } catch (error) {
       // computeCheckoutRates is defensive; this is the belt-and-suspenders.
       console.error("[CarrierCallback] unexpected failure:", error);
-      respond([]);
+      respond([], false);
     } finally {
-      clearTimeout(deadline);
+      if (deadline !== undefined) {
+        clearTimeout(deadline);
+      }
     }
     return undefined;
   });
@@ -269,6 +339,10 @@ export interface PersistCheckoutSnapshotInput {
   parcelPlan: unknown | null;
   rates: RateQuoteResult | null;
   shopifyRates: ShopifyRate[];
+  deliveredShopifyRates?: ShopifyRate[];
+  wireDisposition?: CheckoutWireDisposition;
+  timedOut?: boolean;
+  computeDurationMs?: number;
   warnings: string[];
   disposition: CheckoutRateDisposition;
   rolloutDecision: CheckoutRateRolloutDecision | null;
@@ -353,17 +427,58 @@ export async function computeCheckoutRatePreview(
 export async function computeCheckoutRates(
   body: unknown,
   dependencies: CheckoutRateDependencies = DEFAULT_CHECKOUT_RATE_DEPENDENCIES,
+  options?: CheckoutRateExecutionOptions,
 ): Promise<ShopifyRate[]> {
+  const startedAt = Date.now();
+  const finalize = async (
+    snapshot: Omit<
+      PersistCheckoutSnapshotInput,
+      "deliveredShopifyRates" | "wireDisposition" | "timedOut" | "computeDurationMs"
+    >,
+  ): Promise<ShopifyRate[]> => {
+    const computeDurationMs = Math.max(0, Date.now() - startedAt);
+    const wire = options?.deliverRates
+      ? options.deliverRates(snapshot.shopifyRates)
+      : {
+          deliveredRates: snapshot.shopifyRates,
+          wireDisposition: "delivered" as const,
+          timedOut: false,
+        };
+    const effectiveWarnings =
+      wire.timedOut && snapshot.shopifyRates.length > 0
+        ? [
+            ...snapshot.warnings,
+            `Carrier callback exceeded ${RESPONSE_DEADLINE_MS}ms response deadline; empty rates returned on wire`,
+          ]
+        : snapshot.warnings;
+    incr("shipping_checkout_callback_completed", 1, {
+      disposition: snapshot.disposition,
+      wire_disposition: wire.wireDisposition,
+      timed_out: wire.timedOut,
+    });
+    await dependencies.persistSnapshot({
+      ...snapshot,
+      warnings: effectiveWarnings,
+      deliveredShopifyRates: wire.deliveredRates,
+      wireDisposition: wire.wireDisposition,
+      timedOut: wire.timedOut,
+      computeDurationMs,
+    }).catch((error) => {
+      incr("shipping_checkout_callback_snapshot_failed", 1);
+      console.error("[CarrierCallback] snapshot persistence failed:", error);
+    });
+    return wire.deliveredRates;
+  };
+
   const parsed = parseShopifyRateRequest(body);
   if (!parsed.ok) {
     console.error(`[CarrierCallback] ${parsed.error}`);
-    await dependencies.persistSnapshot({
+    return finalize({
       body, request: null, parcelPlan: null, rates: null,
       shopifyRates: [], warnings: [parsed.error], disposition: "invalid_request",
       rolloutDecision: null,
       channelRouting: null,
     });
-    return [];
   }
   const request = parsed.request;
   const warnings: string[] = [];
@@ -371,7 +486,7 @@ export async function computeCheckoutRates(
   const ownership = resolveShopifyCheckoutRateOwnership(request.destCountry);
   if (!ownership.ok) {
     console.error(`[CarrierCallback] ${ownership.message}`);
-    await dependencies.persistSnapshot({
+    return finalize({
       body,
       request,
       parcelPlan: null,
@@ -382,7 +497,6 @@ export async function computeCheckoutRates(
       rolloutDecision: null,
       channelRouting: null,
     });
-    return [];
   }
 
   let originWarehouseId: number;
@@ -421,7 +535,7 @@ export async function computeCheckoutRates(
         error instanceof Error ? error.message : String(error)
       }`;
     console.error("[CarrierCallback] channel policy lookup failed:", error);
-    await dependencies.persistSnapshot({
+    return finalize({
       body,
       request,
       parcelPlan: null,
@@ -432,7 +546,6 @@ export async function computeCheckoutRates(
       rolloutDecision: null,
       channelRouting: null,
     });
-    return [];
   }
   if (!channelRouting.ok) {
     console.error(JSON.stringify({
@@ -442,7 +555,7 @@ export async function computeCheckoutRates(
       channelId: channelRouting.channel?.id ?? null,
       destinationCountry: request.destCountry,
     }));
-    await dependencies.persistSnapshot({
+    return finalize({
       body,
       request,
       parcelPlan: null,
@@ -453,7 +566,6 @@ export async function computeCheckoutRates(
       rolloutDecision: null,
       channelRouting,
     });
-    return [];
   }
 
   const shippingDecision = channelRouting.decision;
@@ -469,7 +581,7 @@ export async function computeCheckoutRates(
       policyId: shippingDecision.policyId,
       routeId: shippingDecision.routeId,
     }));
-    await dependencies.persistSnapshot({
+    return finalize({
       body,
       request,
       parcelPlan: null,
@@ -480,7 +592,6 @@ export async function computeCheckoutRates(
       rolloutDecision: null,
       channelRouting,
     });
-    return [];
   }
   if (shippingDecision.mode === "disabled") {
     const warning =
@@ -493,7 +604,7 @@ export async function computeCheckoutRates(
       routeId: shippingDecision.routeId,
       destinationCountry: request.destCountry,
     }));
-    await dependencies.persistSnapshot({
+    return finalize({
       body,
       request,
       parcelPlan: null,
@@ -504,7 +615,6 @@ export async function computeCheckoutRates(
       rolloutDecision: null,
       channelRouting,
     });
-    return [];
   }
   if (
     shippingDecision.source === "channel_policy"
@@ -519,7 +629,7 @@ export async function computeCheckoutRates(
       routeId: shippingDecision.routeId,
       message: warning,
     }));
-    await dependencies.persistSnapshot({
+    return finalize({
       body,
       request,
       parcelPlan: null,
@@ -530,7 +640,6 @@ export async function computeCheckoutRates(
       rolloutDecision: null,
       channelRouting,
     });
-    return [];
   }
 
   const rolloutDecision = resolveCheckoutRateRollout(
@@ -547,7 +656,7 @@ export async function computeCheckoutRates(
         ? { deniedSkus: rolloutDecision.deniedSkus }
         : {}),
     }));
-    await dependencies.persistSnapshot({
+    return finalize({
       body,
       request,
       parcelPlan: null,
@@ -560,7 +669,6 @@ export async function computeCheckoutRates(
       rolloutDecision,
       channelRouting,
     });
-    return [];
   }
 
   try {
@@ -616,13 +724,12 @@ export async function computeCheckoutRates(
     });
     if (!shipmentQuote.ok) {
       warnings.push(...shipmentQuote.errors);
-      await dependencies.persistSnapshot({
+      return finalize({
         body, request, parcelPlan: null, rates: null,
         shopifyRates: [], warnings, disposition: "echelon_quote_unavailable",
         rolloutDecision,
         channelRouting,
       });
-      return [];
     }
     const { parcelPlan, rates } = shipmentQuote;
 
@@ -643,7 +750,7 @@ export async function computeCheckoutRates(
     const shopifyRates = mapQuotesToShopifyRates(rates.quotes, deliveryEstimates);
     warnings.push(...parcelPlan.warnings, ...rates.warnings);
 
-    await dependencies.persistSnapshot({
+    return finalize({
       body, request,
       parcelPlan,
       rates,
@@ -651,11 +758,10 @@ export async function computeCheckoutRates(
       rolloutDecision,
       channelRouting,
     });
-    return shopifyRates;
   } catch (error) {
     console.error("[CarrierCallback] quote pipeline failed:", error);
     warnings.push(`quote pipeline failed: ${error instanceof Error ? error.message : String(error)}`);
-    await dependencies.persistSnapshot({
+    return finalize({
       body,
       request,
       parcelPlan: null,
@@ -666,7 +772,6 @@ export async function computeCheckoutRates(
       rolloutDecision,
       channelRouting,
     });
-    return [];
   }
 }
 
@@ -709,6 +814,31 @@ async function loadDeliveryEstimates(
 }
 
 /** Best-effort snapshot — a persistence failure must never affect checkout. */
+export function buildCheckoutSnapshotMetadata(
+  input: PersistCheckoutSnapshotInput,
+): Record<string, unknown> {
+  const wireDisposition: CheckoutWireDisposition =
+    input.wireDisposition ?? (input.timedOut ? "deadline_exceeded" : "delivered");
+  const timedOut = Boolean(input.timedOut || wireDisposition === "deadline_exceeded");
+  const wireRates =
+    wireDisposition === "delivered"
+      ? (input.deliveredShopifyRates ?? input.shopifyRates)
+      : [];
+  return {
+    disposition: input.disposition,
+    wireDisposition,
+    timedOut,
+    rolloutDecision: input.rolloutDecision,
+    channelRouting: input.channelRouting,
+    shopifyRates: wireRates,
+    ratesReturned: wireRates.length,
+    computedShopifyRates: input.shopifyRates,
+    computedRatesCount: input.shopifyRates.length,
+    computeDurationMs: input.computeDurationMs ?? null,
+    warnings: input.warnings,
+  };
+}
+
 async function persistCheckoutSnapshot(input: PersistCheckoutSnapshotInput): Promise<void> {
   try {
     const requestPayload = input.request
@@ -719,7 +849,7 @@ async function persistCheckoutSnapshot(input: PersistCheckoutSnapshotInput): Pro
           items: input.request.items,
         }
       : { unparsedBody: safeJsonable(input.body) };
-    await db.insert(shippingQuoteSnapshots).values({
+    await insertCheckoutQuoteSnapshot({
       source: "checkout",
       destinationCountry: normalizeSnapshotCountry(input.request?.destCountry),
       destinationPostalCode: input.request?.destPostal ?? null,
@@ -735,16 +865,10 @@ async function persistCheckoutSnapshot(input: PersistCheckoutSnapshotInput): Pro
             warnings: input.rates.warnings,
           }
         : null,
-      metadata: {
-        disposition: input.disposition,
-        rolloutDecision: input.rolloutDecision,
-        channelRouting: input.channelRouting,
-        shopifyRates: input.shopifyRates,
-        ratesReturned: input.shopifyRates.length,
-        warnings: input.warnings,
-      },
+      metadata: buildCheckoutSnapshotMetadata(input),
     });
   } catch (error) {
+    incr("shipping_checkout_callback_snapshot_failed", 1);
     console.error("[CarrierCallback] snapshot persist failed:", error);
   }
 }

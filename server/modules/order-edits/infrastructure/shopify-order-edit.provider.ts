@@ -1,3 +1,18 @@
+import {
+  readAccountNativeScan,
+  accountNativeScanQuery,
+  advanceAccountNativeScan,
+  serializeAccountNativeScan,
+  accountNativePageInfoSchema,
+  type AccountNativeRetainer,
+  type AccountNativeObservation,
+} from "../../customer-account/account-native-contracts.api";
+import { ORDER_EDIT_MEMBER_PRICING_DESCRIPTION, isManagedMemberPricingDescription } from "@shared/order-edits/order-edit-member-pricing";
+import {
+  accountNativeFact,
+  accountNativeNodeSchema,
+  accountNativeObservationNode,
+} from "../../customer-account/shopify-account-native.api";
 import { matchingRefund, proveRefund } from "./shopify-order-edit-refund-evidence";
 import {
   matchesOrderEditQuote as matchesQuote,
@@ -44,7 +59,7 @@ import {
 import { priceOrderEditPreviewItems } from "../domain/order-edit-preview-pricing";
 import { supportedVariant, stockAvailable } from "../domain/order-edit-variant";
 import { shopifyOrderEditVariantSchema as VARIANT } from "./shopify-order-edit-variant";
-import { cents } from "./shopify-order-edit-money";
+import { cents, shopifyMoneyBagCents as money } from "./shopify-order-edit-money";
 import { CUSTOMER_ACCOUNT_ORDER_PAGE_SIZE } from "@shared/customer-account/customer-account-orders";
 import {
   shopifyOrderEditTaxLineSchema,
@@ -178,6 +193,7 @@ const ORDER = z.object({
   id: TEXT,
   name: TEXT,
   updatedAt: z.string().datetime(),
+  displayFinancialStatus: accountNativeNodeSchema.shape.displayFinancialStatus.optional(),
   merchantEditable: z.boolean(),
   merchantEditableErrors: z.array(z.string()),
   cancelledAt: z.string().nullable(),
@@ -328,6 +344,8 @@ export class ShopifyOrderEditProvider
       memberPresentation?: MemberPlanPresentationReader;
       codeHistory?: OrderEditCodeHistory;
       rewards?: OrderEditRewards;
+      accountSummaries?: AccountNativeRetainer;
+      reportAccountSummaryFailure?: (error: import("../application/order-edit-diagnostics").OrderEditDiagnosticError) => void;
     },
   ) {
     this.fetchImpl = options.fetch ?? fetch;
@@ -384,18 +402,136 @@ export class ShopifyOrderEditProvider
     return { done: job.done, failed: job.status === "FAILED", orderId: job.order?.id ?? null };
   }
 
+  /** Background-only purchase facts. This performs no mutation or eligibility calculation. */
+  async accountNativeByIds(connectionId: number, externalOrderIds: string[]) {
+    const ids = z
+      .array(
+        z
+          .string()
+          .regex(/^[1-9][0-9]*$/)
+          .max(30),
+      )
+      .min(1)
+      .max(20)
+      .parse(externalOrderIds);
+    if (new Set(ids).size !== ids.length)
+      fail("ACCOUNT_ORDER_IDENTITIES_INVALID", "Duplicate order identities.");
+    const credentials = await this.credentials(connectionId);
+    const startedAt = this.options.clock();
+    const result = z
+      .object({ nodes: z.array(z.unknown().nullable()).length(ids.length) })
+      .parse(
+        await this.request(credentials, gql.ACCOUNT_SUMMARIES_QUERY, {
+          ids: ids.map((id) => gid("Order", id)),
+        }),
+      );
+    const facts: AccountNativeObservation["facts"][number][] = [];
+    const failures: NonNullable<
+      AccountNativeObservation["failures"]
+    >[number][] = [];
+    for (const [index, node] of result.nodes.entries()) {
+      if (node === null) continue;
+      const observed = accountNativeObservationNode(credentials, node);
+      if (observed.externalOrderId !== ids[index])
+        fail("ORDER_IDENTITY_MISMATCH", "Shopify returned a different order.");
+      if (observed.fact) facts.push(observed.fact);
+      if (observed.failure) failures.push(observed.failure);
+    }
+    return { facts, failures, startedAt, finishedAt: this.options.clock() };
+  }
+
+  async accountNativePage(
+    connectionId: number,
+    after: string | null,
+    since: Date | null,
+  ) {
+    const startedAt = this.options.clock();
+    let scan = readAccountNativeScan(connectionId, after, since, startedAt);
+    const credentials = await this.credentials(connectionId);
+    if (after === null && since === null) {
+      const access = z
+        .object({
+          currentAppInstallation: z.object({
+            accessScopes: z.array(z.object({ handle: z.string() })).max(250),
+          }),
+        })
+        .parse(
+          await this.request(
+            credentials,
+            `query EchelonAccountHistoryAccess { currentAppInstallation { accessScopes { handle } } }`,
+            {},
+          ),
+        );
+      const scopes = access.currentAppInstallation.accessScopes.map(
+        (scope) => scope.handle,
+      );
+      if (
+        !scopes.includes("read_all_orders") ||
+        !scopes.some(
+          (scope) => scope === "read_orders" || scope === "write_orders",
+        )
+      )
+        fail(
+          "ACCOUNT_HISTORY_SCOPE_MISSING",
+          "Historical account warming requires read_all_orders and order read access.",
+        );
+    }
+    const pageSchema = z.object({ orders: z.object({
+      nodes: z.array(z.unknown()).max(100), pageInfo: accountNativePageInfoSchema,
+    }) });
+    const readPage = async () => pageSchema.parse(await this.request(
+      credentials, gql.ACCOUNT_NATIVE_PAGE_QUERY, accountNativeScanQuery(scan),
+    ));
+    const identities = (nodes: unknown[]) => nodes.map(node =>
+      z.object({ id: z.string().regex(/^gid:\/\/shopify\/Order\/[1-9][0-9]{0,29}$/) })
+        .parse(node).id.replace("gid://shopify/Order/", ""));
+    let result = await readPage();
+    let step = advanceAccountNativeScan(scan, identities(result.orders.nodes), result.orders.pageInfo);
+    if (step.kind === "range") {
+      scan = step.scan;
+      result = await readPage();
+      step = advanceAccountNativeScan(scan, identities(result.orders.nodes), result.orders.pageInfo);
+    }
+    const observed = result.orders.nodes.map(node => accountNativeObservationNode(credentials, node));
+    return {
+      observation: {
+        facts: observed.flatMap(item => item.fact ? [item.fact] : []),
+        failures: observed.flatMap(item => item.failure ? [item.failure] : []),
+        startedAt, finishedAt: this.options.clock(),
+      },
+      after: step.kind === "complete" ? null : serializeAccountNativeScan(step.scan),
+    };
+  }
+
+  private async retainAccountObservation(
+    observation: () => AccountNativeObservation,
+  ): Promise<void> {
+    if (!this.options.accountSummaries) return;
+    try {
+      await this.options.accountSummaries.retain(observation());
+    } catch (cause) {
+      // Presentation storage must not turn an already verified order command
+      // into a financial failure. The durable delta scan repairs missed facts.
+      this.options.reportAccountSummaryFailure?.(
+        orderEditDiagnosticError(cause),
+      );
+    }
+  }
+
   async readOrderSummaries(connectionId: number, externalOrderIds: readonly string[]) {
+    const startedAt = this.options.clock();
     const ids = z.array(z.string().max(30).regex(/^[1-9]\d*$/)).min(1).max(CUSTOMER_ACCOUNT_ORDER_PAGE_SIZE).parse(externalOrderIds);
     if (new Set(ids).size !== ids.length) fail("ACCOUNT_ORDER_IDENTITIES_INVALID", "Duplicate order identities are not allowed.");
     const expected = ids.map(id => gid("Order", id));
     const credentials = await this.credentials(connectionId);
     const raw = parse(z.object({ nodes: z.array(z.object({
       id: z.string().regex(/^gid:\/\/shopify\/Order\/[1-9]\d*$/), name: z.string().min(1).max(50),
+      updatedAt: z.string().datetime({ offset: true }),
       customer: z.object({ id: z.string().regex(/^gid:\/\/shopify\/Customer\/[1-9]\d*$/) }).nullable(),
       cancelledAt: z.string().nullable(), displayFinancialStatus: z.enum(["AUTHORIZED", "EXPIRED", "PAID", "PARTIALLY_PAID", "PARTIALLY_REFUNDED", "PENDING", "REFUNDED", "VOIDED"]),
       currentTotalPriceSet: BAG,
     }).nullable()).length(ids.length) }), await this.request(credentials, gql.ACCOUNT_SUMMARIES_QUERY, { ids: expected }));
-    return raw.nodes.flatMap((order, index) => {
+    const summaries = raw.nodes.flatMap((order, index) => {
       if (!order) return [];
       if (order.id !== expected[index]) fail("ORDER_IDENTITY_MISMATCH", "Shopify returned a different order.");
       const financialStatus = order.displayFinancialStatus.toLowerCase().replaceAll("_", " ");
@@ -404,6 +540,13 @@ export class ShopifyOrderEditProvider
         currency: "USD" as const, totalCents: money(order.currentTotalPriceSet), cancelled: order.cancelledAt !== null,
         financialStatus: financialStatus.charAt(0).toUpperCase() + financialStatus.slice(1) }];
     });
+    // Retain only after the entire batch's identities and exact money validate.
+    // The canonical retainer owns version ordering and customer attribution.
+    await this.retainAccountObservation(() => ({
+      facts: raw.nodes.flatMap(order => order ? [accountNativeFact(credentials, order)] : []),
+      startedAt, finishedAt: this.options.clock(),
+    }));
+    return summaries;
   }
 
   async readOrder(
@@ -412,6 +555,7 @@ export class ShopifyOrderEditProvider
     expectedCustomerId?: string,
     expectedShopDomain?: string,
   ): Promise<OrderEditSnapshot> {
+    const startedAt = this.options.clock();
     const credentials = await this.credentials(connectionId);
     if (expectedShopDomain !== undefined && credentials.shopDomain !== expectedShopDomain)
       fail("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.");
@@ -431,6 +575,9 @@ export class ShopifyOrderEditProvider
     // Customer reads must prove ownership before reward/code-history enrichment.
     if (expectedCustomerId !== undefined && order.customer?.id !== expectedCustomerId)
       fail("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.");
+    if (order.displayFinancialStatus) await this.retainAccountObservation(() => ({
+      facts: [accountNativeFact(credentials, order)], startedAt, finishedAt: this.options.clock(),
+    }));
     complete(order.lineItems);
     complete(order.discountApplications);
     complete(order.shippingLines);
@@ -1800,7 +1947,7 @@ export class ShopifyOrderEditProvider
                 id: calculated.id,
                 lineItemId: calcId,
                 discount: {
-                  description: "Echelon member pricing",
+                  description: ORDER_EDIT_MEMBER_PRICING_DESCRIPTION,
                   fixedValue: {
                     amount: decimal(retail - member),
                     currencyCode: "USD",
@@ -2901,7 +3048,7 @@ export class ShopifyOrderEditProvider
                   discount: {
                     description:
                       baseline.codePricing?.description ??
-                      "Echelon member pricing",
+                      ORDER_EDIT_MEMBER_PRICING_DESCRIPTION,
                     fixedValue: {
                       amount: decimal(discountCents),
                       currencyCode: "USD",
@@ -3309,16 +3456,6 @@ function decimal(value: number): string {
     fail("MONEY_INVALID", "A nonnegative integer-cents amount is required.");
   const exact = BigInt(value);
   return `${exact / BigInt(100)}.${String(exact % BigInt(100)).padStart(2, "0")}`;
-}
-function money(value: z.infer<typeof BAG>, signed = false): number {
-  const presentment = cents(value.presentmentMoney.amount, signed);
-  const shop = cents(value.shopMoney.amount, signed);
-  if (presentment !== shop)
-    fail(
-      "CURRENCY_CONVERSION_UNSUPPORTED",
-      "Shop and presentment amounts must match for this pilot.",
-    );
-  return presentment;
 }
 function subtract(left: number, right: number) {
   const result = left - right;
@@ -4254,7 +4391,7 @@ function verifyCalculatedFinancials(
     itemDiscountLabels: [
       ...baseline.financials.itemDiscountLabels,
       ...calculatedPromotions(calculated)
-        .filter((entry) => entry.description === "Echelon member pricing")
+        .filter((entry) => isManagedMemberPricingDescription(entry.description))
         .map((entry) => entry.description!),
     ],
     shippingGrossCents: shipping.grossCents,

@@ -32,6 +32,10 @@
 .csz-return-ui button:disabled { cursor: not-allowed; }
 .csz-return-ui :is(button,a,input,select,textarea):focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: 3px; }
 .csz-return-brand { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 12px 28px; background: #080e20; color: #fff; }
+.csz-return-brand[data-shopping="true"] { flex-wrap: wrap; }
+.csz-return-shopping { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 8px 12px; border: 1px solid #8991a5; border-radius: 6px; color: #fff; font-size: 14px; font-weight: 500; line-height: 20px; text-decoration: none; white-space: nowrap; }
+.csz-return-shopping:hover { background: #ffffff14; color: #fff; }
+.csz-return-shopping:focus-visible { outline-color: #b7d0ff; }
 .csz-return-brand-name { display: flex; align-items: center; gap: 12px; min-width: 0; font-size: 18px; font-weight: 700; }
 .csz-return-brand-name > svg { flex-shrink: 0; color: #75a5ff; }
 .csz-return-brand-section { padding-left: 14px; border-left: 1px solid #ffffff40; font-size: 13px; font-weight: 400; }

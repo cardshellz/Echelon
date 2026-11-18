@@ -159,6 +159,9 @@ interface VariantLevel {
   pickedQty: number;
   unreservedQty: number;
   atpUnits: number;
+  /** Server could not compute this product's ATP (e.g. a stale conversion rule). */
+  atpUnavailable?: boolean;
+  atpErrorCode?: string | null;
   locationCount: number;
   pickableQty: number;
   isDuplicate: boolean;
@@ -1406,7 +1409,9 @@ export default function Inventory() {
                         </div>
                         <div className="bg-muted/30 p-2 rounded">
                           <div className="text-muted-foreground">ATP</div>
-                          <div className="font-mono font-bold text-green-600">{level.atpUnits.toLocaleString()}</div>
+                          {level.atpUnavailable
+                            ? <div className="font-medium text-amber-700" title="Sellable stock could not be calculated for this product. Its conversion rules may no longer match its package sizes; review Inventory behavior on the product page.">Unavailable</div>
+                            : <div className="font-mono font-bold text-green-600">{level.atpUnits.toLocaleString()}</div>}
                         </div>
                       </div>
                     </div>
@@ -1532,7 +1537,9 @@ export default function Inventory() {
                             </TableCell>
                             <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
                             <TableCell className="text-right font-mono text-muted-foreground">{level.reservedQty.toLocaleString()}</TableCell>
-                            <TableCell className="text-right font-mono font-medium text-green-600">{level.atpUnits.toLocaleString()}</TableCell>
+                            {level.atpUnavailable
+                              ? <TableCell className="text-right text-sm font-medium text-amber-700" title="Sellable stock could not be calculated for this product. Its conversion rules may no longer match its package sizes; review Inventory behavior on the product page.">Unavailable</TableCell>
+                              : <TableCell className="text-right font-mono font-medium text-green-600">{level.atpUnits.toLocaleString()}</TableCell>}
                             {canEdit && <TableCell></TableCell>}
                           </TableRow>
                           {expandedVariants.has(level.variantId) && (

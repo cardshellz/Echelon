@@ -25,9 +25,9 @@ import {
   type CartonizeBox,
   type CartonizeCandidate,
   type CartonizeItem,
-} from "../../cartonization/domain/cartonize";
-import { buildCartonizeItems } from "../../cartonization/domain/build-items";
-export { buildCartonizeItems } from "../../cartonization/domain/build-items";
+} from "../../cartonization/cartonize-engine.api";
+import { buildCartonizeItems } from "../../cartonization/cartonize-engine.api";
+export { buildCartonizeItems } from "../../cartonization/cartonize-engine.api";
 import {
   quoteShipmentRates,
   RATE_QUOTE_ENGINE,
@@ -37,7 +37,7 @@ import {
   loadActiveBoxes,
   loadPackingInputs,
   resolveVariantIdsBySku,
-} from "../../cartonization/infrastructure/packing-input.repository";
+} from "../../cartonization/packing-inputs.api";
 
 /** Origin used when an order has no warehouse assigned (primary warehouse). */
 const DEFAULT_ORIGIN_WAREHOUSE_ID = 1;

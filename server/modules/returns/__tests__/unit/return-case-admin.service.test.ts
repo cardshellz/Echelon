@@ -334,6 +334,10 @@ function detailRow(): ReturnCaseDetailRow {
       createdAt: new Date("2026-08-10T12:00:01.000Z"),
     }],
     actionContext: {
+      ...({} as Pick<
+        ReturnCaseDetailRow["actionContext"],
+        "businessContext" | "channelProvider" | "vendorId"
+      >),
       lifecycle: {
         caseStatus: "open",
         approvalStatus: "approved",

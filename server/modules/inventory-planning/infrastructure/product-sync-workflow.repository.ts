@@ -9,6 +9,7 @@ import { PRODUCT_SYNC_WORKFLOW_LIMITS as L, missingProductSyncLinks, type Produc
 import { executeInventoryPublicationCommand } from "./inventory-publication-command-transaction";
 import { captureReview } from "./inventory-product-sync.repository";
 import { requestProductStockLinkChecks } from "./stock-link-checks.repository";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 
 const jobSchema = z.object({
   idempotencyKey: z.string().uuid(), productId: z.number().int().positive(), requestedBy: z.string().min(1).max(100),
@@ -44,10 +45,15 @@ export class PostgresProductSyncWorkflowStore implements ProductSyncWorkflowStor
           SET state=$2,message='Retrying the original inventory sync.',updated_at=$3,next_attempt_at=$3,deadline_at=$4,
             lease_token=NULL,lease_expires_at=NULL WHERE id=$1 RETURNING ${columns}`,
         [command.idempotencyKey,state,now,new Date(now.getTime()+L.deadlineMs)]);
-        await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-          VALUES($1,'AUDIT',$2,'inventory_availability.product_sync.retried',$3,$4::jsonb,$5::jsonb)`,
-        [now,actor,`catalog.product:${command.productId}`,JSON.stringify({before:{state:"failed"},after:{state}}),
-          JSON.stringify({requestId:command.idempotencyKey,productId:command.productId})]);
+        await insertAuditEventPgQuery(client, {
+          timestamp: now,
+          actor,
+          action: "inventory_availability.product_sync.retried",
+          target: `catalog.product:${command.productId}`,
+          changesJson: JSON.stringify({before:{state:"failed"},after:{state}}),
+          contextJson: JSON.stringify({requestId:command.idempotencyKey,productId:command.productId}),
+          inlineAction: true,
+        });
         return jobSchema.parse(resumed.rows[0]);
       }
       // Prevent a new workflow from taking over an older, separately recorded v1 command.
@@ -64,10 +70,15 @@ export class PostgresProductSyncWorkflowStore implements ProductSyncWorkflowStor
       // Waking the old draft rejection and accepting the request commit together.
       // A lost acceptance response can only replay this request, never wake twice.
       await requestProductStockLinkChecks(client, scope, now);
-      await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-        VALUES($1,'AUDIT',$2,'inventory_availability.product_sync.requested',$3,$4::jsonb,$5::jsonb)`,
-      [now,actor,`catalog.product:${command.productId}`,JSON.stringify({before:null,after:{state:"checking_links"}}),
-        JSON.stringify({requestId:command.idempotencyKey,requestHash:hash,productId:command.productId,linkScope:scope})]);
+      await insertAuditEventPgQuery(client, {
+        timestamp: now,
+        actor,
+        action: "inventory_availability.product_sync.requested",
+        target: `catalog.product:${command.productId}`,
+        changesJson: JSON.stringify({before:null,after:{state:"checking_links"}}),
+        contextJson: JSON.stringify({requestId:command.idempotencyKey,requestHash:hash,productId:command.productId,linkScope:scope}),
+        inlineAction: true,
+      });
       return jobSchema.parse(result.rows[0]);
     });
   }
@@ -101,10 +112,15 @@ export class PostgresProductSyncWorkflowStore implements ProductSyncWorkflowStor
         WHERE id=$1 AND lease_token=$2`,[job.idempotencyKey,job.leaseToken,now,update.state,update.message,
         JSON.stringify(update.review),update.publicationCommand === null ? null : JSON.stringify(update.publicationCommand),update.nextAttemptAt,release]);
       if (previous.state !== update.state || previous.message !== update.message)
-        await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-          VALUES($1,'AUDIT',$2,'inventory_availability.product_sync.progressed',$3,$4::jsonb,$5::jsonb)`,
-        [now,job.requestedBy,`catalog.product:${job.productId}`,JSON.stringify({before:previous,after:{state:update.state,message:update.message}}),
-          JSON.stringify({requestId:job.idempotencyKey,productId:job.productId,worker:"product_inventory_sync"})]);
+        await insertAuditEventPgQuery(client, {
+          timestamp: now,
+          actor: job.requestedBy,
+          action: "inventory_availability.product_sync.progressed",
+          target: `catalog.product:${job.productId}`,
+          changesJson: JSON.stringify({before:previous,after:{state:update.state,message:update.message}}),
+          contextJson: JSON.stringify({requestId:job.idempotencyKey,productId:job.productId,worker:"product_inventory_sync"}),
+          inlineAction: true,
+        });
     });
   }
   async readLinkChecks(input: ProductSyncLinkScope, now: Date): Promise<readonly ProductSyncLinkCheck[]> {

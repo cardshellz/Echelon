@@ -5,10 +5,11 @@ import express, {
   type Request,
   type Response,
 } from "express";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import {
   buildDropshipEbayOAuthBrandingConfiguration,
   type DropshipEbayOAuthBrandingConfiguration,
+  type DropshipEbayOAuthBrandingService,
 } from "../../application/dropship-ebay-oauth-branding-service";
 import { registerDropshipAdminEbayOAuthBrandingRoutes } from "../../interfaces/http/dropship-admin-ebay-oauth-branding.routes";
 
@@ -26,9 +27,9 @@ describe("dropship admin eBay OAuth branding routes", () => {
   let server: { url: string; close: () => Promise<void> };
   let configuration: DropshipEbayOAuthBrandingConfiguration;
   let service: {
-    getConfiguration: ReturnType<typeof vi.fn>;
-    requestCustomerFacingAppName: ReturnType<typeof vi.fn>;
-    confirmExternalUpdate: ReturnType<typeof vi.fn>;
+    getConfiguration: Mock<DropshipEbayOAuthBrandingService["getConfiguration"]>;
+    requestCustomerFacingAppName: Mock<DropshipEbayOAuthBrandingService["requestCustomerFacingAppName"]>;
+    confirmExternalUpdate: Mock<DropshipEbayOAuthBrandingService["confirmExternalUpdate"]>;
   };
 
   beforeEach(async () => {
@@ -39,12 +40,12 @@ describe("dropship admin eBay OAuth branding routes", () => {
       EBAY_VENDOR_RUNAME: "CardShellz_CardShellz-ops-oauth",
     });
     service = {
-      getConfiguration: vi.fn().mockResolvedValue(configuration),
-      requestCustomerFacingAppName: vi.fn().mockResolvedValue({
+      getConfiguration: vi.fn<DropshipEbayOAuthBrandingService["getConfiguration"]>().mockResolvedValue(configuration),
+      requestCustomerFacingAppName: vi.fn<DropshipEbayOAuthBrandingService["requestCustomerFacingAppName"]>().mockResolvedValue({
         configuration,
         idempotentReplay: false,
       }),
-      confirmExternalUpdate: vi.fn().mockResolvedValue({
+      confirmExternalUpdate: vi.fn<DropshipEbayOAuthBrandingService["confirmExternalUpdate"]>().mockResolvedValue({
         configuration,
         idempotentReplay: false,
       }),

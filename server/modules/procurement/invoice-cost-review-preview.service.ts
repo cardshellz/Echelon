@@ -17,7 +17,7 @@ export function createInvoiceCostReviewPreviewService(database: AmendmentDatabas
     return database.transaction(async tx => {
       await tx.execute(sql`SAVEPOINT invoice_cost_preview`);
       try {
-        const result = await reviewInvoiceCostComponentsInTransaction(tx, lineId, review, actorId, clock(), true, true);
+        const result = await reviewInvoiceCostComponentsInTransaction(tx, lineId, review, actorId, clock(), { kind: "preview" });
         if (!result.body.preview) throw new Error("Invoice cost preview is missing");
         return { preview: result.body.preview, application: result.body.application };
       } finally {

@@ -20,6 +20,11 @@ function createResponse() {
   return res as typeof res & Response;
 }
 
+function createNext() {
+  const next = vi.fn<(err?: unknown) => void>();
+  return next as typeof next & NextFunction;
+}
+
 describe("requireAnyPermission", () => {
   it("refuses to be built without a grant", () => {
     expect(() => requireAnyPermission()).toThrow(/at least one grant/);
@@ -28,7 +33,7 @@ describe("requireAnyPermission", () => {
   it("returns 401 without a session user and never consults the permission owner", async () => {
     hasPermission.mockReset();
     const res = createResponse();
-    const next = vi.fn<NextFunction>();
+    const next = createNext();
     await requireAnyPermission(["channels", "view"])(createRequest(), res, next);
     expect(res.statusCode).toBe(401);
     expect(hasPermission).not.toHaveBeenCalled();
@@ -38,7 +43,7 @@ describe("requireAnyPermission", () => {
   it("allows on the first satisfied grant and stops evaluating", async () => {
     hasPermission.mockReset().mockResolvedValue(true);
     const res = createResponse();
-    const next = vi.fn<NextFunction>();
+    const next = createNext();
     await requireAnyPermission(["channels", "view"], ["inventory_planning", "view"])(createRequest({ id: "u1" }), res, next);
     expect(next).toHaveBeenCalledExactlyOnceWith();
     expect(hasPermission).toHaveBeenCalledExactlyOnceWith("u1", "channels", "view");
@@ -48,7 +53,7 @@ describe("requireAnyPermission", () => {
   it("falls through to a later grant", async () => {
     hasPermission.mockReset().mockImplementation(async (_user, resource) => resource === "inventory_planning");
     const res = createResponse();
-    const next = vi.fn<NextFunction>();
+    const next = createNext();
     await requireAnyPermission(["channels", "view"], ["inventory_planning", "view"])(createRequest({ id: "u1" }), res, next);
     expect(next).toHaveBeenCalledExactlyOnceWith();
     expect(hasPermission).toHaveBeenCalledTimes(2);
@@ -57,7 +62,7 @@ describe("requireAnyPermission", () => {
   it("returns 403 naming every grant when none is held", async () => {
     hasPermission.mockReset().mockResolvedValue(false);
     const res = createResponse();
-    const next = vi.fn<NextFunction>();
+    const next = createNext();
     await requireAnyPermission(["channels", "view"], ["inventory_planning", "view"])(createRequest({ id: "u1" }), res, next);
     expect(res.statusCode).toBe(403);
     expect(res.body).toEqual({ error: "Permission denied: channels:view or inventory_planning:view" });
@@ -68,7 +73,7 @@ describe("requireAnyPermission", () => {
     const failure = new Error("permission store unavailable");
     hasPermission.mockReset().mockRejectedValue(failure);
     const res = createResponse();
-    const next = vi.fn<NextFunction>();
+    const next = createNext();
     await requireAnyPermission(["channels", "view"])(createRequest({ id: "u1" }), res, next);
     expect(next).toHaveBeenCalledExactlyOnceWith(failure);
     expect(res.body).toBeUndefined();

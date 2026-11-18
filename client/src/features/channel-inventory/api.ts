@@ -301,7 +301,8 @@ export function normalizeNote(note: string): string | null {
 export function buildPolicyDraftRequest(input: {
   scope: ChannelExposurePolicyScope;
   value: ChannelExposurePolicyValue;
-  head: ChannelExposurePolicyHead | null;
+  /** Only the fence is read: the head revision and the saved version being replaced. */
+  head: { revision: string; draftPolicy: Pick<NonNullable<ChannelExposurePolicyHead["draftPolicy"]>, "policyId" | "definitionHash"> | null } | null;
 } & DraftCommandContext) {
   return saveChannelExposurePolicyDraftRequestSchema.parse({
     scope: input.scope,

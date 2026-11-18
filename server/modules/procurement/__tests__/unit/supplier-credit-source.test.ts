@@ -90,6 +90,11 @@ describe("supplier credits use explicit immutable invoice component evidence", (
     const fullReturn = { ...returned, amountCents: 1200, disposition: { ...returned.disposition, quantity: 10 } } as SourceLineInput;
     const value = credit(fullReturn, 1, invoice, { ...returnSource, observationQuantity: 10 });
     const contracts = resolvePurchaseCostSource({ purchaseOrderLine: { ...po, received_qty: 0, status }, approvedInvoices: [invoice], supplierCredits: [value] });
+    expect(resolvePurchaseCostSource({ purchaseOrderLine: { ...po, received_qty: 0, status }, approvedInvoices: [invoice], supplierCredits: [value],
+      receiptCosting:{receipts:[],allocations:[]} })).toEqual(contracts);
+    expect(resolvePurchaseCostSource({ purchaseOrderLine: { ...po, received_qty: 0, status }, approvedInvoices: [invoice], supplierCredits: [value],
+      receiptCosting:{receipts:[{receivingLineId:31,receiptId:1,receiptNumber:"CONTRADICTORY-ACCEPTED",startBasePiece:0,pieces:100}],allocations:[]} })
+      .every(row=>row.evidence==="review_required"&&row.inventoryEffect===undefined)).toBe(true);
     expect(contracts).toMatchObject([
       { component: "product", totalMills: 0, basePieces: 0, evidence: "confirmed", issue: null,
         inventoryEffect: { kind: "none", reason: "full_quarantine_return", returnedBasePieces: 100 } },

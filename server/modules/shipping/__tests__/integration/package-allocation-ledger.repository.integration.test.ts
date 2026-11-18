@@ -81,6 +81,7 @@ import {
   PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS,
   PgPackageAllocationLedgerRepository,
   readObservedPackagesForSources,
+  type PackageAllocationAuthorityPreviewTransaction,
   type PersistedPackageAllocationEffectOutboxEntry,
   type PersistedPackageAllocationEntry,
   type PersistedPackageAllocationIntent,
@@ -89,6 +90,7 @@ import {
   PACKAGE_ALLOCATION_PLANNER_VERSION,
   packageAllocationPlanAuthoritySnapshotSchema,
   PackageAllocationPlanningService,
+  persistPackageAllocationPlanCommandSchema,
   type PersistPackageAllocationPlanCommand,
   type PersistPackageAllocationPlanResult,
 } from "../../package-allocation-planning.service";
@@ -100,7 +102,9 @@ import {
   buildHistoricalShipStationContentsRecoveryEvidence,
   buildHistoricalShipStationContentsSystemRecoveryEvent,
   buildHistoricalShipStationWmsConfirmationEvidence,
+  historicalShipStationProviderObservationHash,
   historicalShipStationRecoverableCaseEvidenceHash,
+  normalizedHistoricalShipStationProviderLines,
 } from "../../historical-shipstation-contents-recovery.domain";
 import { PgHistoricalShipStationContentsSystemRecoveryRepository } from "../../historical-shipstation-contents-system-recovery.repository";
 import { HistoricalShipStationContentsSystemRecoveryService } from "../../historical-shipstation-contents-system-recovery.service";
@@ -2373,6 +2377,17 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
             }),
           }),
           recoveryEvidenceDetails: recoveryEvidence,
+          providerObservation: Object.freeze({
+            evidenceHash: historicalShipStationProviderObservationHash({
+              providerShipmentId: 56_001,
+              providerStatus: "authoritative",
+              rawProviderItems: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 2 }],
+              expectedContents,
+            }),
+            lines: normalizedHistoricalShipStationProviderLines([
+              { lineItemKey: `wms-item-${sourceId}`, quantity: 2 },
+            ]),
+          }),
         });
       },
     };
@@ -2524,6 +2539,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
        VALUES ($1, 'historical-attestation-lead', 'test-only-password-hash', 'lead', 1)`,
       [leadUserId],
     );
+    await pool.query(`WITH assigned_role AS (
+      INSERT INTO identity.auth_roles (name, is_system) VALUES ('Team Lead', 1) RETURNING id
+    ) INSERT INTO identity.auth_user_roles (user_id, role_id) SELECT $1, id FROM assigned_role`, [leadUserId]);
     const order = await pool.query<{ id: number }>(
       `INSERT INTO wms.orders (order_number)
        VALUES ('#ATTEST-1001')
@@ -2615,6 +2633,21 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
             }),
           }),
           recoveryEvidenceDetails: recoveryEvidence,
+          providerObservation: Object.freeze({
+            evidenceHash: historicalShipStationProviderObservationHash({
+              providerShipmentId: 55_001,
+              providerStatus: "authoritative",
+              rawProviderItems: [{
+                lineItemKey: `wms-item-${shipmentItem.rows[0].id}`,
+                quantity: 2,
+              }],
+              expectedContents,
+            }),
+            lines: normalizedHistoricalShipStationProviderLines([{
+              lineItemKey: `wms-item-${shipmentItem.rows[0].id}`,
+              quantity: 2,
+            }]),
+          }),
         });
       },
     };
@@ -2727,6 +2760,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
        VALUES ($1, 'historical-review-lead', 'test-only-password-hash', 'lead', 1)`,
       [leadUserId],
     );
+    await pool.query(`WITH assigned_role AS (
+      INSERT INTO identity.auth_roles (name, is_system) VALUES ('Team Lead', 1) RETURNING id
+    ) INSERT INTO identity.auth_user_roles (user_id, role_id) SELECT $1, id FROM assigned_role`, [leadUserId]);
     const order = await pool.query<{ id: number }>(
       `INSERT INTO wms.orders (order_number)
        VALUES ('#REVIEW-1001')
@@ -3660,7 +3696,12 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       const current = await tx.loadPlanByVersion(voided.persistence!.groupId, 2);
       const { previousPlan: _previousPlan, ...plannerCommand } = resolved;
       return new PackageAllocationPlanningService(repository).persistInTransaction(tx,
-        { ...plannerCommand, expectedGroupVersion: 2, actions: [action], writeContext: { createdBy: "shipping-lead-42", reason: action.authorization.reason } },
+        persistPackageAllocationPlanCommandSchema.parse({
+          ...plannerCommand,
+          expectedGroupVersion: 2,
+          actions: [action],
+          writeContext: { createdBy: "shipping-lead-42", reason: action.authorization.reason },
+        }),
         packageAllocationPlanAuthoritySnapshotSchema.parse(current!.authoritySnapshot));
     });
     expect(saved).toMatchObject({ kind: "created", currentGroupVersion: 3 });
@@ -4197,8 +4238,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     // Historical dispatch already updated WMS. Backfill must not do it again.
     await pool.query("UPDATE wms.order_items SET fulfilled_quantity = 2 WHERE id = $1", [source.order_item_id]);
     const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
-    const firstInput = { ...await repository.resolveLegacyPhysicalPackage(source.shipment_id), source: "historical-backfill-test" };
-    const secondInput = { ...await repository.resolveLegacyPhysicalPackage(split.id), source: "historical-backfill-test" };
+    const resolvedFirst = await repository.resolveLegacyPhysicalPackage(source.shipment_id);
+    const firstInput = { ...resolvedFirst, legacyWmsShipmentIds: [...resolvedFirst.legacyWmsShipmentIds], source: "historical-backfill-test" };
+    const resolvedSecond = await repository.resolveLegacyPhysicalPackage(split.id);
+    const secondInput = { ...resolvedSecond, legacyWmsShipmentIds: [...resolvedSecond.legacyWmsShipmentIds], source: "historical-backfill-test" };
     return { source, split, repository, firstInput, secondInput };
   }
 
@@ -4288,7 +4331,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
   it("reuses a full original request for historical packages and serializes competing consumption of its last unit", async () => {
     const fixture = await seedReservedSplitPackages(2);
-    const input = { ...await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId),
+    const resolvedPkg = await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId);
+    const input = { ...resolvedPkg, legacyWmsShipmentIds: [...resolvedPkg.legacyWmsShipmentIds],
       source: "script:backfill-channel-fulfillment-authority", providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
     const before = await snapshotAliasBackfillState();
     await fixture.repository.validatePhysicalPackageIdentity(input);
@@ -4299,7 +4343,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       FROM wms.outbound_shipments WHERE id=$1 RETURNING id`, [input.legacyWmsShipmentIds[0]])).rows[0];
     await pool.query(`INSERT INTO wms.outbound_shipment_items (shipment_id,order_item_id,product_variant_id,qty)
       VALUES ($1,$2,$3,1)`, [duplicate.id, fixture.source.order_item_id, fixture.source.product_variant_id]);
-    const other = { ...await fixture.repository.resolveLegacyPhysicalPackage(duplicate.id), source: input.source,
+    const resolvedOther = await fixture.repository.resolveLegacyPhysicalPackage(duplicate.id);
+    const other = { ...resolvedOther, legacyWmsShipmentIds: [...resolvedOther.legacyWmsShipmentIds], source: input.source,
       providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
     const results = await Promise.allSettled([fixture.repository.materializePhysicalPackage(input), fixture.repository.materializePhysicalPackage(other)]);
     expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
@@ -4313,7 +4358,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
   it("rolls back split request reuse if command creation fails and succeeds on a clean retry", async () => {
     const fixture = await seedReservedSplitPackages(4);
-    const input = { ...await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId),
+    const resolvedPkg = await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId);
+    const input = { ...resolvedPkg, legacyWmsShipmentIds: [...resolvedPkg.legacyWmsShipmentIds],
       source: "script:backfill-channel-fulfillment-authority", providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
     const before = await snapshotAliasBackfillState();
     await pool.query(`CREATE FUNCTION oms.reject_test_split_command() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -4336,7 +4382,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
   it.each(["warehouse", "shipping_order", "quantity"])("rechecks changed %s allocation authority after preview", async change => {
     const fixture = await seedReservedSplitPackages(4);
-    const input = { ...await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId),
+    const resolvedPkg = await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId);
+    const input = { ...resolvedPkg, legacyWmsShipmentIds: [...resolvedPkg.legacyWmsShipmentIds],
       source: "script:backfill-channel-fulfillment-authority", providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
     await fixture.repository.validatePhysicalPackageIdentity(input);
     if (change === "warehouse") {
@@ -5507,7 +5554,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
     const repository = new PgPackageAllocationLedgerRepository(pool);
     const facts = await repository.withSerializableTransaction((transaction) =>
-      transaction.readSourceFacts([validSourceId, refundedSourceId]));
+      (transaction as unknown as PackageAllocationAuthorityPreviewTransaction)
+        .readSourceFacts([validSourceId, refundedSourceId]));
     expect(facts.map((fact) => ({ id: fact.sourceWmsShipmentItemId, cap: fact.commercialRequestedQuantity })))
       .toEqual([
         { id: validSourceId, cap: undefined },
@@ -5599,6 +5647,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
        VALUES ($1, 'current-review-lead', 'test-only-password-hash', 'lead', 1)`,
       [leadUserId],
     );
+    await pool.query(`WITH assigned_role AS (
+      INSERT INTO identity.auth_roles (name, is_system) VALUES ('Team Lead', 1) RETURNING id
+    ) INSERT INTO identity.auth_user_roles (user_id, role_id) SELECT $1, id FROM assigned_role`, [leadUserId]);
     const providerObservationHash = "b".repeat(64);
     const client: HistoricalShipStationContentsClient = {
       async loadShipmentContents(providerShipmentId, expectedContents) {
@@ -7051,8 +7102,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
     // As for order 22039: the package was recorded before dropship lines had a
     // writeback route, so it has no channel command.
+    const resolvedDropshipPkg = await repository.resolveLegacyPhysicalPackage(shipmentId);
     const recorded = await repository.materializePhysicalPackage({
-      ...await repository.resolveLegacyPhysicalPackage(shipmentId),
+      ...resolvedDropshipPkg,
+      legacyWmsShipmentIds: [...resolvedDropshipPkg.legacyWmsShipmentIds],
       source: "live_shipping_event",
       suppressChannelWriteback: true,
     });
@@ -7166,8 +7219,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     )).rows[0];
     await pool.query("UPDATE wms.outbound_shipments SET status = 'shipped', shipped_at = NOW() WHERE id = $1", [shipmentId]);
     const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    const resolvedVoidedPkg = await repository.resolveLegacyPhysicalPackage(shipmentId);
     const materialized = await repository.materializePhysicalPackage({
-      ...await repository.resolveLegacyPhysicalPackage(shipmentId),
+      ...resolvedVoidedPkg,
+      legacyWmsShipmentIds: [...resolvedVoidedPkg.legacyWmsShipmentIds],
       source: "live_shipping_event",
     });
     expect(materialized.channelCommands).toHaveLength(1);

@@ -12,7 +12,7 @@ import {
   normalizePackageAllocationDiscoveryPlanAuditOptions,
   type NormalizedPackageAllocationDiscoveryPlanAuditOptions,
   type PackageAllocationDiscoveryPlanAuditReport,
-} from "../modules/shipping/package-allocation-authority-discovery-plan-audit.repository";
+} from "../modules/shipping/package-allocation-authority.api";
 
 interface PlanAuditPoolClient extends Pick<PoolClient, "query" | "release"> {}
 

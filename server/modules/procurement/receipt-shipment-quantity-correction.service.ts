@@ -21,7 +21,7 @@ import {
   runTransactionalFinancialCommand,
   type FinancialCommandDescriptor,
 } from "../../platform/commands/transactional-command.service";
-import { readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { COGSService } from "../inventory/cogs.service";
 import {
   costFingerprint,

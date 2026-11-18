@@ -369,7 +369,8 @@ function fakeStore(current: FulfillmentRoutingProfileState): {
     replaceMethods: vi.fn().mockResolvedValue(undefined),
     advanceProfile: vi.fn().mockResolvedValue(undefined),
   };
-  const transaction = vi.fn(async (work: (value: FulfillmentRoutingTransaction) => Promise<unknown>) => work(tx));
+  const transactionImpl: FulfillmentRoutingStore["transaction"] = async (work) => work(tx);
+  const transaction = vi.fn(transactionImpl) as unknown as FulfillmentRoutingStore["transaction"] & ReturnType<typeof vi.fn>;
   return {
     tx,
     store: {

@@ -79,7 +79,7 @@ describe("eBay order poll recovery", () => {
       reserveInventory: vi.fn(),
       assignWarehouse: vi.fn(),
     } as any;
-    const getOrders = vi.fn(async () => ({
+    const getOrders = vi.fn(async (_params: { filter: string }) => ({
       orders: [ebayOrder()],
       total: 1,
     }));
@@ -125,7 +125,7 @@ describe("eBay order poll recovery", () => {
       last_window_end: "2026-07-16T11:00:00.000Z",
       last_deep_scan_at: "2026-07-16T11:30:00.000Z",
     });
-    const getOrders = vi.fn(async () => ({ orders: [], total: 0 }));
+    const getOrders = vi.fn(async (_params: { filter: string }) => ({ orders: [], total: 0 }));
 
     await pollEbayOrders(
       {

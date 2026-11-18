@@ -7,7 +7,7 @@ import {
 } from "./audit-wms-inventory-integrity";
 import {
   PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS,
-} from "../server/modules/shipping/package-allocation-ledger.repository";
+} from "../server/modules/shipping/package-allocation-authority.api";
 import { verifiedPostgresPoolConfig } from "../server/infrastructure/verified-postgres-pool-config";
 
 interface CredentialFlags {

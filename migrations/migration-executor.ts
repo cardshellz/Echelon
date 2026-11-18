@@ -80,6 +80,21 @@ export function migrationRetryOptionsFromEnv(
   return options;
 }
 
+/**
+ * TLS settings for the runner's connection. Production and every hosted
+ * database require TLS, which stays the default. A disposable local or CI
+ * PostgreSQL without TLS must opt out explicitly with
+ * MIGRATION_DATABASE_SSL=disable; any other value is rejected.
+ */
+export function migrationSslFromEnv(
+  env: NodeJS.ProcessEnv,
+): { rejectUnauthorized: false } | undefined {
+  const raw = env.MIGRATION_DATABASE_SSL?.trim() ?? '';
+  if (raw === '') return { rejectUnauthorized: false };
+  if (raw === 'disable') return undefined;
+  throw new Error('MIGRATION_DATABASE_SSL must be unset or "disable".');
+}
+
 export async function acquireMigrationAdvisoryLock(
   client: MigrationQueryClient,
 ): Promise<void> {
@@ -92,10 +107,17 @@ export async function acquireMigrationAdvisoryLock(
 export async function releaseMigrationAdvisoryLock(
   client: MigrationQueryClient,
 ): Promise<void> {
-  await client.query(
+  const result = await client.query(
     "SELECT pg_advisory_unlock(hashtext($1))",
     [MIGRATION_ADVISORY_LOCK_NAME],
-  );
+  ) as { rows?: Array<{ pg_advisory_unlock?: boolean; unlocked?: boolean }> } | undefined;
+  const row = result?.rows?.[0];
+  const unlocked = row?.pg_advisory_unlock ?? row?.unlocked;
+  if (unlocked === false) {
+    throw new Error(
+      `PostgreSQL reported pg_advisory_unlock=false for migration advisory lock ${MIGRATION_ADVISORY_LOCK_NAME}.`,
+    );
+  }
 }
 
 export async function executeMigrationWithRetry(

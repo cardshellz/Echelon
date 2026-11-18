@@ -57,6 +57,30 @@ export function marketplaceQuantityRestoreJobKey(input: { storeConnectionId: num
 }
 
 /**
+ * One push job per store per tick for listings that were waiting for stock and
+ * can list now. Its own namespace (`stock-back:`), apart from the restore
+ * push's. Built from the listings and each one's `updated_at`, which moves
+ * every time a queue blocks the listing again: a replay of the same tick (a
+ * second dyno, a retried tick) queues nothing new, while a later return of
+ * stock after a new block gets a new key.
+ */
+export function marketplaceWaitingForStockJobKey(input: {
+  storeConnectionId: number; listings: readonly { listingId: number; updatedAt: Date }[];
+}): string {
+  if (input.listings.length === 0) throw invalidKey("A waiting-for-stock job needs at least one listing.");
+  const byId = new Map<number, number>();
+  for (const listing of input.listings) {
+    const listingId = id(listing.listingId);
+    const updatedAt = instant(listing.updatedAt);
+    const seen = byId.get(listingId);
+    if (seen !== undefined && seen !== updatedAt) throw invalidKey("A listing appears twice with different update times.", { listingId });
+    byId.set(listingId, updatedAt);
+  }
+  const parts = [...byId.entries()].sort(([left], [right]) => left - right).map(([listingId, at]) => `${listingId}@${at}`);
+  return checkedKey(`${MARKETPLACE_SYNC_KEY_PREFIX}stock-back:${id(input.storeConnectionId)}:${shortHash(parts.join(","))}`);
+}
+
+/**
  * A notice batch's key, which is also the notification's idempotency key
  * (§6.6). It carries the batch's id range, so rows that arrive after a batch
  * was claimed (a late commit) get their own batch instead of joining one

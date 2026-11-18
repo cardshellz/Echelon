@@ -32,6 +32,7 @@ import {
   listDropshipAdminStoreConnectionsInputSchema,
   type ListDropshipAdminStoreConnectionsInput,
 } from "./dropship-store-connection-dtos";
+import { vendorPlatformName } from "../domain/vendor-platform-name";
 
 export interface DropshipStoreConnectionProfile {
   storeConnectionId: number;
@@ -987,8 +988,8 @@ export class DropshipStoreConnectionService {
       eventType: DROPSHIP_NOTIFICATION_EVENTS.STORE_DISCONNECTED,
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship store disconnected",
-      message: `Your ${input.connection.platform} dropship store was disconnected. Order intake and listing pushes are paused during the disconnect grace period.`,
+      title: "Store disconnected",
+      message: `Your ${vendorPlatformName(input.connection.platform)} store is being disconnected. New orders and listing updates are paused. Reconnect it from Settings to keep selling.`,
       payload: {
         vendorId: input.connection.vendorId,
         storeConnectionId: input.connection.storeConnectionId,

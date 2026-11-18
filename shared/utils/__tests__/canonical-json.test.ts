@@ -33,7 +33,7 @@ describe("canonicalJson", () => {
     expect(canonicalJson(value)).not.toBe(canonicalJson({}));
   });
 
-  it.each([Number.NaN, Number.POSITIVE_INFINITY, 1n])(
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, BigInt(1)])(
     "rejects non-JSON numeric value %s",
     (value) => {
       expect(() => canonicalJson({ value })).toThrow(TypeError);

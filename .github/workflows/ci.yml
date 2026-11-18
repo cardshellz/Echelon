@@ -56,7 +56,6 @@ jobs:
 
   app-bootstrap:
     name: Application import and startup smoke
-    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 5
     container:
@@ -82,7 +81,6 @@ jobs:
 
   typecheck:
     name: Typecheck (${{ matrix.project }})
-    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -117,11 +115,16 @@ jobs:
         run: npx tsc -p tsconfig.tests.server.json
       - name: Client test types
         if: matrix.project == 'client-tests'
-        run: npx tsc -p tsconfig.tests.client.json
+        # Hosted Node exhausted its default ~2 GB heap at 2,017 MB (Nov 2026).
+        # Full local check: 3,445,442K used; passed with 6144 MB. Keep the
+        # complete program and the application's 6 GB headroom on
+        # this isolated runner; diagnostics retain evidence for future sizing.
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: npx tsc -p tsconfig.tests.client.json --extendedDiagnostics
 
   unit-tests:
     name: Unit tests (${{ matrix.shard }}/4)
-    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -148,7 +151,6 @@ jobs:
 
   contracts:
     name: Offline maintenance and UI contracts
-    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -162,7 +164,7 @@ jobs:
         run: |
           node --import tsx --test scripts/inventory-cutover-records-proposal-20260925.test.ts scripts/inventory-cutover-records-execution-20260925.test.ts
           npx tsc --noEmit --target ES2022 --module ESNext --moduleResolution Bundler --esModuleInterop --skipLibCheck --strict --types node scripts/inventory-cutover-records-*.ts
-      - name: Procurement planning client contracts
+      - name: Procurement, inventory, channel, and finance UI contracts
         run: >-
           npx vitest run
           client/src/features/purchasing/__tests__/reorderEngine.test.ts
@@ -173,32 +175,74 @@ jobs:
           shared/procurement/__tests__/document-relationships.test.ts
           shared/inventory/__tests__/cost-report-read.test.ts
           shared/inventory/__tests__/order-cogs-report.test.ts
-      - name: Customer order lifecycle and saved cancellation contracts
-        run: >-
-          npx vitest run
           shared/__tests__/customer-order-fulfillment.test.ts
           client/src/customer-account/__tests__/order-cancellation-request.test.ts
-      - name: Inventory shipment quantity UI contracts
-        run: >-
-          npx vitest run
           client/src/lib/__tests__/inventory-transaction-quantity.test.ts
           client/src/pages/__tests__/inventory-history-shipment-quantity.test.ts
-      - name: Channel listing publication UI contracts
-        run: >-
-          npx vitest run
           client/src/features/channel-listing-publication/__tests__/api.test.ts
           client/src/features/channel-listing-publication/__tests__/model.test.ts
           client/src/features/channel-listing-publication/__tests__/listing-update-model.test.ts
           client/src/features/channel-listing-publication/__tests__/listing-intent-change-presentation.test.ts
-      # PLAN-CH2 v4.1 §11.5: Channel Inventory stock-link controls. These paths have no "unit" in them,
-      # so test:unit never selects them.
-      - name: Channel Inventory stock-link UI contracts
-        run: >-
-          npx vitest run
           client/src/features/channel-inventory/__tests__/stock-link-presentation.test.ts
           client/src/features/channel-inventory/__tests__/stock-link-api.test.ts
           client/src/features/channel-inventory/__tests__/stock-link-controls.test.ts
           client/src/features/channel-inventory/__tests__/stock-send-api.test.ts
+          shared/dropship/__tests__/program-finance-money.test.ts
+          shared/dropship/__tests__/program-finance-contract.test.ts
+          shared/dropship/__tests__/program-finance-definitions.test.ts
+          client/src/pages/__tests__/dropship-finance-model.test.ts
+          client/src/pages/__tests__/dropship-finance-panel.test.ts
+          server/infrastructure/__tests__/non-overlapping-scheduler.test.ts
+          server/infrastructure/__tests__/postgres-array.test.ts
+          server/infrastructure/__tests__/postgres-pool-observability.test.ts
+          server/infrastructure/__tests__/scheduler-config.test.ts
+          server/infrastructure/__tests__/scheduler-failure-context.test.ts
+          server/infrastructure/__tests__/scheduler-lock.test.ts
+          server/infrastructure/__tests__/session-advisory-lock.test.ts
+          server/platform/observability/__tests__/background-work-report.test.ts
+          server/platform/observability/__tests__/runtime-memory-observer.test.ts
+          server/platform/observability/__tests__/runtime-memory-wiring.test.ts
+          server/platform/observability/__tests__/runtime-memory.test.ts
+          server/platform/document-numbering/__tests__/document-number.test.ts
+          server/modules/operations/__tests__/control-tower.service.test.ts
+          client/src/lib/__tests__/picking-command.test.ts
+          client/src/pages/__tests__/replen-task-retry-model.test.ts
+          server/modules/inventory/__tests__/replenishment-source-empty.test.ts
+          server/modules/inventory/__tests__/cycle-count-replen-feedback.test.ts
+          server/modules/inventory/__tests__/dedicated-replen-bin.test.ts
+      - name: Shipping configuration UI contracts
+        run: >-
+          npx vitest run
+          client/src/components/shipping/service-levels/__tests__/fulfillment-catalog-display.test.ts
+          client/src/components/shipping/service-levels/__tests__/fulfillment-routing-api.test.ts
+          client/src/components/shipping/__tests__/channel-routing-api.test.ts
+          client/src/components/shipping/__tests__/configuration-invalidation.test.ts
+          client/src/components/shipping/__tests__/pricing-program-coverage-cell.test.ts
+          client/src/components/shipping/__tests__/pricing-program-draft-api.test.ts
+          client/src/components/shipping/__tests__/pricing-program-draft-state.test.ts
+          client/src/components/shipping/__tests__/pricing-programs-api.test.ts
+          client/src/components/shipping/__tests__/product-rule-form.test.ts
+          client/src/components/shipping/__tests__/rate-program-copy-api.test.ts
+          client/src/components/shipping/__tests__/rate-table-model.test.ts
+          client/src/components/shipping/__tests__/rate-test-region-select.test.ts
+          client/src/components/shipping/__tests__/rate-test-sku-search.test.ts
+          client/src/components/shipping/__tests__/rate-test-weight.test.ts
+          client/src/pages/__tests__/shipping-fulfillment-routing-ui.test.ts
+      - name: Returns and customer account UI contracts
+        run: >-
+          npx vitest run
+          client/src/components/returns/__tests__/apply-return-inventory-treatment-dialog.test.ts
+          client/src/components/returns/__tests__/return-case-admin-api.test.ts
+          client/src/components/returns/__tests__/return-case-financial-dialogs.test.ts
+          client/src/components/returns/__tests__/return-case-operational-panel.contract.test.ts
+          client/src/components/returns/__tests__/return-case-operations-card.test.ts
+          client/src/components/returns/__tests__/return-cases-create-entry.contract.test.ts
+          client/src/customer-account/__tests__/account-display-money.test.ts
+          client/src/customer-account/__tests__/account-overview-client.test.ts
+          client/src/customer-account/__tests__/customer-account-access.test.ts
+          client/src/customer-account/__tests__/customer-account.transport.test.ts
+          client/src/customer-account/__tests__/customer-return-guest.transport.test.ts
+          client/src/customer-account/__tests__/return-portal-config.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run
@@ -275,26 +319,57 @@ jobs:
           client/src/pages/__tests__/dropship-launch-readiness-panels.test.ts
           client/src/lib/__tests__/dropship-listing-end-ops.test.ts
           client/src/pages/__tests__/dropship-listing-end-ops.test.ts
+          client/src/lib/__tests__/dropship-wallet-flow.test.ts
       # test/browser is in no tsconfig, so nothing else type-checks the Catalog page's browser stubs and specs. The publish
       # run answers are typed against the shared contracts (contractAnswer), so a field a run contract adds or renames
       # fails here; other answers are parsed with the server's schemas when a journey runs (step 1 plan S2-5, TESTS17;
       # review round 2 CT11).
       - name: Dropship catalog browser stub types
         run: npx tsc --noEmit --incremental false --target ES2022 --module ESNext --moduleResolution Bundler --esModuleInterop --skipLibCheck --strict --types node --allowImportingTsExtensions --jsx preserve --lib esnext,dom test/browser/dropship-policy-catalog-stubs.ts test/browser/dropship-policy-listing-settings-*.ts test/browser/dropship-policy-catalog-steps.spec.ts test/browser/dropship-policy-catalog-choose.spec.ts test/browser/dropship-policy-catalog-choose-scale.spec.ts test/browser/dropship-policy-catalog-end.spec.ts test/browser/dropship-policy-catalog-publish-runs.spec.ts test/browser/dropship-policy-listing-access.spec.ts test/browser/dropship-policy-cost-changes-portal.spec.ts
-      # These paths have no "unit" in them, so test:unit never selects them.
-      - name: Dropship program finance contracts
-        run: >-
-          npx vitest run
-          shared/dropship/__tests__/program-finance-money.test.ts
-          shared/dropship/__tests__/program-finance-contract.test.ts
-          shared/dropship/__tests__/program-finance-definitions.test.ts
-          client/src/pages/__tests__/dropship-finance-model.test.ts
-          client/src/pages/__tests__/dropship-finance-panel.test.ts
+
+  database-from-repository:
+    # Builds an empty database from migrations/baseline plus every migration the
+    # baseline does not cover, then runs the migrations a second time, which
+    # must change nothing. This is the only place a new migration runs before a
+    # production release does.
+    name: Build database from repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        # Production's major version: the baseline is a PostgreSQL 17 dump.
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ECHELON_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+      ECHELON_TEST_DATABASE_DISPOSABLE: "true"
+      MIGRATION_DATABASE_SSL: disable
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Build an empty database from the repository
+        run: node --import tsx scripts/ci/build-database-from-repository.ts
 
   check-and-unit:
     # Preserve the existing required check name; skipped/cancelled jobs are failures.
     name: Typecheck + unit tests
-    needs: [preflight, app-bootstrap, typecheck, unit-tests, contracts]
+    needs: [preflight, app-bootstrap, typecheck, unit-tests, contracts, database-from-repository]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -303,7 +378,7 @@ jobs:
       - name: Require every core check
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
-        run: node scripts/ci/require-success.mjs preflight app-bootstrap typecheck unit-tests contracts
+        run: node scripts/ci/require-success.mjs preflight app-bootstrap typecheck unit-tests contracts database-from-repository
 
   postgres-hardening-shard:
     name: PostgreSQL hardening (shard ${{ matrix.shard }}/${{ matrix.count }})

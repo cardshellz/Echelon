@@ -113,6 +113,39 @@ describe("DropshipSelectionAtpService", () => {
     expect(result.rows[0].selectionDecision.quantityCapApplied).toBe(false);
   });
 
+  it("says on every page row whether it is out of stock, whatever its selection reason (owner report)", async () => {
+    const repository = new FakeDropshipSelectionAtpRepository();
+    repository.catalogRules = [{ id: 1, scopeType: "catalog", action: "include" }];
+    // 20 picked in stock; 21 picked at 0; 22 not picked at 0 (its decision quantity is 0 either way); 23 not picked in stock;
+    // 24 picked with a vendor cap of 0; 25 turned off by the vendor at 0.
+    repository.candidates = [20, 21, 22, 23, 24, 25].map((id) => ({ ...candidate, productVariantId: id, variantSku: `V-${id}`,
+      picked: id !== 22 && id !== 23 }));
+    const override = (productVariantId: number, patch: Partial<DropshipVendorVariantOverrideRecord>): DropshipVendorVariantOverrideRecord => ({
+      id: productVariantId, vendorId: 1, productVariantId, enabledOverride: null, marketplaceQuantityCap: null, notes: null,
+      createdAt: now, updatedAt: now, ...patch });
+    repository.overrides = [override(24, { marketplaceQuantityCap: 0 }), override(25, { enabledOverride: false })];
+    const atp = new FakeAtpProvider();
+    for (const [id, units] of [[20, 4], [21, 0], [22, 0], [23, 7], [24, 9], [25, 0]] as const) atp.variantAtpByVariantId.set(id, units);
+
+    const legacy = await makeService(repository, atp).previewCatalog({ vendorId: 1 });
+    expect(legacy.rows.map((row) => [row.productVariantId, row.selectionDecision.reason, row.selectionDecision.marketplaceQuantity, row.outOfStock]))
+      .toEqual([
+        [20, "selected", 4, false],
+        [21, "selected", 0, true],
+        [22, "missing_vendor_include_rule", 0, true],
+        [23, "missing_vendor_include_rule", 0, false],
+        // Legacy authority: the vendor's cap of 0 lists nothing.
+        [24, "selected", 0, true],
+        [25, "disabled_by_vendor_override", 0, true],
+      ]);
+
+    // Canonical authority never reapplies the legacy cap: 24 has stock to list.
+    atp.authority = "canonical";
+    const canonical = await makeService(repository, atp).previewCatalog({ vendorId: 1 });
+    expect(canonical.rows.find((row) => row.productVariantId === 24)).toMatchObject({ outOfStock: false,
+      selectionDecision: { marketplaceQuantity: 9 } });
+  });
+
   it("returns only exposed catalog rows and builds de-duped exposed facets", async () => {
     const repository = new FakeDropshipSelectionAtpRepository();
     repository.catalogRules = [{ id: 1, scopeType: "category", action: "include", category: "Supplies" }];

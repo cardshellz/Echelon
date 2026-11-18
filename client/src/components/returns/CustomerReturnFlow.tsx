@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { CustomerReturnSurface } from "./CustomerReturnSurface";
+import { CustomerReturnHeading } from "./CustomerReturnPresentation";
 import {
   assertReturnFlowOrderMatches,
   assertPreviewReviewMatches,
@@ -40,6 +41,7 @@ export interface CustomerReturnFlowProps {
   gateway: CustomerReturnFlowGateway;
   onAccessDenied: (message: string) => void;
   onClose?: () => void;
+  shoppingHref?: string;
   closeDisabled?: boolean;
   onBusy?: (busy: boolean) => void;
   notice?: ReactNode;
@@ -74,6 +76,7 @@ export function CustomerReturnFlow({
   gateway,
   onAccessDenied,
   onClose,
+  shoppingHref,
   closeDisabled = false,
   onBusy,
   notice,
@@ -266,6 +269,7 @@ export function CustomerReturnFlow({
       ref={canvas}
       testId="preview-canvas"
       onClose={onClose}
+      shoppingHref={shoppingHref}
       closeDisabled={busy || closeDisabled}
     >
       <ol
@@ -294,13 +298,13 @@ export function CustomerReturnFlow({
         ))}
       </ol>
       <div className="csz-return-intro">
-        <h1
+        <CustomerReturnHeading
           ref={heading}
           tabIndex={-1}
           className="outline-none"
         >
           {headings[step]}
-        </h1>
+        </CustomerReturnHeading>
         <p className="text-sm leading-relaxed text-muted-foreground">
           {step === "find"
             ? "Start with the order number from your confirmation."

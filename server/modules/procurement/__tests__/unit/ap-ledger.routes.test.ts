@@ -89,6 +89,7 @@ vi.mock("../../ap-payment-commands", () => ({
 vi.mock("../../ap-invoice-commands", () => ({
   apInvoiceCommands: mocks.apInvoiceCommands,
 }));
+vi.mock("../../ap-invoice-transition.routes", () => ({ registerInvoiceTransitionPreviewRoutes: vi.fn() }));
 
 vi.mock("../../ap-invoice-replacement.commands", () => ({
   apInvoiceReplacementCommands: mocks.apInvoiceReplacementCommands,
@@ -383,6 +384,7 @@ describe("AP ledger routes", () => {
     expect(idempotencyReplayed).toBe("false");
     expect(mocks.apInvoiceCommands.approveInvoice).toHaveBeenCalledWith(12, {
       userId: "test-user",
+      transitionReview: {},
     }, expect.objectContaining({
       commandName: "ap.invoice.approve",
       resourceKey: "vendor_invoice:12",
@@ -410,6 +412,7 @@ describe("AP ledger routes", () => {
     expect(mocks.apInvoiceCommands.disputeInvoice).toHaveBeenCalledWith(12, {
       reason: "price mismatch",
       userId: "test-user",
+      transitionReview: { reason: "price mismatch" },
     }, expect.objectContaining({
       commandName: "ap.invoice.dispute",
       resourceKey: "vendor_invoice:12",
@@ -436,6 +439,7 @@ describe("AP ledger routes", () => {
     expect(mocks.apInvoiceCommands.voidInvoice).toHaveBeenCalledWith(12, {
       reason: "duplicate invoice",
       userId: "test-user",
+      transitionReview: { reason: "duplicate invoice" },
     }, expect.objectContaining({
       commandName: "ap.invoice.void",
       resourceKey: "vendor_invoice:12",

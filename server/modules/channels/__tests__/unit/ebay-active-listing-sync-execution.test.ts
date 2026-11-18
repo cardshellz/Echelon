@@ -4,7 +4,7 @@ import type { EbayListingLifecycleClient, EbayObservedOffer } from "../../listin
 import type { EbayInventoryItem, EbayInventoryItemGroup } from "../../adapters/ebay/ebay-types";
 import type { EbayRegistrationReadTransport } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
 import { captureExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
-import { syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
+import { syncProviderFixture, publishedContentFixture } from "../fixtures/ebay-listing-sync.fixture";
 
 type BindProviderIdentity = NonNullable<Parameters<EbayListingSyncExecution["execute"]>[3]>;
 
@@ -94,6 +94,8 @@ function provider(example: typeof cases[number]) {
     listingPolicies: { fulfillmentPolicyId: "shipping", paymentPolicyId: "payment", returnPolicyId: "returns" } }]));
   let group: EbayInventoryItemGroup = { ...initial.currentGroup(), variantSKUs: source.variants.map(member => member.sku), variesBy: { specifications: [{ name: "Pack Size", values: example.suffixes }] } };
   const client: EbayListingLifecycleClient = { ...initial.client,
+    getPublishedListingContent:vi.fn(async()=>publishedContentFixture(example.listing,[...offers.values()].filter(offer=>offer.status==="PUBLISHED").map(offer=>offer.sku),
+      group.imageUrls??[],offers.values().next().value?.listingPolicies)),
     getInventoryItem: vi.fn(async sku => structuredClone(items.get(sku) ?? null)),
     getOffers: vi.fn(async sku => ({ offers: offers.has(sku) ? [structuredClone(offers.get(sku)!)] : [] })),
     getInventoryItemGroup: vi.fn(async key => { if (key !== example.group) throw new Error("Wrong group"); return structuredClone(group); }),

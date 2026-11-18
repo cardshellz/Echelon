@@ -71,10 +71,12 @@ function observedPackage(
       providerPhysicalShipmentId,
       events,
     },
-  } as const;
+  };
 }
 
-function previousPlanFrom(result: PackageAllocationGroupPlannerResultV1) {
+function previousPlanFrom(
+  result: PackageAllocationGroupPlannerResultV1,
+): NonNullable<PackageAllocationAuthorityResolutionInput["previousPlan"]> {
   return {
     groupKey: result.groupKey,
     groupVersion: result.proposedGroupVersion,
@@ -84,11 +86,11 @@ function previousPlanFrom(result: PackageAllocationGroupPlannerResultV1) {
     packageEvidence: result.state.packageEvidence,
     sourceEvidence: result.state.sourceEvidence,
     effectIntentEvidence: result.state.effectIntentEvidence,
-  };
+  } as unknown as NonNullable<PackageAllocationAuthorityResolutionInput["previousPlan"]>;
 }
 
 function command(
-  packages: PackageAllocationAuthorityResolutionInput["packages"],
+  packages: readonly PackageAllocationAuthorityResolutionInput["packages"][number][],
   actions: readonly PackageAllocationGroupAction[] = [],
   overrides: Partial<PackageAllocationAuthorityResolutionInput> = {},
 ): PackageAllocationAuthorityResolutionInput {
@@ -99,8 +101,8 @@ function command(
     expectedGroupVersion: 0,
     previousPlan: null,
     sourceLines: [{ wmsShipmentItemId: sourceId, sourceQuantity: 2 }],
-    packages,
-    actions,
+    packages: [...packages],
+    actions: [...actions],
     ...overrides,
   };
 }

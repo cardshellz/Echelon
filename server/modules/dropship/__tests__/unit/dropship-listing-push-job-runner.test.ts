@@ -299,7 +299,7 @@ describe("the run steps outside the scheduled sweep (review MC5, CT2)", () => {
 
 describe("PgDropshipListingPushJobQueueRepository", () => {
   it("never claims a run's chunk job before its chunk is recorded (review MC10)", async () => {
-    const query = vi.fn(async () => ({ rows: [] }));
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] }));
     const repository = new PgDropshipListingPushJobQueueRepository({ query } as unknown as Pool);
     await repository.listClaimableJobIds({ limit: 10, now, staleAfterMinutes: 30 });
     expect(String(query.mock.calls[0]?.[0]).replace(/\s+/g, " ")).toContain(
@@ -308,7 +308,7 @@ describe("PgDropshipListingPushJobQueueRepository", () => {
   });
 
   it("selects queued and stale processing jobs", async () => {
-    const query = vi.fn(async () => ({ rows: [{ id: 30 }] }));
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [{ id: 30 }] }));
     const repository = new PgDropshipListingPushJobQueueRepository({ query } as unknown as Pool);
 
     const result = await repository.listClaimableJobIds({

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { readPhysicalShipmentAllocationEvidence, readShipmentItemAllocationSource } from "../shipping/physical-shipment-allocation-evidence.repository";
+import { readPhysicalShipmentAllocationEvidence, readShipmentItemAllocationSource } from "../shipping/package-allocation-authority.api";
 import {
   FulfillmentRequestAllocationError,
   resolveFulfillmentRequestAllocation,

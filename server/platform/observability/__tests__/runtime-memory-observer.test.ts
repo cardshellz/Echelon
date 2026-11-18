@@ -16,6 +16,20 @@ function fixture() {
 }
 
 describe("bounded runtime memory observer", () => {
+  it("aggregates routine groups across samples while emitting failed groups promptly", async () => {
+    const f = fixture();
+    await f.observer.run("job.success", async () => undefined);
+    f.observer.report({}, false);
+    expect(f.records()).toHaveLength(1);
+    await f.observer.run("job.success", async () => undefined);
+    await expect(f.observer.run("job.failure", async () => { throw new Error("private"); })).rejects.toThrow();
+    f.observer.report({}, false);
+    expect(f.records().find(record => record.name === "job.failure")).toMatchObject({failed:1});
+    expect(f.records().find(record => record.name === "job.success")).toBeUndefined();
+    f.observer.report({}, true);
+    expect(f.records().find(record => record.name === "job.success")).toMatchObject({started:2,completed:2});
+    expect(JSON.stringify(f.records())).not.toContain("private");
+  });
   it("preserves work results and reports numeric process deltas without retaining payloads", async () => {
     const f = fixture();
     const result = { customer: "must not enter telemetry" };

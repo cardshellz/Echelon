@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000065000020840001_ebay_listing_change_intents.sql",
+  "generation": 65,
+  "pr": 2084,
+  "ordinal": 1,
+  "after": [
+    "900000064000020830001_catalog_ebay_policy_override_capacity.sql"
+  ]
+}

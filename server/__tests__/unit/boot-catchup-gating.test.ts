@@ -58,6 +58,30 @@ describe("runBootCatchUpIfBehind", () => {
 
     expect(db.execute).toHaveBeenCalledOnce(); // the read only
   });
+
+  it("does not record a completion when the pass resolves allOk: false or skipped: true", async () => {
+    const failedDb = dbReturning([]);
+    const failedRan = await runBootCatchUpIfBehind({
+      db: failedDb,
+      jobKey: "sync_recovery",
+      intervalMs: HOUR,
+      logPrefix: "[t]",
+      run: vi.fn().mockResolvedValue({ allOk: false }),
+    });
+    expect(failedRan).toBe(false);
+    expect(failedDb.execute).toHaveBeenCalledOnce();
+
+    const skippedDb = dbReturning([]);
+    const skippedRan = await runBootCatchUpIfBehind({
+      db: skippedDb,
+      jobKey: "sync_recovery",
+      intervalMs: HOUR,
+      logPrefix: "[t]",
+      run: vi.fn().mockResolvedValue({ allOk: false, skipped: true }),
+    });
+    expect(skippedRan).toBe(false);
+    expect(skippedDb.execute).toHaveBeenCalledOnce();
+  });
 });
 
 /**

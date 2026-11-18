@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
-import { OrderDraft, OrderEditOperationView } from "@/pages/OrderEdits";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { OrderDraft, OrderEditOperationView } from "@/components/order-edits/OrderEditWorkspace";
+import type { OrderEditCodeMessageCatalog } from "@shared/order-edits/order-edit-code-errors";
 import {
   loadPendingOrderEditQuote,
   clearPendingOrderEditQuote,
@@ -11,7 +12,10 @@ import type {
   OrderEditQuoteInput,
 } from "@shared/order-edits/order-edit.contract";
 import type { CustomerAccountTransport } from "./customer-account.transport";
-import { orderEditNeedsPreparation } from "@/lib/order-edit-confirmation";
+import {
+  orderEditHasEditableDraft,
+  orderEditNeedsPreparation,
+} from "@/lib/order-edit-confirmation";
 import { ClubRewardsWidget } from "./ClubRewardsWidget";
 import {
   useOrderEditStatus,
@@ -22,6 +26,8 @@ import {
   clearOrderEditPaymentReturn,
   orderEditPaymentReturnStorage,
 } from "./order-edit-payment-return";
+import { orderEditPaymentDestination } from "./order-edit-payment-handoff";
+import { customerOrderEditUnavailable, customerOrderShippingCutoff } from "./order-edit-unavailability";
 
 const closed = new Set<OrderEditOperation["status"]>([
   "completed",
@@ -42,6 +48,7 @@ export function CustomerOrderEditor({
   onBusy,
   paymentOwner,
   returnOperationId,
+  codeMessages,
   onDone,
 }: {
   api: CustomerAccountTransport;
@@ -52,6 +59,7 @@ export function CustomerOrderEditor({
   onBusy: (busy: boolean) => void;
   paymentOwner?: string;
   returnOperationId?: string;
+  codeMessages?: OrderEditCodeMessageCatalog;
   onDone?: () => void;
 }) {
   const [order, setOrder] = useState<OrderEditOrder | null>(null);
@@ -74,28 +82,100 @@ export function CustomerOrderEditor({
   const reloadInFlight = useRef(false);
   const [locked, setLocked] = useState(false);
   const [uncertain, setUncertain] = useState(false);
+  const [observingCommand, setObservingCommand] = useState(false);
+  const [checkoutIntent, setCheckoutIntent] = useState<string | null>(null);
+  const paymentOpened = useRef<string | null>(null);
   const [draftVisible, setDraftVisible] = useState(true);
   const [closingQuote, setClosingQuote] = useState(false);
   const [closedOperationId, setClosedOperationId] = useState<string>();
   const [now, setNow] = useState(Date.now);
   const inFlight = useRef(false);
+  const closeAfterAbandon = useRef(false);
   const statusRevision = useRef(0);
   const status = useOrderEditStatus({
     operationId: operation?.operationId ?? null,
     watching: Boolean(
-      operation && !draftVisible && orderEditWatchesStatus(operation.status),
+      operation &&
+        !draftVisible &&
+        (observingCommand ||
+          orderEditWatchesStatus(
+            operation.status,
+            operation.commandInProgress,
+          )),
     ),
+    readImmediately: observingCommand,
     read: (id, signal) => api.edits.operation(id, signal),
     busy: () => inFlight.current,
     revision: () => statusRevision.current,
     received: (value) => {
+      if (order && value.orderNumber !== order.orderNumber)
+        throw new Error("The saved edit does not belong to this order.");
       statusRevision.current += 1;
       setOperation(value);
       setError(null);
-      setUncertain(false);
-      if (closed.has(value.status)) setDraftVisible(false);
+      setObservingCommand(value.commandInProgress === true);
+      setUncertain(value.commandInProgress === true);
+      if (closeAfterAbandon.current && !value.canAbandon && !value.commandInProgress) {
+        // A concurrent command may have submitted or closed the operation.
+        // Leave via an owned read rather than attempting to discard it again.
+        finishUnavailableEdit();
+        return;
+      }
+      if (closingQuote && value.status === "expired") {
+        setClosedOperationId(value.operationId);
+        setOperation(null);
+        setClosingQuote(false);
+        setDraftVisible(true);
+        if (closeAfterAbandon.current) finishUnavailableEdit();
+        else void reloadCancelledOrder();
+      } else {
+        setDraftVisible(orderEditHasEditableDraft(value));
+        if (!value.commandInProgress) setClosingQuote(false);
+      }
+      if (
+        closed.has(value.status) ||
+        (value.status === "ready" && !value.commandInProgress)
+      )
+        setCheckoutIntent(null);
+      if (observingCommand && value.status === "ready" && !value.commandInProgress)
+        setNotice("Your changes have not been applied. Review the total below and try again.");
     },
   });
+  const rememberPaymentReturn = useCallback(() => {
+    const storage = orderEditPaymentReturnStorage();
+    if (paymentOwner && operation && storage)
+      saveOrderEditPaymentReturn(
+        {
+          owner: paymentOwner,
+          connectionId,
+          omsOrderId,
+          operationId: operation.operationId,
+          orderNumber: operation.orderNumber,
+        },
+        storage,
+        Date.now,
+      );
+  }, [paymentOwner, operation, connectionId, omsOrderId]);
+  useEffect(() => {
+    if (!operation || uncertain || observingCommand) return;
+    const destination = orderEditPaymentDestination(operation, checkoutIntent);
+    if (!destination || paymentOpened.current === operation.operationId) return;
+    paymentOpened.current = operation.operationId;
+    rememberPaymentReturn();
+    try {
+      window.location.assign(destination);
+    } catch {
+      setError(
+        "We couldn’t open payment. Use Pay the difference below to continue.",
+      );
+    }
+  }, [
+    operation,
+    checkoutIntent,
+    uncertain,
+    observingCommand,
+    rememberPaymentReturn,
+  ]);
   useEffect(() => {
     onBusy(busy || locked || rewardBusy);
     return () => onBusy(false);
@@ -142,11 +222,18 @@ export function CustomerOrderEditor({
           setInitialOperation(active);
           setOperation(active);
           setDiscountCodes(active.requestedPlan?.discountCodes ?? []);
-          setDraftVisible(active.canAbandon && Boolean(active.requestedPlan));
+          setObservingCommand(active.commandInProgress === true);
+          setUncertain(active.commandInProgress === true);
+          setDraftVisible(orderEditHasEditableDraft(active));
           // Mount the draft only once its saved plan is available; mounting it
           // earlier would initialize quantities from the unchanged order.
           setOrder(current);
-          if (orderEditNeedsPreparation(active, Date.now()))
+          if (
+            !active.commandInProgress &&
+            !customerOrderShippingCutoff(current) &&
+            !customerOrderEditUnavailable(active) &&
+            orderEditNeedsPreparation(active, Date.now())
+          )
             await progress("resume", active);
         } else setOrder(current);
       } catch (cause) {
@@ -178,7 +265,7 @@ export function CustomerOrderEditor({
     if (result.requestedPlan?.discountCodes !== undefined)
       setDiscountCodes(result.requestedPlan.discountCodes);
     setOperation(result);
-    setDraftVisible(result.canAbandon);
+    setDraftVisible(orderEditHasEditableDraft(result));
     setLocked(false);
     setUncertain(false);
     setError(null);
@@ -251,6 +338,7 @@ export function CustomerOrderEditor({
     inFlight.current = true;
     setBusy(true);
     setBusyAction(action === "resume" ? "reconcile" : action);
+    if (action === "commit") setCheckoutIntent(target.operationId);
     setError(null);
     setNotice(action === "resume" ? "Recalculating your saved changes…" : null);
     if (action === "abandon") {
@@ -260,9 +348,15 @@ export function CustomerOrderEditor({
     }
     try {
       const result = await api.edits[action](target.operationId);
+      if (order && result.orderNumber !== order.orderNumber)
+        throw new Error("The saved edit does not belong to this order.");
       setOperation(result);
       setUncertain(false);
-      if ((action === "abandon" || closingQuote) && closed.has(result.status)) {
+      setObservingCommand(false);
+      if (
+        (action === "abandon" || closingQuote) &&
+        result.status === "expired"
+      ) {
         setClosedOperationId(result.operationId);
         setOperation(null);
         setClosingQuote(false);
@@ -270,19 +364,36 @@ export function CustomerOrderEditor({
         // Cancellation is confirmed. A failed read must not restore this edit
         // or permit a new review against stale eligibility/revision evidence.
         setBusy(false);
+        if (closeAfterAbandon.current) {
+          finishUnavailableEdit();
+          return true;
+        }
         return Boolean(await reloadCancelledOrder());
       } else if (action === "abandon" || closingQuote) {
         setDraftVisible(false);
         setClosingQuote(false);
-      } else
-        setDraftVisible(result.canAbandon && Boolean(result.requestedPlan));
+      } else setDraftVisible(orderEditHasEditableDraft(result));
     } catch (cause) {
-      setError(message(cause));
-      setUncertain(cause instanceof OrderEditRequestError && cause.uncertain);
-      // Only a genuinely uncertain command needs status reconciliation. A known
-      // failed preparation remains inline with its original selections.
-      if (cause instanceof OrderEditRequestError && cause.uncertain)
-        setDraftVisible(false);
+      if (
+        closeAfterAbandon.current &&
+        cause instanceof OrderEditRequestError &&
+        cause.code === "ORDER_EDIT_ALREADY_SUBMITTED"
+      ) {
+        // Another command won the race. Return to the owned account read;
+        // never discard, replay, or claim a result for that submitted command.
+        finishUnavailableEdit();
+        return false;
+      }
+      const recover =
+        cause instanceof OrderEditRequestError &&
+        (cause.uncertain || cause.code === "ORDER_EDIT_BUSY");
+      setError(recover ? null : message(cause));
+      setUncertain(recover);
+      setObservingCommand(recover);
+      // A busy guard rejects this attempt but another command owns the saved
+      // edit. Recover that result using GET; never replay Apply or reconciliation.
+      if (recover) setDraftVisible(false);
+      else if (action === "commit") setCheckoutIntent(null);
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -297,6 +408,44 @@ export function CustomerOrderEditor({
     if (!operation.canAbandon || uncertain) return false;
     return progress("abandon");
   }
+  function finishUnavailableEdit() {
+    if (onDone) onDone();
+    else window.location.assign("/account");
+  }
+  const unsentShippingCutoff = Boolean(order && customerOrderShippingCutoff(order) &&
+    (!operation || (operation.canAbandon && !operation.commandInProgress)));
+  if (customerOrderEditUnavailable(operation) || unsentShippingCutoff || closeAfterAbandon.current)
+    return (
+      <section className="space-y-4" aria-label="Order changes unavailable">
+        <h2>Order {operation?.orderNumber ?? order?.orderNumber}</h2>
+        <h3>Online changes are no longer available</h3>
+        <p>This order can no longer be changed online. Contact us if you need help.</p>
+        {customerOrderEditUnavailable(operation) && (
+          <p>No changes from this edit were applied.</p>
+        )}
+        {(error || status.error) && (
+          <p role="alert">We couldn’t finish closing this edit. Please try again.</p>
+        )}
+        {(busy || uncertain || status.reading) && (
+          <p role="status">Closing this edit…</p>
+        )}
+        <button
+          type="button"
+          className="csz-action"
+          disabled={busy || status.reading || (observingCommand && !status.error)}
+          onClick={() => {
+            if (status.error) status.retry();
+            else if (operation) {
+              closeAfterAbandon.current = true;
+              void progress("abandon");
+            } else finishUnavailableEdit();
+          }}
+        >
+          {busy || status.reading ? "Closing edit…" : error || status.error ? "Try again" : "Back to order"}
+        </button>
+        <a className="csz-account-link" href="/pages/contact-us">Contact us</a>
+      </section>
+    );
   if (pendingQuote && !operation)
     return (
       <div className="space-y-4">
@@ -363,6 +512,7 @@ export function CustomerOrderEditor({
             closedOperationId={closedOperationId}
             discountCodes={discountCodes}
             onDiscountCodesChange={setDiscountCodes}
+            codeMessages={codeMessages}
             renderRewards={
               order.codeEntryAvailable
                 ? (props) => (
@@ -425,27 +575,16 @@ export function CustomerOrderEditor({
           busy={busy}
           busyAction={busyAction}
           isUncertain={uncertain}
+          recoveringCommand={observingCommand}
+          codeMessages={codeMessages}
           error={error ?? status.error}
           onCommit={() => void progress("commit")}
-          onRefresh={() =>
-            status.error ? status.retry() : void progress("reconcile")
-          }
-          statusReadBusy={status.reading}
-          onPaymentOpen={() => {
-            const storage = orderEditPaymentReturnStorage();
-            if (paymentOwner && order && storage)
-              saveOrderEditPaymentReturn(
-                {
-                  owner: paymentOwner,
-                  connectionId,
-                  omsOrderId,
-                  operationId: operation.operationId,
-                  orderNumber: order.orderNumber,
-                },
-                storage,
-                Date.now,
-              );
+          onRefresh={() => {
+            if (status.error || observingCommand) status.retry();
+            else void progress("reconcile");
           }}
+          statusReadBusy={status.reading}
+          onPaymentOpen={rememberPaymentReturn}
           onAbandon={() => void progress("abandon")}
         />
       )}

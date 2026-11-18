@@ -55,6 +55,7 @@ import { useToast } from "@/hooks/use-toast";
 import { ExclusionRulesModal } from "@/components/purchasing/ExclusionRulesModal";
 import { ForecastAccuracyPanel } from "@/components/purchasing/ForecastAccuracyPanel";
 import { reorderAnalysisSearchParams } from "@/features/purchasing/reorderAnalysisDeepLink";
+import { invalidateRecommendationOrderMutationQueries } from "@/features/purchasing/autoDraftSettingsValidation";
 import {
   forecastBacktestReportSchema,
   formatWapeBasisPoints,
@@ -1516,14 +1517,7 @@ export default function ReorderEngine() {
   };
 
   const invalidateAfterOrderMutations = () => {
-    // Same set as Refresh analysis…
-    queryClient.invalidateQueries({ queryKey: ["/api/purchasing/reorder-analysis"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/purchasing/kpis"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/purchasing/rfq-queue"] });
-    // …plus the decision/accepted-queue family the submission wrote to.
-    queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-review-queue"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-accepted-queue"] });
-    queryClient.invalidateQueries({ queryKey: ["/api/purchasing/recommendation-decisions"] });
+    invalidateRecommendationOrderMutationQueries(queryClient, { includeEngineKpis: true });
   };
 
   /**

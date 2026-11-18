@@ -1,3 +1,4 @@
+import { receiptInvoiceCostRowSchema } from "./receipt-invoice-costs";
 import { z } from "zod";
 import { canonicalJson } from "../utils/canonical-json";
 import { costInventoryEffectSchema, costIssueSchema, type CostInventoryEffect } from "./cost-source-contracts";
@@ -56,6 +57,8 @@ export const purchaseLineCostStatusSchema = z
     sku: z.string().nullable(),
     poNumber: z.string().nullable().optional(),
     reviewFacts: supplierCostReviewFactsSchema.optional(),
+    receiptCosting: z.object({ receipts: z.array(receiptInvoiceCostRowSchema), provisionalPieces: z.number().int().nonnegative().safe().nullable(),
+      unassignedInvoicePieces: z.number().int().nonnegative().safe().nullable() }).strict().optional(),
     components: z.array(purchaseCostComponentStatusSchema).length(2),
     invoices: z.array(
       z.object({
@@ -113,6 +116,14 @@ export type PurchaseLineCostStatus = z.infer<
 >;
 export type PurchaseCostStatus = z.infer<typeof purchaseCostStatusSchema>;
 
+/** No invoice-to-inventory action exists for goods returned before acceptance.
+ * Historical lines first need a proved receipt origin; current-policy lines
+ * expose their own frozen receipt destinations directly. */
+export function hasReceiptInvoiceCostDestinations(line: PurchaseLineCostStatus): boolean {
+  return !line.components.some(component => component.inventoryEffect)
+    && (line.receiptCosting ? line.receiptCosting.receipts.length > 0 : line.lots.some(lot => lot.origin === "receipt"));
+}
+
 /** This uses the same posting decision as landed costs. Product and packaging
  * never inherit a shipment approval: each component needs its own application. */
 export function purchaseComponentPostingStatus(input: {
@@ -143,7 +154,7 @@ export function purchaseLineNeedsCostReview(
 export function purchaseCostNextAction(
   line: PurchaseLineCostStatus,
 ): "invoice" | "history" | "review" | "apply" | "none" {
-  if (line.components.some(component => component.issues.some(issue => issue.code === "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW"))) return "review";
+  if (line.components.some(component => component.issues.some(issue => issue.code === "CREDIT_FULL_QUARANTINE_RETURN_COST_REVIEW" || issue.code.startsWith("PURCHASE_TAX_")))) return "review";
   if (
     line.components.some(
       (component) =>

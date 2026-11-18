@@ -56,10 +56,10 @@ const publicUrl = createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https:
     expect(images.get(20)?.map((image) => image.id)).toEqual([10]);
     expect(images.get(99)).toEqual([]);
     const byId = new Map(images.get(10)?.map((image) => [image.id, image]));
-    // A stored file is fingerprinted only when the photo has no usable URL.
+    // Stored originals remain authoritative even when an old import URL is retained.
     expect(byId.get(2)).toMatchObject({ url: null, fileBytes: png.length, fileHash: sha256(png), mimeType: "image/png" });
     expect(byId.get(2)?.fileHeader?.equals(png.subarray(0, 12))).toBe(true);
-    expect(byId.get(7)).toMatchObject({ url: "https://cdn.example.com/both-4.jpg", fileBytes: null, fileHash: null, fileHeader: null });
+    expect(byId.get(7)).toMatchObject({ url: "https://cdn.example.com/both-4.jpg", fileBytes: jpeg.length, fileHash: sha256(jpeg) });
     expect(byId.get(8)).toMatchObject({ url: null, storageType: "both", fileHash: sha256(gif) });
     expect(byId.get(6)).toMatchObject({ url: null, fileBytes: null, fileHash: null });
   });
@@ -83,7 +83,7 @@ const publicUrl = createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https:
       { assetId: 2, position: 0, url: `https://catalog.example.com/api/catalog/images/2/${sha256(png)}.png`, uploaded: true },
       { assetId: 4, position: 2, url: "https://cdn.example.com/size-10.jpg", uploaded: false },
       { assetId: 1, position: 4, url: "https://cdn.example.com/p-2.jpg", uploaded: false },
-      { assetId: 7, position: 6, url: "https://cdn.example.com/both-4.jpg", uploaded: false },
+      { assetId: 7, position: 6, url: `https://catalog.example.com/api/catalog/images/7/${sha256(jpeg)}.jpg`, uploaded: true },
       { assetId: 8, position: 7, url: `https://catalog.example.com/api/catalog/images/8/${sha256(gif)}.gif`, uploaded: true },
     ]);
     expect(photos.get(10)?.issues).toEqual([expect.objectContaining({ assetId: 6, code: "CATALOG_IMAGE_UNAVAILABLE" })]);
@@ -100,7 +100,7 @@ const publicUrl = createCatalogPublicImageUrl({ CATALOG_PUBLIC_BASE_URL: "https:
   });
 
   it("keeps each independent variant plan identical regardless of other products in the read batch", async () => {
-    await database.pool.query("UPDATE catalog.product_assets SET url='https://cdn.example.com/product-two.jpg' WHERE id=10");
+    await database.pool.query("UPDATE catalog.product_assets SET url='https://cdn.example.com/product-two.jpg',storage_type='url',file_data=NULL WHERE id=10");
     const reader = new PgCatalogVariantPublicationPhotoReader(database.pool, publicUrl);
     const alone = (await reader.listPublicationPlansByVariant({ productVariantIds:[20], maxPhotosPerVariant:20 })).get(20);
     const batched = (await reader.listPublicationPlansByVariant({ productVariantIds:[10,11,20], maxPhotosPerVariant:20 })).get(20);

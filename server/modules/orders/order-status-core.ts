@@ -25,6 +25,10 @@ import { sql } from "drizzle-orm";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
 import type { PoolClient } from "pg";
 import { z } from "zod";
+import {
+  executeGuardedWmsOrderStatusTransitionInWms,
+  restoreStoppedRefundEditWmsOrderInWms,
+} from "../wms/wms-order-mutations.api";
 
 // ─── Terminal states ────────────────────────────────────────────────
 // These states cannot be exited by normal transitions.
@@ -48,20 +52,7 @@ export async function restoreStoppedRefundEditOrder(
 ): Promise<boolean> {
   z.object({ orderId: z.number().int().positive().safe(), omsOrderId: z.number().int().positive().safe(),
     operationId: z.string().uuid(), now: z.date() }).strict().parse(input);
-  const result = await client.query(`UPDATE wms.orders wo SET warehouse_status='ready',cancelled_at=NULL,updated_at=$4
-    WHERE wo.id=$1 AND wo.warehouse_status='cancelled' AND wo.order_edit_operation_id=$2
-      AND wo.assigned_picker_id IS NULL AND wo.started_at IS NULL AND wo.picked_count=0 AND wo.combined_group_id IS NULL
-      AND EXISTS(SELECT 1 FROM oms.order_edit_operations op JOIN oms.oms_orders source ON source.id=op.oms_order_id
-        WHERE op.id=$2 AND op.oms_order_id=$3 AND op.status='synchronizing'
-          AND op.document->>'refundStartedAt' IS NOT NULL AND op.document->'refundIntent'->>'operationId'=$2::text
-          AND source.status<>'cancelled' AND source.cancelled_at IS NULL)
-      AND NOT EXISTS(SELECT 1 FROM wms.order_items oi WHERE oi.order_id=wo.id
-        AND (oi.picked_quantity<>0 OR oi.fulfilled_quantity<>0 OR oi.status<>'cancelled' OR oi.quantity<>0))
-      AND NOT EXISTS(SELECT 1 FROM wms.outbound_shipments shipment WHERE shipment.order_id=wo.id
-        AND (shipment.status NOT IN ('cancelled','voided','planned','queued','on_hold')
-          OR shipment.tracking_number IS NOT NULL OR shipment.shipped_at IS NOT NULL))
-    RETURNING wo.id`, [input.orderId, input.operationId, input.omsOrderId, input.now]);
-  return result.rows.length === 1;
+  return restoreStoppedRefundEditWmsOrderInWms(client, input);
 }
 
 // ─── Transition matrix ──────────────────────────────────────────────
@@ -195,29 +186,19 @@ export async function transitionOrderStatus(
     };
   }
 
-  // Build the UPDATE with guarded WHERE
+  // Build the UPDATE with guarded WHERE and atomic prior-status capture
   const now = clock();
   const fromList = legalFrom.map((s) => `'${s}'`).join(", ");
 
-  let setClauses = `warehouse_status = '${to}', updated_at = '${now.toISOString()}'`;
-  if (setCompletedAt) {
-    setClauses += `, completed_at = '${now.toISOString()}'`;
-  }
-  if (setCancelledAt) {
-    setClauses += `, cancelled_at = COALESCE(cancelled_at, '${now.toISOString()}')`;
-  }
-
-  const result: any = await db.execute(sql`
-    UPDATE wms.orders
-    SET warehouse_status = ${to},
-        updated_at = ${now}
-        ${setCompletedAt ? sql`, completed_at = ${now}` : sql``}
-        ${setCancelledAt ? sql`, cancelled_at = COALESCE(cancelled_at, ${now})` : sql``}
-    WHERE id = ${orderId}
-      AND warehouse_status IN (${sql.raw(fromList)})
-      ${requireNoOrderEdit ? sql`AND order_edit_operation_id IS NULL` : sql``}
-    RETURNING warehouse_status AS new_status
-  `);
+  const result: any = await executeGuardedWmsOrderStatusTransitionInWms(db, {
+    orderId,
+    fromListRaw: fromList,
+    to,
+    now,
+    setCompletedAt,
+    setCancelledAt,
+    requireNoOrderEdit,
+  });
 
   const updated = result?.rows?.[0];
   if (!updated) {
@@ -235,7 +216,7 @@ export async function transitionOrderStatus(
 
   return {
     transitioned: true,
-    previousStatus: legalFrom[0],
+    previousStatus: (updated.previous_status as WmsWarehouseStatus | undefined) ?? legalFrom[0],
     newStatus: to,
     orderId,
     reason,

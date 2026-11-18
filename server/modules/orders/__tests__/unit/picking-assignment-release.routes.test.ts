@@ -79,6 +79,9 @@ describe("picking assignment HTTP boundary", () => {
     const diagnostics = readFileSync("server/routes/diagnostics.ts", "utf8");
     const storage = readFileSync("server/modules/orders/orders.storage.ts", "utf8");
     expect(diagnostics.includes('"PICKING_RELEASE_ENDPOINT_RETIRED"')).toBe(true);
+    expect(diagnostics.includes('"DIAGNOSTIC_DUPLICATE_DELETE_RETIRED"')).toBe(true);
+    expect(diagnostics.includes("DELETE FROM wms.orders")).toBe(false);
+    expect(diagnostics.includes("UPDATE inventory.inventory_transactions")).toBe(false);
     expect(diagnostics.includes("SET\n          warehouse_status = 'ready'")).toBe(false);
     expect(storage.includes("async forceReleaseOrder(")).toBe(false);
     expect(storage.includes("async releaseOrder(")).toBe(false);

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 // This writer fixture has no pending receipt custody. The public read owner and
 // conflicting count behavior have separate database and boundary tests.
-vi.mock("../../../procurement/receiving-custody-public", () => ({
+vi.mock("../../../procurement/receiving-custody.api", () => ({
   readUnresolvedReceivingCustody: vi.fn(async () => []),
 }));
 

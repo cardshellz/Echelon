@@ -58,12 +58,16 @@ function runnerFixture() {
 describe("PostgreSQL CI coverage and isolation", () => {
   it("preserves prior coverage with the explicitly retired duplicate invoice owner, the retired bulk policy writer suite and reviewed additions", () => {
     const addedSuites = [
+      "server/modules/catalog/__tests__/integration/catalog-image-originals.integration.test.ts",
+      "server/modules/oms/__tests__/integration/shopify-paid-event-replay.integration.test.ts",
       "server/modules/catalog/__tests__/integration/shopify-product-connection.integration.test.ts",
       "server/modules/oms/__tests__/integration/package-reconciliation.integration.test.ts",
       "server/modules/procurement/__tests__/integration/shipment-cost-read-batching.integration.test.ts",
       "server/modules/shipping/__tests__/integration/package-dimensions.integration.test.ts",
       "server/modules/shipping/__tests__/integration/package-history.integration.test.ts",
+      "server/modules/shipping/__tests__/integration/shipment-fact.repository.integration.test.ts",
       "server/modules/customer-account/__tests__/integration/order-action-projection.repository.test.ts",
+      "server/modules/customer-account/__tests__/integration/account-native-summaries.repository.test.ts",
       "server/modules/procurement/__tests__/integration/document-relationships.integration.test.ts",
       "server/modules/customer-account/__tests__/integration/customer-account-order-context.integration.test.ts",
       "server/modules/marketplace-listings/__tests__/integration/channel-sync-batch.integration.test.ts",
@@ -270,6 +274,41 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/marketplace-listings/__tests__/integration/channel-identifiers-propagation.integration.test.ts",
       "server/modules/oms/__tests__/integration/channel-merchandise-quantity.integration.test.ts",
       "server/modules/oms/__tests__/integration/shopify-merchandise-refund.integration.test.ts",
+      "server/modules/catalog/__tests__/integration/product-category-update.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/purchase-tax-migration.integration.test.ts",
+      "server/modules/procurement/__tests__/integration/receipt-invoice-migration.integration.test.ts",
+      "server/modules/returns/__tests__/integration/customer-return-guest.repository.test.ts",
+      // Staff Shopify OAuth: atomic challenge claims, current authority, stale completion and durable audit.
+      "server/modules/channels/__tests__/integration/shopify-staff-oauth.integration.test.ts",
+      // Identity: constrained grants remain scoped across HTTP and command readers.
+      "server/modules/identity/__tests__/integration/scoped-grants.integration.test.ts",
+      // Generic role edits: restriction preservation, validation, rollback and races.
+      "server/modules/identity/__tests__/integration/role-permissions.integration.test.ts",
+      // Employee assignment requires an explicit valid selection and serialized replacement.
+      "server/modules/identity/__tests__/integration/role-assignments.integration.test.ts",
+      "server/modules/identity/__tests__/integration/staff-credentials.integration.test.ts",
+      "server/modules/identity/__tests__/integration/identity-administration.integration.test.ts",
+      "server/modules/shipping/__tests__/integration/outbound-shipment-access.integration.test.ts",
+      "server/modules/identity/__tests__/integration/staff-access.integration.test.ts",
+      "server/modules/identity/__tests__/integration/identity-access-audit-migration.integration.test.ts",
+      // Startup registers definitions only; it must not resurrect employee authority.
+      "server/modules/identity/__tests__/integration/startup-authority.integration.test.ts",
+      // Sales status retirement: the release is refused while a stop remains; afterwards the table is frozen.
+      "server/modules/inventory-planning/__tests__/integration/sales-status-retirement-migration.integration.test.ts",
+      // Catalog export: PostgreSQL keyset pagination and historical channel identity evidence.
+      "server/modules/catalog-export/__tests__/integration/postgres-catalog-export.repository.integration.test.ts",
+      // Claim lineage: canonical allocation/reservation/pick/shipment/short-claim lineage invariants.
+      "server/modules/inventory-planning/__tests__/integration/inventory-availability-claim-lineage.integration.test.ts",
+      // Channels eBay auth refresh & first-publication push boundary over disposable PostgreSQL.
+      "server/modules/channels/__tests__/integration/ebay-auth-refresh.integration.test.ts",
+      "server/modules/channels/__tests__/integration/ebay-listing-push.integration.test.ts",
+      // Shipping engine configuration, packaging, and charge migration guards over disposable PostgreSQL (SHP-1).
+      "server/modules/shipping-engine/__tests__/integration/program-charge-migration-guards.integration.test.ts",
+      "server/modules/shipping-engine/__tests__/integration/shared-configuration.integration.test.ts",
+      "server/modules/shipping-engine/__tests__/integration/channel-packaging.integration.test.ts",
+      "server/modules/shipping-engine/__tests__/integration/warehouse-packaging.integration.test.ts",
+      // Returns coexistence: cross-model entitlement & settlement fence over disposable PostgreSQL (RET-1).
+      "server/modules/returns/__tests__/integration/return-coexistence-entitlement-fence.integration.test.ts",
     );
     const retiredInvoiceSuite = "server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts";
     expect(POSTGRES_TEST_FILES).not.toContain(retiredInvoiceSuite);

@@ -3,7 +3,7 @@ import { useState } from "react";
 import { RotateCcw } from "lucide-react";
 import { ReturnCaseAdminPanel } from "@/components/returns/ReturnCaseAdminPanel";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ReturnOpsTab } from "@/pages/Dropship";
+import { ReturnOpsTab } from "@/features/returns/ReturnOpsTab";
 
 export default function ReturnCases() {
   const [activeTab, setActiveTab] = useState("rmas");

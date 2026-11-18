@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -80,11 +81,7 @@ async function setup(page: Page, allowConversions = true) {
       unexpected.push(`${request.method()} ${path}`);
       return route.fulfill({ status: 500, json: { error: "Unexpected write" } });
     }
-    if (path === "/api/auth/me") return route.fulfill({ json: {
-      user: { id: "operator-1", username: "operator", role: "operator" },
-      permissions: ["inventory:view", "inventory:edit"],
-      roles: ["operator"],
-    } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator-1", username: "operator", role: "operator" }, permissions: ["inventory:view", "inventory:edit"], systemRoles: [], assignedRoles: [{ id: 101, name: "operator", isSystem: false }] }) });
     if (path === "/api/inventory/quantity-capabilities") {
       return route.fulfill({ json: { legacyQuantityImportAllowed: false } });
     }

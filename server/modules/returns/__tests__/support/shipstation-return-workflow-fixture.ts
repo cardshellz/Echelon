@@ -13,6 +13,7 @@ export function shipStationReturnWorkflowFixture(now: () => Date) {
   const calls: Array<{ method: string; path: string; externalShipmentId?: string }> = [];
   const savedLabels = new Map<string, Record<string, unknown>>();
   const savedShipments = new Map<string, Record<string, unknown>>();
+  const trackingCodes=new Map<string,string>();
   let sequence = 1000, loseNextReply = false;
   const fetchFn: typeof fetch = async (target, options) => {
     const url = new URL(String(target));
@@ -40,11 +41,20 @@ export function shipStationReturnWorkflowFixture(now: () => Date) {
       const matches = [...savedLabels.values()].filter(label => label.external_shipment_id === url.searchParams.get("external_shipment_id"));
       return json({ labels: matches.map(label => ({ label_id: label.label_id, external_shipment_id: label.external_shipment_id })), total: matches.length, page: 1, pages: 1 });
     }
+    if (method === "GET" && /^\/v2\/carriers\/se-/.test(url.pathname)) return json({carrier_id:url.pathname.split("/").at(-1),carrier_code:"ups"});
+    if (method === "GET" && /^\/v2\/labels\/se-[^/]+\/track$/.test(url.pathname)) {
+      const label=savedLabels.get(url.pathname.split("/").at(-2)!);
+      if(!label)throw new Error("Unknown synthetic tracking label");
+      const code=trackingCodes.get(String(label.tracking_number))??"NY";
+      return json({tracking_number:label.tracking_number,label_id:label.label_id,carrier_code:"ups",status_code:code,
+        events:[{occurred_at:now().toISOString(),status_code:code}]});
+    }
     if (method === "GET" && url.pathname.startsWith("/v2/labels/")) return json(savedLabels.get(url.pathname.split("/").at(-1)!) ?? null);
     if (method === "GET" && url.pathname.startsWith("/v2/shipments/")) return json(savedShipments.get(url.pathname.split("/").at(-1)!) ?? null);
     if (method === "GET" && url.pathname.startsWith("/v2/downloads/test/")) return new Response("%PDF-1.4\nSynthetic return label", { headers: { "content-type": "application/pdf" } });
     throw new Error("Unexpected fixture request");
   };
   return { calls, fetchFn, provider: createShipStationReturnLabelAdapter({ apiKey: "synthetic-workflow-key", fetchFn }),
+    setTracking:(number:string,code:string)=>trackingCodes.set(number,code),
     loseNextPurchaseReply: () => { loseNextReply = true; } };
 }

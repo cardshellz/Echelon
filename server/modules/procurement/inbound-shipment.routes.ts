@@ -1,4 +1,8 @@
 import { readShipmentPackingUnitOptions, ShipmentUnitOptionsError } from "./shipment-unit-options.service";
+import { registerSupplierHeaderCostRoutes } from "./supplier-header-costs.routes";
+import { createSupplierHeaderCostService } from "./supplier-header-cost-review.service";
+import { registerFreightInvoiceCostRoutes } from "./freight-invoice-costs.routes";
+import { createFreightInvoiceCostService } from "./freight-invoice-costs.service";
 import { registerShipmentEditorRoutes } from "./shipment-editor.routes";
 import { createShipmentEditorService } from "./shipment-editor.service";
 import { registerShipmentHistoryCorrectionRoutes } from "./shipment-history-correction.routes";
@@ -20,7 +24,7 @@ import { requireAuth, requirePermission } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import * as apLedger from "./ap-ledger.service";
-import * as notificationService from "../notifications/notifications.service";
+import * as notificationService from "../notifications/in-app-notifications.api";
 import { shipmentCostWorkflowIdSchema } from "@shared/procurement/shipment-cost-workflow";
 import { createShipmentCostUpdateCommands, shipmentCostUpdateScope, SHIPMENT_COST_UPDATE_PRINCIPAL } from "./shipment-cost-update.commands";
 import { registerShipmentCostExceptionRoutes } from "./shipment-cost-exception.routes";
@@ -36,6 +40,8 @@ export function registerInboundShipmentRoutes(app: Express) {
   registerShipmentCostExceptionRoutes(app);
   registerShipmentInvoiceRoutes(app);
   const { shipmentTracking } = app.locals.services;
+  registerSupplierHeaderCostRoutes(app, createSupplierHeaderCostService(db, shipmentTracking, () => new Date()));
+  registerFreightInvoiceCostRoutes(app, createFreightInvoiceCostService(db, shipmentTracking, () => new Date()));
   registerShipmentEditorRoutes(app, createShipmentEditorService(db, shipmentTracking, () => new Date()));
   registerReceiptShipmentQuantityCorrectionRoutes(app, createReceiptShipmentQuantityCorrectionService(db, shipmentTracking, () => new Date()));
   registerReceiptShipmentQuantityCorrectionRoutes(app, createReceiptShipmentQuantityCorrectionService(db, shipmentTracking, () => new Date(), "shipment"), "shipment");

@@ -16,12 +16,12 @@ import {
 import {
   fetchJson,
   listLaunchReadyStoreConnections,
-  queryErrorMessage,
   type DropshipEbayStoreCategoryResponse,
   type DropshipOnboardingState,
   type DropshipSettingsResponse,
 } from "@/lib/dropship-ops-surface";
 import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
+import { vendorErrorMessage } from "@/lib/dropship-vendor-labels";
 import { describeListingAccess, listingAccessLink } from "@/lib/dropship-listing-access";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 import { CatalogStepRail } from "./catalog/CatalogStepRail";
@@ -399,7 +399,7 @@ function DropshipPortalCatalogPage() {
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {queryErrorMessage(settingsQuery.error, "Unable to load store connections.")}
+              {vendorErrorMessage(settingsQuery.error, "We couldn't load your store connection. Reload the page to try again.")}
             </AlertDescription>
           </Alert>
         )}

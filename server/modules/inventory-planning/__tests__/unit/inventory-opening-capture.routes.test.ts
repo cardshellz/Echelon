@@ -1,19 +1,20 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { registerInventoryOpeningCaptureRoutes } from "../../interfaces/http/inventory-opening-capture.routes";
+import type { InventoryOpeningCapturePort } from "../../application/inventory-opening-capture.port";
 import { InventoryCutoverOpeningError } from "../../application/inventory-cutover-opening.service";
 const {hasPermission}=vi.hoisted(()=>({hasPermission:vi.fn(async()=>true)}));
 vi.mock("../../../identity",()=>({hasPermission}));
 const id="0f1b4b41-6cad-4caa-a3dd-d591179a6d84";
-const status={id,state:"queued",stage:"queued",createdAt:"2026-09-10T00:00:00Z",completedAt:null,chunkCount:0,errorCode:null};
+const status={id,state:"queued" as const,stage:"queued" as const,createdAt:"2026-09-10T00:00:00Z",completedAt:null,chunkCount:0,errorCode:null};
 describe("capture queue authenticated HTTP boundary",()=>{
   let server:http.Server,root:string,user:{id:string}|undefined;
-  let jobs:{enqueue:ReturnType<typeof vi.fn>;status:ReturnType<typeof vi.fn>;chunk:ReturnType<typeof vi.fn>};
+  let jobs:{[K in keyof InventoryOpeningCapturePort]:Mock<InventoryOpeningCapturePort[K]>};
   beforeEach(async()=>{
     user={id:"alice"}; hasPermission.mockResolvedValue(true);
-    jobs={enqueue:vi.fn().mockResolvedValue(status),status:vi.fn().mockResolvedValue(status),chunk:vi.fn().mockResolvedValue({captureId:id,index:0,text:"{}"})};
+    jobs={enqueue:vi.fn<InventoryOpeningCapturePort["enqueue"]>().mockResolvedValue(status),status:vi.fn<InventoryOpeningCapturePort["status"]>().mockResolvedValue(status),chunk:vi.fn<InventoryOpeningCapturePort["chunk"]>().mockResolvedValue({captureId:id,index:0,text:"{}"})};
     const app=express();app.use(express.json());
     app.use((req,_res,next)=>{Object.defineProperty(req,"session",{value:{user}});next();});
     registerInventoryOpeningCaptureRoutes(app,jobs);

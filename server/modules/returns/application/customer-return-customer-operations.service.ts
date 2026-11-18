@@ -1,6 +1,7 @@
 import { customerReturnWorkflowStatusSchema, customerReturnWorkflowResumeSchema } from "@shared/returns/customer-return-workflow.contract";
 import type { CustomerReturnWorkflowStore, ReturnWorkflowRecord } from "./customer-return-workflow.ports";
 import { z } from "zod";
+import { customerReturnProgressSchema, type CustomerReturnProgress } from "@shared/customer-account/order-progress";
 import {
   CUSTOMER_RETURN_CUSTOMER_API,
   customerReturnCustomerLabelStatusSchema,
@@ -23,7 +24,9 @@ import type { CustomerReturnLabelsService } from "./customer-return-labels.servi
 
 const id = z.number().int().positive().safe();
 export const customerReturnCustomerPrincipalSchema = customerReturnCanonicalOrderScopeSchema
-  .omit({ omsOrderId: true, externalOrderId: true }).strict();
+  .omit({ omsOrderId: true, externalOrderId: true }).extend({
+    orderScope: customerReturnCanonicalOrderScopeSchema.pick({ omsOrderId: true, externalOrderId: true }).optional(),
+  }).strict().refine(value => value.externalCustomerId !== null || value.orderScope !== undefined);
 export type CustomerReturnCustomerPrincipal = z.infer<typeof customerReturnCustomerPrincipalSchema>;
 export const customerReturnOwnedAuthorizationSchema = z.object({ authorizationId: id, omsOrderId: id }).strict();
 export const customerReturnOwnedCommandSchema = z.object({ omsOrderId: id, authorizationId: id.nullable() }).strict();
@@ -43,6 +46,8 @@ export interface CustomerReturnCustomerOperationsDependencies {
   labels: Pick<CustomerReturnLabelsService, "status" | "progress" | "artifact">;
   workflows?: CustomerReturnWorkflowStore;
   now?: () => Date;
+  historyProgress?: { readHistory(principal: CustomerReturnCustomerPrincipal, rows: readonly { authorizationId: number; omsOrderId: number }[], now: Date): Promise<ReadonlyMap<number, CustomerReturnProgress>> };
+  reportHistoryUnavailable?: () => void;
 }
 
 /** Request-scoped public boundary; existing staff authorization is intentionally unchanged. */
@@ -51,7 +56,9 @@ export class CustomerReturnCustomerOperationsService {
   private readonly actor: string;
   constructor(private readonly dependencies: CustomerReturnCustomerOperationsDependencies) {
     this.principal = Object.freeze(customerReturnCustomerPrincipalSchema.parse(dependencies.principal));
-    this.actor = `customer:${this.principal.channelId}:${this.principal.externalCustomerId}`;
+    this.actor = this.principal.orderScope
+      ? `guest-order:${this.principal.channelId}:${this.principal.orderScope.omsOrderId}`
+      : `customer:${this.principal.channelId}:${this.principal.externalCustomerId}`;
   }
 
   async listReturns(raw: unknown = {}) {
@@ -61,7 +68,25 @@ export class CustomerReturnCustomerOperationsService {
     if (rows.some((row, index) => (input.beforeAuthorizationId !== undefined && row.authorizationId >= input.beforeAuthorizationId)
       || (index > 0 && row.authorizationId >= rows[index - 1].authorizationId))) throw customerReturnUnavailable();
     const page = rows.slice(0, input.pageSize);
-    return customerReturnCustomerHistorySchema.parse({ returns: page,
+    let progress: ReadonlyMap<number, CustomerReturnProgress> | null = null;
+    if (page.length && input.includeProgress && this.dependencies.historyProgress) {
+      try {
+        progress = await this.dependencies.historyProgress.readHistory(this.principal, page, this.workflowNow());
+        for (const row of page) {
+          const value = progress.get(row.authorizationId);
+          if (value && customerReturnProgressSchema.parse(value).key !== `authorization:${row.authorizationId}`)
+            throw customerReturnUnavailable();
+        }
+      } catch {
+        // Accepted history stays accessible if the supplementary physical/
+        // refund projection fails. Do not turn this into "no returns".
+        this.dependencies.reportHistoryUnavailable?.();
+        progress = null;
+      }
+    }
+    return customerReturnCustomerHistorySchema.parse({ returns: page.map(({ progress: _priorProgress, ...row }) => ({ ...row,
+      ...(input.includeProgress && this.dependencies.historyProgress ? { progress: progress?.get(row.authorizationId) ?? null } : {}),
+    })),
       nextBeforeAuthorizationId: rows.length > input.pageSize ? page[page.length - 1].authorizationId : null,
     });
   }
@@ -120,6 +145,8 @@ export class CustomerReturnCustomerOperationsService {
   }
   private async presentWorkflow(record: ReturnWorkflowRecord, expected: { omsOrderId?: number; requestKey?: string; authorizationId?: number } = {}) {
     if (record.scope.channelId !== this.principal.channelId || record.scope.externalCustomerId !== this.principal.externalCustomerId
+      || (this.principal.orderScope !== undefined && (record.scope.omsOrderId !== this.principal.orderScope.omsOrderId
+        || record.scope.externalOrderId !== this.principal.orderScope.externalOrderId))
       || (expected.omsOrderId !== undefined && record.scope.omsOrderId !== expected.omsOrderId)
       || (expected.requestKey !== undefined && record.request.idempotencyKey !== expected.requestKey)
       || (expected.authorizationId !== undefined && record.authorizationId !== null && record.authorizationId !== expected.authorizationId)) throw customerReturnUnavailable();
@@ -175,25 +202,31 @@ export class CustomerReturnCustomerOperationsService {
 
   private async ownedOrder(omsOrderId: number) {
     const order = customerReturnOrderAccessResultSchema.parse(await this.dependencies.orderAccess.resolveOwned({ omsOrderId }));
-    if (order.channelId !== this.principal.channelId || order.omsOrderId !== omsOrderId) throw customerReturnUnavailable();
+    if (order.channelId !== this.principal.channelId || order.omsOrderId !== omsOrderId
+      || (this.principal.orderScope && (order.omsOrderId !== this.principal.orderScope.omsOrderId
+        || order.externalOrderId !== this.principal.orderScope.externalOrderId))) throw customerReturnUnavailable();
     return order;
   }
   private scope(order: z.infer<typeof customerReturnOrderAccessResultSchema>): CustomerReturnCanonicalOrderScope {
     return customerReturnCanonicalOrderScopeSchema.parse({
       channelId: this.principal.channelId, externalCustomerId: this.principal.externalCustomerId,
       omsOrderId: order.omsOrderId, externalOrderId: order.externalOrderId,
+      ...(this.principal.verifiedPurchase ? { verifiedPurchase: this.principal.verifiedPurchase } : {}),
     });
   }
   private async ownedCommand(key: string) {
     const raw = await this.dependencies.ownership.readOwnedCommand(this.principal, key);
     if (raw === null) throw customerReturnUnavailable();
-    return customerReturnOwnedCommandSchema.parse(raw);
+    const result = customerReturnOwnedCommandSchema.parse(raw);
+    if (this.principal.orderScope && result.omsOrderId !== this.principal.orderScope.omsOrderId) throw customerReturnUnavailable();
+    return result;
   }
   private async ownedAuthorization(authorizationId: number) {
     const raw = await this.dependencies.ownership.readOwnedAuthorization(this.principal, authorizationId);
     if (raw === null) throw customerReturnUnavailable();
     const result = customerReturnOwnedAuthorizationSchema.parse(raw);
-    if (result.authorizationId !== authorizationId) throw customerReturnUnavailable();
+    if (result.authorizationId !== authorizationId || (this.principal.orderScope
+      && result.omsOrderId !== this.principal.orderScope.omsOrderId)) throw customerReturnUnavailable();
     return result;
   }
   private async present(raw: unknown, expected: { omsOrderId: number; authorizationId?: number }): Promise<CustomerReturnCustomerLabelStatus> {

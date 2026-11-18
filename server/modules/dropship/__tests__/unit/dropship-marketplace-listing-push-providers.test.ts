@@ -27,6 +27,12 @@ import type {
 } from "../../infrastructure/dropship-marketplace-credentials";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipEbayFulfillmentPolicyPreflight } from "../../application/dropship-ebay-fulfillment-policy-guard";
+import {fixedImageInspector} from "../../../catalog/__tests__/fixtures/catalog-image-inspector.fixture";
+vi.mock("../../../channels/adapters/ebay/ebay-published-content.reader",async importOriginal=>{
+  const actual=await importOriginal<typeof import("../../../channels/adapters/ebay/ebay-published-content.reader")>();
+  return {...actual,readEbayPublishedContent:(input:Parameters<typeof actual.readEbayPublishedContent>[0])=>
+    actual.readEbayPublishedContent({...input,images:fixedImageInspector()})};
+});
 
 describe("dropship marketplace listing push providers", () => {
   beforeEach(() => { quantityAdmission = createAdmittedEbayQuantityTestOwner(); });
@@ -285,12 +291,14 @@ describe("dropship marketplace listing push providers", () => {
     // value for header Accept-Language"); every call carries them like the
     // channel client's, the content locale on writes only.
     for (const call of fetcher.calls) {
+      if(new URL(call.url).pathname==="/ws/api.dll")continue; // Trading has its own authenticated headers.
       const headers = new Headers(call.init.headers);
       expect(headers.get("Accept-Language")).toBe("en-US");
       expect(headers.get("X-EBAY-C-MARKETPLACE-ID")).toBe("EBAY_US");
       expect(headers.get("Content-Language")).toBe(call.init.method === "GET" ? null : "en-US");
     }
-    expect(fetcher.calls.map((call) => call.init.method)).toEqual(["GET", "GET", "GET", "GET", "PUT", "PUT", "GET", "POST", "GET"]);
+    expect(fetcher.calls.map((call) => call.init.method)).toEqual(["GET", "GET", "GET", "GET", "PUT", "PUT", "GET", "POST", "GET", "POST"]);
+    expect(fetcher.calls.at(-1)).toMatchObject({url:"https://api.ebay.com/ws/api.dll",init:{body:expect.stringContaining("<OutputSelector>SellerProfiles</OutputSelector>")}});
   });
 
   it("adopts a published Dropship offer using the shared observer and exact vendor-owned parent product", async () => {
@@ -317,7 +325,7 @@ describe("dropship marketplace listing push providers", () => {
     await expect(provider.pushListing(request)).resolves.toMatchObject({ externalListingId:"900000000101",externalOfferId:"offer-101" });
     expect(query).toHaveBeenCalledWith(expect.stringContaining("pv.product_id"),[50,10,22,101]);
     expect(readCalls).toHaveLength(3);
-    expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET", "POST", "GET", "GET", "POST", "PUT", "PUT", "GET"]);
+    expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET", "POST", "GET", "GET", "POST", "PUT", "PUT", "GET", "POST"]);
     await expect(reader.resolve({ ...request,vendorId:99 },credential,{ listingId:"900000000101",members:[{ variantId:101,sku:"SKU-101",offerId:"offer-101" }] }))
       .rejects.toMatchObject({ code:"DROPSHIP_EBAY_PUBLICATION_ACCOUNT_UNVERIFIED" });
     await expect(reader.resolve(request,{ ...credential,externalAccountId:"different-seller" },{ listingId:"900000000101",members:[{ variantId:101,sku:"SKU-101",offerId:"offer-101" }] }))
@@ -374,7 +382,7 @@ describe("dropship marketplace listing push providers", () => {
         [emptyResponse(),emptyResponse()]);
       await expect(provider.pushListing(liveRequest())).resolves.toMatchObject({ externalListingId:"900000000101" });
       expect(query).toHaveBeenCalledTimes(1);
-      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET", "POST", "GET", "GET", "POST", "PUT", "PUT", "GET"]);
+      expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET", "POST", "GET", "GET", "POST", "PUT", "PUT", "GET", "POST"]);
       expect(readCalls.some(path => path.includes("/identity/"))).toBe(true);
     });
 
@@ -495,10 +503,10 @@ describe("dropship marketplace listing push providers", () => {
       variesBy: { specifications: [] },
     };
     const publishedKeep = {
-      offers: [{ offerId: "offer-keep", sku: "CATALOG-KEEP", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listingId: "listing-old", status: "PUBLISHED" }],
+      offers: [{ offerId: "offer-keep", sku: "CATALOG-KEEP", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listingId: "900000000200", status: "PUBLISHED" }],
     };
     const publishedStale = {
-      offers: [{ offerId: "offer-stale", sku: "CATALOG-STALE", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listingId: "listing-old", status: "PUBLISHED" }],
+      offers: [{ offerId: "offer-stale", sku: "CATALOG-STALE", marketplaceId: "EBAY_US", format: "FIXED_PRICE", listingId: "900000000200", status: "PUBLISHED" }],
     };
     const fetcher = new FakeFetch([
       jsonResponse(currentGroup),
@@ -522,7 +530,7 @@ describe("dropship marketplace listing push providers", () => {
       emptyResponse(),
       jsonResponse({ ...currentGroup, variantSKUs: ["CATALOG-KEEP", "CATALOG-NEW"] }),
       jsonResponse({ ...currentGroup, variantSKUs: ["CATALOG-KEEP", "CATALOG-NEW"] }),
-      jsonResponse({ listingId: "listing-new" }),
+      jsonResponse({ listingId: "900000000201" }),
     ]);
     const provider = createEbayProvider(credentials, fetcher.fetch);
     const draft = makeGroupedRebuildDraft();
@@ -531,7 +539,7 @@ describe("dropship marketplace listing push providers", () => {
       vendorId: 10,
       storeConnectionId: 22,
       marketplaceConfig: ebayMarketplaceConfig(),
-      currentExternalListingId: "listing-old",
+      currentExternalListingId: "900000000200",
       draft,
     });
     fetcher.beginObservation();
@@ -545,7 +553,7 @@ describe("dropship marketplace listing push providers", () => {
 
     expect(preview).toMatchObject({
       groupKey: "CATALOG-GROUP",
-      currentExternalListingId: "listing-old",
+      currentExternalListingId: "900000000200",
       currentSkus: ["CATALOG-KEEP", "CATALOG-STALE"],
       desiredSkus: ["CATALOG-KEEP", "CATALOG-NEW"],
       addedSkus: ["CATALOG-NEW"],
@@ -553,15 +561,15 @@ describe("dropship marketplace listing push providers", () => {
       rebuildRequired: true,
     });
     expect(result).toMatchObject({
-      externalProductId: "listing-new",
-      previousExternalListingId: "listing-old",
+      externalProductId: "900000000201",
+      previousExternalListingId: "900000000200",
       removedSkus: ["CATALOG-STALE"],
       published: true,
     });
     expect(fetcher.calls.map((call) => call.init.method)).toEqual([
       "GET", "GET", "GET",
       "GET", "GET", "GET", "GET", "GET", "GET", "GET", "GET", "GET", "POST", "GET", "GET", "DELETE",
-      "GET", "GET", "GET", "GET", "PUT", "PUT", "PUT", "PUT", "PUT", "GET", "GET", "POST",
+      "GET", "GET", "GET", "GET", "PUT", "PUT", "PUT", "PUT", "PUT", "GET", "GET", "POST", "POST",
     ]);
     // Publishing the rebuilt group cannot use the unchanged-group maintenance
     // exception: every member still requires canonical quantity admission.
@@ -579,7 +587,7 @@ describe("dropship marketplace listing push providers", () => {
       jsonResponse({ offerId: "offer-201" }),
       emptyResponse(),
       jsonResponse({ offerId: "offer-201", sku: "SKU-101", marketplaceId: "EBAY_US" }),
-      jsonResponse({ listingId: "listing-201" }),
+      jsonResponse({ listingId: "900000000201" }),
     ]);
     const provider = createEbayProvider(credentials, fetcher.fetch);
 
@@ -589,7 +597,7 @@ describe("dropship marketplace listing push providers", () => {
       marketplaceConfig: ebayMarketplaceConfig(),
     }));
 
-    expect(result).toMatchObject({ status: "created", externalListingId: "listing-201", externalOfferId: "offer-201", rawResult: { published: true } });
+    expect(result).toMatchObject({ status: "created", externalListingId: "900000000201", externalOfferId: "offer-201", rawResult: { published: true } });
     expect(fetcher.calls.map((call) => `${call.init.method} ${new URL(call.url).pathname}`)).toEqual([
       "GET /sell/inventory/v1/offer",
       "GET /sell/inventory/v1/inventory_item/SKU-101",
@@ -601,6 +609,7 @@ describe("dropship marketplace listing push providers", () => {
       "GET /sell/inventory/v1/offer/offer-201",
       "POST /sell/inventory/v1/offer/offer-201/publish",
       "GET /sell/inventory/v1/inventory_item/SKU-101",
+      "POST /ws/api.dll",
     ]);
     expect(credentials.authFailures).toHaveLength(0);
   });
@@ -913,6 +922,9 @@ class FakeFetch {
   private inventoryItems = new Map<string, Record<string, unknown>>();
   private offerDiscoveries = new Map<string, Response>();
   private freshDiscoveries = new Set<string>();
+  private acceptedOffers = new Map<string,Record<string,any>>();
+  private acceptedGroups = new Map<string,Record<string,any>>();
+  private publications = new Map<string,string[]>();
 
   constructor(private responses: Response[]) {}
 
@@ -932,8 +944,16 @@ class FakeFetch {
         const body = await response.clone().json(); return body.offers ?? [];
       }))).flat() as Array<{ sku: string; listingId?: string; listing?: { listingId?: string } }>;
       const members = offers.filter(offer => (offer.listingId ?? offer.listing?.listingId) === listingId);
-      const native = members.length ? { Ack: "Success", Item: { ItemID: listingId, SKU: members[0]!.sku,
-        Variations: { Variation: members.map(member => ({ SKU: member.sku })) } } } : { Ack: "Failure" };
+      const skus = this.publications.get(listingId) ?? members.map(member=>member.sku);
+      const group=[...this.acceptedGroups.values()].find(group=>skus.length>1&&skus.every(sku=>group.variantSKUs?.includes(sku)));
+      const images=group?.imageUrls??(this.inventoryItems.get(skus[0])?.product as {imageUrls?:string[]}|undefined)?.imageUrls??[];
+      const policy=[...this.acceptedOffers.values()].find(offer=>skus.includes(offer.sku))?.listingPolicies??{};
+      const native = skus.length ? { Ack: "Success", Item: { ItemID: listingId, SKU: skus[0],
+        Variations: { Variation: skus.map(sku => ({ SKU:sku })) },
+        PictureDetails:{PictureURL:images,ExternalPictureURL:images[0]},SellerProfiles:{
+          SellerShippingProfile:{ShippingProfileID:policy.fulfillmentPolicyId},SellerReturnProfile:{ReturnProfileID:policy.returnPolicyId},
+          SellerPaymentProfile:{PaymentProfileID:policy.paymentPolicyId}},
+      } } : { Ack: "Failure" };
       return new Response(new XMLBuilder().build({ GetItemResponse: native }), { headers: { "Content-Type": "text/xml" } });
     }
     const inventorySku = path.startsWith("/sell/inventory/v1/inventory_item/") ? decodeURIComponent(path.split("/").at(-1)!) : null;
@@ -949,6 +969,25 @@ class FakeFetch {
     else if (init?.method !== "GET") this.freshDiscoveries.clear();
     if (inventorySku && init?.method === "PUT" && response.ok) {
       this.inventoryItems.set(inventorySku, { ...JSON.parse(String(init.body)), sku: inventorySku });
+    }
+    if(response.ok){
+      const body=init?.body?JSON.parse(String(init.body)):null;
+      if(path.startsWith("/sell/inventory/v1/inventory_item_group/")&&init?.method==="PUT")
+        this.acceptedGroups.set(decodeURIComponent(path.split("/").at(-1)!),body);
+      if(path.startsWith("/sell/inventory/v1/inventory_item_group/")&&init?.method==="GET")
+        this.acceptedGroups.set(decodeURIComponent(path.split("/").at(-1)!),await response.clone().json());
+      if(path==="/sell/inventory/v1/offer"&&init?.method==="POST"){
+        const created=await response.clone().json();this.acceptedOffers.set(created.offerId,{...body,offerId:created.offerId});
+      }
+      if(/^\/sell\/inventory\/v1\/offer\/[^/]+$/.test(path)&&init?.method==="PUT"){
+        const id=decodeURIComponent(path.split("/").at(-1)!);this.acceptedOffers.set(id,{...body,offerId:id});
+      }
+      if(init?.method==="POST"&&(path.endsWith("/publish")||path.endsWith("/publish_by_inventory_item_group"))){
+        const publication=await response.clone().json();
+        const skus=path.endsWith("/publish")?[this.acceptedOffers.get(decodeURIComponent(path.split("/").at(-2)!))?.sku]
+          :this.acceptedGroups.get(body.inventoryItemGroupKey)?.variantSKUs;
+        if(publication.listingId&&skus?.every((sku:unknown)=>typeof sku==="string"))this.publications.set(publication.listingId,skus);
+      }
     }
     return response;
   };
@@ -1189,7 +1228,7 @@ describe("eBay listing push stock link (Fix PR 2a-2)", () => {
       "GET /sell/inventory/v1/inventory_item/SKU-101",
       "GET /sell/inventory/v1/offer?sku=SKU-101&marketplace_id=EBAY_US",
     ]);
-    expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET", "GET", "GET", "PUT", "POST", "PUT", "GET", "POST", "GET"]);
+    expect(fetcher.calls.map(call => call.init.method)).toEqual(["GET", "GET", "GET", "GET", "PUT", "POST", "PUT", "GET", "POST", "GET", "POST"]);
   });
 
   it.each([

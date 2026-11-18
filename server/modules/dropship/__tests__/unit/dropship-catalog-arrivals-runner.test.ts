@@ -166,7 +166,7 @@ describe("the catalog arrivals worker (PLAN-B v4.1 §11.1, §4.4)", () => {
       .map((line, index) => ({ path: file.path, line: index + 1, text: line }))
       .filter((line) => /\b736219\b/.test(line.text)));
     expect(hits).toHaveLength(1);
-    expect(hits[0].path.endsWith("server/modules/dropship/infrastructure/dropship-catalog-arrivals-runner.ts")).toBe(true);
+    expect(hits[0].path.replaceAll("\\", "/").endsWith("server/modules/dropship/infrastructure/dropship-catalog-arrivals-runner.ts")).toBe(true);
     expect(hits[0].text).toContain("export const DROPSHIP_CATALOG_ARRIVALS_LOCK_ID = 736219;");
   });
 

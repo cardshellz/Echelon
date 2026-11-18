@@ -5,7 +5,58 @@ const config = { themeId: "174740308127", customerId: "100", proxyPath: "/apps/e
 const connection = { connectionId: 4, channelId: 2, name: "Shopify", shopDomain: "fixture.myshopify.com", enabled: true, paymentWindowMinutes: 30 };
 const key = "a".repeat(43);
 const bootstrap = { session: { authenticated: true, privateTesting: true, sessionKey: key }, connection };
+
+async function authenticatedTransport(request: typeof fetch) {
+  const api = createCustomerAccountTransport(config, async (url, options) => {
+    const input = JSON.parse(String(options?.body));
+    return input.path === "/account/bootstrap"
+      ? Response.json(bootstrap)
+      : request(url, options);
+  });
+  await api.bootstrap();
+  return api;
+}
 describe("storefront transport reuses canonical clients", () => {
+  it("never sends dependent reads or commands before session adoption", async () => {
+    const request = vi.fn();
+    const api = createCustomerAccountTransport(config, request);
+    await expect(api.orderDetails({externalOrderId:"99",orderReference:"#49180"}))
+      .rejects.toMatchObject({code:"CUSTOMER_ACCOUNT_SESSION_NOT_READY"});
+    await expect(api.resolve({externalOrderId:"99",orderReference:"#49180"}))
+      .rejects.toMatchObject({code:"CUSTOMER_ACCOUNT_SESSION_NOT_READY"});
+    expect(request).not.toHaveBeenCalled();
+  });
+  it("routes native chooser pagination and history through the same-origin proxy without mutation keys", async () => {
+    const request = vi.fn(async (_url: RequestInfo | URL, options?: RequestInit) => {
+      const input = JSON.parse(String(options?.body));
+      if (input.path === "/account/bootstrap") return Response.json(bootstrap);
+      return Response.json(input.path === "/returns/order-options"
+        ? { orders: [{ omsOrderId: 10, orderReference: "#TEST-1001", purchasedAt: null, eligibleItemCount: 1 }], nextBeforeOmsOrderId: null }
+        : { returns: [], nextBeforeAuthorizationId: null });
+    });
+    const api = createCustomerAccountTransport(config, request);
+    await api.bootstrap();
+    const returns = api.returns(key);
+    await returns.orderChoices(20, new AbortController().signal);
+    await returns.history(null, new AbortController().signal);
+    for (const [url, options] of request.mock.calls.slice(1)) {
+      expect(url).toBe("/apps/echelon-returns/account");
+      expect(options).toMatchObject({ credentials: "same-origin", redirect: "error", cache: "no-store" });
+      expect(JSON.parse(String(options?.body))).toMatchObject({ method: "GET", expectedCustomerId: "100", sessionKey: key });
+      expect(JSON.parse(String(options?.body)).commandKey).toBeUndefined();
+    }
+    expect(JSON.parse(String(request.mock.calls[1][1]?.body))).toMatchObject({ path: "/returns/order-options", query: { before: "20" } });
+  });
+  it("sends cache recovery to the explicit refresh path with paired identities and no financial command",async()=>{
+    const identity={externalOrderId:"99",orderReference:"#49180"};
+    const request=vi.fn(async()=>Response.json({orders:[{...identity,omsOrderId:10,state:"refreshing",snapshot:null,verifiedAt:null,validUntil:null}]}));
+    const api=await authenticatedTransport(request);
+    await api.orderActions({orders:[identity]},undefined,true);
+    const calls=request.mock.calls as unknown as [string,RequestInit][];
+    const input=JSON.parse(String(calls[0][1].body));
+    expect(input).toMatchObject({method:"POST",path:"/account/order-actions/refresh",expectedCustomerId:"100",body:{orders:[identity]}});
+    expect(input.commandKey).toBeUndefined();
+  });
   it("binds batch history and inline details to the signed session without creating a financial command key", async () => {
     const request = vi.fn(async () => Response.json(bootstrap));
     const api = createCustomerAccountTransport(config, request); await api.bootstrap();
@@ -26,12 +77,25 @@ describe("storefront transport reuses canonical clients", () => {
     { orders: [], unavailableExternalOrderIds: ["98"], statusUnavailable: false },
     { orders: [{ externalOrderId: "99", orderReference: "#other", omsOrderId: null, currency: "USD", totalCents: 917, cancelled: false, financialStatus: "Paid" }], unavailableExternalOrderIds: [], statusUnavailable: false },
   ])("rejects missing or substituted batch identities before they can replace a displayed total", async response => {
-    const api = createCustomerAccountTransport(config, async () => Response.json(response));
+    const api = await authenticatedTransport(async () => Response.json(response));
     await expect(api.orderSummaries({ orders: [{ externalOrderId: "99", orderReference: "#49180" }] })).rejects.toThrow();
   });
   it("rejects a late detail reply for a different order instead of displaying its money", async () => {
-    const api = createCustomerAccountTransport(config, async () => Response.json({ externalOrderId: "98", orderReference: "#other", currency: "USD", totalCents: 917, lines: [] }));
+    const api = await authenticatedTransport(async () => Response.json({ externalOrderId: "98", orderReference: "#other", currency: "USD", totalCents: 917, lines: [] }));
     await expect(api.orderDetails({ externalOrderId: "99", orderReference: "#49180" })).rejects.toMatchObject({ code: "CUSTOMER_ACCOUNT_ORDER_MISMATCH" });
+  });
+  it("never falls back to the slow provider endpoint when the saved lookup is unavailable", async () => {
+    const request = vi.fn(async () => Response.json({ error: { code: "RETURN_CUSTOMER_INPUT_INVALID", message: "The request is invalid." } }, { status: 400 }));
+    const api = await authenticatedTransport(request);
+    await expect(api.orderSummaries({ orders: [{ externalOrderId: "99", orderReference: "#49180" }] })).rejects.toThrow();
+    expect(request).toHaveBeenCalledOnce();
+    const options = (request.mock.calls[0] as unknown as [string, RequestInit])[1];
+    expect(JSON.parse(String(options.body))).toMatchObject({ path: "/account/saved-summaries", query: {} });
+  });
+  it.each([401,403,503])("does not downgrade progress negotiation after a %i access/service failure",async status=>{
+    const request=vi.fn(async()=>Response.json({error:{code:"RETURN_CUSTOMER_INPUT_INVALID",message:"Failure"}},{status}));
+    const api=await authenticatedTransport(request);
+    await expect(api.orderSummaries({orders:[{externalOrderId:"99",orderReference:"#49180"}]})).rejects.toThrow();expect(request).toHaveBeenCalledOnce();
   });
   it("binds rewards issuance to the same signed session and preserves its request identity", async () => {
     const request = vi.fn(async () => Response.json(bootstrap));
@@ -58,7 +122,7 @@ describe("storefront transport reuses canonical clients", () => {
       path: "/order-edits/orders/9/rewards/cancel", commandKey: command.requestKey, body: command });
   });
   it("retains classified reward failures so retries preserve uncertain issuance", async () => {
-    const api = createCustomerAccountTransport(config, async () => Response.json({ error: { code: "REWARD_ISSUANCE_PENDING", message: "Retry this same reward." } }, { status: 503 }));
+    const api = await authenticatedTransport(async () => Response.json({ error: { code: "REWARD_ISSUANCE_PENDING", message: "Retry this same reward." } }, { status: 503 }));
     await expect(api.rewards.issue(4, 9, { requestKey: "22222222-2222-4222-8222-222222222222", points: 100 }))
       .rejects.toMatchObject({ code: "REWARD_ISSUANCE_PENDING" });
   });
@@ -84,7 +148,7 @@ describe("storefront transport reuses canonical clients", () => {
     const request = vi.fn<typeof fetch>(async (_target, options) => new Response(new ReadableStream({ start(controller) {
       options!.signal!.addEventListener("abort", () => controller.error(options!.signal!.reason), { once: true });
     } }), { headers: { "Content-Type": "application/json" } }));
-    const api = createCustomerAccountTransport(config, request);
+    const api = await authenticatedTransport(request);
     const operationId = "22222222-2222-4222-8222-222222222222";
     const result = expect(api.edits.abandon(operationId)).rejects.toMatchObject({ code: "ORDER_EDIT_CONNECTION_FAILED", uncertain: true });
     await vi.advanceTimersByTimeAsync(CUSTOMER_ACCOUNT_REQUEST_TIMEOUT_MS);

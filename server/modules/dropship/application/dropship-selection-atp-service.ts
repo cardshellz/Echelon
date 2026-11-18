@@ -11,6 +11,7 @@ import {
   type DropshipListingTierStatus,
 } from "../domain/listing-tiers";
 import {
+  computeDropshipMarketplaceQuantity,
   evaluateDropshipVendorCatalogSelection,
   type DropshipVendorCatalogSelectionDecision,
   type DropshipVendorSelectionRule,
@@ -90,6 +91,12 @@ export interface DropshipVendorCatalogPreviewRow extends Omit<DropshipVendorCata
   selectionDecision: DropshipVendorCatalogSelectionDecision;
   /** The listing tier this SKU sells in and whether it is on sale for the vendor. */
   listingTier: DropshipListingTierStatus;
+  /**
+   * The size's marketplace quantity from its stock is 0, whatever its selection
+   * reason (`selectionDecision.marketplaceQuantity` is 0 for every size that is
+   * not selected, so it cannot say this): nothing would list it now.
+   */
+  outOfStock: boolean;
 }
 
 export interface DropshipVendorCatalogCategoryFacet {
@@ -246,19 +253,25 @@ export class DropshipSelectionAtpService {
       }))),
       this.deps.listingTiers.resolveForVendor(parsed.vendorId),
     ]);
-    const rows = pageRows.map(({ candidate: { picked, ...candidate }, adminExposureDecision, override }) => ({
-      ...candidate,
-      adminExposureDecision,
-      selectionDecision: evaluateDropshipVendorCatalogSelection({
-        candidate,
+    const rows = pageRows.map(({ candidate: { picked, ...candidate }, adminExposureDecision, override }) => {
+      const rawAtpUnits = atp.quantities.get(candidate.productVariantId) ?? 0;
+      const applyMarketplaceQuantityCap = atp.authority === "legacy";
+      return {
+        ...candidate,
         adminExposureDecision,
-        picked,
-        rawAtpUnits: atp.quantities.get(candidate.productVariantId) ?? 0,
-        override,
-        applyMarketplaceQuantityCap: atp.authority === "legacy",
-      }),
-      listingTier: listingTiers.eligibility[listingTierForVariantUomType(candidate.variantUomType)],
-    }));
+        selectionDecision: evaluateDropshipVendorCatalogSelection({
+          candidate,
+          adminExposureDecision,
+          picked,
+          rawAtpUnits,
+          override,
+          applyMarketplaceQuantityCap,
+        }),
+        listingTier: listingTiers.eligibility[listingTierForVariantUomType(candidate.variantUomType)],
+        // The evaluator's own quantity rule, before selection zeroes it: the legacy cap applies only under legacy authority.
+        outOfStock: computeDropshipMarketplaceQuantity(rawAtpUnits, applyMarketplaceQuantityCap ? override : null) === 0,
+      };
+    });
 
     return {
       rows,

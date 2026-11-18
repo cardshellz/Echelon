@@ -46,8 +46,8 @@ describe("dropship listing presentation", () => {
       parseEbayListingConfig(input.marketplaceConfig, {}), new EbayListingBuilder());
     const product = draft.inventoryItems[0]!.payload.product;
     expect(product.description).toBe("<p>My product description</p>");
-    expect(product.aspects.Material).toEqual(["Plastic"]);
-    expect(product.aspects.UPC).toEqual([candidate.gtin]);
+    expect(product.aspects?.Material).toEqual(["Plastic"]);
+    expect(product.aspects?.UPC).toEqual([candidate.gtin]);
     expect(content.facts).toContainEqual({ name: "SKU", value: "PACK-25" });
     expect(candidate.description).toBe("<p>Protect <strong>25 cards</strong>.</p>");
   });
@@ -156,7 +156,7 @@ describe("dropship listing presentation", () => {
         storeCategoryNames: [], businessPolicySelection: null, previewHash: "hash", listingTier: null,
         listingIntent: { ...intent, imageUrls: [uploadedUrl] },
         adminExposureDecision: { exposed: true, reason: "exposed", includeRuleIds: [1], excludeRuleIds: [] },
-        selectionDecision: { selected: true, reason: "selected", adminExposureReason: "exposed", includeRuleIds: [2], excludeRuleIds: [],
+        selectionDecision: { selected: true, reason: "selected", adminExposureReason: "exposed", picked: true, includeRuleIds: [2], excludeRuleIds: [],
           autoConnectNewSkus: true, autoListNewSkus: false, marketplaceQuantity: 3, quantityCapApplied: false } } satisfies DropshipListingPreviewRow;
       const [enriched] = await enrichDropshipListingRows({ rows: [row], candidates: [candidate], vendorId: 10, storeConnectionId: 9,
         listingPhotos: new Map([[7, { photos: [{ assetId: 3, position:0, url: uploadedUrl, uploaded: true }], issues: [] }]]),
@@ -242,7 +242,7 @@ describe("dropship private listing image authorization", () => {
       presentation: { media: { listImages: async () => new Map(), readImageFile }, productCosts: { loadProductCosts: async () => new Map([[7, productCost]]) },
         resolvePublication: () => null, logger },
       clock: { now: () => new Date("2026-09-06T12:00:00Z") }, logger,
-    } as ConstructorParameters<typeof DropshipListingPreviewService>[0]);
+    } as unknown as ConstructorParameters<typeof DropshipListingPreviewService>[0]);
     return { service, repository, readImageFile };
   }
 
@@ -280,9 +280,9 @@ describe("vendor presentation transport and failure isolation", () => {
     productVariantId: 7, productId: 5, sku: "PACK-25", title: "Card protectors", platform: "ebay",
     listingMode: "live", currentListingStatus: "not_listed", previewStatus: "ready", blockers: [], warnings: [],
     marketplaceQuantity: 3, priceCents: 2000, marketplaceCategoryId: "183438", marketplaceCategoryName: "Card Toploaders",
-    storeCategoryNames: [], businessPolicySelection: null, previewHash: "same-publication-hash", listingIntent: intent,
+    storeCategoryNames: [], businessPolicySelection: null, previewHash: "same-publication-hash", listingTier: null, listingIntent: intent,
     adminExposureDecision: { exposed: true, reason: "exposed", includeRuleIds: [1], excludeRuleIds: [] },
-    selectionDecision: { selected: true, reason: "selected", adminExposureReason: "exposed", includeRuleIds: [2], excludeRuleIds: [],
+    selectionDecision: { selected: true, reason: "selected", adminExposureReason: "exposed", picked: true, includeRuleIds: [2], excludeRuleIds: [],
       autoConnectNewSkus: true, autoListNewSkus: false, marketplaceQuantity: 3, quantityCapApplied: false },
   };
 

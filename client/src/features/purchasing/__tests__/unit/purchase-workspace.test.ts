@@ -103,7 +103,7 @@ function renderWorkspace(search: string, data = workspaceFixture(), relationship
   }
   try {
     return renderToStaticMarkup(createElement(QueryClientProvider, { client: queryClient },
-      createElement(Router, { ssrPath: "/purchase-orders/17", ssrSearch: search }, createElement(Page))));
+      createElement(Router, { ssrPath: "/purchase-orders/17", ssrSearch: search, children: createElement(Page) })));
   } finally {
     queryClient.clear();
   }

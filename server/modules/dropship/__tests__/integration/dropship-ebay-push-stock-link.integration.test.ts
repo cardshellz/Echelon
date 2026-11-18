@@ -43,6 +43,7 @@ import type { DropshipLogEvent } from "../../application/dropship-ports";
 import type { DropshipMarketplaceCredentialRepository, DropshipMarketplaceStoreCredentials } from "../../infrastructure/dropship-marketplace-credentials";
 import * as destinationHealth from "../../../oms/dropship-stock-destination-health";
 import { FakeEbayInventory } from "../fixtures/fake-ebay-inventory";
+import { fixedImageInspector } from "../../../catalog/__tests__/fixtures/catalog-image-inspector.fixture";
 import { listingPushRunsMigrationSql } from "../fixtures/listing-push-runs.fixture";
 import { ebaySyncBackListingColumnsSql } from "../fixtures/ebay-sync-back.fixture";
 import { DropshipError } from "../../domain/errors";
@@ -218,7 +219,7 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
       { evaluateForStoreConnection: async () => preflight, evaluateWithAccessToken: async () => preflight },
       { ensureForStoreConnection: async () => location, ensureWithAccessToken: async () => location },
       createDropshipEbayQuantityRequestAdmission, new PostgresDropshipEbayPushPublicationReader(database.pool, observer),
-      { stockReadiness: gate, sleep: async ms => { providerSleeps.push(ms); await options.providerSleep?.(ms); },
+      { stockReadiness: gate, publishedImages: fixedImageInspector(), sleep: async ms => { providerSleeps.push(ms); await options.providerSleep?.(ms); },
         logger: { debug: () => {}, warn: () => {} } });
     const worker = new DropshipListingPushWorkerService({ repository: new PgDropshipListingPushWorkerRepository(database.pool),
       marketplacePush: provider, clock: { now: () => NOW }, logger: { info: record("info"), warn: record("warn"), error: record("error") } });
@@ -292,6 +293,7 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
       "POST /sell/inventory/v1/bulk_update_price_quantity",
       "POST /sell/inventory/v1/offer/fake-offer-1/publish",
       "GET /sell/inventory/v1/inventory_item/P5",
+      "POST /ws/api.dll",
     ]);
     // Canonical 17, never the intent's 999, on every quantity-bearing write.
     const putItem = h.fake.calls.find(call => call.method === "PUT" && call.path === "/sell/inventory/v1/inventory_item/P5");
@@ -335,7 +337,10 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
     expect(h.logs.filter(log => log.context?.outcome === "already_linked")).toHaveLength(1);
     expect(h.fake.offersForSku(F.sku)).toHaveLength(1);
     expect(h.fake.items.get(F.sku)?.packageWeightAndSize).toMatchObject({ packageType: "LARGE_ENVELOPE" });
-    expect(h.fake.calls.filter(call => call.path === "/ws/api.dll")).toHaveLength(2);
+    const nativeReads = h.fake.calls.filter(call => call.path === "/ws/api.dll");
+    expect(nativeReads).toHaveLength(4);
+    expect(nativeReads.some(call => JSON.stringify(call.body).includes("ShippingPackageDetails"))).toBe(true);
+    expect(nativeReads.some(call => JSON.stringify(call.body).includes("SellerProfiles"))).toBe(true);
   });
 
   it("replays the same item after a post-link eBay failure: same command, no second link, then it lists", async () => {
@@ -1180,7 +1185,7 @@ dbDescribe.sequential("Dropship eBay push with its automatic stock link, end to 
       const provider = new EbayDropshipListingPushProvider(credentials, fake.fetch, { now: () => NOW },
         { evaluateForStoreConnection: async () => preflight, evaluateWithAccessToken: async () => preflight },
         { ensureForStoreConnection: async () => location, ensureWithAccessToken: async () => location },
-        createDropshipEbayQuantityRequestAdmission, undefined, { stockReadiness: gate, sleep: async () => {} });
+        createDropshipEbayQuantityRequestAdmission, undefined, { stockReadiness: gate, publishedImages: fixedImageInspector(), sleep: async () => {} });
 
       await expect(provider.pushListing({ vendorId: F.vendorId, storeConnectionId: F.storeConnectionId, jobId: 1, jobItemId: 1, listingId: 1,
         productVariantId: F.variantId, platform: "ebay", listingIntent: intent({ quantity: 6 }) as never, existingExternalListingId: null,

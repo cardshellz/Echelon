@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ReturnCaseOperationError,
   ReturnCaseOperationService,
+  type PersistReturnDispositionInput,
   type ReturnCaseOperationAggregate,
   type ReturnCaseOperationStore,
   type ReturnCaseOperationTransaction,
@@ -507,7 +508,7 @@ describe("ReturnCaseOperationService", () => {
       inspectionStatus: "approved",
       inspection: terminalInspection(8, "approved"),
     }));
-    tx.persistDisposition.mockImplementation(async (input) => ({
+    tx.persistDisposition.mockImplementation(async (input: PersistReturnDispositionInput) => ({
       commandType: "record_disposition",
       caseId: input.aggregate.caseId,
       caseNumber: input.aggregate.caseNumber,
@@ -582,7 +583,7 @@ describe("ReturnCaseOperationService", () => {
       inspectionStatus: "not_required",
       inspectionRequirement: "none",
     }));
-    tx.persistDisposition.mockImplementation(async (input) => ({
+    tx.persistDisposition.mockImplementation(async (input: PersistReturnDispositionInput) => ({
       commandType: "record_disposition",
       caseId: input.aggregate.caseId,
       caseNumber: input.aggregate.caseNumber,
@@ -950,7 +951,7 @@ function aggregate(input: {
   logisticsStatus?: "awaiting_return" | "partially_received" | "received";
   wmsStatus?: "expected" | "partially_received" | "received";
   inspectionStatus?: "pending" | "in_progress" | "approved" | "rejected" | "not_required";
-  inspectionRequirement?: "required" | "conditional_required" | "none";
+  inspectionRequirement?: "required" | "conditional" | "none";
   receivedAt?: Date;
   inspection?: ReturnCaseOperationAggregate["actionContext"]["inspection"];
   disposition?: ReturnCaseOperationAggregate["actionContext"]["disposition"];
@@ -973,6 +974,9 @@ function aggregate(input: {
       { returnCaseItemId: 2, omsOrderLineId: 12, wmsOrderItemId: 22, productVariantId: 1002 },
     ],
     actionContext: {
+      businessContext: "retail",
+      channelProvider: "shopify",
+      vendorId: null,
       lifecycle: {
         caseStatus: "open",
         approvalStatus: "approved",

@@ -5,8 +5,10 @@ import type { OrderEditRewards } from "../application/order-edit-rewards";
 import { orderEditCodeRuleSchema } from "@shared/order-edits/order-edit-codes";
 import { rewardWidgetScopeSchema, rewardWidgetIssueSchema, rewardWidgetStateSchema, rewardWidgetIssueResultSchema,
   rewardWidgetManagementStateSchema, rewardWidgetCancelSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
-import type { CustomerRewards } from "../../customer-account/application/customer-rewards";
-import type { OrderCancellationRewards } from "../../customer-account/application/order-cancellation.ports";
+import type {
+  CustomerRewards,
+  OrderCancellationRewards,
+} from "../../customer-account/order-cancellation-contracts.api";
 import { cancellationRewardsSchema } from "@shared/customer-account/order-cancellation";
 
 /** Club's existing issuance and receipt service; ordinary coupons never use it. */

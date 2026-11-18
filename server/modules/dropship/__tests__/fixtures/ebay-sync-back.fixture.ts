@@ -56,6 +56,8 @@ export const ebaySyncBackBaseFixtureSql = `
   CREATE TABLE channels.channel_listings (channel_id integer, product_variant_id integer, external_product_id text, external_variant_id text,
     external_sku text);
   CREATE TABLE channels.ebay_listing_sync_jobs (product_id integer, operation text, identity jsonb, provider_identity jsonb, state text);
+  CREATE TABLE IF NOT EXISTS channels.ebay_listing_change_intents(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,channel_id integer,connection_id integer,product_id integer,product_variant_id integer,kind text,external_listing_id text,sku text,review_token text,actor text,opened_at timestamptz,closed_at timestamptz,close_reason text);
+  CREATE UNIQUE INDEX IF NOT EXISTS ebay_listing_change_intents_open_variant_idx ON channels.ebay_listing_change_intents(channel_id,product_variant_id) WHERE closed_at IS NULL;
   CREATE TABLE ebay.ebay_category_mappings (channel_id integer, product_type_slug text, listing_enabled boolean);
   CREATE TABLE inventory.publication_variant_mapping_heads (publication_target_id integer, product_variant_id integer, active_mapping_id bigint);
 

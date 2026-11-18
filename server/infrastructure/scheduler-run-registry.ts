@@ -105,6 +105,15 @@ export async function isBehindSchedule(
  *
  * Returns whether the pass actually ran, which is what the tests assert on.
  */
+function isCompletedRunResult(result: unknown): boolean {
+  if (!result || typeof result !== "object") return true;
+  const candidate = result as { allOk?: unknown; skipped?: unknown; status?: unknown };
+  if (candidate.skipped === true) return false;
+  if (candidate.allOk === false) return false;
+  if (typeof candidate.status === "string" && candidate.status !== "success") return false;
+  return true;
+}
+
 export async function runBootCatchUpIfBehind(input: {
   db: Db;
   jobKey: string;
@@ -117,7 +126,10 @@ export async function runBootCatchUpIfBehind(input: {
     console.log(`${logPrefix} Boot catch-up skipped - ${jobKey} is on schedule.`);
     return false;
   }
-  await run();
+  const result = await run();
+  if (!isCompletedRunResult(result)) {
+    return false;
+  }
   await recordRunCompleted(db, jobKey);
   return true;
 }

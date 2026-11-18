@@ -1,9 +1,11 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { view, policyHead, policyValue, previewRow, stockLinkStatus, target, HASH_A, HASH_B } from "../../client/src/features/channel-inventory/__tests__/fixtures";
 import type { StockLinkSupportedStatus } from "../../shared/types/stock-link";
 import type { ChannelPublicationStatus } from "../../shared/types/inventory-channel-publication-status";
 import type { ChannelDefinitionProgress, ChannelDefinitionReview } from "../../shared/types/inventory-channel-definition";
+import type { ChannelRuleProgress, ChannelRuleReview } from "../../shared/types/inventory-channel-rule";
 import type { InventoryChannelExposureAdminView, InventoryChannelExposurePreview } from "../../shared/types/inventory-channel-exposure";
 
 const BASE = "/api/inventory-planning/admin/channel-exposure";
@@ -38,7 +40,9 @@ async function setup(page: Page, options: {
   });
   const state = { data, writes: [] as Array<{ path: string; body: Record<string, unknown>; raw: string }>,
     applyLostResponse: false, applyConflict: false, reviewBlocked: false, progress: null as ChannelDefinitionProgress | null,
+    ruleProgress: null as ChannelRuleProgress | null, ruleApplyLostResponse: false, ruleReviews: [] as Array<Record<string, unknown>>,
     reads: [] as string[], errors: [] as string[], unexpected: [] as string[], loseResponse: false, conflict: false, invalidResponse: false,
+    copies: [] as Array<Record<string, unknown>>, copyRefused: false, copyLostResponse: false,
     enableFailed: false, enableLostResponse: false, globalFailed: false, globalChangeFailed: false, previewFailed: false, stopFailed: false,
     global: { globalEnabled: options.globalEnabled ?? true, sweepIntervalMinutes: 15, revision: "1",
       changedBy: "operator-1", changeReason: "Approved" as string | null, lastSweepAt: null },
@@ -68,14 +72,12 @@ async function setup(page: Page, options: {
         if (state.stockLinkReadFailure === 503) return route.fulfill({ status: 503, json: { error: { code: "SERVICE_UNAVAILABLE", message: "Try again." } } });
         return route.fulfill({ json: id === state.stockLink.publicationTargetId ? state.stockLink : { supported: false, publicationTargetId: id } });
       }
-      if (path === "/api/auth/me") return route.fulfill({ json: {
-        user: { id: "operator-1", username: "operator", role: "operator" }, roles: ["operator"],
-        permissions: options.permission === "none" ? [] : options.permission === "view" ? ["inventory_planning:view"]
-          : ["inventory_planning:view", "inventory_planning:edit", "inventory_planning:activate"],
-      } });
+      if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator-1", username: "operator", role: "operator" }, permissions: options.permission === "none" ? [] : options.permission === "view" ? ["inventory_planning:view"]
+          : ["inventory_planning:view", "inventory_planning:edit", "inventory_planning:activate"], systemRoles: [], assignedRoles: [{ id: 101, name: "operator", isSystem: false }] }) });
       if (path === BASE) return route.fulfill({ json: state.data });
       if (path === "/api/inventory-planning/admin/channel-definitions/3/progress") return route.fulfill({ json: state.progress });
       if ([4,104].some(id => path === `/api/inventory-planning/admin/channel-definitions/${id}/progress`)) return route.fulfill({ json: null });
+      if (path === "/api/inventory-planning/admin/channel-rule-definitions/progress") return route.fulfill({ json: state.ruleProgress });
       if (path === `${BASE}/preview`) return state.previewFailed
         ? route.fulfill({ status: 503, json: { error: { code: "PREVIEW_UNAVAILABLE", message: "Stock calculation could not be loaded." } } })
         : route.fulfill({ json: {
@@ -169,6 +171,30 @@ async function setup(page: Page, options: {
       if (state.applyLostResponse) { state.applyLostResponse = false; return route.abort("failed"); }
       return route.fulfill({ json: { ...state.progress.receipt, alreadyApplied } });
     }
+    if (req.method() === "POST" && path === "/api/inventory-planning/admin/channel-rule-definitions/review") {
+      const body = req.postDataJSON(); state.ruleReviews.push(body);
+      const review: ChannelRuleReview = { selection: body, scopeKey: "channel:3:variant:101", channelId: 3, channelName: "Shopify US", productId: 10,
+        authorityRevision: "9", activationRunId: "44", reviewHash: HASH_A, ready: true, blockers: [], skippedDestinations: [],
+        warnings: ["eBay / BOX-C25: The SKU has no active exact provider inventory identity for this publication target."],
+        change: { selection: { kind: "channel_policy", key: "channel:3:variant:101", definitionId: 2, definitionHash: HASH_B },
+          headRevision: "1", label: "CARD-P5", before: null, after: { eligible: false } },
+        quantities: [{ targetId: 5, channelName: "Shopify US", variantId: 101, sku: "CARD-P5", current: "60", proposed: "0" },
+          { targetId: 6, channelName: "eBay", variantId: 101, sku: "CARD-P5", current: "60", proposed: "60" }] };
+      return route.fulfill({ json: review });
+    }
+    if (req.method() === "POST" && path === "/api/inventory-planning/admin/channel-rule-definitions/apply") {
+      const body = req.postDataJSON(); state.writes.push({ path, body, raw: req.postData()! });
+      const alreadyApplied = state.ruleProgress !== null;
+      const receipt = { channelId: 3, appliedAt: AT, appliedBy: "operator-1", reviewHash: HASH_A, publicationIds: ["31"],
+        changedDefinitions: 1, alreadyApplied: false, scopeKey: "channel:3:variant:101", productId: 10, policyId: 2 };
+      state.ruleProgress = { receipt, publications: [{ id: "31", targetId: 5, variantId: 101, state: "verified", desiredQuantity: "0", errorCode: null }] };
+      // Only this rule becomes active; every other saved change on the channel stays a draft.
+      const index = state.data.policyHeads.findIndex(head => head.scopeKey === "channel:3:variant:101");
+      state.data.policyHeads[index] = policyHead({ scopeKey: "channel:3:variant:101", channelId: 3,
+        scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 }, active: policyValue({ eligible: false }), revision: "2" });
+      if (state.ruleApplyLostResponse) { state.ruleApplyLostResponse = false; return route.abort("failed"); }
+      return route.fulfill({ json: { ...receipt, alreadyApplied } });
+    }
     if (req.method() === "PUT" && ["policy-draft", "source-binding-draft", "variant-mapping-draft"].some(suffix => path === `${BASE}/${suffix}`)) {
       const body = req.postDataJSON();
       state.writes.push({ path, body, raw: req.postData()! });
@@ -185,6 +211,22 @@ async function setup(page: Page, options: {
       }
       return route.fulfill({ json: { definitionId: 2, version: 2, definitionHash: HASH_B, headRevision: "2", alreadyApplied: false,
         runtimeAuthorityChanged: false, providerWriteAttempted: false } });
+    }
+    if (req.method() === "POST" && path === "/api/inventory-planning/admin/channel-rule-definitions/copy") {
+      const body = req.postDataJSON();
+      state.copies.push(body);
+      if (state.copyRefused) return route.fulfill({ status: 409, json: { error: { code: "CHANNEL_RULE_COPY_BLOCKED",
+        message: "These rules would create a problem, so nothing was copied.", details: ["eBay / CARD-P5: shared stock is over-allocated."] } } });
+      // A reduced stand-in for the server: the target now has the source's default and one exception, in effect.
+      const targetId = body.targetChannelId as number;
+      state.data.policyHeads.push(
+        policyHead({ scopeKey: `channel:${targetId}`, channelId: targetId, scope: { scopeType: "channel", channelId: targetId }, active: defaults }),
+        policyHead({ scopeKey: `channel:${targetId}:variant:101`, channelId: targetId,
+          scope: { scopeType: "variant", channelId: targetId, productId: 10, productVariantId: 101 }, active: policyValue({ maxPublish: { mode: "units", units: "0" } }) }));
+      if (state.copyLostResponse) { state.copyLostResponse = false; return route.abort("failed"); }
+      return route.fulfill({ json: { receipt: { channelId: targetId, appliedAt: AT, appliedBy: "operator-1", reviewHash: HASH_A,
+        publicationIds: ["31"], changedDefinitions: 2, alreadyApplied: false }, sourceChannelId: body.sourceChannelId, sourceChannelName: "Shopify US",
+        targetChannelName: "eBay", copiedExceptions: 1, skippedRules: [], changedQuantities: 2, skippedDestinations: [], warnings: [] } });
     }
     state.unexpected.push(`${req.method()} ${path}`);
     return route.fulfill({ status: 500, json: { error: { code: "UNEXPECTED_TEST_REQUEST", message: "Unexpected request" } } });
@@ -388,9 +430,77 @@ test("channel default saves without a written reason or any activation call", as
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
+const COPY_CARD = "Copy stock rules from another channel";
+const EBAY_RULES = "?channel=4&destination=6&tab=rules";
+
+test("a channel with no stock rules copies another channel's rules in one step", async ({ page }, testInfo) => {
+  const state = await setup(page, { query: EBAY_RULES });
+  const card = page.locator("section").filter({ hasText: COPY_CARD }).first();
+  await expect(card).toBeVisible();
+  await expect(card.getByRole("button", { name: "Copy", exact: true })).toBeDisabled();
+  await card.getByRole("combobox", { name: "Copy stock rules from" }).click();
+  // Only a channel whose rules are in effect is offered, never the channel itself.
+  await expect(page.getByRole("option")).toHaveText(["Shopify US"]);
+  await page.getByRole("option", { name: "Shopify US", exact: true }).click();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("copy-stock-rules.png"), fullPage: true });
+  await card.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(page.getByTestId("copy-stock-rules-result"))
+    .toHaveText("Copied the default and 1 exception from Shopify US to eBay. 2 quantities sent to channels changed.");
+  expect(state.copies).toHaveLength(1);
+  expect(state.copies[0]).toMatchObject({ sourceChannelId: 3, targetChannelId: 4 });
+  expect(Object.keys(state.copies[0]).sort()).toEqual(["changeReason", "idempotencyKey", "sourceChannelId", "targetChannelId"]);
+  expect(state.copies[0].changeReason).toBeNull();
+  // The channel has rules now, so the offer is gone and nothing was saved as a draft.
+  await expect(page.getByText(COPY_CARD)).toHaveCount(0);
+  expect(state.writes).toEqual([]);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a refused copy says why, changes nothing and stays on offer", async ({ page }) => {
+  const state = await setup(page, { query: EBAY_RULES });
+  state.copyRefused = true;
+  const card = page.locator("section").filter({ hasText: COPY_CARD }).first();
+  await card.getByRole("combobox", { name: "Copy stock rules from" }).click();
+  await page.getByRole("option", { name: "Shopify US", exact: true }).click();
+  await card.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(page.getByTestId("copy-stock-rules-result"))
+    .toHaveText("Not copied. These rules would create a problem, so nothing was copied. eBay / CARD-P5: shared stock is over-allocated.");
+  await expect(card).toBeVisible();
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a lost copy response is reported as unknown, and the screen reloads what is in effect", async ({ page }) => {
+  const state = await setup(page, { query: EBAY_RULES });
+  state.copyLostResponse = true;
+  const card = page.locator("section").filter({ hasText: COPY_CARD }).first();
+  await card.getByRole("combobox", { name: "Copy stock rules from" }).click();
+  await page.getByRole("option", { name: "Shopify US", exact: true }).click();
+  await card.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(page.getByTestId("copy-stock-rules-result")).toContainText("The outcome is unknown.");
+  // The copy did land on the server; the reload shows the channel's rules and withdraws the offer.
+  await expect(page.getByText(COPY_CARD)).toHaveCount(0);
+  expect(state.copies).toHaveLength(1);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("copying is not offered to a channel that has rules, to view-only staff, or when no channel has rules", async ({ page }) => {
+  await setup(page);
+  await expect(page.getByText("Inventory settings for Shopify US", { exact: true })).toBeVisible();
+  await expect(page.getByText(COPY_CARD)).toHaveCount(0);
+  await setup(page, { query: EBAY_RULES, permission: "view" });
+  await expect(page.getByText("Inventory settings for eBay", { exact: true })).toBeVisible();
+  await expect(page.getByText(COPY_CARD)).toHaveCount(0);
+  await setup(page, { query: EBAY_RULES, viewOverrides: { policyHeads: [] } });
+  await expect(page.getByText("Inventory settings for eBay", { exact: true })).toBeVisible();
+  await expect(page.getByText(COPY_CARD)).toHaveCount(0);
+});
+
 test("new channels show editable suggestions and save them only after the operator chooses Save", async ({ page }, testInfo) => {
   const state = await setup(page, { viewOverrides: { policyHeads: [] } });
-  await expect(page.getByRole("radio", { name: "Available to sell", exact: true })).toBeChecked();
+  // Availability is not an operator choice any more: zero is a maximum of 0.
+  await expect(page.getByRole("radio", { name: "Available to sell", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("radio", { name: "Show as out of stock", exact: true })).toHaveCount(0);
   await expect(page.getByLabel("Stock percentage", { exact: true })).toHaveValue("100");
   await expect(page.getByRole("radio", { name: "Not set", exact: true })).toHaveCount(0);
   await expect(page.getByRole("radio", { name: "Set", exact: true })).toHaveCount(0);
@@ -403,7 +513,7 @@ test("new channels show editable suggestions and save them only after the operat
   await page.locator("summary").filter({ hasText: "Advanced stock rules" }).click();
   await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("0");
   await expect(page.getByRole("radio", { name: "No maximum", exact: true })).toBeChecked();
-  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("0");
+  await expect(page.getByLabel("Hide when below", { exact: true })).toHaveValue("0");
   await expect(page.getByRole("radio", { name: "Share available stock", exact: true })).toBeChecked();
   expect(state.writes).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
@@ -423,7 +533,7 @@ test("new channels show editable suggestions and save them only after the operat
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("saved out-of-stock, zero and partitioned settings survive an unrelated edit", async ({ page }) => {
+test("saved zero and partitioned settings survive an unrelated edit, and a retired out-of-stock flag is saved as the maximum of 0", async ({ page }) => {
   const existing = policyValue({
     eligible: false, shareBps: 0, holdbackSellableUnits: "0", maxPublish: { mode: "units", units: "0" },
     minPublishSellableUnits: "0", allocationSemantics: "partitioned",
@@ -431,32 +541,31 @@ test("saved out-of-stock, zero and partitioned settings survive an unrelated edi
   const state = await setup(page, { viewOverrides: { policyHeads: [policyHead({
     scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: existing,
   })] } });
-  await expect(page.getByRole("radio", { name: "Show as out of stock", exact: true })).toBeChecked();
+  await expect(page.getByRole("radio", { name: "Show as out of stock", exact: true })).toHaveCount(0);
   await expect(page.getByLabel("Stock percentage", { exact: true })).toHaveValue("0");
   await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("0");
   await expect(page.getByRole("radio", { name: "Limit quantity", exact: true })).toBeChecked();
   await expect(page.getByRole("textbox", { name: "Maximum displayed quantity", exact: true })).toHaveValue("0");
-  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("0");
+  await expect(page.getByLabel("Hide when below", { exact: true })).toHaveValue("0");
   await expect(page.getByRole("radio", { name: "Limit combined channel percentages", exact: true })).toBeChecked();
   expect(state.writes).toEqual([]);
 
   await page.getByLabel("Stock buffer", { exact: true }).fill("2");
   await page.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect.poll(() => state.writes.length).toBe(1);
-  expect(state.writes[0].body.value).toEqual({ ...existing, holdbackSellableUnits: "2" });
+  expect(state.writes[0].body.value).toEqual({ ...existing, eligible: true, holdbackSellableUnits: "2" });
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
 test("partial saved drafts retain missing values instead of silently adopting suggested defaults", async ({ page }) => {
-  const partial = policyValue({ eligible: false, shareBps: 2500 });
+  const partial = policyValue({ shareBps: 2500 });
   const state = await setup(page, { viewOverrides: { policyHeads: [policyHead({
     scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 },
     active: defaults, draft: partial, revision: "2",
   })] } });
-  await expect(page.getByRole("radio", { name: "Show as out of stock", exact: true })).toBeChecked();
   await expect(page.getByLabel("Stock percentage", { exact: true })).toHaveValue("25");
   await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Hide when below", { exact: true })).toHaveValue("");
   await expect(page.getByRole("radio", { name: "No maximum", exact: true })).not.toBeChecked();
   await expect(page.getByRole("radio", { name: "Limit quantity", exact: true })).not.toBeChecked();
   await expect(page.getByRole("radio", { name: "Share available stock", exact: true })).not.toBeChecked();
@@ -467,20 +576,21 @@ test("partial saved drafts retain missing values instead of silently adopting su
   await page.getByRole("button", { name: "Save draft", exact: true }).click();
   await expect.poll(() => state.writes.length).toBe(1);
   expect(state.writes[0].body).toMatchObject({ expectedHeadRevision: "2", expectedDraftPolicyId: 2 });
-  expect(state.writes[0].body.value).toEqual({ ...partial, shareBps: 3500 });
+  // A channel default always sends stock; only the fields the operator sets are filled in.
+  expect(state.writes[0].body.value).toEqual({ ...partial, eligible: true, shareBps: 3500 });
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("advanced stock rules edit the buffer and cutoff independently without enable-field controls", async ({ page }) => {
+test("advanced stock rules edit the buffer and hide-when-below independently without enable-field controls", async ({ page }) => {
   const state = await setup(page);
   await page.locator("summary").filter({ hasText: "Advanced stock rules" }).click();
   await page.getByLabel("Stock buffer", { exact: true }).fill("5");
-  await page.getByLabel("Out-of-stock cutoff", { exact: true }).fill("3");
+  await page.getByLabel("Hide when below", { exact: true }).fill("3");
   await page.getByRole("radio", { name: "Limit quantity", exact: true }).click();
   await page.getByRole("textbox", { name: "Maximum displayed quantity", exact: true }).fill("20");
   await page.getByRole("radio", { name: "Limit combined channel percentages", exact: true }).click();
   await expect(page.getByLabel("Stock buffer", { exact: true })).toHaveValue("5");
-  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toHaveValue("3");
+  await expect(page.getByLabel("Hide when below", { exact: true })).toHaveValue("3");
   await expect(page.getByRole("radio", { name: "Set", exact: true })).toHaveCount(0);
   await expect(page.getByText("20 units shown", { exact: true })).toBeVisible();
   await page.getByLabel("Example available stock", { exact: true }).fill("30");
@@ -559,10 +669,9 @@ test("no view permission means no inventory query or cached settings", async ({ 
 test("view-only access has no draft save controls", async ({ page }) => {
   const state = await setup(page, { permission: "view" });
   await expect(page.getByLabel("Stock percentage", { exact: true })).toBeDisabled();
-  await expect(page.getByRole("radio", { name: "Available to sell", exact: true })).toBeDisabled();
   await page.locator("summary").filter({ hasText: "Advanced stock rules" }).click();
   await expect(page.getByLabel("Stock buffer", { exact: true })).toBeDisabled();
-  await expect(page.getByLabel("Out-of-stock cutoff", { exact: true })).toBeDisabled();
+  await expect(page.getByLabel("Hide when below", { exact: true })).toBeDisabled();
   await expect(page.getByRole("radio", { name: "No maximum", exact: true })).toBeDisabled();
   await expect(page.getByRole("radio", { name: "Share available stock", exact: true })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Save draft", exact: true })).toHaveCount(0);
@@ -800,6 +909,63 @@ test("an existing SKU exception can restore complete inheritance as an audited d
   expect(state.writes[0].body).toMatchObject({ expectedHeadRevision: "1", value: { inheritAll: true, shareBps: null,
     allocationSemantics: null, eligible: null, holdbackSellableUnits: null, maxPublish: null, minPublishSellableUnits: null } });
   expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+async function openPendingSkuRule(page: Page, state: Awaited<ReturnType<typeof setup>>) {
+  state.data.policyHeads.push(policyHead({ scopeKey: "channel:3:variant:101", channelId: 3,
+    scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 }, draft: policyValue({ eligible: false }) }));
+  await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
+  await page.getByRole("button", { name: "Add exception", exact: true }).click();
+  const sheet = page.getByRole("dialog");
+  await sheet.getByRole("combobox").click(); await page.getByRole("option", { name: /Card Shell/ }).click();
+  await sheet.getByRole("radio", { name: "CARD-P5", exact: true }).click();
+  return sheet.getByRole("region", { name: "Apply this rule", exact: true });
+}
+
+test("one saved SKU rule applies on its own, without the channel's other saved changes", async ({ page }, testInfo) => {
+  // The channel default also has a saved draft: it must not be reviewed, applied or block this rule.
+  const state = await setup(page, { pending: true });
+  const panel = await openPendingSkuRule(page, state);
+  await expect(panel.getByRole("list", { name: "Quantity changes" })).toContainText("60 → 0");
+  await expect(panel.getByRole("list", { name: "Quantity changes" })).not.toContainText("60 → 60");
+  await expect(panel).toContainText("1 existing problem not caused by this rule");
+  await page.screenshot({ path: testInfo.outputPath("apply-one-sku-rule.png"), fullPage: true });
+  await panel.getByRole("button", { name: "Apply this rule", exact: true }).click();
+  await expect(panel.getByText("Last applied", { exact: false })).toBeVisible();
+  expect(state.ruleReviews[0]).toEqual({ scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 },
+    draftPolicyId: 2, expectedHeadRevision: "1", expectedDefinitionHash: HASH_B });
+  expect(state.writes).toHaveLength(1);
+  expect(state.writes[0].path).toBe("/api/inventory-planning/admin/channel-rule-definitions/apply");
+  expect(state.writes[0].body).toMatchObject({ draftPolicyId: 2, expectedHeadRevision: "1", expectedDefinitionHash: HASH_B, expectedReviewHash: HASH_A });
+  expect(state.data.policyHeads[0].draftPolicy).not.toBeNull();
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a lost rule-apply response retries the identical command", async ({ page }) => {
+  const state = await setup(page);
+  const panel = await openPendingSkuRule(page, state);
+  state.ruleApplyLostResponse = true;
+  await panel.getByRole("button", { name: "Apply this rule", exact: true }).click();
+  await expect(panel.getByText(/The apply outcome is unknown/)).toBeVisible();
+  await panel.getByRole("button", { name: "Retry same apply", exact: true }).click();
+  await expect(panel.getByText("Last applied", { exact: false })).toBeVisible();
+  expect(state.writes).toHaveLength(2);
+  expect(state.writes[1].raw).toBe(state.writes[0].raw);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("view-only roles see what a saved rule changes but cannot apply it", async ({ page }) => {
+  const state = await setup(page, { permission: "view" });
+  state.data.policyHeads.push(policyHead({ scopeKey: "channel:3:variant:101", channelId: 3,
+    scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 }, draft: policyValue({ eligible: false }) }));
+  await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
+  // No subject labels in this fixture, so the exception is listed by its SKU id.
+  await page.getByRole("button", { name: /SKU #101/ }).click();
+  const panel = page.getByRole("dialog").getByRole("region", { name: "Apply this rule", exact: true });
+  await expect(panel.getByRole("list", { name: "Quantity changes" })).toContainText("60 → 0");
+  await expect(panel).toContainText("Applying a rule needs inventory activation permission.");
+  await expect(panel.getByRole("button", { name: "Apply this rule", exact: true })).toHaveCount(0);
+  expect(state.writes).toEqual([]); expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
 

@@ -20,7 +20,7 @@ import {
 import {
   readPurchaseApprovalActor,
   readPurchaseApproverName,
-} from "../identity/infrastructure/purchase-approval-access.repository";
+} from "../identity/purchase-approval-authority.api";
 import { COGSService } from "../inventory/cogs.service";
 import { applyCostRevision } from "../inventory/application/apply-cost-revision";
 import { lotCostTotals } from "../inventory/domain/lot-cost";
@@ -221,7 +221,7 @@ async function executeRepair(
     },
     actorId,
     now,
-    false,
+    { kind: "nested" },
   );
   await restoreReceiptCostFields(tx, facts, choices.unitsPerCase, actorId, now);
   await recordReceiptCostOrigin(

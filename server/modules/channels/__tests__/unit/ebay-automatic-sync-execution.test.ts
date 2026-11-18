@@ -90,6 +90,15 @@ describe("automatic recovery inside the existing Sync command", () => {
       expect(failure.state).toBe("recovering");
       expect(failure.nextAttemptAt.getTime() - clock().getTime()).toBe(15 * 60_000);
     });
+  it.each(["EBAY_SYNC_READBACK_PENDING", "EBAY_PUBLICATION_READBACK_PENDING"])(
+    "backs off repeated %s verification when publication attempts were reset", code => {
+      const failure = syncFailure(Object.assign(new Error("not visible yet"), { code }), 1, clock(), 3, code);
+      expect(failure).toMatchObject({ state: "recovering", readRetry: { failures: 4, paused: false } });
+      expect(failure.nextAttemptAt.getTime() - clock().getTime()).toBe(8 * 60_000);
+      const paused = syncFailure(Object.assign(new Error("not visible yet"), { code }), 1, clock(), 4, code);
+      expect(paused.readRetry).toEqual({ failures: 5, paused: true });
+      expect(paused.nextAttemptAt.getTime() - clock().getTime()).toBe(15 * 60_000);
+    });
 });
 
 describe("listing status with independent stock evidence", () => {

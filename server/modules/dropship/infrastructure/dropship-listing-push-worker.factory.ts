@@ -12,6 +12,8 @@ import { createDropshipNotificationServiceFromEnv } from "./dropship-notificatio
 import { createDropshipListingPreviewServiceFromEnv } from "./dropship-listing-preview.factory";
 import { createDropshipCostChangePolicyServiceFromEnv } from "./dropship-cost-change-policy.factory";
 import { createDropshipMarketplaceSyncServiceFromEnv } from "./dropship-marketplace-sync.factory";
+import { createDropshipLiveListingZeroQuantityServiceFromEnv } from "./dropship-live-listing-zero-quantity.factory";
+import { readDropshipEbayStockAuthority } from "../../inventory-planning/quantity-publication";
 
 export function createDropshipListingPushWorkerServiceFromEnv(): DropshipListingPushWorkerService {
   const logger = makeDropshipListingPushWorkerLogger();
@@ -32,6 +34,10 @@ export function createDropshipListingPushWorkerServiceFromEnv(): DropshipListing
       syncListingBeforePush: (input) => marketplaceSync.syncListingBeforePush(input),
       recordPushAttempt: (input) => marketplaceSync.recordPushAttempt(input),
     },
+    // Stock gone between queue and push (the refresh's only blocker): 0 to a live listing under legacy authority,
+    // nothing under canonical (inventory planning publishes it), "waiting for stock" for a first publish.
+    zeroQuantity: createDropshipLiveListingZeroQuantityServiceFromEnv(),
+    quantityAuthority: () => readDropshipEbayStockAuthority(pool),
     clock: systemDropshipListingPushWorkerClock,
     logger,
   });

@@ -17,9 +17,9 @@ export interface PostgresImpactPlan {
 // use fewer runners; two minutes of measured test work is the initial target.
 export const SELECTED_POSTGRES_TARGET_MS = 120_000;
 const globalFiles = ["package.json", "package-lock.json", ".npmrc", ".nvmrc", "tsconfig.json",
-  "vitest.config.ts", "server/db.ts", "server/storage.ts"];
-const globalPrefixes = ["migrations/", "shared/", "test/fixtures/", "test/helpers/", "test/support/",
-  "server/platform/", "server/__tests__/", "scripts/", ".github/", "server/db/"];
+  "vitest.config.ts", "server/db.ts", "server/storage.ts", "shared/schema.ts", "shared/schema/index.ts"];
+const globalPrefixes = ["migrations/", "test/fixtures/", "test/helpers/", "test/support/",
+  "server/platform/", "server/__tests__/integration/", "scripts/ci/", "scripts/migrations/", ".github/", "server/db/"];
 const ownerFor = (file: string): string | null => /^server\/(modules\/[^/]+|platform)\//.exec(file)?.[1] ?? null;
 
 export function postgresSelectionShardCount(files: readonly string[]): number {
@@ -41,7 +41,7 @@ function plan(files: readonly string[], decisions: PostgresImpactPlan["decisions
 export function fullPostgresPlan(reason: string): PostgresImpactPlan {
   return plan(POSTGRES_TEST_FILES, [{ owner: "all", run: true, reason }]);
 }
-export function selectPostgresTests(evidence: ChangeEvidence): PostgresImpactPlan {
+export function selectPostgresTests(evidence: ChangeEvidence & { dependencyCache?: Map<unknown, unknown> }): PostgresImpactPlan {
   const owners = new Map<string, string[]>();
   for (const file of POSTGRES_TEST_FILES) {
     const owner = ownerFor(file);
@@ -56,7 +56,7 @@ export function selectPostgresTests(evidence: ChangeEvidence): PostgresImpactPla
         || (file.startsWith("server/") && !file.includes("/__tests__/unit/") && !owners.has(ownerFor(file) ?? "")))
       return fullPostgresPlan("Unclassified server ownership: " + file);
   }
-  const dependencyCache = new Map();
+  const dependencyCache = evidence.dependencyCache ?? new Map();
   const decisions: PostgresImpactPlan["decisions"] = [];
   const selected = new Set<string>();
   for (const [owner, suites] of owners) {
@@ -66,7 +66,7 @@ export function selectPostgresTests(evidence: ChangeEvidence): PostgresImpactPla
     const decision = selectTestImpact({ ...evidence, dependencyCache, coverage: {
       roots: () => [], testPattern, ownedFiles, ownedPrefixes: [], globalFiles, globalPrefixes,
       globalPattern: /^(?:tsconfig[^/]*\.json|vitest[^/]*\.[cm]?[jt]s)$/,
-      knownPrefixes: ["client/", "server/", "test/browser/", "docs/"],
+      knownPrefixes: ["client/", "server/", "shared/", "scripts/", "test/browser/", "docs/"],
       knownPattern: /^(?:README|AGENTS|LICENSE)(?:\.[^/]*)?$/,
     } });
     if (hasUncertainImpact(decision)) return fullPostgresPlan(decision.reason);

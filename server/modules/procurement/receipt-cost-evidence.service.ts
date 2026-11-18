@@ -1,3 +1,5 @@
+import { readPurchaseCostSource } from "./purchase-cost-source.repository";
+import { resolvePurchaseCostSource } from "./domain/purchase-cost-source";
 import { recordPurchaseCostRevisions } from "./purchase-cost-application.service";
 import { recordShipmentCostRevisions } from "./shipment-cost-application.service";
 import { sql } from "drizzle-orm";
@@ -50,13 +52,20 @@ export async function resolveReceiptCostEvidence(
       "These invoice quantities were fully returned and credited. Review the replacement invoice and return source before accepting new stock.",
       { receivingLineId: input.receivingLineId });
   }
-  const actual = productSource?.evidence === "confirmed" && packagingSource?.evidence === "confirmed"
+  const receiptSpecific = productSource?.receiptCostSegments !== undefined;
+  const actual = !receiptSpecific && productSource?.evidence === "confirmed" && packagingSource?.evidence === "confirmed"
     && productSource.currency === "USD" && packagingSource.currency === "USD"
     && productSource.totalMills !== null && packagingSource.totalMills !== null && productSource.basePieces !== null;
   const qty = actual ? productSource!.basePieces! : quotedQty;
-  const productTotal = actual ? productSource!.totalMills! : line.currency === "USD"
+  // New physical receiving has no approved invoice assignment yet. Keep its
+  // own PO estimate (including the selected tax rule), never a blend of older receipts.
+  const currentSource = receiptSpecific ? await readPurchaseCostSource(tx, input.purchaseOrderLineId) : null;
+  const quote = currentSource ? resolvePurchaseCostSource({ purchaseOrderLine: { ...currentSource.purchaseOrderLine, status: "open" }, approvedInvoices: [] }) : [];
+  const provisionalProduct = quote.find(row => row.component === "product")?.totalMills;
+  const provisionalPackaging = quote.find(row => row.component === "packaging")?.totalMills;
+  const productTotal = receiptSpecific && provisionalProduct !== null && provisionalProduct !== undefined ? provisionalProduct : actual ? productSource!.totalMills! : line.currency === "USD"
     ? costInteger((BigInt(costInteger(line.total_product_cost_cents, "productCents")) * BigInt(100)).toString(), "productMills") : 0;
-  const packagingTotal = actual ? packagingSource!.totalMills! : line.currency === "USD"
+  const packagingTotal = receiptSpecific && provisionalPackaging !== null && provisionalPackaging !== undefined ? provisionalPackaging : actual ? packagingSource!.totalMills! : line.currency === "USD"
     ? costInteger((BigInt(costInteger(line.packaging_cost_cents, "packagingCents")) * BigInt(100)).toString(), "packagingMills") : 0;
   let landedMills = 0;
   let freightPending = input.inboundShipmentId !== null;

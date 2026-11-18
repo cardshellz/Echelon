@@ -10,7 +10,7 @@ vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 import { registerDropshipListingContentRoutes } from "../../interfaces/http/dropship-listing-content.routes";
 import { CONTENT_PROFILE_TOO_LARGE_MESSAGE, DROPSHIP_BULK_JSON_LIMIT_BYTES } from "../../interfaces/http/dropship-bulk-json.middleware";
 import { installGlobalJsonBodyParser } from "../../../shipping-engine/interfaces/http/rate-table-admin-body.middleware";
-const content = { storeConnectionId: 22, productVariantId: 101, customText: null, revisionId: null, updatedAt: null,
+const content = { storeConnectionId: 22, productVariantId: 101, customText: null, revisionId: null as number | null, updatedAt: null,
   resolved: resolveListingContent({ candidate: contentCandidate(), profile: noContentProfile, saved: null }) };
 const input = { customText: "My copy", expectedRevisionId: null, expectedProfileRevisionId: null,
   expectedCatalogHash: content.resolved.catalogHash, idempotencyKey: "content-save" };

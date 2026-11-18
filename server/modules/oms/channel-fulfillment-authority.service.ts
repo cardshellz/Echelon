@@ -11,7 +11,7 @@ import {
   resolveReviewedChannelFulfillmentNotifyCustomer,
 } from "./channel-fulfillment-notification.policy";
 
-import { EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT } from "../channels/adapters/ebay/ebay-api.client";
+import { EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT } from "../channels/ebay-connector.api";
 import { DROPSHIP_WRITEBACK_PROVIDER } from "./channel-fulfillment-authority.policy";
 import { isEbayTrackingConflictError } from "./channel-fulfillment-conflict";
 import {

@@ -1422,6 +1422,59 @@ describeDatabase.sequential("publish runs (PostgreSQL)", () => {
 
   // Rebase of PR A onto PR 1b: the scheduled sweep runs 1b's recovery first, then the run steps, then the claims
   // (dropship-listing-push-job-runner runDropshipListingPushSweep).
+  describe("the run notice leaves out sizes only waiting for stock", () => {
+    it("excludes a stock-only blocked size never on eBay; keeps one with another blocker and one with an eBay item number", async () => {
+      const sizes = await seedSizes(4);
+      const [waiting, otherBlocker, onEbay, published] = sizes as [number, number, number, number];
+      const run = await pool.query<{ id: string }>(`INSERT INTO dropship.dropship_listing_push_runs (vendor_id, store_connection_id,
+        scope, status, idempotency_key, request_hash, target_count, chunk_size, chunk_count, actor_type, created_at, updated_at)
+        VALUES ($1, $2, 'all', 'processing', 'run-waiting-stock', $3, 4, 500, 1, 'vendor', $4, $4) RETURNING id`,
+      [VENDOR, STORE, "b".repeat(64), PRESS]);
+      const runId = Number(run.rows[0]!.id);
+      const job = await pool.query<{ id: number }>(`INSERT INTO dropship.dropship_listing_push_jobs
+        (vendor_id, store_connection_id, status, run_id, run_chunk_index, created_at, updated_at, completed_at)
+        VALUES ($1, $2, 'failed', $3, 0, $4, $4, $4) RETURNING id`, [VENDOR, STORE, runId, PRESS]);
+      const jobId = job.rows[0]!.id;
+      const seeded: Array<[number, string, string | null, string | null, string | null]> = [
+        // [size, item status, item error code, item error message (the joined blockers), the listing's eBay item number]
+        [waiting, "blocked", "DROPSHIP_LISTING_PREVIEW_BLOCKED", "marketplace_quantity_unavailable", null],
+        [otherBlocker, "blocked", "DROPSHIP_LISTING_PREVIEW_BLOCKED", "marketplace_quantity_unavailable, variant_not_selected", null],
+        [onEbay, "blocked", "DROPSHIP_LISTING_PREVIEW_BLOCKED", "marketplace_quantity_unavailable", "EBAY-ON-1"],
+        [published, "completed", null, null, "EBAY-DONE-1"],
+      ];
+      for (const [size, status, code, message, externalListingId] of seeded) {
+        const listing = await pool.query<{ id: number }>(`INSERT INTO dropship.dropship_vendor_listings
+          (vendor_id, store_connection_id, product_variant_id, platform, status, external_listing_id)
+          VALUES ($1, $2, $3, 'ebay', $4, $5) RETURNING id`,
+        [VENDOR, STORE, size, status === "completed" ? "active" : "blocked", externalListingId]);
+        const item = await pool.query<{ id: number }>(`INSERT INTO dropship.dropship_listing_push_job_items
+          (job_id, listing_id, product_variant_id, status, error_code, error_message, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $7) RETURNING id`, [jobId, listing.rows[0]!.id, size, status, code, message, PRESS]);
+        await pool.query(`INSERT INTO dropship.dropship_listing_push_run_targets
+          (run_id, product_variant_id, chunk_index, outcome, code, job_id, job_item_id, decided_at) VALUES ($1, $2, 0, $3, $4, $5, $6, $7)`,
+        [runId, size, runTargetOutcomeForItem({ status, errorCode: code }), code, jobId, item.rows[0]!.id, PRESS]);
+      }
+
+      // The finish (inside its transaction) and the recovered notice (on the pool) read the same facts.
+      const repository = new PgDropshipListingPushRunSweepRepository(pool);
+      const [finished] = await repository.finishRuns({ now: PRESS, problemLimit: 25 });
+      expect(finished).toMatchObject({ run: { runId, status: "partial" }, waitingForStockCount: 1,
+        counts: { completed: 1, blocked: 3 } });
+      expect(finished!.problems.map((problem) => problem.productVariantId)).toEqual([otherBlocker, onEbay]);
+      const [awaiting] = await repository.listRunsAwaitingNotice({ now: PRESS, windowMs: 60_000, limit: 5, problemLimit: 25 });
+      expect(awaiting).toMatchObject({ run: { runId }, waitingForStockCount: 1, counts: { completed: 1, blocked: 3 } });
+      expect(awaiting!.problems.map((problem) => problem.productVariantId)).toEqual([otherBlocker, onEbay]);
+
+      // The notice counts the two real problems only; the run's status and counts stay as stored.
+      await services().sweepService.reconcileAndFinish();
+      expect(notices).toHaveLength(1);
+      expect(notices[0]!.message).toMatch(/^2 of 4 listings didn't publish to your eBay store\./);
+      expect(notices[0]!.payload).toMatchObject({ waitingForStockCount: 1, omittedProblemCount: 0, counts: { completed: 1, blocked: 3 } });
+      expect(await runRow(runId)).toMatchObject({ status: "partial" });
+      expect(await outcomeCounts(runId)).toEqual({ blocked: 3, completed: 1 });
+    }, REPLAY_TIMEOUT_MS);
+  });
+
   describe("one sweep with PR 1b's listing push recovery", () => {
     /** A listing an earlier release demoted: a push published it live, then a later update's failure wrote 'failed'. */
     async function seedDemotedLiveListing(productVariantId: number): Promise<number> {

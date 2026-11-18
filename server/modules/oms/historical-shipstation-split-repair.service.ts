@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { normalizeShipStationV1Date } from "@shared/utils/shipstation-date";
 
 import type { ShipStationShipment } from "./shipstation.service";
-import { parseExactPositiveWmsShipmentItems } from "../shipping/shipstation-provider-contents.domain";
+import { parseExactPositiveWmsShipmentItems } from "../shipping/shipstation-provider-reconciliation.api";
 
 export const HISTORICAL_SPLIT_REPAIR_SOURCE =
   "historical_ss_split_repair";

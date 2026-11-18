@@ -106,8 +106,12 @@ export function registerCustomerReturnCustomerAuthRoutes(app: Express, dependenc
       const { proof } = z.object({ proof: z.string().min(1).max(RETURN_CUSTOMER_ENCODED_PROOF_MAX_LENGTH).regex(/^[A-Za-z0-9_-]+$/) }).strict().parse(req.body);
       const session = await auth.authenticate(req.session.returnLoginBrowserKey ?? "", proof);
       const user = req.session.user;
+      const staffCredentialVersion = req.session.staffCredentialVersion;
+      const staffCredentialCompletion = req.session.staffCredentialCompletion;
       await new Promise<void>((resolve, reject) => req.session.regenerate(error => error ? reject(error) : resolve()));
       if (user) req.session.user = user;
+      if (user && staffCredentialVersion) req.session.staffCredentialVersion = staffCredentialVersion;
+      if (staffCredentialCompletion) req.session.staffCredentialCompletion = staffCredentialCompletion;
       req.session.customerReturnSession = session;
       req.session.cookie.secure = true;
       await save(req);

@@ -30,7 +30,12 @@ import { readChannelMerchandiseCapability, type ChannelMerchandiseCapabilityRead
 import { isMerchandiseOrderCancelled } from "./domain/order-merchandise-state";
 import { assertChannelMerchandiseDispatchQuantities } from "./domain/channel-merchandise-dispatch";
 import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
-import { registerStoppedRefundDeferredShipment } from "../order-edits/infrastructure/order-edit-deferred-shipment";
+import { registerStoppedRefundDeferredShipment } from "../order-edits/oms-coordination.api";
+import {
+  recomputeWmsOrderStatusAndCountsAfterLineSyncInWms,
+  updateWmsOrderAggregateCountsInWms,
+  updateWmsOrderSlaAndPromotionInWms,
+} from "../wms/wms-order-mutations.api";
 import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
 import { shopifyMerchandiseSnapshotSchema, type ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
 import {
@@ -61,7 +66,7 @@ import {
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import { omsOrderEvents } from "@shared/schema/oms.schema";
 import type { ServiceRegistry } from "../../services";
-import { computeSortRank, getShippingBase, resolveSlaDueAt, type ShippingServiceLevel } from "../orders/sort-rank";
+import { computeSortRank, getShippingBase, resolveSlaDueAt, type ShippingServiceLevel } from "../orders/sort-rank-and-priority.api";
 import { getSlaCutoffConfig } from "../warehouse/settings.resolver";
 import { selectPickBinCandidate } from "../warehouse/pick-bin-candidate";
 import {
@@ -77,24 +82,25 @@ import {
   PROVIDER_MEMBERSHIP_PENDING_APPEND,
   linkChildToParentShipment,
   ChildWithoutParentShipmentError,
-} from "../wms/create-shipment";
-import { WMS_ORDER_SHIPMENT_LOCK_NAMESPACE } from "../wms/shipment-lock-namespaces";
+} from "../wms/shipment-execution-and-projection.api";
+import { WMS_ORDER_SHIPMENT_LOCK_NAMESPACE } from "../wms/shipment-execution-and-projection.api";
 import {
   appendUncoveredItemsToShipment,
   createLateEditResidualShipment,
-} from "../wms/late-order-shipment-coverage";
+} from "../wms/shipment-execution-and-projection.api";
 import {
   selectLateOrderShipmentTarget,
-} from "../wms/late-order-shipment-selection";
+} from "../wms/shipment-execution-and-projection.api";
 import {
   insertWmsOrderItems,
   reconcileWmsOrderItemAuthority,
   refreshWmsOrderItemFinancialSnapshotsFromOms,
   replaceUnstartedWmsOrderItemsForRepair,
   updateWmsOrderItemCatalogSnapshot,
-} from "../wms/order-item-commands";
+} from "../wms/order-intake-and-items.api";
 import {
   enqueueShippingEngineShipmentAmendRetry,
+  enqueueShippingEngineShipmentQuantityAmendRetry,
   enqueueShipStationShipmentPushRetry,
   enqueueShipStationSortRankSyncRetry,
 } from "./webhook-retry.worker";
@@ -108,7 +114,7 @@ import {
 import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
 import { selectWmsCatalogSku } from "./domain/order-line-catalog-identity";
 import { createOrderLineCatalogIdentityRepository } from "./infrastructure/order-line-catalog-identity.repository";
-import type { ReservationResult } from "../channels/reservation.service";
+import type { ReservationResult } from "../inventory-planning/reservation-authority.api";
 
 type WmsBinLocation = { location: string; zone: string };
 type DbLike = typeof db | any;
@@ -357,6 +363,7 @@ type WmsReconciliationAutoRepairRule =
   | "create_missing_initial_shipment"
   | "attach_authorized_line_to_planned_shipment"
   | "attach_authorized_line_to_editable_engine_order"
+  | "amend_engine_line_quantity"
   | "create_late_edit_residual_shipment";
 
 type WmsReconciliationManualReviewRule =
@@ -553,7 +560,7 @@ interface WmsSyncServices {
    */
   memberResolver?: Pick<MemberResolver, "resolve">;
   slaMonitor?: any;
-  shippingEngine?: import("../shipping/engine").ShippingEngine;
+  shippingEngine?: import("../shipping/engine-and-reconcile.api").ShippingEngine;
   shipStation?: any;
   omsService?: any;
 }
@@ -2261,7 +2268,7 @@ export class WmsSyncService {
   }
 
   private async cancelExistingWmsOrderForFinalOmsOrder(omsOrderId: number): Promise<void> {
-    const { cancelWmsOrderAndRelease } = await import("../orders/cancel-wms-order");
+    const { cancelWmsOrderAndRelease } = await import("../orders/order-lifecycle-and-cancellation.api");
     const rows: any = await db.execute(sql`
       SELECT id FROM wms.orders
        WHERE (
@@ -2354,17 +2361,14 @@ export class WmsSyncService {
       return { updated: false, sortRankChanged: false, promoted: false };
     }
 
-    await db
-      .update(wmsOrders)
-      .set({
-        ...(promoted ? { warehouseStatus: "ready" } : {}),
-        channelShipByDate: nextChannelShipByDate,
-        slaDueAt: nextSlaDueAt,
-        slaStatus: slaStatusFor(nextSlaDueAt),
-        sortRank: nextSortRank,
-        updatedAt: new Date(),
-      })
-      .where(eq(wmsOrders.id, wmsOrderId));
+    await updateWmsOrderSlaAndPromotionInWms(db, wmsOrderId, {
+      promoted,
+      channelShipByDate: nextChannelShipByDate,
+      slaDueAt: nextSlaDueAt,
+      slaStatus: slaStatusFor(nextSlaDueAt),
+      sortRank: nextSortRank,
+      updatedAt: new Date(),
+    });
 
     if (promoted) {
       console.log(
@@ -2779,52 +2783,7 @@ export class WmsSyncService {
       }))
       .filter((item) => Number.isInteger(item.id) && item.id > 0 && item.quantity > 0);
 
-    await db.execute(sql`
-      UPDATE wms.orders w
-         SET warehouse_status = CASE
-               WHEN w.warehouse_status IN ('cancelled', 'pending', 'awaiting_3pl')
-                 THEN w.warehouse_status
-               WHEN EXISTS (
-                 SELECT 1
-                 FROM wms.order_items pending_items
-                 WHERE pending_items.order_id = w.id
-                   AND COALESCE(pending_items.requires_shipping, 1) <> 0
-                   AND COALESCE(pending_items.quantity, 0) > 0
-                   AND COALESCE(pending_items.quantity, 0) > COALESCE(pending_items.fulfilled_quantity, 0)
-                   AND pending_items.status NOT IN ('cancelled', 'completed')
-               ) THEN 'ready'
-               WHEN (
-                 SELECT COUNT(*) FROM wms.order_items all_items
-                 WHERE all_items.order_id = w.id
-               ) = 0 THEN 'cancelled'
-               -- Anything else means the order has lines but none of them are
-               -- pickable right now. That is not evidence of completion, and
-               -- this rollup has none: it cannot see picks or shipments, and it
-               -- never stamps completed_at. It used to answer 'completed' here,
-               -- which marked orders #62269 and #62226 done while they sat
-               -- unpicked with zero units - and 'completed' is terminal, so the
-               -- repair pass skipped them for three days. Completion is owned by
-               -- completeOrder() and updateOrderStatus(), which check the
-               -- transition is legal and record when it happened. Leave the
-               -- status alone and let the writers with evidence move it.
-               ELSE w.warehouse_status
-             END,
-             item_count = agg.item_count,
-             unit_count = agg.unit_count,
-             picked_count = agg.picked_count,
-             updated_at = NOW()
-        FROM (
-          SELECT
-            order_id,
-            COUNT(*)::int AS item_count,
-            COALESCE(SUM(quantity), 0)::int AS unit_count,
-            COALESCE(SUM(picked_quantity), 0)::int AS picked_count
-          FROM wms.order_items
-          WHERE order_id = ${wmsOrderId}
-          GROUP BY order_id
-        ) agg
-       WHERE w.id = agg.order_id
-    `);
+    await recomputeWmsOrderStatusAndCountsAfterLineSyncInWms(db, wmsOrderId);
 
     await this.refreshOmsLineMaterializedQuantities(omsOrderId);
 
@@ -3016,6 +2975,31 @@ export class WmsSyncService {
             useXactLock: true,
           },
         );
+        // An order item already in the engine's order grows in place: the
+        // engine line's quantity is amended (one row per order item per
+        // package). #65696 stranded 2 units here because the old code tried to
+        // insert a second row and hit the unique index.
+        for (const increase of attached.quantityIncreases) {
+          await enqueueShippingEngineShipmentQuantityAmendRetry(
+            tx,
+            target.id,
+            increase.shipmentItemId,
+            `OMS order edit raised order item ${increase.orderItemId} from ${increase.fromQuantity} to ${increase.toQuantity} after shipping-engine push`,
+          );
+          await this.recordWmsReconciliationAuditEvent(
+            tx,
+            omsOrderId,
+            "amend_engine_line_quantity",
+            {
+              wmsOrderId,
+              wmsShipmentId: target.id,
+              outboundShipmentItemId: increase.shipmentItemId,
+              orderItemId: increase.orderItemId,
+              fromQuantity: increase.fromQuantity,
+              toQuantity: increase.toQuantity,
+            },
+          );
+        }
         if (attached.shipmentItemIds.length > 0) {
           await enqueueShippingEngineShipmentAmendRetry(
             tx,
@@ -3039,7 +3023,7 @@ export class WmsSyncService {
         }
         return attached;
       });
-      updatedShipments += coverage.shipmentItemIds.length;
+      updatedShipments += coverage.shipmentItemIds.length + coverage.quantityIncreases.length;
       return { insertedItems: insertedItems.length, updatedShipments };
     }
 
@@ -3386,14 +3370,12 @@ export class WmsSyncService {
         0,
       );
 
-      await db.execute(sql`
-        UPDATE wms.orders SET
-          item_count = ${newItemCount},
-          unit_count = ${newUnitCount},
-          picked_count = ${newPickedCount},
-          updated_at = NOW()
-        WHERE id = ${wmsOrderId}
-      `);
+      await updateWmsOrderAggregateCountsInWms(db, {
+        wmsOrderId,
+        itemCount: newItemCount,
+        unitCount: newUnitCount,
+        pickedCount: newPickedCount,
+      });
 
       await this.refreshOmsLineMaterializedQuantities(omsOrderId);
     }

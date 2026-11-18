@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { reviewRfqQuantity } from "../../shared/procurement/rfq-quantity-review";
 import { expect, test, type Page, type Locator } from "@playwright/test";
 import { resolve } from "node:path";
@@ -41,7 +42,7 @@ async function setup(page: Page, options: { canEdit?: boolean; currency?: string
   const replays = new Map<string, unknown>();
   let lost = false;
   const controls = { actorId: "rfq-reviewer", canEdit: options.canEdit !== false, postStatus: 0, loseNext: false, malformedNext: false, listStatus: 0, hideSecond: false };
-  await page.route("**/api/auth/me", (route) => route.fulfill({ json: { user: { id: controls.actorId, username: "test", role: "admin" }, permissions: controls.canEdit ? ["purchasing:view", "purchasing:edit"] : ["purchasing:view"], roles: ["admin"] } }));
+  await page.route("**/api/auth/me", (route) => route.fulfill({ json: staffAuthorityFixture({ user: { id: controls.actorId, username: "test", role: "admin" }, permissions: controls.canEdit ? ["purchasing:view", "purchasing:edit"] : ["purchasing:view"], systemRoles: ["admin"] }) }));
   await page.route("**/api/purchasing/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;

@@ -18,6 +18,8 @@ import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { ShopifyProductSearch, isShopifyProductReference } from "./ShopifyProductSearch";
+import { ProductSyncWorkflowDialog } from "@/features/channel-inventory/components/ProductSyncWorkflowDialog";
 
 const ROWS_PER_PAGE = 25;
 
@@ -55,14 +57,17 @@ function VariantChoice(props: {
 }
 
 export function ShopifyProductConnectionActions({ productId }: { productId: number }) {
-  const { hasPermission } = useAuth();
+  const { user, hasPermission } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const allowed = hasPermission("inventory", "edit") && hasPermission("channels", "edit");
+  const canLink = allowed && hasPermission("inventory_planning", "activate") && hasPermission("inventory_planning", "view");
+  const [inventorySyncRequestId, setInventorySyncRequestId] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<"create" | "link">("link");
   const [channelId, setChannelId] = useState<number | undefined>();
   const [target, setTarget] = useState("");
+  const [searchText, setSearchText] = useState("");
   const [prices, setPrices] = useState<Record<string, string>>({});
   const [comparisons, setComparisons] = useState<Record<string, string>>({});
   const [bindings, setBindings] = useState<Record<string, string>>({});
@@ -75,6 +80,7 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
   const [error, setError] = useState<string | null>(null);
   const [page, setPage] = useState(0);
   const initialized = useRef<number | null>(null);
+  const reviewVersion = useRef(0);
   const handledTerminal = useRef<string | null>(null);
   const base = `/api/products/${productId}/shopify-connection`;
   const contextUrl = `${base}${channelId ? `?channelId=${channelId}` : ""}`;
@@ -93,9 +99,11 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
   useEffect(() => {
     if (!open || !context || initialized.current === context.channelId) return;
     initialized.current = context.channelId;
+    reviewVersion.current += 1;
     setPrices(Object.fromEntries(context.variants.map(variant => [String(variant.id), variant.priceCents === null ? "" : formatShopifyConnectionMoney(variant.priceCents)])));
     setComparisons(Object.fromEntries(context.variants.map(variant => [String(variant.id), variant.compareAtPriceCents === null ? "" : formatShopifyConnectionMoney(variant.compareAtPriceCents)])));
     setTarget(mode === "link" ? context.matchingProducts[0]?.id || "" : "");
+    setSearchText(mode === "link" ? context.matchingProducts[0]?.title || "" : "");
     setBindings({}); setPublicationId(null); setRequiresShipping(true); setReview(null); setReviewRequest(null); setDirty(true); setPage(0);
   }, [context, open, mode]);
 
@@ -133,9 +141,15 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
     mutationFn: async () => { const reviewedRequest = request(); return {
       request: reviewedRequest, preview: await shopifyProductFetch(`${base}/preview`, reviewedRequest, shopifyProductConnectionPreviewSchema),
     }; },
-    onMutate: () => setError(null),
-    onSuccess: result => { setReview(result.preview); setReviewRequest(result.request); setDirty(false); setSubmitted(null); },
-    onError: failure => setError(failure instanceof Error ? failure.message : "The Shopify product could not be reviewed."),
+    onMutate: () => { setError(null); return reviewVersion.current; },
+    onSuccess: (result, _variables, version) => {
+      // Closing/reopening or changing the form invalidates an outstanding read.
+      if (version !== reviewVersion.current) return;
+      setReview(result.preview); setReviewRequest(result.request); setDirty(false); setSubmitted(null);
+    },
+    onError: (failure, _variables, version) => {
+      if (version === reviewVersion.current) setError(failure instanceof Error ? failure.message : "The Shopify product could not be reviewed.");
+    },
   });
 
   const executeMutation = useMutation({
@@ -171,8 +185,13 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
     if (handledTerminal.current === command.commandKey) return;
     handledTerminal.current = command.commandKey;
     await invalidate(); setSubmitted(null); setReview(null); setError(null); setOpen(false);
+    // ATP status is scoped to the original operator. Another operator can resume
+    // the link without trying to read or re-admit someone else's ATP request.
+    const ownSync = command.inventorySyncRequestId && command.inventorySyncRequestedBy === user?.id;
+    if (ownSync) setInventorySyncRequestId(command.inventorySyncRequestId!);
     toast({ title: command.mode === "create" ? "Shopify product created and connected" : "Shopify product linked",
-      description: command.remoteProductId ? `Shopify product ${command.remoteProductId}` : undefined });
+      description: command.inventorySyncRequestId && !ownSync ? "Inventory sync is recorded for the original operator. Channel Inventory shows channel delivery."
+        : command.remoteProductId ? `Shopify product ${command.remoteProductId}` : undefined });
   }
   useEffect(() => {
     const command = statusQuery.data;
@@ -187,10 +206,11 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
 
   const pending = statusQuery.data && !["complete", "rejected"].includes(statusQuery.data.state) ? statusQuery.data : context?.pendingCommand;
   const busy = contextQuery.isFetching || reviewMutation.isPending || executeMutation.isPending;
-  const locked = Boolean(pending || submitted || executeMutation.isPending);
-  const change = () => { setDirty(true); setError(null); };
+  const locked = Boolean(pending || submitted || executeMutation.isPending || reviewMutation.isPending);
+  const change = () => { reviewVersion.current += 1; setDirty(true); setError(null); };
   const start = (nextMode: "create" | "link") => {
-    initialized.current = null; setMode(nextMode); setChannelId(undefined); setTarget(""); setReview(null); setReviewRequest(null);
+    reviewVersion.current += 1;
+    initialized.current = null; setMode(nextMode); setChannelId(undefined); setTarget(""); setSearchText(""); setReview(null); setReviewRequest(null);
     setSubmitted(null); setError(null); setPage(0); setOpen(true);
   };
   const resume = () => {
@@ -208,7 +228,8 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
 
   return <>
     <div className="flex flex-wrap gap-2">
-      <Button variant="outline" size="sm" onClick={() => start("link")} disabled={!allowed || executeMutation.isPending}>
+      <Button variant="outline" size="sm" onClick={() => start("link")} disabled={!canLink || executeMutation.isPending}
+        title={!canLink ? "Inventory, channel editing and inventory activation permissions are required to link and sync." : undefined}>
         <ArrowRightLeft className="mr-2 h-4 w-4" />Link existing Shopify product
       </Button>
       <Button size="sm" onClick={() => start("create")} disabled={!allowed || executeMutation.isPending}>
@@ -229,7 +250,7 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
         {context && <div className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="space-y-1"><Label>Shopify channel</Label>
-              <Select value={String(context.channelId)} disabled={locked} onValueChange={value => { setChannelId(Number(value)); initialized.current = null; setSubmitted(null); change(); }}>
+              <Select value={String(context.channelId)} disabled={locked} onValueChange={value => { setChannelId(Number(value)); initialized.current = null; setSubmitted(null); setTarget(""); setSearchText(""); setReview(null); setReviewRequest(null); setBindings({}); change(); }}>
                 <SelectTrigger aria-label="Shopify channel"><SelectValue /></SelectTrigger>
                 <SelectContent>{context.channels.map(channel => <SelectItem key={channel.id} value={String(channel.id)}>{channel.name}</SelectItem>)}</SelectContent>
               </Select>
@@ -248,13 +269,14 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
             <p className="font-medium">Shopify products matching this catalog's SKUs</p>
             {context.matchingProducts.map(product => <div key={product.id} className="flex flex-wrap items-center justify-between gap-2">
               <span>{product.title} · {product.status.toLowerCase()} · {product.id}</span>
-              <Button size="sm" variant="outline" disabled={locked} onClick={() => { setMode("link"); setTarget(product.id); setReview(null); setBindings({}); change(); }}>Link this product</Button>
+              <Button size="sm" variant="outline" disabled={!canLink || locked || product.status === "ARCHIVED"} onClick={() => { setMode("link"); setTarget(product.id); setSearchText(product.title); setReview(null); setBindings({}); change(); }}>Link this product</Button>
             </div>)}
           </div>}
-          {context.lookupIssue && <p className="text-sm text-muted-foreground">SKU lookup: {context.lookupIssue} You can still enter an exact Shopify product ID.</p>}
-          {mode === "link" ? <div className="space-y-1"><Label htmlFor="shopify-product-reference">Shopify product URL or ID</Label>
-            <Input id="shopify-product-reference" value={target} disabled={locked} placeholder="Paste the Shopify admin product URL or product ID"
-              onChange={event => { setTarget(event.target.value); setReview(null); setBindings({}); change(); }} /></div>
+          {context.lookupIssue && <p className="text-sm text-muted-foreground">SKU lookup: {context.lookupIssue} You can search by name or enter an exact Shopify product ID.</p>}
+          {mode === "link" ? <ShopifyProductSearch key={`${productId}:${context.channelId}`} productId={productId} channelId={context.channelId}
+              value={searchText} selectedReference={target} disabled={locked || busy || Boolean(context.blockedReason)}
+              onChange={(value, asSearch) => { setSearchText(value); setTarget(!asSearch && isShopifyProductReference(value) ? value.trim() : ""); setReview(null); setReviewRequest(null); setBindings({}); change(); }}
+              onSelect={product => { setTarget(product.id); setSearchText(product.title); setReview(null); setReviewRequest(null); setBindings({}); change(); }} />
             : <div className="space-y-3">
               <div className="space-y-1"><Label>Shopify visibility</Label>
                 <Select value={publicationId ?? "draft"} disabled={locked} onValueChange={value => { setPublicationId(value === "draft" ? null : value); change(); }}>
@@ -306,12 +328,14 @@ export function ShopifyProductConnectionActions({ productId }: { productId: numb
             <Button variant="outline" onClick={() => reviewMutation.mutate()} disabled={!context || busy || Boolean(context.blockedReason) || mode === "link" && !target.trim()}>
               {reviewMutation.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}{review ? "Refresh review" : "Review Shopify connection"}
             </Button>
-            <Button onClick={confirm} disabled={!review?.ready || dirty || busy || Boolean(context?.blockedReason)}>
+            <Button onClick={confirm} disabled={!context || !review?.ready || dirty || busy || Boolean(context.blockedReason)}>
               {mode === "create" ? publicationId ? "Create, connect and publish" : "Create draft and connect" : "Confirm Shopify link"}
             </Button>
           </>}
         </DialogFooter>
       </DialogContent>
     </Dialog>
+    {inventorySyncRequestId && <ProductSyncWorkflowDialog key={inventorySyncRequestId} productId={productId} actor={user?.id ?? ""}
+      initialCommand={{ productId, idempotencyKey: inventorySyncRequestId }} onClose={() => setInventorySyncRequestId(null)} />}
   </>;
 }

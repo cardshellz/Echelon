@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "../../shared/utils/canonical-json";
 import { expect, test, type Locator, type Page } from "@playwright/test";
@@ -149,13 +150,13 @@ async function setup(
   const failures = await installFixtures(page);
   await page.route("**/api/auth/me", (route) =>
     route.fulfill({
-      json: {
+      json: staffAuthorityFixture({
         user: { id: "test-user", username: "test", role: "admin" },
         permissions: canEdit
           ? ["purchasing:view", "purchasing:edit", "inventory:view"]
           : ["purchasing:view", "inventory:view"],
-        roles: ["admin"],
-      },
+        systemRoles: ["admin"],
+      }),
     }),
   );
   // A failed daily-review request must not remove the independently loaded purchases.
@@ -1206,12 +1207,12 @@ for (const actor of [
   { name: "admin without adjustment", role: "admin", permissions: ["purchasing:view", "inventory:view"], canRun: false },
   { name: "adjustment lead", role: "lead", permissions: ["purchasing:view", "inventory:view", "inventory:adjust"], canRun: false },
   { name: "adjustment admin", role: "admin", permissions: ["purchasing:view", "inventory:view", "inventory:adjust"], canRun: true },
-]) {
+] as const) {
   test(`dashboard auto-draft authority matches the server for ${actor.name}`, async ({ page }) => {
     const { failures } = await setup(page, false, true);
-    await page.route("**/api/auth/me", route => route.fulfill({ json: {
-      user: { id: "test-user", username: "test", role: actor.role }, permissions: actor.permissions, roles: [actor.role],
-    } }));
+    await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({
+      user: { id: "test-user", username: "test", role: actor.role }, permissions: actor.permissions, systemRoles: [actor.role],
+    }) }));
     let runRequests = 0;
     await page.route("**/api/purchasing/auto-draft/run", route => {
       runRequests += 1;
@@ -1253,16 +1254,17 @@ for (const missing of ["purchasing:view", "inventory:view"]) {
   test(`dashboard rejects a direct route without ${missing} before reading its mixed data`, async ({ page }) => {
     const { failures } = await setup(page, false, true);
     const permissions = ["purchasing:view", "inventory:view"].filter(grant => grant !== missing);
-    await page.route("**/api/auth/me", route => route.fulfill({ json: {
-      user: { id: "test-user", username: "test", role: "lead" }, permissions, roles: ["lead"],
-    } }));
+    await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({
+      user: { id: "test-user", username: "test", role: "lead" }, permissions, systemRoles: ["lead"],
+    }) }));
     let dashboardReads = 0;
     await page.route("**/api/purchasing/dashboard", route => {
       dashboardReads += 1;
       return route.fulfill({ json: dashboardFixture() });
     });
     await page.goto("/purchasing");
-    await expect(page).toHaveURL(/\/picking$/);
+    await expect(page).toHaveURL(/\/purchasing$/);
+    await expect(page.getByTestId("staff-access-notice")).toContainText("Your assigned roles do not provide access to this page.");
     expect(dashboardReads).toBe(0);
     expect(failures).toEqual([]);
   });

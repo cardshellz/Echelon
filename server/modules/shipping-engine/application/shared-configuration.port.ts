@@ -1,5 +1,5 @@
 import type { z } from "zod";
-import type { CartonizeBox } from "../../cartonization/domain/cartonize";
+import type { CartonizeBox } from "../../cartonization/cartonize-engine.api";
 import type {
   BoxSuiteSummary,
   DropshipSharedShippingConfig,

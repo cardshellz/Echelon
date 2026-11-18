@@ -1,4 +1,4 @@
-import { sendEmail } from "../../notifications/email.service";
+import { sendEmail } from "../../notifications/email-delivery.api";
 import type { DropshipAuthEmailSender } from "../application/dropship-auth-service";
 import type { DropshipSensitiveAction } from "../domain/auth";
 

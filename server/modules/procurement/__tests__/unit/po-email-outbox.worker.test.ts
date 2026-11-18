@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import { poEmailDocumentHash } from "../../po-email-document-contract";
+import type { PoEmailOutboxDbPool } from "../../po-email-outbox.service";
 import {
   claimDeliveries,
   classifyDeliveryError,
   computeNextAttemptAt,
   processPoEmailOutboxBatch,
 } from "../../po-email-outbox.worker";
+
+function makePool(query: PoEmailOutboxDbPool["query"]): PoEmailOutboxDbPool {
+  return { query, connect: vi.fn() };
+}
 
 const claimedDelivery = {
   id: 42,
@@ -76,7 +81,7 @@ describe("PO email outbox worker", () => {
     });
 
     const result = await processPoEmailOutboxBatch({
-      dbPool: { query: poolQuery },
+      dbPool: makePool(poolQuery),
       deliver: vi.fn().mockRejectedValue(smtpError),
       now: new Date("2026-07-14T12:00:00.000Z"),
     });
@@ -135,7 +140,7 @@ describe("PO email outbox worker", () => {
     });
 
     const result = await processPoEmailOutboxBatch({
-      dbPool: { query: poolQuery },
+      dbPool: makePool(poolQuery),
       deliver: vi.fn().mockRejectedValue(smtpError),
       now: new Date("2026-07-14T12:00:00.000Z"),
     });
@@ -157,7 +162,7 @@ describe("PO email outbox worker", () => {
       .mockResolvedValueOnce({ rowCount: 1, rows: [{ status: "queued" }] });
 
     const result = await processPoEmailOutboxBatch({
-      dbPool: { query: poolQuery },
+      dbPool: makePool(poolQuery),
       deliver: vi.fn().mockRejectedValue(Object.assign(new Error("timeout"), { code: "ETIMEDOUT", responseCode: 421 })),
       now: new Date("2026-07-14T12:00:00.000Z"),
     });
@@ -166,12 +171,95 @@ describe("PO email outbox worker", () => {
     expect(poolQuery.mock.calls[3][1][2]).toBe("queued");
     expect(poolQuery.mock.calls[3][1][7]).toBeNull();
   });
+
+  it("parks accepted SMTP delivery in dead_letter with provider evidence if local completion fails (PWF-01)", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const poolQuery = vi.fn()
+        .mockResolvedValueOnce({ rowCount: 0, rows: [] })
+        .mockResolvedValueOnce({ rowCount: 0, rows: [] })
+        .mockResolvedValueOnce({ rowCount: 1, rows: [claimedDelivery] })
+        .mockResolvedValueOnce({ rowCount: 1, rows: [{ id: 42 }] });
+      const clientQuery = vi.fn(async (sql: string) => {
+        if (sql.includes("INSERT INTO procurement.po_status_history")) {
+          throw new Error("po_status_history write failed");
+        }
+        if (sql.includes("UPDATE procurement.po_email_outbox")) {
+          return { rowCount: 1, rows: [{ id: 42 }] };
+        }
+        return { rowCount: 1, rows: [] };
+      });
+      const release = vi.fn();
+      const deliver = vi.fn().mockResolvedValue({
+        messageId: "<provider-accepted-42@example.com>",
+        response: "250 2.0.0 OK",
+        accepted: ["vendor@example.com"],
+        rejected: [],
+      });
+
+      const now = new Date("2026-07-14T12:00:00.000Z");
+      const result = await processPoEmailOutboxBatch({
+        dbPool: {
+          query: poolQuery,
+          connect: vi.fn().mockResolvedValue({ query: clientQuery, release }),
+        },
+        deliver,
+        now,
+      });
+
+      expect(result).toEqual({ claimed: 1, sent: 0, retried: 0, deadLettered: 1, held: 0 });
+      expect(clientQuery.mock.calls.map(([sql]) => sql)).toContain("ROLLBACK");
+      expect(release).toHaveBeenCalled();
+
+      const parkCall = poolQuery.mock.calls[3];
+      expect(String(parkCall[0])).toContain("status = 'dead_letter'");
+      expect(String(parkCall[0])).toContain("LOCAL_FINALIZE_FAILED_AFTER_SMTP_ACCEPT");
+      expect(parkCall[1]).toEqual(expect.arrayContaining([
+        42,
+        "lease-1",
+        now,
+        "<provider-accepted-42@example.com>",
+      ]));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
+  it("parks ambiguous post-connect socket timeout in dead_letter instead of risking duplicate PO send (PWF-01)", async () => {
+    const poolQuery = vi.fn()
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] })
+      .mockResolvedValueOnce({ rowCount: 0, rows: [] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [claimedDelivery] })
+      .mockResolvedValueOnce({ rowCount: 1, rows: [{ status: "dead_letter" }] });
+
+    const lostResponseError = Object.assign(new Error("Socket timeout waiting for DATA response"), {
+      code: "ETIMEDOUT",
+      command: "DATA",
+    });
+
+    const result = await processPoEmailOutboxBatch({
+      dbPool: makePool(poolQuery),
+      deliver: vi.fn().mockRejectedValue(lostResponseError),
+      now: new Date("2026-07-14T12:00:00.000Z"),
+    });
+
+    expect(result).toEqual({ claimed: 1, sent: 0, retried: 0, deadLettered: 1, held: 0 });
+    expect(poolQuery.mock.calls[3][1][2]).toBe("dead_letter");
+    expect(poolQuery.mock.calls[3][1][5]).toBe("SMTP_OUTCOME_UNCERTAIN");
+  });
 });
 
 describe("PO email retry policy", () => {
   it("classifies SMTP 5xx and envelope failures as permanent", () => {
-    expect(classifyDeliveryError({ code: "EENVELOPE", responseCode: 550 })).toMatchObject({ permanent: true });
-    expect(classifyDeliveryError({ code: "ETIMEDOUT", responseCode: 421 })).toMatchObject({ permanent: false });
+    expect(classifyDeliveryError({ code: "EENVELOPE", responseCode: 550 })).toMatchObject({ permanent: true, uncertain: false });
+    expect(classifyDeliveryError({ code: "ETIMEDOUT", responseCode: 421 })).toMatchObject({ permanent: false, uncertain: false });
+    expect(classifyDeliveryError({ code: "ECONNREFUSED" })).toMatchObject({ permanent: false, uncertain: false });
+    expect(classifyDeliveryError({ code: "ETIMEDOUT", command: "CONN" })).toMatchObject({ permanent: false, uncertain: false });
+    expect(classifyDeliveryError({ code: "ETIMEDOUT", command: "DATA" })).toMatchObject({
+      code: "SMTP_OUTCOME_UNCERTAIN",
+      permanent: true,
+      uncertain: true,
+    });
   });
 
   it("uses bounded exponential backoff", () => {
@@ -199,7 +287,7 @@ describe("PO email worker content gate", () => {
       }], rowCount: 1 });
     const deliver = vi.fn();
     const result = await processPoEmailOutboxBatch({
-      dbPool: { query }, deliver, now: new Date("2026-10-12T12:00:00Z"),
+      dbPool: makePool(query), deliver, now: new Date("2026-10-12T12:00:00Z"),
     });
     expect(result).toEqual({ claimed: 1, sent: 0, retried: 0, deadLettered: 0, held: 1 });
     expect(deliver).not.toHaveBeenCalled();
@@ -227,8 +315,8 @@ describe("PO email document hold audit logging", () => {
         .mockResolvedValueOnce({ rows: [returnedHold, { ...returnedHold, deliveryId: 43, poId: 8 }], rowCount: 2 })
         .mockResolvedValue({ rows: [], rowCount: 0 });
       const input = { batchSize: 10, leaseSeconds: 120, now };
-      await claimDeliveries({ query }, input);
-      await claimDeliveries({ query }, input); // Already held rows are not returned or logged again.
+      await claimDeliveries(makePool(query), input);
+      await claimDeliveries(makePool(query), input); // Already held rows are not returned or logged again.
       expect(warning.mock.calls.map(([entry]) => JSON.parse(entry))).toEqual([
         expectedAudit, { ...expectedAudit, deliveryId: 43, poId: 8 },
       ]);
@@ -247,7 +335,7 @@ describe("PO email document hold audit logging", () => {
         .mockResolvedValueOnce({ rows: [{ ...claimedDelivery, htmlBody: "<html>Secret terms</html>" }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [returnedHold], rowCount: 1 });
       const deliver = vi.fn();
-      await processPoEmailOutboxBatch({ dbPool: { query }, deliver, now });
+      await processPoEmailOutboxBatch({ dbPool: makePool(query), deliver, now });
       expect(warning).toHaveBeenCalledExactlyOnceWith(JSON.stringify(expectedAudit));
       expect(deliver).not.toHaveBeenCalled();
       expect(JSON.stringify(warning.mock.calls)).not.toMatch(/private-vendor|Private subject|Secret terms|htmlBody|toEmail/);
@@ -262,7 +350,7 @@ describe("PO email document hold audit logging", () => {
         .mockResolvedValueOnce({ rows: [], rowCount: 0 })
         .mockResolvedValueOnce({ rows: [{ ...claimedDelivery, contractVersion: null }], rowCount: 1 })
         .mockResolvedValueOnce({ rows: [], rowCount: 0 });
-      await expect(processPoEmailOutboxBatch({ dbPool: { query }, deliver: vi.fn(), now }))
+      await expect(processPoEmailOutboxBatch({ dbPool: makePool(query), deliver: vi.fn(), now }))
         .rejects.toThrow("lost its lease while recording a document hold");
       expect(warning).not.toHaveBeenCalled();
     } finally { warning.mockRestore(); }

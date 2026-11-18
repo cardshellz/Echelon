@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000046000019710001_purchase_tax_treatments.sql",
+  "generation": 46,
+  "pr": 1971,
+  "ordinal": 1,
+  "after": [
+    "900000045000019690001_customer_order_progress_capture.sql"
+  ]
+}

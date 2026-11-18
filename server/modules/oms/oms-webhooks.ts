@@ -30,7 +30,8 @@ import {
   deriveOmsLineAuthority,
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
-import { guardOrderEditShopifyIngress } from "../order-edits/infrastructure/order-edit-ingress-guard";
+import { guardOrderEditShopifyIngress } from "../order-edits/oms-coordination.api";
+import { syncWmsOrderAddressAndFinancialFromShopifyWebhookInWms } from "../wms/wms-order-mutations.api";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 import {
   applyShopifyRefundCascade,
@@ -48,6 +49,7 @@ import type {
 } from "./channel-fulfillment-ingress.service";
 import rateLimit from "express-rate-limit";
 import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
+import type { EngineCancelResult } from "../shipping/engine-and-reconcile.api";
 import {
   buildShopifyWebhookInboxInput,
   enqueueWebhookInboxRetry,
@@ -61,10 +63,13 @@ import {
   enqueueOmsWmsSyncRetry,
   enqueueShipStationShipmentPushRetry,
 } from "./webhook-retry.worker";
-import type { ShippingEngine } from "../shipping/engine";
-import { recordShopifyRefundReturnCase } from "../returns/application/shopify-return-case.service";
+import type { ShippingEngine } from "../shipping/engine-and-reconcile.api";
+import { recordShopifyRefundReturnCase } from "../returns/shopify-return-intake.api";
 import { deriveShopifyRefundFinancialStatus } from "./domain/shopify-refund-financial-status";
 import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
+import { deriveShopifyChannelPaymentSettled } from "./domain/channel-payment-settlement";
+import { recordChannelAuthorityGap } from "./infrastructure/channel-authority-gap.repository";
+import { applyVersionedShopifyOrderMoney } from "./infrastructure/shopify-order-money.repository";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -153,7 +158,9 @@ interface ShipStationService {
     carrierCode?: string | null;
     notifyCustomer?: boolean;
   }) => Promise<{ alreadyInState: boolean } | void>;
-  cancelOrder: (shipstationOrderId: number) => Promise<{ alreadyInState: boolean } | void>;
+  cancelOrder: (
+    shipstationOrderId: number,
+  ) => Promise<EngineCancelResult | { state: EngineCancelResult["state"]; alreadyInState?: boolean } | void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -178,6 +185,16 @@ function verifyShopifyHmac(rawBody: Buffer, hmacHeader: string | undefined): boo
 // ---------------------------------------------------------------------------
 // Shopify payload → OMS OrderData mapping
 // ---------------------------------------------------------------------------
+
+/**
+ * mapShopifyOrderToOrderData always fills header money, but OrderData types it
+ * optional for other channels. A missing amount here is a mapper defect: fail
+ * the webhook (retried) rather than writing zero money onto the order.
+ */
+function requireMappedCents(value: number | undefined, field: string): number {
+  if (value === undefined) throw new Error(`Shopify order mapping produced no ${field}`);
+  return value;
+}
 
 function dollarsToCents(value: string | number | undefined | null): number {
   if (value === null || value === undefined) return 0;
@@ -337,7 +354,11 @@ export async function cascadeShopifyCancelToShipments(
   },
   opts: {
     now?: Date;
-    shipstation?: { removeFromList?: (id: number) => Promise<void> };
+    shipstation?: {
+      removeFromList?: (
+        id: number,
+      ) => Promise<EngineCancelResult | { state: EngineCancelResult["state"]; alreadyInState?: boolean } | void>;
+    };
     logPrefix?: string;
   } = {},
 ): Promise<{
@@ -425,14 +446,14 @@ export async function cancelOrderCascade(
     return { cascadeDetails: { noWmsOrder: true } };
   }
 
-  const rollupModule = await import("../orders/shipment-rollup");
-  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+  const rollupModule = await import("../orders/shipment-rollup-and-context.api");
+  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-lifecycle-and-cancellation.api");
 
   const ssAdapter = opts.shipStationService
     ? {
         removeFromList: async (ssOrderId: number) => {
           try {
-            await opts.shipStationService!.cancelOrder(ssOrderId);
+            return await opts.shipStationService!.cancelOrder(ssOrderId);
           } catch (e: any) {
             console.error(`${LOG} SS cancel failed for ssOrderId=${ssOrderId}: ${e.message}`);
             throw e;
@@ -441,6 +462,7 @@ export async function cancelOrderCascade(
       }
     : undefined;
 
+  let hadShipmentCancelError = false;
   for (const wmsRow of wmsOrderRows) {
     if (opts.wmsServices) {
       try {
@@ -478,6 +500,9 @@ export async function cancelOrderCascade(
     );
 
     if (cascade.hadShipments) {
+      if (cascade.cascadeResults.some((r) => r.mode === "error")) {
+        hadShipmentCancelError = true;
+      }
       cancelCascadeDetails = {
         wmsOrderId: wmsRow.id,
         shipmentOutcomes: cascade.cascadeResults,
@@ -490,16 +515,29 @@ export async function cancelOrderCascade(
     }
   }
 
-  await db.insert(omsOrderEvents).values({
-    orderId: omsOrderId,
-    eventType: "cancelled",
-    details: {
-      source: opts.source,
-      reason: opts.reason,
-      cancelledAt: now.toISOString(),
-      ...cancelCascadeDetails,
-    },
-  });
+  if (hadShipmentCancelError) {
+    await db.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "cancel_cascade_incomplete",
+      details: {
+        source: opts.source,
+        reason: opts.reason,
+        cancelledAt: now.toISOString(),
+        ...cancelCascadeDetails,
+      },
+    });
+  } else {
+    await db.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "cancelled",
+      details: {
+        source: opts.source,
+        reason: opts.reason,
+        cancelledAt: now.toISOString(),
+        ...cancelCascadeDetails,
+      },
+    });
+  }
 
   return { cascadeDetails: cancelCascadeDetails };
 }
@@ -901,7 +939,7 @@ export function registerOmsWebhooks(
     const shipments: Array<{ id: number }> = shipmentResult?.rows ?? [];
     if (shipments.length === 0) return;
 
-    const rollupModule = await import("../orders/shipment-rollup");
+    const rollupModule = await import("../orders/shipment-rollup-and-context.api");
     let anyRequiresReview = false;
     for (const shipment of shipments) {
       const result = await rollupModule.handleAddressChangeOnShipment(db, shipment.id, { now });
@@ -1196,6 +1234,14 @@ export function registerOmsWebhooks(
 
       const nextShipTo = canonicalShipToFromShopifyUpdate(shopifyOrder, existing);
       const now = new Date();
+      // Shopify's own statement that the order is fully paid for its current
+      // contents. Lets a Shopify-admin edit that adds units without a new
+      // payment (e.g. #65696) raise paid authority. A malformed amount throws
+      // here, fails the inbox row, and is retried rather than authorizing.
+      const channelPaymentSettled = deriveShopifyChannelPaymentSettled({
+        financialStatus: shopifyOrder.financial_status,
+        totalOutstanding: shopifyOrder.total_outstanding,
+      });
       const isCancelledPayload = Boolean(shopifyOrder.cancelled_at);
       // cancelNow (channel truth) drives the cancel cascade; isFinalOmsState
       // (includes our existing terminal status) drives only the reconcile/
@@ -1205,6 +1251,28 @@ export function registerOmsWebhooks(
         ? await readChannelShopifyMerchandise(db, { channelId, orderId: externalOrderId }) : null;
       const { cancelNow: isCancelledByChannel, isFinal: isFinalOmsState } =
         deriveOmsUpdateFinality(shopifyOrder, existing.status, { verifiedCancelled: nativeMerchandise?.cancelled ?? null });
+
+      // Order money and the raw snapshot are channel facts that only a
+      // same-or-newer Shopify version may replace. One conditional statement
+      // keeps a late, older webhook from regressing them (the line ledger
+      // guards quantities the same way via channel_quantity_updated_at).
+      // Without a version the payload cannot be ordered, so money is left as is.
+      const channelVersion = shopifyOrder.updated_at ? new Date(shopifyOrder.updated_at) : null;
+      const hasChannelVersion = channelVersion !== null && Number.isFinite(channelVersion.getTime());
+      if (hasChannelVersion) {
+        await applyVersionedShopifyOrderMoney(db, {
+          omsOrderId: existing.id,
+          channelVersion: channelVersion!,
+          money: {
+            subtotalCents: requireMappedCents(orderData.subtotalCents, "subtotalCents"),
+            shippingCents: requireMappedCents(orderData.shippingCents, "shippingCents"),
+            taxCents: requireMappedCents(orderData.taxCents, "taxCents"),
+            discountCents: requireMappedCents(orderData.discountCents, "discountCents"),
+            totalCents: requireMappedCents(orderData.totalCents, "totalCents"),
+          },
+          rawPayload: shopifyOrder,
+        });
+      }
 
       // Update OMS order fields
       await db
@@ -1234,7 +1302,8 @@ export function registerOmsWebhooks(
           shipToZip: nextShipTo.zip,
           shipToCountry: nextShipTo.country,
           notes: shopifyOrder.note ?? existing.notes,
-          rawPayload: shopifyOrder as any,
+          // Versioned payloads are written by the guarded statement above.
+          ...(hasChannelVersion ? {} : { rawPayload: shopifyOrder as any }),
           updatedAt: now,
         })
         .where(eq(omsOrders.id, existing.id));
@@ -1268,26 +1337,21 @@ export function registerOmsWebhooks(
 
       if (wmsOrderRows.length > 0) {
         const isPaidNow = shopifyOrder.financial_status === "paid" || shopifyOrder.financial_status === "partially_paid";
-        await db.execute(sql`
-          UPDATE wms.orders SET
-            shipping_name = ${nextShipTo.name},
-            shipping_company = ${nextShipTo.company},
-            shipping_address = ${nextShipTo.address1},
-            shipping_address2 = ${nextShipTo.address2},
-            shipping_city = ${nextShipTo.city},
-            shipping_state = ${nextShipTo.state},
-            shipping_postal_code = ${nextShipTo.zip},
-            shipping_country = ${nextShipTo.country},
-            financial_status = ${shopifyOrder.financial_status || "paid"},
-            warehouse_status = CASE
-              WHEN warehouse_status = 'pending' AND ${isPaidNow} THEN 'ready'
-              ELSE warehouse_status
-            END,
-            customer_name = ${nextShipTo.name || existing.customerName || null},
-            customer_email = ${shopifyOrder.email || existing.customerEmail || null}
-          WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
-             OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
-        `);
+        await syncWmsOrderAddressAndFinancialFromShopifyWebhookInWms(db, {
+          omsOrderIdText: String(existing.id),
+          shippingName: nextShipTo.name,
+          shippingCompany: nextShipTo.company,
+          shippingAddress: nextShipTo.address1,
+          shippingAddress2: nextShipTo.address2,
+          shippingCity: nextShipTo.city,
+          shippingState: nextShipTo.state,
+          shippingPostalCode: nextShipTo.zip,
+          shippingCountry: nextShipTo.country,
+          financialStatus: shopifyOrder.financial_status || "paid",
+          isPaidNow,
+          customerName: nextShipTo.name || existing.customerName || null,
+          customerEmail: shopifyOrder.email || existing.customerEmail || null,
+        });
 
         if (isCancelledByChannel) {
           await cancelOrderCascade(db, existing.id, {
@@ -1400,6 +1464,7 @@ export function registerOmsWebhooks(
                   : previousAuthority.fulfillableQuantity,
                 currentQuantity: readShopifyLineCurrentQuantity(item),
                 channelUpdatedAt: shopifyOrder.updated_at ?? null,
+                channelPaymentSettled,
                 previous: previousAuthority,
               });
               if (authority.staleChannelObservation) return;
@@ -1464,7 +1529,8 @@ export function registerOmsWebhooks(
                 ? Number(item.fulfillable_quantity)
                 : null,
               currentQuantity: readShopifyLineCurrentQuantity(item),
-                channelUpdatedAt: shopifyOrder.updated_at ?? null,
+              channelUpdatedAt: shopifyOrder.updated_at ?? null,
+              channelPaymentSettled,
             });
             // Insert new line and authority ledger atomically.
             await db.transaction(async (tx: any) => {
@@ -1619,6 +1685,11 @@ export function registerOmsWebhooks(
               console.error(
                 `${LOG_PREFIX} WMS edit propagation failed for order ${shopifyOrder.name || externalOrderId}: ${propErr.message}`,
               );
+              await enqueueOmsWmsSyncRetry(
+                db,
+                existing.id,
+                propErr instanceof Error ? propErr : new Error(propErr?.message ?? String(propErr)),
+              );
             }
           } else {
             await enqueueOmsWmsSyncRetry(
@@ -1647,6 +1718,16 @@ export function registerOmsWebhooks(
           }
         }
       }
+
+      // Units Shopify sold that OMS still will not ship are never silent:
+      // awaiting payment is recorded as a visible state, and a fully paid
+      // order with unshippable units is an error for a human.
+      await recordChannelAuthorityGap(db, {
+        omsOrderId: existing.id,
+        externalOrderNumber: shopifyOrder.name ?? null,
+        channelPaymentSettled,
+        sourceEventId: orderData.sourceEventId,
+      });
 
       // Log event
       await db.insert(omsOrderEvents).values({
@@ -1890,7 +1971,7 @@ export function registerOmsWebhooks(
   // =========================================================================
   // 5. POST /api/oms/webhooks/refunds/create
   // =========================================================================
-  app.post("/api/oms/webhooks/refunds/create", async (req: Request, res: Response) => {
+  app.post("/api/oms/webhooks/refunds/create", webhookLimiter, async (req: Request, res: Response) => {
     const refundPayload = verifyAndParse(req, res);
     if (!refundPayload) return;
 
@@ -2058,9 +2139,8 @@ export function registerOmsWebhooks(
             : undefined,
           shipstation: shipStationService
             ? {
-                cancelOrder: async (shipstationOrderId: number) => {
-                  await shipStationService.cancelOrder(shipstationOrderId);
-                },
+                cancelOrder: async (shipstationOrderId: number) =>
+                  shipStationService.cancelOrder(shipstationOrderId),
               }
             : undefined,
           shippingEngine: shippingEngine ?? undefined,

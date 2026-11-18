@@ -2,13 +2,13 @@ import type { Pool } from "pg";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
-import { wmsOmsOrderIdSql } from "../../oms/oms-wms-order-link.sql";
+import { wmsOmsOrderIdSql } from "../../oms/order-linkage-sql.api";
 import type {
   CustomerAccountOrderContextReader,
   CustomerAccountOrderContext,
 } from "../application/customer-account-order-queries.service";
 import { CUSTOMER_ACCOUNT_ORDER_PAGE_SIZE } from "@shared/customer-account/customer-account-orders";
-import { OrderEditError } from "../../order-edits/domain/order-edit-error";
+import { OrderEditError } from "../../order-edits/customer-account.api";
 
 const id = z.number().int().positive().safe();
 const inputSchema = z

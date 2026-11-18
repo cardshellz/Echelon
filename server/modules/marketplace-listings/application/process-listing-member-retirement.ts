@@ -33,6 +33,11 @@ export async function processListingMemberRetirement(
       now(),
     );
 
+  // A previously claimed ID can arrive after another worker deferred this
+  // same conflict. Keep the first failure visible without another audit/log.
+  if (record.code === "LISTING_MEMBER_IDENTITY_CONFLICT" && session.retryDeferred)
+    return record;
+
   const failure = (error: unknown, submitted: boolean) => {
     const code =
       error instanceof ListingMemberLifecycleError
@@ -54,8 +59,9 @@ export async function processListingMemberRetirement(
     return session.save(
       submitted ? "retiring" : "failed",
       code,
-      detail +
-        " This archived variant remains excluded; the listing lifecycle will retry verification.",
+      detail + (code === "LISTING_MEMBER_IDENTITY_CONFLICT"
+        ? " This archived variant remains excluded. Correct the conflicting listing link to resume removal."
+        : " This archived variant remains excluded; the listing lifecycle will retry verification."),
       now(),
     );
   };

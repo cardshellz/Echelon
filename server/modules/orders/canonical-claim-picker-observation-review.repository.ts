@@ -1,6 +1,7 @@
 import type {
   CanonicalClaimPickerObservationReviewPort,
 } from "../inventory-planning/application/canonical-claim-picker-observation-review.port";
+import { insertPickerObservationReviewAllocationExceptionInWms } from "../wms/wms-order-mutations.api";
 
 function positiveInteger(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value <= 0 || value > 2_147_483_647) {
@@ -63,33 +64,17 @@ export class PostgresCanonicalClaimPickerObservationReviewRepository
         { cause: cause instanceof Error ? cause.message : String(cause) },
       );
     }
-    const result = await input.client.query(
-      `INSERT INTO wms.allocation_exceptions (
-         order_id, order_item_id, order_number, sku, product_variant_id,
-         exception_type, status, requested_qty, selected_location_id,
-         selected_location_code, resolution, auto_fixed_setup, review_reason, metadata,
-         created_at, updated_at
-       )
-       SELECT item.order_id, item.id, order_row.order_number, item.sku, $1,
-              'inventory_auto_resolved', 'needs_review', $2, $3,
-              location.code, $4, false, $5, $6::jsonb, $7, $7
-       FROM wms.order_items AS item
-       JOIN wms.orders AS order_row ON order_row.id = item.order_id
-       JOIN warehouse.warehouse_locations AS location ON location.id = $3
-       WHERE item.id = $8 AND item.order_id = $9
-       RETURNING id`,
-      [
-        targetVariantId,
-        requestedQty,
-        selectedLocationId,
-        input.resolution,
-        reviewReason,
-        metadataJson,
-        input.occurredAt,
-        orderItemId,
-        orderId,
-      ],
-    );
+    const result = await insertPickerObservationReviewAllocationExceptionInWms(input.client, {
+      targetVariantId,
+      requestedQty,
+      selectedLocationId,
+      resolution: input.resolution,
+      reviewReason,
+      metadataJson,
+      occurredAt: input.occurredAt,
+      orderItemId,
+      orderId,
+    });
     const row = Array.isArray(result.rows) ? result.rows[0] : undefined;
     if (!row?.id) {
       throw new CanonicalClaimPickerObservationReviewError(

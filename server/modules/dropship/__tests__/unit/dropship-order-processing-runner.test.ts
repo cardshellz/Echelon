@@ -102,7 +102,7 @@ describe("runDropshipOrderProcessingSweep", () => {
 
 describe("PgDropshipOrderProcessingQueueRepository", () => {
   it("revisits an active payment hold only after its vendor wallet changes", async () => {
-    const query = vi.fn(async () => ({ rows: [{ id: 91 }] }));
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [{ id: 91 }] }));
     const repository = new PgDropshipOrderProcessingQueueRepository({ query } as unknown as Pool);
 
     const result = await repository.listProcessableIntakeIds({
@@ -246,6 +246,12 @@ function fakeWalletPolicy(holdExpiryWarningMinutes = 120): DropshipWalletPolicyR
       advanceFeeBps: 100,
       advanceCapCents: 50_000,
       tierChangeGraceDays: 14,
+      cardFundingFeeBps: 0,
+      cardFundingMinCents: 1_000,
+      rewardsRateBankBps: 100,
+      rewardsRateUsdcBps: 100,
+      rewardsRateCardBps: 0,
+      rewardsExpiryDays: null,
     }),
   };
 }

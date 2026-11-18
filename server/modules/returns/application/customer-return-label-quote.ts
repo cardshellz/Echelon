@@ -6,7 +6,7 @@ import {
   returnRateCandidateSchema,
   returnRateResultSchema,
   returnRateShipmentSchema,
-} from "../../shipping-engine/application/return-rate-provider.port";
+} from "../../shipping-engine/return-shipping-and-labels.api";
 
 // Quick rates have no persistent provider rate id. Bound the interval between
 // observation and durable purchase intent; this is not a provider price lock.

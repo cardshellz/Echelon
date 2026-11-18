@@ -52,3 +52,24 @@
 @media (max-width:600px) { .csz-account-ui.csz-order-panel { width:100vw; } .csz-order-panel-content { padding:20px; } }
 [data-csz-order-total]:empty::before, [data-csz-order-financials]:empty::before { content: "Checking total…"; }
 @media (max-width: 600px) { .csz-account-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); } .csz-dialog-body { padding: 14px; } .csz-dialog-heading { padding: 16px; gap: 12px; } .csz-dialog-heading h2 { font-size: 21px; } }
+
+/* Three independent tracks; scoped against storefront dl/dd overrides. */
+.csz-account-ui.csz-order-panel .csz-order-tracks { display:grid; gap:8px; margin:0; min-width:0; }
+.csz-account-ui.csz-order-panel .csz-order-tracks > div { display:grid; grid-template-columns:58px minmax(0,1fr); gap:8px; }
+.csz-account-ui.csz-order-panel .csz-order-tracks dt { color:#657080; font-size:12px; font-weight:400; }
+.csz-account-ui.csz-order-panel .csz-order-tracks dd { display:block; min-width:0; margin:0; font-size:13px; overflow-wrap:anywhere; }
+.csz-account-ui.csz-order-panel .csz-order-tracks small { display:block; margin-top:3px; font-size:12px; }
+.csz-progress-details section { border-bottom:1px solid #dee4eb; padding:0 0 16px; margin:0 0 18px; }
+.csz-progress-details h3 { margin:0 0 12px; font-size:14px; font-weight:600; }
+.csz-progress-details ul { margin:0; padding:0; list-style:none; }
+.csz-progress-details li,.csz-progress-return-heading { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; margin:10px 0; font-size:12px; }
+.csz-progress-details li > span { min-width:0; }
+.csz-progress-details li strong,.csz-progress-return-heading strong { font-size:12px; font-weight:500; text-align:right; }
+.csz-progress-details li small { display:block; margin-top:4px; color:#657080; overflow-wrap:anywhere; }
+.csz-progress-details article + article { border-top:1px solid #eef0f4; padding-top:12px; margin-top:14px; }
+.csz-progress-details article p { font-size:12px; color:#657080; margin:6px 0 10px; }
+
+.csz-account-ui.csz-order-panel .csz-progress-details details { margin:0 0 14px; border-bottom:1px solid #dee4eb; }
+.csz-account-ui.csz-order-panel .csz-progress-details summary { padding:10px 0 14px; font-size:13px; cursor:pointer; }
+.csz-account-ui.csz-order-panel .csz-progress-details summary:focus-visible { outline:2px solid #c96513; outline-offset:3px; }
+.csz-account-ui.csz-order-panel .csz-progress-details details > section { border:0; margin:0; }

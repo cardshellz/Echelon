@@ -358,6 +358,106 @@ scope (order/line), released_by; picking + push + release all consult it; boot w
 - **P4.1 Migration authority:** delete db.ts DDL that duplicates tracked migrations; single
   numbering series (renumber the 43 collisions); drizzle `tablesFilter` per the runbook; boot and
   release runner use the same env var. Fail-fast, no swallow-all.
+
+  **Status 2026-11-17: done.** Every block is retired and the routine, `startup-migration-guard.ts`,
+  `scripts/release-schema-fallbacks.ts`, its step in `scripts/release.sh`, the
+  `SKIP_STARTUP_MIGRATIONS` flag and `schema-fallbacks-only-shrink.test.ts` are deleted. Releases
+  v3571 to v3573 ran the emptied routine (`completed`, no statements) before it was deleted.
+  `server/db.ts` now changes no schema; `boot-does-not-change-schema.test.ts` and
+  `db-boot-no-dml.test.ts` keep it that way. What P4.1 still owes: the objects the Progress
+  table marks as having no tracked CREATE (the buildable-from-migrations baseline), the
+  numbering collisions and the drizzle `tablesFilter`. The text below is the record of how the
+  routine was retired.
+
+  **Status 2026-11-11.** Step 0 is done: the routine (`runReleaseSchemaFallbacks()` in
+  `server/db.ts`, formerly `runStartupMigrations()`) no longer runs when the web process boots.
+  It runs once per release from `scripts/release.sh`. It still exists, and the end state is that
+  it does not. Retire it block by block; `server/__tests__/unit/schema-fallbacks-only-shrink.test.ts`
+  holds a ceiling on its size that each step lowers and nothing may raise.
+
+  **Facts the steps rest on (checked 2026-11-11):**
+  - The routine is 170 statements in 30 blocks (one `console.log("Checked ...")` per block).
+    Many blocks carry a comment naming the tracked migration they mirror (024, 037, 038, 045,
+    048, 051, 053, 103, 116, 0573, 0580); those comments are unverified leads.
+  - Production already has everything it creates: the v3518 boot logged all 30 blocks with no
+    error in 0.4 s. Confirmed 2026-11-12 by running the whole routine against a structure-only
+    copy of production (792 tables): the schema dump before and after is identical. On that
+    data-less copy the last block (WMS order dedup index) stops at its `UPDATE wms.orders`
+    because a trigger needs a singleton row; its two constraints and its index were confirmed
+    present in production by direct query, and its `UPDATE` matches 0 rows there. The three
+    seed statements also match existing rows (default product line, 16 product types, one
+    `sync_settings` row).
+  - The tracked migrations alone cannot build an empty database (they fail at
+    `0002_concerned_darwin.sql`), and CI never builds one from them. So a block may be the only
+    thing that creates its objects outside production; "production has it" is not enough to delete.
+
+  **Per block (one small PR each, or a few related blocks together):**
+  1. Restore a structure-only copy of production's schema locally (`pg_dump --schema-only`,
+     read-only). Run the block against it and diff the schema before and after. No diff proves the
+     block changes nothing in production.
+  2. Find the tracked migration that creates the same objects. The block's own comment usually
+     names it; confirm by reading the migration, not the comment.
+  3. If one exists: delete the block. If none exists: move the block's SQL, fully
+     schema-qualified, into a new tracked migration, run that migration against the production
+     schema copy (it must apply cleanly and leave no diff), then delete the block.
+  4. Lower the ceiling in the shrink test to the new counts.
+
+  **Order.** Start with the blocks whose comment names a migration (cheapest to prove). Leave the
+  four allow-listed data statements (`db-boot-no-dml.test.ts`) and the two blocks with their own
+  failure handling (WMS order dedup index, refund return lifecycle) for last; they need the most
+  care. When the last block goes, delete `runReleaseSchemaFallbacks`, `startup-migration-guard.ts`,
+  `scripts/release-schema-fallbacks.ts`, its line in `scripts/release.sh`, and the
+  `SKIP_STARTUP_MIGRATIONS` flag.
+
+  **Progress.**
+  | Date | Blocks retired | Covered by | Left |
+  |---|---|---|---|
+  | 2026-11-12 | Fulfillment-state ledger; shipping-engine columns on `oms.oms_orders`; shipping-engine columns on `wms.outbound_shipments` | `103_line_fulfillments_ledger.sql`; `0002`/`0071` + `0574_oms_engine_agnostic_refs.sql`; `0573_engine_agnostic_shipment_refs.sql` (all recorded as applied in production) | 157 statements, 27 blocks |
+  | 2026-11-12 | Hold flags on `wms.outbound_shipments` (`held`, `held_at`) | New tracked migration `*_outbound_shipment_hold_flags.sql`: no earlier migration created these columns. It adds each only when missing, so it takes no table lock where they already exist | 155 statements, 26 blocks |
+  | 2026-11-12 | eBay columns: `ebay_category_mappings.listing_enabled`, `products.ebay_listing_excluded`, `product_variants.ebay_listing_excluded`, `products.ebay_browse_category_id` / `_name` | `0002`/`0071` table CREATEs and `051_ensure_catalog_columns.sql` (recorded as applied in production). `051` adds `products.ebay_listing_excluded` as nullable, so new tracked migration `*_products_ebay_listing_excluded_not_null.sql` enforces production's `NOT NULL DEFAULT false` | 150 statements, 23 blocks |
+  | 2026-11-12 | OMS Shopify webhook columns on `oms.oms_orders` (`financial_status`, `cancelled_at`, `refunded_at`) | `0002`/`0071` table CREATE (recorded as applied in production). This was the statement that hit the lock limit in the v3536 and v3537 releases | 147 statements, 22 blocks |
+  | 2026-11-13 | eBay policy override columns on `products` and `product_variants` (six columns) | `051_ensure_catalog_columns.sql`. Production had them at `varchar(20)` (the fallback created them first) against `varchar(100)` in `051` and `shared/schema`; new tracked migration `*_catalog_ebay_policy_override_capacity.sql` widens them. First chunk whose migration changes production's schema | 141 statements, 21 blocks |
+  | 2026-11-14 | WMS order dedup: `wms.orders.fulfillment_partition_key`, two check constraints, unique index `uq_wms_orders_oms_fulfillment_partition_active` (and the routine's only `UPDATE`) | `111_oms_wms_fulfillment_partitions.sql`, same statements (recorded as applied in production). The block's inner catch hid a lock timeout in the v3542 release behind a `completed` outcome | 135 statements, 20 blocks |
+  | 2026-11-14 | The three remaining inner `try`/`catch` groups: refund return lifecycle (`wms.returns` columns and foreign key, `wms.return_items`), `wms.reconciliation_exceptions`, and the shipment dedup index `uq_outbound_shipments_external_fulfillment_id` | `131_refund_line_disposition_authority.sql`; `109_oms_wms_reconciliation_exceptions.sql` + `0603_shipping_provider_label_direction.sql`; `0579_outbound_shipment_fulfillment_dedup.sql` (all recorded as applied in production). No inner catch is left, so every failure now reaches the routine's one handler and reports `failed_partway` | 120 statements, 18 blocks |
+  | 2026-11-14 | Order combining: `combined_order_groups` table and its eleven add-column statements, `orders.combined_group_id`, `orders.combined_role` (three blocks) | `001_order_combining.sql`, same statements, and the baseline `0002_concerned_darwin.sql` (both recorded as applied in production; every statement was a no-op there) | 106 statements, 15 blocks |
+  | 2026-11-14 | Channel allocation tables: `channels.channel_product_allocation`, its unique index, `channels.channel_sync_log` | `024_channel_allocation_tables.sql` and the baseline `0002_concerned_darwin.sql` (both recorded as applied in production; every statement was a no-op there) | 103 statements, 14 blocks |
+  | 2026-11-15 | Product lines: `cycle_counts.aisle_filter`, `inventory_transactions.reserved_qty_delta` and its index, the three product-line tables and four indexes, and the `TRADING_CARD_SUPPLIES` seed `INSERT` | `0002_concerned_darwin.sql`, `116_reservation_ledger_qty.sql`, `037_product_lines.sql` (all recorded as applied in production; the seed row exists). The boot DML allowlist drops the product-lines seed and the already-retired `wms.orders` backfill | 92 statements, 13 blocks |
+  | 2026-11-15 | Performance indexes: `cycle_counts.location_codes`, per-warehouse location code uniqueness, `inventory_transactions.voided_at`, the non-negative on-hand check, and 17 indexes | `0002_concerned_darwin.sql`, `038_location_code_warehouse_unique.sql`, `002_consolidate_inventory_model.sql`, `0671_inventory_quantity_level_identity.sql`, `0575_inventory_ledger_immutability.sql`, `209_recipe_mixed_supply_reservations.sql`, `0577_reservation_dedup_and_freeze_index.sql`, `155_receipt_line_idempotency.sql` (all recorded as applied in production). Four indexes had no tracked migration and get one in this change (`legacy_performance_indexes`); the duplicate `idx_inventory_levels_pv_wl` is no longer created | 71 statements, 12 blocks |
+  | 2026-11-15 | Product types (table, 16-row seed `INSERT`, `products.product_type`), `ebay.ebay_listing_rules`, `ebay.ebay_category_mappings` | `0002_concerned_darwin.sql` for the tables and column (all exist in production). The seed rows and the `ebay_listing_rules.scope_type` check had no tracked migration and get one in this change (`product_types_seed_and_listing_rule_scope_check`). The boot DML allowlist drops the product types seed | 66 statements, 9 blocks |
+  | 2026-11-15 | OMS tables: `oms.oms_orders`, `oms.oms_order_lines`, `oms.oms_order_line_authority_events`, `oms.oms_order_events` and their ten indexes | `045_oms_tables.sql`, `0002_concerned_darwin.sql`, `107_oms_order_line_authority_events.sql` (all recorded as applied in production; every table and index exists) | 52 statements, 8 blocks |
+  | 2026-11-16 | Sync control: `channels.sync_settings` and its default row, `channels.sync_log` and three indexes, the `channels` sync columns and `sync_mode` check, `warehouses.feed_enabled` | `0002_concerned_darwin.sql`, `0669_inventory_publication_global_control_singleton.sql` (both recorded as applied in production). `channels_sync_mode_check` had no tracked migration and gets one in this change. The fallback now contains no DML | 41 statements, 7 blocks |
+  | 2026-11-16 | eBay aspects (three tables, three indexes), `channels.channel_pricing_rules` and its two partial unique indexes, `channel_allocation_rules` nullable `channel_id` / unique index rebuild / `floor_type` | `ebay.ebay_category_aspects` had no tracked migration and gets one in this change (`ebay_category_aspects_table`). `ebay.ebay_type_aspect_defaults`, `ebay.ebay_product_aspect_overrides` and `channels.channel_pricing_rules` still have no tracked CREATE: `*_listing_intent_propagation.sql` fails unless they already exist, so the fallback could not create them for a new database and a later migration cannot either; they must be declared by the buildable-from-migrations baseline work. The allocation rules end state is in `0002_concerned_darwin.sql` and `048_floor_type_days_of_cover.sql` (recorded as applied in production); releases no longer drop and rebuild `car_channel_product_variant_idx` | 30 statements, 3 blocks |
+  | 2026-11-16 | Lot cost columns (eight COGS and five mills columns on `inventory_lots`, two mills columns on `oms.order_item_costs`), COGS engine tables (`order_line_costs`, `inventory.cost_adjustment_log`, their five indexes, three partial indexes on `inventory_lots`), forward demand events (two tables, three indexes) | Demand events: `0580_demand_events.sql`. The lot cost columns and COGS tables have no tracked CREATE; `0083_inventory_fk_constraints.sql`, `0576_align_money_columns_bigint.sql` and `0751_exact_inventory_cost_totals.sql` already require them, so the fallback could not create them for a new database and a later migration cannot either; they must be declared by the buildable-from-migrations baseline work. The unqualified `order_line_costs` statements targeted a leftover `public.order_line_costs`. The routine is now empty; deleting it is the next change | 0 statements, 0 blocks |
+
+  The first two blocks were chosen because they were the statements that hit the lock limit in
+  the v3528 release. The hold-flag block is the first one that needed a migration written; use
+  it as the pattern (check the catalog first, alter only when missing, compare the result with
+  production's definition).
+
+  **Separate item, same phase:** make a new empty database buildable from tracked migrations
+  (a baseline schema file plus the migrations after it), and have CI build one. Until that exists
+  there is no tested way to create an Echelon database from the repository.
+
+  **Status 2026-11-17: step 1 done.** `migrations/baseline/schema.sql` is a structure-only
+  snapshot of production (793 tables, PostgreSQL 17.10) and `manifest.json` lists the 604
+  migrations it covers. The release runner loads it only into a database with no objects and no
+  migration records (`migrations/baseline-bootstrap.ts`), records the covered migrations as
+  applied, then runs the rest. CI job "Build database from repository" does this on every PR.
+  Checked by hand on 2026-11-17: a database built this way has the same structure as production.
+  The snapshot declares the objects the Progress table marks as having no tracked CREATE.
+  - Owner decision (2026-11-17): one snapshot of the whole shared database for now, `membership`
+    and shellz-club's `public` tables included, because foreign keys cross both ways. Split it by
+    owner when the database roles are separated (`DB-ROLE-SEPARATION-RUNBOOK.md`). A plain
+    four-part split was tried and fails on 6 foreign keys and 1 view; it needs tables, then keys
+    and indexes, then cross-application links. `public` has 33 tables and no current owner list;
+    the runbook's §2b list is out of date.
+  - Still owed: (a) reference rows. The snapshot holds no rows, and 75 legacy migrations insert
+    some (notification types, permissions, shipping configuration, settings); which tables are
+    reference data needs a table-by-table review. (b) A repeatable drift check that builds from
+    the repository and compares with production's structure. (c) Retiring the legacy files the
+    baseline covers, once CI has built from it for a while; that needs the frozen-legacy rule in
+    `migration-policy.mjs` changed. (d) The integration suites still build their own fixtures on
+    PostgreSQL 16; the baseline has not been tried on 16.
 - **P4.2 Logging:** adopt `server/platform/observability` everywhere (~1,600 console.* sites,
   mechanical/codemod-able); every log line carries `{oms_order_id, wms_order_id, shipment_id,
   channel_event_id, engine_ref}` per CLAUDE.md §10; DropshipLogger/AuditLogger fold in or wrap.

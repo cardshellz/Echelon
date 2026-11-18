@@ -19,20 +19,23 @@ const root = (p: string) => readFileSync(resolve(__dirname, "../../..", p), "utf
 const MIGRATION = root("migrations/0629_wms_orders_completed_requires_timestamp.sql");
 const WMS_SYNC = root("server/modules/oms/wms-sync.service.ts");
 const STATUS_CORE = root("server/modules/orders/order-status-core.ts");
+const WMS_ORDER_MUTATIONS = root("server/modules/wms/wms-order-mutations.repository.ts");
 
 describe("wms-sync status rollup", () => {
   it("no longer answers 'completed' from an absence of pickable rows", () => {
+    expect(WMS_SYNC).toContain("recomputeWmsOrderStatusAndCountsAfterLineSyncInWms(");
     expect(WMS_SYNC).not.toMatch(/ELSE 'completed'/);
+    expect(WMS_ORDER_MUTATIONS).not.toMatch(/ELSE 'completed'/);
   });
 
   it("preserves the existing status when it has nothing to go on", () => {
     // Matching its three sibling writers, none of which invent a status.
-    expect(WMS_SYNC).toMatch(/ELSE w\.warehouse_status\s*\n\s*END,/);
+    expect(WMS_ORDER_MUTATIONS).toMatch(/ELSE w\.warehouse_status\s*\n\s*END,/);
   });
 
   it("still resolves the two states it can actually evidence", () => {
-    expect(WMS_SYNC).toMatch(/THEN 'ready'/);
-    expect(WMS_SYNC).toMatch(/= 0 THEN 'cancelled'/);
+    expect(WMS_ORDER_MUTATIONS).toMatch(/THEN 'ready'/);
+    expect(WMS_ORDER_MUTATIONS).toMatch(/= 0 THEN 'cancelled'/);
   });
 });
 
@@ -43,7 +46,8 @@ describe("the guarded completion path stays intact", () => {
     // that into a loud failure rather than another phantom completion.
     const stamped = STATUS_CORE.match(/setCompletedAt: true/g) ?? [];
     expect(stamped.length).toBe(2); // completeOrder + shipOrder
-    expect(STATUS_CORE).toMatch(/completed_at = \$\{now\}/);
+    expect(STATUS_CORE).toContain("executeGuardedWmsOrderStatusTransitionInWms(");
+    expect(WMS_ORDER_MUTATIONS).toMatch(/completed_at = \$\{input\.now\}/);
   });
 });
 

@@ -1,3 +1,4 @@
+import { accountOverviewReadSchema, parseAccountOverview } from "./account-overview-client";
 import { z } from "zod";
 import { CUSTOMER_ACCOUNT_COMMAND_HEADER, customerAccountRequestSchema, customerAccountBootstrapSchema, customerAccountOrderIdentitySchema, customerAccountOrderIdentityInputSchema } from "@shared/customer-account/customer-account.contract";
 import { ORDER_EDIT_API } from "@shared/order-edits/order-edit.contract";
@@ -11,23 +12,25 @@ import { customerOrderCancellationInputSchema, customerOrderCancellationReviewSc
 import { customerAccountOrderSummariesInputSchema, customerAccountOrderSummariesSchema, customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";
 import { customerOrderActionPageSchema } from "@shared/customer-account/order-actions";
 
-export const customerAccountPageConfigSchema = z.object({
-  themeId: z.string().max(30).regex(/^[1-9][0-9]*$/),
-  customerId: z.string().max(30).regex(/^[1-9][0-9]*$/),
-  loginPath: z.string().max(100).regex(/^\/(?:[a-z]{2}(?:-[a-z0-9]{2,8})?\/)?account\/login$/i).default("/account/login"),
-  proxyPath: z.string().regex(/^\/(apps|a|community|tools)\/[a-z0-9][a-z0-9-]*$/).refine(path => !path.endsWith("/member-portal")),
-}).strict();
-export type CustomerAccountPageConfig = z.input<typeof customerAccountPageConfigSchema>;
+export { customerAccountPageConfigSchema } from "./account-page-config";
+import { customerAccountPageConfigSchema, type CustomerAccountPageConfig } from "./account-page-config";
+export type { CustomerAccountPageConfig } from "./account-page-config";
 // Bound storefront waits; a timed-out mutation must still be reconciled.
 export const CUSTOMER_ACCOUNT_REQUEST_TIMEOUT_MS = 25_000;
-export class CustomerAccountRequestError extends Error {
-  constructor(public readonly code: string | undefined, message: string) { super(message); }
-}
+import { CustomerAccountRequestError } from "./account-request-error";
+export { CustomerAccountRequestError } from "./account-request-error";
 export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, request: typeof fetch = fetch) {
   const config = customerAccountPageConfigSchema.parse(raw);
   let sessionKey: string | undefined;
   async function call(input: { method: "GET" | "POST"; path: string; query?: Record<string, string>; body?: unknown; commandKey?: string }, signal?: AbortSignal | null): Promise<Response> {
-    const body = customerAccountRequestSchema.parse({ ...input, themeId: config.themeId, expectedCustomerId: config.customerId, ...(sessionKey ? { sessionKey } : {}) });
+    // Display caches contain purchase facts, never session authority. Every
+    // dependent request must wait for a verified bootstrap/overview adoption.
+    if (!["/account/bootstrap", "/account/overview"].includes(input.path) && !sessionKey)
+      throw new CustomerAccountRequestError(
+        "CUSTOMER_ACCOUNT_SESSION_NOT_READY",
+        "Your account is still loading. Please try again.",
+      );
+    const body = customerAccountRequestSchema.parse({ ...input, themeId: config.themeId, expectedCustomerId: config.customerId, ...(sessionKey && !["/account/bootstrap", "/account/overview"].includes(input.path) ? { sessionKey } : {}) });
     const controller = new AbortController();
     const cancel = () => controller.abort(signal?.reason);
     if (signal?.aborted) cancel();
@@ -85,6 +88,21 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
       ...(key ? { commandKey: key } : {}) }, options?.signal);
   };
   return {
+    async overview(raw: unknown, signal?: AbortSignal) {
+      const input = customerAccountOrderSummariesInputSchema.parse(raw);
+      const result = parseAccountOverview(await json(await call({ method: "POST", path: "/account/overview", body: input }, signal), accountOverviewReadSchema), input);
+      if (!result.bootstrap.session.authenticated || !result.bootstrap.session.sessionKey)
+        throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_SESSION_INVALID", "The account response could not be verified.");
+      sessionKey = result.bootstrap.session.sessionKey;
+      return result;
+    },
+    adoptOverview(raw: unknown, orders: unknown) {
+      const result = parseAccountOverview(raw, customerAccountOrderSummariesInputSchema.parse(orders));
+      if (!result.bootstrap.session.authenticated || !result.bootstrap.session.sessionKey)
+        throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_SESSION_INVALID", "The account response could not be verified.");
+      sessionKey = result.bootstrap.session.sessionKey;
+      return result;
+    },
     async bootstrap(signal?: AbortSignal) {
       const result = await json(await call({ method: "GET", path: "/account/bootstrap" }, signal), customerAccountBootstrapSchema);
       if (!result.session.authenticated || !result.session.sessionKey) throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_SESSION_INVALID", "The account response could not be verified.");
@@ -92,9 +110,9 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
       return result;
     },
     resolve: async (raw: unknown, signal?: AbortSignal) => json(await call({ method: "POST", path: "/account/resolve", body: customerAccountOrderIdentityInputSchema.parse(raw) }, signal), customerAccountOrderIdentitySchema),
-    orderActions: async (raw: unknown, signal?: AbortSignal) => {
+    orderActions: async (raw: unknown, signal?: AbortSignal, refresh = false) => {
       const input = customerAccountOrderSummariesInputSchema.parse(raw);
-      const result = await json(await call({ method: "POST", path: "/account/order-actions", body: input }, signal), customerOrderActionPageSchema);
+      const result = await json(await call({ method: "POST", path: refresh ? "/account/order-actions/refresh" : "/account/order-actions", body: input }, signal), customerOrderActionPageSchema);
       if (result.orders.length !== input.orders.length || result.orders.some(row => !input.orders.some(
         expected => row.externalOrderId === expected.externalOrderId && row.orderReference === expected.orderReference)))
         throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_ACTION_MISMATCH", "Order options could not be verified. Please try again.");
@@ -102,7 +120,8 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
     },
     orderSummaries: async (raw: unknown, signal?: AbortSignal) => {
       const input = customerAccountOrderSummariesInputSchema.parse(raw);
-      const result = await json(await call({ method: "POST", path: "/account/order-summaries", body: input }, signal), customerAccountOrderSummariesSchema);
+      const response = await call({ method: "POST", path: "/account/saved-summaries", body: input }, signal);
+      const result = await json(response, customerAccountOrderSummariesSchema);
       const expected = input.orders.map(order => order.externalOrderId);
       const received = [...result.orders.map(order => order.externalOrderId), ...result.unavailableExternalOrderIds];
       if (received.length !== expected.length || received.some(id => !expected.includes(id)) || result.orders.some(order => !input.orders.some(item => item.externalOrderId === order.externalOrderId && item.orderReference === order.orderReference)))
@@ -116,7 +135,7 @@ export function createCustomerAccountTransport(raw: CustomerAccountPageConfig, r
         throw new CustomerAccountRequestError("CUSTOMER_ACCOUNT_ORDER_MISMATCH", "Order details could not be verified. Please try again.");
       return result;
     },
-    edits: createOrderEditTransport(bridge),
+    edits: createOrderEditTransport(bridge, { observationVersion: "v1" }),
     cancellation: {
       review: async (connectionId: number, omsOrderId: number, signal?: AbortSignal) => json(await call({
         method: "GET", path: `/account/orders/${omsOrderId}/cancellation/review`, query: { connectionId: String(connectionId) },

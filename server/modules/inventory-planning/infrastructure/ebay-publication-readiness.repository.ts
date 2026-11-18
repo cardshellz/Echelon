@@ -12,6 +12,7 @@ import { PublicationMappingPreparationStore, readTargets } from "./publication-m
 import { applyExactEbaySkuMappingsInsideTransaction } from "./exact-ebay-sku-mapping.apply";
 import { captureEbayPublicationReadiness, readinessDigest } from "./ebay-publication-readiness.read";
 import { lockEbayListingPreparationScope, validateEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../channels/ebay-listing-preparation-scope";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 
 type ConnectionPool = Pick<Pool, "connect">;
 const fail = (code: string, message: string): never => { throw new InventoryPublicationMembershipError(code, message); };
@@ -234,10 +235,15 @@ export async function withEbayPublicationReadinessApplied<T>(pool: ConnectionPoo
     await client.query(`INSERT INTO inventory.ebay_publication_readiness_applications(command_key,channel_id,product_id,request_hash,actor,occurred_at,source,review,receipt)
       VALUES($1::uuid,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb)`, [input.commandKey, input.source.channelId, input.source.productId,
       requestHash, actor, now, JSON.stringify(verifiedListing ? { ...input.source, verifiedListing } : input.source), JSON.stringify(evidence.review), JSON.stringify(receipt)]);
-    await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-      VALUES($1,'AUDIT',$2,'inventory_availability.ebay_publication_stock.enrolled',$3,$4::jsonb,$5::jsonb)`,
-    [now, actor, `inventory.inventory_publication_target:${target.id}`, JSON.stringify({ before: evidence.review, after: receipt }),
-      JSON.stringify({ commandKey: input.commandKey, requestHash })]);
+    await insertAuditEventPgQuery(client, {
+      timestamp: now,
+      actor,
+      action: "inventory_availability.ebay_publication_stock.enrolled",
+      target: `inventory.inventory_publication_target:${target.id}`,
+      changesJson: JSON.stringify({ before: evidence.review, after: receipt }),
+      contextJson: JSON.stringify({ commandKey: input.commandKey, requestHash }),
+      inlineAction: true,
+    });
     return { receipt, result: await followUp(client, receipt) };
   });
 }

@@ -1,10 +1,11 @@
 import { asc, eq, sql } from "drizzle-orm";
 import { auditEvents, inboundShipments, inboundShipmentLines } from "@shared/schema";
 import { shipmentMeasurementContextSchema, shipmentMeasurementsSchema, shipmentMeasurementApprovalResultSchema, type ShipmentMeasurementReviewRequest, type ShipmentMeasurementPreview } from "@shared/procurement/shipment-measurement-correction";
-import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { lockInventoryCostGraph, costFingerprint } from "../inventory/infrastructure/cost-evidence.repository";
 import { readPoAmendmentDependencies, type PoAmendmentDependencies } from "./po-amendment-dependencies.repository";
 import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
+import { insertAuditEventDrizzleReturningId } from "../../infrastructure/transactional-audit";
 
 export class ShipmentMeasurementCorrectionError extends Error {
   constructor(message: string, readonly code: string, readonly statusCode = 409) { super(message); this.name = "ShipmentMeasurementCorrectionError"; }
@@ -56,11 +57,11 @@ export async function readShipmentMeasurementApprovals(tx: AmendmentTransaction,
 export async function recordShipmentMeasurementApproval(tx: AmendmentTransaction, source: ShipmentMeasurementSource,
   preview: ShipmentMeasurementPreview, actorId: string, at: Date) {
   const actorName = await readPurchaseApproverName(tx, actorId);
-  const [event] = await tx.insert(auditEvents).values({ timestamp: at, level: "AUDIT", actor: actorId,
+  const [event] = await insertAuditEventDrizzleReturningId(tx, { timestamp: at, level: "AUDIT", actor: actorId,
     action: "procurement.shipment.measurements_corrected", target: `shipment:${source.shipment.id}`,
     changes: { preview }, context: { shipmentId: source.shipment.id, actorName, reason: preview.reason,
       source: "saved_shipment_line_measurements", inventoryQuantityDelta: 0, shipmentStatus: source.shipment.status },
-  }).returning({ id: auditEvents.id });
+  });
   if (!event) throw new ShipmentMeasurementCorrectionError("The measurement approval could not be recorded.", "SHIPMENT_MEASUREMENTS_AUDIT_FAILED", 500);
   return shipmentMeasurementApprovalResultSchema.parse({ auditEventId: event.id, actorId, actorName, approvedAt: at.toISOString(), preview });
 }

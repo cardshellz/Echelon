@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { SYSTEM_ROLES } from "../../server/modules/identity/domain/identity.domain";
 import { relationshipFixture } from "../fixtures/document-relationships";
 import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
@@ -28,7 +29,7 @@ export async function installFixtures(page: Page, options: { permissions?: reado
       const parts = path.split("/");
       json = relationshipFixture({ kind: parts[4] as "purchase" | "shipment" | "receipt", id: Number(parts[5]) });
     }
-    else if (path === "/api/auth/me") json = { user: { id: "test-user", username: "test", role: "admin" }, permissions, roles: ["admin"] };
+    else if (path === "/api/auth/me") json = staffAuthorityFixture({ user: { id: "test-user", username: "test", role: "admin" }, permissions, systemRoles: ["admin"] });
     else if (path === "/api/settings/procurement") json = { useNewPoEditor: true };
     else if (/^\/api\/purchase-orders\/\d+\/financial-evidence$/.test(path)) json = {
       purchaseOrderId: Number(path.split("/")[3]), currency: "USD", state: "complete",
@@ -77,6 +78,7 @@ export async function installFixtures(page: Page, options: { permissions?: reado
     else if (path === "/api/inbound-shipments/42/allocation-status") json = { issues: [], costs: [], status: "allocated", blockerCount: 0, warningCount: 0, lineCount: 1, allocatableCostCount: 1, effectiveCostCents: 10000, unallocatedCents: 0 };
     else if (path === "/api/inbound-shipments/42/invoices") json = { invoices: [invoice], summary: { invoiceCount: 1, activeInvoiceCount: 1, totalInvoicedCents: 10000, totalPaidCents: 10000, outstandingCents: 0 } };
     else if (path === "/api/vendor-invoices/71") json = invoice;
+    else if (/^\/api\/vendor-invoices\/\d+\/transition-history$/.test(path)) json = [];
     else if (/^\/api\/receiving\/\d+\/quarantine$/.test(path)) json = {
       receivingOrderId: Number(path.split("/")[3]), warehouseId: 1,
       canRecord: { allowed: true, reason: null }, canAcceptAll: { allowed: true, reason: null }, observations: [],

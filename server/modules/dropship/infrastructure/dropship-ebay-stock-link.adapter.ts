@@ -5,7 +5,7 @@ import type { StockLinkOfferAdapter, StockLinkProviderCallOptions } from "../../
 import { STOCK_LINK_ERROR_CODES, StockLinkError } from "../../inventory-planning/domain/stock-link-errors";
 import {
   EbayInventoryQuantityError, discoverEbayInventoryOffers, ebayInventoryMarketplace, ebayInventoryOffersPath,
-} from "../../channels/adapters/ebay/ebay-inventory-quantity";
+} from "../../channels/ebay-connector.api";
 import { boundedProviderRetryAfterSeconds } from "../../channels/provider-request-limits";
 import { DropshipError } from "../domain/errors";
 import { ebaySellRequestHeaders } from "./ebay-sell-headers";

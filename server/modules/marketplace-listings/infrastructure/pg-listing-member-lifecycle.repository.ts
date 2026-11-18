@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
-import { listingMemberIdentitySchema, listingMemberRetirementSchema, type ListingMemberIdentity, type ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
+import { listingMemberConflictListSchema, listingMemberIdentitySchema, listingMemberRetirementSchema, type ListingMemberIdentity, type ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
 import { listingMemberRemoteKey } from "../domain/listing-member-lifecycle";
@@ -13,7 +13,7 @@ const RETRY_MS = 60_000;
 const LOCK_NAMESPACE = 2591013;
 const positiveId = z.number().int().positive().max(2_147_483_647);
 const batchLimit = z.number().int().min(1).max(250);
-interface Row { id: string; identity: unknown; source_identity: unknown; source_revision: string; state: string; code: string | null; message: string | null; verified_at: Date | null; version: number; dispatch_status: string; dispatch_key: string | null; verification_attempts: number; recovery_required: boolean }
+interface Row { id: string; identity: unknown; source_identity: unknown; source_revision: string; state: string; code: string | null; message: string | null; verified_at: Date | null; version: number; dispatch_status: string; dispatch_key: string | null; verification_attempts: number; recovery_required: boolean; next_attempt_at?: Date | number | null }
 
 const localIdentitySchema = listingMemberIdentitySchema.pick({
   destinationKind: true, connectionId: true, channelId: true, vendorId: true, productId: true, productVariantId: true,
@@ -105,6 +105,24 @@ export async function readListingMemberRetirements(client: StockSelectionQueryCl
 
 export class PostgresListingMemberLifecycleRepository implements ListingMemberLifecycleStore {
   constructor(private readonly pool: Pick<Pool, "connect">, private readonly uuid: () => string = randomUUID) {}
+  async listConflictsForChannel(channelId: number, offset: number) {
+    positiveId.parse(channelId); z.number().int().nonnegative().safe().parse(offset);
+    const client = await this.pool.connect();
+    try {
+      // Only current source evidence belongs in the workspace. The immutable
+      // history retains superseded conflicts separately for audit.
+      const rows = (await client.query(`SELECT DISTINCT r.product_id AS "productId",
+          r.product_variant_id AS "productVariantId",v.sku,r.id::text AS "operationId"
+        FROM marketplace.listing_member_retirements r
+        JOIN marketplace.listing_member_retirement_sources s ON s.product_variant_id=r.product_variant_id
+          AND s.source_revision=r.source_revision AND s.identity=r.source_identity
+        JOIN catalog.product_variants v ON v.id=r.product_variant_id
+        WHERE r.identity->>'destinationKind'='channel_connection' AND r.identity->>'channelId'=$1
+          AND r.state='failed' AND r.code='LISTING_MEMBER_IDENTITY_CONFLICT'
+        ORDER BY "productVariantId","operationId" LIMIT 101 OFFSET $2::bigint`, [String(channelId), offset])).rows;
+      return listingMemberConflictListSchema.parse({ items: rows.slice(0, 100), hasMore: rows.length > 100, offset });
+    } finally { client.release(); }
+  }
   async listForChannel(channelId: number, productId: number, limit: number): Promise<ListingMemberRetirement[]> {
     positiveId.parse(channelId); positiveId.parse(productId); batchLimit.parse(limit);
     const client = await this.pool.connect();
@@ -161,14 +179,15 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
       await client.query("BEGIN");
       await client.query("SET LOCAL lock_timeout='2s'");
       await client.query("SET LOCAL statement_timeout='10s'");
-      const row = (await client.query<Row>(`SELECT * FROM marketplace.listing_member_retirements WHERE id=$1`,
+      let row = (await client.query<Row>(`SELECT * FROM marketplace.listing_member_retirements WHERE id=$1`,
         [z.string().uuid().parse(id)])).rows[0];
       if (!row) { await client.query("ROLLBACK"); return null; }
       let current = record(row);
       // Two generations/destinations addressing the same remote member cannot race.
       if (!(await tryLockListingMemberRemote(client, current.identity))) { await client.query("ROLLBACK"); return null; }
       // The prior worker may have committed between the first read and lock.
-      current = record((await client.query<Row>("SELECT * FROM marketplace.listing_member_retirements WHERE id=$1", [id])).rows[0]);
+      row = (await client.query<Row>("SELECT * FROM marketplace.listing_member_retirements WHERE id=$1", [id])).rows[0];
+      current = record(row);
       // Catalog owns archive/reactivation. Hold only this product/member while a
       // remote removal is in flight, so reactivation cannot race a destructive call.
       await client.query("SELECT id FROM catalog.products WHERE id=$1 FOR SHARE", [current.identity.productId]);
@@ -186,6 +205,7 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
         [current.identity.vendorId, current.identity.connectionId, current.identity.productVariantId]);
       }
       const result = await work({ current,
+        retryDeferred: row.next_attempt_at === Infinity,
         isCurrent: async () => (await client.query(`SELECT 1 FROM marketplace.listing_member_retirement_sources
           WHERE identity=$1 AND source_revision=$2`, [row.source_identity, current.sourceRevision])).rowCount === 1,
         save: (state, code, message, now, progress) => this.saveProgress(id, state, code, message, now, progress),
@@ -215,7 +235,9 @@ export class PostgresListingMemberLifecycleRepository implements ListingMemberLi
         dispatch_status=COALESCE($8,dispatch_status),dispatch_key=COALESCE($9,dispatch_key),
         verification_attempts=COALESCE($10,verification_attempts),recovery_required=CASE WHEN $2 IN ('retired','superseded') THEN false ELSE COALESCE($11,recovery_required) END WHERE id=$1 RETURNING *`,
       [id, state, code, message, state === "retired" ? now : null,
-        state === "retired" || state === "superseded" ? null : new Date(now.getTime() + RETRY_MS), now, progress.dispatchStatus ?? null, progress.dispatchKey ?? null,
+        state === "retired" || state === "superseded" ? null
+          : state === "failed" && code === "LISTING_MEMBER_IDENTITY_CONFLICT" ? "infinity"
+          : new Date(now.getTime() + RETRY_MS), now, progress.dispatchStatus ?? null, progress.dispatchKey ?? null,
         progress.verificationAttempts ?? null, progress.recoveryRequired ?? null])).rows[0];
       await audit(client, id, record(before), now);
       await client.query("COMMIT");

@@ -1,23 +1,210 @@
 import { db } from "../../db";
-import { eq, and, desc, isNull, sql } from "drizzle-orm";
+import { eq, and, desc, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   notifications,
   notificationTypes,
   notificationPreferences,
   users,
   authUserRoles,
-  type Notification,
   type NotificationType,
   type NotificationPreference,
 } from "@shared/schema";
 import { broadcastToUser } from "../../websocket";
+
+const NOTIFICATION_PREFS_ADVISORY_LOCK_NAMESPACE = 918_440;
+const DEFAULT_DEDUPE_WINDOW_SECONDS = 300;
+const MAX_DEDUPE_WINDOW_SECONDS = 86_400;
+
+export class NotificationPreferenceInputError extends Error {
+  constructor(
+    message: string,
+    readonly statusCode: number,
+    readonly code: string,
+  ) {
+    super(message);
+    this.name = "NotificationPreferenceInputError";
+  }
+}
+
+export interface NotifyPayload {
+  title: string;
+  message?: string;
+  data?: Record<string, unknown>;
+  dedupeKey?: string;
+  dedupeWindowSeconds?: number;
+}
+
+/**
+ * Deterministically picks the canonical preference row when legacy duplicate rows exist
+ * for the same `(notificationTypeId, userId)` or `(notificationTypeId, roleId)`.
+ * Chooses the row with the latest `updatedAt` timestamp and highest `id` tie-breaker.
+ */
+export function pickCanonicalPreferenceRow<
+  T extends { id: number; updatedAt?: Date | string | null },
+>(rows: readonly T[]): T | undefined {
+  if (rows.length === 0) return undefined;
+  let best = rows[0];
+  let bestUpdatedMs = toTimestampMs(best.updatedAt);
+  for (let index = 1; index < rows.length; index += 1) {
+    const candidate = rows[index];
+    const candidateMs = toTimestampMs(candidate.updatedAt);
+    if (candidateMs > bestUpdatedMs || (candidateMs === bestUpdatedMs && candidate.id > best.id)) {
+      best = candidate;
+      bestUpdatedMs = candidateMs;
+    }
+  }
+  return best;
+}
+
+function toTimestampMs(value: Date | string | null | undefined): number {
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  if (typeof value === "string") {
+    const ms = Date.parse(value);
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  return 0;
+}
+
+/**
+ * Single canonical preference resolver shared by `notify()` and `getPreferencesForUser()`.
+ * - Explicit user override (`true` or `false`) always takes precedence over role defaults.
+ * - Otherwise, enabled when ANY assigned role has an enabled default.
+ * - Otherwise, disabled (`false`).
+ */
+export function resolveEffectiveNotificationPreference(input: {
+  userOverrideEnabled: boolean | null;
+  roleIds: Iterable<number>;
+  enabledRoleIds: ReadonlySet<number>;
+}): { enabled: boolean; isOverride: boolean } {
+  if (input.userOverrideEnabled !== null) {
+    return {
+      enabled: input.userOverrideEnabled,
+      isOverride: true,
+    };
+  }
+  for (const roleId of input.roleIds) {
+    if (input.enabledRoleIds.has(roleId)) {
+      return {
+        enabled: true,
+        isOverride: false,
+      };
+    }
+  }
+  return {
+    enabled: false,
+    isOverride: false,
+  };
+}
+
+/**
+ * Clamp pagination options to safe bounded integers (`limit: 1..100`, `offset: >= 0`).
+ */
+export function normalizeNotificationPageOptions(opts?: {
+  unreadOnly?: boolean;
+  limit?: number;
+  offset?: number;
+}): { unreadOnly: boolean; limit: number; offset: number } {
+  const rawLimit = opts?.limit;
+  const limit =
+    typeof rawLimit === "number" && Number.isFinite(rawLimit)
+      ? Math.min(Math.max(Math.trunc(rawLimit), 1), 100)
+      : 50;
+  const rawOffset = opts?.offset;
+  const offset =
+    typeof rawOffset === "number" && Number.isFinite(rawOffset)
+      ? Math.max(Math.trunc(rawOffset), 0)
+      : 0;
+  return {
+    unreadOnly: Boolean(opts?.unreadOnly),
+    limit,
+    offset,
+  };
+}
+
+function buildPreferenceIndexesForType(allPrefs: readonly NotificationPreference[]): {
+  userOverrides: Map<string, boolean>;
+  enabledRoleIds: Set<number>;
+} {
+  const userRows = new Map<string, NotificationPreference[]>();
+  const roleRows = new Map<number, NotificationPreference[]>();
+
+  for (const pref of allPrefs) {
+    if (pref.userId && pref.roleId === null) {
+      const bucket = userRows.get(pref.userId) ?? [];
+      bucket.push(pref);
+      userRows.set(pref.userId, bucket);
+    } else if (pref.roleId !== null && pref.userId === null) {
+      const bucket = roleRows.get(pref.roleId) ?? [];
+      bucket.push(pref);
+      roleRows.set(pref.roleId, bucket);
+    }
+  }
+
+  const userOverrides = new Map<string, boolean>();
+  for (const [userId, rows] of userRows.entries()) {
+    const canonical = pickCanonicalPreferenceRow(rows);
+    if (canonical) {
+      userOverrides.set(userId, canonical.enabled === 1);
+    }
+  }
+
+  const enabledRoleIds = new Set<number>();
+  for (const [roleId, rows] of roleRows.entries()) {
+    const canonical = pickCanonicalPreferenceRow(rows);
+    if (canonical && canonical.enabled === 1) {
+      enabledRoleIds.add(roleId);
+    }
+  }
+
+  return { userOverrides, enabledRoleIds };
+}
+
+/**
+ * Resolve recipient user IDs from active user-role join rows and preference rows
+ * without depending on SQL join row order (`PLAT-02`).
+ */
+export function resolveNotificationRecipients(
+  activeUserRoleRows: readonly { userId: string; roleId: number | null }[],
+  allPrefsForType: readonly NotificationPreference[],
+): string[] {
+  const rolesByUser = new Map<string, Set<number>>();
+  for (const row of activeUserRoleRows) {
+    let roleSet = rolesByUser.get(row.userId);
+    if (!roleSet) {
+      roleSet = new Set<number>();
+      rolesByUser.set(row.userId, roleSet);
+    }
+    if (typeof row.roleId === "number") {
+      roleSet.add(row.roleId);
+    }
+  }
+
+  const { userOverrides, enabledRoleIds } = buildPreferenceIndexesForType(allPrefsForType);
+  const recipients: string[] = [];
+
+  for (const [userId, roleIds] of rolesByUser.entries()) {
+    const decision = resolveEffectiveNotificationPreference({
+      userOverrideEnabled: userOverrides.has(userId) ? userOverrides.get(userId)! : null,
+      roleIds,
+      enabledRoleIds,
+    });
+    if (decision.enabled) {
+      recipients.push(userId);
+    }
+  }
+
+  return recipients;
+}
 
 /**
  * Send a notification to all users whose preferences (role default or user override) enable it.
  */
 export async function notify(
   typeKey: string,
-  payload: { title: string; message?: string; data?: Record<string, unknown> }
+  payload: NotifyPayload,
 ) {
   // Look up the notification type
   const [nt] = await db
@@ -47,43 +234,37 @@ export async function notify(
     .from(notificationPreferences)
     .where(eq(notificationPreferences.notificationTypeId, nt.id));
 
-  // Index preferences for fast lookup
-  const userPrefs = new Map<string, NotificationPreference>();
-  const rolePrefs = new Map<number, NotificationPreference>();
-  for (const pref of allPrefs) {
-    if (pref.userId) {
-      userPrefs.set(pref.userId, pref);
-    } else if (pref.roleId) {
-      rolePrefs.set(pref.roleId, pref);
-    }
-  }
-
-  // Determine recipients
-  const recipients: string[] = [];
-  const seen = new Set<string>();
-
-  for (const row of activeUsers) {
-    if (seen.has(row.userId)) continue;
-    seen.add(row.userId);
-
-    // Check user-level override first
-    const userPref = userPrefs.get(row.userId);
-    if (userPref) {
-      if (userPref.enabled === 1) recipients.push(row.userId);
-      continue;
-    }
-
-    // Fall back to role default
-    if (row.roleId) {
-      const rolePref = rolePrefs.get(row.roleId);
-      if (rolePref && rolePref.enabled === 1) {
-        recipients.push(row.userId);
-      }
-    }
-    // No preference at all → default off
-  }
-
+  let recipients = resolveNotificationRecipients(activeUsers, allPrefs);
   if (recipients.length === 0) return;
+
+  const trimmedDedupeKey = payload.dedupeKey?.trim() || null;
+  if (trimmedDedupeKey) {
+    const rawWindow = payload.dedupeWindowSeconds ?? DEFAULT_DEDUPE_WINDOW_SECONDS;
+    const windowSeconds =
+      typeof rawWindow === "number" && Number.isFinite(rawWindow)
+        ? Math.min(Math.max(Math.trunc(rawWindow), 1), MAX_DEDUPE_WINDOW_SECONDS)
+        : DEFAULT_DEDUPE_WINDOW_SECONDS;
+    const cutoff = new Date(Date.now() - windowSeconds * 1_000);
+    const recentDuplicates = await db
+      .select({ userId: notifications.userId })
+      .from(notifications)
+      .where(
+        and(
+          eq(notifications.notificationTypeId, nt.id),
+          inArray(notifications.userId, recipients),
+          gte(notifications.createdAt, cutoff),
+          sql`${notifications.data}->>'dedupeKey' = ${trimmedDedupeKey}`,
+        ),
+      );
+    const suppressedUsers = new Set(recentDuplicates.map((row) => row.userId));
+    recipients = recipients.filter((userId) => !suppressedUsers.has(userId));
+    if (recipients.length === 0) return;
+  }
+
+  const persistedData =
+    trimmedDedupeKey !== null
+      ? { ...(payload.data ?? {}), dedupeKey: trimmedDedupeKey }
+      : payload.data ?? null;
 
   // Batch insert notifications
   const rows = recipients.map((userId) => ({
@@ -91,25 +272,29 @@ export async function notify(
     notificationTypeId: nt.id,
     title: payload.title,
     message: payload.message ?? null,
-    data: payload.data ?? null,
+    data: persistedData,
   }));
 
   const inserted = await db.insert(notifications).values(rows).returning();
 
-  // Push real-time via WebSocket
+  // Push real-time hint via WebSocket — transport errors must never fail durable persistence
   for (const n of inserted) {
-    broadcastToUser(n.userId, {
-      type: "notification",
-      notification: {
-        id: n.id,
-        title: n.title,
-        message: n.message,
-        data: n.data,
-        category: nt.category,
-        typeKey: nt.key,
-        createdAt: n.createdAt,
-      },
-    });
+    try {
+      broadcastToUser(n.userId, {
+        type: "notification",
+        notification: {
+          id: n.id,
+          title: n.title,
+          message: n.message,
+          data: n.data,
+          category: nt.category,
+          typeKey: nt.key,
+          createdAt: n.createdAt,
+        },
+      });
+    } catch (wsError) {
+      console.warn(`[Notifications] WebSocket hint failed for user ${n.userId}`, wsError);
+    }
   }
 
   console.log(
@@ -118,14 +303,15 @@ export async function notify(
 }
 
 /**
- * Get notifications for a user (newest first).
+ * Get notifications for a user (newest first with deterministic id tie-breaker).
  */
 export async function getUserNotifications(
   userId: string,
   opts: { unreadOnly?: boolean; limit?: number; offset?: number } = {}
 ) {
+  const normalized = normalizeNotificationPageOptions(opts);
   const conditions = [eq(notifications.userId, userId)];
-  if (opts.unreadOnly) {
+  if (normalized.unreadOnly) {
     conditions.push(eq(notifications.read, 0));
   }
 
@@ -147,9 +333,9 @@ export async function getUserNotifications(
       eq(notifications.notificationTypeId, notificationTypes.id)
     )
     .where(and(...conditions))
-    .orderBy(desc(notifications.createdAt))
-    .limit(opts.limit ?? 50)
-    .offset(opts.offset ?? 0);
+    .orderBy(desc(notifications.createdAt), desc(notifications.id))
+    .limit(normalized.limit)
+    .offset(normalized.offset);
 
   return rows;
 }
@@ -190,96 +376,153 @@ export async function markAllRead(userId: string) {
 
 /**
  * Get merged preferences for a user: user overrides take priority over role defaults.
+ * Uses the exact same canonical resolver as `notify()` (`PLAT-02`).
  */
 export async function getPreferencesForUser(userId: string) {
-  // Get all notification types
-  const types = await db.select().from(notificationTypes).orderBy(notificationTypes.category, notificationTypes.label);
+  const types = await db
+    .select()
+    .from(notificationTypes)
+    .orderBy(notificationTypes.category, notificationTypes.label);
 
-  // Get user's role IDs
   const userRoles = await db
     .select({ roleId: authUserRoles.roleId })
     .from(authUserRoles)
     .where(eq(authUserRoles.userId, userId));
   const roleIds = userRoles.map((r) => r.roleId);
 
-  // Get all relevant preferences
-  const allPrefs = await db.select().from(notificationPreferences);
+  const prefFilter =
+    roleIds.length > 0
+      ? or(
+          and(eq(notificationPreferences.userId, userId), isNull(notificationPreferences.roleId)),
+          and(isNull(notificationPreferences.userId), inArray(notificationPreferences.roleId, roleIds)),
+        )
+      : and(eq(notificationPreferences.userId, userId), isNull(notificationPreferences.roleId));
 
-  // Build merged view
+  const relevantPrefs = await db
+    .select()
+    .from(notificationPreferences)
+    .where(prefFilter);
+
+  const prefsByType = new Map<number, NotificationPreference[]>();
+  for (const pref of relevantPrefs) {
+    const bucket = prefsByType.get(pref.notificationTypeId) ?? [];
+    bucket.push(pref);
+    prefsByType.set(pref.notificationTypeId, bucket);
+  }
+
   return types.map((nt) => {
-    // Check for user override
-    const userPref = allPrefs.find(
-      (p) => p.notificationTypeId === nt.id && p.userId === userId
-    );
-    if (userPref) {
-      return {
-        ...nt,
-        enabled: userPref.enabled === 1,
-        isOverride: true,
-      };
-    }
-
-    // Check role defaults (enabled if ANY of user's roles has it enabled)
-    const rolePref = allPrefs.find(
-      (p) =>
-        p.notificationTypeId === nt.id &&
-        p.userId === null &&
-        p.roleId !== null &&
-        roleIds.includes(p.roleId) &&
-        p.enabled === 1
-    );
+    const typePrefs = prefsByType.get(nt.id) ?? [];
+    const { userOverrides, enabledRoleIds } = buildPreferenceIndexesForType(typePrefs);
+    const decision = resolveEffectiveNotificationPreference({
+      userOverrideEnabled: userOverrides.has(userId) ? userOverrides.get(userId)! : null,
+      roleIds,
+      enabledRoleIds,
+    });
 
     return {
       ...nt,
-      enabled: !!rolePref,
-      isOverride: false,
+      enabled: decision.enabled,
+      isOverride: decision.isOverride,
     };
   });
 }
 
 /**
- * Set a user-specific preference override.
+ * Set a user-specific preference override atomically under a per-user transactional
+ * advisory lock (`PLAT-03`), deduplicating any legacy duplicate user-override rows.
  */
 export async function setUserPreference(
   userId: string,
   notificationTypeId: number,
   enabled: boolean
 ) {
-  // Upsert: insert or update
-  const existing = await db
-    .select()
-    .from(notificationPreferences)
-    .where(
-      and(
-        eq(notificationPreferences.notificationTypeId, notificationTypeId),
-        eq(notificationPreferences.userId, userId),
-        isNull(notificationPreferences.roleId)
-      )
-    )
-    .limit(1);
-
-  if (existing.length > 0) {
-    await db
-      .update(notificationPreferences)
-      .set({ enabled: enabled ? 1 : 0, updatedAt: new Date() })
-      .where(eq(notificationPreferences.id, existing[0].id));
-  } else {
-    await db.insert(notificationPreferences).values({
-      notificationTypeId,
-      roleId: null,
-      userId,
-      enabled: enabled ? 1 : 0,
-    });
+  if (!Number.isSafeInteger(notificationTypeId) || notificationTypeId <= 0 || notificationTypeId > 2_147_483_647) {
+    throw new NotificationPreferenceInputError(
+      "Valid notification type id is required",
+      400,
+      "INVALID_NOTIFICATION_TYPE_ID",
+    );
   }
+
+  await db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(${NOTIFICATION_PREFS_ADVISORY_LOCK_NAMESPACE}, hashtext(${userId}))`,
+    );
+
+    const [typeExists] = await tx
+      .select({ id: notificationTypes.id })
+      .from(notificationTypes)
+      .where(eq(notificationTypes.id, notificationTypeId))
+      .limit(1);
+
+    if (!typeExists) {
+      throw new NotificationPreferenceInputError(
+        "Notification type not found",
+        404,
+        "NOTIFICATION_TYPE_NOT_FOUND",
+      );
+    }
+
+    const existing = await tx
+      .select()
+      .from(notificationPreferences)
+      .where(
+        and(
+          eq(notificationPreferences.notificationTypeId, notificationTypeId),
+          eq(notificationPreferences.userId, userId),
+          isNull(notificationPreferences.roleId),
+        ),
+      )
+      .orderBy(desc(notificationPreferences.updatedAt), desc(notificationPreferences.id));
+
+    const now = new Date();
+    const encodedEnabled = enabled ? 1 : 0;
+
+    if (existing.length > 0) {
+      const canonical = pickCanonicalPreferenceRow(existing)!;
+      await tx
+        .update(notificationPreferences)
+        .set({ enabled: encodedEnabled, updatedAt: now })
+        .where(eq(notificationPreferences.id, canonical.id));
+
+      const duplicateIds = existing
+        .filter((row) => row.id !== canonical.id)
+        .map((row) => row.id);
+      if (duplicateIds.length > 0) {
+        await tx
+          .delete(notificationPreferences)
+          .where(inArray(notificationPreferences.id, duplicateIds));
+      }
+    } else {
+      await tx.insert(notificationPreferences).values({
+        notificationTypeId,
+        roleId: null,
+        userId,
+        enabled: encodedEnabled,
+        updatedAt: now,
+      });
+    }
+  });
 }
 
 /**
- * Reset a user's overrides back to role defaults (delete user-level prefs).
+ * Reset a user's overrides back to role defaults atomically under the same per-user
+ * transactional advisory lock (`PLAT-03`).
  */
 export async function resetUserPreferences(userId: string) {
-  await db
-    .delete(notificationPreferences)
-    .where(eq(notificationPreferences.userId, userId));
+  await db.transaction(async (tx) => {
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(${NOTIFICATION_PREFS_ADVISORY_LOCK_NAMESPACE}, hashtext(${userId}))`,
+    );
+    await tx
+      .delete(notificationPreferences)
+      .where(
+        and(
+          eq(notificationPreferences.userId, userId),
+          isNull(notificationPreferences.roleId),
+        ),
+      );
+  });
 }
 
 /**

@@ -826,6 +826,7 @@ function stringArray(value: unknown): string[] {
 
 function candidateFromRow(row: Record<string, unknown>): CarrierTrackingMatchCandidate {
   return {
+    ...(row.status_only === true ? { statusOnly: true } : {}),
     shippingProviderLabelId: requiredId(row.shipping_provider_label_id, "shipping_provider_label_id"),
     providerLabelId: requiredString(row.provider_label_id, "provider_label_id"),
     labelStatus: labelStatus(row.label_status),
@@ -892,6 +893,7 @@ function candidateEvidence(candidate: CarrierTrackingMatchCandidate): Record<str
     shippingProviderLabelId: candidate.shippingProviderLabelId,
     providerLabelId: candidate.providerLabelId,
     labelStatus: candidate.labelStatus,
+    ...(candidate.statusOnly ? { statusOnly: true } : {}),
     linkCount: candidate.linkCount,
     labelDirection: candidate.labelDirection,
     orderNumbers: candidate.orderNumbers,
@@ -1428,7 +1430,9 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               metadata: {
                 ...retainShippingPackageDimensionsMetadata(existing[0].metadata, observation.sanitizedPayload.packageDimensions,
                   observation.observedAt, observation.eventHash),
-                authorityMode: "carrier_dispatch_cutover",
+                authorityMode: observation.observationSource === "shipstation_status_observation"
+                  ? ((existing[0]?.metadata as Record<string,unknown>|null)?.authorityMode ?? "carrier_dispatch_cutover")
+                  : "carrier_dispatch_cutover",
                 labelDirection: effectiveLabelDirection,
               },
               updatedAt: sql`GREATEST(
@@ -1461,7 +1465,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
               metadata: {
                 ...retainShippingPackageDimensionsMetadata(undefined, observation.sanitizedPayload.packageDimensions,
                   observation.observedAt, observation.eventHash),
-                authorityMode: "carrier_dispatch_cutover",
+                authorityMode: observation.observationSource === "shipstation_status_observation" ? "status_only" : "carrier_dispatch_cutover",
                 labelDirection: effectiveLabelDirection,
               },
               createdAt: observation.observedAt,
@@ -1544,7 +1548,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))
         `);
         const labelResult = await databaseTx.execute(sql`
-          SELECT id, label_direction
+          SELECT id, label_direction, metadata
           FROM wms.shipping_provider_labels
           WHERE provider = ${normalizedProvider}
             AND provider_label_id = ${normalizedProviderLabelId}
@@ -1556,6 +1560,9 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           "shipping_provider_label_id",
         );
         const currentLabelDirection = labelDirection(labelRow?.label_direction);
+        if ((labelRow?.metadata as Record<string,unknown>|null)?.authorityMode === "status_only") {
+          return { shippingProviderLabelId, linksInserted: 0, totalLinks: 0 };
+        }
 
 
         const insertedResult = await databaseTx.execute(sql`
@@ -1806,7 +1813,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
       const result = await db.execute(sql`
         SELECT label.provider, label.provider_label_id
         FROM wms.shipping_provider_labels AS label
-        WHERE (
+        WHERE COALESCE(label.metadata->>'authorityMode','')<>'status_only' AND (
           label.last_link_reconciled_at IS NULL
           OR label.last_link_reconciled_at < label.last_observed_at
           OR (
@@ -3146,7 +3153,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                 label.label_direction,
                 label.label_status,
                 label.carrier,
-                label.service_code,
+                label.service_code,(label.metadata->>'authorityMode'='status_only') AS status_only,
                 COUNT(DISTINCT link.id)::integer AS link_count,
                 ARRAY_REMOVE(ARRAY_AGG(DISTINCT wms_order.order_number), NULL) AS order_numbers
               FROM candidate_labels AS label
@@ -3177,7 +3184,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
                 label.label_direction,
                 label.label_status,
                 label.carrier,
-                label.service_code
+                label.service_code,label.metadata
               ORDER BY label.id
             `);
             return resultRows(labelResult).map(candidateFromRow);
@@ -3239,6 +3246,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
             const matchedWithoutLineage =
               resolution.status === "matched"
               && resolution.selectedCandidate?.labelDirection === "outbound"
+              && resolution.selectedCandidate.statusOnly !== true
               && (resolution.selectedCandidate.linkCount ?? 0) === 0;
             const nextReconcileAt =
               ["unmatched", "ambiguous", "review"].includes(resolution.status)

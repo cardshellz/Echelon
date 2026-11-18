@@ -1,11 +1,15 @@
 import { z } from "zod";
 import type { CustomerRewards } from "./customer-rewards";
-import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
-import type { CustomerReturnOrderAccessService } from "../../returns/application/customer-return-order-access.service";
-import type { OrderEditService } from "../../order-edits/application/order-edit.service";
-import type { OrderEditStore } from "../../order-edits/application/order-edit-store";
-import { customerOrderEditActorId } from "../../order-edits/domain/order-edit-actor";
-import { OrderEditError } from "../../order-edits/domain/order-edit-error";
+import type {
+  CustomerReturnCustomerSession,
+  CustomerReturnOrderAccessService,
+} from "../../returns/customer-return-access-contracts.api";
+import {
+  customerOrderEditActorId,
+  OrderEditError,
+  type OrderEditService,
+  type OrderEditStore,
+} from "../../order-edits/customer-account.api";
 import { orderEditQuoteInputSchema } from "@shared/order-edits/order-edit.contract";
 import {
   orderEditPreviewInputSchema,
@@ -212,9 +216,9 @@ export class CustomerOrderEditService {
     await this.ownedScope(input.connectionId, input.omsOrderId);
     return this.dependencies.edits.quote(input, this.actorId);
   }
-  async operation(raw: string, codeEntryVersion?: "v1") {
+  async operation(raw: string, codeEntryVersion?: "v1", observationVersion?: "v1") {
     await this.ownedOperation(raw);
-    return this.dependencies.edits.get(raw, codeEntryVersion);
+    return this.dependencies.edits.get(raw, codeEntryVersion, observationVersion);
   }
   async progress(
     raw: string,

@@ -12,6 +12,11 @@ const WEBHOOKS_SRC = readFileSync(
   "utf-8",
 );
 
+const WMS_ORDER_MUTATIONS_SRC = readFileSync(
+  resolve(__dirname, "../../../wms/wms-order-mutations.repository.ts"),
+  "utf-8",
+);
+
 describe("pending → ready promotion on payment", () => {
   describe("wms-sync.service :: refreshExistingWmsOrderHeaderFromOms", () => {
     it("detects pending→ready promotion via determineWarehouseStatus", () => {
@@ -21,7 +26,8 @@ describe("pending → ready promotion on payment", () => {
     });
 
     it("updates warehouseStatus to ready when promoted", () => {
-      expect(WMS_SYNC_SRC).toMatch(/promoted \? \{ warehouseStatus: "ready" \}/);
+      expect(WMS_SYNC_SRC).toContain("updateWmsOrderSlaAndPromotionInWms(");
+      expect(WMS_ORDER_MUTATIONS_SRC).toMatch(/updates\.promoted \? \{ warehouseStatus: "ready" \}/);
     });
 
     it("returns promoted flag in the result", () => {
@@ -53,13 +59,14 @@ describe("pending → ready promotion on payment", () => {
 
   describe("oms-webhooks :: orders/updated direct SQL promotion", () => {
     it("promotes warehouse_status from pending to ready when paid", () => {
-      expect(WEBHOOKS_SRC).toMatch(
+      expect(WEBHOOKS_SRC).toContain("syncWmsOrderAddressAndFinancialFromShopifyWebhookInWms(");
+      expect(WMS_ORDER_MUTATIONS_SRC).toMatch(
         /WHEN warehouse_status = 'pending' AND.*THEN 'ready'/,
       );
     });
 
     it("preserves existing warehouse_status for non-pending orders", () => {
-      expect(WEBHOOKS_SRC).toMatch(/ELSE warehouse_status/);
+      expect(WMS_ORDER_MUTATIONS_SRC).toMatch(/ELSE warehouse_status/);
     });
   });
 });

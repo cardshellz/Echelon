@@ -895,10 +895,10 @@ describe("dropship ops surface client helpers", () => {
       storeConnectionId: "34",
       intakeId: "44",
       omsOrderId: "56",
-      reasonCode: "",
+      reasonCode: "" as const,
       faultCategory: "none" as const,
       returnWindowDays: "30",
-      labelSource: "",
+      labelSource: "" as const,
       returnTrackingNumber: "",
       vendorNotes: "",
     };

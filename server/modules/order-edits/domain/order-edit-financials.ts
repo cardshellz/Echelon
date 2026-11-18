@@ -224,6 +224,12 @@ export function matchesOrderCancellationSettlement(before: SettlementEvidence, a
     && BigInt(current.refundedCents) - BigInt(original.refundedCents) === BigInt(refundCents);
 }
 
+export function cancellationPaymentsSettled(snapshot: SettlementEvidence & { cancelled: boolean; capturableCents: number }): boolean {
+  return snapshot.cancelled && snapshot.netPaidCents === 0 && snapshot.outstandingCents === 0 && snapshot.capturableCents === 0
+    && [...snapshot.transactions, ...snapshot.refunds.flatMap(refund => refund.transactions)]
+      .every(transaction => ["SUCCESS", "FAILURE", "ERROR"].includes(transaction.status));
+}
+
 /** Confirmed receipts and completed refunds can leave less than the order
  * total (including zero) available to return. A status or net balance alone
  * cannot prove this. Merchandise cancellation remains a separate command. */

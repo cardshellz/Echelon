@@ -15,6 +15,10 @@ describe("order page access presentation", () => {
       expect(customerAccountAccessNotice(new CustomerAccountRequestError(code, "Sign in to view your returns. private detail")))
         .toEqual({ message: "We couldn't load the options for your order. Please try again.", action: "retry" });
     });
+  it("recognizes a verified sign-in error passed from the separately built preload bundle", () => {
+    expect(customerAccountAccessNotice({ code: "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", message: "private upstream text" }, "history"))
+      .toEqual({ message: "Your sign-in is no longer active. Sign in again to make changes.", action: "sign_in" });
+  });
   it("does not expose raw network errors", () => {
     expect(customerAccountAccessNotice(new TypeError("Failed to fetch"))).toMatchObject({ action: "retry" });
     expect(customerAccountAccessNotice(null).message).not.toMatch(/tools|returns|sign.in/i);

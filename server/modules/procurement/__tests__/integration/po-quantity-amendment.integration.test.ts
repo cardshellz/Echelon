@@ -10,6 +10,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import * as schema from "@shared/schema";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { fixtureTable, fixtureForeignKeys } from "./shipment-line-fixture";
@@ -33,6 +34,10 @@ import { readQuantityAmendmentSource } from "../../po-quantity-amendment.reposit
 import { computePurchaseOrderInvoiceMatchSourceFingerprint } from "../../purchase-order-invoice-match";
 import { resolveException, acknowledgeException } from "../../po-exceptions.service";
 import { registerInvoiceQuantityCorrectionRoutes } from "../../invoice-quantity-correction.routes";
+import { InvoiceQuantityCorrectionError } from "../../invoice-quantity-correction.policy";
+import { PurchaseApprovalAuthorityError } from "../../purchase-order-approval.policy";
+import { PoQuantityAmendmentError } from "../../po-quantity-amendment.policy";
+import { CostEvidenceError } from "../../../inventory/infrastructure/cost-evidence-values";
 
 const TEST_URL = process.env.ECHELON_TEST_DATABASE_URL;
 const databaseTests = TEST_URL && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
@@ -49,10 +54,23 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
   let ownsAudit = false;
   const ownedSchemas: string[] = [];
   let requestActor: string | null = "admin-user";
+  async function reviewInvoiceRequest(request: InvoiceQuantityApprovalRequest, actorId = "admin-user"): Promise<InvoiceQuantityApprovalRequest> {
+    const { reason: _reason, approvalConfirmed: _confirmed, previewVersion: _version, ...draft } = request;
+    try {
+      const preview = await invoiceService.preview(81, draft, actorId);
+      return { ...request, previewVersion: preview.previewVersion };
+    } catch (error) {
+      // Invalid/stale/unauthorized cases must still reach the independent
+      // approval checks. Infrastructure failures are never hidden by a helper.
+      if (error instanceof InvoiceQuantityCorrectionError || error instanceof PurchaseApprovalAuthorityError
+        || error instanceof PoQuantityAmendmentError || error instanceof CostEvidenceError || error instanceof z.ZodError) return request;
+      throw error;
+    }
+  }
   const tables: Parameters<typeof fixtureTable>[0][] = [schema.products, schema.productVariants, schema.vendors, schema.vendorProducts, schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
-    schema.purchaseOrders, schema.purchaseOrderLines, schema.poApprovalTiers, schema.poStatusHistory, schema.poRevisions, schema.poEvents, schema.poExceptions,
+    schema.purchaseTaxTypes, schema.purchaseOrders, schema.purchaseOrderLines, schema.poApprovalTiers, schema.poStatusHistory, schema.poRevisions, schema.poEvents, schema.poExceptions,
     schema.purchasingRecommendationPoHandoffs, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poReceipts,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoiceLineTaxes, schema.vendorInvoicePoLinks, schema.poReceipts,
     schema.warehouseSettings, schema.apPayments, schema.apPaymentAllocations, schema.receivingOrders, schema.receivingLines, schema.inventoryLots, schema.auditEvents];
   tables.push(schema.inboundShipments, schema.inboundShipmentLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
     schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receiptReversals, schema.inventoryTransactions, schema.orderItemCosts, schema.orderLineCosts);
@@ -240,6 +258,89 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     expect(result.status).toBeLessThan(500);
     expect(await evidence()).toEqual(before);
   });
+  async function productChangeRequest() {
+    // An open, untouched line on the original product, already billed on the
+    // paid supplier invoice (the PO-20260602-001 line 6 shape).
+    await pool.query(`INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,product_id,expected_receive_variant_id,expected_receive_units_per_variant,sku,product_name,order_qty,status,unit_cost_cents,unit_cost_mills,total_product_cost_cents,line_total_cents,pricing_basis,pricing_source,quoted_unit_cost_mills)
+        VALUES(12,1,2,1,1,1,'TEST-ORIGINAL','Original product',5,'open',100,10000,500,500,'per_piece','manual',10000);
+      UPDATE procurement.purchase_orders SET subtotal_cents=1600,total_cents=1600,line_count=2,status='partially_received',physical_status='receiving' WHERE id=1;
+      INSERT INTO procurement.vendor_invoice_lines(id,vendor_invoice_id,line_number,purchase_order_line_id,product_name,description,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents,match_status)
+        VALUES(82,71,2,12,'Original product','Supplier toploader description',5,100,10000,500,'over_billed')`);
+    return { sourceVersion: (await service.context(1, "admin-user")).sourceVersion, changes: [],
+      productChanges: [{ lineId: 12, productId: 2, expectedReceiveVariantId: 2, expectedReceiveUnitsPerVariant: 1, vendorProductId: null, vendorSku: "SUPPLIER-NEW" }],
+      reason: "The ordered product was archived; the supplier ships the replacement product" };
+  }
+  it("changes an untouched, invoiced line's product in one reviewed revision without touching quantities, money or billing", async () => {
+    const request = await productChangeRequest();
+    // Match status is the AP owner's derived projection; the recorded supplier
+    // document (identity, description, quantity and money) must not move.
+    const invoiceDocument = "SELECT id,vendor_invoice_id,purchase_order_line_id,product_variant_id,sku,product_name,description,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents FROM procurement.vendor_invoice_lines WHERE id=82";
+    const invoiceLineBefore = (await pool.query(invoiceDocument)).rows[0];
+    const lineBefore = (await pool.query("SELECT order_qty,unit_cost_mills,total_product_cost_cents,line_total_cents,status,pricing_source FROM procurement.purchase_order_lines WHERE id=12")).rows[0];
+    const context = await service.context(1, "admin-user");
+    expect(context.lines.find(line => line.id === 12)).toMatchObject({ sku: "TEST-ORIGINAL", productId: 1, productChangeBlockedReason: null });
+    expect(context.lines.find(line => line.id === 11)?.productChangeBlockedReason).toMatch(/received/);
+    const before = await evidence(), protectedBefore = await protectedRecords();
+    const preview = await service.preview(1, request, "admin-user");
+    expect(await evidence()).toEqual(before);
+    expect(preview).toMatchObject({ beforeTotalCents: 1600, afterTotalCents: 1600, lines: [],
+      productChanges: [{ lineId: 12, before: { sku: "TEST-ORIGINAL", productId: 1, receiveVariantSku: "TEST-ORIGINAL-PIECE" },
+        after: { sku: "TEST-NEW", productId: 2, name: "New product", receiveVariantSku: "TEST-NEW-PIECE", vendorSku: "SUPPLIER-NEW" },
+        invoiceLines: [{ invoiceId: 71, invoiceNumber: "TEST-INV", invoiceLineId: 82 }] }] });
+    const approval = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true as const };
+    const key = randomUUID();
+    const result = await post(approval, key);
+    expect(result).toMatchObject({ status: 200, body: { revisionNumber: 1, preview } });
+    const after = await evidence();
+    expect(await post(approval, key)).toMatchObject({ status: 200, replayed: "true", body: result.body });
+    expect(await evidence()).toEqual(after);
+    expect((await pool.query(`SELECT product_id,product_variant_id,expected_receive_variant_id,expected_receive_units_per_variant,sku,product_name,vendor_sku,vendor_product_id
+      FROM procurement.purchase_order_lines WHERE id=12`)).rows[0]).toEqual({ product_id: 2, product_variant_id: 2, expected_receive_variant_id: 2,
+      expected_receive_units_per_variant: 1, sku: "TEST-NEW", product_name: "New product", vendor_sku: "SUPPLIER-NEW", vendor_product_id: null });
+    expect((await pool.query("SELECT order_qty,unit_cost_mills,total_product_cost_cents,line_total_cents,status,pricing_source FROM procurement.purchase_order_lines WHERE id=12")).rows[0]).toEqual(lineBefore);
+    // The supplier document is untouched and stays matched to the same line.
+    expect((await pool.query(invoiceDocument)).rows[0]).toEqual(invoiceLineBefore);
+    expect(await protectedRecords()).toEqual(protectedBefore);
+    expect((await pool.query("SELECT event_type,payload_json->'before'->>'productId' AS before_product,payload_json->'after'->>'productId' AS after_product FROM procurement.po_events ORDER BY id")).rows)
+      .toEqual([{ event_type: "product_identity_corrected", before_product: "1", after_product: "2" }, { event_type: "line_amendment_approved", before_product: null, after_product: null }]);
+    expect((await pool.query("SELECT change_type,field_changed,old_value,new_value FROM procurement.po_revisions WHERE line_id=12 AND field_changed IN ('productId','sku','vendorSku') ORDER BY field_changed")).rows).toEqual([
+      { change_type: "product_changed", field_changed: "productId", old_value: "1", new_value: "2" },
+      { change_type: "product_changed", field_changed: "sku", old_value: "TEST-ORIGINAL", new_value: "TEST-NEW" },
+      { change_type: "product_changed", field_changed: "vendorSku", old_value: null, new_value: "SUPPLIER-NEW" }]);
+    expect((await pool.query("SELECT revision_number,total_cents FROM procurement.purchase_orders WHERE id=1")).rows[0]).toEqual({ revision_number: 1, total_cents: "1600" });
+  });
+  it("keeps the product while an active shipment or any receipt names it, and re-verifies the catalog at approval", async () => {
+    const request = await productChangeRequest();
+    try {
+      await pool.query(`INSERT INTO procurement.inbound_shipments(id,shipment_number,status) VALUES(61,'TEST-SHIP','booked');
+        INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,qty_shipped) VALUES(62,61,1,12,5)`);
+      const shipped = await service.context(1, "admin-user");
+      expect(shipped.lines.find(line => line.id === 12)?.productChangeBlockedReason).toMatch(/shipment TEST-SHIP/);
+      await expect(service.preview(1, { ...request, sourceVersion: shipped.sourceVersion }, "admin-user")).rejects.toMatchObject({ code: "PO_AMENDMENT_PRODUCT_CHANGE_BLOCKED" });
+      // A cancelled shipment is history only; its manifest keeps its own description.
+      await pool.query("UPDATE procurement.inbound_shipments SET status='cancelled' WHERE id=61");
+      const cancelled = await service.context(1, "admin-user");
+      expect(cancelled.lines.find(line => line.id === 12)?.productChangeBlockedReason).toBeNull();
+    } finally {
+      await pool.query("DELETE FROM procurement.inbound_shipment_lines WHERE id=62; DELETE FROM procurement.inbound_shipments WHERE id=61");
+    }
+    await pool.query(`INSERT INTO procurement.receiving_orders(id,receipt_number,purchase_order_id,status) VALUES(32,'TEST-DRAFT-RCV',1,'draft');
+      INSERT INTO procurement.receiving_lines(id,receiving_order_id,purchase_order_line_id,expected_qty,received_qty,product_variant_id,units_per_variant_snapshot) VALUES(42,32,12,5,0,1,1)`);
+    const receiving = await service.context(1, "admin-user");
+    expect(receiving.lines.find(line => line.id === 12)?.productChangeBlockedReason).toMatch(/receiving history \(TEST-DRAFT-RCV\)/);
+    await expect(service.preview(1, { ...request, sourceVersion: receiving.sourceVersion }, "admin-user")).rejects.toMatchObject({ code: "PO_AMENDMENT_PRODUCT_CHANGE_BLOCKED" });
+    await pool.query("DELETE FROM procurement.receiving_lines WHERE id=42; DELETE FROM procurement.receiving_orders WHERE id=32");
+
+    // Archived after review: approval re-runs the catalog checks and saves nothing.
+    const current = { ...request, sourceVersion: (await service.context(1, "admin-user")).sourceVersion };
+    const preview = await service.preview(1, current, "admin-user");
+    await pool.query("UPDATE catalog.products SET is_active=false WHERE id=2");
+    const before = await evidence();
+    const result = await post({ ...current, previewVersion: preview.previewVersion, approvalConfirmed: true });
+    expect(result.status).toBeGreaterThanOrEqual(400);
+    expect(result.status).toBeLessThan(500);
+    expect(await evidence()).toEqual(before);
+  });
   it("rejects removing received/invoiced lines and adding new purchases to a closed PO", async () => {
     const request = await compositionRequest();
     const before = await evidence();
@@ -323,9 +424,19 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
     expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events")).rows[0].count).toBe(1);
     expect((await pool.query("SELECT revision_number FROM procurement.purchase_orders")).rows[0].revision_number).toBe(1);
   });
-  it.each(["lead-user", "custom-user", "scoped-user"])("rejects forged legacy role or insufficient current authority for %s", async (actor) => {
+  it.each(["lead-user", "custom-user"])("rejects forged legacy role or insufficient current authority for %s", async (actor) => {
     const request = await body(20, actor); requestActor = actor; const before = await evidence();
     expect(await post(request)).toMatchObject({ status: 403, body: { code: "PO_AMENDMENT_ADMIN_REQUIRED" } }); expect(await evidence()).toEqual(before);
+  });
+  it("rejects scoped approval grants at both the HTTP boundary and direct command", async () => {
+    const actor = "scoped-user";
+    const request = await body(20, actor); requestActor = actor; const before = await evidence();
+    expect(await post(request)).toMatchObject({ status: 403, body: { error: "Permission denied: purchasing:approve" } });
+    expect(await evidence()).toEqual(before);
+    expect(await approve(1, request, actor, descriptor(request, randomUUID(), actor))).toMatchObject({
+      httpStatus: 403, body: { code: "PO_AMENDMENT_ADMIN_REQUIRED" }, terminalState: "rejected",
+    });
+    expect(await evidence()).toEqual(before);
   });
   it("checks live membership revocation after preview, including direct command execution", async () => {
     const request = await body(); await pool.query("DELETE FROM identity.auth_user_roles WHERE user_id='admin-user'"); const before = await evidence();
@@ -440,8 +551,8 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       const poRequest = { ...await editRequest({ quantityPieces: 20, pricing: { basis: "per_piece", quantityPieces: 20, unitCostMills: 15000 }, packagingCostCents: 100, discountCents: 0, taxCents: 0 }), closedPurchaseOrderConfirmed: true as const };
       expect(await post(poRequest)).toMatchObject({ status: 200, body: { preview: { afterTotalCents: 3100, afterStatus: "closed" } } });
       const invoiceContext = await invoiceService.context(81, "admin-user");
-      const invoiceRequest = { sourceVersion: invoiceContext.sourceVersion, quantityPieces: 20, unitCostMills: 15000, lineTotalCents: 3100,
-        closedPurchaseOrderConfirmed: true, approvalConfirmed: true, reason: "Supplier invoice confirms these manually corrected values" };
+      const invoiceRequest = await reviewInvoiceRequest({ sourceVersion: invoiceContext.sourceVersion, quantityPieces: 20, unitCostMills: 15000, lineTotalCents: 3100,
+        closedPurchaseOrderConfirmed: true, approvalConfirmed: true, reason: "Supplier invoice confirms these manually corrected values" });
       const invoiceReply = await requestLocalHttp(url + "/api/vendor-invoice-lines/81/quantity-correction", { method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": randomUUID() }, body: JSON.stringify(invoiceRequest) });
       expect(invoiceReply.status).toBe(200); expect(await invoiceReply.json()).toMatchObject({ preview: { afterMatch: "matched", afterBalanceCents: 2100 } });
       expect((await pool.query("SELECT status,physical_status,closed_at,closed_by FROM procurement.purchase_orders WHERE id=1")).rows[0]).toEqual(closure);
@@ -571,10 +682,11 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       // The PO has already been corrected; receiving and the paid bill remain intact.
       await pool.query("UPDATE procurement.purchase_order_lines SET order_qty=20,total_product_cost_cents=2000,line_total_cents=2100 WHERE id=11; UPDATE procurement.purchase_orders SET subtotal_cents=2100,total_cents=2100 WHERE id=1");
     });
-    const invoiceBody = async (quantityPieces = 20, actorId = "admin-user"): Promise<InvoiceQuantityApprovalRequest> => ({
+    const rawInvoiceBody = async (quantityPieces = 20, actorId = "admin-user"): Promise<InvoiceQuantityApprovalRequest> => ({
       sourceVersion: (await invoiceService.context(81, actorId)).sourceVersion, quantityPieces,
       reason: "Supplier confirmed the invoice piece quantity", approvalConfirmed: true,
     });
+    const invoiceBody = async (quantityPieces = 20, actorId = "admin-user") => reviewInvoiceRequest(await rawInvoiceBody(quantityPieces, actorId), actorId);
     const invoiceDescriptor = (request: unknown, key = randomUUID(), actorId = "admin-user"): FinancialCommandDescriptor => ({
       actorType: "user", actorId, method: "POST", routeTemplate: "/api/vendor-invoice-lines/:lineId/quantity-correction", resourceKey: "vendor_invoice_line:81",
       idempotencyKey: key, requestHash: createHash("sha256").update(canonicalJson(request)).digest("hex"), commandName: "ap.invoice.quantity_correction", contractVersion: 1,
@@ -589,7 +701,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       po: (await pool.query("SELECT * FROM procurement.purchase_orders ORDER BY id")).rows,
       poLines: (await pool.query("SELECT * FROM procurement.purchase_order_lines ORDER BY id")).rows,
     });
-    const economicBody = async (fields = {}): Promise<InvoiceQuantityApprovalRequest> => ({ ...await invoiceBody(), unitCostMills: 10000, lineTotalCents: 2000, ...fields });
+    const economicBody = async (fields = {}): Promise<InvoiceQuantityApprovalRequest> => reviewInvoiceRequest({ ...await rawInvoiceBody(), unitCostMills: 10000, lineTotalCents: 2000, ...fields });
     const stockAndPayments = async () => {
       const records = await protectedRecords();
       delete records["procurement.vendor_invoices"]; delete records.invoiceEconomics;
@@ -600,7 +712,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       const closed = (await pool.query("SELECT status,closed_at,closed_by,total_cents FROM procurement.purchase_orders WHERE id=1")).rows[0];
       const stock = await stockAndPayments(), poLines = (await pool.query("SELECT * FROM procurement.purchase_order_lines")).rows;
       const request = await economicBody({ closedPurchaseOrderConfirmed: true }), key = randomUUID();
-      const { reason: _reason, approvalConfirmed: _confirmed, ...previewRequest } = request;
+      const { reason: _reason, approvalConfirmed: _confirmed, previewVersion: _version, ...previewRequest } = request;
       const preview = await invoiceService.preview(81, previewRequest, "admin-user");
       expect(preview).toMatchObject({ afterInvoiceAmountCents: 2000, paidAmountCents: 1000, afterBalanceCents: 1000, afterInvoiceStatus: "partially_paid" });
       const first = await invoicePost(request, key); expect(first.status).toBe(200);
@@ -663,7 +775,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       expect((await invoiceService.approve(81, request, "admin-user", command)).httpStatus).toBe(200);
     });
     it("serializes financial corrections and records only one economic result", async () => {
-      const request = await economicBody(), other = { ...request, lineTotalCents: 2500 };
+      const request = await economicBody(), other = await economicBody({ lineTotalCents: 2500 });
       const results = await Promise.all([invoiceService.approve(81, request, "admin-user", invoiceDescriptor(request)), invoiceService.approve(81, other, "admin-user", invoiceDescriptor(other))]);
       expect(results.map(row => row.httpStatus).sort()).toEqual([200, 409]);
       expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events WHERE event_type='invoice_line_corrected'")).rows[0].count).toBe(1);
@@ -707,7 +819,7 @@ databaseTests.sequential("PO quantity amendment real PostgreSQL and HTTP guarant
       expect((await pool.query("SELECT COUNT(*)::int AS count FROM public.audit_events WHERE action='procurement.invoice.quantity_corrected'")).rows[0].count).toBe(1);
     });
     it("serializes competing invoice corrections and allows only one from a source version", async () => {
-      const request = await invoiceBody(), other = { ...request, quantityPieces: 15 };
+      const request = await invoiceBody(), other = await invoiceBody(15);
       const results = await Promise.all([invoiceService.approve(81, request, "admin-user", invoiceDescriptor(request)), invoiceService.approve(81, other, "admin-user", invoiceDescriptor(other))]);
       expect(results.map((result) => result.httpStatus).sort()).toEqual([200, 409]);
       expect((await pool.query("SELECT COUNT(*)::int AS count FROM procurement.po_events")).rows[0].count).toBe(1);

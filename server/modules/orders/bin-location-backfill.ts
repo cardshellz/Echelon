@@ -27,7 +27,7 @@
  * commit — the picker's bin scan then auto-heals setup via resolve-allocation.)
  */
 import { db } from "../../storage/base";
-import { backfillUnassignedWmsOrderItemBin } from "../wms/order-item-commands";
+import { backfillUnassignedWmsOrderItemBin } from "../wms/order-intake-and-items.api";
 
 type ExecutorLike = Pick<typeof db, "execute">;
 
@@ -35,6 +35,7 @@ export async function backfillOpenOrderItemBinAssignment(params: {
   sku?: string | null;
   locationCode: string | null | undefined;
   zone?: string | null;
+  warehouseId?: number | null;
 }, tx: ExecutorLike = db): Promise<number> {
   try {
     const code = (params.locationCode || "").trim().toUpperCase();
@@ -47,6 +48,7 @@ export async function backfillOpenOrderItemBinAssignment(params: {
       sku,
       locationCode: code,
       zone,
+      ...(params.warehouseId !== undefined ? { warehouseId: params.warehouseId } : {}),
     });
     if (updated > 0) {
       console.log(

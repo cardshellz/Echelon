@@ -2446,6 +2446,14 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
       resolve(__dirname, "../../shipstation.service.ts"),
       "utf-8",
     );
+    const wmsShipmentsRepoSrc = readFileSync(
+      resolve(__dirname, "../../../wms/outbound-shipments-mutations.repository.ts"),
+      "utf-8",
+    );
+    const wmsShipmentItemsRepoSrc = readFileSync(
+      resolve(__dirname, "../../../wms/outbound-shipment-items-mutations.repository.ts"),
+      "utf-8",
+    );
     const fnStart = src.indexOf("async function resolveShipmentByOrderKey(");
     const fnBlock = src.slice(fnStart, src.indexOf("async function syncShipmentItemsFromShipStation("));
 
@@ -2456,7 +2464,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
     const fulfilledTerminalGuardPos = fnBlock.indexOf(
       "distinct_physical_shipment_after_terminal_fulfillment",
     );
-    const splitInsertPos = fnBlock.indexOf("INSERT INTO wms.outbound_shipments");
+    const splitInsertPos = fnBlock.indexOf("insertShipStationChildOutboundShipmentInWms(");
     expect(terminalGuardPos).toBeGreaterThan(-1);
     expect(fulfilledTerminalGuardPos).toBeGreaterThan(terminalGuardPos);
     expect(splitInsertPos).toBeGreaterThan(terminalGuardPos);
@@ -2464,14 +2472,16 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
 
     // Full/duplicate packages REPAIR the parent mapping instead of creating
     // a second row.
-    expect(fnBlock).toContain("shipstation_duplicate_order_key_repaired");
+    expect(fnBlock).toContain("adoptDriftedShipStationOrderMappingOnOutboundShipmentInWms(");
+    expect(wmsShipmentsRepoSrc).toContain("shipstation_duplicate_order_key_repaired");
 
     // The split mutation is transactional, deduped, and preserves source IDs
     // on the parent so later physical packages can still reference them.
     expect(fnBlock).toContain("pg_advisory_xact_lock(918406");
     expect(fnBlock).toContain("external_fulfillment_id = ${externalFulfillmentId}");
-    expect(fnBlock).toContain("SET qty = qty - ${item.qty}");
-    expect(fnBlock).toContain(
+    expect(fnBlock).toContain("reduceParentShipmentItemAfterPhysicalSplitInWms(");
+    expect(wmsShipmentItemsRepoSrc).toContain("SET qty = qty - ${input.splitQty}");
+    expect(wmsShipmentItemsRepoSrc).toContain(
       "correction_for_shipment_item_id, split_root_shipment_item_id",
     );
     expect(fnBlock).toContain(
@@ -2524,7 +2534,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
       "if (safeLegacyTrackingRepair)",
     );
     const repairUpdatePos = fnBlock.indexOf(
-      "SET external_fulfillment_id = COALESCE(",
+      "repairLegacyTrackingOutboundShipmentRefsInWms(",
       repairGuardPos,
     );
     const repairReturnPos = fnBlock.indexOf(
@@ -2535,7 +2545,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
       "const parsedShipStationItems",
     );
     const splitInsertPos = fnBlock.indexOf(
-      "INSERT INTO wms.outbound_shipments",
+      "insertShipStationChildOutboundShipmentInWms(",
     );
 
     expect(repairGuardPos).toBeGreaterThan(-1);

@@ -7,6 +7,7 @@ import { z } from "zod";
 import { invoiceWorkListQuerySchema, paymentWorkListQuerySchema } from "@shared/procurement/ap-work-list";
 import { registerPoFinancialEvidenceRoutes } from "./po-financial-evidence.routes";
 import { invoiceCostReviewCommands } from "./invoice-cost-review.service";
+import { registerInvoiceCostReviewRoute } from "./invoice-cost-review.routes";
 import { previewInvoiceCostReview } from "./invoice-cost-review-preview.service";
 import { registerInvoiceCostReviewPreviewRoute } from "./invoice-cost-review-preview.routes";
 import { registerInvoiceQuantityCorrectionRoutes } from "./invoice-quantity-correction.routes";
@@ -23,6 +24,8 @@ import { apPaymentCommands } from "./ap-payment-commands";
 import { apInvoiceCommands } from "./ap-invoice-commands";
 import { apInvoiceReplacementCommands } from "./ap-invoice-replacement.commands";
 import { invoiceReplacementInputSchema } from "@shared/procurement/invoice-replacement";
+import { registerInvoiceTransitionPreviewRoutes } from "./ap-invoice-transition.routes";
+import { invoiceTransitionIdSchema } from "./ap-invoice-transition.service";
 
 function handleApLedgerError(res: any, err: any, fallbackStatus = 400) {
   if (err?.name === "ApLedgerError" || err instanceof SupplierCreditEvidenceError) {
@@ -51,6 +54,7 @@ function sendFinancialCommandError(res: any, error: FinancialCommandError): any 
 }
 
 export function registerApLedgerRoutes(app: Express) {
+  registerInvoiceTransitionPreviewRoutes(app);
   registerInvoiceCostReviewPreviewRoute(app, previewInvoiceCostReview);
   registerSupplierCreditRoutes(app);
   registerSupplierReturnRoutes(app);
@@ -165,7 +169,9 @@ export function registerApLedgerRoutes(app: Express) {
 
   app.post("/api/vendor-invoices/:id/approve", requirePermission("purchasing", "approve"), async (req, res) => {
     try {
-      const invoiceId = Number(req.params.id);
+      const id = invoiceTransitionIdSchema.safeParse(req.params.id);
+      if (!id.success) return res.status(400).json({ error: "Choose a valid invoice." });
+      const invoiceId = id.data;
       const descriptor = financialCommandFromRequest(req, {
         actorId: getUserId(req),
         routeTemplate: "/api/vendor-invoices/:id/approve",
@@ -174,6 +180,7 @@ export function registerApLedgerRoutes(app: Express) {
       });
       const result = await apInvoiceCommands.approveInvoice(invoiceId, {
         userId: getUserId(req),
+        transitionReview: req.body,
       }, descriptor);
       return sendFinancialCommandResult(res, result);
     } catch (err: any) {
@@ -185,7 +192,9 @@ export function registerApLedgerRoutes(app: Express) {
   app.post("/api/vendor-invoices/:id/dispute", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
       const { reason } = req.body;
-      const invoiceId = Number(req.params.id);
+      const id = invoiceTransitionIdSchema.safeParse(req.params.id);
+      if (!id.success) return res.status(400).json({ error: "Choose a valid invoice." });
+      const invoiceId = id.data;
       const descriptor = financialCommandFromRequest(req, {
         actorId: getUserId(req),
         routeTemplate: "/api/vendor-invoices/:id/dispute",
@@ -195,6 +204,7 @@ export function registerApLedgerRoutes(app: Express) {
       const result = await apInvoiceCommands.disputeInvoice(invoiceId, {
         reason,
         userId: getUserId(req),
+        transitionReview: req.body,
       }, descriptor);
       return sendFinancialCommandResult(res, result);
     } catch (err: any) {
@@ -206,7 +216,9 @@ export function registerApLedgerRoutes(app: Express) {
   app.post("/api/vendor-invoices/:id/void", requirePermission("purchasing", "approve"), async (req, res) => {
     try {
       const { reason } = req.body;
-      const invoiceId = Number(req.params.id);
+      const id = invoiceTransitionIdSchema.safeParse(req.params.id);
+      if (!id.success) return res.status(400).json({ error: "Choose a valid invoice." });
+      const invoiceId = id.data;
       const descriptor = financialCommandFromRequest(req, {
         actorId: getUserId(req),
         routeTemplate: "/api/vendor-invoices/:id/void",
@@ -216,6 +228,7 @@ export function registerApLedgerRoutes(app: Express) {
       const result = await apInvoiceCommands.voidInvoice(invoiceId, {
         reason,
         userId: getUserId(req),
+        transitionReview: req.body,
       }, descriptor);
       return sendFinancialCommandResult(res, result);
     } catch (err: any) {
@@ -315,18 +328,7 @@ export function registerApLedgerRoutes(app: Express) {
     }
   });
 
-  app.post("/api/vendor-invoice-lines/:lineId/cost-components", requirePermission("purchasing", "approve"), async (req, res) => {
-    try {
-      const lineId = Number(req.params.lineId);
-      const actorId = getUserId(req);
-      const descriptor = financialCommandFromRequest(req, { actorId, routeTemplate: "/api/vendor-invoice-lines/:lineId/cost-components",
-        resourceKey: `vendor_invoice_line:${lineId}`, commandName: "ap.invoice.cost_components" });
-      return sendFinancialCommandResult(res, await invoiceCostReviewCommands.review(lineId, req.body, actorId || "", descriptor));
-    } catch (error) {
-      if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
-      return handleApLedgerError(res, error, 500);
-    }
-  });
+  registerInvoiceCostReviewRoute(app, invoiceCostReviewCommands);
 
   app.patch("/api/vendor-invoice-lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
     try {

@@ -21,6 +21,9 @@ export interface CatalogPublicationImage {
   fileBytes: number | null;
   fileHash: string | null;
   fileHeader: Buffer | null;
+  /** A derived copy of these exact source bytes, when the audience requests it. */
+  renditionHash?: string | null;
+  renditionMimeType?: string | null;
 }
 
 /** An explicit audience selection; Catalog does not know which channel supplied it. */
@@ -37,13 +40,21 @@ export interface CatalogPublicationPhotoSelection {
   maxGroupPhotos?: number;
   productId?: number;
   overrides?: readonly CatalogPublicationImageOverride[];
+  minimumLongestSide?: number;
+}
+
+/** A cached original is Catalog's authoritative source. Its historical remote
+ * URL remains provenance/deduplication identity, not a preferred thumbnail. */
+export function usesStoredCatalogPublicationImage(image: CatalogPublicationImage): boolean {
+  return (image.storageType === "file" || image.storageType === "both")
+    && (image.url === null || image.fileBytes !== null);
 }
 
 export function resolveCatalogPublicationImage(
   image: CatalogPublicationImage,
   publicUrl: CatalogPublicImageUrl,
 ): string | null {
-  if (image.url !== null) return image.url;
+  if (!usesStoredCatalogPublicationImage(image)) return image.url;
   if (image.storageType !== "file" && image.storageType !== "both") return null;
   if (
     !image.fileBytes ||
@@ -62,5 +73,11 @@ export function resolveCatalogPublicationImage(
     data: image.fileHeader,
     mimeType: image.mimeType ?? "",
   });
+  if (image.renditionHash && image.renditionMimeType)
+    return publicUrl(image.id, image.renditionHash, image.renditionMimeType);
   return publicUrl(image.id, image.fileHash, validated.mimeType);
+}
+
+export function catalogPublicationVersionHash(image: CatalogPublicationImage): string | null {
+  return usesStoredCatalogPublicationImage(image) ? image.renditionHash ?? image.fileHash : null;
 }

@@ -65,7 +65,7 @@ vi.mock("../../ap-ledger.service", () => ({
   },
 }));
 
-vi.mock("../../../notifications/notifications.service", () => mocks.notifications);
+vi.mock("../../../notifications/in-app-notifications.api", () => mocks.notifications);
 
 import { ApLedgerError } from "../../ap-ledger.service";
 import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";

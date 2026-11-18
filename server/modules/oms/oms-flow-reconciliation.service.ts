@@ -1,7 +1,10 @@
+import { queueOmsPaidEventReplay } from "./shopify-paid-event-replay";
 import { sql } from "drizzle-orm";
 import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
 import { channelMerchandiseCapabilitySql } from "./infrastructure/channel-merchandise-policy";
-import { cancelOrder } from "../orders/order-status-core";
+import { cancelOrder } from "../orders/order-lifecycle-and-cancellation.api";
+import { clearWmsOrderAssignedPickerInWms } from "../wms/wms-order-mutations.api";
+import { flagShippedOutboundShipmentOmsTerminalReviewInWms } from "../wms/outbound-shipment-mutations.api";
 import type { OmsOpsIssue } from "./ops-health.service";
 import {
   enqueueShipStationShipmentPushRetry,
@@ -59,7 +62,44 @@ const AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT = 100;
 const AUTO_FLOW_REMEDIATION_LIMIT = 10;
 const AUTO_RESERVATION_REPAIR_LIMIT = 25;
 /** Short claims re-planned per run; each attempt is one serializable transaction. */
-const SHORT_CLAIM_REFRESH_LIMIT = 25;
+export const SHORT_CLAIM_REFRESH_LIMIT = 25;
+/** Candidate window scanned per sweep so declined oldest prefixes do not starve improvable later orders. */
+export const SHORT_CLAIM_CANDIDATE_WINDOW = 250;
+
+export interface ShortClaimDeclineEntry {
+  orderId: number;
+  seq: number;
+  code: string;
+  attempts: number;
+  lastDeclinedAt: string;
+}
+
+let shortClaimDeclineSequence = 0;
+const declinedShortClaimState = new Map<number, ShortClaimDeclineEntry>();
+
+export function getShortClaimRefreshDiagnostics(): {
+  declinedOrderCount: number;
+  declineCodeCounts: Record<string, number>;
+  declinedOrders: ShortClaimDeclineEntry[];
+} {
+  const declineCodeCounts: Record<string, number> = {};
+  const declinedOrders = Array.from(declinedShortClaimState.values()).sort(
+    (a, b) => a.seq - b.seq,
+  );
+  for (const entry of declinedOrders) {
+    declineCodeCounts[entry.code] = (declineCodeCounts[entry.code] ?? 0) + 1;
+  }
+  return {
+    declinedOrderCount: declinedOrders.length,
+    declineCodeCounts,
+    declinedOrders,
+  };
+}
+
+export function resetShortClaimRefreshStateForTests(): void {
+  shortClaimDeclineSequence = 0;
+  declinedShortClaimState.clear();
+}
 /** Confirmed pick corrections retried per run; each is a few short transactions. */
 const CONFIRMED_PICK_RETRY_LIMIT = 50;
 /** Exception orders re-checked per run; each is a few reads, one write if released. */
@@ -1102,26 +1142,62 @@ export async function refreshShortClaims(
             JOIN warehouse.warehouse_locations wl ON wl.id = il.warehouse_location_id
             WHERE sv.product_id = tv.product_id
               AND il.variant_qty - il.reserved_qty > 0
+              AND wl.warehouse_id IS NOT NULL
+              AND COALESCE(wl.location_type, 'pick') NOT IN ('receiving', 'staging', 'quarantine')
               AND wl.is_active = true
               AND wl.cycle_count_freeze_id IS NULL
               AND (o.warehouse_id IS NULL OR wl.warehouse_id = o.warehouse_id)
           )
       )
     ORDER BY o.created_at, o.id
-    LIMIT ${SHORT_CLAIM_REFRESH_LIMIT}
+    LIMIT ${SHORT_CLAIM_CANDIDATE_WINDOW}
   `);
 
-  for (const row of candidates?.rows ?? []) {
-    const wmsOrderId = Number(row.order_id);
+  const rawRows = (candidates?.rows ?? []) as Array<{ order_id: number | string }>;
+  const candidateIndexById = new Map<number, number>();
+  for (let i = 0; i < rawRows.length; i++) {
+    const orderId = Number(rawRows[i].order_id);
+    if (Number.isFinite(orderId) && orderId > 0 && !candidateIndexById.has(orderId)) {
+      candidateIndexById.set(orderId, i);
+    }
+  }
+  const orderedIds = Array.from(candidateIndexById.keys());
+  // Fair rotation: fresh/non-declined orders (seq = 0) are attempted first in SQL order,
+  // followed by previously declined orders ordered by oldest decline sequence (LRU).
+  // This guarantees a persistently declining prefix of >= 25 orders never starves
+  // later improvable orders in the candidate window.
+  orderedIds.sort((a, b) => {
+    const seqA = declinedShortClaimState.get(a)?.seq ?? 0;
+    const seqB = declinedShortClaimState.get(b)?.seq ?? 0;
+    if (seqA !== seqB) return seqA - seqB;
+    return (candidateIndexById.get(a) ?? 0) - (candidateIndexById.get(b) ?? 0);
+  });
+
+  const sweepDeclineCodes: Record<string, number> = {};
+  for (const wmsOrderId of orderedIds.slice(0, SHORT_CLAIM_REFRESH_LIMIT)) {
     try {
-      const result = await svc.refreshShortClaimSupply(wmsOrderId);
+      const result:
+        | { outcome: "refreshed"; claimId: string; idempotentReplay: boolean }
+        | { outcome: "declined"; code: string; message: string } =
+        await svc.refreshShortClaimSupply(wmsOrderId);
       if (result.outcome === "refreshed") {
         totals.refreshed += 1;
+        declinedShortClaimState.delete(wmsOrderId);
         console.log(JSON.stringify({ level: "info", action: "refresh_short_claim", outcome: "refreshed",
           wms_order_id: wmsOrderId, after: { claimId: result.claimId }, idempotent_replay: result.idempotentReplay }));
       } else {
-        // Expected while stock is still missing or reserved elsewhere.
+        // Expected while stock is still missing, reserved elsewhere, or only case-break / unverified supply exists.
         totals.declined += 1;
+        const code = result.code || "CLAIM_SUPPLY_REFRESH_DECLINED";
+        sweepDeclineCodes[code] = (sweepDeclineCodes[code] ?? 0) + 1;
+        const prev = declinedShortClaimState.get(wmsOrderId);
+        declinedShortClaimState.set(wmsOrderId, {
+          orderId: wmsOrderId,
+          seq: ++shortClaimDeclineSequence,
+          code,
+          attempts: (prev?.attempts ?? 0) + 1,
+          lastDeclinedAt: new Date().toISOString(),
+        });
       }
     } catch (err: any) {
       totals.failed += 1;
@@ -1129,8 +1205,13 @@ export async function refreshShortClaims(
         wms_order_id: wmsOrderId, error_code: err?.code ?? null, error: err?.message ?? String(err) }));
     }
   }
-  if (totals.refreshed + totals.failed > 0) {
-    console.log(`${LOG_PREFIX} short-claim refresh: refreshed=${totals.refreshed} declined=${totals.declined} failed=${totals.failed}`);
+  if (totals.refreshed + totals.declined + totals.failed > 0) {
+    const declineBreakdown = Object.entries(sweepDeclineCodes)
+      .map(([code, count]) => `${code}:${count}`)
+      .join(",");
+    console.log(
+      `${LOG_PREFIX} short-claim refresh: refreshed=${totals.refreshed} declined=${totals.declined} failed=${totals.failed}${declineBreakdown ? ` decline_codes=${declineBreakdown}` : ""}`,
+    );
   }
   if (totals.failed > 0) {
     // Surface on the scheduler heartbeat via the step wrapper.
@@ -1514,157 +1595,9 @@ export async function remediateOmsFlowIssue(
   }
 
   if (input.code === "OMS_PAID_WITHOUT_WMS") {
-    const omsOrderId = positiveInt(input.omsOrderId, "omsOrderId");
-    return withOptionalTransaction(db, async (tx) => {
-      // Serialize operator clicks for one OMS order. The retry worker preserves
-      // the original inbox identity, so the paid handler replays the succeeded
-      // source event instead of creating a second receipt.
-      await tx.execute(sql`
-        SELECT pg_advisory_xact_lock(hashtext('oms_paid_without_wms_replay'), ${omsOrderId})
-      `);
-
-      const targetResult = await tx.execute(sql`
-        SELECT oo.id,
-               paid_inbox.id AS paid_inbox_id
-        FROM oms.oms_orders oo
-        LEFT JOIN LATERAL (
-          SELECT wi.id
-          FROM oms.webhook_inbox wi
-          WHERE wi.provider = 'shopify'
-            AND wi.topic = 'orders/paid'
-            AND wi.status = 'succeeded'
-            AND COALESCE(wi.payload->>'id', wi.payload->>'order_id') = oo.external_order_id
-          ORDER BY COALESCE(wi.processed_at, wi.updated_at, wi.first_received_at) DESC NULLS LAST,
-                   wi.id DESC
-          LIMIT 1
-        ) paid_inbox ON TRUE
-        WHERE oo.id = ${omsOrderId}
-          AND oo.status NOT IN ('cancelled', 'shipped')
-          AND oo.financial_status IN ('paid', 'partially_paid')
-          AND NOT EXISTS (
-            SELECT 1
-            FROM wms.orders wo
-            WHERE (wo.source = 'oms' AND wo.oms_fulfillment_order_id = oo.id::text)
-               OR (wo.source_table_id = oo.id::text)
-          )
-        LIMIT 1
-      `);
-
-      const target = firstRow<{ id: number; paid_inbox_id: number | null }>(targetResult);
-      if (!target) {
-        return {
-          code: input.code,
-          action: "paid_replay_not_queued",
-          changed: false,
-          omsOrderId,
-          wmsOrderId: null,
-          shipmentId: null,
-          retryQueueId: null,
-          sourceInboxId: null,
-          provider: "shopify",
-          topic: "orders/paid",
-        };
-      }
-
-      const sourceInboxId = Number(target.paid_inbox_id);
-      if (!Number.isInteger(sourceInboxId) || sourceInboxId <= 0) {
-        throw new Error(
-          `No succeeded Shopify orders/paid inbox event found for OMS order ${omsOrderId}`,
-        );
-      }
-
-      const pendingResult = await tx.execute(sql`
-        SELECT id
-        FROM oms.webhook_retry_queue
-        WHERE provider = 'shopify'
-          AND topic = 'orders/paid'
-          AND source_inbox_id = ${sourceInboxId}
-          AND status = 'pending'
-        ORDER BY id DESC
-        LIMIT 1
-      `);
-      const pending = firstRow<{ id: number }>(pendingResult);
-      if (pending) {
-        return {
-          code: input.code,
-          action: "orders_paid_replay_already_pending",
-          changed: false,
-          omsOrderId,
-          wmsOrderId: null,
-          shipmentId: null,
-          retryQueueId: Number(pending.id),
-          sourceInboxId,
-          provider: "shopify",
-          topic: "orders/paid",
-        };
-      }
-
-      const queuedResult = await tx.execute(sql`
-        INSERT INTO oms.webhook_retry_queue (
-          provider,
-          topic,
-          payload,
-          source_inbox_id,
-          attempts,
-          last_error,
-          next_retry_at,
-          status,
-          created_at,
-          updated_at
-        )
-        SELECT wi.provider,
-               wi.topic,
-               wi.payload,
-               wi.id,
-               0,
-               ${`Control Tower paid-event replay for OMS order ${omsOrderId} by ${input.operator || "unknown"}`},
-               NOW(),
-               'pending',
-               NOW(),
-               NOW()
-        FROM oms.webhook_inbox wi
-        WHERE wi.id = ${sourceInboxId}
-          AND wi.provider = 'shopify'
-          AND wi.topic = 'orders/paid'
-          AND wi.status = 'succeeded'
-        RETURNING id
-      `);
-      const queued = firstRow<{ id: number }>(queuedResult);
-      if (!queued) {
-        throw new Error(
-          `Succeeded Shopify orders/paid inbox event ${sourceInboxId} is no longer replayable`,
-        );
-      }
-      const retryQueueId = Number(queued.id);
-
-      await tx.execute(sql`
-        INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-        VALUES (
-          ${omsOrderId},
-          'flow_reconciliation_remediated',
-          ${JSON.stringify({
-            code: input.code,
-            operator: input.operator,
-            action: "replay_orders_paid",
-            sourceInboxId,
-            retryQueueId,
-          })}::jsonb,
-          NOW()
-        )
-      `);
-
-      return {
-        code: input.code,
-        action: "queued_orders_paid_replay",
-        changed: true,
-        omsOrderId,
-        wmsOrderId: null,
-        shipmentId: null,
-        retryQueueId,
-        sourceInboxId,
-        provider: "shopify",
-        topic: "orders/paid",
-      };
+    return queueOmsPaidEventReplay(db, {
+      omsOrderId: positiveInt(input.omsOrderId, "omsOrderId"),
+      operator: input.operator,
     });
   }
 
@@ -1866,7 +1799,7 @@ export async function remediateOmsFlowIssue(
 
       if (transResult.transitioned) {
         if (isCancelled) {
-          await tx.execute(sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${wmsOrderId}`);
+          await clearWmsOrderAssignedPickerInWms(tx, wmsOrderId);
           cancelledByThisRemediation = true;
         }
         await tx.execute(sql`
@@ -2081,14 +2014,11 @@ export async function remediateOmsFlowIssue(
         LIMIT 1
       `);
       if (firstRow<{ status: string }>(terminal)) {
-        await tx.execute(sql`
-          UPDATE wms.outbound_shipments
-          SET requires_review = true,
-              review_reason = ${"shipped_but_oms_terminal: physical shipment shipped while OMS order is money-final"},
-              updated_at = NOW()
-          WHERE id = ${shipmentId}
-            AND COALESCE(requires_review, false) = false
-        `);
+        await flagShippedOutboundShipmentOmsTerminalReviewInWms(
+          tx,
+          shipmentId,
+          "shipped_but_oms_terminal: physical shipment shipped while OMS order is money-final",
+        );
         await tx.execute(sql`
           INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
           VALUES (

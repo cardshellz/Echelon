@@ -5,8 +5,8 @@ import { reconciliationEligibility, reconciliationState } from "../inventory/dom
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { shipmentExceptionDecisionSchema, shipmentExceptionHistorySchema, type ShipmentCostException, type ShipmentExceptionContext,
   type ShipmentExceptionRequest } from "@shared/procurement/shipment-cost-exception";
-import type { PurchaseApprovalActor } from "../identity/domain/purchase-approval-authority";
-import { readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import type { PurchaseApprovalActor } from "../identity/authority-contracts.api";
+import { readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { costFingerprint, costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import { dateValues } from "./purchase-workspace-read";
 import { shipmentCostReadBatches } from "./shipment-cost-read-scope";

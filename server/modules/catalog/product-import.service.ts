@@ -319,7 +319,11 @@ export function createProductImportService(
   } = {}): Promise<ContentSyncResult> {
     console.log("Starting Shopify catalog sync...");
 
-    const shopifyProducts = await filterConnections(options.shopifyProducts ?? await fetchShopifyCatalogProducts());
+    const shopifyProducts = await filterConnections(
+      options.shopifyProducts ?? await fetchShopifyCatalogProducts(),
+      db,
+      options.shopifyProducts ? undefined : { expectedShopDomain: process.env.SHOPIFY_SHOP_DOMAIN },
+    );
     const verifiedShopifyProducts = buildVerifiedShopifyProducts(shopifyProducts);
     const canonicalMappings = emptyCanonicalMappingProjection();
     console.log(`Fetched ${shopifyProducts.length} variants from Shopify`);
@@ -545,7 +549,11 @@ export function createProductImportService(
   } = {}): Promise<ProductSyncResult> {
     console.log("Starting Shopify product sync to products/product_variants tables...");
 
-    const shopifyProducts = await filterConnections(options.shopifyProducts ?? await fetchShopifyCatalogProducts());
+    const shopifyProducts = await filterConnections(
+      options.shopifyProducts ?? await fetchShopifyCatalogProducts(),
+      db,
+      options.shopifyProducts ? undefined : { expectedShopDomain: process.env.SHOPIFY_SHOP_DOMAIN },
+    );
     const verifiedShopifyProducts = buildVerifiedShopifyProducts(shopifyProducts);
     const canonicalMappings = emptyCanonicalMappingProjection();
     console.log(`Fetched ${shopifyProducts.length} variants from Shopify`);
@@ -1153,7 +1161,12 @@ export function createProductImportService(
   async function syncProductsAndContent(): Promise<ShopifyProductAndContentSyncResult> {
     // One provider snapshot owns the whole command. Fetching twice could map an
     // older identity set and then report content from a newer set as one sync.
-    const shopifyProducts = await fetchShopifyCatalogProducts();
+    const rawShopifyProducts = await fetchShopifyCatalogProducts();
+    const shopifyProducts = await filterConnections(
+      rawShopifyProducts,
+      db,
+      { expectedShopDomain: process.env.SHOPIFY_SHOP_DOMAIN },
+    );
     const productResult = await syncProductsWithMultiUOM({ shopifyProducts });
     const contentResult = await syncContentAndAssets({
       projectCanonicalMappings: false,

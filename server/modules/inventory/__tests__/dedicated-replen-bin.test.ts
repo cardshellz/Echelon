@@ -60,27 +60,35 @@ describe("GET /api/picking/replen-bins (gun pick-screen label)", () => {
     resolve(__dirname, "../../orders/picking.routes.ts"),
     "utf8",
   );
-  const start = ROUTES_SRC.indexOf('"/api/picking/replen-bins"');
-  const block = ROUTES_SRC.slice(start, start + 3200);
+  const USE_CASES_SRC = readFileSync(
+    resolve(__dirname, "../../orders/picking.use-cases.ts"),
+    "utf8",
+  );
+  const routeStart = ROUTES_SRC.indexOf('"/api/picking/replen-bins"');
+  const routeEnd = ROUTES_SRC.indexOf('"/api/picking/orders/:id/claim"', routeStart);
+  const routeBlock = ROUTES_SRC.slice(routeStart, routeEnd > routeStart ? routeEnd : routeStart + 700);
+  const methodStart = USE_CASES_SRC.indexOf("async getDedicatedReplenBins(");
+  const methodBlock = USE_CASES_SRC.slice(methodStart, methodStart + 1200);
 
   it("exists and resolves via the exact engine resolver", () => {
-    expect(start).toBeGreaterThan(-1);
-    expect(block).toContain("resolveDedicatedReplenBin");
+    expect(routeStart).toBeGreaterThan(-1);
+    expect(routeBlock).toContain("getDedicatedReplenBins");
+    expect(methodBlock).toContain("resolveDedicatedReplenBin");
   });
 
   it("never blocks picking — degrades to an empty map on failure", () => {
     // Both the outer catch and the per-item catch must degrade, not 500.
-    expect(block).toContain("res.json(empty)");
-    expect(block).not.toContain("res.status(500)");
+    expect(routeBlock).toContain("res.json(empty)");
+    expect(routeBlock).not.toContain("res.status(500)");
+    expect(methodBlock).toContain("picker_replen_hint_unavailable");
   });
 
   it("guards against duplicate-SKU variants and skips unassigned bins", () => {
-    expect(block).toContain("DISTINCT ON (oi.id)");
-    expect(block).toContain("pv.is_active = true");
-    expect(block).toContain("'UNASSIGNED'");
+    expect(methodBlock).toContain("this.resolvePickTarget(item");
+    expect(methodBlock).toContain("item.requiresShipping !== 1");
   });
 
   it("does not echo the pick bin back as its own backup", () => {
-    expect(block).toContain("bin.locationId !== Number(row.location_id)");
+    expect(methodBlock).toContain("bin.locationId !== target.locationId");
   });
 });

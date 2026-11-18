@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po, receipt } from "./procurement-fixtures";
 import { reviewReceivingConfiguration } from "../../shared/procurement/receiving-configuration";
@@ -17,11 +18,11 @@ async function setup(page: Page, options: { noCatalogPermission?: boolean; unava
   let preview: ShipmentEditorPreview;
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: {
-      user: { id: "test-user", username: "admin", role: "admin" }, roles: ["Administrator"],
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({
+      user: { id: "test-user", username: "admin", role: "admin" }, systemRoles: ["admin"],
       permissions: ["purchasing:view", "purchasing:create", "purchasing:edit", "purchasing:approve", "inventory:receive",
         ...(options.noCatalogPermission ? [] : ["inventory:create"])],
-    } });
+    }) });
     if (path === "/api/vendors") return route.fulfill({ json: [{ id: 2, name: "Test vendor", code: "TEST" }] });
     if (path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), lines: [{ id: 9, purchaseOrderId: 17, productId: 10,
       lineNumber: 1, lineType: "product", sku: "ITEM", productName: "Fixture product", orderQty: 1000, receivedQty: 0, unitCostCents: 10, subtotalCents: 10000 }] } });

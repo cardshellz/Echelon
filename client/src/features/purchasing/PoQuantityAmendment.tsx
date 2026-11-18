@@ -12,7 +12,7 @@ import {
   poQuantityPreviewRequestSchema, poQuantityApprovalRequestSchema,
   type PoQuantityAmendmentContext, type PoQuantityAmendmentPreview, type PoQuantityAmendmentResult,
   type PoQuantityApprovalRequest, type PoQuantityPreviewRequest,
-  poLineAmountCents, type PoQuantityChange,
+  poLineAmountCents, type PoQuantityChange, type PoLineProductIdentity,
 } from "@shared/procurement/po-quantity-amendment";
 import { normalizePoLinePricing } from "@shared/utils/po-line-pricing";
 import { useAuth } from "@/lib/auth";
@@ -26,6 +26,7 @@ import { Input } from "@/components/ui/input";
 import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import { PoAmendmentImpact } from "./PoAmendmentImpact";
 import { PoLineAdditions, type NewPoLine } from "./PoLineAdditions";
+import { PoLineProductChange, type PoProductChangeDraft } from "./PoLineProductChange";
 
 const savedIntentSchema = z.object({
   key: z.string().uuid(), body: poQuantityApprovalRequestSchema, preview: poQuantityAmendmentPreviewSchema,
@@ -77,6 +78,14 @@ function pendingIntent(key: string): ApprovalIntent | null {
   // possibly committed request and issuing a different idempotency key.
   return savedIntentSchema.parse(JSON.parse(raw));
 }
+function ProductIdentityCell({ identity }: { identity: PoLineProductIdentity }) {
+  const unit = identity.receiveVariantName ?? identity.receiveVariantSku;
+  return <>
+    <p>{identity.sku ? <span className="font-mono">{identity.sku}</span> : null}{identity.sku ? " · " : ""}{identity.name}</p>
+    {unit && <p className="text-xs">Receive as {unit}{identity.receiveUnitsPerVariant ? ` (${identity.receiveUnitsPerVariant.toLocaleString()} pieces)` : ""}</p>}
+    <p className="text-xs">Supplier SKU {identity.vendorSku ?? "not set"}{identity.vendorProductId ? " · catalog item linked" : ""}</p>
+  </>;
+}
 export function PoAmendmentSummary({ preview, approved = false }: { preview: PoQuantityAmendmentPreview; approved?: boolean }) {
   const rows = preview.lines.flatMap(({ before, after }) => {
     const fields: [string, string, string][] = [
@@ -94,7 +103,14 @@ export function PoAmendmentSummary({ preview, approved = false }: { preview: PoQ
   const fieldCounts = new Map<number, number>();
   for (const row of rows) fieldCounts.set(row.lineId, (fieldCounts.get(row.lineId) ?? 0) + 1);
   return <div className="space-y-3">
-    <p className="text-sm font-semibold">{approved ? "Approved changes" : "Review changes"}: {preview.lines.length} edited, {preview.addedLines?.length ?? 0} added, {preview.removedLines?.length ?? 0} removed</p>
+    <p className="text-sm font-semibold">{approved ? "Approved changes" : "Review changes"}: {preview.lines.length} edited, {preview.addedLines?.length ?? 0} added, {preview.removedLines?.length ?? 0} removed{preview.productChanges?.length ? `, ${preview.productChanges.length} product changed` : ""}</p>
+    {!!preview.productChanges?.length && <table className="w-full text-sm" aria-label="Product changes"><thead><tr className="border-b text-left"><th>Line</th><th>Product before</th><th>Product after</th></tr></thead><tbody>
+      {preview.productChanges.map(change => <tr key={change.lineId} className="border-b align-top">
+        <td className="py-2 pr-2">Line {change.lineNumber}</td>
+        <td className="py-2 pr-2 text-muted-foreground"><ProductIdentityCell identity={change.before} /></td>
+        <td className="py-2"><ProductIdentityCell identity={change.after} /></td>
+      </tr>)}
+    </tbody></table>}
     {(!!preview.addedLines?.length || !!preview.removedLines?.length) && <table className="w-full text-sm" aria-label="Added and removed PO lines"><thead><tr className="border-b text-left"><th>Line item</th><th>Before</th><th>After</th></tr></thead><tbody>
       {preview.addedLines?.map(line => <tr key={line.clientKey} className="border-b"><td className="py-2">Add · {line.name}</td><td>Not on this PO</td><td>{line.orderQty.toLocaleString()} pieces · {exactMoneyAsInput(line.lineTotalCents, 2)} {preview.currency}<p className="text-xs">Nothing received or invoiced yet</p></td></tr>)}
       {preview.removedLines?.map(line => <tr key={line.id} className="border-b"><td className="py-2">Remove · {line.name}</td><td>{line.orderQty.toLocaleString()} pieces · {exactMoneyAsInput(line.lineTotalCents, 2)} {preview.currency}</td><td>Removed from active totals<p className="text-xs">Original line retained in history</p></td></tr>)}
@@ -138,6 +154,9 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
   const [additions, setAdditions] = useState<NewPoLine[]>([]);
   const [pendingLine, setPendingLine] = useState(false);
   const [removals, setRemovals] = useState<number[]>([]);
+  const [productChanges, setProductChanges] = useState<Record<number, PoProductChangeDraft>>({});
+  const [changingLineId, setChangingLineId] = useState<number | null>(null);
+  const changingLine = changingLineId === null ? null : context.lines.find(line => line.id === changingLineId) ?? null;
   const [review, setReview] = useState<{ request: PoQuantityPreviewRequest; preview: PoQuantityAmendmentPreview } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
@@ -199,8 +218,11 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
         const change = lineChange(line, drafts[line.id]);
         return hasChangedLine(line, change) ? [change] : [];
       });
+      const changedProducts = Object.values(productChanges).filter(change => !removals.includes(change.input.lineId))
+        .map(change => change.input).sort((a, b) => a.lineId - b.lineId);
       const parsed = poQuantityPreviewRequestSchema.safeParse({ sourceVersion: context.sourceVersion, changes,
-        ...(additions.length ? { additions: additions.map(line => line.input) } : {}), ...(removals.length ? { removals } : {}), reason, ...(context.closedPurchaseOrder ? { closedPurchaseOrderConfirmed: true } : {}) });
+        ...(additions.length ? { additions: additions.map(line => line.input) } : {}), ...(removals.length ? { removals } : {}),
+        ...(changedProducts.length ? { productChanges: changedProducts } : {}), reason, ...(context.closedPurchaseOrder ? { closedPurchaseOrderConfirmed: true } : {}) });
       if (!parsed.success) throw new Error("Edit at least one line and enter a reason of at least 10 characters.");
       setValidationError(null); previewMutation.mutate(parsed.data);
     } catch (error) { setValidationError(error instanceof Error ? error.message : "Review the correction fields."); }
@@ -232,8 +254,20 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
     {!impact && !blocked && <fieldset disabled={locked} className="space-y-3">
       <p className="text-xs text-muted-foreground">Enter product price and packaging separately.</p>
       <PoAmendmentLineTable disabled={locked} lines={context.lines} drafts={drafts} currency={context.currency} onChange={updateDraft} totalLabel={newTotalLabel}
-        removals={removals} onRemove={id => { if (!locked) setRemovals(values => values.includes(id) ? values.filter(value => value !== id) : [...values, id]); }} />
-      <PoLineAdditions lines={additions} onChange={setAdditions} onDraftChange={setPendingLine} disabled={locked} blockedReason={context.additionBlockedReason} currency={context.currency} />
+        removals={removals} onRemove={id => {
+          if (locked) return;
+          // A removed line keeps the product it was ordered as.
+          setProductChanges(values => { const { [id]: _removed, ...rest } = values; return rest; });
+          if (changingLineId === id) setChangingLineId(null);
+          setRemovals(values => values.includes(id) ? values.filter(value => value !== id) : [...values, id]);
+        }}
+        productChanges={productChanges}
+        onChangeProduct={pendingLine || changingLineId !== null ? undefined : id => { setChangingLineId(id); setConfirmed(false); setValidationError(null); }}
+        onUndoProductChange={id => { if (!locked) setProductChanges(values => { const { [id]: _undone, ...rest } = values; return rest; }); }} />
+      {changingLine && <PoLineProductChange key={changingLine.id} line={changingLine} vendorId={context.vendorId ?? null} draft={productChanges[changingLine.id] ?? null} disabled={locked}
+        onSave={draft => { setProductChanges(values => ({ ...values, [draft.input.lineId]: draft })); setChangingLineId(null); }}
+        onCancel={() => setChangingLineId(null)} />}
+      <PoLineAdditions lines={additions} onChange={setAdditions} onDraftChange={setPendingLine} disabled={locked || changingLineId !== null} blockedReason={context.additionBlockedReason} currency={context.currency} />
     </fieldset>}
     {impact && <PoAmendmentSummary preview={impact} approved={saved !== null} />}
     {saved && <p role="status" className="rounded bg-green-50 p-3 font-semibold text-green-800">PO edit approved and saved as revision {saved.revisionNumber}.</p>}
@@ -242,8 +276,9 @@ function Editor({ context: loadedContext, storageKey, setBusy, onSaved, onReload
       {!impact && !blocked && <div><Label htmlFor="quantity-correction-reason">Reason for editing / supplier reference</Label><Input id="quantity-correction-reason" value={reason} maxLength={2000} disabled={locked} onChange={(event) => setReason(event.target.value)} /></div>}
       {review && !unresolved && !saved && <div className="flex items-start gap-2"><Checkbox id="quantity-approval-confirm" checked={confirmed} disabled={locked} onCheckedChange={(checked) => setConfirmed(checked === true)} /><Label htmlFor="quantity-approval-confirm">{context.closedPurchaseOrder ? "I approve these changes to the closed PO and its total." : "I reviewed these changes and the new PO total."}</Label></div>}
       <div className="flex flex-wrap gap-2">
-      {!impact && !blocked && <Button className="min-h-[44px]" disabled={locked || pendingLine} onClick={preview}>{previewMutation.isPending ? "Reviewing…" : "Review changes"}</Button>}
+      {!impact && !blocked && <Button className="min-h-[44px]" disabled={locked || pendingLine || changingLineId !== null} onClick={preview}>{previewMutation.isPending ? "Reviewing…" : "Review changes"}</Button>}
       {pendingLine && <p className="text-sm">Add the new line to this edit, or cancel it, before reviewing.</p>}
+      {changingLineId !== null && <p className="text-sm">Use the new product, or cancel the product change, before reviewing.</p>}
       {review && !unresolved && !saved && <><Button variant="outline" className="min-h-[44px]" disabled={locked} onClick={() => { setReview(null); setConfirmed(false); approveMutation.reset(); }}>Keep editing</Button><Button className="min-h-[44px] bg-green-700 hover:bg-green-800 text-white" disabled={!confirmed || locked || !!blocked} onClick={approve}>Approve &amp; save PO</Button></>}
       {unresolved && <Button disabled={approveMutation.isPending} onClick={() => approveMutation.mutate(unresolved)}>{approveMutation.isPending ? "Confirming…" : "Retry saved approval"}</Button>}
       {stale && !unresolved && <Button variant="outline" onClick={onReload}>Discard review and reload PO</Button>}
@@ -297,7 +332,7 @@ export function PoQuantityAmendment({ purchaseOrderId, status }: { purchaseOrder
     <Button variant="outline" className="flex-1 sm:flex-none min-h-[44px]" onClick={() => setOpen(true)}>Edit PO</Button>
     <Dialog open={open} onOpenChange={changeOpen}>
       <DialogContent className="flex max-h-[90dvh] flex-col overflow-hidden w-[calc(100vw-2rem)] sm:max-w-6xl" onEscapeKeyDown={(event) => { if (busy) event.preventDefault(); }} onInteractOutside={(event) => { if (busy) event.preventDefault(); }}>
-        <DialogHeader><DialogTitle>Edit purchase order</DialogTitle><DialogDescription>Add or remove line items, edit quantities and prices, then review all changes before administrator approval.</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>Edit purchase order</DialogTitle><DialogDescription>Add or remove line items, change a line's product, edit quantities and prices, then review all changes before administrator approval.</DialogDescription></DialogHeader>
         {context.isPending && <p>Loading current PO evidence…</p>}
         {context.error && <p role="alert" className="text-sm text-destructive">Could not load correction evidence. {context.error.message}</p>}
         {context.data && <Editor key={editorKey} context={context.data} storageKey={storageKey} setBusy={setBusy} onSaved={refresh} onReload={() => { changeOpen(false); refresh(); }} />}

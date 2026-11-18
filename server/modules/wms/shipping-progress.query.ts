@@ -13,26 +13,18 @@ export interface WmsShippingProgressRow {
   shipped_quantity: string | number;
 }
 
-/** Scoped to affected orders; never scans the full shipping ledger for a page.
+/**
+ * The one definition of "customer units shipped" for a WMS order item.
+ *
+ * Yields one `quantity` row per piece of shipment evidence for the order item
+ * aliased `oi` in the enclosing query (`oi.id`, `oi.order_id`). Every reader
+ * that needs shipped units must sum these rows rather than restate the rule.
+ *
  * Canonical package portions replace their compatibility source item, not add
  * to it. Even voided/adjusted-to-zero canonical items suppress that fallback.
  * This keeps a label for one of three units from inheriting a whole-request qty.
  */
-export function wmsShippingProgressQuery(orderIds: readonly number[]) {
-  if (!orderIds.length || orderIds.some(id => !Number.isSafeInteger(id) || id <= 0)) {
-    throw new WmsShippingProgressError("Shipping progress requires positive order IDs");
-  }
-  return sql`
-    SELECT wms_order.id AS order_id, wms_order.warehouse_status,
-           oi.id, oi.quantity, oi.picked_quantity, oi.requires_shipping, oi.status,
-           ol.authority_fulfillable_quantity,
-           COALESCE(coverage.shipped_quantity, 0) AS shipped_quantity
-    FROM wms.orders wms_order
-    JOIN wms.order_items oi ON oi.order_id = wms_order.id
-    LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
-    LEFT JOIN LATERAL (
-      SELECT SUM(evidence.quantity)::bigint AS shipped_quantity
-      FROM (
+const SHIPPED_UNITS_EVIDENCE_SQL = sql`
         SELECT physical.quantity_shipped AS quantity
         FROM wms.effective_physical_shipment_items physical
         JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id = physical.fulfillment_plan_line_id
@@ -66,7 +58,29 @@ export function wmsShippingProgressQuery(orderIds: readonly number[]) {
               AND plan_line.wms_order_item_id = oi.id
               AND (physical.legacy_wms_shipment_item_id = item.id
                 OR request_item.legacy_wms_shipment_item_id = item.id)
-          )
+          )`;
+
+function positiveIds(ids: readonly number[], message: string): readonly number[] {
+  if (!ids.length || ids.some(id => !Number.isSafeInteger(id) || id <= 0)) {
+    throw new WmsShippingProgressError(message);
+  }
+  return ids;
+}
+
+/** Scoped to affected orders; never scans the full shipping ledger for a page. */
+export function wmsShippingProgressQuery(orderIds: readonly number[]) {
+  positiveIds(orderIds, "Shipping progress requires positive order IDs");
+  return sql`
+    SELECT wms_order.id AS order_id, wms_order.warehouse_status,
+           oi.id, oi.quantity, oi.picked_quantity, oi.requires_shipping, oi.status,
+           ol.authority_fulfillable_quantity,
+           COALESCE(coverage.shipped_quantity, 0) AS shipped_quantity
+    FROM wms.orders wms_order
+    JOIN wms.order_items oi ON oi.order_id = wms_order.id
+    LEFT JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+    LEFT JOIN LATERAL (
+      SELECT SUM(evidence.quantity)::bigint AS shipped_quantity
+      FROM (${SHIPPED_UNITS_EVIDENCE_SQL}
       ) evidence
     ) coverage ON TRUE
     WHERE wms_order.id IN (${sql.join(orderIds.map(id => sql`${id}`), sql`, `)})
@@ -85,4 +99,56 @@ export function shippingProgressLine(row: WmsShippingProgressRow): WmsShippingPr
     cancelled: row.status === "cancelled",
     authorizedQuantity: row.authority_fulfillable_quantity == null ? null : Number(row.authority_fulfillable_quantity),
   };
+}
+
+export interface ShippedUnitsByOrderLineRow {
+  oms_order_id: string | number;
+  oms_order_line_id: string | number;
+  shipped_quantity: string | number;
+}
+
+export interface ShippedUnitsByOrderLine {
+  omsOrderId: number;
+  omsOrderLineId: number;
+  shippedQuantity: number;
+}
+
+/**
+ * Read-only answer to "how many customer units of each purchased line have
+ * shipped?" for whole orders. Takes no locks, so it is safe on read paths.
+ *
+ * Every line of each requested order is returned; a line with no shipment
+ * evidence (never sent to the warehouse, not yet shipped, or removed) reports
+ * zero. Uses the same evidence definition as the locking progress query above.
+ */
+export function shippedUnitsByOrderLineQuery(omsOrderIds: readonly number[]) {
+  positiveIds(omsOrderIds, "Shipped units require positive order IDs");
+  return sql`
+    SELECT ol.order_id AS oms_order_id, ol.id AS oms_order_line_id,
+           COALESCE(SUM(coverage.shipped_quantity), 0)::bigint AS shipped_quantity
+    FROM oms.oms_order_lines ol
+    LEFT JOIN wms.order_items oi ON oi.oms_order_line_id = ol.id
+    LEFT JOIN LATERAL (
+      SELECT SUM(evidence.quantity)::bigint AS shipped_quantity
+      FROM (${SHIPPED_UNITS_EVIDENCE_SQL}
+      ) evidence
+    ) coverage ON TRUE
+    WHERE ol.order_id IN (${sql.join(omsOrderIds.map(id => sql`${id}`), sql`, `)})
+    GROUP BY ol.order_id, ol.id
+    ORDER BY ol.order_id, ol.id
+  `;
+}
+
+export function shippedUnitsByOrderLine(row: ShippedUnitsByOrderLineRow): ShippedUnitsByOrderLine {
+  const line = {
+    omsOrderId: Number(row.oms_order_id),
+    omsOrderLineId: Number(row.oms_order_line_id),
+    shippedQuantity: Number(row.shipped_quantity),
+  };
+  if (!Number.isSafeInteger(line.omsOrderId) || line.omsOrderId <= 0
+    || !Number.isSafeInteger(line.omsOrderLineId) || line.omsOrderLineId <= 0
+    || !Number.isSafeInteger(line.shippedQuantity) || line.shippedQuantity < 0) {
+    throw new WmsShippingProgressError("Invalid shipped units for order line", { omsOrderLineId: line.omsOrderLineId });
+  }
+  return line;
 }

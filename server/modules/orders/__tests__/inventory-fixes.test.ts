@@ -55,9 +55,15 @@ function createMockDb() {
 
 function createMockInventoryCore() {
   return {
-    adjustLevel: vi.fn(async () => ({ id: 1, variantQty: 10, pickedQty: 0 })),
-    logTransaction: vi.fn(async () => {}),
-    recordShipment: vi.fn(async () => {}),
+    adjustLevel: vi.fn(
+      async (_levelId: number, _deltas: { pickedQty?: number; variantQty?: number }) => ({
+        id: 1,
+        variantQty: 10,
+        pickedQty: 0,
+      }),
+    ),
+    logTransaction: vi.fn(async (_txn: Record<string, unknown>) => {}),
+    recordShipment: vi.fn(async (_params: Record<string, unknown>) => {}),
   };
 }
 

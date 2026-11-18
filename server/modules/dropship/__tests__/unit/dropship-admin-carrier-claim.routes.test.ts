@@ -81,8 +81,8 @@ class FakeService {
 function buildApp(service: DropshipCarrierClaimService): express.Express {
   const app = express();
   app.use(express.json());
-  app.use((req: Request & { session?: { user?: { id: string } } }, _res, next) => {
-    req.session = { user: { id: "admin-1" } };
+  app.use((req, _res, next) => {
+    req.session = { user: { id: "admin-1" } } as unknown as Request["session"];
     next();
   });
   registerDropshipAdminCarrierClaimRoutes(app, service);

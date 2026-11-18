@@ -3,6 +3,14 @@ import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { readStaffSystemRoleAuthorityPg } from "../identity/staff-authority.api";
+import {
+  touchExactHistoricalContentsReconciliationExceptionInTx,
+  reopenRefreshedHistoricalContentsReconciliationExceptionInTx,
+  insertHistoricalContentsReconciliationExceptionInTx,
+  resolveWmsConfirmedHistoricalContentsReconciliationExceptionInTx,
+  acknowledgeHistoricalContentsReconciliationExceptionDecisionInTx,
+} from "../oms/reconciliation-exceptions.api";
 
 import {
   loadCurrentShipStationContentsConflictCandidate,
@@ -375,12 +383,12 @@ function snapshotFromRow(row: Record<string, unknown>): HistoricalShipStationCon
 }
 
 async function authorizedActor(client: PoolClient, actorUserId: string): Promise<"admin" | "lead"> {
-  const result = await client.query(
-    "SELECT role, active FROM identity.users WHERE id = $1 FOR UPDATE",
-    [actorUserId],
-  );
-  const role = result.rows[0]?.role;
-  if (result.rows.length !== 1 || Number(result.rows[0]?.active) !== 1 || !["admin", "lead"].includes(role)) {
+  const authority = await readStaffSystemRoleAuthorityPg(client, actorUserId);
+  // Existing immutable evidence uses admin/lead labels; the authorization
+  // behind a new decision now comes only from explicit system assignments.
+  const role = authority.roles.includes("admin") ? "admin"
+    : authority.roles.includes("lead") ? "lead" : null;
+  if (!authority.active || !role) {
     throw new HistoricalShipStationContentsReviewRepositoryError(
       "LEAD_AUTHORIZATION_REQUIRED",
       "Historical contents decisions require an active lead or administrator",
@@ -536,14 +544,10 @@ implements HistoricalShipStationContentsReviewRepository {
         const exact = canonicalJson(reviewEvidenceDetails(existing.rows[0].details))
           === canonicalJson(reviewEvidenceDetails(details));
         if (exact) {
-          await client.query(
-            `UPDATE wms.reconciliation_exceptions
-             SET last_seen_at = transaction_timestamp(),
-                 occurrence_count = occurrence_count + 1,
-                 summary = $2,
-                 updated_at = transaction_timestamp()
-             WHERE id = $1::bigint`,
-            [existing.rows[0].id, summary],
+          await touchExactHistoricalContentsReconciliationExceptionInTx(
+            client,
+            existing.rows[0].id,
+            summary,
           );
         } else {
           const prior = existing.rows[0].details as Record<string, unknown>;
@@ -553,21 +557,11 @@ implements HistoricalShipStationContentsReviewRepository {
               ? prior.decisionHistory
               : [],
           };
-          await client.query(
-            `UPDATE wms.reconciliation_exceptions
-             SET classification = 'manual_review',
-                 status = 'open',
-                 severity = 'review',
-                 last_seen_at = transaction_timestamp(),
-                 occurrence_count = occurrence_count + 1,
-                 details = $2::jsonb,
-                 summary = $3,
-                 resolved_at = NULL,
-                 resolved_by = NULL,
-                 resolution = NULL,
-                 updated_at = transaction_timestamp()
-             WHERE id = $1::bigint`,
-            [existing.rows[0].id, JSON.stringify(refreshedDetails), summary],
+          await reopenRefreshedHistoricalContentsReconciliationExceptionInTx(
+            client,
+            existing.rows[0].id,
+            JSON.stringify(refreshedDetails),
+            summary,
           );
         }
         return Object.freeze({
@@ -576,29 +570,16 @@ implements HistoricalShipStationContentsReviewRepository {
           shippingProviderLabelId: record.candidate.shippingProviderLabelId,
         });
       }
-      const inserted = await client.query(
-        `INSERT INTO wms.reconciliation_exceptions (
-           source, classification, rule, status, severity,
-           wms_order_id, wms_shipment_id,
-           external_system, external_order_ref, external_shipment_ref,
-           idempotency_key, summary, details
-         ) VALUES (
-           'historical_shipstation_contents_system_recovery',
-           'manual_review', $1, 'open', 'review',
-           $2, $3, 'shipstation', $4, $5, $6, $7, $8::jsonb
-         )
-         RETURNING id::text AS id`,
-        [
-          HISTORICAL_SHIPSTATION_CONTENTS_REVIEW_RULE,
-          wmsOrderId,
-          wmsShipmentId,
-          record.candidate.shipStationOrderId,
-          String(record.candidate.providerShipmentId),
-          `historical_shipstation_contents_review:label:${record.candidate.shippingProviderLabelId}`,
-          summary,
-          JSON.stringify(details),
-        ],
-      );
+      const inserted = await insertHistoricalContentsReconciliationExceptionInTx(client, {
+        rule: HISTORICAL_SHIPSTATION_CONTENTS_REVIEW_RULE,
+        wmsOrderId,
+        wmsShipmentId,
+        externalOrderRef: record.candidate.shipStationOrderId,
+        externalShipmentRef: String(record.candidate.providerShipmentId),
+        idempotencyKey: `historical_shipstation_contents_review:label:${record.candidate.shippingProviderLabelId}`,
+        summary,
+        detailsJson: JSON.stringify(details),
+      });
       return Object.freeze({
         kind: "created" as const,
         exceptionId: positiveBigintText(inserted.rows[0]?.id, "exceptionId"),
@@ -762,31 +743,19 @@ implements HistoricalShipStationContentsReviewRepository {
         kind = "already_persisted";
         labelEventId = positiveBigintText(prior.rows[0].id, "labelEventId");
       }
-      await client.query(
-        `UPDATE wms.reconciliation_exceptions
-         SET classification = 'safe_auto_repair',
-             status = 'resolved',
-             severity = 'info',
-             details = details || $2::jsonb,
-             resolved_at = transaction_timestamp(),
-             resolved_by = $3,
-             resolution = $4,
-             updated_at = transaction_timestamp()
-         WHERE id = $1::bigint`,
-        [
-          input.snapshot.exceptionId,
-           JSON.stringify({
-             decision: "wms_confirmed",
-             decisionPreviewEvidenceHash: input.expectedPreviewHash,
-             decisionActorUserId: input.actorUserId,
-             decisionReason: input.reason,
-             resolutionLabelEventId: labelEventId,
-            resolutionEventHash: event.eventHash,
-          }),
-          input.actorUserId,
-          input.reason,
-        ],
-      );
+      await resolveWmsConfirmedHistoricalContentsReconciliationExceptionInTx(client, {
+        exceptionId: input.snapshot.exceptionId!,
+        patchDetailsJson: JSON.stringify({
+          decision: "wms_confirmed",
+          decisionPreviewEvidenceHash: input.expectedPreviewHash,
+          decisionActorUserId: input.actorUserId,
+          decisionReason: input.reason,
+          resolutionLabelEventId: labelEventId,
+          resolutionEventHash: event.eventHash,
+        }),
+        resolvedBy: input.actorUserId,
+        resolution: input.reason,
+      });
       return Object.freeze({
         kind,
         exceptionId: input.snapshot.exceptionId!,
@@ -858,53 +827,32 @@ implements HistoricalShipStationContentsReviewRepository {
           Object.freeze({ maxDecisionHistory: MAX_DECISION_HISTORY }),
         );
       }
-      const result = await client.query(
-        `UPDATE wms.reconciliation_exceptions
-         SET classification = $2,
-             status = 'acknowledged',
-             severity = $3,
-             details = details
-               || $4::jsonb
-               || jsonb_build_object(
-                    'decisionRecordedAt', transaction_timestamp(),
-                    'decisionHistory',
-                    COALESCE(details->'decisionHistory', '[]'::jsonb)
-                      || jsonb_build_array(
-                           $5::jsonb || jsonb_build_object(
-                             'decisionHash', $6::text,
-                             'recordedAt', transaction_timestamp()
-                           )
-                         )
-                  ),
-             resolved_by = NULL,
-             resolution = NULL,
-             updated_at = transaction_timestamp()
-         WHERE id = $1::bigint
-           AND rule = $7
-           AND status IN ('open', 'acknowledged')
-         RETURNING id::text AS id, status`,
-        [
-          input.exceptionId,
-          input.decision === "provider_confirmed_pending_inventory_correction"
-            ? "hard_block"
-            : "manual_review",
-          input.decision === "provider_confirmed_pending_inventory_correction"
-            ? "blocker"
-            : "review",
-          JSON.stringify({
-             decision: input.decision,
-             decisionPreviewEvidenceHash: input.expectedPreviewHash,
-             decisionActorUserId: input.actorUserId,
-             decisionActorRole: actorRole,
-             decisionReason: input.reason,
-             decisionHash: evidenceHash,
-             inventoryCorrectionRequired:
-               input.decision === "provider_confirmed_pending_inventory_correction",
-           }),
-           JSON.stringify(auditEvidence),
-           evidenceHash,
-           HISTORICAL_SHIPSTATION_CONTENTS_REVIEW_RULE,
-        ],
+      const result = await acknowledgeHistoricalContentsReconciliationExceptionDecisionInTx(
+        client,
+        {
+          exceptionId: input.exceptionId,
+          classification:
+            input.decision === "provider_confirmed_pending_inventory_correction"
+              ? "hard_block"
+              : "manual_review",
+          severity:
+            input.decision === "provider_confirmed_pending_inventory_correction"
+              ? "blocker"
+              : "review",
+          decisionDetailsJson: JSON.stringify({
+            decision: input.decision,
+            decisionPreviewEvidenceHash: input.expectedPreviewHash,
+            decisionActorUserId: input.actorUserId,
+            decisionActorRole: actorRole,
+            decisionReason: input.reason,
+            decisionHash: evidenceHash,
+            inventoryCorrectionRequired:
+              input.decision === "provider_confirmed_pending_inventory_correction",
+          }),
+          auditEvidenceJson: JSON.stringify(auditEvidence),
+          decisionHash: evidenceHash,
+          rule: HISTORICAL_SHIPSTATION_CONTENTS_REVIEW_RULE,
+        },
       );
       if (result.rows.length !== 1) {
         throw new HistoricalShipStationContentsReviewRepositoryError(

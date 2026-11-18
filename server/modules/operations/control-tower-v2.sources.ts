@@ -11,7 +11,7 @@ import {
   type ControlTowerSourcePage,
   type ProjectedControlTowerWorkItem,
 } from "./control-tower-v2.domain";
-import { EBAY_TRACKING_CONFLICT_RULE } from "../oms/channel-fulfillment-conflict";
+import { EBAY_TRACKING_CONFLICT_RULE } from "../oms/operations-observability.api";
 
 const CHANNEL_PUSH_PENDING_THRESHOLD_MINUTES = 15;
 // Link reconciliation runs every five minutes. Allow multiple sweeps so a

@@ -153,9 +153,11 @@ test("a non-lead receiver with identical grants can reach the same receipt as th
   await expect(page.getByTestId("btn-add-line")).toBeHidden();
   if ((page.viewportSize()?.width ?? 1280) < 768) await page.getByRole("button", { name: "Open navigation", exact: true }).click();
   await expect(page.getByRole("link", { name: "Receiving", exact: true })).toBeVisible();
-  // Receiving access must not expose unrelated links inherited from the
-  // Procurement group's legacy lead/admin role restriction.
-  await expect(page.getByRole("link", { name: "Demand Planner", exact: true })).toHaveCount(0);
+  // The explicit purchasing:view grant admits the planner regardless of the
+  // compatibility picker label. It does not confer unrelated role administration.
+  await expect(page.getByRole("link", { name: "Demand Planner", exact: true })).toBeVisible();
+  const roleAdministration = await page.request.get(backend.url + "/api/roles");
+  expect(roleAdministration.status(), await roleAdministration.text()).toBe(403);
 });
 
 test("revocation after a committed lost response retains intent and restoration replays exactly once", async ({ page, backend }, info) => {
@@ -346,7 +348,8 @@ test("a catalog creator can create metadata without gaining receipt adjustment a
   }
   for (const path of ["/ap", "/ap-payments", "/supplier-credits", "/supplier-returns", "/purchasing"]) {
     await page.goto(backend.url + path);
-    await expect(page).toHaveURL(backend.url + "/picking");
+    await expect(page).toHaveURL(backend.url + path);
+    await expect(page.getByTestId("staff-access-notice")).toContainText("Your assigned roles do not provide access to this page.");
   }
   expect(await backend.control("navigation-state")).toEqual(financialBefore);
   await attachState(info, "catalog-created-receipt-unchanged", backend);

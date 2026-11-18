@@ -269,9 +269,9 @@ export class DropshipVendorProvisioningService {
       critical: true,
       channels: ["email", "in_app"],
       title: entitlement.status === "suspended"
-        ? "Dropship entitlement suspended"
-        : "Dropship entitlement lapsed",
-      message: "Your .ops dropship entitlement needs attention. New order acceptance and restricted dropship actions may be blocked until the membership is restored.",
+        ? "Your .ops membership is suspended"
+        : "Your .ops membership has lapsed",
+      message: "Your .ops membership needs attention. Until it's renewed, you may not be able to accept new orders or change your store.",
       payload: {
         vendorId: result.vendor.vendorId,
         memberId: entitlement.memberId,

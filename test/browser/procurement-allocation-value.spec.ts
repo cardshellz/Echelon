@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 
@@ -6,10 +7,10 @@ const missingMessage = "PO line 101 has no valid product total and piece quantit
 
 async function setup(page: Page, mode: "current" | "legacy" | "missing" | "invalid_basis") {
   const failures = await installFixtures(page);
-  await page.route("**/api/auth/me", route => route.fulfill({ json: {
-    user: { id: "test-user", username: "test", role: "admin" }, roles: ["admin"],
+  await page.route("**/api/auth/me", route => route.fulfill({ json: staffAuthorityFixture({
+    user: { id: "test-user", username: "test", role: "admin" }, systemRoles: ["admin"],
     permissions: ["purchasing:view", "purchasing:approve"],
-  } }));
+  }) }));
   const state = { legacy: mode === "legacy", missing: mode === "missing" || mode === "invalid_basis", allocations: 0, closes: 0, writes: [] as Array<{ path: string; body: string | null }> };
   const invalidStatus = mode === "invalid_basis" ? "invalid_allocation_basis" : "invalid_value_basis";
   const invalidMessage = mode === "invalid_basis" ? "Shipment line 1 has invalid weight evidence. Review the shipment source before allocating or closing." : missingMessage;

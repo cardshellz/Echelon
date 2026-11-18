@@ -154,7 +154,7 @@ export function selectedIdsUrl(): string {
 export async function readSelectedIds(fetcher: PublishFetch = defaultFetch, signal?: AbortSignal): Promise<number[]> {
   const answer = await requestPublishAnswer(fetcher, selectedIdsUrl(), dropshipCatalogIdsAnswerSchema, { signal });
   // Never null for the purpose asked (the read is refused instead); a null here is an answer off its contract.
-  if (answer.selectedIds === null) throw new DropshipApiError({ message: "The selected ids could not be read.", status: 500, code: "DROPSHIP_CATALOG_IDS_OFF_CONTRACT" });
+  if (answer.selectedIds === null) throw new DropshipApiError({ message: "Reload the page and try again.", status: 500, code: "DROPSHIP_CATALOG_IDS_OFF_CONTRACT" });
   return answer.selectedIds;
 }
 
@@ -350,7 +350,7 @@ export async function runListingCheck(deps: ListingCheckDeps, input: ListingChec
     if (input.signal.aborted || !deps.stillCurrent()) return { kind: "aborted" };
     if (answer.preview.storeConnectionId !== input.storeConnectionId) {
       return { kind: "failed", done: processed, total,
-        error: new DropshipApiError({ message: "The check answered for another store.", status: 500, code: "DROPSHIP_LISTING_CHECK_STORE_MISMATCH" }) };
+        error: new DropshipApiError({ message: "Reload the page and try again.", status: 500, code: "DROPSHIP_LISTING_CHECK_STORE_MISMATCH" }) };
     }
     meta ??= { vendorId: answer.preview.vendorId, platform: answer.preview.platform, generatedAt: answer.preview.generatedAt };
     for (const row of answer.preview.rows) rows.push(toCheckRow(row));

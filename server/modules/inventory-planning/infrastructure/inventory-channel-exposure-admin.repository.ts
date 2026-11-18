@@ -2,6 +2,10 @@ import { eq, sql } from "drizzle-orm";
 import { inventoryPublicationScopeSchema } from "@shared/types/inventory-publication-scope";
 import type { StockSelectionQueryClient } from "@shared/types/stock-publication-selection";
 import { readPublicationStockSelection, selectionRequiresPublication } from "./inventory-publication-selection.reader";
+import {
+  insertIdempotencyKeyDrizzle,
+  updateIdempotencyKeyDrizzle,
+} from "../../../infrastructure/idempotency-keys.repository";
 
 import {
   channelExposurePolicyHeads,
@@ -822,7 +826,14 @@ implements InventoryChannelExposureAdminStore {
   async savePolicyDraft(
     command: SaveChannelExposurePolicyDraftCommand,
   ): Promise<ChannelExposureDraftSaveResult> {
-    return this.database.transaction(async (tx) => {
+    return this.database.transaction(tx => this.savePolicyDraftInsideTransaction(tx, command));
+  }
+
+  /** The single-rule set command (inventory-channel-rule.repository.ts `set`) supplies its existing transaction, so the
+   * saved version, its review and its apply commit or roll back together. That path and the ordinary draft save share
+   * this one writer. The caller owns BEGIN/COMMIT; nothing here opens or ends a transaction. */
+  async savePolicyDraftInsideTransaction(tx: Transaction,
+    command: SaveChannelExposurePolicyDraftCommand): Promise<ChannelExposureDraftSaveResult> {
       const receiptKey = `${POLICY_RECEIPT_PREFIX}${command.idempotencyKey}`;
       await lockIdempotency(tx, command.idempotencyKey);
       const replay = await loadReplay(tx, receiptKey, command.requestHash);
@@ -954,7 +965,6 @@ implements InventoryChannelExposureAdminStore {
       }, { timestamp: command.occurredAt, emitStructuredLog: false });
       await completeReceipt(tx, receiptKey, "channel_exposure_policy_draft_save", result);
       return result;
-    });
   }
 
   async saveSourceBindingDraft(
@@ -1877,7 +1887,7 @@ async function insertReceipt(
   requestHash: string,
   occurredAt: Date,
 ): Promise<void> {
-  await tx.insert(idempotencyKeys).values({
+  await insertIdempotencyKeyDrizzle(tx, {
     key,
     requestHash,
     responseBody: null,
@@ -1892,8 +1902,7 @@ async function completeReceipt(
   commandType: string,
   result: ChannelExposureDraftSaveResult,
 ): Promise<void> {
-  await tx.update(idempotencyKeys).set({ responseBody: { commandType, result } })
-    .where(eq(idempotencyKeys.key, key));
+  await updateIdempotencyKeyDrizzle(tx, key, { responseBody: { commandType, result } });
 }
 
 /** Receipt writer for bulk setup; kept separate so each result stays typed. */
@@ -1902,9 +1911,9 @@ async function completeChannelDestinationsReceipt(
   key: string,
   result: SetUpChannelDestinationsResult,
 ): Promise<void> {
-  await tx.update(idempotencyKeys)
-    .set({ responseBody: { commandType: "inventory_channel_destinations_setup", result } })
-    .where(eq(idempotencyKeys.key, key));
+  await updateIdempotencyKeyDrizzle(tx, key, {
+    responseBody: { commandType: "inventory_channel_destinations_setup", result },
+  });
 }
 
 async function completeTargetReceipt(
@@ -1913,8 +1922,7 @@ async function completeTargetReceipt(
   commandType: string,
   result: InventoryPublicationTargetCommandResult,
 ): Promise<void> {
-  await tx.update(idempotencyKeys).set({ responseBody: { commandType, result } })
-    .where(eq(idempotencyKeys.key, key));
+  await updateIdempotencyKeyDrizzle(tx, key, { responseBody: { commandType, result } });
 }
 
 function mapPolicyHeads(policyRows: Record<string, any>[]): ChannelExposurePolicyHead[] {

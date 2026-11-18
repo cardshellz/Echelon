@@ -432,3 +432,56 @@ export function createDrizzleFinancialCommandRepository(
 }
 
 export const financialCommandRepository = createDrizzleFinancialCommandRepository();
+
+export async function rearmDeadFinancialCommandResultInRepository(
+  client: { query: (text: string, values?: unknown[]) => Promise<{ rows: any[] }> },
+  commandId: number,
+  retentionDays: number,
+) {
+  return client.query(
+    `UPDATE public.financial_command_results
+     SET status = 'retryable',
+         attempt_limit = attempt_limit + 1,
+         recovery_count = recovery_count + 1,
+         next_attempt_at = transaction_timestamp(),
+         completed_at = NULL,
+         updated_at = transaction_timestamp(),
+         expires_at = GREATEST(
+           expires_at,
+           transaction_timestamp() + ($2::text || ' days')::interval
+         )
+     WHERE id = $1
+     RETURNING
+       id,
+       status,
+       attempt_count AS "attemptCount",
+       attempt_limit AS "attemptLimit",
+       recovery_count AS "recoveryCount",
+       next_attempt_at AS "nextAttemptAt",
+       expires_at AS "expiresAt"`,
+    [commandId, retentionDays],
+  );
+}
+
+export async function purgeExpiredFinancialCommandResultsInRepository(
+  dbPool: { query: (text: string, values?: unknown[]) => Promise<{ rowCount: number | null }> },
+  batchSize: number,
+): Promise<number> {
+  const result = await dbPool.query(
+    `WITH expired AS (
+       SELECT id
+       FROM public.financial_command_results
+       WHERE status IN ('succeeded', 'rejected')
+         AND expires_at <= transaction_timestamp()
+       ORDER BY expires_at ASC, id ASC
+       FOR UPDATE SKIP LOCKED
+       LIMIT $1
+     )
+     DELETE FROM public.financial_command_results command
+     USING expired
+     WHERE command.id = expired.id
+     RETURNING command.id`,
+    [batchSize],
+  );
+  return result.rowCount ?? 0;
+}

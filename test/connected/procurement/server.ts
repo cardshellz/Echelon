@@ -157,8 +157,24 @@ async function main(): Promise<void> {
       try { res.json(await navigation.readConnectedNavigationState(context.pool)); }
       catch (error) { next(error); }
     });
+    app.post("/__test/supplier-header-workflow", async (_req, res, next) => {
+      try { await workflow.seedSupplierHeaderWorkflow(context.pool); res.json({ ready: true }); }
+      catch (error) { next(error); }
+    });
+    app.post("/__test/receipt-invoice-workflow", async (_req, res, next) => {
+      try { await workflow.seedReceiptInvoiceWorkflow(context.pool); res.json({ ready: true }); }
+      catch (error) { next(error); }
+    });
+    app.post("/__test/freight-invoice-workflow", async (_req, res, next) => {
+      try { await workflow.seedFreightInvoiceWorkflow(context.pool); res.json({ ready: true }); }
+      catch (error) { next(error); }
+    });
     app.get("/__test/workflow-state", async (_req, res, next) => {
       try { res.json(await workflow.readConnectedWorkflowState(context.pool)); }
+      catch (error) { next(error); }
+    });
+    app.post("/__test/seed-ap-transition-workflow", async (_req, res, next) => {
+      try { await workflow.seedApTransitionWorkflow(context.pool); res.json({ ready: true }); }
       catch (error) { next(error); }
     });
     app.post("/__test/expire-sessions", async (_req, res, next) => {
@@ -203,7 +219,7 @@ async function main(): Promise<void> {
     const { registerSettingsRoutes } = await import("../../../server/modules/warehouse/settings.routes");
     const { registerProductRoutes } = await import("../../../server/modules/catalog/catalog.routes");
     const { registerInventoryRoutes } = await import("../../../server/modules/inventory/inventory.routes");
-    const { registerNotificationRoutes } = await import("../../../server/modules/notifications/notifications.routes");
+    const { registerNotificationRoutes } = await import("../../../server/modules/notifications/routes.api");
     registerAuthRoutes(app);
     registerPurchasingRoutes(app);
     registerWarehouseRoutes(app);

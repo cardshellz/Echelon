@@ -115,6 +115,7 @@ export function registerCostSourceCompatibilityCases(fixture: {
       const originalSources = (await query("SELECT * FROM procurement.cost_source_revisions ORDER BY id")).rows;
       await query(`UPDATE procurement.vendor_invoice_lines SET line_total_cents=line_total_cents+1,
         cost_component_evidence=jsonb_set(cost_component_evidence,'{productMills}',to_jsonb((cost_component_evidence->>'productMills')::bigint+100)) WHERE id=72`);
+      await query("UPDATE procurement.vendor_invoices SET invoiced_amount_cents=invoiced_amount_cents+1,balance_cents=balance_cents+1 WHERE id=71");
       const status = await supplierStatus();
       expect(status.lines[0].components.every(component => component.sourceCurrent === false)).toBe(true);
       const results = await Promise.all([1, 2].map(() => fixture.database()

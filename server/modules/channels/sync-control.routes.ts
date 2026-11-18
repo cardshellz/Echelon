@@ -7,16 +7,18 @@
 import type { Express } from "express";
 import { requireAnyPermission, requirePermission } from "../../routes/middleware";
 import { createManualSyncRunner } from "./manual-sync-runner";
-import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
-import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
-import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+import {
+  createInventoryLegacyAdminControlService,
+  INVENTORY_LEGACY_ADMIN_CONTROLS,
+  sendInventoryLegacyAdminControlError,
+} from "../inventory-planning/legacy-admin-control.api";
 import { createSyncSettingsService } from "./sync-settings.service";
-import { InventoryPublicationGlobalControlService } from "../inventory-planning/application/inventory-publication-global-control.service";
-import { InventoryAvailabilityMasterDataError } from "../inventory-planning/domain/inventory-availability-master-data.contracts";
 import {
   applyInventoryPublicationGlobalControlInsideTransaction,
+  InventoryAvailabilityMasterDataError,
+  InventoryPublicationGlobalControlService,
   PostgresInventoryPublicationGlobalControlStore,
-} from "../inventory-planning/infrastructure/inventory-publication-global-control.repository";
+} from "../inventory-planning/publication-global-control.api";
 
 export function registerSyncControlRoutes(app: Express) {
   const manualSync = createManualSyncRunner();

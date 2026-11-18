@@ -2,12 +2,12 @@ import { sql } from "drizzle-orm";
 import type {
   ShipStationCompletedPhysicalPackage,
   ShipStationPhysicalRecoveryClient,
-} from "../shipping/shipstation-physical-recovery.client";
-import type { CarrierTrackingService } from "../shipping/carrier-tracking.service";
+} from "../shipping/shipstation-provider-reconciliation.api";
+import type { CarrierTrackingService } from "../shipping/carrier-tracking-and-dispatch.api";
 import {
   normalizeExactPositiveWmsShipmentItems,
   type ExactWmsShipmentItem,
-} from "../shipping/shipstation-provider-contents.domain";
+} from "../shipping/shipstation-provider-reconciliation.api";
 
 const DEFAULT_LIMIT = 10;
 const MAX_LIMIT = 500;

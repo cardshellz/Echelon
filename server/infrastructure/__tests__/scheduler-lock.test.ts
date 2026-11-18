@@ -1,12 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-
-process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
-
-const {
+import {
   createAdvisoryLockRunner,
   DEFAULT_SCHEDULER_LOCK_POOL_MAX,
   resolveSchedulerLockPoolMax,
-} = await import("../scheduler-lock");
+} from "../scheduler-lock";
+
+process.env.DATABASE_URL ??= "postgres://test:test@localhost:5432/test";
+
+type AdvisoryLockPoolArg = Parameters<typeof createAdvisoryLockRunner>[0];
+type AdvisoryLockLoggerArg = Parameters<typeof createAdvisoryLockRunner>[1];
+type AdvisoryLockClient = Awaited<ReturnType<AdvisoryLockPoolArg["connect"]>>;
 
 interface QueryResult {
   rows: Array<Record<string, unknown>>;
@@ -14,13 +17,24 @@ interface QueryResult {
 
 describe("createAdvisoryLockRunner", () => {
   let query: ReturnType<typeof vi.fn>;
-  let release: ReturnType<typeof vi.fn>;
-  let connect: ReturnType<typeof vi.fn>;
-  let logger: { log: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> };
+  let release: ReturnType<typeof vi.fn<(err?: Error | boolean) => void>>;
+  let connect: ReturnType<typeof vi.fn<() => Promise<AdvisoryLockClient>>>;
+  let logger: {
+    log: ReturnType<typeof vi.fn<AdvisoryLockLoggerArg["log"]>>;
+    error: ReturnType<typeof vi.fn<AdvisoryLockLoggerArg["error"]>>;
+  };
+
+  const poolClient = (): AdvisoryLockClient => ({
+    query: query as unknown as AdvisoryLockClient["query"],
+    release: release as unknown as AdvisoryLockClient["release"],
+  });
 
   beforeEach(() => {
-    release = vi.fn();
-    logger = { log: vi.fn(), error: vi.fn() };
+    release = vi.fn<(err?: Error | boolean) => void>();
+    logger = {
+      log: vi.fn<AdvisoryLockLoggerArg["log"]>(),
+      error: vi.fn<AdvisoryLockLoggerArg["error"]>(),
+    };
   });
 
   it("runs the job while tracking, holding, and releasing an acquired advisory lock", async () => {
@@ -33,7 +47,7 @@ describe("createAdvisoryLockRunner", () => {
       }
       throw new Error(`Unexpected query: ${statement}`);
     });
-    connect = vi.fn(async () => ({ query, release }));
+    connect = vi.fn(async () => poolClient());
     const activeLocks = new Set<number>();
 
     const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
@@ -52,7 +66,7 @@ describe("createAdvisoryLockRunner", () => {
 
   it("skips the job without tracking or unlocking when the advisory lock is already held", async () => {
     query = vi.fn(async (): Promise<QueryResult> => ({ rows: [{ acquired: false }] }));
-    connect = vi.fn(async () => ({ query, release }));
+    connect = vi.fn(async () => poolClient());
     const job = vi.fn(async () => "processed");
     const activeLocks = new Set<number>();
 
@@ -77,7 +91,7 @@ describe("createAdvisoryLockRunner", () => {
       }
       throw new Error(`Unexpected query: ${statement}`);
     });
-    connect = vi.fn(async () => ({ query, release }));
+    connect = vi.fn(async () => poolClient());
     const activeLocks = new Set<number>();
 
     const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
@@ -116,7 +130,7 @@ describe("createAdvisoryLockRunner", () => {
       }
       throw new Error(`Unexpected query: ${statement}`);
     });
-    connect = vi.fn(async () => ({ query, release }));
+    connect = vi.fn(async () => poolClient());
     const activeLocks = new Set<number>();
     const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
 
@@ -127,6 +141,51 @@ describe("createAdvisoryLockRunner", () => {
     expect(logger.error).toHaveBeenCalledWith(
       "[AdvisoryLock] Failed to release lock 736207:",
       "connection terminated during unlock",
+    );
+  });
+
+  it("destroys the pooled client when lock acquisition acknowledgement is lost", async () => {
+    const acquireError = new Error("query read timeout during pg_try_advisory_lock");
+    query = vi.fn(async (): Promise<QueryResult> => {
+      throw acquireError;
+    });
+    connect = vi.fn(async () => poolClient());
+    const activeLocks = new Set<number>();
+    const job = vi.fn(async () => "processed");
+    const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
+
+    await expect(runner(736208, job)).rejects.toBe(acquireError);
+
+    expect(job).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(activeLocks.size).toBe(0);
+    expect(release).toHaveBeenCalledWith(acquireError);
+  });
+
+  it("destroys the pooled client while preserving the job result when pg_advisory_unlock returns false", async () => {
+    query = vi.fn(async (statement: string): Promise<QueryResult> => {
+      if (statement.includes("pg_try_advisory_lock")) {
+        return { rows: [{ acquired: true }] };
+      }
+      if (statement.includes("pg_advisory_unlock")) {
+        return { rows: [{ pg_advisory_unlock: false }] };
+      }
+      throw new Error(`Unexpected query: ${statement}`);
+    });
+    connect = vi.fn(async () => poolClient());
+    const activeLocks = new Set<number>();
+    const runner = createAdvisoryLockRunner({ connect }, logger, activeLocks);
+
+    await expect(runner(736209, async () => "processed")).resolves.toBe("processed");
+
+    expect(activeLocks.size).toBe(0);
+    expect(release).toHaveBeenCalledTimes(1);
+    const releaseArg = release.mock.calls[0]?.[0];
+    expect(releaseArg).toBeInstanceOf(Error);
+    expect((releaseArg as Error).message).toContain("736209");
+    expect(logger.error).toHaveBeenCalledWith(
+      "[AdvisoryLock] Failed to release lock 736209:",
+      expect.stringContaining("736209"),
     );
   });
 });

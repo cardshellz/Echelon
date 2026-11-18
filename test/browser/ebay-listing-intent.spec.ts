@@ -328,6 +328,24 @@ function memberChange() {
       nextActions:[{owner:"listing_member_retirement",operationId:archivedMember.operationId}]}],
   }});
 }
+test("a conflicting archived link stays visible and directs the user to review the mapping",async({page})=>{
+  const state=await setupEbayChannelPage(page,{readOnly:false}); state.excluded=true; state.feedStatus="excluded";
+  state.intentChanges.items=[channelIntentChange(67,{state:"waiting_lifecycle",lifecycle:{
+    assessedAt:"2026-10-20T20:00:00.000Z",selectionFingerprint:"a".repeat(64),members:[{
+      productVariantId:11,duty:"retirement",state:"attention",code:"LISTING_MEMBER_IDENTITY_CONFLICT",
+      message:"Conflicting saved identities exist for this archived variant. Correct the conflicting listing link to resume removal.",
+      references:[archivedMember.operationId],nextActions:[{owner:"listing_mapping"}],
+    }],
+  }})];
+  await page.reload();
+  const panel=page.getByTestId("listing-intent-changes"); await panel.locator("summary").first().click();
+  await panel.getByRole("button",{name:"Review listing",exact:true}).click();
+  const dialog=page.getByRole("dialog");
+  await expect(dialog).toContainText("Correct the conflicting listing link to resume removal.");
+  await expect(dialog.getByRole("button",{name:"Review listing link",exact:true})).toBeVisible();
+  await expect(dialog.getByRole("button",{name:/Review removal/})).toHaveCount(0);
+  expect(state.commands).toEqual([]); expect(state.errors).toEqual([]);
+});
 for (const readOnly of [false,true]) test(`archived recovery uses the shared owner and preserves a lost-response command (read only: ${readOnly})`, async ({page}) => {
   const state=await setupEbayChannelPage(page,{readOnly}); state.excluded=true; state.feedStatus="excluded";
   state.intentChanges.items=[memberChange()];

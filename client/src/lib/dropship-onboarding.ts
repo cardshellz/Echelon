@@ -9,7 +9,8 @@
  * decide the wording and the action.
  */
 
-import { formatCents, formatStatus, type DropshipOnboardingState, type DropshipOnboardingStep } from "./dropship-ops-surface";
+import { formatCents, type DropshipOnboardingState, type DropshipOnboardingStep } from "./dropship-ops-surface";
+import { humanizeCode } from "./dropship-vendor-labels";
 
 /** The one vendor status the checklist applies to. Every other status is past it, or blocked out of it. */
 export const ONBOARDING_VENDOR_STATUS = "onboarding";
@@ -274,10 +275,10 @@ export function describeAccountSummary(vendorStatus: string): AccountSummary {
       return { title: "Selling is paused", detail: "Your account is paused. Your store connection is managed below." };
     case "lapsed":
     case "suspended":
-      return { title: `Your .ops membership is ${formatStatus(vendorStatus).toLowerCase()}`, detail: "Renew it at Card Shellz to keep selling. Your store connection is managed below." };
+      return { title: `Your .ops membership is ${humanizeCode(vendorStatus).toLowerCase()}`, detail: "Renew it at Card Shellz to keep selling. Your store connection is managed below." };
     case "closed":
       return { title: "This account is closed", detail: "Contact Card Shellz support if you expected to be able to sell." };
     default:
-      return { title: `Your account is ${formatStatus(vendorStatus).toLowerCase()}`, detail: "Your store connection is managed below." };
+      return { title: `Your account is ${humanizeCode(vendorStatus).toLowerCase()}`, detail: "Your store connection is managed below." };
   }
 }

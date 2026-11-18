@@ -1,12 +1,12 @@
 import type { Pool } from "pg";
 import { ebaySellRequestHeaders } from "./ebay-sell-headers";
-import { executeEbayQuantityHttpResponse, EbayQuantityResponseUncertainError } from "../../channels/adapters/ebay/ebay-quantity-http";
+import { executeEbayQuantityHttpResponse, EbayQuantityResponseUncertainError } from "../../channels/ebay-connector.api";
 import { PROVIDER_REQUEST_TIMEOUT_MS } from "../../channels/provider-request-limits";
 import {
   EbayInventoryQuantityError, ebayInventoryMarketplace, ebayInventoryOffersPath,
   publishEbayInventoryQuantity, readEbayInventoryQuantity, EbayInventoryQuantityPreflightError, type EbayInventoryQuantityClient,
   type EbayResolvedPublishedOffer,
-} from "../../channels/adapters/ebay/ebay-inventory-quantity";
+} from "../../channels/ebay-connector.api";
 import { observeEbayQuantityRequest } from "../../inventory-planning/application/quantity-provider-request-evidence";
 import { readDropshipEbayPublishedQuantities } from "../../inventory-planning/quantity-publication";
 import { logger as platformLogger } from "../../../platform/observability/logger";

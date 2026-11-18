@@ -13,8 +13,9 @@
  * A relisted item is re-mapped by the next import.
  */
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
-import { productLocations, products, productVariants } from "@shared/schema";
+import { products, productVariants } from "@shared/schema";
 import { db } from "../../db";
+import { deleteProductLocationsBySkusInTx } from "../warehouse/cross-module-warehouse-mutations.api";
 
 export interface RetireDeletedShopifyProductResult {
   shopifyProductId: string;
@@ -55,14 +56,7 @@ export async function retireDeletedShopifyProduct(
       .filter((sku): sku is string => !!sku && sku.trim() !== "")
       .map((sku) => sku.toUpperCase());
 
-    let pickLocationsRemoved = 0;
-    if (skus.length > 0) {
-      const removed = await tx
-        .delete(productLocations)
-        .where(inArray(productLocations.sku, skus))
-        .returning({ id: productLocations.id });
-      pickLocationsRemoved = removed.length;
-    }
+    const pickLocationsRemoved = await deleteProductLocationsBySkusInTx(tx, skus);
 
     const retired = await tx
       .update(products)

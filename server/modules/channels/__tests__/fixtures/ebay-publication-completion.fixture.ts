@@ -8,7 +8,7 @@ import { resolveEbayPublicationTarget } from "../../ebay-publication-completion.
 import { syncIdentity, syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
 
 export async function publicationCompletionFixture(automaticRecovery?: ConstructorParameters<typeof EbayPublicationCompletionExecution>[4], options: { missing?: boolean; source?: EbayListingSyncIdentity } = {}) {
-  const base = syncProviderFixture();
+  const base = syncProviderFixture({grouped:false});
   let published = false; let visible = true; let offerExists = !options.missing;
   let readResponse: { status: number; body: unknown; requestId?: string } | null = null;
   const source: EbayListingSyncIdentity = { ...(options.source ?? syncIdentity), groupKey: null,

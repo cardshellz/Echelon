@@ -2,6 +2,7 @@ import { customerReturnWorkflowWorking, customerReturnWorkflowMessage, type Cust
 import { CustomerReturnRequestError } from "@/lib/customer-return-customer";
 import {
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -13,6 +14,8 @@ import { Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CustomerReturnFlow } from "@/components/returns/CustomerReturnFlow";
 import { CustomerReturnSurface } from "@/components/returns/CustomerReturnSurface";
+import { CustomerReturnHeading, CustomerReturnPresentationContext } from "@/components/returns/CustomerReturnPresentation";
+import { CustomerReturnHistoryCard } from "@/components/returns/CustomerReturnHistoryCard";
 import { PreviewError } from "@/components/returns/CustomerReturnPreviewSteps";
 import { PreviewAccessError } from "@/lib/customer-return-preview";
 import {
@@ -22,11 +25,14 @@ import {
   downloadCustomerReturnLabel,
 } from "@/lib/customer-return-customer";
 import type { CustomerReturnFlowGateway } from "@/lib/customer-return-gateway";
-import type { CustomerReturnCustomerOrder } from "@shared/returns/customer-return-access.contract";
+import type { CustomerReturnCustomerOrder, CustomerReturnOrderChoice } from "@shared/returns/customer-return-access.contract";
 import type { CustomerReturnCustomerLabelStatus } from "@shared/returns/customer-return-customer.contract";
 
 const RETURN_OBSERVATION_INTERVAL_MS = 2_000;
 const MAX_RETURN_OBSERVATION_FAILURES = 3;
+// This customer portal is branded for Card Shellz. Use its public storefront,
+// never the backend origin, referrer, or a caller-supplied redirect destination.
+const CUSTOMER_RETURN_SHOPPING_URL = "https://www.cardshellz.com/";
 
 type Session = Awaited<
   ReturnType<ReturnType<typeof createCustomerReturnTransport>["session"]>
@@ -95,7 +101,7 @@ export default function CustomerReturnCustomerPortal() {
             onSignedOut={signedOut}
           />
         ) : (
-          <CustomerReturnSurface>
+          <CustomerReturnSurface shoppingHref={CUSTOMER_RETURN_SHOPPING_URL}>
             <div className="csz-return-status">
               <h1 className="text-2xl font-semibold">Return an order</h1>
               <PreviewError message={error} />
@@ -140,6 +146,8 @@ export function CustomerWorkspace({
   downloadRequest = fetch,
   embedded = false,
   onBusy,
+  signOutHref,
+  onFindOrder,
 }: {
   sessionKey: string;
   onDenied: (message: string) => void;
@@ -151,11 +159,16 @@ export function CustomerWorkspace({
   downloadRequest?: typeof fetch;
   embedded?: boolean;
   onBusy?: (busy: boolean) => void;
+  /** Native Shopify pages sign out through Shopify, not the backend cookie. */
+  signOutHref?: string;
+  onFindOrder?: () => void;
 }) {
+  const storefront = useContext(CustomerReturnPresentationContext) === "storefront";
   const api = useMemo(
     () => transport ?? createCustomerReturnTransport(fetch, sessionKey),
     [sessionKey, transport],
   );
+  const shoppingHref = embedded ? undefined : CUSTOMER_RETURN_SHOPPING_URL;
   const [commands] = useState(() => {
     let storage: Storage | null = null;
     try {
@@ -169,9 +182,11 @@ export function CustomerWorkspace({
     commands.subscribe,
     commands.getSnapshot,
   );
-  const [orders, setOrders] = useState<CustomerReturnCustomerOrder[]>([]);
+  const [orders, setOrders] = useState<CustomerReturnOrderChoice[]>([]);
   const [nextOrder, setNextOrder] = useState<number | null>(null);
   const [unavailableOrders, setUnavailableOrders] = useState(0);
+  const [ordersLoaded, setOrdersLoaded] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
   const [history, setHistory] = useState<History>({
     returns: [],
     nextBeforeAuthorizationId: null,
@@ -290,8 +305,8 @@ export function CustomerWorkspace({
     if (command.record || embedded || directOrderId !== null) return;
     void run(async (signal) => {
       const [page, prior] = await Promise.allSettled([
-        api.orders(null, signal),
-        api.history(null, signal),
+        api.orderChoices(null, signal),
+        api.history(null, signal, storefront),
       ]);
       if (signal.aborted) return;
       for (const result of [page, prior])
@@ -301,6 +316,7 @@ export function CustomerWorkspace({
         )
           throw result.reason;
       if (page.status === "fulfilled") {
+        setOrdersLoaded(true);
         setOrders(page.value.orders);
         setNextOrder(page.value.nextBeforeOmsOrderId);
         setUnavailableOrders(page.value.unavailableOrderCount);
@@ -311,6 +327,7 @@ export function CustomerWorkspace({
         setError(message(page.reason));
       }
       if (prior.status === "fulfilled") {
+        setHistoryLoaded(true);
         setHistory(prior.value);
         setHistoryError(null);
       } else {
@@ -319,7 +336,23 @@ export function CustomerWorkspace({
       }
     });
     return () => operation.current?.abort();
-  }, [api, run, attempt, command.record !== null, embedded, directOrderId]);
+  }, [api, run, attempt, command.record !== null, embedded, directOrderId, storefront]);
+
+  useEffect(() => {
+    if (!storefront || command.record || selected || historicalStatus || embedded || directOrderId !== null) return;
+    // Refresh saved reads on return to the page and once a minute while visible.
+    // Commands, verification and label purchases are never retried here.
+    let scheduled: ReturnType<typeof setTimeout> | undefined;
+    const refresh = () => {
+      if (document.visibilityState !== "visible" || operation.current) return;
+      clearTimeout(scheduled);
+      scheduled = setTimeout(() => setAttempt(value => value + 1), 0);
+    };
+    const interval = setInterval(refresh, 60_000);
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { clearTimeout(scheduled); clearInterval(interval); window.removeEventListener("focus", refresh); document.removeEventListener("visibilitychange", refresh); };
+  }, [storefront, command.record !== null, selected, historicalStatus, embedded, directOrderId]);
 
   useEffect(() => {
     if (directOrderId === null || command.record) { setRestoring(false); return; }
@@ -444,7 +477,10 @@ export function CustomerWorkspace({
     onBusy?.(busy || flowBusy);
     return () => onBusy?.(false);
   }, [busy, flowBusy, onBusy]);
-  const signOut = embedded ? null : (
+  const signOut = embedded || storefront ? null : signOutHref ? (
+    requestBusy ? <Button variant="ghost" disabled>Sign out</Button> :
+      <Button variant="ghost" asChild><a href={signOutHref}>Sign out</a></Button>
+  ) : (
     <Button
       variant="ghost"
       disabled={requestBusy}
@@ -460,9 +496,11 @@ export function CustomerWorkspace({
   );
   async function download(parcelId: number) {
     if (!status) return;
-    await run(async (signal) => {
+    await run(signal => saveDownload(status, parcelId, signal));
+  }
+  async function saveDownload(labelStatus: CustomerReturnCustomerLabelStatus, parcelId: number, signal: AbortSignal) {
       const blob = await downloadCustomerReturnLabel(
-        status,
+        labelStatus,
         parcelId,
         sessionKey,
         signal,
@@ -473,7 +511,7 @@ export function CustomerWorkspace({
       downloads.current.add(url);
       const anchor = document.createElement("a");
       anchor.href = url;
-      anchor.download = `return-${status.authorizationId}-box-${parcelId}.pdf`;
+      anchor.download = `return-${labelStatus.authorizationId}-box-${parcelId}.pdf`;
       document.body.append(anchor);
       anchor.click();
       anchor.remove();
@@ -481,17 +519,16 @@ export function CustomerWorkspace({
         URL.revokeObjectURL(url);
         downloads.current.delete(url);
       }, 60_000);
-    });
   }
   if (showStatus)
     return (
-      <CustomerReturnSurface label="Your return" onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
+      <CustomerReturnSurface label="Your return" shoppingHref={shoppingHref} onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
         <div className="csz-return-status">
-          <h1 ref={statusHeading} tabIndex={-1} className="text-2xl font-semibold outline-none">
+          <CustomerReturnHeading ref={statusHeading} tabIndex={-1} className="text-2xl font-semibold outline-none">
             {status
               ? `Return ${status.authorizationNumber}`
               : inProgress ? labelPreparationText : "We couldn’t finish your return"}
-          </h1>
+          </CustomerReturnHeading>
           <PreviewError message={error ?? command.error ?? workflowError ?? notice} />
           {!status && !inProgress && !error && !command.error && (
             <p className="text-sm text-muted-foreground">
@@ -583,6 +620,7 @@ export function CustomerWorkspace({
           gateway={gateway}
           onAccessDenied={onDenied}
           onClose={embedded ? onSignedOut : undefined}
+          shoppingHref={shoppingHref}
           closeDisabled={busy || flowBusy}
           onBusy={setFlowBusy}
           notice={<>
@@ -600,9 +638,9 @@ export function CustomerWorkspace({
 
   if (directOrderId !== null)
     return (
-      <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
+      <CustomerReturnSurface shoppingHref={shoppingHref} onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
         <div className="csz-return-status">
-          <h1 className="text-2xl font-semibold">Return items</h1>
+          <CustomerReturnHeading>Return items</CustomerReturnHeading>
           <PreviewError message={error} />
           {busy && <Loading text="Loading return items…" />}
           {error && !busy && (
@@ -618,29 +656,30 @@ export function CustomerWorkspace({
     );
 
   return (
-    <CustomerReturnSurface onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
+    <CustomerReturnSurface shoppingHref={shoppingHref} onClose={embedded ? onSignedOut : undefined} closeDisabled={busy || flowBusy}>
       <div className="csz-return-status">
-        <h1
+        <CustomerReturnHeading
           ref={chooser}
           tabIndex={-1}
           className="text-2xl font-semibold outline-none"
         >
-          Choose an order to return
-        </h1>
+          {storefront ? "Start a return" : "Choose an order to return"}
+        </CustomerReturnHeading>
         <PreviewError message={error ?? command.error ?? workflowError ?? notice} />
-        {busy && <Loading text="Loading your orders…" />}
+        {busy && (!ordersLoaded || !historyLoaded) && <Loading text="Loading your orders…" />}
         {unavailableOrders > 0 && (
           <p role="status" className="text-sm text-muted-foreground">
-            Some orders could not be checked. Refresh or contact support.
+            {storefront ? "Some order options couldn’t be loaded. Try again or contact us for help." : "Some orders could not be checked. Refresh or contact support."}
           </p>
         )}
-        {!busy && !error && !orders.length && unavailableOrders === 0 && (
-          <p className="text-sm text-muted-foreground">
-            No eligible orders were found on this page. Items must meet the return
-            policy.
-          </p>
+        {ordersLoaded && !busy && !error && !orders.length && unavailableOrders === 0 && (
+          <div className="csz-return-empty">
+            <h3>No orders available for a new return</h3>
+            <p>{history.returns.length ? "You can still manage your existing returns below." : "Items must meet the return policy."}</p>
+            {onFindOrder && <Button variant="link" onClick={onFindOrder}>Find another order</Button>}
+          </div>
         )}
-        <div className="space-y-3">
+        {orders.length > 0 && <div className="space-y-3">
           {orders.map((item) => (
             <div
               key={item.omsOrderId}
@@ -648,15 +687,11 @@ export function CustomerWorkspace({
             >
               <div>
                 <h2 className="font-semibold">
-                  Order #{item.order.orderReference.replace(/^#\s*/, "")}
+                  Order #{item.orderReference.replace(/^#\s*/, "")}
                 </h2>
                 <p className="text-sm text-muted-foreground">
-                  {new Date(item.order.purchasedAt).toLocaleDateString()} ·{" "}
-                  {item.order.lines.reduce(
-                    (sum, line) => sum + line.eligibleQuantity,
-                    0,
-                  )}{" "}
-                  items available
+                  {item.purchasedAt && <>{new Date(item.purchasedAt).toLocaleDateString()} · </>}
+                  {item.eligibleItemCount === null ? "Choose the items you want to return." : `${item.eligibleItemCount} items available`}
                 </p>
               </div>
               <Button
@@ -673,22 +708,23 @@ export function CustomerWorkspace({
               </Button>
             </div>
           ))}
-        </div>
-        <div className="flex flex-wrap gap-3">
-          <Button
+        </div>}
+        {(!storefront || error || historyError || unavailableOrders > 0 || nextOrder !== null || (onFindOrder && orders.length > 0)) && <div className="flex flex-wrap gap-3">
+          {(!storefront || error || historyError || unavailableOrders > 0) && <Button
             variant="outline"
             disabled={busy}
             onClick={() => setAttempt((value) => value + 1)}
           >
-            Refresh orders
-          </Button>
+            {storefront ? "Try again" : "Refresh orders"}
+          </Button>}
+          {onFindOrder && orders.length > 0 && <Button variant="link" disabled={busy} onClick={onFindOrder}>Find another order</Button>}
           {nextOrder !== null && (
             <Button
               variant="outline"
               disabled={busy}
               onClick={() =>
                 void run(async (signal) => {
-                  const page = await api.orders(nextOrder, signal);
+                  const page = await api.orderChoices(nextOrder, signal);
                   if (!signal.aborted) {
                     setOrders((previous) => [
                       ...previous.filter(
@@ -710,19 +746,34 @@ export function CustomerWorkspace({
               More orders
             </Button>
           )}
-        </div>
+        </div>}
         <section
           className="space-y-3 border-t pt-5"
           aria-label="Existing returns"
         >
           <h2 className="text-lg font-semibold">Your returns</h2>
           <PreviewError message={historyError} />
-          {!history.returns.length && !historyError && (
+          {historyLoaded && !history.returns.length && !historyError && (
             <p className="text-sm text-muted-foreground">
               Your saved returns will appear here.
             </p>
           )}
-          {history.returns.map((item) => (
+          {history.returns.map((item) => storefront ? <CustomerReturnHistoryCard
+            key={item.authorizationId} item={item} busy={busy}
+            onOpen={() => void run(async signal => {
+              const result = await api.status(item.authorizationId, signal);
+              if (!signal.aborted) setHistoricalStatus(result);
+            })}
+            onDownload={() => void run(async signal => {
+              // Cached progress controls presentation only. Fetch current label
+              // evidence and reauthorize the protected artifact before download.
+              const result = await api.status(item.authorizationId, signal);
+              if (signal.aborted) return;
+              if (result.parcels.length === 1 && result.parcels[0].downloadPath)
+                await saveDownload(result, result.parcels[0].parcelId, signal);
+              else setHistoricalStatus(result);
+            })}
+          /> : (
             <Button
               key={item.authorizationId}
               variant="outline"
@@ -748,6 +799,7 @@ export function CustomerWorkspace({
                   const page = await api.history(
                     history.nextBeforeAuthorizationId,
                     signal,
+                    storefront,
                   );
                   if (!signal.aborted)
                     setHistory((previous) => ({

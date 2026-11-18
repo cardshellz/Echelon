@@ -12,7 +12,7 @@ import { EbayAutomaticPublicationRecoveryService } from "../application/ebay-aut
 import { PostgresEbayAutomaticPublicationRecoveryRepository } from "./ebay-automatic-publication-recovery.repository";
 import { PostgresEbayPublicationReconciliationRepository } from "./ebay-publication-reconciliation.repository";
 import { PostgresEbayPublicationRejectionReader } from "./ebay-publication-rejection.reader";
-import { PostgresEbayLegacyMaintenanceEvidenceReader } from "../../channels/infrastructure/ebay-legacy-maintenance-evidence";
+import { PostgresEbayLegacyMaintenanceEvidenceReader } from "../../channels/ebay-maintenance-evidence.api";
 
 /** Shared production instance bounds nested provider connections across the known quantity owners. */
 export const quantityPublicationAdmission = new PostgresQuantityPublicationAdmission(pool);
@@ -113,7 +113,7 @@ export function createQuantityPublicationCatchupService(input: {
     if (authority === "canonical") return planCurrentCanonicalListingQuantity(scope);
     if (authority !== "legacy") throw new QuantityPublicationAdmissionError("PUBLICATION_AUTHORITY_MISSING", "Runtime publication authority is unavailable.");
     if (scope.destinationKind === "dropship_store_connection") {
-      const { refreshDropshipQuantityPublicationCatchup } = await import("../../dropship/infrastructure/dropship-quantity-publication-catchup.provider");
+      const { refreshDropshipQuantityPublicationCatchup } = await import("../../dropship/quantity-publication-catchup.api");
       await refreshDropshipQuantityPublicationCatchup(scope, claim);
       return;
     }

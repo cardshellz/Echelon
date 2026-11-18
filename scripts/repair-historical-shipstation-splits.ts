@@ -371,9 +371,9 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
   ] = await Promise.all([
     import("../server/db"),
     import("../server/modules/oms/historical-shipstation-split-repair.repository"),
-    import("../server/modules/shipping/carrier-tracking.repository"),
-    import("../server/modules/shipping/carrier-tracking.service"),
-    import("../server/modules/shipping/shipstation-tracking-events.client"),
+    import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
+    import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
+    import("../server/modules/shipping/shipstation-tracking-transport.api"),
   ]);
 
   const repository = createHistoricalShipStationSplitRepairRepository(pool);

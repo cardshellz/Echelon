@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000061000020670001_retire_inventory_sales_statuses.sql",
+  "generation": 61,
+  "pr": 2067,
+  "ordinal": 1,
+  "after": [
+    "900000060000020570001_shipping_shipment_facts.sql"
+  ]
+}

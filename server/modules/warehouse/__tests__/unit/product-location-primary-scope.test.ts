@@ -122,7 +122,7 @@ describe("promoteBestRemainingSlot", () => {
   });
 
   it("matches legacy SKU-keyed rows when there is no variant id", async () => {
-    const execute = vi.fn(async () => ({ rows: [{ id: 7, sku: "LEGACY", location: "B-01", zone: "B" }] }));
+    const execute = vi.fn(async (_query: unknown) => ({ rows: [{ id: 7, sku: "LEGACY", location: "B-01", zone: "B" }] }));
     const promoted = await promoteBestRemainingSlot({ execute } as any, { productVariantId: null, sku: "legacy" });
     expect(promoted).toEqual({ id: 7, sku: "LEGACY", location: "B-01", zone: "B" });
     const text = sqlTextOf(execute.mock.calls[0][0]);

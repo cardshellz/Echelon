@@ -2,7 +2,8 @@ import { sql } from "drizzle-orm";
 import {
   isPositivePostgresInteger,
   parseExactPositiveWmsShipmentItems,
-} from "../shipping/shipstation-provider-contents.domain";
+} from "../shipping/shipstation-provider-reconciliation.api";
+import { adoptProvenShipStationOrderOnOutboundShipmentInWms } from "../wms/outbound-shipment-mutations.api";
 
 export interface ExpectedShipStationOrderIdentity {
   shipmentId: number;
@@ -128,31 +129,11 @@ export async function adoptProvenShipStationOrder(
   if (!isPositivePostgresInteger(input.providerOrderId)) {
     throw new Error("providerOrderId must fit the WMS PostgreSQL integer column");
   }
-  const updated = await dbArg.execute(sql`
-    UPDATE wms.outbound_shipments
-    SET shipstation_order_id = ${input.providerOrderId},
-        shipstation_order_key = ${input.orderKey},
-        shipping_engine = 'shipstation',
-        engine_order_ref = ${String(input.providerOrderId)},
-        engine_shipment_ref = ${input.orderKey},
-        status = CASE WHEN status = 'planned' THEN 'queued'::wms.shipment_status ELSE status END,
-        requires_review = CASE
-          WHEN review_reason = 'shipstation_push_retry_exhausted' THEN false
-          ELSE requires_review
-        END,
-        review_reason = CASE
-          WHEN review_reason = 'shipstation_push_retry_exhausted' THEN NULL
-          ELSE review_reason
-        END,
-        updated_at = NOW()
-    WHERE id = ${input.shipmentId}
-      AND status IN ('planned', 'queued', 'labeled', 'on_hold')
-      AND (
-        shipstation_order_id IS NULL
-        OR shipstation_order_id = ${input.providerOrderId}
-      )
-    RETURNING order_id
-  `);
+  const updated = await adoptProvenShipStationOrderOnOutboundShipmentInWms(dbArg, {
+    shipmentId: input.shipmentId,
+    providerOrderId: input.providerOrderId,
+    orderKey: input.orderKey,
+  });
 
   const linkedRow = updated?.rows?.[0];
   if (linkedRow) {

@@ -11,6 +11,7 @@ import { inInventoryCutoverTransaction } from "./inventory-cutover-commit.reposi
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
 import { PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "./inventory-publication-target-stop.repository";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 
 const receiptKey = (key: string, targetId: number) => `precutover-exclusion:${key}:${targetId}`;
 const targetIds = (input: ReviewPrecutoverExclusion) => [...new Set(input.exclusions.map(row => row.publicationTargetId))].sort((a, b) => a - b);
@@ -93,13 +94,17 @@ export class PostgresPrecutoverExclusionStore implements PrecutoverExclusionStor
           VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)`,
         [targetId, receiptKey(input.idempotencyKey, targetId), requestHash, actor, now,
           JSON.stringify({ operation: "precutover_nonlive_listing_exclusion", input, ...review }), JSON.stringify(receipt)]);
-        const audit = await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-          VALUES($1,'AUDIT',$2,'inventory_availability.publication_scope.pre_cutover_excluded',$3,$4::jsonb,$5::jsonb)`,
-        [now, actor, `inventory.inventory_publication_target:${targetId}`,
-          JSON.stringify({ before: { revision: target.revision, members }, after: { revision: receipt.revision,
+        const audit = await insertAuditEventPgQuery(client, {
+          timestamp: now,
+          actor,
+          action: "inventory_availability.publication_scope.pre_cutover_excluded",
+          target: `inventory.inventory_publication_target:${targetId}`,
+          changesJson: JSON.stringify({ before: { revision: target.revision, members }, after: { revision: receipt.revision,
             members: members.map(row => ({ productVariantId: row.productVariantId, included: false })) } }),
-          JSON.stringify({ reason: input.reason, requestHash, reviewHash: review.reviewHash,
-            idempotencyKey: input.idempotencyKey, receipt, providerWriteAttempted: false, runtimeAuthorityChanged: false })]);
+          contextJson: JSON.stringify({ reason: input.reason, requestHash, reviewHash: review.reviewHash,
+            idempotencyKey: input.idempotencyKey, receipt, providerWriteAttempted: false, runtimeAuthorityChanged: false }),
+          inlineAction: true,
+        });
         if (application.rowCount !== 1 || audit.rowCount !== 1)
           fail("PRECUTOVER_EXCLUSION_WRITE_INCOMPLETE", "The immutable receipt or audit was not recorded.");
         receipts.push(receipt);

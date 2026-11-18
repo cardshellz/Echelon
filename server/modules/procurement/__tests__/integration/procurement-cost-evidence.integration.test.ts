@@ -32,7 +32,7 @@ const migration = readFileSync(resolve(process.cwd(), "migrations/222_procuremen
       await pool.query(`CREATE SCHEMA ${name}`); owned.push(name);
     }
     for (const table of [schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipmentLines,
-      schema.receivingOrders, schema.receivingLines, schema.vendorInvoiceLines, schema.inventoryLots]) {
+      schema.receivingOrders, schema.receivingLines, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines, schema.inventoryLots]) {
       await pool.query(fixtureTable(table));
     }
     await pool.query(`

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { enqueueShipStationShipmentPushRetry } from "../oms/webhook-retry.worker";
+import { enqueueShipStationShipmentPushRetry } from "../oms/webhook-retry.api";
 
 /**
  * After an order-level hold is released, make the order actually shippable:

@@ -82,6 +82,13 @@ export class ListingLifecycleService {
     if (!this.dependencies.members.store.listForDropship) throw new ListingPublicationError("LISTING_LIFECYCLE_UNAVAILABLE","Listing retirement history is unavailable.",503);
     return {items:await this.dependencies.members.store.listForDropship(scope.connectionId,scope.vendorId,request.productId,request.limit)};
   }
+  async memberConflicts(channelId: number, input: unknown) {
+    const request = z.object({ offset: z.number().int().nonnegative().safe().default(0) }).strict().parse(input);
+    const store = this.dependencies.members?.store;
+    if (!store?.listConflictsForChannel)
+      throw new ListingPublicationError("LISTING_LIFECYCLE_UNAVAILABLE", "Archived listing checks are unavailable.", 503);
+    return store.listConflictsForChannel(channelIdSchema.parse(channelId), request.offset);
+  }
   async list(channelId: number, rawSkus: unknown) {
     const skus = z.array(listingLifecycleSkuSchema).max(250).parse(rawSkus);
     const account = listingAccountSchema.parse(

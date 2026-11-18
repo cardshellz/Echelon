@@ -8,7 +8,7 @@ import { verifiedPostgresPoolConfig } from "../infrastructure/verified-postgres-
 import {
   createHistoricalShipStationContentsClient,
   type HistoricalShipStationContentsClient,
-} from "../modules/shipping/historical-shipstation-contents-audit.client";
+} from "../modules/shipping/historical-shipstation-contents.api";
 import {
   HISTORICAL_SHIPSTATION_CONTENTS_AUDIT_LIMITS,
   HistoricalShipStationContentsAuditRepositoryError,
@@ -17,11 +17,11 @@ import {
   type HistoricalShipStationContentsAuditRepositoryOptions,
   type HistoricalShipStationContentsCandidateBatch,
   type NormalizedHistoricalShipStationContentsAuditRepositoryOptions,
-} from "../modules/shipping/historical-shipstation-contents-audit.repository";
+} from "../modules/shipping/historical-shipstation-contents.api";
 import {
   auditHistoricalShipStationContents,
   type HistoricalShipStationContentsAuditReport,
-} from "../modules/shipping/historical-shipstation-contents-audit.service";
+} from "../modules/shipping/historical-shipstation-contents.api";
 
 interface AuditPoolClient extends Pick<PoolClient, "query" | "release"> {}
 

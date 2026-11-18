@@ -21,7 +21,7 @@ vi.mock("../../../channels", () => ({ channelsStorage: {} }));
 vi.mock("../../infrastructure/quantity-authority.query", () => ({ readInventoryQuantityCapabilities: vi.fn(async () => ({ legacyQuantityImportAllowed: true })) }));
 vi.mock("../../../../routes/middleware", () => {
   const pass = (_req: Request, _res: Response, next: NextFunction) => next();
-  return { requirePermission: () => pass, requireAuth: pass, upload: { single: () => pass } };
+  return { requirePermission: () => pass, requireAuth: pass, requireAssignedSystemRole: () => pass, upload: { single: () => pass } };
 });
 import { registerInventoryRoutes } from "../../inventory.routes";
 

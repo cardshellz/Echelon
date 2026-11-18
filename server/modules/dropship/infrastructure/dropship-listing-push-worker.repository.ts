@@ -19,6 +19,7 @@ import { LISTING_PUSH_RUN_WORDS } from "../domain/listing-push-run-words";
 import { restoreListingsOfCancelledItems, syncRunTargetsOfItems } from "./dropship-listing-push-run-items";
 import { updateMarketplaceIssueCodesWithClient } from "./dropship-marketplace-listing-sync-state.repository";
 import { recordPreviousMarketplaceIdWithClient } from "./dropship-marketplace-previous-ids.repository";
+import { settleZeroQuantityWithClient } from "./dropship-live-listing-zero-quantity.repository";
 import type { MarketplaceIssueCode } from "../domain/marketplace-sync-decision";
 import {
   decideListingEndFence,
@@ -542,6 +543,71 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
     });
   }
 
+  /**
+   * A queued update of a live listing whose stock is now gone (legacy authority): 0 was sent to eBay as a
+   * quantity-only write (DropshipLiveListingZeroQuantityService), and here, in ONE transaction, the item completes
+   * and the listing settles at 0 (settleZeroQuantityWithClient: pushed_quantity, last_pushed_at, the sync event and
+   * audit row). Unlike completeItem, nothing the push did not send is recorded: price, status, item numbers and the
+   * stored intent stay. An item a stop cancelled meanwhile keeps its cancel, but the listing still settles: the 0
+   * is on eBay. A listing that stopped being live on the offer refuses (retryable) and nothing commits.
+   */
+  async completeItemAtZeroQuantity(
+    input: Parameters<DropshipListingPushWorkerRepository["completeItemAtZeroQuantity"]>[0],
+  ): Promise<{ pushedQuantityBefore: number; lastPushedAtBefore: Date | null }> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      // A completed push ends the job's run of pauses (§4.5); the job before its item, as completeItem.
+      await client.query(
+        `UPDATE dropship.dropship_listing_push_jobs SET consecutive_pause_count = 0
+         WHERE id = $1 AND consecutive_pause_count <> 0`,
+        [input.job.jobId],
+      );
+      const decided = await updateJobItemTerminalStatus(client, {
+        itemId: input.item.itemId,
+        onlyFrom: ["processing"],
+        status: "completed",
+        externalListingId: input.externalListingId,
+        errorCode: null,
+        errorMessage: null,
+        resultPatch: {
+          push: {
+            status: "zero_quantity",
+            quantity: 0,
+            externalListingId: input.externalListingId,
+            externalOfferId: input.settlement.externalOfferId,
+            pushedAt: input.now.toISOString(),
+            workerId: input.workerId,
+          },
+        },
+        now: input.now,
+      });
+      const before = await settleZeroQuantityWithClient(client, input.settlement);
+      if (decided) {
+        await syncRunTargetsOfItems(client, { itemIds: [input.item.itemId] });
+        await recordAuditEvent(client, {
+          vendorId: input.job.vendorId,
+          storeConnectionId: input.job.storeConnectionId,
+          entityType: "dropship_listing_push_job_item",
+          entityId: String(input.item.itemId),
+          eventType: "listing_push_item_completed",
+          actorId: input.workerId,
+          payload: { jobId: input.job.jobId, listingId: input.item.listingId, externalListingId: input.externalListingId,
+            zeroQuantity: true, before: { status: "processing", pushedQuantity: before.pushedQuantityBefore },
+            after: { status: "completed", pushedQuantity: 0 } },
+          occurredAt: input.now,
+        });
+      }
+      await client.query("COMMIT");
+      return before;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async finalizeJob(input: {
     jobId: number;
     workerId: string;
@@ -907,6 +973,12 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
     endpoint?: string | null;
     context?: Record<string, unknown>;
     endsPauseRun?: boolean;
+    /**
+     * The preview's blockers, written to the listing's metadata.blockers (with lastPreviewStatus) as the queue writes
+     * them (dropship-listing-preview.repository upsertVendorListingForPreview): an unpublished listing blocked only for
+     * stock is then "waiting for stock" (WAITING_FOR_STOCK_LISTINGS_SQL), which the sweep lists once stock is back.
+     */
+    listingBlockers?: readonly string[];
     workerId: string;
     eventType: string;
     now: Date;
@@ -994,6 +1066,7 @@ export class PgDropshipListingPushWorkerRepository implements DropshipListingPus
                 retryable: input.retryable,
                 workerId: input.workerId,
               },
+              ...(input.listingBlockers ? { lastPreviewStatus: "blocked", blockers: [...input.listingBlockers] } : {}),
             }),
             input.now,
             [...LIVE_LISTING_STATUSES],

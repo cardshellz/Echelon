@@ -7,6 +7,7 @@ import { registerDropshipMarketplaceOrderIntakeRoutes } from "../../interfaces/h
 import type { DropshipNotificationSenderInput } from "../../application/dropship-ports";
 import type {
   DropshipOrderIntakeSourceRepository,
+  DropshipOrderIntakeSourceStoreConnection,
   DropshipShopifyStoreUninstallResult,
 } from "../../infrastructure/dropship-order-intake-source.repository";
 
@@ -67,7 +68,7 @@ describe("Shopify dropship app uninstall webhook route", () => {
       eventType: "dropship_store_disconnected",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship store disconnected",
+      title: "Store disconnected",
       idempotencyKey: "shopify-uninstall:22:webhook-1",
       payload: {
         vendorId: 10,
@@ -158,7 +159,9 @@ class FakeDropshipOrderIntakeSourceRepository implements DropshipOrderIntakeSour
     previousStatus: "connected",
   };
 
-  async findShopifyStoreConnectionByShopDomain() {
+  async findShopifyStoreConnectionByShopDomain(
+    _shopDomain: string,
+  ): Promise<DropshipOrderIntakeSourceStoreConnection | null> {
     throw new Error("findShopifyStoreConnectionByShopDomain should not be called by uninstall route");
   }
 

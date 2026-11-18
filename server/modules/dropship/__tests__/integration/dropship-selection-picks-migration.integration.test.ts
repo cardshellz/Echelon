@@ -1375,16 +1375,18 @@ describeDatabase.sequential("picks migration: lock windows on 30,000 sizes (Post
     try {
       const pid = await backendPid(migrationClient);
       let done = false;
+      const firstRequested = new Map<string, number>();
       const firstSeen = new Map<string, number>();
       const sampling = (async () => {
         while (!done) {
-          const locks = await sampler.query<{ relation: string; mode: string }>(`SELECT n.nspname || '.' || c.relname AS relation, l.mode
+          const locks = await sampler.query<{ relation: string; mode: string; granted: boolean }>(`SELECT n.nspname || '.' || c.relname AS relation, l.mode, l.granted
             FROM pg_locks l JOIN pg_class c ON c.oid = l.relation JOIN pg_namespace n ON n.oid = c.relnamespace
-            WHERE l.pid = $1 AND l.locktype = 'relation' AND l.granted`, [pid]);
+            WHERE l.pid = $1 AND l.locktype = 'relation'`, [pid]);
           const at = performance.now();
           for (const lock of locks.rows) {
             const key = `${lock.relation} ${lock.mode}`;
-            if (!firstSeen.has(key)) firstSeen.set(key, at);
+            if (!firstRequested.has(key)) firstRequested.set(key, at);
+            if (lock.granted && !firstSeen.has(key)) firstSeen.set(key, at);
           }
           await delay(2);
         }
@@ -1427,8 +1429,13 @@ describeDatabase.sequential("picks migration: lock windows on 30,000 sizes (Post
       expect(sizesHeldAt).toBeLessThanOrEqual(backfillAt);
       expect(backfillAt).toBeLessThan(vendorsHeldAt);
       const longest = (probes: Probe[]) => Math.max(...probes.map((probe) => probe.end - probe.start));
+      // Measure only the portion of a probe spent before `opened`: a probe that starts < UNBLOCKED_MS before the
+      // lock window opens (or queues behind an ungranted ShareRowExclusiveLock) and then waits inside the window
+      // until commit did not wait early, even when pre-window + in-window duration exceeds UNBLOCKED_MS.
       const waitedBefore = (probes: Probe[], opened: number) => probes
-        .filter((probe) => probe.start < opened - SAMPLE_SLACK_MS && probe.end - probe.start > UNBLOCKED_MS);
+        .filter((probe) => Math.min(probe.end, opened - SAMPLE_SLACK_MS) - probe.start > UNBLOCKED_MS);
+      const sizesOpenedAt = firstRequested.get("catalog.product_variants ShareRowExclusiveLock") ?? sizesHeldAt;
+      const vendorsOpenedAt = firstRequested.get("dropship.dropship_vendors ShareRowExclusiveLock") ?? vendorsHeldAt;
       const measured = {
         sizes: SCALE_SIZES,
         picks: (await db.pool.query("SELECT count(*)::int AS count FROM dropship.dropship_vendor_selected_variants")).rows[0].count as number,
@@ -1454,11 +1461,11 @@ describeDatabase.sequential("picks migration: lock windows on 30,000 sizes (Post
       }
       // Each writer waits only inside its window: the sizes from the sizes lock, other vendors from the foreign key
       // step, a converted vendor's row from its backfill revision (FOR KEY SHARE), each until commit.
-      expect(waitedBefore(sizeProbes, sizesHeldAt)).toEqual([]);
-      expect(waitedBefore(otherProbes, vendorsHeldAt)).toEqual([]);
+      expect(waitedBefore(sizeProbes, sizesOpenedAt)).toEqual([]);
+      expect(waitedBefore(otherProbes, vendorsOpenedAt)).toEqual([]);
       expect(waitedBefore(convertedProbes, backfillAt)).toEqual([]);
-      expect(measured.longestSizeWriteMs).toBeLessThanOrEqual(measured.sizesHoldMs + UNBLOCKED_MS);
-      expect(measured.longestOtherVendorWriteMs).toBeLessThanOrEqual(measured.vendorsHoldMs + UNBLOCKED_MS);
+      expect(measured.longestSizeWriteMs).toBeLessThanOrEqual(Math.round(committed - sizesOpenedAt) + UNBLOCKED_MS);
+      expect(measured.longestOtherVendorWriteMs).toBeLessThanOrEqual(Math.round(committed - vendorsOpenedAt) + UNBLOCKED_MS);
       expect(measured.longestConvertedVendorWriteMs).toBeLessThanOrEqual(measured.backfillToCommitMs + UNBLOCKED_MS);
       for (const probes of [sizeProbes, convertedProbes, otherProbes]) expect(probes.length).toBeGreaterThanOrEqual(3);
 

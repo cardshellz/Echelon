@@ -26,10 +26,21 @@ function savedRequest(key: string, productId: number): { command: ProductSyncSta
   } catch { return { command: null, error: "The saved sync could not be read. Check its status in Channel Inventory before starting another request." }; }
 }
 
-export function ProductSyncWorkflowDialog({ productId, actor, onClose }: { productId: number; actor: string; onClose(): void }) {
+function admittedRequest(command: ProductSyncStart, productId: number) {
+  const parsed = productSyncStartSchema.safeParse(command);
+  return parsed.success && parsed.data.productId === productId
+    ? { command: parsed.data, error: null }
+    : { command: null, error: "The recorded sync does not match this product. Check its status in Channel Inventory." };
+}
+
+export function ProductSyncWorkflowDialog({ productId, actor, onClose, initialCommand }: {
+  productId: number; actor: string; onClose(): void; initialCommand?: ProductSyncStart;
+}) {
   const client = useQueryClient();
   const storageKey = `inventory-product-sync:v2:${actor}:${productId}`;
-  const [saved] = useState(() => savedRequest(storageKey, productId));
+  const [saved] = useState(() => initialCommand
+    ? admittedRequest(initialCommand, productId)
+    : savedRequest(storageKey, productId));
   const [command, setCommand] = useState(saved.command);
   const [error, setError] = useState(saved.error);
   const [storageBlocked, setStorageBlocked] = useState(saved.error !== null);
@@ -61,6 +72,9 @@ export function ProductSyncWorkflowDialog({ productId, actor, onClose }: { produ
   });
   const clearSaved = (input: ProductSyncStart) => {
     const raw = sessionStorage.getItem(storageKey);
+    // A server-admitted linking sync must not erase another browser's saved intent.
+    if (initialCommand?.idempotencyKey === input.idempotencyKey && raw !== null
+      && productSyncStartSchema.parse(JSON.parse(raw)).idempotencyKey !== input.idempotencyKey) return;
     if (raw !== null && productSyncStartSchema.parse(JSON.parse(raw)).idempotencyKey !== input.idempotencyKey)
       throw new Error("Another request owns the saved identity.");
     sessionStorage.removeItem(storageKey);

@@ -1,9 +1,10 @@
+import { enqueueSavedLabelStatus } from "../../shipping/package-history-and-delivery.api";
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import { customerReturnDimensionsSchema } from "@shared/returns/customer-return-parcel";
 import { customerReturnLabelSettingsSchema } from "@shared/returns/customer-return-label.contract";
 import { isReturnCarrierServiceAllowed } from "@shared/returns/customer-return-carrier-policy";
-import { returnRateShipmentSchema } from "../../shipping-engine/application/return-rate-provider.port";
+import { returnRateShipmentSchema } from "../../shipping-engine/return-shipping-and-labels.api";
 import { selectCustomerReturnRate } from "../domain/customer-return-rate-selection";
 import {
   customerReturnQuoteDecisionSchema,
@@ -19,7 +20,7 @@ import {
   returnLabelRecordSchema,
   type ReturnLabelInput,
   type ReturnLabelAddress,
-} from "../../shipping-engine/application/return-label-provider.port";
+} from "../../shipping-engine/return-shipping-and-labels.api";
 import type {
   CustomerReturnLabelStore,
   StoredReturnLabels,
@@ -416,6 +417,7 @@ export class PostgresCustomerReturnLabelStore
           now,
         ],
       );
+      if (result) await enqueueSavedLabelStatus(client, { kind: "return", sourceId: attemptId, providerReference: result.labelId, trackingNumber: result.trackingNumber }, now);
       await audit(
         client,
         attemptId,

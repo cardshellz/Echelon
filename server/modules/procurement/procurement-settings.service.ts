@@ -1,6 +1,6 @@
 import { procurementSettingsCommandSchema, procurementSettingsSnapshotSchema } from "@shared/procurement/procurement-settings";
-import { commandAuthorityActorSchema } from "../identity/domain/command-authority";
-import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
+import { commandAuthorityActorSchema } from "../identity/authority-contracts.api";
+import { readCommandAuthorityActor } from "../identity/command-authority.api";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { applyProcurementSettingsCommand, assertProcurementSettingsAuthority, ProcurementSettingsError } from "./procurement-settings.policy";
 import { readProcurementSettings, saveProcurementSettings, type ProcurementSettingsTransaction } from "./procurement-settings.repository";

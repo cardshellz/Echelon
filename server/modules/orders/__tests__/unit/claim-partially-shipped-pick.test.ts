@@ -6,12 +6,22 @@ const ORDERS_STORAGE_SRC = readFileSync(
   resolve(__dirname, "../../orders.storage.ts"),
   "utf-8",
 );
+const WMS_ORDER_MUTATIONS_SRC = readFileSync(
+  resolve(__dirname, "../../../wms/wms-order-mutations.repository.ts"),
+  "utf-8",
+);
 
 describe("claimOrder claimable states", () => {
   it("treats ready / partially_shipped / ready_to_ship / in_progress as claimable statuses", () => {
-    const claimBlock = ORDERS_STORAGE_SRC.slice(
+    const storageClaimBlock = ORDERS_STORAGE_SRC.slice(
       ORDERS_STORAGE_SRC.indexOf("async claimOrder"),
       ORDERS_STORAGE_SRC.indexOf("async updateOrderStatus"),
+    );
+    expect(storageClaimBlock).toContain("claimWmsOrderForPickerInWms(");
+
+    const claimBlock = WMS_ORDER_MUTATIONS_SRC.slice(
+      WMS_ORDER_MUTATIONS_SRC.indexOf("export async function claimWmsOrderForPickerInWms("),
+      WMS_ORDER_MUTATIONS_SRC.indexOf("export async function restoreStoppedRefundEditWmsOrderInWms("),
     );
     expect(claimBlock).toMatch(/inArray\(orders\.warehouseStatus, \[/);
     expect(claimBlock).toContain('"ready"');
@@ -21,9 +31,9 @@ describe("claimOrder claimable states", () => {
   });
 
   it("blocks ONLY when in_progress under a different picker (stale picker id never blocks)", () => {
-    const claimBlock = ORDERS_STORAGE_SRC.slice(
-      ORDERS_STORAGE_SRC.indexOf("async claimOrder"),
-      ORDERS_STORAGE_SRC.indexOf("async updateOrderStatus"),
+    const claimBlock = WMS_ORDER_MUTATIONS_SRC.slice(
+      WMS_ORDER_MUTATIONS_SRC.indexOf("export async function claimWmsOrderForPickerInWms("),
+      WMS_ORDER_MUTATIONS_SRC.indexOf("export async function restoreStoppedRefundEditWmsOrderInWms("),
     );
     // The lock is expressed as: NOT (in_progress AND held by someone else),
     // i.e. allow if status != in_progress OR picker is null OR picker is me.
@@ -33,14 +43,10 @@ describe("claimOrder claimable states", () => {
   });
 
   it("does NOT require assigned_picker_id to be null as a blanket guard", () => {
-    const claimBlock = ORDERS_STORAGE_SRC.slice(
-      ORDERS_STORAGE_SRC.indexOf("async claimOrder"),
-      ORDERS_STORAGE_SRC.indexOf("async updateOrderStatus"),
+    const claimBlock = WMS_ORDER_MUTATIONS_SRC.slice(
+      WMS_ORDER_MUTATIONS_SRC.indexOf("export async function claimWmsOrderForPickerInWms("),
+      WMS_ORDER_MUTATIONS_SRC.indexOf("export async function restoreStoppedRefundEditWmsOrderInWms("),
     );
-    // The old bug: a top-level `isNull(orders.assignedPickerId)` in the AND(...)
-    // blocked claims on any order carrying a stale attribution picker id.
-    // It must now only appear inside the OR(...) lock expression. Assert there
-    // is no standalone `isNull(...),` immediately preceded by the onHold guard.
     expect(claimBlock).not.toMatch(/eq\(orders\.onHold, 0\),\s*isNull\(orders\.assignedPickerId\)/);
   });
 });

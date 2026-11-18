@@ -5,7 +5,9 @@ import { catalogStorage } from "../catalog";
 import { ordersStorage } from "../orders";
 import { inventoryStorage } from "../inventory";
 const storage = { ...warehouseStorage, ...catalogStorage, ...ordersStorage, ...inventoryStorage };
-import { requirePermission, requireAuth } from "../../routes/middleware";
+import { db } from "../../storage/base";
+import { assertPickFaceAssignmentEligible } from "./location-integrity";
+import { requirePermission } from "../../routes/middleware";
 import { insertProductLocationSchema, updateProductLocationSchema, productLocations, productVariants, products, inventoryLevels, warehouseLocations } from "@shared/schema";
 import type { InsertProductLocation, UpdateProductLocation } from "@shared/schema";
 import Papa from "papaparse";
@@ -58,31 +60,6 @@ export function registerLocationRoutes(app: Express) {
       res.status(500).json({ error: "Failed to fetch location" });
     }
   });
-
-  // Helper to sync product_location to warehouse_locations (WMS source of truth)
-  async function ensureWarehouseLocation(locationCode: string, zone?: string | null): Promise<void> {
-    try {
-      if (!locationCode || locationCode === "UNASSIGNED") return;
-      
-      const code = locationCode.toUpperCase();
-      const safeZone = (zone || code.split("-")[0] || "U").toUpperCase();
-      
-      const existing = await storage.getWarehouseLocationByCode(code);
-      if (!existing) {
-        await storage.createWarehouseLocation({
-          code,
-          name: `Bin ${code}`,
-          locationType: "pick",
-          zone: safeZone,
-          isPickable: 1,
-          movementPolicy: "implicit",
-        });
-        console.log(`[WMS] Created warehouse location: ${code}`);
-      }
-    } catch (err) {
-      console.warn(`[WMS] Could not ensure warehouse location ${locationCode}:`, err);
-    }
-  }
 
   // Create location (with upsert support for productId)
   app.post("/api/locations", requirePermission("inventory", "edit"), async (req, res) => {
@@ -217,9 +194,18 @@ export function registerLocationRoutes(app: Express) {
       }
       
       // Get target warehouse location details
-      const targetLocation = await storage.getWarehouseLocationById(parseInt(targetWarehouseLocationId));
+      const targetLocationId = parseInt(targetWarehouseLocationId);
+      if (isNaN(targetLocationId)) {
+        return res.status(400).json({ error: "Invalid target location ID" });
+      }
+      const targetLocation = await storage.getWarehouseLocationById(targetLocationId);
       if (!targetLocation) {
         return res.status(404).json({ error: "Target warehouse location not found" });
+      }
+      try {
+        assertPickFaceAssignmentEligible(targetLocation);
+      } catch (validationError: any) {
+        return res.status(400).json({ error: validationError.message });
       }
       
       // Get source warehouse location for audit
@@ -227,29 +213,37 @@ export function registerLocationRoutes(app: Express) {
         ? await storage.getWarehouseLocationById(productLocation.warehouseLocationId)
         : null;
       
-      // Update the product location
-      const updated = await storage.updateProductLocation(id, {
-        warehouseLocationId: parseInt(targetWarehouseLocationId),
-        location: targetLocation.code,
-        zone: targetLocation.zone || 'U'
+      // Update the product location and log the move audit atomically in a single transaction
+      const userId = req.session?.user?.id || 'system';
+      const updated = await db.transaction(async (tx) => {
+        const updatedRow = await storage.updateProductLocation(
+          id,
+          {
+            warehouseLocationId: targetLocationId,
+            location: targetLocation.code,
+            zone: targetLocation.zone || 'U',
+          },
+          tx,
+        );
+        if (productLocation.productId) {
+          await storage.createInventoryTransaction(
+            {
+              productVariantId: productLocation.productVariantId ?? null,
+              fromLocationId: sourceLocation?.id || null,
+              toLocationId: targetLocation.id,
+              transactionType: 'transfer',
+              sourceState: 'on_hand',
+              targetState: 'on_hand',
+              variantQtyDelta: 0, // Location change only, not quantity
+              notes: notes || `Moved SKU ${productLocation.sku} from ${sourceLocation?.code || 'unassigned'} to ${targetLocation.code}`,
+              userId,
+              batchId: `move-${Date.now()}`,
+            },
+            tx,
+          );
+        }
+        return updatedRow;
       });
-      
-      // Log the move as an inventory transaction (transfer type)
-      if (productLocation.productId) {
-        const userId = req.session?.user?.id || 'system';
-        await storage.createInventoryTransaction({
-          productVariantId: null,
-          fromLocationId: sourceLocation?.id || null,
-          toLocationId: targetLocation.id,
-          transactionType: 'transfer',
-          sourceState: 'on_hand',
-          targetState: 'on_hand',
-          variantQtyDelta: 0, // Location change only, not quantity
-          notes: notes || `Moved SKU ${productLocation.sku} from ${sourceLocation?.code || 'unassigned'} to ${targetLocation.code}`,
-          userId,
-          batchId: `move-${Date.now()}`
-        });
-      }
       
       res.json({ 
         success: true, 
@@ -385,7 +379,7 @@ export function registerLocationRoutes(app: Express) {
   });
   
   // Sync product locations to pick queue (update pending order items)
-  app.post("/api/locations/sync-to-queue", requireAuth, async (req, res) => {
+  app.post("/api/locations/sync-to-queue", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       let updated = 0;
       let checked = 0;
@@ -398,7 +392,7 @@ export function registerLocationRoutes(app: Express) {
             checked++;
           
             // Only update items that haven't been picked yet
-            if (item.status !== "pending") continue;
+            if (item.status !== "pending" || (item.pickedQuantity ?? 0) > 0) continue;
           
             // Look up current location from inventory_levels (where stock actually is)
             const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
@@ -413,14 +407,17 @@ export function registerLocationRoutes(app: Express) {
               item.imageUrl !== binLocation.imageUrl;
           
             if (needsUpdate) {
-              await storage.updateOrderItemLocation(
+              const updatedItem = await storage.updateOrderItemLocation(
                 item.id,
                 binLocation.location,
                 binLocation.zone,
                 binLocation.barcode || null,
-                binLocation.imageUrl || null
+                binLocation.imageUrl || null,
+                { onlyIfPendingUnpicked: true },
               );
-              updated++;
+              if (updatedItem) {
+                updated++;
+              }
             }
           }
         }

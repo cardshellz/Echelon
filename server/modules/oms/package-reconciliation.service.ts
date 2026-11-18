@@ -2,7 +2,7 @@ import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { knownCarrierCode } from "@shared/utils/carrier-identity";
 import type { ChannelFulfillmentProviderClients } from "../channels/channel-fulfillment-provider-clients.service";
-import type { ShipStationPackageReconciliationClient } from "../shipping/shipstation-package-reconciliation.client";
+import type { ShipStationPackageReconciliationClient } from "../shipping/shipstation-provider-reconciliation.api";
 import type { ChannelFulfillmentAuthorityRepository } from "./channel-fulfillment-authority.repository";
 import type { PackageReconciliationProjector } from "./channel-fulfillment-projection.repository";
 import { packageReconciliationInputFromProof, PackageReconciliationError, type PackageReconciliationCommand,

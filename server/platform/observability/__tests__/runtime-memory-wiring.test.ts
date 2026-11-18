@@ -63,7 +63,7 @@ describe("enabled diagnostics preserve runtime contracts", () => {
     expect(service.runLabelLifecycleBatch).toHaveBeenCalledTimes(1);
     expect(await runChannelFulfillmentCommandWorkerOnce(service, 7)).toBe(batch);
     finish(); await correction;
-    await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(240_000);
     expect(emit.mock.calls).toEqual(expect.arrayContaining([
       ["runtime.work_memory", expect.objectContaining({ name: "shipping.label_lifecycle", started: 1, completed: 1 })],
       ["runtime.work_memory", expect.objectContaining({ name: "shipping.channel_commands", completed: 1, overlappingStarts: 1 })],
@@ -124,6 +124,10 @@ describe("enabled diagnostics preserve runtime contracts", () => {
       expect(await call("/api/echo?secret=private-query", payload)).toEqual({ status: 200, body: payload });
       expect((await call("/api/failure")).status).toBe(503);
       await vi.advanceTimersByTimeAsync(60_000);
+      expect(emit.mock.calls).toEqual(expect.arrayContaining([
+        ["runtime.work_memory", expect.objectContaining({ name: "http.api_read", failed: 1, active: 0 })],
+      ]));
+      await vi.advanceTimersByTimeAsync(180_000);
       expect(emit.mock.calls).toEqual(expect.arrayContaining([
         ["runtime.work_memory", expect.objectContaining({ name: "http.api_write", completed: 1, active: 0 })],
         ["runtime.work_memory", expect.objectContaining({ name: "http.api_read", failed: 1, active: 0 })],

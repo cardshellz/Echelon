@@ -7,14 +7,16 @@ import type {
 } from "../../marketplace-listings/application/registration-ports";
 import {
   EbayMarketplaceRegistrationObserver,
-} from "../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
+} from "../../marketplace-listings/ebay-registration.api";
 import {
   FetchEbayRegistrationReadTransport,
   type EbayRegistrationCredentialProvider,
   type EbayRegistrationReadTransport,
-} from "../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
-import { createAuthorityAwareInventoryAtpService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
-import { createInventoryChannelQuantityRuntimeService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
+} from "../../marketplace-listings/ebay-registration.api";
+import {
+  createAuthorityAwareInventoryAtpService,
+  createInventoryChannelQuantityRuntimeService,
+} from "../../inventory-planning/runtime-availability.api";
 import { DropshipMarketplaceRegistrationAccountClaimer } from "../application/dropship-marketplace-registration-account-claimer";
 import {
   DropshipMarketplaceRegistrationOwnerReader,

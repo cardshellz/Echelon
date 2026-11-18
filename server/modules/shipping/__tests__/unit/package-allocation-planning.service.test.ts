@@ -145,6 +145,8 @@ function persistedEffectOutbox(
 
 class InMemoryLedgerTransaction implements PackageAllocationLedgerTransaction {
   async lockSourceGroupClosure() { return null; }
+  async discoverAuthorityReadinessPackageSelection() { return []; }
+  async lockAuthorityReadinessPackages() { return []; }
   group: LockedPackageAllocationGroup | null = null;
   readonly plansByVersion = new Map<number, PersistedPackageAllocationPlan>();
   readonly entriesByPlan = new Map<string, readonly PersistedPackageAllocationEntry[]>();

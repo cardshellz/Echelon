@@ -11,6 +11,8 @@ import { readPurchasePlanningSnapshot } from "./purchase-planning-snapshot.repos
 import { purchaseInventorySnapshotQuery } from "./purchase-inventory-snapshot.query";
 import { getPurchasePlanningPolicyService } from "./purchase-planning-policy.runtime";
 import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
+import { setProductReorderExcludedInCatalog } from "../catalog/cross-module-product-mutations.api";
+import { updateWarehouseAutoDraftAndForecastSettingsInTx } from "../inventory/cross-module-inventory-mutations.api";
 import {
   db,
   type Vendor,
@@ -79,14 +81,15 @@ import { normalizePurchasingForecastPolicy } from "./purchasing-forecast-policy"
 export interface IProcurementStorage {
   getAllVendors(): Promise<Vendor[]>;
   getVendorById(id: number, executor?: any): Promise<Vendor | undefined>;
+  getVendorsByIds(ids: number[], executor?: any): Promise<Vendor[]>;
   getVendorByCode(code: string, executor?: any): Promise<Vendor | undefined>;
   createVendor(data: InsertVendor, executor?: any): Promise<Vendor>;
   updateVendor(id: number, updates: Partial<InsertVendor>, executor?: any): Promise<Vendor | null>;
-  getAllReceivingOrders(): Promise<ReceivingOrder[]>;
+  getAllReceivingOrders(options?: { limit?: number; offset?: number }): Promise<ReceivingOrder[]>;
   getReceivingOrderById(id: number, executor?: any): Promise<ReceivingOrder | undefined>;
   getReceivingOrderByReceiptNumber(receiptNumber: string): Promise<ReceivingOrder | undefined>;
   getReceivingOrdersForPurchaseOrder(purchaseOrderId: number, executor?: any): Promise<ReceivingOrder[]>;
-  getReceivingOrdersByStatus(status: string): Promise<ReceivingOrder[]>;
+  getReceivingOrdersByStatus(status: string, options?: { limit?: number; offset?: number }): Promise<ReceivingOrder[]>;
   createReceivingOrder(data: InsertReceivingOrder, executor?: any): Promise<ReceivingOrder>;
   updateReceivingOrder(id: number, updates: Partial<InsertReceivingOrder>, executor?: any): Promise<ReceivingOrder | null>;
   deleteReceivingOrder(id: number, executor?: any): Promise<boolean>;
@@ -155,6 +158,7 @@ export interface IProcurementStorage {
   getPurchaseOrders(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string; limit?: number; offset?: number }): Promise<PurchaseOrder[]>;
   getPurchaseOrdersCount(filters?: { status?: string | string[]; physicalStatus?: string | string[]; financialStatus?: string | string[]; vendorId?: number; search?: string }): Promise<number>;
   getPurchaseOrderById(id: number, executor?: any): Promise<PurchaseOrder | undefined>;
+  getPurchaseOrdersByIds(ids: number[], executor?: any): Promise<PurchaseOrder[]>;
   getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined>;
   createPurchaseOrder(data: InsertPurchaseOrder, historyData?: Omit<InsertPoStatusHistory, "purchaseOrderId">, executor?: any): Promise<PurchaseOrder>;
   updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor?: any): Promise<PurchaseOrder | null>;
@@ -163,6 +167,7 @@ export interface IProcurementStorage {
   generatePoNumber(executor: any, recordedAt?: Date): Promise<string>;
   getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<PurchaseOrderLine[]>;
   getPurchaseOrderLineById(id: number, executor?: any): Promise<PurchaseOrderLine | undefined>;
+  getPurchaseOrderLinesByIds(ids: number[], executor?: any): Promise<PurchaseOrderLine[]>;
   createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine>;
   bulkCreatePurchaseOrderLines(lines: InsertPurchaseOrderLine[]): Promise<PurchaseOrderLine[]>;
   updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>, executor?: any): Promise<PurchaseOrderLine | null>;
@@ -255,6 +260,12 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
+  async getVendorsByIds(ids: number[], executor: any = db): Promise<Vendor[]> {
+    const uniqueIds = [...new Set(ids)].filter((id) => Number.isSafeInteger(id) && id > 0);
+    if (uniqueIds.length === 0) return [];
+    return await executor.select().from(vendors).where(inArray(vendors.id, uniqueIds));
+  },
+
   async getVendorByCode(code: string, executor: any = db): Promise<Vendor | undefined> {
     const result = await executor.select().from(vendors).where(eq(vendors.code, code.toUpperCase())).limit(1);
     return result[0];
@@ -278,8 +289,10 @@ export const procurementMethods: IProcurementStorage = {
     return result[0] || null;
   },
 
-  async getAllReceivingOrders(): Promise<ReceivingOrder[]> {
-    return await db.select().from(receivingOrders).orderBy(desc(receivingOrders.createdAt));
+  async getAllReceivingOrders(options?: { limit?: number; offset?: number }): Promise<ReceivingOrder[]> {
+    const limit = Math.max(1, Math.min(options?.limit ?? 500, 500));
+    const offset = Math.max(0, options?.offset ?? 0);
+    return await db.select().from(receivingOrders).orderBy(desc(receivingOrders.createdAt)).limit(limit).offset(offset);
   },
 
   async getReceivingOrderById(id: number, executor: any = db): Promise<ReceivingOrder | undefined> {
@@ -298,10 +311,14 @@ export const procurementMethods: IProcurementStorage = {
       .orderBy(desc(receivingOrders.createdAt));
   },
 
-  async getReceivingOrdersByStatus(status: string): Promise<ReceivingOrder[]> {
+  async getReceivingOrdersByStatus(status: string, options?: { limit?: number; offset?: number }): Promise<ReceivingOrder[]> {
+    const limit = Math.max(1, Math.min(options?.limit ?? 500, 500));
+    const offset = Math.max(0, options?.offset ?? 0);
     return await db.select().from(receivingOrders)
       .where(eq(receivingOrders.status, status))
-      .orderBy(desc(receivingOrders.createdAt));
+      .orderBy(desc(receivingOrders.createdAt))
+      .limit(limit)
+      .offset(offset);
   },
 
   async createReceivingOrder(data: InsertReceivingOrder, executor: any = db): Promise<ReceivingOrder> {
@@ -785,6 +802,12 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
+  async getPurchaseOrdersByIds(ids: number[], executor: any = db): Promise<PurchaseOrder[]> {
+    const uniqueIds = [...new Set(ids)].filter((id) => Number.isSafeInteger(id) && id > 0);
+    if (uniqueIds.length === 0) return [];
+    return await executor.select().from(purchaseOrders).where(inArray(purchaseOrders.id, uniqueIds));
+  },
+
   async getPurchaseOrderByPoNumber(poNumber: string): Promise<PurchaseOrder | undefined> {
     const result = await db.select().from(purchaseOrders).where(eq(purchaseOrders.poNumber, poNumber)).limit(1);
     return result[0];
@@ -872,14 +895,20 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
+  async getPurchaseOrderLinesByIds(ids: number[], executor: any = db): Promise<PurchaseOrderLine[]> {
+    const uniqueIds = [...new Set(ids)].filter((id) => Number.isSafeInteger(id) && id > 0);
+    if (uniqueIds.length === 0) return [];
+    return await executor.select().from(purchaseOrderLines).where(inArray(purchaseOrderLines.id, uniqueIds));
+  },
+
   async createPurchaseOrderLine(data: InsertPurchaseOrderLine): Promise<PurchaseOrderLine> {
-    const result = await db.insert(purchaseOrderLines).values(data).returning();
+    const result = await db.insert(purchaseOrderLines).values({ ...data, receiptCostingEnabled: 1 }).returning();
     return result[0];
   },
 
   async bulkCreatePurchaseOrderLines(lines: InsertPurchaseOrderLine[]): Promise<PurchaseOrderLine[]> {
     if (lines.length === 0) return [];
-    return await db.insert(purchaseOrderLines).values(lines).returning();
+    return await db.insert(purchaseOrderLines).values(lines.map(line => ({ ...line, receiptCostingEnabled: 1 }))).returning();
   },
 
   async updatePurchaseOrderLine(id: number, updates: Partial<InsertPurchaseOrderLine>, executor: any = db): Promise<PurchaseOrderLine | null> {
@@ -1982,7 +2011,7 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async setProductReorderExcluded(productId: number, excluded: boolean): Promise<void> {
-    await db.update(products).set({ reorderExcluded: excluded }).where(eq(products.id, productId));
+    await setProductReorderExcludedInCatalog(db, productId, excluded);
   },
 
   async getLatestAutoDraftRun(): Promise<any | undefined> {
@@ -2226,52 +2255,51 @@ export const procurementMethods: IProcurementStorage = {
     await db.transaction(async (tx) => {
       const target = await getSettingsForWarehouse(warehouseId, tx);
       if (!target) return;
-      await tx.execute(sql`
-      UPDATE inventory.warehouse_settings SET
-        auto_draft_mode = COALESCE(${autoDraftMode}, auto_draft_mode),
-        auto_draft_approval_policy = COALESCE(${approvalPolicy}, auto_draft_approval_policy),
-        auto_draft_include_order_soon = COALESCE(${settings.includeOrderSoon ?? null}, auto_draft_include_order_soon),
-        auto_draft_skip_on_open_po = COALESCE(${settings.skipOnOpenPo ?? null}, auto_draft_skip_on_open_po),
-        auto_draft_skip_no_vendor = COALESCE(${settings.skipNoVendor ?? null}, auto_draft_skip_no_vendor),
-        recommendation_candidate_score_strong_threshold = COALESCE(${settings.candidateScoreStrongThreshold ?? null}, recommendation_candidate_score_strong_threshold),
-        recommendation_candidate_score_review_threshold = COALESCE(${settings.candidateScoreReviewThreshold ?? null}, recommendation_candidate_score_review_threshold),
-        velocity_lookback_days = COALESCE(${forecastPolicy?.standardWindowDays ?? null}, velocity_lookback_days),
-        purchasing_forecast_method = COALESCE(${forecastPolicy?.method ?? null}, purchasing_forecast_method),
-        purchasing_forecast_short_window_days = COALESCE(${forecastPolicy?.shortWindowDays ?? null}, purchasing_forecast_short_window_days),
-        purchasing_forecast_long_window_days = COALESCE(${forecastPolicy?.longWindowDays ?? null}, purchasing_forecast_long_window_days),
-        purchasing_forecast_seasonal_enabled = COALESCE(${forecastPolicy?.seasonalEnabled ?? null}, purchasing_forecast_seasonal_enabled),
-        purchasing_forecast_seasonal_window_days = COALESCE(${forecastPolicy?.seasonalWindowDays ?? null}, purchasing_forecast_seasonal_window_days),
-        purchasing_forecast_weight_short = COALESCE(${forecastPolicy?.weights.short ?? null}, purchasing_forecast_weight_short),
-        purchasing_forecast_weight_standard = COALESCE(${forecastPolicy?.weights.standard ?? null}, purchasing_forecast_weight_standard),
-        purchasing_forecast_weight_long = COALESCE(${forecastPolicy?.weights.long ?? null}, purchasing_forecast_weight_long),
-        purchasing_forecast_weight_seasonal = COALESCE(${forecastPolicy?.weights.seasonal ?? null}, purchasing_forecast_weight_seasonal),
-        purchasing_forward_demand_enabled = COALESCE(${forecastPolicy?.forwardDemandEnabled ?? null}, purchasing_forward_demand_enabled),
-        purchasing_forward_demand_horizon_days = COALESCE(${forecastPolicy?.forwardDemandHorizonDays ?? null}, purchasing_forward_demand_horizon_days),
-        purchasing_forward_demand_high_weight = COALESCE(${forecastPolicy?.forwardDemandConfidenceWeights.high ?? null}, purchasing_forward_demand_high_weight),
-        purchasing_forward_demand_medium_weight = COALESCE(${forecastPolicy?.forwardDemandConfidenceWeights.medium ?? null}, purchasing_forward_demand_medium_weight),
-        purchasing_forward_demand_low_weight = COALESCE(${forecastPolicy?.forwardDemandConfidenceWeights.low ?? null}, purchasing_forward_demand_low_weight),
-        purchasing_automation_min_order_count = COALESCE(${forecastPolicy?.automationMinimumOrderCount ?? null}, purchasing_automation_min_order_count),
-        purchasing_automation_min_active_days = COALESCE(${forecastPolicy?.automationMinimumActiveDays ?? null}, purchasing_automation_min_active_days),
-        rfq_draft_automation_mode = COALESCE(${rfqDraftAutomationMode}, rfq_draft_automation_mode),
-        rfq_draft_minimum_confidence = COALESCE(${rfqDraftMinimumConfidence}, rfq_draft_minimum_confidence),
-        rfq_draft_require_trusted_forecast = COALESCE(${settings.rfqDraftRequireTrustedForecast ?? null}, rfq_draft_require_trusted_forecast),
-        rfq_draft_maximum_lines_per_run = COALESCE(${rfqDraftMaximumLinesPerRun}, rfq_draft_maximum_lines_per_run),
-        auto_draft_po_review_warning_days = COALESCE(${settings.stalePoThresholds?.reviewPendingWarningDays ?? null}, auto_draft_po_review_warning_days),
-        auto_draft_po_review_critical_days = COALESCE(${settings.stalePoThresholds?.reviewPendingCriticalDays ?? null}, auto_draft_po_review_critical_days),
-        auto_draft_po_supplier_send_warning_days = COALESCE(${settings.stalePoThresholds?.supplierSendWarningDays ?? null}, auto_draft_po_supplier_send_warning_days),
-        auto_draft_po_supplier_send_critical_days = COALESCE(${settings.stalePoThresholds?.supplierSendCriticalDays ?? null}, auto_draft_po_supplier_send_critical_days),
-        auto_draft_po_supplier_followup_warning_days = COALESCE(${settings.stalePoThresholds?.supplierFollowupWarningDays ?? null}, auto_draft_po_supplier_followup_warning_days),
-        auto_draft_po_supplier_followup_critical_days = COALESCE(${settings.stalePoThresholds?.supplierFollowupCriticalDays ?? null}, auto_draft_po_supplier_followup_critical_days),
-        auto_draft_po_receiving_warning_days = COALESCE(${settings.stalePoThresholds?.receivingWarningDays ?? null}, auto_draft_po_receiving_warning_days),
-        auto_draft_po_receiving_critical_days = COALESCE(${settings.stalePoThresholds?.receivingCriticalDays ?? null}, auto_draft_po_receiving_critical_days),
-        auto_draft_po_ap_closeout_warning_days = COALESCE(${settings.stalePoThresholds?.apCloseoutWarningDays ?? null}, auto_draft_po_ap_closeout_warning_days),
-        auto_draft_po_ap_closeout_critical_days = COALESCE(${settings.stalePoThresholds?.apCloseoutCriticalDays ?? null}, auto_draft_po_ap_closeout_critical_days),
-        auto_draft_po_exception_warning_days = COALESCE(${settings.stalePoThresholds?.exceptionBlockedWarningDays ?? null}, auto_draft_po_exception_warning_days),
-        auto_draft_po_exception_critical_days = COALESCE(${settings.stalePoThresholds?.exceptionBlockedCriticalDays ?? null}, auto_draft_po_exception_critical_days),
-        auto_draft_po_closeout_warning_days = COALESCE(${settings.stalePoThresholds?.closeoutWarningDays ?? null}, auto_draft_po_closeout_warning_days),
-        auto_draft_po_closeout_critical_days = COALESCE(${settings.stalePoThresholds?.closeoutCriticalDays ?? null}, auto_draft_po_closeout_critical_days)
-      WHERE id = ${target.id}
-      `);
+      await updateWarehouseAutoDraftAndForecastSettingsInTx(tx, {
+        targetId: target.id,
+        autoDraftMode,
+        approvalPolicy,
+        includeOrderSoon: settings.includeOrderSoon ?? null,
+        skipOnOpenPo: settings.skipOnOpenPo ?? null,
+        skipNoVendor: settings.skipNoVendor ?? null,
+        candidateScoreStrongThreshold: settings.candidateScoreStrongThreshold ?? null,
+        candidateScoreReviewThreshold: settings.candidateScoreReviewThreshold ?? null,
+        standardWindowDays: forecastPolicy?.standardWindowDays ?? null,
+        forecastMethod: forecastPolicy?.method ?? null,
+        shortWindowDays: forecastPolicy?.shortWindowDays ?? null,
+        longWindowDays: forecastPolicy?.longWindowDays ?? null,
+        seasonalEnabled: forecastPolicy?.seasonalEnabled ?? null,
+        seasonalWindowDays: forecastPolicy?.seasonalWindowDays ?? null,
+        weightShort: forecastPolicy?.weights.short ?? null,
+        weightStandard: forecastPolicy?.weights.standard ?? null,
+        weightLong: forecastPolicy?.weights.long ?? null,
+        weightSeasonal: forecastPolicy?.weights.seasonal ?? null,
+        forwardDemandEnabled: forecastPolicy?.forwardDemandEnabled ?? null,
+        forwardDemandHorizonDays: forecastPolicy?.forwardDemandHorizonDays ?? null,
+        forwardDemandHighWeight: forecastPolicy?.forwardDemandConfidenceWeights.high ?? null,
+        forwardDemandMediumWeight: forecastPolicy?.forwardDemandConfidenceWeights.medium ?? null,
+        forwardDemandLowWeight: forecastPolicy?.forwardDemandConfidenceWeights.low ?? null,
+        automationMinimumOrderCount: forecastPolicy?.automationMinimumOrderCount ?? null,
+        automationMinimumActiveDays: forecastPolicy?.automationMinimumActiveDays ?? null,
+        rfqDraftAutomationMode,
+        rfqDraftMinimumConfidence,
+        rfqDraftRequireTrustedForecast: settings.rfqDraftRequireTrustedForecast ?? null,
+        rfqDraftMaximumLinesPerRun,
+        reviewPendingWarningDays: settings.stalePoThresholds?.reviewPendingWarningDays ?? null,
+        reviewPendingCriticalDays: settings.stalePoThresholds?.reviewPendingCriticalDays ?? null,
+        supplierSendWarningDays: settings.stalePoThresholds?.supplierSendWarningDays ?? null,
+        supplierSendCriticalDays: settings.stalePoThresholds?.supplierSendCriticalDays ?? null,
+        supplierFollowupWarningDays: settings.stalePoThresholds?.supplierFollowupWarningDays ?? null,
+        supplierFollowupCriticalDays: settings.stalePoThresholds?.supplierFollowupCriticalDays ?? null,
+        receivingWarningDays: settings.stalePoThresholds?.receivingWarningDays ?? null,
+        receivingCriticalDays: settings.stalePoThresholds?.receivingCriticalDays ?? null,
+        apCloseoutWarningDays: settings.stalePoThresholds?.apCloseoutWarningDays ?? null,
+        apCloseoutCriticalDays: settings.stalePoThresholds?.apCloseoutCriticalDays ?? null,
+        exceptionBlockedWarningDays: settings.stalePoThresholds?.exceptionBlockedWarningDays ?? null,
+        exceptionBlockedCriticalDays: settings.stalePoThresholds?.exceptionBlockedCriticalDays ?? null,
+        closeoutWarningDays: settings.stalePoThresholds?.closeoutWarningDays ?? null,
+        closeoutCriticalDays: settings.stalePoThresholds?.closeoutCriticalDays ?? null,
+      });
     }, { isolationLevel: "repeatable read" });
   },
 

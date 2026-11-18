@@ -37,6 +37,11 @@ vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
 vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: vi.fn(() => {
   throw new Error("Unpublished policy test must use the publication owner");
 }) }));
+// This policy suite uses a stateful fake provider rather than eBay's Trading
+// HTTP service. Its published readback must reflect that provider's actual writes.
+vi.mock("../../adapters/ebay/ebay-published-content.reader", () => ({
+  readEbayPublishedContent: async ({ listingId }: { listingId: string }) => runtime.provider!.publishedContent(listingId),
+}));
 vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () => {
   const { EbayMarketplaceRegistrationObserver } = await import("../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer");
   return { createEbayMarketplaceRegistrationAdapters: () => {

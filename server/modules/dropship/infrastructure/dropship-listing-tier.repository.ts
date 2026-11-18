@@ -67,7 +67,9 @@ export class PgDropshipListingTierRepository implements DropshipListingTierRepos
     const result = await this.dbPool.query<VendorRow>(
       `${VENDOR_WITH_HOLD_SELECT}
        WHERE v.status = ANY($1::text[])
-       ORDER BY v.id ASC
+       ORDER BY CASE WHEN h.applied = false THEN 0 WHEN h.evaluated_at IS NULL THEN 1 ELSE 2 END ASC,
+                h.evaluated_at ASC NULLS FIRST,
+                v.id ASC
        LIMIT $2`,
       [REVIEWABLE_VENDOR_STATUSES, input.limit],
     );

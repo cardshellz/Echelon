@@ -41,7 +41,7 @@ import { replenishmentTaskPatchSchema } from "@shared/types/replenishment-task-c
 function buildApp(services: Record<string, any> = {}): Express {
   const app = express();
   app.use(express.json());
-  app.locals.services = services;
+  app.locals.services = services as unknown as typeof app.locals.services;
   registerReplenishmentRoutes(app);
   return app;
 }

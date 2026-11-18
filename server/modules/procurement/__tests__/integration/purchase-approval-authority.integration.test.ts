@@ -124,7 +124,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     }
     for (const table of [schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
       schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipmentLines, schema.receivingLines, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poApprovalTiers, schema.poStatusHistory, schema.poEvents, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings]) {
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.poApprovalTiers, schema.poStatusHistory, schema.poEvents, schema.poRevisions, schema.purchasingRecommendationPoHandoffs, schema.warehouseSettings]) {
       await pool.query(fixtureTable(table));
     }
     await pool.query(`
@@ -154,7 +154,7 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
       (req as any).session = { user: requestActor ? { id: requestActor, role: "admin" } : undefined };
       next();
     });
-    app.locals.services = { purchasing: service, shipmentTracking: {} };
+    app.locals.services = { purchasing: service, shipmentTracking: {} } as any;
     registerPurchaseOrderRoutes(app);
     server = createServer(app);
     await new Promise<void>((resolveValue) => server.listen(0, "127.0.0.1", resolveValue));
@@ -775,10 +775,11 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     expect(await evidence()).toEqual(before);
   });
 
-  it("rejects unsupported scoped authority in the real approval owner even when generic permission middleware passes", async () => {
+  it("rejects unsupported scoped authority at both HTTP permission and direct approval-owner boundaries", async () => {
     requestActor = "scoped-user";
     const before = await evidence();
-    expect(await postApproval()).toMatchObject({ status: 403, body: { details: { code: "PO_APPROVAL_SCOPE_UNSUPPORTED" } } });
+    expect(await postApproval()).toMatchObject({ status: 403, body: { error: "Permission denied: purchasing:approve" } });
+    await expect(approveCurrent("scoped-user")).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_APPROVAL_SCOPE_UNSUPPORTED" } });
     expect(await evidence()).toEqual(before);
   });
 

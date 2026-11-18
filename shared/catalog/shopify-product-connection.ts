@@ -7,6 +7,22 @@ const CENTS_PER_UNIT = BigInt(100);
 // Shopify's product model supports at most 2,048 variants per product.
 export const SHOPIFY_PRODUCT_VARIANT_LIMIT = 2048;
 
+export const SHOPIFY_CONNECTION_SEARCH_PAGE_SIZE = 20;
+export const shopifyProductSearchTermSchema = z.string().trim().min(2).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
+export const shopifyProductSearchCursorSchema = z.string().min(1).max(2048).regex(/^[^\u0000-\u001f\u007f]+$/);
+export const shopifyProductSearchRequestSchema = z.object({
+  channelId: positiveId,
+  query: shopifyProductSearchTermSchema,
+  cursor: shopifyProductSearchCursorSchema.optional(),
+}).strict();
+export type ShopifyProductSearchRequest = z.infer<typeof shopifyProductSearchRequestSchema>;
+export const shopifyProductSearchResultSchema = z.object({
+  products: z.array(z.object({ id: remoteId, title: z.string().min(1), status: z.enum(["ACTIVE", "DRAFT", "ARCHIVED", "UNLISTED"]) }))
+    .max(SHOPIFY_CONNECTION_SEARCH_PAGE_SIZE).refine(products => new Set(products.map(product => product.id)).size === products.length),
+  nextCursor: shopifyProductSearchCursorSchema.nullable(),
+});
+export type ShopifyProductSearchResult = z.infer<typeof shopifyProductSearchResultSchema>;
+
 export const shopifyProductConnectionRequestSchema = z.object({
   channelId: positiveId,
   currency: z.string().regex(/^[A-Z]{3}$/),
@@ -105,6 +121,8 @@ export interface ShopifyConnectionPreview {
 }
 
 export interface ShopifyProductConnectionCommand {
+  inventorySyncRequestId?: string | null;
+  inventorySyncRequestedBy?: string | null;
   commandKey: string;
   productId: number;
   channelId: number;
@@ -122,6 +140,8 @@ export interface ShopifyProductConnectionCommand {
 // Shared response validation also strips internal repository fields at the HTTP
 // boundary. Saved commands never expose leases, credentials or source snapshots.
 export const shopifyProductConnectionCommandSchema = z.object({
+  inventorySyncRequestId: z.string().uuid().nullable().optional(),
+  inventorySyncRequestedBy: z.string().min(1).nullable().optional(),
   commandKey: z.string().uuid(), productId: positiveId, channelId: positiveId,
   mode: z.enum(["create", "link"]),
   state: z.enum(["pending", "creating", "configuring", "mapping", "publishing", "complete", "review", "rejected"]),

@@ -6,6 +6,7 @@ import { createShopifyProductMappingService } from "../modules/catalog/shopify-p
 /** Shared composition for HTTP admission and durable background recovery. */
 export function createDefaultShopifyProductConnectionService(input: {
   onConnected?: (productId: number, trackedVariantIds: readonly number[]) => Promise<void>;
+  startInventorySync?: (command: { productId: number; idempotencyKey: string }, actor: string) => Promise<unknown>;
   now?: () => Date;
 } = {}) {
   const now = input.now ?? (() => new Date());
@@ -14,5 +15,6 @@ export function createDefaultShopifyProductConnectionService(input: {
     provider: createShopifyProductConnectionProvider(),
     mappingOwner: createShopifyProductMappingService({ now }),
     onConnected: input.onConnected,
+    startInventorySync: input.startInventorySync,
   });
 }

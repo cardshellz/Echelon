@@ -1,7 +1,12 @@
 {
+  "catalog.product_asset_renditions": [
+    "modules/catalog"
+  ],
+  "catalog.product_asset_versions": [
+    "modules/catalog"
+  ],
   "catalog.product_assets": [
-    "modules/catalog",
-    "server/routes/ebay/ebay-policies.routes.ts"
+    "modules/catalog"
   ],
   "catalog.product_categories": [
     "modules/catalog"
@@ -10,29 +15,19 @@
     "modules/catalog"
   ],
   "catalog.product_line_products": [
-    "modules/catalog",
-    "modules/channels"
+    "modules/catalog"
   ],
   "catalog.product_lines": [
-    "modules/channels",
-    "server/db.ts"
+    "modules/channels"
   ],
-  "catalog.product_types": [
-    "server/db.ts"
+  "catalog.product_merge_runs": [
+    "modules/catalog"
   ],
   "catalog.product_variants": [
-    "modules/catalog",
-    "modules/channels",
-    "modules/inventory",
-    "modules/shipping-engine",
-    "server/routes/ebay/ebay-listing-state.ts"
+    "modules/catalog"
   ],
   "catalog.products": [
-    "modules/catalog",
-    "modules/channels",
-    "modules/procurement",
-    "server/routes/ebay-listing-rules.routes.ts",
-    "server/routes/ebay/ebay-config.routes.ts"
+    "modules/catalog"
   ],
   "catalog.publication_media_references": [
     "modules/catalog"
@@ -59,21 +54,13 @@
     "modules/channels"
   ],
   "channels.channel_connections": [
-    "modules/channels",
-    "modules/dropship",
-    "server/routes/ebay-settings.routes.ts",
-    "server/routes/shopify.routes.ts"
+    "modules/channels"
   ],
   "channels.channel_feeds": [
-    "modules/catalog",
-    "modules/channels",
-    "modules/inventory"
+    "modules/channels"
   ],
   "channels.channel_listings": [
-    "modules/catalog",
-    "modules/channels",
-    "server/routes/ebay/ebay-listing-state.ts",
-    "server/routes/ebay/ebay-listings.routes.ts"
+    "modules/channels"
   ],
   "channels.channel_pricing": [
     "modules/channels"
@@ -103,17 +90,16 @@
     "modules/channels"
   ],
   "channels.channel_variant_overrides": [
-    "modules/channels",
-    "server/routes/ebay/ebay-listing-state.ts"
+    "modules/channels"
   ],
   "channels.channel_warehouse_assignments": [
     "modules/channels"
   ],
   "channels.channels": [
-    "modules/channels",
-    "modules/dropship",
-    "modules/identity",
-    "server/routes/pick-priority.routes.ts"
+    "modules/channels"
+  ],
+  "channels.ebay_listing_change_intents": [
+    "modules/channels"
   ],
   "channels.ebay_listing_exclusion_commands": [
     "modules/channels"
@@ -142,6 +128,9 @@
   "channels.partner_profiles": [
     "modules/channels"
   ],
+  "channels.shopify_oauth_authorizations": [
+    "modules/channels"
+  ],
   "channels.shopify_ownership_repair_commands": [
     "modules/catalog"
   ],
@@ -152,9 +141,7 @@
     "modules/channels"
   ],
   "channels.sync_settings": [
-    "modules/channels",
-    "modules/inventory-planning",
-    "server/db.ts"
+    "modules/channels"
   ],
   "channels.walmart_connection_events": [
     "modules/channels"
@@ -490,23 +477,22 @@
     "modules/dropship"
   ],
   "ebay.ebay_category_aspects": [
-    "server/routes/ebay/ebay-taxonomy.routes.ts"
+    "modules/channels"
   ],
   "ebay.ebay_category_mappings": [
-    "modules/channels",
-    "server/routes/ebay/ebay-config.routes.ts"
+    "modules/channels"
   ],
   "ebay.ebay_listing_rules": [
-    "server/routes/ebay-listing-rules.routes.ts"
+    "modules/channels"
   ],
   "ebay.ebay_oauth_tokens": [
     "modules/channels"
   ],
   "ebay.ebay_product_aspect_overrides": [
-    "server/routes/ebay/ebay-taxonomy.routes.ts"
+    "modules/channels"
   ],
   "ebay.ebay_type_aspect_defaults": [
-    "server/routes/ebay/ebay-taxonomy.routes.ts"
+    "modules/channels"
   ],
   "identity.auth_permissions": [
     "modules/identity"
@@ -520,11 +506,13 @@
   "identity.auth_user_roles": [
     "modules/identity"
   ],
+  "identity.staff_credentials": [
+    "modules/identity"
+  ],
   "identity.users": [
     "modules/identity"
   ],
   "inventory.adjustment_reasons": [
-    "modules/identity",
     "modules/inventory"
   ],
   "inventory.availability_activation_commands": [
@@ -705,10 +693,7 @@
     "modules/inventory"
   ],
   "inventory.inventory_levels": [
-    "modules/catalog",
-    "modules/channels",
-    "modules/inventory",
-    "server/scripts/fix_orphaned_picks.ts"
+    "modules/inventory"
   ],
   "inventory.inventory_lots": [
     "modules/inventory"
@@ -738,10 +723,7 @@
     "modules/inventory-planning"
   ],
   "inventory.inventory_transactions": [
-    "modules/channels",
-    "modules/inventory",
-    "server/routes/diagnostics.ts",
-    "server/scripts/fix_orphaned_picks.ts"
+    "modules/inventory"
   ],
   "inventory.location_promise_policy_heads": [
     "modules/inventory-planning"
@@ -801,6 +783,9 @@
     "modules/inventory-planning"
   ],
   "inventory.product_definition_applications": [
+    "modules/inventory-planning"
+  ],
+  "inventory.product_inventory_sync_requests": [
     "modules/inventory-planning"
   ],
   "inventory.promise_safety_policy_heads": [
@@ -912,13 +897,10 @@
     "modules/inventory"
   ],
   "inventory.replen_rules": [
-    "modules/catalog",
     "modules/inventory"
   ],
   "inventory.replen_tasks": [
-    "modules/catalog",
-    "modules/inventory",
-    "modules/orders"
+    "modules/inventory"
   ],
   "inventory.replen_tier_defaults": [
     "modules/inventory"
@@ -939,9 +921,6 @@
     "modules/inventory-planning"
   ],
   "inventory.stock_link_checks": [
-    "modules/inventory-planning"
-  ],
-  "inventory.product_inventory_sync_requests": [
     "modules/inventory-planning"
   ],
   "inventory.stock_link_destinations": [
@@ -990,9 +969,7 @@
     "modules/inventory-planning"
   ],
   "inventory.warehouse_settings": [
-    "modules/inventory",
-    "modules/orders",
-    "modules/procurement"
+    "modules/inventory"
   ],
   "marketplace.channel_listing_drafts": [
     "modules/marketplace-listings"
@@ -1106,8 +1083,7 @@
     "modules/subscriptions"
   ],
   "membership.plans": [
-    "modules/subscriptions",
-    "server/routes/pick-priority.routes.ts"
+    "modules/subscriptions"
   ],
   "membership.selling_plan_map": [
     "modules/subscriptions"
@@ -1145,6 +1121,12 @@
   "oms.channel_fulfillment_receipts": [
     "modules/oms"
   ],
+  "oms.customer_account_native_cursors": [
+    "modules/customer-account"
+  ],
+  "oms.customer_account_native_summaries": [
+    "modules/customer-account"
+  ],
   "oms.customer_order_action_invalidations": [
     "modules/customer-account"
   ],
@@ -1161,21 +1143,16 @@
     "modules/oms"
   ],
   "oms.oms_order_events": [
-    "modules/dropship",
-    "modules/oms",
-    "server/index.ts"
+    "modules/oms"
   ],
   "oms.oms_order_line_authority_events": [
     "modules/oms"
   ],
   "oms.oms_order_lines": [
-    "modules/dropship",
     "modules/oms"
   ],
   "oms.oms_orders": [
-    "modules/dropship",
-    "modules/oms",
-    "modules/orders"
+    "modules/oms"
   ],
   "oms.order_country_repair_operations": [
     "modules/orders"
@@ -1248,6 +1225,9 @@
   ],
   "operations.control_tower_work_items": [
     "modules/operations"
+  ],
+  "procurement.ap_invoice_transition_reviews": [
+    "modules/procurement"
   ],
   "procurement.ap_payment_allocations": [
     "modules/procurement"
@@ -1366,6 +1346,9 @@
   "procurement.purchase_supplier_progress_revisions": [
     "modules/procurement"
   ],
+  "procurement.purchase_tax_types": [
+    "modules/procurement"
+  ],
   "procurement.purchasing_recommendation_decisions": [
     "modules/procurement"
   ],
@@ -1382,6 +1365,9 @@
     "modules/procurement"
   ],
   "procurement.receipt_cost_requests": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_invoice_cost_allocations": [
     "modules/procurement"
   ],
   "procurement.receipt_reversals": [
@@ -1441,6 +1427,9 @@
   "procurement.supplier_credits": [
     "modules/procurement"
   ],
+  "procurement.supplier_header_cost_reviews": [
+    "modules/procurement"
+  ],
   "procurement.supplier_return_credit_entitlements": [
     "modules/procurement"
   ],
@@ -1465,6 +1454,9 @@
   "procurement.vendor_invoice_attachments": [
     "modules/procurement"
   ],
+  "procurement.vendor_invoice_line_taxes": [
+    "modules/procurement"
+  ],
   "procurement.vendor_invoice_lines": [
     "modules/procurement"
   ],
@@ -1481,9 +1473,7 @@
     "modules/procurement"
   ],
   "public.audit_events": [
-    "modules/inventory-planning",
-    "modules/procurement",
-    "server/infrastructure/auditLogger.ts"
+    "server/infrastructure/transactional-audit.ts"
   ],
   "public.auto_draft_runs": [
     "modules/procurement"
@@ -1492,13 +1482,10 @@
     "server/platform/commands/financial-command-operations.service.ts"
   ],
   "public.financial_command_results": [
-    "server/platform/commands/command-results.repository.ts",
-    "server/platform/commands/financial-command-operations.service.ts"
+    "server/platform/commands/command-results.repository.ts"
   ],
   "public.idempotency_keys": [
-    "modules/inventory-planning",
-    "modules/warehouse",
-    "server/middleware/idempotency.ts"
+    "server/infrastructure/idempotency-keys.repository.ts"
   ],
   "public.notification_preferences": [
     "modules/notifications"
@@ -1540,6 +1527,12 @@
     "modules/returns"
   ],
   "returns.customer_return_case_links": [
+    "modules/returns"
+  ],
+  "returns.customer_return_guest_challenges": [
+    "modules/returns"
+  ],
+  "returns.customer_return_guest_events": [
     "modules/returns"
   ],
   "returns.customer_return_intakes": [
@@ -1690,12 +1683,10 @@
     "modules/cartonization"
   ],
   "shipping.pack_plan_parcels": [
-    "modules/cartonization",
-    "modules/shipping-engine"
+    "modules/cartonization"
   ],
   "shipping.pack_plans": [
-    "modules/cartonization",
-    "modules/shipping-engine"
+    "modules/cartonization"
   ],
   "shipping.packaging_assignments": [
     "modules/shipping-engine"
@@ -1754,6 +1745,15 @@
   "shipping.service_levels": [
     "modules/shipping-engine"
   ],
+  "shipping.shipment_items": [
+    "modules/shipping"
+  ],
+  "shipping.shipment_voids": [
+    "modules/shipping"
+  ],
+  "shipping.shipments": [
+    "modules/shipping"
+  ],
   "shipping.variant_shipping_attrs": [
     "modules/shipping-engine"
   ],
@@ -1767,30 +1767,21 @@
     "modules/warehouse"
   ],
   "warehouse.echelon_settings": [
-    "modules/orders",
-    "modules/warehouse",
-    "server/routes/pick-priority.routes.ts"
+    "modules/warehouse"
   ],
   "warehouse.fulfillment_nodes": [
     "modules/warehouse"
   ],
   "warehouse.product_locations": [
-    "modules/catalog",
-    "modules/orders",
-    "modules/warehouse",
-    "server/seed.ts"
+    "modules/warehouse"
   ],
   "warehouse.warehouse_locations": [
-    "modules/channels",
-    "modules/inventory",
     "modules/warehouse"
   ],
   "warehouse.warehouse_zones": [
     "modules/warehouse"
   ],
   "warehouse.warehouses": [
-    "modules/channels",
-    "modules/inventory",
     "modules/warehouse"
   ],
   "warehouse.work_access_scopes": [
@@ -1809,7 +1800,7 @@
     "modules/warehouse"
   ],
   "wms.allocation_exceptions": [
-    "modules/orders"
+    "modules/wms"
   ],
   "wms.carrier_dispatch_attempts": [
     "modules/shipping"
@@ -1881,23 +1872,13 @@
     "modules/wms"
   ],
   "wms.orders": [
-    "modules/oms",
-    "modules/orders",
-    "modules/wms",
-    "server/db.ts",
-    "server/index.ts",
-    "server/routes/diagnostics.ts"
+    "modules/wms"
   ],
   "wms.outbound_shipment_items": [
-    "modules/oms",
-    "modules/orders",
     "modules/wms"
   ],
   "wms.outbound_shipments": [
-    "modules/oms",
-    "modules/orders",
-    "modules/wms",
-    "server/index.ts"
+    "modules/wms"
   ],
   "wms.package_allocation_effect_intents": [
     "modules/shipping"
@@ -1948,19 +1929,25 @@
     "modules/wms"
   ],
   "wms.picking_logs": [
-    "modules/catalog",
-    "modules/orders",
     "modules/wms"
   ],
   "wms.reconciliation_exceptions": [
-    "modules/oms",
-    "modules/shipping"
+    "modules/oms"
   ],
   "wms.return_items": [
     "modules/wms"
   ],
   "wms.returns": [
     "modules/wms"
+  ],
+  "wms.sales_channel_delivery_evidence": [
+    "modules/shipping"
+  ],
+  "wms.saved_label_status_attempts": [
+    "modules/shipping"
+  ],
+  "wms.saved_label_status_jobs": [
+    "modules/shipping"
   ],
   "wms.shipment_request_items": [
     "modules/oms"

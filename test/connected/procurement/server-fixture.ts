@@ -88,6 +88,7 @@ export async function createConnectedReceivingDatabase(database: InventoryCutove
       schema.inboundShipments, schema.inboundShipmentLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
       schema.receivingOrders, schema.receivingLines,
       schema.poReceipts, schema.poStatusHistory, schema.vendorInvoices, schema.vendorInvoiceLines,
+      schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.receiptInvoiceCostAllocations,
       schema.supplierCredits, schema.supplierCreditLines, schema.supplierCreditApplications,
       schema.supplierCreditApplicationReversals, schema.supplierReturnLines, schema.receiptReversals,
       schema.notificationTypes, schema.notificationPreferences, schema.notifications, schema.echelonSettings,
@@ -95,8 +96,9 @@ export async function createConnectedReceivingDatabase(database: InventoryCutove
     for (const table of [...identityTables, ...receivingTables]) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys([...identityTables, ...receivingTables])) await pool.query(statement);
     const passwordHash = await bcrypt.hash(CONNECTED_PASSWORD, 10);
-    await pool.query(`INSERT INTO identity.auth_roles(id,name) VALUES(1,'connected-receiver'),(2,'connected-viewer'),(3,'connected-admin'),
+    await pool.query(`INSERT INTO identity.auth_roles(id,name) VALUES(1,'connected-receiver'),(2,'connected-viewer'),(3,'Administrator'),
       (4,'connected-picker'),(5,'connected-second-receiver'),(6,'connected-catalog-creator'),(7,'connected-creator'),(8,'connected-editor'),(9,'connected-financial');
+      UPDATE identity.auth_roles SET is_system=1 WHERE id=3;
       INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES
       (1,'inventory','adjust','inventory'),(2,'inventory','view','inventory'),(3,'purchasing','view','purchasing'),
       (4,'roles','edit','identity'),(5,'users','manage_roles','identity'),(6,'users','edit','identity'),
@@ -108,6 +110,10 @@ export async function createConnectedReceivingDatabase(database: InventoryCutove
         [actor.id, actor.username, passwordHash, actor.role]);
       await pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,$2)", [actor.id, actor.roleId]);
     }
+    // Apply the release's actual credential-state backfill after the synthetic
+    // accounts exist. Real login must exercise the canonical generation read;
+    // a reduced connected fixture must not omit or stub that prerequisite.
+    await pool.query(migration("900000056000020040001_staff_credential_state.sql"));
     await prepareQuantityLotCreationMetadata(pool);
     await addOwnerReadColumns(pool);
     await pool.query("ALTER TABLE inventory.inventory_lots ALTER COLUMN received_at TYPE timestamp USING received_at AT TIME ZONE 'UTC'");

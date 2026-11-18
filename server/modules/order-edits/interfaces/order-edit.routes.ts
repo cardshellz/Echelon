@@ -28,6 +28,7 @@ import {
 } from "@shared/order-edits/order-edit-catalog";
 import { OrderEditError } from "../domain/order-edit-error";
 import { OrderEditProviderError } from "../application/order-edit-provider";
+import { extractPublicOrderEditCodeErrorParams } from "@shared/order-edits/order-edit-code-errors";
 import { customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
 import {
   ORDER_EDIT_PRICING_DISPLAY_HEADER,
@@ -166,6 +167,14 @@ export function registerOrderEditRoutes(
           method: req.method,
           route: req.route?.path ?? ORDER_EDIT_API,
         });
+        const publicParams = known
+          ? extractPublicOrderEditCodeErrorParams(
+              code,
+              error instanceof OrderEditError
+                ? error.params
+                : error.context,
+            )
+          : undefined;
         res
           .status(
             validation
@@ -184,6 +193,7 @@ export function registerOrderEditRoutes(
                 : known
                   ? error.message
                   : "The order editor is unavailable. Check the saved operation before retrying.",
+              ...(publicParams ? { params: publicParams } : {}),
             },
           });
       }

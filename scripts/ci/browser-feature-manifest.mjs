@@ -37,6 +37,7 @@ export const BROWSER_FEATURES = Object.freeze({
       "tests": [
         "test/browser/inventory-availability.spec.ts",
         "test/browser/inventory-authority-gates.spec.ts",
+        "test/browser/staff-access-journey.spec.ts",
         "test/browser/inventory-publication-target-resume.spec.ts"
       ],
       "roots": []
@@ -66,6 +67,8 @@ export const BROWSER_FEATURES = Object.freeze({
       "shards": 1,
       "tests": [
         "test/browser/channel-inventory-workspace.spec.ts",
+        "test/browser/product-stock-rules.spec.ts",
+        "test/browser/channel-inventory-available-stock.spec.ts",
         "test/browser/walmart-channel-workspace.spec.ts"
       ],
       "roots": []
@@ -79,10 +82,13 @@ export const BROWSER_FEATURES = Object.freeze({
         "test/browser/returns-portal-preview.spec.ts",
         "test/browser/returns-policy-shipping.spec.ts",
         "test/browser/returns-customer.spec.ts",
-        "test/browser/returns-account-layout.spec.ts"
+        "test/browser/returns-account-layout.spec.ts",
+        "test/browser/returns-storefront-page.spec.ts"
       ],
       "roots": [
-        "client/src/customer-account/entry.tsx"
+        "client/src/customer-account/entry.tsx",
+        "client/src/customer-account/preload-entry.ts",
+        "client/src/customer-account/return-portal.entry.tsx"
       ],
       "appRoutes": ["/returns", "/return-policies", "/customer-returns"]
     }

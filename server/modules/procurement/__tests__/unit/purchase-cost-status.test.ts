@@ -75,6 +75,10 @@ function line(): PurchaseLineCostStatus {
   };
 }
 describe("current supplier and receipt cost authority", () => {
+  it.each(["PURCHASE_TAX_TYPE_REQUIRED", "PURCHASE_TAX_CREDIT_REVIEW"])("routes %s to its review instead of a blind cost retry", code => {
+    const current = line(); current.components[0] = { ...current.components[0], status: "review_required", issues: [{ code, message: "Choose or review the recorded tax treatment." }] };
+    expect(purchaseCostNextAction(current)).toBe("review");
+  });
   it("requires current source, complete lot coverage, component balances and reporting evidence", () => {
     const input = evidence(),
       before = structuredClone(input);

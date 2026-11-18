@@ -6,8 +6,10 @@ import { EbayApiClient } from "./modules/channels/adapters/ebay/ebay-api.client"
 import { assertEbayQuantityAcknowledgement } from "./modules/channels/adapters/ebay/ebay-inventory-quantity";
 import { WalmartListingMemberAdapter } from "./modules/channels/adapters/walmart/walmart-listing-member.adapter";
 import type { WalmartListingLifecycleProvider } from "./modules/channels/adapters/walmart/walmart-listing-lifecycle.provider";
-import { PgDropshipMarketplaceCredentialRepository } from "./modules/dropship/infrastructure/dropship-marketplace-credentials";
-import { RefreshingDropshipEbayRegistrationCredentialProvider } from "./modules/dropship/infrastructure/dropship-ebay-registration-credentials";
+import {
+  PgDropshipMarketplaceCredentialRepository,
+  RefreshingDropshipEbayRegistrationCredentialProvider,
+} from "./modules/dropship/ebay-registration-credentials.api";
 import { createChannelEbayQuantityRequestAdmission, createDropshipEbayQuantityRequestAdmission } from "./modules/inventory-planning/quantity-publication";
 import { ListingMemberLifecycleError } from "./modules/marketplace-listings/domain/listing-member-lifecycle";
 import { EbayListingMemberAdapter } from "./modules/marketplace-listings/infrastructure/providers/ebay/ebay-listing-member.adapter";

@@ -49,4 +49,3 @@ export * from "./dropship-wallet-service";
 export * from "./dropship-vendor-provisioning-service";
 export * from "./dropship-worker-ops-service";
 export * from "./dropship-use-case-dtos";
-export * from "./dropship-use-cases";

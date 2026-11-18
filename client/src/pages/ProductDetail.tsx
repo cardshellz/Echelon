@@ -4,6 +4,7 @@ import { InventoryTrackingHistory } from "@/components/catalog/InventoryTracking
 import { ShopifyProductConnectionActions } from "@/components/catalog/ShopifyProductConnection";
 import { InventoryProductSyncButton } from "@/features/channel-inventory/components/InventoryProductSync";
 import { ProductImageGallery } from "@/components/catalog/ProductImageGallery";
+import { ProductMergeDialog } from "@/components/catalog/ProductMergeDialog";
 import { invalidateCatalogImages } from "@/lib/catalog-image-queries";
 import { saveProductAssetScope, type ProductAssetScopeAttempt } from "@/lib/product-asset-scope";
 import type { CatalogGalleryAsset, ReorderProductAssets } from "@shared/catalog/product-assets";
@@ -54,12 +55,13 @@ import {
   Download,
   ExternalLink,
   Copy,
+  GitMerge,
 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Command, CommandInput, CommandList, CommandGroup, CommandItem, CommandEmpty } from "@/components/ui/command";
 import { cn } from "@/lib/utils";
-import { formatShopifyMappingRepairError } from "@/lib/shopify-product-mapping";
+import { describeDelistedShopifyVariants, formatShopifyMappingRepairError } from "@/lib/shopify-product-mapping";
 import { Link } from "wouter";
 import {
   VendorCatalogQuoteEditor,
@@ -73,6 +75,7 @@ import {
 } from "@/features/supplier-catalog/VendorCatalogQuoteEditor";
 import { ProductConversionCard, ProductConversionSummary } from "@/features/inventory-builds/ProductConversionCard";
 import { ProductSafetySummary } from "@/features/inventory-builds/ProductSafetySummary";
+import { ProductStockRulesCard } from "@/features/channel-inventory/components/ProductStockRulesCard";
 import { transformationQueryKey } from "@/features/inventory-builds/package-conversion-draft";
 import { createProductVariant } from "@/features/catalog/create-product-variant";
 import { buildVariantPackagePatch } from "@/lib/variant-package";
@@ -868,7 +871,7 @@ export function ShopifyProductMappingPanel({ productId, enabled }: { productId: 
       });
       const body = await response.json().catch(() => null);
       if (!response.ok) throw new Error(formatShopifyMappingRepairError(body));
-      return body as { alreadyConsistent: boolean; shippingGroupMetafieldQueued: boolean };
+      return body as { alreadyConsistent: boolean; shippingGroupMetafieldQueued: boolean; delistedVariants?: unknown };
     },
     onSuccess: async (result) => {
       setConfirmTargetId(null);
@@ -878,11 +881,13 @@ export function ShopifyProductMappingPanel({ productId, enabled }: { productId: 
         queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}/channel-listings`] }),
         queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}/channel-status`] }),
       ]);
+      const delistedNote = describeDelistedShopifyVariants(result);
+      const outcome = result.shippingGroupMetafieldQueued
+        ? "The parent and channel mappings now agree. Shipping-group sync was queued."
+        : "The live Shopify product and linked variants were verified; no additional write was needed.";
       toast({
         title: result.alreadyConsistent ? "Shopify mapping already consistent" : "Shopify mapping repaired",
-        description: result.shippingGroupMetafieldQueued
-          ? "The parent and channel mappings now agree. Shipping-group sync was queued."
-          : "The live Shopify product and linked variants were verified; no additional write was needed.",
+        description: delistedNote ? `${outcome} ${delistedNote}` : outcome,
       });
     },
     onError: (mutationError: Error) => {
@@ -1005,7 +1010,8 @@ export function ShopifyProductMappingPanel({ productId, enabled }: { productId: 
             <DialogTitle>Repair Shopify product mapping?</DialogTitle>
             <DialogDescription>
               Shopify will be checked before any write. Active variants will be resolved from a verified existing ID or one exact unique SKU.
-              Archived variants are excluded. The catalog, feed, and listing mappings will be updated together for product {confirmTargetId},
+              Archived variants are excluded. A variant whose linked Shopify variant was deleted in Shopify is marked not listed on this store
+              (its stock and other channels are untouched). The catalog, feed, and listing mappings will be updated together for product {confirmTargetId},
               then the shipping-group metafield will be queued.
             </DialogDescription>
           </DialogHeader>
@@ -1774,6 +1780,9 @@ export default function ProductDetail() {
     },
   });
 
+  // --- Merge this duplicate product into another ---
+  const [mergeOpen, setMergeOpen] = useState(false);
+
   // --- Duplicate product (prefilled draft) ---
   const [duplicateOpen, setDuplicateOpen] = useState(false);
   const [dupName, setDupName] = useState("");
@@ -1912,14 +1921,20 @@ export default function ProductDetail() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url, altText: altText || null, assetType: "image", productVariantId: null }),
       });
-      if (!res.ok) throw new Error("Failed to add image");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(typeof body.error === "string" ? body.error : "Failed to add image");
+      }
       return res.json();
     },
-    onSuccess: async () => {
+    onSuccess: async (data: { publicationWarning?: { message: string } }) => {
       await refreshImageReferences();
       setAddImageUrl("");
       setAddImageAlt("");
-      toast({ title: "Image added" });
+      toast({ title: "Image added", ...(data.publicationWarning ? { description: data.publicationWarning.message } : {}) });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Could not add image", description: error.message, variant: "destructive" });
     },
   });
 
@@ -1936,12 +1951,15 @@ export default function ProductDetail() {
         method: "POST",
         body: formData,
       });
-      if (!res.ok) throw new Error("Failed to upload image");
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(typeof body.error === "string" ? body.error : "Failed to upload image");
+      }
       return res.json();
     },
-    onSuccess: async () => {
+    onSuccess: async (data: { publicationWarning?: { message: string } }) => {
       await refreshImageReferences();
-      toast({ title: "Image uploaded" });
+      toast({ title: "Image uploaded", ...(data.publicationWarning ? { description: data.publicationWarning.message } : {}) });
       if (fileInputRef.current) fileInputRef.current.value = "";
     },
     onError: (err: Error) => {
@@ -2671,6 +2689,18 @@ export default function ProductDetail() {
             <Copy className="h-4 w-4 mr-2" />
             Duplicate
           </Button>
+          {product.isActive && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="min-h-[44px]"
+              onClick={() => setMergeOpen(true)}
+              data-testid="btn-merge-product"
+            >
+              <GitMerge className="h-4 w-4 mr-2" />
+              Merge into…
+            </Button>
+          )}
           {product.isActive ? (
             <Button
               variant="outline"
@@ -2727,6 +2757,18 @@ export default function ProductDetail() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {mergeOpen && (
+        <ProductMergeDialog
+          product={{ id: product.id, sku: product.sku ?? null, name: product.name }}
+          onClose={() => setMergeOpen(false)}
+          onMerged={(targetProductId) => {
+            setMergeOpen(false);
+            queryClient.invalidateQueries();
+            setLocation(`/products/${targetProductId}`);
+          }}
+        />
+      )}
 
       {/* Duplicate product dialog */}
       <Dialog open={duplicateOpen} onOpenChange={setDuplicateOpen}>
@@ -3315,18 +3357,16 @@ export default function ProductDetail() {
                 </div>
               </div>
 
-              {inventoryRuntimeAuthorityQuery.data?.authority !== "legacy" ? (
+              {inventoryRuntimeAuthorityQuery.data?.authority === "canonical" ? (
+                // The retired legacy allocation's place: this product's stock rules on
+                // every channel. Max 0 there is how a SKU is stopped on a channel.
+                <ProductStockRulesCard productId={product!.productId} />
+              ) : inventoryRuntimeAuthorityQuery.data?.authority !== "legacy" ? (
                 <Card data-testid="product-legacy-channel-allocation-unavailable">
                   <CardHeader className="p-3 md:p-6">
-                    <CardTitle className="text-base md:text-lg">
-                      {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
-                        ? "Legacy product allocation is retired"
-                        : "Product allocation controls are unavailable"}
-                    </CardTitle>
+                    <CardTitle className="text-base md:text-lg">Product allocation controls are unavailable</CardTitle>
                     <CardDescription className="text-xs md:text-sm">
-                      {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
-                        ? "Per-SKU channel eligibility, holdback, share, and publish limits now live in Channel Inventory."
-                        : "The live inventory authority could not be confirmed, so legacy allocation reads and writes remain disabled."}
+                      The live inventory authority could not be confirmed, so legacy allocation reads and writes remain disabled.
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="p-3 md:p-6 pt-0 md:pt-0">

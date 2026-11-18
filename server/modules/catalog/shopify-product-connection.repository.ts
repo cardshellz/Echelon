@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import {
-  channelConnections, channelPricing, channels, products, productVariants,
+  channelConnections, channelPricing, channelVariantOverrides, channels, products, productVariants,
 } from "@shared/schema";
 import {
   shopifyProductConnectionRequestSchema, type ShopifyProductConnectionCommand,
@@ -53,6 +53,7 @@ interface CommandRow {
 }
 
 export interface StoredShopifyConnection extends ShopifyProductConnectionCommand {
+  actor: string;
   connectionId: number;
   shopDomain: string;
   source: ShopifyConnectionSource;
@@ -107,7 +108,7 @@ function decode(row: CommandRow): StoredShopifyConnection {
     throw new ShopifyProductConnectionError("SHOPIFY_CONNECTION_RECEIPT_INVALID", "The saved Shopify command's intent or account evidence is invalid. Review is required.", 409);
   }
   return {
-    commandKey: row.command_key, productId: row.product_id, channelId: row.channel_id,
+    commandKey: row.command_key, productId: row.product_id, channelId: row.channel_id, actor: row.actor,
     mode: row.mode, state: row.state, remoteProductId: row.remote_product_id,
     request, previewHash: row.preview_hash, lastErrorCode: row.last_error_code,
     lastErrorMessage: row.last_error_message, retryable: row.retryable,
@@ -123,7 +124,9 @@ export function publicConnectionCommand(command: StoredShopifyConnection): Shopi
   const { commandKey, productId, channelId, mode, state, remoteProductId, request, previewHash,
     lastErrorCode, lastErrorMessage, retryable, completedAt } = command;
   return { commandKey, productId, channelId, mode, state, remoteProductId, request, previewHash,
-    lastErrorCode, lastErrorMessage, retryable, completedAt };
+    lastErrorCode, lastErrorMessage, retryable, completedAt,
+    inventorySyncRequestId: typeof command.result?.inventorySyncRequestId === "string" ? command.result.inventorySyncRequestId : null,
+    inventorySyncRequestedBy: command.result?.inventorySyncRequestId ? command.actor.replace(/^user:/, "") : null };
 }
 
 export function createShopifyProductConnectionRepository(input: {
@@ -177,6 +180,7 @@ export function createShopifyProductConnectionRepository(input: {
     const summary = await mapping.getSummary(productId, channelId, client);
     const variants = await client.select({
       id: productVariants.id, sku: productVariants.sku, name: productVariants.name,
+      skuOverride: channelVariantOverrides.skuOverride,
       barcode: productVariants.barcode, isActive: productVariants.isActive,
       salesEligibility: productVariants.salesEligibility, requiresShipping: productVariants.requiresShipping,
       inventoryTrackingOverride: productVariants.inventoryTrackingOverride,
@@ -184,6 +188,7 @@ export function createShopifyProductConnectionRepository(input: {
       channelCompareAtPrice: channelPricing.compareAtPrice, channelCurrency: channelPricing.currency,
       catalogPrice: productVariants.priceCents, catalogCompareAtPrice: productVariants.compareAtPriceCents,
     }).from(productVariants).leftJoin(channelPricing, and(eq(channelPricing.productVariantId, productVariants.id), eq(channelPricing.channelId, channelId)))
+      .leftJoin(channelVariantOverrides, and(eq(channelVariantOverrides.productVariantId, productVariants.id), eq(channelVariantOverrides.channelId, channelId)))
       .where(eq(productVariants.productId, productId)).orderBy(asc(productVariants.id));
     // Metadata and file signatures only. Resolution stays with Catalog's shared
     // image owner, including content-addressed publication of uploaded photos.
@@ -203,7 +208,7 @@ export function createShopifyProductConnectionRepository(input: {
       product: { id: product.id, sku: product.sku, name: product.name, title: product.title,
         description: product.description, vendor: product.brand, productType: product.productType,
         tags: (product.tags ?? []) as string[], isActive: product.isActive, trackInventory: product.inventoryTrackingDefault },
-      variants: variants.map(variant => ({ ...variant,
+      variants: variants.map(variant => ({ ...variant, stockSku: variant.skuOverride ?? variant.sku,
         trackInventory: resolveInventoryTrackingPolicy({ requiresShipping: variant.requiresShipping,
           inventoryTrackingOverride: variant.inventoryTrackingOverride, inventoryTrackingDefault: product.inventoryTrackingDefault }),
         ...resolveShopifyConnectionPrice({ primaryStore: summary.channel.isPrimary === true,
@@ -256,6 +261,21 @@ export function createShopifyProductConnectionRepository(input: {
 
   async function reserve(reservation: ShopifyConnectionReservation, options: { runNow?: boolean } = {}): Promise<StoredShopifyConnection> {
     return database.transaction(async tx => {
+      if (reservation.request.mode === "link") {
+        // Store-scoped admission serializes competing native SKU intents, even
+        // when operators start from different catalog products or channel IDs.
+        // The durable active commands retain ownership between worker leases.
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`shopify-connection-skus:${reservation.source.channel.shopDomain}`},0))`);
+        const active = rows<{ review_evidence: ShopifyConnectionReviewEvidence }>(await tx.execute(sql`
+          SELECT review_evidence FROM catalog.shopify_product_connection_commands
+          WHERE shop_domain=${reservation.source.channel.shopDomain} AND command_key<>${reservation.commandKey}::uuid
+            AND mode='link' AND state NOT IN ('complete','rejected')`));
+        const skus = new Set((reservation.review.skuAssignments ?? []).map(item => item.sku.trim().toUpperCase()));
+        if (active.some(other => other.review_evidence.remoteProductId === reservation.review.remoteProductId
+          || other.review_evidence.skuAssignments?.some(item => skus.has(item.sku.trim().toUpperCase())))) {
+          throw new ShopifyProductConnectionError("SHOPIFY_SKU_COMMAND_PENDING", "Another saved link owns this Shopify product or a requested SKU. Finish that command before linking.", 409);
+        }
+      }
       // The product row serializes different command keys for this resource;
       // the partial unique index remains the final cross-process owner guard.
       await tx.execute(sql`SELECT id FROM catalog.products WHERE id=${reservation.productId} FOR UPDATE`);

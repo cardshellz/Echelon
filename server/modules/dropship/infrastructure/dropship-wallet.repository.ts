@@ -2222,6 +2222,14 @@ export class PgDropshipWalletRepository
       const hasActiveFundingMethod = await vendorHasActiveFundingMethodWithClient(client, input.vendorId);
       const shouldBeDefault = input.isDefault || !hasActiveFundingMethod;
 
+      if (input.rail === "usdc_base" && !input.usdcWalletAddress) {
+        throw new DropshipError(
+          "DROPSHIP_USDC_WALLET_ADDRESS_REQUIRED",
+          "USDC Base funding methods require a wallet address.",
+          { vendorId: input.vendorId },
+        );
+      }
+
       if (shouldBeDefault) {
         await client.query(
           `UPDATE dropship.dropship_funding_methods
@@ -2229,15 +2237,25 @@ export class PgDropshipWalletRepository
                updated_at = $2
            WHERE vendor_id = $1
              AND status = 'active'
-             AND is_default = true`,
-          [input.vendorId, input.updatedAt],
-        );
-      }
-      if (input.rail === "usdc_base" && !input.usdcWalletAddress) {
-        throw new DropshipError(
-          "DROPSHIP_USDC_WALLET_ADDRESS_REQUIRED",
-          "USDC Base funding methods require a wallet address.",
-          { vendorId: input.vendorId },
+             AND is_default = true
+             AND NOT EXISTS (
+               SELECT 1
+               FROM dropship.dropship_funding_methods AS archived_fm
+               WHERE archived_fm.vendor_id = $1
+                 AND archived_fm.rail = $3
+                 AND archived_fm.status = 'archived'
+                 AND (
+                   ($3 = 'usdc_base' AND archived_fm.usdc_wallet_address = $4)
+                   OR ($3 <> 'usdc_base' AND archived_fm.provider_payment_method_id = $5)
+                 )
+             )`,
+          [
+            input.vendorId,
+            input.updatedAt,
+            input.rail,
+            input.usdcWalletAddress ?? null,
+            input.providerPaymentMethodId ?? null,
+          ],
         );
       }
 
@@ -2250,11 +2268,11 @@ export class PgDropshipWalletRepository
              ON CONFLICT (vendor_id, rail, usdc_wallet_address)
                WHERE usdc_wallet_address IS NOT NULL
              DO UPDATE
-               SET status = EXCLUDED.status,
-                   display_label = EXCLUDED.display_label,
-                   is_default = fm.is_default OR EXCLUDED.is_default,
-                   metadata = EXCLUDED.metadata,
-                   updated_at = EXCLUDED.updated_at
+               SET status = CASE WHEN fm.status = 'archived' THEN fm.status ELSE EXCLUDED.status END,
+                   display_label = CASE WHEN fm.status = 'archived' THEN fm.display_label ELSE EXCLUDED.display_label END,
+                   is_default = CASE WHEN fm.status = 'archived' THEN false ELSE (fm.is_default OR EXCLUDED.is_default) END,
+                   metadata = CASE WHEN fm.status = 'archived' THEN fm.metadata ELSE EXCLUDED.metadata END,
+                   updated_at = CASE WHEN fm.status = 'archived' THEN fm.updated_at ELSE EXCLUDED.updated_at END
              RETURNING id, vendor_id, rail, status, provider_customer_id,
                        provider_payment_method_id, usdc_wallet_address, display_label,
                        is_default, metadata, created_at, updated_at,
@@ -2278,13 +2296,13 @@ export class PgDropshipWalletRepository
              ON CONFLICT (vendor_id, rail, provider_payment_method_id)
                WHERE provider_payment_method_id IS NOT NULL
              DO UPDATE
-               SET status = EXCLUDED.status,
-                   provider_customer_id = EXCLUDED.provider_customer_id,
-                   usdc_wallet_address = EXCLUDED.usdc_wallet_address,
-                   display_label = EXCLUDED.display_label,
-                   is_default = fm.is_default OR EXCLUDED.is_default,
-                   metadata = EXCLUDED.metadata,
-                   updated_at = EXCLUDED.updated_at
+               SET status = CASE WHEN fm.status = 'archived' THEN fm.status ELSE EXCLUDED.status END,
+                   provider_customer_id = CASE WHEN fm.status = 'archived' THEN fm.provider_customer_id ELSE EXCLUDED.provider_customer_id END,
+                   usdc_wallet_address = CASE WHEN fm.status = 'archived' THEN fm.usdc_wallet_address ELSE EXCLUDED.usdc_wallet_address END,
+                   display_label = CASE WHEN fm.status = 'archived' THEN fm.display_label ELSE EXCLUDED.display_label END,
+                   is_default = CASE WHEN fm.status = 'archived' THEN false ELSE (fm.is_default OR EXCLUDED.is_default) END,
+                   metadata = CASE WHEN fm.status = 'archived' THEN fm.metadata ELSE EXCLUDED.metadata END,
+                   updated_at = CASE WHEN fm.status = 'archived' THEN fm.updated_at ELSE EXCLUDED.updated_at END
              RETURNING id, vendor_id, rail, status, provider_customer_id,
                        provider_payment_method_id, usdc_wallet_address, display_label,
                        is_default, metadata, created_at, updated_at,

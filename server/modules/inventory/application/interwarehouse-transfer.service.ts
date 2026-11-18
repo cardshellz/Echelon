@@ -14,6 +14,10 @@ import {
 } from "@shared/types/interwarehouse-transfer";
 import { createHash, randomUUID } from "node:crypto";
 import type { db } from "../../../db";
+import {
+  closeInterwarehouseTransitLocationInWarehouse,
+  insertInterwarehouseTransitLocationInWarehouse,
+} from "../../warehouse/cross-module-warehouse-mutations.api";
 import type { InventoryUseCases } from "./inventory.use-cases";
 
 type Database = Pick<typeof db, "transaction" | "execute">;
@@ -174,15 +178,12 @@ export class InterwarehouseTransferService {
       `);
       const id = integer(inserted.rows[0]?.id, "transfer id");
       const transitCode = `IWT-${String(id).padStart(8, "0")}`;
-      const transitLocation = await tx.execute(sql`
-        INSERT INTO warehouse.warehouse_locations(
-          warehouse_id,code,name,zone,location_type,bin_type,is_pickable,is_active,created_at,updated_at
-        ) VALUES (
-          ${integer(transitWarehouse.rows[0].id, "transit warehouse id")},${transitCode},
-          ${`Transit custody for WT-${String(id).padStart(8, "0")}`},'TRANSIT','in_transit','virtual',0,1,${occurredAt},${occurredAt}
-        ) RETURNING id
-      `);
-      const transitLocationId = integer(transitLocation.rows[0]?.id, "transit location id");
+      const transitLocationId = integer(await insertInterwarehouseTransitLocationInWarehouse(tx, {
+        warehouseId: integer(transitWarehouse.rows[0].id, "transit warehouse id"),
+        code: transitCode,
+        name: `Transit custody for WT-${String(id).padStart(8, "0")}`,
+        occurredAt,
+      }), "transit location id");
       await tx.execute(sql`UPDATE inventory.interwarehouse_transfers SET transit_location_id=${transitLocationId} WHERE id=${id}`);
       await tx.execute(sql`
         INSERT INTO inventory.interwarehouse_transfer_lines(transfer_id,product_variant_id,requested_qty)
@@ -521,12 +522,8 @@ export class InterwarehouseTransferService {
   }
 
   private async closeTransitLocation(tx: Executor, transitLocationId: number, occurredAt: Date): Promise<void> {
-    const closed = await tx.execute(sql`
-      UPDATE warehouse.warehouse_locations SET is_active=0,updated_at=${occurredAt}
-      WHERE id=${transitLocationId} AND location_type='in_transit' AND is_active=1
-      RETURNING id
-    `);
-    if (closed.rows.length !== 1) {
+    const closed = await closeInterwarehouseTransitLocationInWarehouse(tx, { transitLocationId, occurredAt });
+    if (!closed) {
       throw new IntegrityError("Transfer transit custody could not be closed", { transitLocationId });
     }
   }

@@ -350,7 +350,8 @@ function planTarget(
   const variantHolds = new Map(target.variantHolds.map((entry) => [entry.productVariantId, entry.hold] as const));
   const rows = selectedVariants.map((variant): RuntimeRow => {
     // The hold that zeroes this SKU: the destination-wide hold covers every SKU
-    // and wins; otherwise a SKU-level hold covers this one alone.
+    // and wins; otherwise a SKU-level hold covers this one alone. An operator
+    // stops a SKU on a channel with a Max 0 stock rule, which is a rule, not a hold.
     const hold = target.hold ?? variantHolds.get(variant.id) ?? null;
     const selection = target.selection?.variants.find(entry => entry.productVariantId === variant.id);
     const blockers: RuntimeIssue[] = (selection?.blockers ?? []).map(blocker => issue(blocker.code, blocker.message,

@@ -64,7 +64,7 @@ async function proveReadAccess(page: Page, backend: Backend, documents: Array<{ 
   expect(inaccessible, "The same current purchasing:view grant must admit these connected document routes").toEqual([]);
 }
 
-async function verifyDocumentSidebar(page: Page, picker: boolean): Promise<void> {
+async function verifyDocumentSidebar(page: Page): Promise<void> {
   const mobile = (page.viewportSize()?.width ?? 1280) < 768;
   if (mobile) await page.getByRole("button", { name: "Open navigation", exact: true }).click();
   const procurement = page.getByRole("button", { name: "Procurement", exact: true }).filter({ visible: true });
@@ -72,7 +72,7 @@ async function verifyDocumentSidebar(page: Page, picker: boolean): Promise<void>
   for (const name of ["Purchase Orders", "Shipments", "Receiving"]) {
     await expect(page.getByRole("link", { name, exact: true }).filter({ visible: true })).toBeVisible();
   }
-  if (picker) await expect(page.getByRole("link", { name: "Demand Planner", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Demand Planner", exact: true }).filter({ visible: true })).toBeVisible();
   const payable = page.getByRole("button", { name: "Accounts Payable", exact: true }).filter({ visible: true });
   if (await payable.getAttribute("aria-expanded") !== "true") await payable.click();
   await expect(page.getByRole("link", { name: "Invoices", exact: true }).filter({ visible: true })).toBeVisible();
@@ -142,7 +142,7 @@ for (const actorId of ["connected-viewer", "connected-picker"] as const) {
       await page.goForward();
       await expect(page).toHaveURL(costsUrl);
       await expectPurchaseAnchor(page, purchaseId);
-      await verifyDocumentSidebar(page, actorId === "connected-picker");
+      await verifyDocumentSidebar(page);
     });
   });
 
@@ -210,11 +210,13 @@ test("a non-lead creator saves a fee-only purchase and keeps existing drafts rea
     const denied = await page.request.patch(backend.url + "/api/purchase-orders/" + backend.navigation.draftPurchaseOrderId, { data: { internalNotes: "Creator cannot edit an existing purchase" } });
     expect(denied.status(), await denied.text()).toBe(403);
     await page.goto(backend.url + "/purchase-orders/" + backend.navigation.draftPurchaseOrderId + "/edit");
-    await expect(page).toHaveURL(backend.url + "/picking");
+    await expect(page).toHaveURL(backend.url + "/purchase-orders/" + backend.navigation.draftPurchaseOrderId + "/edit");
+    await expect(page.getByTestId("staff-access-notice")).toContainText("Your assigned roles do not provide access to this page.");
     const deniedDashboard = await page.request.get(backend.url + "/api/purchasing/dashboard");
     expect(deniedDashboard.status(), await deniedDashboard.text()).toBe(403);
     await page.goto(backend.url + "/purchasing");
-    await expect(page).toHaveURL(backend.url + "/picking");
+    await expect(page).toHaveURL(backend.url + "/purchasing");
+    await expect(page.getByTestId("staff-access-notice")).toContainText("Your assigned roles do not provide access to this page.");
   });
   // A create grant can save a non-product PO without catalog visibility or
   // edit authority. Verify the actual command commit and its read-only return.
@@ -281,7 +283,7 @@ test("a non-lead purchasing reader can inspect AP work without receiving payment
       await page.goto(backend.url + path);
       await expect(page.getByRole("button", { name: action, exact: true })).toHaveCount(0);
     }
-    await verifyDocumentSidebar(page, true);
+    await verifyDocumentSidebar(page);
   });
 });
 
@@ -308,7 +310,8 @@ test("a non-lead read-only purchaser keeps draft detail and cannot enter or muta
       expect(denied.status(), path + ": " + await denied.text()).toBe(403);
     }
     await page.goto(backend.url + "/purchase-orders/" + draftId + "/edit");
-    await expect(page).toHaveURL(backend.url + "/picking");
+    await expect(page).toHaveURL(backend.url + "/purchase-orders/" + draftId + "/edit");
+    await expect(page.getByTestId("staff-access-notice")).toContainText("Your assigned roles do not provide access to this page.");
   });
 });
 
@@ -333,7 +336,8 @@ test("a non-lead purchase editor can open an existing draft without gaining crea
     const denied = await page.request.post(backend.url + "/api/purchase-orders", { headers: { "Idempotency-Key": "connected-editor-cannot-create" }, data: {} });
     expect(denied.status(), await denied.text()).toBe(403);
     await page.goto(backend.url + "/purchase-orders/new");
-    await expect(page).toHaveURL(backend.url + "/picking");
+    await expect(page).toHaveURL(backend.url + "/purchase-orders/new");
+    await expect(page.getByTestId("staff-access-notice")).toContainText("Your assigned roles do not provide access to this page.");
   });
 });
 

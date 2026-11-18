@@ -101,7 +101,10 @@ describe("ListingReplacementPlanningService", () => {
     const snapshot = ownerSnapshot();
     const ownerReader = new FakeOwnerReader({
       ...snapshot,
-      owner: { ...snapshot.owner, channelId: 999 },
+      owner: {
+        ...(snapshot.owner as Extract<ListingOwnerRef, { kind: "channel" }>),
+        channelId: 999,
+      },
     });
     const service = createService(
       new InMemoryPlanningRepository(),

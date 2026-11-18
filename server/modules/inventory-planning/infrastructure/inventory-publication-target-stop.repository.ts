@@ -16,6 +16,11 @@ import type {
 } from "../application/inventory-publication-target-stop.service";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
+import {
+  completeIdempotencyKeyPgQuery,
+  insertIdempotencyKeyPgQuery,
+} from "../../../infrastructure/idempotency-keys.repository";
 
 const IDEMPOTENCY_LOCK_NAMESPACE = 918420;
 export const PUBLICATION_TARGET_SCOPE_LOCK_SEED = 918420;
@@ -121,12 +126,11 @@ implements InventoryPublicationTargetStopStore {
           scopeKeys.push(scopeKey);
         }
 
-        await client.query(
-          `INSERT INTO public.idempotency_keys(
-             key, request_hash, response_body, created_at, expires_at
-           ) VALUES ($1,$2,NULL,$3,NULL)`,
-          [receiptKey, command.requestHash, command.occurredAt],
-        );
+        await insertIdempotencyKeyPgQuery(client, {
+          key: receiptKey,
+          requestHash: command.requestHash,
+          createdAt: command.occurredAt,
+        });
         const updated = await client.query<{ revision: string }>(
           `UPDATE inventory.inventory_publication_targets
            SET state='disabled', activated_by=NULL, activated_at=NULL,
@@ -157,32 +161,26 @@ implements InventoryPublicationTargetStopStore {
           providerWriteAttempted: false,
           outboxEnqueued: false,
         });
-        await client.query(
-          `INSERT INTO public.audit_events(
-             timestamp, level, actor, action, target, changes, context
-           ) VALUES ($1,'AUDIT',$2,$3,$4,$5::jsonb,$6::jsonb)`,
-          [
-            command.occurredAt,
-            command.actorId,
-            "inventory_availability.publication_target.stopped",
-            `inventory.inventory_publication_target:${command.publicationTargetId}`,
-            JSON.stringify({
-              before: { state: "live", revision: command.expectedRevision },
-              after: { state: "disabled", revision: result.revision },
-            }),
-            JSON.stringify({
-              reason: command.changeReason,
-              idempotencyKey: command.idempotencyKey,
-              requestHash: command.requestHash,
-              exactScopeCount: scopes.length,
-            }),
-          ],
-        );
-        await client.query(
-          `UPDATE public.idempotency_keys
-           SET response_body=$2::jsonb
-           WHERE key=$1`,
-          [receiptKey, JSON.stringify({ commandType: "inventory_publication_target_stop", result })],
+        await insertAuditEventPgQuery(client, {
+          timestamp: command.occurredAt,
+          actor: command.actorId,
+          action: "inventory_availability.publication_target.stopped",
+          target: `inventory.inventory_publication_target:${command.publicationTargetId}`,
+          changesJson: JSON.stringify({
+            before: { state: "live", revision: command.expectedRevision },
+            after: { state: "disabled", revision: result.revision },
+          }),
+          contextJson: JSON.stringify({
+            reason: command.changeReason,
+            idempotencyKey: command.idempotencyKey,
+            requestHash: command.requestHash,
+            exactScopeCount: scopes.length,
+          }),
+        });
+        await completeIdempotencyKeyPgQuery(
+          client,
+          receiptKey,
+          JSON.stringify({ commandType: "inventory_publication_target_stop", result }),
         );
         await client.query("COMMIT");
         inTransaction = false;

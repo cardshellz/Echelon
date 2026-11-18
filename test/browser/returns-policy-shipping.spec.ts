@@ -10,8 +10,25 @@ async function openPolicy(page: Page) {
   return dialog;
 }
 
+test("an admin assignment without settings view cannot load the policy editor", async ({ page }) => {
+  const transport = await installReturnPreviewFixtures(page);
+  const policies = await installPolicyShippingFixtures(page);
+  const policyRequests: string[] = [];
+  page.on("request", request => {
+    const path = new URL(request.url()).pathname;
+    if (path.startsWith("/api/returns/admin/policies")) policyRequests.push(`${request.method()} ${path}`);
+  });
+  await page.goto("/return-policies?policyId=3&section=shipping");
+  await expect(page.getByTestId("staff-access-notice")).toContainText("Your assigned roles do not provide access to this page.");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(policies.reads).toBe(0);
+  expect(policies.writes).toEqual([]);
+  expect(policyRequests).toEqual([]);
+  expect(transport.failures).toEqual([]);
+});
+
 test("saving a business contact preserves a legacy policy's absent shipping guardrails", async ({ page }) => {
-  await installReturnPreviewFixtures(page);
+  await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
   const policies = await installPolicyShippingFixtures(page, { guardrails: false });
   await installReturnLabelFixtures(page);
   const dialog = await openPolicy(page);
@@ -29,7 +46,7 @@ test("saving a business contact preserves a legacy policy's absent shipping guar
 test("policy editor saves rules and shipping as one version and removes the separate menu entry", async ({
   page,
 }, testInfo) => {
-  const transport = await installReturnPreviewFixtures(page);
+  const transport = await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
   const policies = await installPolicyShippingFixtures(page);
   const labels = await installReturnLabelFixtures(page);
   const dialog = await openPolicy(page);
@@ -98,7 +115,7 @@ test("policy editor saves rules and shipping as one version and removes the sepa
 test("policy shipping validates allowed services and weight limits before the combined save", async ({
   page,
 }) => {
-  await installReturnPreviewFixtures(page);
+  await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
   const policies = await installPolicyShippingFixtures(page);
   const dialog = await openPolicy(page);
   await dialog
@@ -163,7 +180,7 @@ test("policy shipping validates allowed services and weight limits before the co
 test("uncertain combined save retries the same policy and shipping intent exactly once", async ({
   page,
 }) => {
-  await installReturnPreviewFixtures(page);
+  await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
   const policies = await installPolicyShippingFixtures(page, {
     uncertainFirstSave: true,
   });
@@ -190,7 +207,7 @@ test("uncertain combined save retries the same policy and shipping intent exactl
 test("a stale policy save preserves edits and cannot silently replace the newer policy", async ({
   page,
 }) => {
-  await installReturnPreviewFixtures(page);
+  await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
   const policies = await installPolicyShippingFixtures(page, {
     staleFirstSave: true,
   });
@@ -214,7 +231,7 @@ test("a stale policy save preserves edits and cannot silently replace the newer 
 test("legacy label settings links open the applicable policy and unknown shops never select another policy", async ({
   page,
 }) => {
-  await installReturnPreviewFixtures(page);
+  await installReturnPreviewFixtures(page, { permissions: ["settings:view"] });
   await installPolicyShippingFixtures(page);
   await page.goto("/returns/label-settings?channelId=36");
   await expect(page).toHaveURL(/\/return-policies/);
@@ -258,7 +275,7 @@ test("portal links to its applied policy and pause controls do not write a polic
 test("another channel starts with unconfigured shipping and never borrows Shopify's warehouse", async ({
   page,
 }) => {
-  await installReturnPreviewFixtures(page);
+  await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
   const policies = await installPolicyShippingFixtures(page);
   await page.goto("/return-policies");
   await page.getByRole("button", { name: "New policy", exact: true }).click();
@@ -297,7 +314,7 @@ test("another channel starts with unconfigured shipping and never borrows Shopif
 test("a delayed legacy channel resolution cannot replace a manually edited policy draft", async ({
   page,
 }) => {
-  await installReturnPreviewFixtures(page);
+  await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
   await installPolicyShippingFixtures(page);
   let release!: () => void;
   const held = new Promise<void>((resolve) => {

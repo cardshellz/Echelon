@@ -24,9 +24,11 @@ import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eli
 import { requireLegacyQuantityImport, sendInventoryQuantityError, validateInventoryCommandKey } from "./interfaces/quantity-command.middleware";
 import { readInventoryQuantityCapabilities } from "./infrastructure/quantity-authority.query";
 import { OrderCOGSCurrencyError } from "./domain/order-cogs-read";
-import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
-import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
-import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+import {
+  createInventoryLegacyAdminControlService,
+  INVENTORY_LEGACY_ADMIN_CONTROLS,
+  sendInventoryLegacyAdminControlError,
+} from "../inventory-planning/legacy-admin-control.api";
 import { projectCanonicalVariantsInsideRuntimeTransaction } from "../inventory-planning/application/inventory-availability-runtime-atp.service";
 import type { InventoryAvailabilityRuntimeAtpContext } from "../inventory-planning/application/inventory-availability-runtime-atp.service";
 import { createChannelSyncService } from "../channels/sync.service";
@@ -324,10 +326,11 @@ export function registerInventoryRoutes(app: Express) {
   
   app.post("/api/inventory/transfer/:id/undo", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
+      const { inventoryCore } = req.app.locals.services;
       const transactionId = parseInt(req.params.id);
       const userId = req.session.user?.id || "system";
       
-      const transaction = await storage.undoTransfer(transactionId, userId);
+      const transaction = await inventoryCore.undoTransfer(transactionId, userId);
       res.json({ success: true, transaction });
     } catch (error) {
       console.error("Undo transfer error:", error);
@@ -336,7 +339,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // Inventory Transactions History
-  app.get("/api/inventory/transactions", requireAuth, limitPageRead(async (req, res) => {
+  app.get("/api/inventory/transactions", requirePermission("inventory", "audit"), limitPageRead(async (req, res) => {
     try {
       const { batchId, transactionType, startDate, endDate, locationCode } = req.query;
       const pageQuery = offsetPageQuerySchema.safeParse(req.query);
@@ -392,9 +395,9 @@ export function registerInventoryRoutes(app: Express) {
   }));
 
   // CSV Inventory Upload - bulk update inventory levels
-  app.post("/api/inventory/upload-csv", requireAuth, requireLegacyQuantityImport, upload.single("file"), async (req, res) => {
+  app.post("/api/inventory/upload-csv", requirePermission("inventory", "upload"), requireLegacyQuantityImport, upload.single("file"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
 
@@ -580,7 +583,7 @@ export function registerInventoryRoutes(app: Express) {
     res.send(template);
   });
 
-  app.post("/api/inventory/receive", requireAuth, validateInventoryCommandKey, async (req, res) => {
+  app.post("/api/inventory/receive", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     if (!req.session.user) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -702,24 +705,14 @@ export function registerInventoryRoutes(app: Express) {
   // Delete an orphan inventory_levels row (0 qty, not assigned)
   app.delete("/api/inventory/levels/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
+      const { inventoryCore } = req.app.locals.services;
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
 
-      const level = await storage.getInventoryLevelById(id);
-      if (!level) return res.status(404).json({ error: "Inventory level not found" });
-
-      // Safety: only allow deletion of fully empty rows
-      if (level.variantQty !== 0 || level.reservedQty !== 0) {
-        return res.status(400).json({ error: "Cannot delete — row still has quantity or reservations" });
+      const outcome = await inventoryCore.deleteEmptyUnassignedLevel(id);
+      if (!outcome.deleted) {
+        return res.status(outcome.statusCode ?? 400).json({ error: outcome.error });
       }
-
-      // Safety: don't delete if variant is assigned to this location
-      const hasAssignment = await storage.hasProductLocationAssignment(level.productVariantId, level.warehouseLocationId);
-      if (hasAssignment) {
-        return res.status(400).json({ error: "Cannot delete — variant is assigned to this location" });
-      }
-
-      await storage.deleteInventoryLevel(id);
       res.json({ success: true });
     } catch (error: any) {
       if (isLevelDeleteForbiddenError(error)) {
@@ -919,7 +912,7 @@ export function registerInventoryRoutes(app: Express) {
 
       const { replenishment: breakReplen } = req.app.locals.services;
       if (breakReplen) {
-        const targetLocId = (result as any).targetLocationId || targetLocationId || warehouseLocationId;
+        const targetLocId = result.targetLocationId ?? targetLocationId ?? warehouseLocationId;
         breakReplen.checkReplenForLocation(targetLocId).catch((err: any) =>
           console.warn(`[Replen] Post-break check failed for loc ${targetLocId}:`, err)
         );
@@ -1385,10 +1378,10 @@ export function registerInventoryRoutes(app: Express) {
   // BOOTSTRAP ROUTES
   // ============================================
 
-  app.post("/api/inventory/bootstrap/dry-run", requireAuth, async (req, res) => {
+  app.post("/api/inventory/bootstrap/dry-run", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const user = req.session?.user;
-      if (!user || user.role !== "admin") {
+      if (!user) {
         return res.status(403).json({ error: "Admin access required" });
       }
 
@@ -1519,10 +1512,10 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/bootstrap", requireAuth, async (req, res) => {
+  app.post("/api/inventory/bootstrap", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const user = req.session?.user;
-      if (!user || user.role !== "admin") {
+      if (!user) {
         return res.status(403).json({ error: "Admin access required" });
       }
 
@@ -1747,7 +1740,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/locations", requireAuth, async (req, res) => {
+  app.post("/api/inventory/locations", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const parsed = insertWarehouseLocationSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1934,7 +1927,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/items", requireAuth, protectEbayPolicyWriteBoundary("create"), async (req, res) => {
+  app.post("/api/inventory/items", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
     try {
       const parsed = insertProductSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -2026,9 +2019,9 @@ export function registerInventoryRoutes(app: Express) {
   // MIGRATE LOCATIONS & SYNC/DEBUG ROUTES
   // ============================================
 
-  app.post("/api/inventory/migrate-locations", requireAuth, async (req, res) => {
+  app.post("/api/inventory/migrate-locations", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
-      if (!req.session.user || req.session.user.role !== "admin") {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin access required" });
       }
       
@@ -2301,6 +2294,32 @@ export function registerInventoryRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching inventory levels:", error);
       res.status(500).json({ error: "Failed to fetch inventory levels" });
+    }
+  });
+
+  // Active, saved conversion directions for one product (read-only). Manual
+  // case-break forms offer only these; the server re-authorizes on execution.
+  app.get("/api/inventory/products/:productId/allowed-conversions", requirePermission("inventory", "view"), async (req, res) => {
+    const productId = Number(req.params.productId);
+    if (!Number.isSafeInteger(productId) || productId <= 0) {
+      return res.status(400).json({
+        error: "INVALID_PRODUCT_ID",
+        message: "productId must be a positive integer",
+      });
+    }
+    try {
+      const conversions = await req.app.locals.services.inventoryConversions.getAllowedConversions(productId);
+      res.json(conversions);
+    } catch (error) {
+      console.error(JSON.stringify({
+        level: "error",
+        action: "inventory.allowed_conversions.read_failed",
+        outcome: "failed",
+        error_code: "INVENTORY_ALLOWED_CONVERSIONS_READ_FAILED",
+        product_id: productId,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+      res.status(500).json({ error: "INVENTORY_ALLOWED_CONVERSIONS_READ_FAILED", message: "Failed to read allowed conversions" });
     }
   });
 

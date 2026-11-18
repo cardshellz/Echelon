@@ -1,8 +1,10 @@
 import { sql } from "drizzle-orm";
-import { omsWarehouseCancellationSql } from "../oms/order-merchandise-state.sql";
+import {
+  omsWarehouseCancellationSql,
+  wmsOmsOrderIdSql,
+} from "../oms/order-linkage-sql.api";
 
 import { logger } from "../../platform/observability/logger";
-import { wmsOmsOrderIdSql } from "../oms/oms-wms-order-link.sql";
 import {
   cancelWmsOrderAndRelease,
   completeWmsOrderAndRelease,

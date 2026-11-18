@@ -1,5 +1,6 @@
 import { providerReadDiagnosticFromError, providerReadShouldRetry } from "@shared/channel-provider-read";
 import { providerWriteDiagnosticFromError, providerWriteShouldRetry } from "@shared/channel-provider-write";
+import { channelVerificationMismatchRetry } from "../marketplace-listings/domain/channel-publication-content";
 import { channelListingValidationFromError, ChannelListingValidationError } from "@shared/channel-listing-validation";
 import { ChannelPricingResolutionError } from "./channel-pricing-resolver";
 import { z } from "zod";
@@ -152,16 +153,21 @@ const AUTOMATIC_RECOVERY_CODES = new Set([
   "EBAY_POLICY_CATALOG_UNAVAILABLE",
   "EBAY_PUBLICATION_PREFLIGHT_RETRY",
   "EBAY_QUANTITY_RESPONSE_UNCERTAIN", "QUANTITY_PROVIDER_REQUEST_TIMEOUT",
-  "EBAY_SYNC_READBACK_PENDING", "EBAY_SYNC_PERSISTENCE_FAILED", "EBAY_SYNC_PACKAGE_CHANGED",
+  "EBAY_SYNC_PERSISTENCE_FAILED", "EBAY_SYNC_PACKAGE_CHANGED",
   "PUBLICATION_RESPONSE_RECOVERY_FAILED", "PUBLICATION_AUTOMATIC_RECOVERY_FAILED",
   "ECONNRESET", "ETIMEDOUT", "ECONNREFUSED", "EBAY_AUTH_UNAVAILABLE",
   "EBAY_AUTH_REFRESH_SUPERSEDED", "EBAY_REGISTRATION_READ_TIMEOUT", "EBAY_REGISTRATION_READ_FAILED",
 ]);
+function isEbayContentReadbackPending(code: string | null | undefined): boolean {
+  return code === "EBAY_SYNC_READBACK_PENDING" || code === "EBAY_PUBLICATION_READBACK_PENDING";
+}
 export function syncFailure(
   error: unknown,
   attempts: number,
   now: Date,
   readFailureCount = 0,
+  previousCode?: string | null,
+  previousProviderRead = false,
 ): {
   readRetry?: { failures: number; paused: boolean };
   state: "recovering" | "awaiting_evidence" | "needs_attention";
@@ -175,8 +181,15 @@ export function syncFailure(
   const readFailure = providerReadDiagnosticFromError(error);
   const writeFailure = providerWriteDiagnosticFromError(error);
   const validation = channelListingValidationFromError(error);
-  const retrying = validation ? false : writeFailure ? providerWriteShouldRetry(writeFailure)
-    : readFailure ? providerReadShouldRetry(readFailure, readFailureCount + 1) :
+  // The existing durable read-check counter is scoped to the current outcome:
+  // a valid mismatch is not a provider transport failure, and neither kind of
+  // check consumes the other's retry budget when the outcome changes.
+  const previousMismatch = isEbayContentReadbackPending(previousCode) && !previousProviderRead;
+  const mismatch = !readFailure && !writeFailure && !validation && isEbayContentReadbackPending(code)
+    ? channelVerificationMismatchRetry(previousMismatch && previousCode === code ? readFailureCount : 0) : undefined;
+  const providerReadFailures = (previousMismatch ? 0 : readFailureCount) + 1;
+  const retrying = mismatch ? !mismatch.paused : validation ? false : writeFailure ? providerWriteShouldRetry(writeFailure)
+    : readFailure ? providerReadShouldRetry(readFailure, providerReadFailures) :
     waiting || AUTOMATIC_RECOVERY_CODES.has(code) ||
     ((RETRY_CODES.has(code) || code === "EBAY_LISTING_SYNC_FAILED" || code === "DATABASE_POOL_ACQUIRE_TIMEOUT") &&
       attempts < SYNC_RETRY_LIMIT);
@@ -188,8 +201,12 @@ export function syncFailure(
     "retryNotBefore" in error.context
       ? Date.parse(String(error.context.retryNotBefore))
       : NaN;
-  const minimum =
-    now.getTime() + Math.min(15 * 60_000, 30_000 * 2 ** Math.min(attempts, 5));
+  // Publication recovery may reset attempts to retain its write barrier. Use
+  // the mismatch count in that case, but never shorten an established outage
+  // backoff merely because a successful read revealed a content mismatch.
+  const backoffAttempts = Math.max(attempts, mismatch?.failures ?? 0);
+  const minimum = now.getTime() + Math.min(15 * 60_000,
+    30_000 * 2 ** Math.min(backoffAttempts, 5));
   const message = code === "DATABASE_POOL_ACQUIRE_TIMEOUT"
     ? "The database connection queue timed out. The saved update retains its earlier write evidence and can be retried safely."
     : readFailure
@@ -206,11 +223,11 @@ export function syncFailure(
       ? error.message.slice(0, 1000)
       : "The listing update could not finish. Inspect the saved sync job before retrying.";
   return {
-    ...(readFailure ? { readRetry: { failures: readFailureCount + 1, paused: !retrying } } : {}),
+    ...(mismatch ? { readRetry: mismatch } : readFailure ? { readRetry: { failures: providerReadFailures, paused: !retrying } } : {}),
     state:
       code === "EBAY_SYNC_RESPONSE_EVIDENCE_REQUIRED" || code === "EBAY_PUBLICATION_RESPONSE_UNCERTAIN" || code === "EBAY_WITHDRAWAL_RESPONSE_UNCERTAIN"
         ? "awaiting_evidence"
-        : retrying
+        : retrying || mismatch
           ? "recovering"
           : "needs_attention",
     code,

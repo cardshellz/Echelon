@@ -71,8 +71,12 @@ export function PoShipmentCostSummary({
         <div className="space-y-1 text-sm" role="status">
           <div className="rounded-md bg-muted/50 p-3 mb-3" data-testid="po-landed-cost-breakdown">
             <p className="font-semibold">Total landed cost</p>
-            <p className="font-mono text-lg font-bold">{costs.combinedCostCents === null ? "Incomplete" : money(costs.combinedCostCents)}</p>
-            <p className="text-xs text-muted-foreground">Supplier PO {money(costs.poAmountCents)} + shipment charges {money(costs.totalCents)}. Includes product, packaging and saved freight, duties and other charges.</p>
+            <p className="font-mono text-lg font-bold">{query.data.taxCosts ? query.data.taxCosts.inventoryLandedCents === null ? "Needs cost review" : money(query.data.taxCosts.inventoryLandedCents)
+              : costs.combinedCostCents === null ? "Incomplete" : money(costs.combinedCostCents)}</p>
+            {query.data.taxCosts ? <div className="text-xs text-muted-foreground"><p>Selected supplier cost {query.data.taxCosts.supplierInventoryCents === null ? "needs review" : money(query.data.taxCosts.supplierInventoryCents)} + shipment inventory cost {query.data.taxCosts.shipmentInventoryCents === null ? "needs review" : money(query.data.taxCosts.shipmentInventoryCents)}.</p>
+              <p>Recoverable supplier tax: {money(query.data.taxCosts.recoverableSupplierTaxCents)} · Recoverable shipment tax: {money(query.data.taxCosts.recoverableShipmentTaxCents)}. These remain on the bills and are recorded separately from inventory.</p>
+              {query.data.taxCosts.reason && <p>{query.data.taxCosts.reason}</p>}</div>
+              : <p className="text-xs text-muted-foreground">Supplier PO {money(costs.poAmountCents)} + shipment charges {money(costs.totalCents)}. Includes product, packaging and saved freight, duties and other charges.</p>}
           </div>
           {costs.otherCents !== 0 && <p>Other shipping charges included in total: <strong>{money(costs.otherCents)}</strong></p>}
           {costs.estimatedCents !== 0 && (

@@ -425,10 +425,12 @@ describe("decideMarketplaceSync: issue bookkeeping and Best Offer", () => {
 });
 
 describe("vendor notice kinds (owner rule 7)", () => {
-  it("are only a price below cost, an unshippable policy, a changed custom label, a listing Card Shellz can no longer update and the order-side events", () => {
+  it("are only a price below cost, an unshippable policy (and its fix), a changed custom label, a listing Card Shellz can no longer update and the order-side events", () => {
     expect(Object.keys(MARKETPLACE_SYNC_NOTICE_KINDS).sort()).toEqual(
-      ["offer_missing", "order_cancel_not_stopped", "order_cancel_refunded", "policy_incompatible", "price_below_cost", "sku_changed",
-        "unknown_item_number", "variation_unsupported"]);
+      ["offer_missing", "order_cancel_not_stopped", "order_cancel_refunded", "policy_fixed", "policy_incompatible", "price_below_cost",
+        "sku_changed", "unknown_item_number", "variation_unsupported"]);
+    // Good news is never critical: a vendor who muted optional notices isn't sent it.
+    expect(MARKETPLACE_SYNC_NOTICE_KINDS.policy_fixed.critical).toBe(false);
   });
 
   it("sends an eBay cancel Card Shellz could not stop even to a vendor who turned optional notices off (plan v4 §7.2)", () => {

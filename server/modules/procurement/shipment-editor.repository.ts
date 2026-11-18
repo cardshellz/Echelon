@@ -8,11 +8,12 @@ import type { AmendmentTransaction } from "./po-quantity-amendment.repository";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { costFingerprint, costInteger } from "../inventory/infrastructure/cost-evidence-values";
 import { hasQuantityAmendmentAuthority } from "./po-quantity-amendment.policy";
-import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor, readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { shipmentLineVersion } from "./shipment-line-version";
 import { rejectShipmentEdit, sumShipmentCents, shipmentEditorBlockedReason } from "./shipment-editor.policy";
 import { readShipmentUnitOptions } from "./shipment-unit-selection.repository";
 import { shipmentReceivingUnitSource } from "./shipment-receiving-setup.service";
+import { insertAuditEventDrizzleReturningId } from "../../infrastructure/transactional-audit";
 import { computeShipmentPhysicalTotals } from "@shared/procurement/shipment-physical-values";
 
 const number = (value: unknown) => costInteger(value, "shipment value", -Number.MAX_SAFE_INTEGER);
@@ -67,10 +68,10 @@ export async function readShipmentEditorSource(tx: AmendmentTransaction, shipmen
 export async function recordShipmentEditorApproval(tx: AmendmentTransaction, source: Awaited<ReturnType<typeof readShipmentEditorSource>>,
   after: Awaited<ReturnType<typeof readShipmentEditorSource>>, preview: ShipmentEditorPreview, request: ShipmentEditorRequest, actorId: string, at: Date) {
   const actorName = await readPurchaseApproverName(tx, actorId);
-  const [event] = await tx.insert(auditEvents).values({ timestamp: at, level: "AUDIT", actor: actorId,
+  const [event] = await insertAuditEventDrizzleReturningId(tx, { timestamp: at, level: "AUDIT", actor: actorId,
     action: "procurement.shipment.editor.approved", target: `shipment:${source.context.shipmentId}`,
     changes: { before: source.lines, after: after.lines, preview },
-    context: { shipmentId: source.context.shipmentId, actorName, reason: request.reason, sourceVersion: request.sourceVersion } }).returning({ id: auditEvents.id });
+    context: { shipmentId: source.context.shipmentId, actorName, reason: request.reason, sourceVersion: request.sourceVersion } });
   await tx.insert(inboundShipmentStatusHistory).values({ inboundShipmentId: source.context.shipmentId,
     fromStatus: source.context.status, toStatus: source.context.status, changedBy: actorId, changedAt: at,
     notes: `Shipment lines edited with administrator approval (${actorName}). ${request.reason}` });

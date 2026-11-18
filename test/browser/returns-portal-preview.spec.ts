@@ -2362,7 +2362,7 @@ test("denied automatic settings refresh removes the existing return canvas and l
 test("archiving reviews fallback and preserves history while an uncertain retry uses the same intent", async ({
   page,
 }, testInfo) => {
-  const fixture = await installReturnPreviewFixtures(page);
+  const fixture = await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
   const policies = await installReturnPolicyFixtures(page, {
     fallback: true,
     failFirstArchive: true,
@@ -2433,7 +2433,7 @@ test("archiving reviews fallback and preserves history while an uncertain retry 
 test("archiving without a fallback requires review again when the impact changes", async ({
   page,
 }) => {
-  await installReturnPreviewFixtures(page);
+  await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
   const policies = await installReturnPolicyFixtures(page, {
     staleFirstArchive: true,
   });
@@ -2486,7 +2486,7 @@ for (const failure of ["invalidPreview", "deniedArchive"] as const) {
   test(
     failure + " cannot hide a policy as successfully archived",
     async ({ page }) => {
-      await installReturnPreviewFixtures(page);
+      await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
       const policies = await installReturnPolicyFixtures(page, {
         [failure]: true,
       });

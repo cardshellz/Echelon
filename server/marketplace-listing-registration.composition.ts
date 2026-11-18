@@ -8,7 +8,7 @@ import {
 } from "./modules/channels/adapters/ebay/ebay-marketplace-registration.factory";
 import {
   createDropshipMarketplaceRegistrationOwnerAdaptersFromEnv,
-} from "./modules/dropship/infrastructure/dropship-marketplace-registration.factory";
+} from "./modules/dropship/ebay-registration-credentials.api";
 import {
   MarketplaceListingRegistrationError,
   MarketplaceListingRegistrationService,

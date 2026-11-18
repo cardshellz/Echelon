@@ -17,10 +17,13 @@ export interface ShopifyProductSetResult {
   rawResult: Record<string, unknown>;
 }
 
-interface ShopifyMarketplaceListingConnectorOptions {
+export const DEFAULT_SHOPIFY_LISTING_REQUEST_TIMEOUT_MS = 30_000;
+
+export interface ShopifyMarketplaceListingConnectorOptions {
   fetchImpl?: typeof fetch;
   delay?: (ms: number) => Promise<void>;
   maxRetries?: number;
+  requestTimeoutMs?: number;
 }
 
 interface ShopifyGraphqlResponse {
@@ -88,11 +91,13 @@ export class ShopifyMarketplaceListingConnector {
   private readonly fetchImpl: typeof fetch;
   private readonly delay: (ms: number) => Promise<void>;
   private readonly maxRetries: number;
+  private readonly requestTimeoutMs: number;
 
   constructor(options: ShopifyMarketplaceListingConnectorOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? ((...args) => fetch(...args));
     this.delay = options.delay ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.maxRetries = options.maxRetries ?? 3;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_SHOPIFY_LISTING_REQUEST_TIMEOUT_MS;
   }
 
   async pushChannelListing(input: {
@@ -202,6 +207,53 @@ export class ShopifyMarketplaceListingConnector {
     };
   }
 
+  private async fetchWithTimeout(
+    url: string,
+    init: RequestInit,
+    description: string,
+  ): Promise<Response> {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(
+          new ShopifyListingConnectorHttpError(
+            `${description} timed out after ${this.requestTimeoutMs}ms.`,
+            504,
+            "",
+          ),
+        );
+      }, this.requestTimeoutMs);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([
+        this.fetchImpl(url, {
+          ...init,
+          signal: controller.signal,
+        }),
+        timeoutPromise,
+      ]);
+    } catch (error) {
+      if (error instanceof ShopifyListingConnectorHttpError) {
+        throw error;
+      }
+      if (error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError")) {
+        throw new ShopifyListingConnectorHttpError(
+          `${description} timed out after ${this.requestTimeoutMs}ms.`,
+          504,
+          "",
+        );
+      }
+      throw error;
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
+  }
+
   private async shopifyRequest(
     credentials: ShopifyListingCredentials,
     method: string,
@@ -212,14 +264,32 @@ export class ShopifyMarketplaceListingConnector {
     const url = path.startsWith("/") ? `${baseUrl}${path}` : `${baseUrl}/${path}`;
 
     for (let attempt = 1; attempt <= this.maxRetries; attempt++) {
-      const response = await this.fetchImpl(url, {
-        method,
-        headers: {
-          "X-Shopify-Access-Token": credentials.accessToken,
-          "Content-Type": "application/json",
-        },
-        body: body ? JSON.stringify(body) : undefined,
-      });
+      let response: Response;
+      try {
+        response = await this.fetchWithTimeout(
+          url,
+          {
+            method,
+            headers: {
+              "X-Shopify-Access-Token": credentials.accessToken,
+              "Content-Type": "application/json",
+            },
+            body: body ? JSON.stringify(body) : undefined,
+          },
+          `Shopify API ${method} ${path}`,
+        );
+      } catch (error) {
+        if (
+          error instanceof ShopifyListingConnectorHttpError
+          && error.retryable
+          && attempt < this.maxRetries
+        ) {
+          const backoff = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+          await this.delay(backoff);
+          continue;
+        }
+        throw error;
+      }
 
       if (response.status === 429) {
         const retryAfter = parseInt(response.headers.get("Retry-After") || "2", 10);
@@ -258,7 +328,7 @@ export class ShopifyMarketplaceListingConnector {
       variables: Record<string, unknown>;
     },
   ): Promise<ShopifyGraphqlResponse> {
-    const response = await this.fetchImpl(
+    const response = await this.fetchWithTimeout(
       `https://${credentials.shopDomain}/admin/api/${credentials.apiVersion}/graphql.json`,
       {
         method: "POST",
@@ -268,6 +338,7 @@ export class ShopifyMarketplaceListingConnector {
         },
         body: JSON.stringify(payload),
       },
+      "Shopify listing push",
     );
     const text = await response.text();
     if (!response.ok) {

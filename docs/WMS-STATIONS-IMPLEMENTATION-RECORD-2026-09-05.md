@@ -1,5 +1,7 @@
 # WMS stations implementation record
 
+> FND-2C local correction (2026-11-04; not deployed): startup now registers missing permission/role definitions only. It does not grant permissions or assign legacy users. Any automatic-grant statement below describes prior behavior and is superseded for this candidate. Existing authority remains unchanged; explicit provisioning and mixed-version rollout gates are recorded in [the Foundation batch review](identity-explicit-access-rollout.md).
+
 Date: 2026-09-05
 
 ## Status and delivered scope

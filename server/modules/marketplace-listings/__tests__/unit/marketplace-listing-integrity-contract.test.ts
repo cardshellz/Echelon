@@ -60,6 +60,7 @@ function configuredForeignKeyNames(table: PgTable): string[] {
 function configuredUniqueConstraintNames(table: PgTable): string[] {
   return getTableConfig(table)
     .uniqueConstraints.map((constraint) => constraint.name)
+    .filter((name): name is string => name !== undefined)
     .sort();
 }
 

@@ -88,7 +88,7 @@ test("reviews real before/after values and applies once without leaving the PO l
   await dialog.getByLabel("Is packaging included in the product price?", { exact: true }).click();
   await page.getByRole("option", { name: "No, packaging is charged separately", exact: true }).click();
   await dialog.getByLabel(/^Product total/).fill("120"); await dialog.getByLabel(/^Packaging total/).fill("10");
-  await dialog.getByLabel(/^Other adjustments/).fill("0"); await dialog.getByLabel("Notes / supplier invoice reference").fill("Supplier's final document confirmed");
+  await dialog.getByLabel(/^Billed adjustments total/).fill("0"); await dialog.getByLabel("Notes / supplier invoice reference").fill("Supplier's final document confirmed");
   await dialog.getByRole("button", { name: "Review cost changes", exact: true }).click();
   const changes = dialog.getByRole("region", { name: "Supplier cost changes" });
   await expect(changes).toContainText("TEST-LOT-901"); await expect(changes).toContainText("55.0000 USD"); await expect(changes).toContainText("65.0000 USD");
@@ -139,7 +139,7 @@ test("viewers can read the task but cannot approve supplier costs", async ({ pag
   const { state, failures } = await setup(page, { cannotApprove: true });
   await page.getByTestId("cost-review-purchase:21").getByRole("button", { name: "Confirm invoice", exact: true }).click();
   const dialog = page.getByRole("dialog");
-  await expect(dialog).toContainText("Purchasing approval permission is required");
+  await expect(dialog).toContainText("An Administrator with purchasing approval permission must approve supplier cost changes.");
   await expect(dialog.getByRole("button", { name: "Review cost changes", exact: true })).toHaveCount(0);
   expect(state.previews).toBe(0); expect(state.approvals).toHaveLength(0); expect(failures).toEqual([]);
 });

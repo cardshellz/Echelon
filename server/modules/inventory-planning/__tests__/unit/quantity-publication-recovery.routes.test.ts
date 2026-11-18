@@ -1,7 +1,7 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { registerQuantityPublicationRecoveryRoutes } from "../../interfaces/http/quantity-publication-recovery.routes";
 import { QuantityPublicationRecoveryService } from "../../application/quantity-publication-recovery.service";
 import { QuantityPublicationAdmissionError } from "../../domain/quantity-publication-admission";
@@ -16,7 +16,11 @@ const actions = ["pending", "attest"] as const;
 describe("publication recovery activation-role HTTP boundary", () => {
   let server: Awaited<ReturnType<typeof startServer>>;
   let session: { user?: { id?: string } };
-  let service: { pending: ReturnType<typeof vi.fn>; attest: ReturnType<typeof vi.fn>; attestProviderAnswers: ReturnType<typeof vi.fn> };
+  let service: {
+    pending: Mock<(...args: any[]) => Promise<any>>;
+    attest: Mock<(...args: any[]) => Promise<any>>;
+    attestProviderAnswers: Mock<(...args: any[]) => Promise<any>>;
+  };
   const confirmation = { activationRunId: "1", confirmations: [{ attemptId: "20", evidenceHash: "b".repeat(64) }] };
   const confirmationOutcome = { basis: "operator_attestation", providerWriteAttempted: false, confirmed: [{ attemptId: "20", replay: false }], skipped: [] };
   beforeEach(async () => {

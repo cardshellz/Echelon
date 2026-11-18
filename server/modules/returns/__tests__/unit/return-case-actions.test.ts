@@ -155,14 +155,14 @@ describe("return case action plan", () => {
   );
 
   it("keeps coherent terminal evidence completed after later case closure and restocking", () => {
-    const inspection: NonNullable<ReturnCaseActionContext["inspection"]> = {
+    const inspection = {
       inspectionId: 8,
       status: "approved",
       startedAt: new Date("2026-08-22T12:00:00.000Z"),
       startedBy: "user:7",
       completedAt: new Date("2026-08-22T12:15:00.000Z"),
       completedBy: "user:9",
-    };
+    } satisfies NonNullable<ReturnCaseActionContext["inspection"]>;
     const plan = deriveReturnCaseActionPlan(context({
       lifecycle: {
         ...lifecycle(),

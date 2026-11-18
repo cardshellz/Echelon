@@ -36,7 +36,7 @@ describe("warehouse work transaction safety", () => {
   it("reads identity-owned grants and refuses unsupported constraints", async () => {
     const f = transactionFixture();
     f.query.mockResolvedValueOnce({ rows: [{ id: "user", active: 1 }] }).mockResolvedValueOnce({ rows: [
-      { action: "view", constraints: null }, { action: "configure", constraints: { warehouseId: 1 } }, { action: "picking", constraints: {} },
+      { action: "view", unscoped: true }, { action: "configure", unscoped: false }, { action: "picking", unscoped: false },
     ] });
     expect(await readWarehouseWorkActor(f.client, "user")).toEqual({ id: "user", active: true, permissions: ["warehouse_work:view"] });
     expect(f.query.mock.calls[0][1]).toEqual(["user"]);

@@ -66,13 +66,30 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     }));
     history = (await import("../../order-history.storage")).orderHistoryMethods;
     vi.doMock("../../../../db", () => ({ db: orm, pool: database.pool }));
+    // This suite proves WMS listing SQL/DTO behavior. Keep the real HTTP gate,
+    // supplying its current Identity authority through an explicit test port;
+    // the deliberately small listing schema is not an Identity fixture.
+    vi.doMock("../../../identity", async importOriginal => ({
+      ...await importOriginal<typeof import("../../../identity")>(),
+      readCurrentStaffAccess: async (userId: string) => userId === "fixture-operator" ? {
+        user: { id: userId, username: "Fixture operator", active: 1, role: "picker", displayName: null,
+          createdAt: new Date("2026-10-05T00:00:00Z"), lastLoginAt: null },
+        roles: [{ id: 1, name: "Picker", isSystem: true }], permissions: ["picking:view"],
+      } : userId === "fixture-without-picking" ? {
+        user: { id: userId, username: "No picking grant", active: 1, role: "admin", displayName: null,
+          createdAt: new Date("2026-10-05T00:00:00Z"), lastLoginAt: null },
+        roles: [{ id: 2, name: "Custom role", isSystem: false }], permissions: ["shipments:view"],
+      } : undefined,
+      hasPermission: async (userId: string, resource: string, action: string) =>
+        userId === "fixture-operator" && `${resource}:${action}` === "picking:view",
+    }));
     orderStorage = (await import("../../orders.storage")).orderMethods;
   });
   beforeEach(async () => {
     await database.pool.query("TRUNCATE wms.order_items, wms.orders, wms.picking_logs, oms.oms_orders, oms.oms_order_lines, channels.channels RESTART IDENTITY");
     queries.length = 0;
   });
-  afterAll(async () => { vi.doUnmock("../../../../storage/base"); vi.doUnmock("../../../../db"); await database?.close(); });
+  afterAll(async () => { vi.doUnmock("../../../../storage/base"); vi.doUnmock("../../../../db"); vi.doUnmock("../../../identity"); await database?.close(); });
 
   async function seed(status: string, overrides: Partial<typeof schema.wmsOrders.$inferInsert> = {}) {
     const [order] = await orm.insert(schema.wmsOrders).values({
@@ -156,7 +173,7 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
       } as never);
     const app = express();
     app.use((req, _res, next) => {
-      req.session = { user: req.headers.authorization === "fixture-session" ? { id: "fixture-operator" } : undefined } as Request["session"];
+      req.session = { user: req.headers.authorization === "fixture-session" ? { id: "fixture-operator" } : req.headers.authorization === "fixture-without-picking" ? { id: "fixture-without-picking" } : undefined } as Request["session"];
       next();
     });
     app.locals.services = { picking } as unknown as typeof app.locals.services;
@@ -167,6 +184,7 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     const logging = vi.spyOn(console, "error");
     try {
       expect((await fetch(url)).status).toBe(401);
+      expect((await fetch(url, { headers: { authorization: "fixture-without-picking" } })).status).toBe(403);
       const response = await fetch(url, { headers: { authorization: "fixture-session" } });
       expect(response.status).toBe(200);
       expect(response.headers.get("cache-control")).toContain("no-store");
@@ -184,6 +202,16 @@ describeDatabase("bounded order listing PostgreSQL reads", () => {
     }
   });
 
+  it("keeps cancelled/shipped held history in terminal buckets without changing records",async()=>{
+    const cancelled=await seed("cancelled",{onHold:1,priority:-1});
+    const shipped=await seed("shipped",{onHold:1,priority:-1});
+    const active=await seed("ready",{onHold:1,priority:-1});
+    const before=(await database.pool.query("SELECT * FROM wms.orders ORDER BY id")).rows;
+    expect((await repository.page({bucket:"issues"})).orders.map(order=>order.id)).toEqual([active.id]);
+    expect((await repository.page({bucket:"cancelled"})).orders.map(order=>order.id)).toEqual([cancelled.id]);
+    expect((await repository.page({bucket:"shipped"})).orders.map(order=>order.id)).toEqual([shipped.id]);
+    expect((await database.pool.query("SELECT * FROM wms.orders ORDER BY id")).rows).toEqual(before);
+  });
   it("matches every operational bucket including held/unknown statuses and scoped counts", async () => {
     const rows = [];
     for (const status of ["ready", "in_progress", "partially_shipped", "completed", "ready_to_ship", "exception", "on_hold", "shipped", "cancelled", "unknown", " READY "]) {

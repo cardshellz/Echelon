@@ -10,7 +10,7 @@ import {
   type PackageCloseDecision,
   type PackageCloseEvidence,
 } from "@shared/warehouse-package-close";
-import { normalizeTrackingNumber } from "../shipping/carrier-tracking.domain";
+import { normalizeTrackingNumber } from "../shipping/carrier-tracking-and-dispatch.api";
 
 /** Canonical ordering only; parsing creates new objects and never mutates owner evidence. */
 function normalizeEvidence(raw: unknown): PackageCloseEvidence {

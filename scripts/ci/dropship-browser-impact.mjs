@@ -18,7 +18,7 @@ export function fullDropshipBrowserPlan(reason) {
   } };
 }
 
-export function selectDropshipBrowserFeatures({ changes, files, readSource, previous, force = false }) {
+export function selectDropshipBrowserFeatures({ changes, files, readSource, previous, force = false, dependencyCache = new Map() }) {
   try {
     validateDropshipFeatureCoverage(files);
     const definitions = Object.fromEntries(Object.entries(DROPSHIP_BROWSER_FEATURES).map(([name, group]) => [name, {
@@ -31,7 +31,6 @@ export function selectDropshipBrowserFeatures({ changes, files, readSource, prev
       ownedPrefixes: [],
       isolated: true,
     }]));
-    const dependencyCache = new Map();
     const decisions = Object.keys(definitions).map(feature => ({ feature,
       ...selectBrowserSuite({ suite: feature, changes, files, readSource, previous, force, definitions, dependencyCache }),
     }));

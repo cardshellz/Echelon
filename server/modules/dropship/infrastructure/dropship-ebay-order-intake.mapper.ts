@@ -1,6 +1,6 @@
 import { DropshipError } from "../domain/errors";
 import type { RecordDropshipOrderIntakeInput } from "../application/dropship-order-intake-service";
-import type { EbayAmount, EbayOrder, EbayOrderLineItem } from "../../channels/adapters/ebay/ebay-types";
+import type { EbayAmount, EbayOrder, EbayOrderLineItem } from "../../channels/ebay-connector.api";
 
 /** A minus sign directly followed by an amount eBay could report: "-1", "-1.5", "-1.50". */
 const NEGATIVE_EBAY_AMOUNT_PATTERN = /^-(\d+(?:\.\d{1,2})?)$/;

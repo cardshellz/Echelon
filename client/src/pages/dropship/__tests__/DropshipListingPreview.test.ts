@@ -229,7 +229,7 @@ describe("rich listing preview", () => {
     const value = row(); value.economics!.vendorProductCostCents = null;
     value.presentation!.images = [{ assetId: 2, url: null, altText: null, source: "catalog_file", publicationStatus: "not_included", reason: "not_publishable" }];
     const markup = sheet(value, setup());
-    expect(markup).toContain("Unavailable"); expect(markup).toContain("No image available"); expect(markup).toContain("not included in the listing payload");
+    expect(markup).toContain("Unavailable"); expect(markup).toContain("No image available"); expect(markup).toContain("not included in your listing");
     expect(markup).not.toContain("$0.00");
   });
   it("shows an uploaded photo the listing publishes as included, and says why one is left out", () => {
@@ -239,7 +239,7 @@ describe("rich listing preview", () => {
     const included = sheet(value, setup(), "2026-10-06T12:00:00.000Z");
     expect(included).toContain(`src="${uploadedUrl}"`);
     expect(included).toContain("1 included in listing");
-    expect(included).toContain("Included in the listing payload.");
+    expect(included).toContain("Included in your listing.");
 
     value.presentation!.images = [{ assetId: 4, url: "/api/dropship/listings/stores/9/variants/1/assets/4/file", altText: null,
       source: "catalog_file", publicationStatus: "not_included", reason: "catalog_photo_public_address_missing" }];

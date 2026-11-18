@@ -1,4 +1,4 @@
-import type { Pool, PoolClient, QueryResult } from "pg";
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
 vi.hoisted(() => {
@@ -169,7 +169,7 @@ function makeClient(input: { packageRows: Record<string, unknown>[] }): PoolClie
   };
 }
 
-function result<T>(rows: T[]): QueryResult<T> {
+function result<T extends QueryResultRow>(rows: T[]): QueryResult<T> {
   return {
     command: "SELECT",
     rowCount: rows.length,

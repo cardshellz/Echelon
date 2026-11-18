@@ -1,4 +1,6 @@
 import { z } from "zod";
+import { invoiceCostComponentEvidenceSchema, invoiceCostComponentFields, validateInvoiceCostPackaging } from "./invoice-cost-evidence";
+import { invoiceCorrectionCostImpactSchema } from "./invoice-correction-cost-impact";
 
 export const invoiceQuantityIdSchema = z.number().int().positive().max(2_147_483_647);
 const count = z.number().int().nonnegative().safe();
@@ -6,12 +8,15 @@ const money = z.number().int().nonnegative().safe();
 const version = z.string().regex(/^[a-f0-9]{64}$/);
 const match = z.enum(["pending", "matched", "po_line_missing", "price_discrepancy", "qty_discrepancy", "over_billed"]);
 const amountPerPiece = z.string().regex(/^\d+\.\d{6}$/);
+export const invoiceCorrectionCostComponentsSchema = z.object(invoiceCostComponentFields).strict().superRefine(validateInvoiceCostPackaging);
+export type InvoiceCorrectionCostComponents = z.infer<typeof invoiceCorrectionCostComponentsSchema>;
 
 const invoiceCorrectionFields = z.object({
   sourceVersion: version, quantityPieces: invoiceQuantityIdSchema,
   // Explicit economics opt into a reviewed line amendment. Legacy saved
   // quantity-only requests preserve their amounts and remain replayable.
   unitCostMills: money.optional(), lineTotalCents: money.optional(),
+  costComponents: invoiceCorrectionCostComponentsSchema.optional(),
   closedPurchaseOrderConfirmed: z.literal(true).optional(),
 }).strict();
 function validateCorrectionFields(request: z.infer<typeof invoiceCorrectionFields>, ctx: z.RefinementCtx): void {
@@ -21,6 +26,9 @@ function validateCorrectionFields(request: z.infer<typeof invoiceCorrectionField
 export const invoiceQuantityPreviewRequestSchema = invoiceCorrectionFields.superRefine(validateCorrectionFields);
 export const invoiceQuantityApprovalRequestSchema = invoiceCorrectionFields.extend({
   reason: z.string().trim().min(10).max(2000), approvalConfirmed: z.literal(true),
+  // Optional for decoding committed legacy receipts. Every new approval must
+  // supply the measured preview version; the owning service enforces that.
+  previewVersion: version.optional(),
 }).strict().superRefine(validateCorrectionFields);
 export const invoiceQuantityPreviewSchema = z.object({
   invoiceId: invoiceQuantityIdSchema,
@@ -53,6 +61,11 @@ export const invoiceQuantityPreviewSchema = z.object({
   afterMatch: match,
   remainingIssues: z.array(z.object({ invoiceId: invoiceQuantityIdSchema, lineId: invoiceQuantityIdSchema, status: match }).strict()),
   warnings: z.array(z.string()),
+  beforeCostComponents: invoiceCostComponentEvidenceSchema.nullable().optional(),
+  afterCostComponents: invoiceCostComponentEvidenceSchema.nullable().optional(),
+  costComponentsReviewed: z.boolean().optional(),
+  costing: invoiceCorrectionCostImpactSchema.optional(),
+  previewVersion: version.optional(),
 }).strict();
 export const invoiceQuantityContextSchema = z.object({
   invoiceId: invoiceQuantityIdSchema,

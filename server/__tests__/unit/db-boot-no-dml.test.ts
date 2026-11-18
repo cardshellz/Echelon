@@ -5,16 +5,22 @@ import { fileURLToPath } from "node:url";
 /**
  * P0.2 — boot must never mutate data (source invariant / writer-ratchet seed).
  *
- * runStartupMigrations() historically carried one-time data repairs that
+ * The schema fallbacks that used to live in db.ts (run at every boot, later
+ * once per release, deleted under REFACTOR-PLAN P4.1) carried one-time data
+ * repairs that
  * re-ran on EVERY deploy: an unledgered DELETE of inventory_levels rows, a
  * hold wipe that silently released every line-item hold on restart (audit
  * F2, CRITICAL), shipment status rewrites, engine-ref re-stamping, and a
  * recurring lot-cost "repair" that masked live cost-drift writers.
  *
- * This test freezes the boot DML surface to an explicit allowlist:
- *   - idempotent CONFIG seeds (product lines/types, sync settings default)
- *   - the fulfillment_partition_key backfill, which is load-bearing for the
- *     CHECK constraint + unique index created immediately after it
+ * This test freezes the boot DML surface to an explicit allowlist, which is
+ * now empty: the schema fallbacks write no rows at all.
+ *
+ * The allowlist only shrinks. The product-lines seed, the
+ * fulfillment_partition_key backfill, the product types seed and the sync
+ * settings default row were retired with their fallback blocks
+ * (REFACTOR-PLAN P4.1); all four live in tracked migrations (037, 111,
+ * product_types_seed_and_listing_rule_scope_check, 0669).
  *
  * Any new INSERT/UPDATE/DELETE in db.ts fails this test and must go through
  * a reviewed, tracked migration instead.
@@ -30,12 +36,7 @@ const CODE_ONLY = DB_SRC.split("\n")
   .filter((line) => !line.trim().startsWith("//") && !line.trim().startsWith("*"))
   .join("\n");
 
-const DML_ALLOWLIST: Array<{ pattern: RegExp; why: string }> = [
-  { pattern: /INSERT INTO catalog\.product_lines/, why: "config seed (idempotent WHERE NOT EXISTS)" },
-  { pattern: /INSERT INTO catalog\.product_types/, why: "config seed (idempotent ON CONFLICT)" },
-  { pattern: /INSERT INTO sync_settings/, why: "config default row (idempotent WHERE NOT EXISTS)" },
-  { pattern: /UPDATE wms\.orders\s*\n?\s*SET fulfillment_partition_key = 'default'/, why: "DDL-coupled backfill required by the partition CHECK constraint + unique index" },
-];
+const DML_ALLOWLIST: Array<{ pattern: RegExp; why: string }> = [];
 
 describe("db.ts boot path — no data mutations (P0.2)", () => {
   it("contains no DML outside the explicit allowlist", () => {
@@ -51,7 +52,7 @@ describe("db.ts boot path — no data mutations (P0.2)", () => {
     expect(
       unexpected,
       `Boot-time DML found outside the allowlist — data mutations belong in ` +
-        `reviewed tracked migrations, never in runStartupMigrations():\n${unexpected.join("\n")}`,
+        `reviewed tracked migrations, never in the db.ts schema fallbacks:\n${unexpected.join("\n")}`,
     ).toEqual([]);
   });
 

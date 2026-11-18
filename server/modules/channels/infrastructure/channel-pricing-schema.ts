@@ -1,5 +1,8 @@
 /**
- * Production pricing-rule DDL, shared by startup and PostgreSQL regressions.
+ * Production pricing-rule DDL for PostgreSQL regressions. It matches the table
+ * production has. No tracked migration creates this table yet: the release-phase
+ * schema fallback that used to run this was retired (REFACTOR-PLAN P4.1), and
+ * *_listing_intent_propagation.sql requires the table to exist already.
  * These are two partial indexes: conflict inference must include their exact
  * null/non-null predicates. Do not replace them with an unconditional test index.
  */

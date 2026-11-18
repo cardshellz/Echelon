@@ -8,9 +8,9 @@
  */
 
 // Storage
-export { type IInventoryStorage, inventoryMethods } from "./infrastructure/inventory.repository";
-export { type IReplenishmentStorage, replenishmentMethods } from "./infrastructure/replenishment.repository";
-export { type ICycleCountStorage, cycleCountMethods } from "./infrastructure/cycle-count.repository";
+export type { IInventoryStorage } from "./infrastructure/inventory.repository";
+export type { IReplenishmentStorage } from "./infrastructure/replenishment.repository";
+export type { ICycleCountStorage } from "./infrastructure/cycle-count.repository";
 
 import { type IInventoryStorage, inventoryMethods } from "./infrastructure/inventory.repository";
 import { type IReplenishmentStorage, replenishmentMethods } from "./infrastructure/replenishment.repository";
@@ -38,6 +38,21 @@ export { createBuildUseCases, BuildUseCases } from "./application/build.use-case
 export { createCOGSService, COGSService } from "./cogs.service";
 export { registerReplenishmentRoutes } from "./replenishment.routes";
 export { registerBuildRoutes } from "./build.routes";
+export {
+  CostEvidenceError,
+  costFingerprint,
+  costInteger,
+  lockInventoryCostGraph,
+  applyCostRevision,
+  refreshReceiptProvisional,
+  readLatestCostApplicationStatuses,
+  type CostEvidenceTransaction,
+  type CostRevisionInput,
+  type RecordedCostRevision,
+  type CostApplicationOptions,
+  type CostComponentWriter,
+  type CostRevisionApplicationResult,
+} from "./cost-application-public";
 
 // Service types
 export type {

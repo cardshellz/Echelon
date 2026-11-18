@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { storedEbayListingSyncJobSchema } from "../../ebay-listing-sync.domain";
 import { ebayListingSyncJobSchema } from "@shared/types/ebay-listing-sync";
+import { createHash } from "node:crypto";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import { buildEbayQuantityUpdateRequest } from "../../adapters/ebay/ebay-quantity-update";
 
 const fixture = vi.hoisted(() => ({
   rows: [] as Array<Record<string, unknown>>,
@@ -9,6 +12,10 @@ const fixture = vi.hoisted(() => ({
   products: [] as Array<{ id: number; name: string }>,
   saved: new Map<string, { actor: string; job: unknown; requestedOperation?: "sync" | "publish" | "withdraw" }>(),
   rejections: new Map<string, unknown>(),
+  unfinished: vi.fn(async () => false),
+  outstanding: vi.fn(async () => false),
+  rowReads: 0,
+  changeAfter: 0,
 }));
 vi.mock("../../../../db", () => ({
   pool: {},
@@ -16,7 +23,11 @@ vi.mock("../../../../db", () => ({
     const query = {
       from: () => query, innerJoin: () => query, leftJoin: () => query, where: () => query,
       limit: async () => [{ id: 12, metadata: { marketplaceId: "EBAY_US" } }],
-      orderBy: async () => fixture.rows,
+      orderBy: async () => {
+        fixture.rowReads += 1;
+        return fixture.rows.map((row, index) => fixture.changeAfter && fixture.rowReads >= fixture.changeAfter && index === 0
+          ? { ...row, variant_sku: "RENAMED-DURING-CHECK" } : row);
+      },
       then: (resolve: (value: unknown) => unknown) => Promise.resolve(selection?.id ? fixture.products : []).then(resolve),
     };
     return query;
@@ -26,8 +37,10 @@ vi.mock("../../infrastructure/ebay-api-runtime", () => ({ EBAY_CHANNEL_ID: 67,
   getAuthService: () => ({ getVerifiedProviderAccount: async () => ({ externalAccountId: "seller" }) }),
   atpService: {}, ebayListingPhotoResolver: {},
 }));
-vi.mock("../../infrastructure/ebay-listing-sync.repository", () => ({ PostgresEbayListingSyncRepository: class {} }));
-vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: {},
+vi.mock("../../infrastructure/ebay-listing-sync.repository", () => ({ PostgresEbayListingSyncRepository: class {
+  hasUnfinishedRecoveryWork = fixture.unfinished;
+} }));
+vi.mock("../../../inventory-planning/quantity-publication", () => ({ quantityProviderResponseRecovery: { hasOutstanding: fixture.outstanding },
   automaticEbayPublicationRecovery: {}, ebayPublicationReconciliationRepository: {},
   ebayPublicationRejectionReader: { read: vi.fn() },
   EbayPublicationContentRefreshRejectedError: class extends Error {
@@ -79,9 +92,40 @@ beforeEach(() => {
   fixture.products = [];
   fixture.saved.clear();
   fixture.rejections.clear();
+  fixture.unfinished.mockReset().mockResolvedValue(false);
+  fixture.outstanding.mockReset().mockResolvedValue(false);
+  fixture.rowReads = 0;
+  fixture.changeAfter = 0;
 });
 
 describe("active existing-listing selection to admission composition", () => {
+  function retainedStockOnly() {
+    const sku = "EBAY-3-PACK", offerId = "offer-3-0", quantity = 17;
+    return { scope: { destinationKind: "channel_connection" as const, connectionId: 12, providerKey: "ebay" as const,
+      providerScopeType: "account" as const, externalScopeId: "seller", externalInventoryItemId: sku, productId: 3, productVariantId: 30 },
+    effect: { attemptId: "1", ownerKind: "outbox", requestCount: 1, method: "POST",
+      path: "/sell/inventory/v1/bulk_update_price_quantity", requestHash: createHash("sha256")
+        .update(canonicalJson(buildEbayQuantityUpdateRequest([{ sku, offerId, quantity }]))).digest("hex"),
+      desiredQuantity: "17", inventoryItemId: sku, productVariantId: 30, connectionId: 12, accountId: "seller" } };
+  }
+  it("uses retained stock-only evidence without enqueueing a listing job", async () => {
+    fixture.rows = rows(3, "CAT-3", "EBAY-3");
+    const { scope, effect } = retainedStockOnly();
+    const result = await refreshRecoveredEbayListing({ productId: 3, connectionId: 12, accountId: "seller",
+      commandKey: "00000000-0000-4000-8000-000000000003", scopes: [scope], effects: [effect] });
+    expect(result).toMatchObject({ verified: { kind: "stock_only" } });
+    expect(fixture.queued).toHaveLength(0);
+    expect(fixture.outstanding).toHaveBeenCalled();
+  });
+  it("hands changed mapping to normal Sync instead of recording stale stock-only proof", async () => {
+    fixture.rows = rows(3, "CAT-3", "EBAY-3");
+    fixture.changeAfter = 4;
+    const { scope, effect } = retainedStockOnly();
+    const result = await refreshRecoveredEbayListing({ productId: 3, connectionId: 12, accountId: "seller",
+      commandKey: "00000000-0000-4000-8000-000000000004", scopes: [scope], effects: [effect] });
+    expect(result).toMatchObject({ jobId: "00000000-0000-4000-8000-000000000004" });
+    expect(fixture.queued).toHaveLength(1);
+  });
   it("returns a normal Sync's accepted publication receipt after a lost acknowledgement and mapping changes", async () => {
     fixture.rows = rows(3, "CAT-3", "EBAY-3");
     const commandKey = "00000000-0000-4000-8000-000000000003";

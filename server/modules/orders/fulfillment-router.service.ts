@@ -5,6 +5,7 @@ import {
   orders,
 } from "@shared/schema";
 import { getDefaultFulfillmentWarehouse } from "../warehouse/infrastructure/warehouse.repository";
+import { updateWmsOrderByIdInWms } from "../wms/wms-order-mutations.api";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -158,10 +159,7 @@ class FulfillmentRouterService {
       updates.warehouseStatus = "awaiting_3pl";
     }
 
-    await this.db
-      .update(orders)
-      .set(updates)
-      .where(eq(orders.id, orderId));
+    await updateWmsOrderByIdInWms(this.db, orderId, updates);
   }
 }
 

@@ -1,7 +1,7 @@
 import type {
   EbayRegistrationCredentialProvider,
   EbayRegistrationReadCredential,
-} from "../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
+} from "../../marketplace-listings/ebay-registration.api";
 import { MarketplaceListingRegistrationError } from "../../marketplace-listings/domain/registration-errors";
 import type { ListingOwnerRef } from "../../marketplace-listings/domain/listing-replacement-plan";
 import type { DropshipMarketplaceRegistrationOwnerRepository } from "../application/dropship-marketplace-registration-owner-reader";

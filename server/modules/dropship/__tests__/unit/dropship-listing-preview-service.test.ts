@@ -143,9 +143,9 @@ describe("DropshipListingPreviewService", () => {
       ebayFulfillmentPolicyGuard: {
         evaluateForStoreConnection: async (input) => {
           evaluatedFulfillmentPolicyIds.push(input.fulfillmentPolicyId);
-          return { ...ebayPolicyPreflight, fulfillmentPolicyId: input.fulfillmentPolicyId };
+          return { originWarehouseId: null, ...ebayPolicyPreflight, fulfillmentPolicyId: input.fulfillmentPolicyId };
         },
-        evaluateWithAccessToken: async () => ebayPolicyPreflight,
+        evaluateWithAccessToken: async () => ({ originWarehouseId: null, ...ebayPolicyPreflight }),
       },
       ebayReturnPaymentPolicies: {
         check: async (input) => {
@@ -1122,6 +1122,7 @@ describe("DropshipListingPreviewService", () => {
     };
     repository.listingPolicyOverrides = [{
       productVariantId: 101,
+      revisionId: 1,
       fulfillmentPolicyId: "fulfillment-override",
       returnPolicyId: "return-override",
       paymentPolicyId: null,
@@ -1968,7 +1969,7 @@ describe("DropshipListingPreviewService", () => {
         generatePreview: (input) => service.generatePreview(input),
         resolveCostChangePolicy: async () => ({ policyId: null, settings: DEFAULT_DROPSHIP_COST_CHANGE_POLICY }),
         logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      }, { jobId: 30, jobItemId: 1, vendorId: 10, storeConnectionId: 22, productVariantId: 101, queuedPriceCents: 1152 });
+      }, { jobId: 30, jobItemId: 1, vendorId: 10, storeConnectionId: 22, productVariantId: 101, queuedPriceCents: 1152, queuedMarketplaceCategory: null });
       separateReads();
       const separate = await refresh();
 
@@ -2300,7 +2301,7 @@ function availableCost(unitCostCents: number): DropshipProductCost {
   return { status: "available", unitCostCents, planId: "ops", source: "variant_fixed_price", overrideId: "fixed", issue: null, retailPriceCents: null, discountBps: null };
 }
 function rulePrice(): ListingRulePrice {
-  return { priceCents: 1152, ruleName: "Store default rule", ruleId: null, issue: null, profileRevisionId: 1,
+  return { priceCents: 1152, ruleName: "Store default rule", ruleId: null, issue: null, basis: "product_cost", profileRevisionId: 1,
     evidenceHash: "a".repeat(64), productCost: { status: "available", unitCostCents: 809, planId: "ops", source: "variant_fixed_price", overrideId: "fixed", issue: null, retailPriceCents: null, discountBps: null } };
 }
 function makeCandidate(): DropshipListingCatalogCandidate {

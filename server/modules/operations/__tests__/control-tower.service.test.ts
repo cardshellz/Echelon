@@ -1,22 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../oms/ops-health.service", () => ({
+vi.mock("../../oms/operations-observability.api", () => ({
   getOmsOpsHealth: vi.fn(),
-}));
-vi.mock("../../oms/flow-waterfall.service", () => ({
   getFlowBucketSamples: vi.fn(),
   getFlowWaterfall: vi.fn(),
-}));
-vi.mock("../../oms/oms-flow-reconciliation.service", () => ({
   remediateOmsFlowIssue: vi.fn(),
+  SHIPSTATION_UNMAPPED_PHYSICAL_RULE: "shipstation_unmapped_physical_shipment",
 }));
-vi.mock("../../procurement/procurement-health-summary.service", () => ({
+vi.mock("../../procurement/health-and-observability.api", () => ({
   loadProcurementHealthSummary: vi.fn(),
 }));
 
-import { getFlowBucketSamples, getFlowWaterfall } from "../../oms/flow-waterfall.service";
-import { getOmsOpsHealth } from "../../oms/ops-health.service";
-import { remediateOmsFlowIssue } from "../../oms/oms-flow-reconciliation.service";
+import {
+  getFlowBucketSamples,
+  getFlowWaterfall,
+  getOmsOpsHealth,
+  remediateOmsFlowIssue,
+} from "../../oms/operations-observability.api";
 import {
   executeOperationsControlTowerAction,
   getOperationsControlTower,
