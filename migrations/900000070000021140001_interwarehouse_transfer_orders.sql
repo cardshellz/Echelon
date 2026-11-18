@@ -1,4 +1,15 @@
 -- Durable inter-warehouse custody: source -> isolated transit node -> destination.
+-- Baseline restores intentionally omit singleton data. Restore the cutover
+-- admission row under the narrowly scoped migration bypass before touching a
+-- table protected by the admission trigger. Existing databases are unchanged.
+ALTER TABLE inventory.cutover_admission_fence
+  DISABLE TRIGGER cutover_admission_owner_write_guard;
+INSERT INTO inventory.cutover_admission_fence(singleton_key, epoch)
+VALUES (true, 1)
+ON CONFLICT (singleton_key) DO NOTHING;
+ALTER TABLE inventory.cutover_admission_fence
+  ENABLE TRIGGER cutover_admission_owner_write_guard;
+
 INSERT INTO warehouse.warehouses (
   code, name, warehouse_type, is_active, is_default, inventory_source_type, feed_enabled
 ) VALUES (

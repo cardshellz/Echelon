@@ -175,6 +175,9 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
           recoverInventoryTransfers: async () => {
             calls.push("transfers");
           },
+          recoverInterwarehouseTransfers: async () => {
+            calls.push("interwarehouse");
+          },
           recoverSupplierReturns: async () => {
             calls.push("returns");
           },
@@ -185,7 +188,7 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
       await new Promise((r) => setTimeout(r, 80));
       worker.stop();
 
-      expect(calls).toEqual(["replen", "transfers", "returns"]);
+      expect(calls).toEqual(["replen", "transfers", "interwarehouse", "returns"]);
       expect(errSpy).toHaveBeenCalledWith(
         expect.stringContaining("recoverPendingPickingCommands"),
       );
