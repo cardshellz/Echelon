@@ -282,7 +282,17 @@ describe("fast CI preserves coverage and required checks", () => {
       expect(job(workflow, name)).not.toContain("needs: preflight");
     }
     expect(job(workflow, "postgres-hardening-shard")).toContain("needs: preflight");
-    expect(job(workflow, "check-and-unit")).toContain("needs: [preflight, app-bootstrap, typecheck, unit-tests, contracts]");
+    expect(job(workflow, "check-and-unit")).toContain("needs: [preflight, app-bootstrap, typecheck, unit-tests, contracts, database-from-repository]");
+  });
+
+  it("builds an empty database from the repository on production's PostgreSQL major version", () => {
+    const build = job(workflow, "database-from-repository");
+    expect(build).toContain("image: postgres:17");
+    expect(build).toContain('ECHELON_TEST_DATABASE_DISPOSABLE: "true"');
+    expect(build).toContain("MIGRATION_DATABASE_SSL: disable");
+    expect(build).toContain("run: node --import tsx scripts/ci/build-database-from-repository.ts");
+    // It runs on every pull request: a migration must not reach a release untested.
+    expect(build).not.toMatch(/needs:|if:|continue-on-error/);
   });
 
   it("runs only the selected feature matrix, with bounded concurrency and an unfiltered failure fallback", () => {
@@ -588,10 +598,10 @@ describe("fast CI preserves coverage and required checks", () => {
   it("retains the existing required core check and fails closed on every dependency", () => {
     const gate = job(workflow, "check-and-unit");
     expect(gate).toContain("name: Typecheck + unit tests");
-    expect(gate).toContain("needs: [preflight, app-bootstrap, typecheck, unit-tests, contracts]");
+    expect(gate).toContain("needs: [preflight, app-bootstrap, typecheck, unit-tests, contracts, database-from-repository]");
     expect(gate).toContain("if: ${{ always() }}");
     expect(gate).toContain("CI_NEEDS: ${{ toJSON(needs) }}");
-    expect(gate).toContain("node scripts/ci/require-success.mjs preflight app-bootstrap typecheck unit-tests contracts");
+    expect(gate).toContain("node scripts/ci/require-success.mjs preflight app-bootstrap typecheck unit-tests contracts database-from-repository");
     expect(workflow).not.toMatch(/continue-on-error:|paths(?:-ignore)?:/);
   });
 

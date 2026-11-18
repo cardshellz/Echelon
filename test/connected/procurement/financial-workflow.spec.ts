@@ -28,6 +28,14 @@ async function loseCommittedResponse(page: Page, path: string | RegExp) {
 
 test("non-admin cash receipt survives committed response loss, revoked authority and session expiry, then applies once", async ({ page, backend }, info) => {
   const actor = financialOperator(backend);
+  // The connected server has no notification socket, so the page's socket
+  // closes at once and every close makes the page re-read the operator's
+  // permissions (retrying after 1s, 2s, 4s...). If one of those reads lands
+  // between the revocation below and the click, the page disables the button
+  // itself and the click times out. Hold the socket open so the page can only
+  // learn of the revocation from the server refusing the request, which is
+  // what this case checks.
+  await page.routeWebSocket("**/ws", () => {});
   await login(page, backend, actor);
   const initial = await state(backend);
   const attempts = await loseCommittedResponse(page, "**/api/ap-payments");

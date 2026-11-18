@@ -80,6 +80,21 @@ export function migrationRetryOptionsFromEnv(
   return options;
 }
 
+/**
+ * TLS settings for the runner's connection. Production and every hosted
+ * database require TLS, which stays the default. A disposable local or CI
+ * PostgreSQL without TLS must opt out explicitly with
+ * MIGRATION_DATABASE_SSL=disable; any other value is rejected.
+ */
+export function migrationSslFromEnv(
+  env: NodeJS.ProcessEnv,
+): { rejectUnauthorized: false } | undefined {
+  const raw = env.MIGRATION_DATABASE_SSL?.trim() ?? '';
+  if (raw === '') return { rejectUnauthorized: false };
+  if (raw === 'disable') return undefined;
+  throw new Error('MIGRATION_DATABASE_SSL must be unset or "disable".');
+}
+
 export async function acquireMigrationAdvisoryLock(
   client: MigrationQueryClient,
 ): Promise<void> {

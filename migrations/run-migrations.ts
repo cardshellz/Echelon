@@ -9,12 +9,14 @@ import { fileURLToPath } from 'url';
 import * as crypto from 'crypto';
 import { validateMigrationDirectory } from '../scripts/migrations/migration-policy.mjs';
 import { createDatabasePoolConfig } from '../server/database-pool-config';
+import { applyBaselineToEmptyDatabase } from './baseline-bootstrap';
 import {
   acquireMigrationAdvisoryLock,
   executeMigrationWithRetry,
   migrationErrorMessage,
   migrationRetryOptionsFromEnv,
   migrationSqlState,
+  migrationSslFromEnv,
   releaseMigrationAdvisoryLock,
 } from './migration-executor';
 
@@ -62,7 +64,7 @@ const connectionString = resolveMigrationConnectionString(process.env);
 
 const pool = new Pool(createDatabasePoolConfig({
   connectionString: connectionString || 'postgresql://stub:stub@localhost:5432/stub',
-  ssl: { rejectUnauthorized: false },
+  ssl: migrationSslFromEnv(process.env),
 }));
 const retryOptions = migrationRetryOptionsFromEnv(process.env);
 
@@ -106,6 +108,21 @@ async function runMigrations() {
     // for the collision-resistant namespace before any migration is executed.
     const migrationsDir = join(__dirname);
     const files = validateMigrationDirectory(migrationsDir);
+
+    // An empty database is built from the schema baseline first; the loop below
+    // then applies only what the baseline does not cover. A database that
+    // already has migration records (production) is left exactly as it is.
+    const baseline = await applyBaselineToEmptyDatabase({ client, migrationsDir, files });
+    if (baseline.applied) {
+      console.log(JSON.stringify({
+        level: 'info',
+        action: 'migration_baseline',
+        outcome: 'applied',
+        recorded: baseline.recorded,
+        capturedAt: baseline.capturedAt,
+        error_code: null,
+      }));
+    }
 
     // Create migrations tracking table
     await client.query(`
