@@ -1,11 +1,19 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 // Holding a line from the gun: the picker parks one line (out of stock,
 // damaged, not received) and keeps picking the rest, which ships now. The
 // server splits the held line onto its own shipment and the pick-queue guard
 // stops counting it, so the order leaves the floor.
-const PICKING = readFileSync("client/src/pages/Picking.tsx", "utf8");
+const PICKING_DIR = "client/src/pages/picking";
+const PICKING = [
+  readFileSync("client/src/pages/Picking.tsx", "utf8"),
+  ...readdirSync(PICKING_DIR)
+    .filter((name) => /\.(ts|tsx)$/.test(name))
+    .sort()
+    .map((name) => readFileSync(join(PICKING_DIR, name), "utf8")),
+].join("\n");
 
 describe("pick-floor line hold", () => {
   it("offers hold from both the scan card and the list overflow menu", () => {
