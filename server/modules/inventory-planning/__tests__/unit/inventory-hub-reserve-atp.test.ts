@@ -37,6 +37,11 @@ describe("hub ATP includes its linked reserve warehouses", () => {
     ["receiving bin", supply => { supply.locations[2].locationType = "receiving"; }],
     ["staging bin", supply => { supply.locations[2].locationType = "staging"; }],
     ["quarantine bin", supply => { supply.locations[2].locationType = "quarantine"; }],
+    ["in-transit custody", supply => {
+      supply.locations[2].locationType = "in_transit";
+      supply.locations[2].promisePolicy = { policyId: 1, version: 1, lifecycleSelection: "active_head",
+        eligibilityMode: "eligible", definitionHash: "b".repeat(64) };
+    }],
     ["explicit promise exclusion", supply => {
       supply.locations[2].promisePolicy = { policyId: 1, version: 1, lifecycleSelection: "active_head",
         eligibilityMode: "ineligible", definitionHash: "b".repeat(64) };

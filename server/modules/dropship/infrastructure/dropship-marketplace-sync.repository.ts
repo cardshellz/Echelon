@@ -392,6 +392,15 @@ export class PgDropshipMarketplaceSyncRepository implements MarketplaceSyncRepos
               requiredHandlingTimeBusinessDays: input.requiredHandlingTimeBusinessDays,
               ...await readPolicyNoticeListingsWithClient(client, input) })],
           createdAt: input.checkedAt }) > 0;
+      } else {
+        // notify_fixed: the vendor was told this policy didn't work, and now it does. Once per change: the told
+        // verdict is cleared below in this same transaction, and the subject key makes a replay a no-op.
+        notified = await enqueueMarketplaceSyncNoticesWithClient(client, { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId,
+          notices: [marketplaceSyncNotice("policy_fixed",
+            marketplacePolicySubjectKey(input.fulfillmentPolicyId, input.verdictHash, input.checkedAt),
+            { fulfillmentPolicyId: input.fulfillmentPolicyId, policyName: boundedText(input.policyName, MAX_POLICY_NAME_CHARS),
+              listingCount: input.listingCount })],
+          createdAt: input.checkedAt }) > 0;
       }
       await setFulfillmentPolicyNotifiedVerdictWithClient(client, { storeConnectionId: input.storeConnectionId,
         fulfillmentPolicyId: input.fulfillmentPolicyId, verdictHash: input.verdictHash, notifiedVerdictHash: decision.notifiedVerdictHash });

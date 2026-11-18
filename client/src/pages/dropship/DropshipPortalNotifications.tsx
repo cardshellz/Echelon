@@ -31,6 +31,7 @@ import {
   vendorNotificationEventLabel,
   vendorNotificationStatusLabel,
 } from "@/lib/dropship-vendor-labels";
+import { splitVendorMessageLinks } from "@/lib/vendor-message-links";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingPreferenceAction = "send-code" | "verify-code" | "passkey-proof" | "save" | null;
@@ -341,7 +342,7 @@ export default function DropshipPortalNotifications() {
                         <Badge variant="outline" className={statusTone(notification.status)}>{vendorNotificationStatusLabel(notification.status)}</Badge>
                       </div>
                       {/* whitespace-pre-line: a publish run's notice lists its sizes one per line (review round 2 DUX13). */}
-                      {notification.message && <p className="mt-1 whitespace-pre-line text-sm text-zinc-600">{notification.message}</p>}
+                      {notification.message && <NotificationMessage message={notification.message} />}
                       <p className="mt-2 text-xs text-zinc-500">
                         {vendorNotificationEventLabel(notification.eventType)} · {vendorNotificationChannelLabel(notification.channel)}
                         {notification.readAt ? ` | Read ${formatDateTime(notification.readAt)}` : ""}
@@ -600,4 +601,27 @@ function statusTone(status: string): string {
   if (status === "pending") return "border-amber-200 bg-amber-50 text-amber-900";
   if (status === "failed") return "border-rose-200 bg-rose-50 text-rose-800";
   return "border-zinc-200 bg-zinc-50 text-zinc-700";
+}
+
+/**
+ * An alert's message, its allowed https links (eBay and the portal) as real
+ * links and everything else as text: React text nodes and anchors only, never
+ * HTML. eBay pages open in a new tab.
+ */
+export function NotificationMessage({ message }: { message: string }) {
+  const origin = typeof window === "undefined" ? null : window.location.origin;
+  return (
+    <p className="mt-1 whitespace-pre-line break-words text-sm text-zinc-600">
+      {splitVendorMessageLinks(message, origin).map((piece, index) => piece.kind === "text" ? piece.text : (
+        <a
+          key={index}
+          className="underline"
+          href={piece.href}
+          {...(piece.external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
+        >
+          {piece.text}
+        </a>
+      ))}
+    </p>
+  );
 }

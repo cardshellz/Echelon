@@ -20,6 +20,8 @@ export {
   freezeWarehouseLocationsChunkForCycleCountInWarehouse,
   releaseStaleCycleCountLocationFreezesInWarehouse,
   insertVirtual3plWarehouseLocationInWarehouse,
+  insertInterwarehouseTransitLocationInWarehouse,
+  closeInterwarehouseTransitLocationInWarehouse,
   updateWarehouseFeedEnabledInWarehouse,
   updateWarehouseInventorySyncStatusInWarehouse,
 } from "./infrastructure/cross-module-warehouse-mutations.repository";

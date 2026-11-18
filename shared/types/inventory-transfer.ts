@@ -13,7 +13,6 @@ export const inventoryTransferRequestSchema = z.object({
   quantity: positivePgInteger,
   notes: z.string().max(5000).optional(),
   moveReserved: z.boolean().optional(),
-  crossWarehouseArrivalConfirmed: z.boolean().optional(),
 }).refine((input) => input.fromLocationId !== input.toLocationId, {
   message: "Source and destination must be different", path: ["toLocationId"],
 });

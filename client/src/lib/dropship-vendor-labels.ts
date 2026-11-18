@@ -471,6 +471,7 @@ export const VENDOR_NOTIFICATION_EVENT_LABELS: Labels = Object.freeze({
   dropship_cost_change_listings_resumed: "Listings back on sale",
   dropship_ebay_listing_action_needed: "eBay listing needs action",
   dropship_ebay_listing_warning: "eBay listing warning",
+  dropship_ebay_listing_update: "eBay listing update",
   dropship_ebay_order_action_needed: "eBay order needs action",
   dropship_ebay_order_update: "eBay order update",
   dropship_catalog_new_items: "New items in your categories",

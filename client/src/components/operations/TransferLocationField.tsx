@@ -21,6 +21,7 @@ export const transferWarehouseSchema = z.object({
   code: z.string().min(1),
   name: z.string(),
   isActive: z.number().int(),
+  warehouseType: z.string().optional(),
 });
 export type TransferLocation = z.infer<typeof transferLocationSchema>;
 export type TransferWarehouse = z.infer<typeof transferWarehouseSchema>;
@@ -64,7 +65,7 @@ export function TransferLocationField({
           onValueChange={(value) => onWarehouseChange(Number(value))}>
           <SelectTrigger id={`${id}-warehouse`}><SelectValue placeholder="Select warehouse" /></SelectTrigger>
           <SelectContent>
-            {warehouses.filter((warehouse) => warehouse.isActive === 1).map((warehouse) =>
+            {warehouses.filter((warehouse) => warehouse.isActive === 1 && warehouse.warehouseType !== "system_transit").map((warehouse) =>
               <SelectItem key={warehouse.id} value={String(warehouse.id)}>{warehouseLabel(warehouse.id, warehouses)}</SelectItem>)}
           </SelectContent>
         </Select>
