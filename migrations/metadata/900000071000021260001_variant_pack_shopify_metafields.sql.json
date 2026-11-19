@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000071000021260001_variant_pack_shopify_metafields.sql",
+  "generation": 71,
+  "pr": 2126,
+  "ordinal": 1,
+  "after": [
+    "900000070000021140001_interwarehouse_transfer_orders.sql"
+  ]
+}
