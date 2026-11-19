@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 import { InterwarehouseTransferService } from "../../application/interwarehouse-transfer.service";
 
@@ -125,6 +126,12 @@ describe("InterwarehouseTransferService", () => {
       warehouseLocationId: 900,
       qtyDelta: -5,
     }));
+    const transferStateUpdate = execute.mock.calls
+      .map(([query]) => new PgDialect().sqlToQuery(query))
+      .find(({ sql }) => sql.includes("exception_notes=CASE"));
+    expect(transferStateUpdate).toBeDefined();
+    expect(transferStateUpdate!.sql).toContain("NULLIF(exception_notes,''),$3::text)");
+    expect(transferStateUpdate!.params[2]).toBe("Five crushed in transit");
     expect(effects.deliver).toHaveBeenCalledWith(expect.objectContaining({ eventId: 701, eventType: "received" }));
     expect(result).toMatchObject({ status: "exception", receivedQuantity: 40, damagedQuantity: 5, inTransitQuantity: 5 });
   });
