@@ -137,7 +137,7 @@ type DrizzleDb = {
   select: (...args: any[]) => any;
   update: (...args: any[]) => any;
   insert: (...args: any[]) => any;
-  execute: <T = any>(query: any) => Promise<{ rows: T[] }>;
+  execute: NodePgDatabase["execute"];
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
 
@@ -2409,7 +2409,7 @@ export class InventoryUseCases {
         ORDER BY il.warehouse_location_id, il.product_variant_id, il.id
         FOR UPDATE OF il
       `);
-      
+
       const sourceInventory = sourceInventoryResp.rows;
       if (sourceInventory.length === 0) {
         throw new IntegrityError("No inventory found for source variant");
@@ -2432,9 +2432,9 @@ export class InventoryUseCases {
           warehouseLocationId: inv.warehouse_location_id,
         }, tx);
         if (quantityPosting) await this.assertNotFrozen(inv.warehouse_location_id, tx);
-        
+
         if (!quantityPosting) await this.storage.adjustInventoryLevel(sourceLevel.id, { variantQty: -qtyToConvert }, tx);
-        
+
         await this.storage.createInventoryTransaction({
           productVariantId: params.fromVariantId,
           fromLocationId: inv.warehouse_location_id,
@@ -2456,7 +2456,7 @@ export class InventoryUseCases {
           productVariantId: params.toVariantId,
           warehouseLocationId: inv.warehouse_location_id,
         }, tx);
-        
+
         if (quantityPosting) {
           const lotService = this.lotService!.withTx(tx);
           const consumed = await lotService.adjustLots({ productVariantId: params.fromVariantId,
@@ -2481,7 +2481,7 @@ export class InventoryUseCases {
             outputStartQty += layer.qty;
           }
         } else await this.storage.adjustInventoryLevel(destLevel.id, { variantQty: qtyToConvert }, tx);
-        
+
         await this.storage.createInventoryTransaction({
           productVariantId: params.toVariantId,
           toLocationId: inv.warehouse_location_id,
@@ -2516,7 +2516,7 @@ export class InventoryUseCases {
         conversions.push({ locationCode: inv.location_code, qty: qtyToConvert });
         remaining -= qtyToConvert;
       }
-      
+
       const result = { totalConverted: conversions.reduce((s, c) => s + c.qty, 0), conversions, batchId };
       if (quantityPosting && !sharedPosting) {
         await quantityPosting.post({ idempotencyKey: params.commandKey!, kind: "transform",
@@ -2694,6 +2694,27 @@ export class InventoryUseCases {
     return result;
   }
 
+  async syncAll(): Promise<
+    Array<{
+      warehouseId: number;
+      warehouseCode: string;
+      synced: number;
+      skipped: number;
+      errors: string[];
+    }>
+  > {
+    await assertLegacyQuantityImportAllowed(this.db, "Legacy external inventory sync");
+    const channelWarehouses = await this.db
+      .select({ id: warehouses.id })
+      .from(warehouses)
+      .where(eq(warehouses.inventorySourceType, "channel"));
+    const results = [];
+    for (const wh of channelWarehouses) {
+      results.push(await this.syncWarehouse(wh.id));
+    }
+    return results;
+  }
+
   // ---------------------------------------------------------------------------
   // LEDGER — direct transaction logging & administrative level maintenance
   // ---------------------------------------------------------------------------
@@ -2752,7 +2773,7 @@ export class InventoryUseCases {
       select: (...args: any[]) => tx.select(...args),
       update: (...args: any[]) => tx.update(...args),
       insert: (...args: any[]) => tx.insert(...args),
-      execute: (query: any) => tx.execute(query),
+      execute: ((query: any) => tx.execute(query)) as NodePgDatabase["execute"],
       transaction: async <T>(fn: (innerTx: any) => Promise<T>) => fn(tx),
     };
 

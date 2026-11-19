@@ -124,6 +124,11 @@ import {
   startWebhookRetryWorker,
   enqueueShipStationRetry,
   enqueueShipStationSortRankSyncRetry,
+  buildShipStationWebhookInboxInput,
+  recordWebhookReceived,
+  markWebhookProcessing,
+  markWebhookSucceeded,
+  markWebhookFailed,
   registerOmsWebhooks,
 } from "./modules/oms/webhook-retry.api";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-intake.api";
@@ -476,7 +481,7 @@ function startEchelonSyncScheduler(
     reader: createCarrierTrackingProjectionReader(db),
   });
 
-  // --- ShipStation SHIP_NOTIFY webhook (BEFORE auth middleware; shared-secret verified) ---
+  // --- ShipStation SHIP_NOTIFY webhook (P1.6: persist to inbox → ACK → process from inbox) ---
   app.post("/api/shipstation/webhooks/ship-notify", async (req, res) => {
     const { resource_url, resource_type } = req.body || {};
     const verification = verifyShipStationWebhook(req);
@@ -493,29 +498,53 @@ function startEchelonSyncScheduler(
       return res.status(400).json({ error: "Invalid webhook resource_url" });
     }
 
+    let inboxReceiptId: number;
     try {
-      console.log(`[ShipStation Webhook] Received SHIP_NOTIFY`);
-      const processed = await services.shippingEngine.processWebhook(resource_url);
-      console.log(`[ShipStation Webhook] Processed ${processed} shipment(s)`);
+      const receipt = await recordWebhookReceived(
+        db,
+        buildShipStationWebhookInboxInput(req, resource_url, req.body),
+      );
+      if (!receipt.inserted && (receipt.status === "succeeded" || receipt.status === "processing")) {
+        console.log(`[ShipStation Webhook] Duplicate SHIP_NOTIFY (inbox=${receipt.id}, status=${receipt.status}), skipping`);
+        return res.status(200).json({ status: "ok", duplicate: true, inboxId: receipt.id });
+      }
+      inboxReceiptId = receipt.id;
+      await markWebhookProcessing(db, inboxReceiptId);
+    } catch (inboxErr: any) {
+      console.error(`[ShipStation Webhook] Failed to persist SHIP_NOTIFY to webhook_inbox: ${inboxErr?.message || inboxErr}`);
+      return res.status(500).json({ error: "Webhook inbox unavailable" });
+    }
 
-      return res.status(200).json({ status: "ok", processed });
+    // Durable receipt persisted: ACK immediately before processing from inbox.
+    res.status(200).json({ status: "accepted", inboxId: inboxReceiptId });
+
+    try {
+      console.log(`[ShipStation Webhook] Processing SHIP_NOTIFY (inbox=${inboxReceiptId})`);
+      const processed = await services.shippingEngine.processWebhook(resource_url);
+      await markWebhookSucceeded(db, inboxReceiptId);
+      console.log(`[ShipStation Webhook] Processed ${processed} shipment(s) (inbox=${inboxReceiptId})`);
     } catch (err: any) {
       console.error(
-        `[ShipStation Webhook] processShipNotify failed, enqueueing for retry: ${err.message}`
+        `[ShipStation Webhook] processShipNotify failed (inbox=${inboxReceiptId}), enqueueing for retry: ${err.message}`
       );
-
-      // Enqueue for the webhook-retry worker. Best-effort: if the enqueue
-      // itself fails we still 500 so SS's own retry layer can take over —
-      // we don't want an enqueue blip to mask the original processing error.
       try {
-        await enqueueShipStationRetry(db, { resource_url });
+        await markWebhookFailed(db, inboxReceiptId, err);
+      } catch (markErr: any) {
+        console.error(
+          `[ShipStation Webhook] failed to mark inbox ${inboxReceiptId} failed: ${markErr?.message || markErr}`
+        );
+      }
+
+      try {
+        await enqueueShipStationRetry(db, { resource_url }, {
+          sourceInboxId: inboxReceiptId,
+          lastError: err?.message || String(err),
+        });
       } catch (enqueueErr: any) {
         console.error(
           `[ShipStation Webhook] retry-queue enqueue failed: ${enqueueErr?.message || enqueueErr}`
         );
       }
-
-      return res.status(500).json({ error: "Internal error" });
     }
   });
 
@@ -884,7 +913,7 @@ function startEchelonSyncScheduler(
       // not a scheduler: DISABLE_SCHEDULERS does not stop it.
       await startDropshipProcessHeartbeatFromEnv();
       log(`serving on port ${port}`);
-      
+
       // REMOVED: order-sync-listener deleted (duplicate path)
       // Now using: Echelon OMS webhooks → oms_orders → wmsSync → orders
 
@@ -1204,7 +1233,7 @@ function startEchelonSyncScheduler(
         console.warn("[eBay Reconcile] Sweep error:", err?.message);
       }
     };
-    
+
     // Run immediately on boot, then every hour
     const runObservedEbayReconcile = () => observeRuntimeWork("channels.ebay_fulfillment_reconcile", runEbayReconcile);
     setTimeout(runObservedEbayReconcile, 5000);
