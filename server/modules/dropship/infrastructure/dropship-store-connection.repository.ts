@@ -16,6 +16,7 @@ import {
   type DropshipSupportedStorePlatform,
 } from "../domain/store-connection";
 import { DropshipError } from "../domain/errors";
+import { claimSingleUseNoncePgQuery } from "../../../infrastructure/idempotency-keys.repository";
 import { ensureDefaultListingConfigWithClient } from "./dropship-listing-config.repository";
 import { hasOpenStoreSetupBlockers } from "./dropship-store-setup-blockers";
 
@@ -87,6 +88,23 @@ const ACTIVE_STORE_CONNECTION_STATUSES = [...dropshipActiveStoreConnectionStatus
 
 export class PgDropshipStoreConnectionRepository implements DropshipStoreConnectionRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
+
+  async consumeOAuthStateNonce(input: {
+    nonce: string;
+    vendorId: number;
+    platform: DropshipSupportedStorePlatform;
+    requestHash: string;
+    expiresAt: Date;
+    now: Date;
+  }): Promise<boolean> {
+    const key = `dropship:oauth_state_nonce:${input.vendorId}:${input.platform}:${input.nonce}`;
+    return claimSingleUseNoncePgQuery(this.dbPool, {
+      key,
+      requestHash: input.requestHash,
+      createdAt: input.now,
+      expiresAt: input.expiresAt,
+    });
+  }
 
   async listByVendorId(vendorId: number): Promise<DropshipStoreConnectionProfile[]> {
     const client = await this.dbPool.connect();

@@ -75,3 +75,33 @@ export async function completeIdempotencyKeyPgQuery(
     [key, responseBodyJson],
   );
 }
+
+/**
+ * Atomically claim a single-use cryptographic nonce (e.g. OAuth `state.nonce`)
+ * in `public.idempotency_keys` (`P3.2`). Returns `true` on first use and `false`
+ * on any concurrent or subsequent replay.
+ */
+export async function claimSingleUseNoncePgQuery(
+  client: {
+    query: (
+      text: string,
+      values?: unknown[],
+    ) => Promise<{ rowCount?: number | null; rows?: unknown[] }>;
+  },
+  input: {
+    key: string;
+    requestHash: string;
+    createdAt: Date;
+    expiresAt: Date;
+  },
+): Promise<boolean> {
+  const result = await client.query(
+    `INSERT INTO public.idempotency_keys(
+       key, request_hash, response_body, created_at, expires_at
+     ) VALUES ($1, $2, '{"consumed":true}'::jsonb, $3, $4)
+     ON CONFLICT (key) DO NOTHING
+     RETURNING key`,
+    [input.key, input.requestHash, input.createdAt, input.expiresAt],
+  );
+  return (result.rows?.length ?? result.rowCount ?? 0) > 0;
+}
