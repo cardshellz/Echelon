@@ -229,6 +229,14 @@ non-idempotent financial operations · use `allowNegative: true` · commit secre
   PR (`scripts/ci/build-database-from-repository.ts`, PostgreSQL 17). Never hand-edit the
   baseline; regenerate it with `scripts/migrations/generate-baseline.mjs`. It never runs
   in production, which already has migration records.
+- **Schema drift check:** nightly, `.github/workflows/schema-drift.yml` compares a database
+  built from the repository with production's structure and posts to the ops alert webhook
+  if they differ, or if it could not run. GitHub holds no database credential: a Heroku
+  Scheduler job (`scripts/publish-production-structure.ts`) publishes the structure (no
+  rows) to the `production-structure` branch, and the check reads it there. Never edit that
+  branch by hand. A difference in `membership` or another shellz-club table means they
+  shipped a change: regenerate the baseline. A difference in an Echelon table means
+  production changed outside a migration: investigate first.
 - **Shipping engine:** fully engine-agnostic via `shippingEngine.*` interface (C9 complete).
   ShipStation adapter is the only implementation. Legacy `shipstation_order_id` /
   `shipstation_order_key` columns remain on `oms.oms_orders` and `wms.outbound_shipments`
