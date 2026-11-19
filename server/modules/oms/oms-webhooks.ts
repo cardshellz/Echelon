@@ -74,6 +74,19 @@ import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-
 import { deriveShopifyChannelPaymentSettled } from "./domain/channel-payment-settlement";
 import { recordChannelAuthorityGap } from "./infrastructure/channel-authority-gap.repository";
 import { applyVersionedShopifyOrderMoney } from "./infrastructure/shopify-order-money.repository";
+import {
+  createShopifyOrderIntakeAdapter,
+  extractShopifyRisk,
+  getShopifyExternalOrderId,
+  mapShopifyOrderToOrderData,
+  shopifyDollarsToCents,
+  verifyShopifyHmacSignature,
+  type ExtractedShopifyRisk as ExtractedRisk,
+} from "./adapters/shopify-order-intake.adapter";
+import {
+  ensureChannelOrderQueuedForWmsSync,
+  ingestAndRoute,
+} from "./channel-order-ingest-and-route";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -81,6 +94,7 @@ import { applyVersionedShopifyOrderMoney } from "./infrastructure/shopify-order-
 
 const LOG_PREFIX = "[OMS Shopify Webhook]";
 const RETURN_CASE_SHOPIFY_RUNTIME_ENABLED = process.env.RETURN_CASE_SHOPIFY_RUNTIME_ENABLED === "true";
+const shopifyOrderIntakeAdapter = createShopifyOrderIntakeAdapter();
 
 function authorityLinePatch(state: OmsLineAuthorityState) {
   return {
@@ -102,24 +116,13 @@ async function ensureOmsOrderQueuedForWmsSync(
   omsOrderId: number,
   label: string,
 ): Promise<void> {
-  try {
-    const wmsOrderId = await wmsSyncService.syncOmsOrderToWms(omsOrderId);
-    if (!wmsOrderId) {
-      // `null` = sync intentionally skipped (order already final/fulfilled out-of-band) —
-      // a no-op, not a failure. Don't throw (that re-queues and dead-letters a harmless skip).
-      console.log(`${LOG_PREFIX} WMS sync skipped for ${label} — already fulfilled out-of-band; no-op`);
-      return;
-    }
-    console.log(`${LOG_PREFIX} Synced ${label} to WMS (wms=${wmsOrderId})`);
-  } catch (error: any) {
-    const message = error?.message ?? String(error);
-    console.error(`${LOG_PREFIX} WMS sync failed for ${label}: ${message}`);
-    await enqueueOmsWmsSyncRetry(
-      db,
-      omsOrderId,
-      error instanceof Error ? error : new Error(message),
-    );
-  }
+  await ensureChannelOrderQueuedForWmsSync({
+    db,
+    wmsSyncService,
+    omsOrderId,
+    label,
+    logPrefix: LOG_PREFIX,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -172,155 +175,23 @@ interface ShipStationService {
 // ---------------------------------------------------------------------------
 
 function verifyShopifyHmac(rawBody: Buffer, hmacHeader: string | undefined): boolean {
-  if (!hmacHeader) return false;
-  // Try both app API secret and admin webhook secret
-  const secrets = [process.env.SHOPIFY_API_SECRET, process.env.SHOPIFY_WEBHOOK_SECRET].filter(Boolean) as string[];
-  for (const secret of secrets) {
-    const computed = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
-    try {
-      if (crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(hmacHeader))) return true;
-    } catch {
-      if (computed === hmacHeader) return true;
-    }
-  }
-  return false;
+  return verifyShopifyHmacSignature(rawBody, hmacHeader);
 }
 
 // ---------------------------------------------------------------------------
-// Shopify payload → OMS OrderData mapping
+// Shopify payload → OMS OrderData mapping (delegated to ShopifyOrderIntakeAdapter)
 // ---------------------------------------------------------------------------
 
-/**
- * mapShopifyOrderToOrderData always fills header money, but OrderData types it
- * optional for other channels. A missing amount here is a mapper defect: fail
- * the webhook (retried) rather than writing zero money onto the order.
- */
 function requireMappedCents(value: number | undefined, field: string): number {
   if (value === undefined) throw new Error(`Shopify order mapping produced no ${field}`);
   return value;
 }
 
 function dollarsToCents(value: string | number | undefined | null): number {
-  if (value === null || value === undefined) return 0;
-  return parseDecimalCents(String(value), "dollarsToCents");
+  return shopifyDollarsToCents(value);
 }
 
-// ---------------------------------------------------------------------------
-// C22b — Shopify fraud-risk extraction (§6 Group E, Decision D3)
-// ---------------------------------------------------------------------------
-//
-// Shopify exposes risk in two shapes depending on Admin API version:
-//
-//   - Modern (2024-10+): `risk_assessments` array, each entry carrying
-//     `risk_level` (LOW/MEDIUM/HIGH), optional `recommendation`, optional
-//     numeric `score`, and a `facts` array.
-//   - Legacy: a single `risk` object with `level` + `recommendation` and
-//     no numeric score.
-//
-// We collect whichever shape is present, defensively, and fall back to
-// NULL on absent / malformed data. Severity ordering for the modern
-// payload picks the highest-risk assessment so a single HIGH assessment
-// can't be hidden by a LOW one.
-//
-// Pure: no DB, no network, no globals. Exported via __test__ for unit
-// tests (Rule #9, Rule #13).
-
-const RISK_LEVEL_SEVERITY: Record<string, number> = {
-  low: 0,
-  medium: 1,
-  high: 2,
-};
-
-function normalizeRiskLevel(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim().toLowerCase();
-  if (trimmed.length === 0) return null;
-  return trimmed;
-}
-
-function normalizeRiskRecommendation(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim().toLowerCase();
-  if (trimmed.length === 0) return null;
-  return trimmed;
-}
-
-function parseRiskScore(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return String(value);
-  }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (trimmed.length === 0) return null;
-    const parsed = Number(trimmed);
-    if (Number.isFinite(parsed)) return String(parsed);
-  }
-  return null;
-}
-
-export interface ExtractedRisk {
-  riskLevel: string | null;
-  riskScore: string | null;
-  riskRecommendation: string | null;
-  riskFacts: unknown;
-}
-
-function extractShopifyRisk(shopifyOrder: any): ExtractedRisk {
-  const empty: ExtractedRisk = {
-    riskLevel: null,
-    riskScore: null,
-    riskRecommendation: null,
-    riskFacts: null,
-  };
-  if (!shopifyOrder || typeof shopifyOrder !== "object") return empty;
-
-  // Modern payload: risk_assessments array.
-  const assessments = (shopifyOrder as any).risk_assessments;
-  if (Array.isArray(assessments) && assessments.length > 0) {
-    let bestLevel: string | null = null;
-    let bestSeverity = -1;
-    let bestRecommendation: string | null = null;
-    let bestScore: string | null = null;
-
-    for (const a of assessments) {
-      if (!a || typeof a !== "object") continue;
-      const level = normalizeRiskLevel((a as any).risk_level ?? (a as any).level);
-      const severity = level !== null ? RISK_LEVEL_SEVERITY[level] ?? -1 : -1;
-      if (severity > bestSeverity) {
-        bestSeverity = severity;
-        bestLevel = level;
-        bestRecommendation = normalizeRiskRecommendation((a as any).recommendation);
-        bestScore = parseRiskScore((a as any).score);
-      }
-    }
-
-    return {
-      riskLevel: bestLevel,
-      riskScore: bestScore,
-      riskRecommendation: bestRecommendation,
-      riskFacts: assessments,
-    };
-  }
-
-  // Legacy payload: single risk object with level + recommendation.
-  const legacy = (shopifyOrder as any).risk;
-  if (legacy && typeof legacy === "object") {
-    const level = normalizeRiskLevel(legacy.level);
-    const recommendation = normalizeRiskRecommendation(legacy.recommendation);
-    if (level === null && recommendation === null) {
-      return empty;
-    }
-    return {
-      riskLevel: level,
-      riskScore: parseRiskScore(legacy.score),
-      riskRecommendation: recommendation,
-      riskFacts: legacy,
-    };
-  }
-
-  return empty;
-}
+export type { ExtractedRisk };
 
 // Exposed for unit testing the extractor in isolation. Keeping the
 // helper private to the module avoids leaking an internal contract;
@@ -590,106 +461,6 @@ export const __test__ = {
   canonicalShipToFromShopifyUpdate,
 };
 
-function mapShopifyOrderToOrderData(shopifyOrder: any): ShopifyOrderData {
-  const shipping = shopifyOrder.shipping_address || {};
-  const shipToCountry = resolveProviderCountryCode(shipping.country_code, shipping.country);
-  const customer = shopifyOrder.customer || {};
-
-  // Use normalizer to extract line items with full discount splitting
-  const discountApplications = shopifyOrder.discount_applications || [];
-  const normalizedItems = normalizeShopifyLineItems(
-    shopifyOrder.line_items || [],
-    discountApplications,
-    shopifyOrder.order_number
-  );
-
-  const lineItems: LineItemData[] = normalizedItems.map((item) => ({
-    externalLineItemId: item.externalLineItemId,
-    externalProductId: item.externalProductId,
-    externalVariantId: item.externalVariantId,
-    sku: item.sku,
-    title: item.title,
-    name: item.name,
-    variantTitle: item.variantTitle,
-    quantity: item.quantity,
-    currentQuantity: item.currentQuantity,
-    fulfillableQuantity: item.fulfillableQuantity,
-    paidPriceCents: item.paidPriceCents,
-    totalCents: item.totalCents,
-    taxCents: 0, // Tax handled at order level
-    discountCents: item.discountCents,
-    requiresShipping: item.requiresShipping,
-  }));
-
-  // Financial status
-  let financialStatus = shopifyOrder.financial_status || "paid";
-
-  // Fulfillment status
-  let fulfillmentStatus = shopifyOrder.fulfillment_status || "unfulfilled";
-
-  // OMS status
-  let status = "pending";
-  if (shopifyOrder.cancelled_at) {
-    status = "cancelled";
-  } else if (fulfillmentStatus === "fulfilled") {
-    status = "shipped";
-  } else if (financialStatus === "paid" || financialStatus === "partially_paid") {
-    status = "confirmed";
-  }
-
-  const customerName =
-    shipping.name ||
-    `${customer.first_name || ""} ${customer.last_name || ""}`.trim() ||
-    shopifyOrder.name;
-
-  // C22b — capture fraud risk from the webhook payload (§6 Group E D3).
-  // Defensive: if no risk data is present we leave all fields null.
-  const risk = extractShopifyRisk(shopifyOrder);
-
-  return {
-    externalOrderNumber: shopifyOrder.name || shopifyOrder.order_number?.toString(),
-    status,
-    financialStatus,
-    fulfillmentStatus,
-    riskLevel: risk.riskLevel,
-    riskScore: risk.riskScore,
-    riskRecommendation: risk.riskRecommendation,
-    riskFacts: risk.riskFacts,
-    customerName,
-    customerEmail: shopifyOrder.email || customer.email,
-    customerPhone: shipping.phone || customer.phone,
-    // Channel-agnostic customer id — for Shopify this is the Shopify customer id.
-    externalCustomerId: normalizeShopifyCustomerId(customer.id),
-    shipToName: shipping.name,
-    shipToCompany: shipping.company || null,
-    shipToAddress1: shipping.address1,
-    shipToAddress2: shipping.address2,
-    shipToCity: shipping.city,
-    shipToState: shipping.province_code || shipping.province,
-    shipToZip: shipping.zip,
-    shipToCountry,
-    shippingMethod: shopifyOrder.shipping_lines?.[0]?.title || null,
-    shippingMethodCode: shopifyOrder.shipping_lines?.[0]?.code || null,
-    // Card Shellz only offers 'standard' today. When expedited/overnight
-    // tiers launch, map from shipping_lines[0].code here.
-    shippingServiceLevel: "standard" as const,
-    subtotalCents: dollarsToCents(shopifyOrder.subtotal_price),
-    shippingCents: (shopifyOrder.shipping_lines || []).reduce(
-      (sum: number, s: any) => sum + dollarsToCents(s.price), 0
-    ),
-    taxCents: dollarsToCents(shopifyOrder.total_tax),
-    discountCents: dollarsToCents(shopifyOrder.total_discounts),
-    totalCents: dollarsToCents(shopifyOrder.total_price),
-    currency: shopifyOrder.currency || "USD",
-    rawPayload: shopifyOrder,
-    notes: shopifyOrder.note || undefined,
-    tags: shopifyOrder.tags ? shopifyOrder.tags.split(",").map((t: string) => t.trim()) : undefined,
-    orderedAt: shopifyOrder.created_at ? new Date(shopifyOrder.created_at) : new Date(),
-    channelUpdatedAt: shopifyOrder.updated_at ?? null,
-    lineItems,
-  };
-}
-
 function mapShopifyLineFulfillmentStatus(
   lineItem: any,
   orderFulfillmentStatus?: string | null,
@@ -726,16 +497,7 @@ function mapShopifyLineFulfillmentStatus(
  * Plan ref: post-refactor C39 fix.
  */
 export function getExternalOrderId(shopifyOrder: any): string {
-  const raw = shopifyOrder?.admin_graphql_api_id || shopifyOrder?.id;
-  if (raw === undefined || raw === null) {
-    throw new Error("getExternalOrderId: missing admin_graphql_api_id and id on payload");
-  }
-  const s = String(raw).trim();
-  const PREFIX = "gid://shopify/Order/";
-  if (s.startsWith(PREFIX)) {
-    return s.substring(PREFIX.length);
-  }
-  return s;
+  return getShopifyExternalOrderId(shopifyOrder);
 }
 
 type CanonicalShipTo = {
@@ -1093,103 +855,76 @@ export function registerOmsWebhooks(
       const channelId = await getChannelId(req, shopifyOrder);
       if (!channelId) throw new Error("Unknown Shopify channel domain");
 
-      // Dedup: check OMS first
-      const orderData = {
-        ...mapShopifyOrderToOrderData(shopifyOrder),
+      const normalizedOrder = shopifyOrderIntakeAdapter.normalizeOrder(shopifyOrder, {
+        channelId,
         sourceTopic: "orders/paid",
         sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
         sourceInboxId: inbox.receipt.id,
-      };
-      const omsOrder = await omsService.ingestOrder(channelId, externalOrderId, orderData);
-      if ((await db.transaction((tx: any) => guardOrderEditShopifyIngress(tx,omsOrder.id,shopifyOrder,new Date()))).skipOrder) {
-        await markInboxSucceeded(inbox.receipt); acknowledgeProcessed(req,res); return;
-      }
+      });
 
-      // Check if newly created (within last 5 seconds)
-      const isNew = omsOrder.createdAt && (Date.now() - new Date(omsOrder.createdAt).getTime()) < 5000;
-      if (!isNew) {
-        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already exists in OMS (id=${omsOrder.id}), ensuring routing`);
-      }
-
-      // Enrich with member tier (non-blocking, logs errors)
-      if (isNew) {
-        enrichOrderWithMemberTier(omsOrder.id, omsOrder.customerEmail || '').catch(err => {
-          console.error(`${LOG_PREFIX} Member tier enrichment failed:`, err);
-        });
-      }
-
-      // Sync to WMS via sync service. §6 C9b: legacy
-      // createWmsOrderFromShopify fallback removed (unreachable in
-      // prod per Overlord Q2 decision). If wmsSyncService is absent
-      // we fail loudly so the missing wiring is diagnosable.
-      if (!wmsSyncService) {
-        throw new Error("wmsSyncService required; legacy createWmsOrderFromShopify fallback removed (§6 C9b)");
-      }
-      await ensureOmsOrderQueuedForWmsSync(
+      const outcome = await ingestAndRoute({
+        db,
+        omsService,
         wmsSyncService,
-        omsOrder.id,
-        shopifyOrder.name || externalOrderId,
-      );
-
-      // OMS-level reservation (delegates to WMS reservation service).
-      // A near-simultaneous orders/updated webhook can create the OMS order
-      // before orders/paid finishes. In that case, do not treat "already
-      // exists" as routed; if no warehouse is assigned yet, finish the paid
-      // routing path now.
-      if (!omsOrder.warehouseId) {
-        try {
-          await omsService.reserveInventory(omsOrder.id);
-          await omsService.assignWarehouse(omsOrder.id);
-        } catch (e: any) {
-          console.error(`${LOG_PREFIX} Post-ingest processing failed for ${shopifyOrder.name}: ${e.message}`);
-        }
-      } else {
-        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already has warehouse_id=${omsOrder.warehouseId}`);
-      }
-
-      // The post-ingest reservation / warehouse assignment path changes
-      // the exact state WMS needs. Run the idempotent sync once more and
-      // persist a retry if it cannot create/find the WMS order. This is the
-      // hard guarantee against OMS orders getting stuck after assignment
-      // with no WMS row and no retry handle.
-      await ensureOmsOrderQueuedForWmsSync(
-        wmsSyncService,
-        omsOrder.id,
-        shopifyOrder.name || externalOrderId,
-      );
-
-      // C22b — populate Shopify fulfillment-order line item IDs at ingest
-      // (§6 Group E D2/D4). Failure is non-fatal: C22c's Path B fallback
-      // re-resolves at push time. We swallow errors here so a Shopify GQL
-      // hiccup doesn't block ingestion of an otherwise good order.
-      try {
-        const externalGid = String(
-          shopifyOrder.admin_graphql_api_id ??
-            (shopifyOrder.id ? `gid://shopify/Order/${shopifyOrder.id}` : externalOrderId),
-        );
-        const summary = await (omsService as any).populateShopifyFulfillmentOrderIds?.(
-          omsOrder.id,
-          externalGid,
-          getShopifyAdminClient(),
-        );
-        if (summary) {
-          console.log(
-            `${LOG_PREFIX} FO IDs populated for ${shopifyOrder.name}: matched=${summary.matched} unmatched=${summary.unmatched} updates=${summary.updates}`,
+        order: normalizedOrder,
+        logPrefix: LOG_PREFIX,
+        label: shopifyOrder.name || externalOrderId,
+        alwaysSyncExistingAssigned: true,
+        afterIngested: async ({ omsOrder, isNew }) => {
+          const guard = await db.transaction((tx: any) =>
+            guardOrderEditShopifyIngress(tx, omsOrder.id, shopifyOrder, new Date()),
           );
-        }
-      } catch (err: any) {
-        console.error(
-          `${LOG_PREFIX} populateShopifyFulfillmentOrderIds failed for ${shopifyOrder.name}: ${err?.message ?? String(err)} (non-fatal; Path B fallback will retry at push)`,
-        );
+          if (guard.skipOrder) {
+            return { skipRouting: true };
+          }
+          if (isNew) {
+            enrichOrderWithMemberTier(omsOrder.id, omsOrder.customerEmail || "").catch((err) => {
+              console.error(`${LOG_PREFIX} Member tier enrichment failed:`, err);
+            });
+          }
+          if (!wmsSyncService) {
+            throw new Error("wmsSyncService required; legacy createWmsOrderFromShopify fallback removed (§6 C9b)");
+          }
+        },
+        afterRouted: async ({ omsOrder, isNew }) => {
+          try {
+            const externalGid = String(
+              shopifyOrder.admin_graphql_api_id ??
+                (shopifyOrder.id ? `gid://shopify/Order/${shopifyOrder.id}` : externalOrderId),
+            );
+            const summary = await (omsService as any).populateShopifyFulfillmentOrderIds?.(
+              omsOrder.id,
+              externalGid,
+              getShopifyAdminClient(),
+            );
+            if (summary) {
+              console.log(
+                `${LOG_PREFIX} FO IDs populated for ${shopifyOrder.name}: matched=${summary.matched} unmatched=${summary.unmatched} updates=${summary.updates}`,
+              );
+            }
+          } catch (err: any) {
+            console.error(
+              `${LOG_PREFIX} populateShopifyFulfillmentOrderIds failed for ${shopifyOrder.name}: ${err?.message ?? String(err)} (non-fatal; Path B fallback will retry at push)`,
+            );
+          }
+
+          console.log(
+            `${LOG_PREFIX} ✅ Processed ${isNew ? "new" : "existing"} order ${shopifyOrder.name} (OMS id=${omsOrder.id})`,
+          );
+          if (isNew) {
+            pushToMissionControl(omsOrder.id, "order.created");
+          }
+
+          await db.execute(sql`NOTIFY shopify_order_ingested`);
+        },
+      });
+
+      if (outcome.skippedByGuard) {
+        await markInboxSucceeded(inbox.receipt);
+        acknowledgeProcessed(req, res);
+        return;
       }
 
-      console.log(`${LOG_PREFIX} ✅ Processed ${isNew ? "new" : "existing"} order ${shopifyOrder.name} (OMS id=${omsOrder.id})`);
-      if (isNew) {
-        pushToMissionControl(omsOrder.id, "order.created");
-      }
-
-      // M18: Trigger real-time backfill bridge
-      await db.execute(sql`NOTIFY shopify_order_ingested`);
       await markInboxSucceeded(inbox.receipt);
       acknowledgeProcessed(req, res);
     } catch (err: any) {

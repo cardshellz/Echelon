@@ -451,3 +451,30 @@ export class ChannelAdapterRegistry {
     return Array.from(this.adapters.keys());
   }
 }
+
+// ---------------------------------------------------------------------------
+// P3.1 — Channel Order Intake Port & Zod Boundary Schemas
+// ---------------------------------------------------------------------------
+export {
+  ChannelOrderAdapterRegistry,
+  ChannelOrderBoundaryValidationError,
+  channelIntakeCancelSchema,
+  channelIntakeOrderLineSchema,
+  channelIntakeOrderSchema,
+  channelIntakeRefundSchema,
+  channelOrderShippingAddressSchema,
+  parseValidatedChannelCancel,
+  parseValidatedChannelOrder,
+  parseValidatedChannelRefund,
+  type ChannelOrderAdapter,
+  type ChannelOrderNormalizeContext,
+  type ChannelWebhookVerifyInput,
+  type ChannelWebhookVerifyResult,
+  type ValidatedChannelCancelEvent,
+  type ValidatedChannelCancelInput,
+  type ValidatedChannelOrder,
+  type ValidatedChannelOrderInput,
+  type ValidatedChannelOrderLine,
+  type ValidatedChannelRefundEvent,
+  type ValidatedChannelRefundInput,
+} from "./channel-order-intake-port";

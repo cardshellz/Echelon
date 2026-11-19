@@ -60,8 +60,27 @@ export type {
   FulfillmentPushResult,
   CancellationPayload,
   CancellationPushResult,
+  ChannelOrderAdapter,
+  ChannelOrderNormalizeContext,
+  ChannelWebhookVerifyInput,
+  ChannelWebhookVerifyResult,
+  ValidatedChannelCancelEvent,
+  ValidatedChannelOrder,
+  ValidatedChannelOrderLine,
+  ValidatedChannelRefundEvent,
 } from "./channel-adapter.interface";
-export { ChannelAdapterRegistry } from "./channel-adapter.interface";
+export {
+  ChannelAdapterRegistry,
+  ChannelOrderAdapterRegistry,
+  ChannelOrderBoundaryValidationError,
+  channelIntakeCancelSchema,
+  channelIntakeOrderLineSchema,
+  channelIntakeOrderSchema,
+  channelIntakeRefundSchema,
+  parseValidatedChannelCancel,
+  parseValidatedChannelOrder,
+  parseValidatedChannelRefund,
+} from "./channel-adapter.interface";
 
 // Source Lock System (Phase 1)
 export { createSourceLockService } from "./source-lock.service";

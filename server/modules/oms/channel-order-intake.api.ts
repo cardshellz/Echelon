@@ -32,3 +32,32 @@ export {
   startEbayFulfillmentStuckOrderScheduler,
   type EbayFulfillmentStuckOrderSchedulerDeps,
 } from "./reconcilers/ebay-fulfillment-stuck-order.scheduler";
+export {
+  ensureChannelOrderQueuedForWmsSync,
+  ingestAndRoute,
+  validatedChannelOrderToOrderData,
+  type EnsureWmsSyncInput,
+  type IngestAndRouteContext,
+  type IngestAndRouteInput,
+  type IngestAndRouteResult,
+  type WmsOrderSyncPort,
+} from "./channel-order-ingest-and-route";
+export {
+  createShopifyOrderIntakeAdapter,
+  extractShopifyRisk,
+  getShopifyExternalOrderId,
+  mapShopifyOrderToOrderData,
+  verifyShopifyHmacSignature,
+  type ExtractedShopifyRisk,
+  type ShopifyOrderIntakeAdapterOptions,
+} from "./adapters/shopify-order-intake.adapter";
+export {
+  createEbayOrderIntakeAdapter,
+  ebayDollarsToCents,
+  mapEbayOrderToOrderData,
+  type EbayOrderIntakeAdapterOptions,
+} from "./adapters/ebay-order-intake.adapter";
+export {
+  createDefaultChannelOrderAdapterRegistry,
+  type DefaultChannelOrderAdapterRegistryOptions,
+} from "./adapters/channel-order-intake-registry";
