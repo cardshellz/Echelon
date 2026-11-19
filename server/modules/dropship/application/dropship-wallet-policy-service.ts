@@ -24,7 +24,8 @@ import {
   type DropshipEnforcedListingTierMinimums,
   type DropshipListingTierPolicyVersion,
 } from "../domain/listing-tiers";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 /**
  * Dropship wallet policy service.
@@ -678,28 +679,10 @@ function environmentFallbackTierVersion(limits: DropshipWalletPolicyLimits): Dro
 }
 
 export function makeDropshipWalletPolicyLogger(): DropshipLogger {
-  return {
-    info: (event) => logWalletPolicyEvent("info", event),
-    warn: (event) => logWalletPolicyEvent("warn", event),
-    error: (event) => logWalletPolicyEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.wallet_policy");
 }
 
 export const systemDropshipWalletPolicyClock: DropshipClock = {
   now: () => new Date(),
 };
 
-function logWalletPolicyEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 const dropshipWorkerSweepNameSchema = z.enum([
   "listing_push",
@@ -153,11 +154,7 @@ export class DropshipWorkerOpsService {
 }
 
 export function makeDropshipWorkerOpsLogger(): DropshipLogger {
-  return {
-    info: (event) => logWorkerOpsEvent("info", event),
-    warn: (event) => logWorkerOpsEvent("warn", event),
-    error: (event) => logWorkerOpsEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.worker_ops");
 }
 
 export const systemDropshipWorkerOpsClock: DropshipClock = {

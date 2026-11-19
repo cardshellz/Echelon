@@ -8,6 +8,7 @@ import type {
   DropshipLogger,
   DropshipNotificationSender,
 } from "../../application/dropship-ports";
+import { createDropshipPlatformLogger } from "../../application/dropship-platform-logger";
 import type { DropshipOrderIntakeService } from "../../application/dropship-order-intake-service";
 import { createDropshipOrderIntakeServiceFromEnv } from "../../infrastructure/dropship-order-intake.factory";
 import { createDropshipNotificationServiceFromEnv } from "../../infrastructure/dropship-notification.factory";
@@ -353,26 +354,5 @@ function logShopifyWebhookIgnored(input: {
   }));
 }
 
-const dropshipMarketplaceOrderIntakeRouteLogger: DropshipLogger = {
-  info: (event) => logDropshipMarketplaceOrderIntakeRouteEvent("info", event),
-  warn: (event) => logDropshipMarketplaceOrderIntakeRouteEvent("warn", event),
-  error: (event) => logDropshipMarketplaceOrderIntakeRouteEvent("error", event),
-};
-
-function logDropshipMarketplaceOrderIntakeRouteEvent(
-  level: "info" | "warn" | "error",
-  event: { code: string; message: string; context?: Record<string, unknown> },
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}
+const dropshipMarketplaceOrderIntakeRouteLogger: DropshipLogger =
+  createDropshipPlatformLogger("dropship.marketplace_order_intake_route");

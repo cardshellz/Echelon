@@ -28,6 +28,7 @@ import type {
   OrderData,
 } from "./oms.service";
 import { enqueueOmsWmsSyncRetry } from "./webhook-retry.worker";
+import { enrichContext } from "../../platform/observability";
 
 export interface WmsOrderSyncPort {
   syncOmsOrderToWms(omsOrderId: number): Promise<number | null | undefined>;
@@ -223,12 +224,16 @@ export async function ingestAndRoute(
   try {
     const providerKey = input.order.source || "unknown";
     validatedOrder = parseValidatedChannelOrder(providerKey, input.order);
+    if (validatedOrder.sourceEventId) {
+      enrichContext({ channelEventId: validatedOrder.sourceEventId });
+    }
     orderData = validatedChannelOrderToOrderData(validatedOrder);
     omsOrder = await input.omsService.ingestOrder(
       validatedOrder.channelId,
       validatedOrder.externalOrderId,
       orderData,
     );
+    enrichContext({ omsOrderId: omsOrder.id });
 
     const nowMs = input.nowMs ?? Date.now();
     isNew = Boolean(

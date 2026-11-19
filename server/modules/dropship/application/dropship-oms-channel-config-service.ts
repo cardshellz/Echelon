@@ -1,7 +1,8 @@
 import { createHash } from "crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 const positiveIdSchema = z.number().int().positive();
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
@@ -148,11 +149,7 @@ export function hashDropshipOmsChannelConfigCommand(commandType: string, payload
 }
 
 export function makeDropshipOmsChannelConfigLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipOmsChannelConfigEvent("info", event),
-    warn: (event) => logDropshipOmsChannelConfigEvent("warn", event),
-    error: (event) => logDropshipOmsChannelConfigEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.oms_channel_config");
 }
 
 export const systemDropshipOmsChannelConfigClock: DropshipClock = {
@@ -188,22 +185,3 @@ function sortJsonValue(value: unknown): unknown {
   return value;
 }
 
-function logDropshipOmsChannelConfigEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-    return;
-  }
-  if (level === "warn") {
-    console.warn(payload);
-    return;
-  }
-  console.info(payload);
-}

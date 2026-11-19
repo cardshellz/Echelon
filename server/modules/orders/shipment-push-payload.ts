@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { readIntegerCents } from "@shared/money-read";
+import { enrichContext } from "../../platform/observability";
 import {
   engineRefFromRow,
   type EnginePushResult,
@@ -250,6 +251,14 @@ async function hydrateFromHeaderRow(
     shipstation_order_id:
       row.shipstation_order_id != null ? Number(row.shipstation_order_id) : null,
     shipstation_order_key: row.shipstation_order_key ?? null,
+  });
+
+  enrichContext({
+    shipmentId,
+    wmsOrderId: orderId,
+    ...(existingEngineRef
+      ? { engineRef: `${existingEngineRef.engine}:${existingEngineRef.engineOrderRef}` }
+      : {}),
   });
 
   return {

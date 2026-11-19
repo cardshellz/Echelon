@@ -43,7 +43,7 @@ import { createStaffSessionGate } from "./modules/identity/staff-session.api";
 import connectPgSimple from "connect-pg-simple";
 import { Pool } from "pg";
 import cookieParser from "cookie-parser";
-import { timingSafeEqual } from "crypto";
+import { randomUUID, timingSafeEqual } from "crypto";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
@@ -149,11 +149,19 @@ import {
   schedulerIsDisabled,
 } from "./infrastructure/scheduler-config";
 import { registerScheduledJob } from "./infrastructure/job-registry";
-import { reportError, runWithContext } from "./platform/observability";
+import {
+  installStructuredConsoleBridge,
+  reportError,
+  runWithContext,
+} from "./platform/observability";
 import { createHttpRequestLogger } from "./platform/observability/http-request-log";
 import { observeRuntimeRequests, startRuntimeMemoryTelemetry } from "./platform/observability/runtime-memory";
 import { getPostgresPoolSnapshot } from "./infrastructure/postgres-pool-observability";
 import { getSchedulerLockPoolSnapshot } from "./infrastructure/scheduler-lock";
+
+if (!process.env.VITEST && process.env.DISABLE_STRUCTURED_CONSOLE_BRIDGE !== "true") {
+  installStructuredConsoleBridge();
+}
 
 const app = express();
 const httpServer = createServer(app);
@@ -176,11 +184,25 @@ app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
 
 // Per-request correlation context via AsyncLocalStorage.
-// Reads x-request-id from upstream (load balancer) or generates one.
+// Reads x-correlation-id / x-request-id from upstream (load balancer) or generates one,
+// and captures inbound webhook event identifiers (`channel_event_id`).
 app.use((req: Request, res: Response, next: NextFunction) => {
-  const correlationId = (req.headers["x-request-id"] as string) ?? require("node:crypto").randomUUID();
+  const correlationId =
+    (req.headers["x-correlation-id"] as string | undefined)?.trim() ||
+    (req.headers["x-request-id"] as string | undefined)?.trim() ||
+    randomUUID();
+  const channelEventId =
+    (req.headers["x-shopify-webhook-id"] as string | undefined)?.trim() ||
+    (req.headers["x-ebay-notification-id"] as string | undefined)?.trim() ||
+    undefined;
   res.setHeader("x-correlation-id", correlationId);
-  runWithContext({ correlationId }, () => next());
+  runWithContext(
+    {
+      correlationId,
+      ...(channelEventId ? { channelEventId } : {}),
+    },
+    () => next(),
+  );
 });
 
 // Trust proxy for Heroku (needed for secure cookies behind load balancer)

@@ -2,7 +2,8 @@ import { createHash } from "crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 
 const positiveIdSchema = z.number().int().positive();
@@ -469,11 +470,7 @@ export function isDropshipCriticalLaunchNotificationEvent(eventType: string): bo
 }
 
 export function makeDropshipNotificationLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipNotificationEvent("info", event),
-    warn: (event) => logDropshipNotificationEvent("warn", event),
-    error: (event) => logDropshipNotificationEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.notification");
 }
 
 export const systemDropshipNotificationClock: DropshipClock = {
@@ -550,17 +547,3 @@ function parseNotificationInput<T>(
   return result.data;
 }
 
-function logDropshipNotificationEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

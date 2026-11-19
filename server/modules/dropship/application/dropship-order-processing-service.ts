@@ -1,6 +1,5 @@
 import { createHash } from "crypto";
 import { z } from "zod";
-import { logger as platformLogger } from "../../../platform/observability/logger";
 import { DropshipError } from "../domain/errors";
 import {
   decideOrderProcessingFailure,
@@ -14,14 +13,8 @@ import { isDropshipFundingDeclineError } from "../domain/vendor-standing";
 import { syncDropshipAcceptedOrderToWmsSafely } from "./dropship-fulfillment-sync-dispatch";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-  DropshipOmsFulfillmentSync,
-  DropshipOmsFulfillmentSyncRetryQueue,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipNotificationSender, DropshipOmsFulfillmentSync, DropshipOmsFulfillmentSyncRetryQueue } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import {
   DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE,
   type DropshipAcceptanceReloadContext,
@@ -840,13 +833,7 @@ export function deriveOrderProcessingIdempotencyKey(
 }
 
 export function makeDropshipOrderProcessingLogger(): DropshipLogger {
-  return {
-    // Expected repeats (CLAUDE.md §10): the platform logger's debug level, off at the default LOG_LEVEL (review ARCH-5).
-    debug: (event) => platformLogger.debug(event.code, { message: event.message, context: event.context ?? {} }),
-    info: (event) => logDropshipOrderProcessingEvent("info", event),
-    warn: (event) => logDropshipOrderProcessingEvent("warn", event),
-    error: (event) => logDropshipOrderProcessingEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.order_processing");
 }
 
 export const systemDropshipOrderProcessingClock: DropshipClock = {
@@ -1020,17 +1007,3 @@ export function classifyOrderProcessingError(error: unknown): OrderProcessingErr
 }
 
 
-function logDropshipOrderProcessingEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

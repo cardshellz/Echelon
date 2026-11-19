@@ -21,12 +21,8 @@ import {
   sendDropshipNotificationSafely,
 } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 /**
  * Listing tiers: which of a vendor's tiers are on, and keeping the
@@ -636,20 +632,10 @@ function errorMessage(error: unknown): string {
 }
 
 export function makeDropshipListingTierLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipListingTierEvent("info", event),
-    warn: (event) => logDropshipListingTierEvent("warn", event),
-    error: (event) => logDropshipListingTierEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.listing_tier");
 }
 
 export const systemDropshipListingTierClock: DropshipClock = {
   now: () => new Date(),
 };
 
-function logDropshipListingTierEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({ code: event.code, message: event.message, context: event.context ?? {} });
-  if (level === "error") console.error(payload);
-  else if (level === "warn") console.warn(payload);
-  else console.info(payload);
-}

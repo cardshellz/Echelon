@@ -22,6 +22,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import {
   ERC20_SELECTORS,
   addressToTopic,
@@ -975,9 +976,5 @@ function classificationOf(error: unknown): "transient" | "permanent" | "fatal" {
 export const systemDropshipUsdcDepositClock: DropshipClock = { now: () => new Date() };
 
 export function makeDropshipUsdcDepositLogger(): DropshipLogger {
-  return {
-    info: (event) => console.info(JSON.stringify({ level: "info", ...event })),
-    warn: (event) => console.warn(JSON.stringify({ level: "warn", ...event })),
-    error: (event) => console.error(JSON.stringify({ level: "error", ...event })),
-  };
+  return createDropshipPlatformLogger("dropship.usdc_deposit");
 }

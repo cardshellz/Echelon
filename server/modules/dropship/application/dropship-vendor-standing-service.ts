@@ -15,12 +15,8 @@ import {
 } from "../domain/vendor-standing";
 import { formatNotificationCurrency, sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 /**
  * Vendor standing: pause on the first funding decline, freeze the vendor's
@@ -534,20 +530,10 @@ function errorMessage(error: unknown): string {
 }
 
 export function makeDropshipVendorStandingLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipVendorStandingEvent("info", event),
-    warn: (event) => logDropshipVendorStandingEvent("warn", event),
-    error: (event) => logDropshipVendorStandingEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.vendor_standing");
 }
 
 export const systemDropshipVendorStandingClock: DropshipClock = {
   now: () => new Date(),
 };
 
-function logDropshipVendorStandingEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({ code: event.code, message: event.message, context: event.context ?? {} });
-  if (level === "error") console.error(payload);
-  else if (level === "warn") console.warn(payload);
-  else console.info(payload);
-}

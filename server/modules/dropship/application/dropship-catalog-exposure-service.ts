@@ -6,7 +6,8 @@ import {
   type DropshipCatalogExposureRule,
   type DropshipCatalogVariantCandidate,
 } from "../domain/catalog-exposure";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import {
   listDropshipCatalogExposureRulesInputSchema,
   previewDropshipCatalogExposureInputSchema,
@@ -208,11 +209,7 @@ export function normalizeCatalogExposureRule(
 }
 
 export function makeDropshipCatalogExposureLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipCatalogExposureEvent("info", event),
-    warn: (event) => logDropshipCatalogExposureEvent("warn", event),
-    error: (event) => logDropshipCatalogExposureEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.catalog_exposure");
 }
 
 export const systemDropshipCatalogExposureClock: DropshipClock = {
@@ -236,22 +233,3 @@ function sortJsonValue(value: unknown): unknown {
   return value;
 }
 
-function logDropshipCatalogExposureEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-    return;
-  }
-  if (level === "warn") {
-    console.warn(payload);
-    return;
-  }
-  console.info(payload);
-}

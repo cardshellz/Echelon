@@ -11,12 +11,8 @@ import {
   type DropshipStoreConnectionLifecycleStatus,
   type DropshipSupportedStorePlatform,
 } from "../domain/store-connection";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
@@ -1088,11 +1084,7 @@ export class DropshipStoreConnectionService {
 }
 
 export function makeDropshipStoreConnectionLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipStoreConnectionEvent("info", event),
-    warn: (event) => logDropshipStoreConnectionEvent("warn", event),
-    error: (event) => logDropshipStoreConnectionEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.store_connection");
 }
 
 export const systemDropshipStoreConnectionClock: DropshipClock = {
@@ -1535,22 +1527,3 @@ function parseListForAdminInput(input: unknown): ListDropshipAdminStoreConnectio
   return result.data;
 }
 
-function logDropshipStoreConnectionEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-    return;
-  }
-  if (level === "warn") {
-    console.warn(payload);
-    return;
-  }
-  console.info(payload);
-}

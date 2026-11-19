@@ -30,6 +30,7 @@ import {
   recordRunCompleted,
 } from "./scheduler-run-registry";
 import { observeRuntimeWork } from "../platform/observability/runtime-memory";
+import { logger, runWithContext } from "../platform/observability";
 
 export type JobDeadLetterPolicy =
   | "review_flag"
@@ -201,32 +202,48 @@ export function registerScheduledJob(spec: RegisteredJobSpec): RegisteredJobHand
     }
 
     let executedInsideLock = false;
-    await lockRunner(spec.advisoryLockId, async () => {
-      executedInsideLock = true;
-      record.inFlight = true;
-      record.lastStartedAt = new Date();
-      try {
-        await observeRuntimeWork(name, spec.run);
-        const completedAt = new Date();
-        record.lastCompletedAt = completedAt;
-        record.lastOutcome = "succeeded";
-        record.lastError = null;
-        record.runCount += 1;
-        if (spec.db) {
-          await recordRunCompleted(spec.db, name, completedAt).catch((err: any) => {
-            console.warn(
-              `[JobRegistry] Failed to persist completion for ${name}: ${err?.message ?? err}`,
-            );
+    const jobCorrelationId = `job:${name}:${Date.now()}`;
+    await runWithContext({ correlationId: jobCorrelationId }, async () => {
+      await lockRunner(spec.advisoryLockId, async () => {
+        executedInsideLock = true;
+        record.inFlight = true;
+        const startedAt = new Date();
+        record.lastStartedAt = startedAt;
+        try {
+          await observeRuntimeWork(name, spec.run);
+          const completedAt = new Date();
+          record.lastCompletedAt = completedAt;
+          record.lastOutcome = "succeeded";
+          record.lastError = null;
+          record.runCount += 1;
+          logger.debug("job.completed", {
+            job_name: name,
+            advisory_lock_id: spec.advisoryLockId,
+            duration_ms: completedAt.getTime() - startedAt.getTime(),
           });
+          if (spec.db) {
+            await recordRunCompleted(spec.db, name, completedAt).catch((err: any) => {
+              logger.warn("job.persist_completion_failed", {
+                job_name: name,
+                advisory_lock_id: spec.advisoryLockId,
+                error: err instanceof Error ? err : String(err),
+              });
+            });
+          }
+        } catch (err: any) {
+          record.errorCount += 1;
+          record.lastOutcome = "failed";
+          record.lastError = err instanceof Error ? err.message : String(err);
+          logger.error("job.failed", {
+            job_name: name,
+            advisory_lock_id: spec.advisoryLockId,
+            error: err instanceof Error ? err : String(err),
+          });
+          throw err;
+        } finally {
+          record.inFlight = false;
         }
-      } catch (err: any) {
-        record.errorCount += 1;
-        record.lastOutcome = "failed";
-        record.lastError = err instanceof Error ? err.message : String(err);
-        throw err;
-      } finally {
-        record.inFlight = false;
-      }
+      });
     });
 
     if (!executedInsideLock) {

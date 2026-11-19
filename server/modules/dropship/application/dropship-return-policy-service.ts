@@ -1,10 +1,7 @@
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 /**
  * Dropship return policy resolution (design spec D1 + D2; build spec B1).
@@ -547,11 +544,7 @@ export class DropshipReturnPolicyService {
 }
 
 export function makeDropshipReturnPolicyLogger(): DropshipLogger {
-  return {
-    info: (event) => logPolicyEvent("info", event),
-    warn: (event) => logPolicyEvent("warn", event),
-    error: (event) => logPolicyEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.return_policy");
 }
 
 export const systemDropshipReturnPolicyClock: DropshipClock = {
@@ -580,20 +573,3 @@ function parsePolicyInput<T>(
   return result.data;
 }
 
-function logPolicyEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

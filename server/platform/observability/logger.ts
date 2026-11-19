@@ -1,4 +1,4 @@
-import { getContext } from "./log-context";
+import { getContext, toCanonicalCorrelationFields } from "./log-context";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -165,16 +165,19 @@ function serializeLogLine(line: Record<string, unknown>, fallbackLevel: LogLevel
   }
 }
 
+export function formatStructuredLogLine(entry: LogEntry): string {
+  const ctx = getContext();
+  const rawLine: Record<string, unknown> = {
+    ts: new Date().toISOString(),
+    ...toCanonicalCorrelationFields(ctx),
+    ...entry,
+  };
+  return serializeLogLine(rawLine, entry.level, String(entry.action ?? "unknown"));
+}
+
 function emit(entry: LogEntry): void {
   try {
-    const ctx = getContext();
-    const rawLine: Record<string, unknown> = {
-      ts: new Date().toISOString(),
-      ...entry,
-      ...(ctx ?? {}),
-    };
-
-    const json = serializeLogLine(rawLine, entry.level, String(entry.action ?? "unknown"));
+    const json = formatStructuredLogLine(entry);
 
     switch (entry.level) {
       case "error":

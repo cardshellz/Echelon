@@ -1,5 +1,6 @@
 import { webhookRetryQueue } from "@shared/schema";
 import { observeRuntimeWork } from "../../platform/observability/runtime-memory";
+import { enrichContext, runWithContext } from "../../platform/observability";
 import { eq, lte, and, sql } from "drizzle-orm";
 import { incr } from "../../instrumentation/metrics";
 import { createShipmentForOrder } from "../wms/shipment-execution-and-projection.api";
@@ -1298,6 +1299,7 @@ export async function dispatchShipStationShipmentPushRetry(
     return "malformed";
   }
 
+  enrichContext({ shipmentId });
   const eng = resolveShippingEngine(dbArg);
   const ssSvc = resolveShipStationService(dbArg);
   if (!eng && (!ssSvc || typeof ssSvc.pushShipment !== "function")) {
@@ -1377,6 +1379,7 @@ export async function dispatchShipStationShipmentCancelRetry(
     return "malformed";
   }
 
+  enrichContext({ shipmentId });
   const eng = resolveShippingEngine(dbArg);
   const ssSvc = resolveShipStationService(dbArg);
   if (!eng && (!ssSvc || typeof ssSvc.cancelOrder !== "function")) {
@@ -1512,6 +1515,7 @@ export async function dispatchShippingEngineShipmentAmendRetry(
     return "malformed";
   }
 
+  enrichContext({ shipmentId });
   const eng = resolveShippingEngine(dbArg);
   const ssSvc = resolveShipStationService(dbArg);
   if (
@@ -1631,6 +1635,7 @@ export async function dispatchShippingEngineShipmentQuantityAmendRetry(
     return "malformed";
   }
 
+  enrichContext({ shipmentId });
   const eng = resolveShippingEngine(dbArg);
   const ssSvc = resolveShipStationService(dbArg);
   if (
@@ -1759,6 +1764,7 @@ export async function dispatchShipStationHoldSyncRetry(
     return "malformed";
   }
 
+  enrichContext({ wmsOrderId });
   const eng = resolveShippingEngine(dbArg);
   const ssSvc = resolveShipStationService(dbArg);
   if (!eng && (!ssSvc || typeof ssSvc.syncWmsOrderShipStationHoldState !== "function")) {
@@ -2650,6 +2656,12 @@ export async function claimDueWebhookRetryBatch(
 }
 
 async function processPendingWebhooks(
+  dependencies: WebhookRetryWorkerDependencies,
+) {
+  return runWithContext({ correlationId: `webhook_retry:${Date.now()}` }, async () => processPendingWebhooksBatch(dependencies));
+}
+
+async function processPendingWebhooksBatch(
   dependencies: WebhookRetryWorkerDependencies,
 ) {
   const defaultDb = getDefaultDb();

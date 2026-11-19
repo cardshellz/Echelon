@@ -2,7 +2,8 @@ import { createHash } from "crypto";
 import { z } from "zod";
 import { CurrencyCodeSchema } from "../../../../shared/validation/currency";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 const positiveIdSchema = z.number().int().positive();
 const nonNegativeIntSchema = z.number().int().min(0);
@@ -512,11 +513,7 @@ export function hashDropshipShippingConfigCommand(commandType: string, payload: 
 }
 
 export function makeDropshipShippingConfigLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipShippingConfigEvent("info", event),
-    warn: (event) => logDropshipShippingConfigEvent("warn", event),
-    error: (event) => logDropshipShippingConfigEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.shipping_config");
 }
 
 export const systemDropshipShippingConfigClock: DropshipClock = {
@@ -573,25 +570,6 @@ function sortJsonValue(value: unknown): unknown {
   return value;
 }
 
-function logDropshipShippingConfigEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-    return;
-  }
-  if (level === "warn") {
-    console.warn(payload);
-    return;
-  }
-  console.info(payload);
-}
 
 export function shippingConfigValidationError(error: unknown): DropshipError | null {
   if (error && typeof error === "object" && "issues" in error) {

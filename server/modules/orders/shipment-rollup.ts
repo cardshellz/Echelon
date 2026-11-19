@@ -33,6 +33,7 @@ import { readIntegerCents } from "@shared/money-read";
  */
 
 import { sql } from "drizzle-orm";
+import { enrichContext } from "../../platform/observability";
 import {
   type ShipmentStatus,
   type WmsWarehouseStatus,
@@ -1013,6 +1014,12 @@ export async function dispatchShipmentEvent(
   event: ShipmentEvent | CanonicalShipmentEvent,
   opts: ShipmentEventDispatchOptions = {},
 ): Promise<MarkShipmentResult> {
+  enrichContext({
+    shipmentId,
+    ...("engineRef" in event && event.engineRef
+      ? { engineRef: `${event.engineRef.engine}:${event.engineRef.engineOrderRef}` }
+      : {}),
+  });
   const rollupEvent = canonicalShipmentEventToRollupEvent(event, { now: opts.now });
   if (!rollupEvent) {
     assertPositiveInt(shipmentId, "shipmentId");

@@ -11,7 +11,8 @@ import type {
   DropshipMarketplaceTrackingService,
   PushDropshipTrackingForOmsOrderResult,
 } from "./dropship-marketplace-tracking-service";
-import type { DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 export const DROPSHIP_TRACKING_PUSH_OPS_DEFAULT_STATUSES: DropshipTrackingPushStatus[] = [
   "failed",
@@ -194,11 +195,7 @@ export class DropshipTrackingPushOpsService {
 }
 
 export function makeDropshipTrackingPushOpsLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipTrackingPushOpsEvent("info", event),
-    warn: (event) => logDropshipTrackingPushOpsEvent("warn", event),
-    error: (event) => logDropshipTrackingPushOpsEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.tracking_push_ops");
 }
 
 function parseListPushesInput(input: unknown): ListDropshipTrackingPushesInput {
@@ -237,20 +234,3 @@ function parseRetryPushInput(input: unknown): RetryDropshipTrackingPushInput {
   return result.data;
 }
 
-function logDropshipTrackingPushOpsEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

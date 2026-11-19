@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
 import type { DropshipStoreConnectionPostConnectProvider } from "./dropship-store-connection-service";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 const positiveIdSchema = z.number().int().positive();
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
@@ -105,11 +106,7 @@ export class DropshipStoreWebhookRepairService {
 }
 
 export function makeDropshipStoreWebhookRepairLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipStoreWebhookRepairEvent("info", event),
-    warn: (event) => logDropshipStoreWebhookRepairEvent("warn", event),
-    error: (event) => logDropshipStoreWebhookRepairEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.store_webhook_repair");
 }
 
 export const systemDropshipStoreWebhookRepairClock: DropshipClock = {
@@ -134,20 +131,3 @@ function parseRepairInput(input: unknown): RepairDropshipStoreWebhooksInput {
   return result.data;
 }
 
-function logDropshipStoreWebhookRepairEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

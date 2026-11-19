@@ -8,7 +8,8 @@ import {
   type RetryDropshipNotificationEventInput,
 } from "./dropship-notification-ops-dtos";
 import type { DropshipNotificationEmailSender } from "./dropship-notification-service";
-import type { DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 export const DROPSHIP_NOTIFICATION_OPS_DEFAULT_STATUSES: DropshipNotificationOpsStatus[] = [
   "failed",
@@ -236,11 +237,7 @@ export class DropshipNotificationOpsService {
 }
 
 export function makeDropshipNotificationOpsLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipNotificationOpsEvent("info", event),
-    warn: (event) => logDropshipNotificationOpsEvent("warn", event),
-    error: (event) => logDropshipNotificationOpsEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.notification_ops");
 }
 
 export const systemDropshipNotificationOpsClock = {
@@ -300,20 +297,3 @@ function makeRetryActionResult(
   };
 }
 
-function logDropshipNotificationOpsEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

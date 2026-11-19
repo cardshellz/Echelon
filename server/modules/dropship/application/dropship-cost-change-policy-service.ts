@@ -6,7 +6,8 @@ import {
   type DropshipCostChangePolicySettings,
 } from "../../../../shared/dropship/cost-change-policy";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 /**
  * Dropship .ops cost change policy service.
@@ -273,11 +274,7 @@ export function hashCostChangePolicyRequest(value: {
 }
 
 export function makeDropshipCostChangePolicyLogger(): DropshipLogger {
-  return {
-    info: (event) => logCostChangePolicyEvent("info", event),
-    warn: (event) => logCostChangePolicyEvent("warn", event),
-    error: (event) => logCostChangePolicyEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.cost_change_policy");
 }
 
 export const systemDropshipCostChangePolicyClock: DropshipClock = {
@@ -303,13 +300,3 @@ function parseCostChangePolicyInput<T>(schema: z.ZodType<T, z.ZodTypeDef, unknow
   return result.data;
 }
 
-function logCostChangePolicyEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({ level, code: event.code, message: event.message, context: event.context ?? {} });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}
