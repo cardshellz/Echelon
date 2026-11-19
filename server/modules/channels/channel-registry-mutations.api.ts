@@ -9,4 +9,7 @@ export {
   clearExistingDropshipOmsChannelAndConnectionMarkersInTx,
   markChannelAsDropshipOmsInTx,
   ensureDefaultShopifyChannelSeeded,
+  listDropshipOmsChannelOptionsInTx,
+  findDropshipDefaultOmsChannelIdInTx,
+  lockDropshipOmsChannelByIdInTx,
 } from "./infrastructure/channel-registry-mutations.repository";

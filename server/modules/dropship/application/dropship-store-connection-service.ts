@@ -215,6 +215,14 @@ export interface CompleteOAuthQuery {
 }
 
 export interface DropshipStoreConnectionRepository {
+  consumeOAuthStateNonce?(input: {
+    nonce: string;
+    vendorId: number;
+    platform: DropshipSupportedStorePlatform;
+    requestHash: string;
+    expiresAt: Date;
+    now: Date;
+  }): Promise<boolean>;
   listByVendorId(vendorId: number): Promise<DropshipStoreConnectionProfile[]>;
   listForAdmin(input: ListDropshipAdminStoreConnectionsInput): Promise<DropshipAdminStoreConnectionListResult>;
   countActiveByVendorId(vendorId: number): Promise<number>;
@@ -329,9 +337,65 @@ export interface DropshipStoreConnectionServiceDependencies {
 
 export class DropshipStoreConnectionService {
   private readonly disconnectGraceHours: number;
+  private readonly consumedOAuthNonces = new Map<string, number>();
 
   constructor(private readonly deps: DropshipStoreConnectionServiceDependencies) {
     this.disconnectGraceHours = deps.disconnectGraceHours ?? DROPSHIP_STORE_DISCONNECT_GRACE_HOURS;
+  }
+
+  private async consumeOAuthStateNonceOrThrow(input: {
+    state: DropshipOAuthStatePayload;
+    rawState: string;
+    vendorId: number;
+    platform: DropshipSupportedStorePlatform;
+    now: Date;
+  }): Promise<void> {
+    const expiresAt = new Date(input.state.expiresAt);
+    const requestHash = createHash("sha256").update(input.rawState).digest("hex");
+    let claimed: boolean;
+
+    if (this.deps.repository.consumeOAuthStateNonce) {
+      claimed = await this.deps.repository.consumeOAuthStateNonce({
+        nonce: input.state.nonce,
+        vendorId: input.vendorId,
+        platform: input.platform,
+        requestHash,
+        expiresAt,
+        now: input.now,
+      });
+    } else {
+      for (const [k, exp] of this.consumedOAuthNonces.entries()) {
+        if (exp <= input.now.getTime()) {
+          this.consumedOAuthNonces.delete(k);
+        }
+      }
+      const key = `${input.vendorId}:${input.platform}:${input.state.nonce}`;
+      if (this.consumedOAuthNonces.has(key)) {
+        claimed = false;
+      } else {
+        this.consumedOAuthNonces.set(key, expiresAt.getTime());
+        claimed = true;
+      }
+    }
+
+    if (!claimed) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_OAUTH_STATE_REPLAYED",
+        message: "Dropship store OAuth state replay rejected.",
+        context: {
+          vendorId: input.vendorId,
+          platform: input.platform,
+        },
+      });
+      throw new DropshipError(
+        "DROPSHIP_OAUTH_STATE_REPLAYED",
+        "Store authorization state has already been used.",
+        {
+          vendorId: input.vendorId,
+          platform: input.platform,
+        },
+      );
+    }
   }
 
   async listForMember(memberId: string): Promise<{
@@ -501,6 +565,13 @@ export class DropshipStoreConnectionService {
         })
       : null;
     assertOAuthTargetStateMatchesConnection(targetState, targetConnection);
+    await this.consumeOAuthStateNonceOrThrow({
+      state,
+      rawState: input.state,
+      vendorId: vendor.vendorId,
+      platform,
+      now,
+    });
 
     let grant: DropshipStoreConnectionTokenGrant;
     try {

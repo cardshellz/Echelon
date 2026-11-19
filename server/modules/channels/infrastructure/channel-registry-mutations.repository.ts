@@ -159,3 +159,101 @@ export async function ensureDefaultShopifyChannelSeeded(
     );
   }
 }
+
+export async function listDropshipOmsChannelOptionsInTx<
+  TRow extends Record<string, any>,
+>(
+  client: PoolClient,
+  input: {
+    defaultName: string;
+    defaultType: string;
+    defaultProvider: string;
+  },
+): Promise<TRow[]> {
+  const result = await client.query<TRow>(
+    `SELECT
+       c.id,
+       c.name,
+       c.type,
+       c.provider,
+       c.status,
+       c.updated_at,
+       LOWER(c.name) = LOWER($1)
+         AND c.type = $2
+         AND c.provider = $3 AS internal_dropship_channel,
+       LOWER(COALESCE(c.shipping_config #>> '{dropship,role}', '')) = 'oms' AS channel_role_marked,
+       COALESCE(c.shipping_config #>> '{dropship,omsChannel}', 'false') = 'true' AS channel_flag_marked,
+       EXISTS (
+         SELECT 1
+         FROM channels.channel_connections cc
+         WHERE cc.channel_id = c.id
+           AND LOWER(COALESCE(cc.metadata #>> '{dropship,role}', '')) = 'oms'
+       ) AS connection_role_marked,
+       EXISTS (
+         SELECT 1
+         FROM channels.channel_connections cc
+         WHERE cc.channel_id = c.id
+           AND (
+             COALESCE(cc.metadata #>> '{features,dropshipOms}', 'false') = 'true'
+             OR COALESCE(cc.metadata #>> '{features,dropship_oms}', 'false') = 'true'
+           )
+       ) AS connection_feature_marked
+     FROM channels.channels c
+     ORDER BY
+       CASE WHEN c.status = 'active' THEN 0 ELSE 1 END,
+       c.name ASC,
+       c.id ASC`,
+    [input.defaultName, input.defaultType, input.defaultProvider],
+  );
+  return result.rows;
+}
+
+export async function findDropshipDefaultOmsChannelIdInTx(
+  client: PoolClient,
+  input: {
+    name: string;
+    type: string;
+    provider: string;
+  },
+): Promise<number | undefined> {
+  const existing = await client.query<{ id: number }>(
+    `SELECT id
+     FROM channels.channels
+     WHERE LOWER(name) = LOWER($1)
+       AND type = $2
+       AND provider = $3
+     ORDER BY id ASC
+     LIMIT 1`,
+    [input.name, input.type, input.provider],
+  );
+  return existing.rows[0]?.id;
+}
+
+export async function lockDropshipOmsChannelByIdInTx(
+  client: PoolClient,
+  channelId: number,
+): Promise<
+  | {
+      id: number;
+      name: string;
+      type: string;
+      provider: string;
+      status: string;
+    }
+  | undefined
+> {
+  const result = await client.query<{
+    id: number;
+    name: string;
+    type: string;
+    provider: string;
+    status: string;
+  }>(
+    `SELECT id, name, type, provider, status
+     FROM channels.channels
+     WHERE id = $1
+     FOR UPDATE`,
+    [channelId],
+  );
+  return result.rows[0];
+}

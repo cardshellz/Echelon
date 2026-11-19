@@ -60,6 +60,15 @@ export {
 export {
   mapCarrierToEbay,
 } from "./adapters/ebay/ebay-category-map";
+export {
+  EBAY_REST_API_BASE_URLS,
+  fetchEbayFulfillmentResource,
+  paginateEbayFulfillmentOrders,
+  resolveEbayRetryDelayMs,
+  type EbayRestEnvironment,
+  type FetchEbayFulfillmentResourceInput,
+  type PaginateEbayFulfillmentOrdersInput,
+} from "./adapters/ebay/ebay-fulfillment-order-pager";
 export type {
   EbayAmount,
   EbayBulkPriceQuantityRequest,
