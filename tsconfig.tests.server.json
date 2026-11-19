@@ -7,6 +7,9 @@
     "scripts/verify-preserved-reward-staging.ts",
     "scripts/warm-customer-order-actions.ts",
     "scripts/backfill-shipping-package-history.ts",
-    "scripts/recover-catalog-image-originals.ts"
+    "scripts/recover-catalog-image-originals.ts",
+    "scripts/ci/check-schema-drift.ts",
+    "scripts/ci/build-database-from-repository.ts",
+    "scripts/publish-production-structure.ts"
   ]
 }
