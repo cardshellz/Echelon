@@ -99,6 +99,7 @@ export async function enqueueShopifyFulfillmentWebhookRetry(
     topic: ShopifyFulfillmentWebhookTopic;
     envelope: ShopifyFulfillmentRetryEnvelope;
     errorMessage: string;
+    sourceInboxId?: number | null;
   },
 ): Promise<void> {
   await dbArg
@@ -109,6 +110,7 @@ export async function enqueueShopifyFulfillmentWebhookRetry(
       payload: input.envelope.payload,
       retryKey: input.envelope.retryKey,
       lastError: input.errorMessage,
+      ...(input.sourceInboxId ? { sourceInboxId: input.sourceInboxId } : {}),
     })
     .onConflictDoNothing();
 }

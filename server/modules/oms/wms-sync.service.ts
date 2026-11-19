@@ -550,7 +550,7 @@ interface WmsSyncServices {
   readChannelMerchandise?: (input: { channelId: number; orderId: string }) => Promise<ShopifyMerchandiseSnapshot>;
   /** Exact channel-owned warehouse assignments, such as a Walmart ship node. */
   resolveChannelWarehouse?: (channelId: number) => Promise<{ warehouseId: number; warehouseType: string } | null>;
-  inventoryCore: any;
+  inventoryCore?: import("../inventory").InventoryCore | unknown;
   reservation: any;
   fulfillmentRouter: any;
   /** Resolves the static internal Dropship OMS channel; Dropship orders bypass the router. */

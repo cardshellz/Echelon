@@ -83,12 +83,31 @@ const RESERVATION_LOCK_NS = 918410;
  * - Individual item failures are collected -- they never block other items.
  * - Every mutation is audited via the inventory transactions ledger.
  */
+type ReservationInventoryCoreMethods = Pick<
+  import("../inventory").InventoryCore,
+  | "reserveForOrder"
+  | "releaseReservation"
+  | "trimOrphanedReservation"
+  | "assertCountableCustody"
+  | "adjustInventory"
+  | "recordCycleCountReconciliationNoop"
+  | "approveCycleCountItemReconciliation"
+>;
+
+export type ReservationInventoryCore = ReservationInventoryCoreMethods & {
+  withTx(tx: any): ReservationInventoryCore;
+};
+
+export type ReservationInventoryCoreInput = Partial<ReservationInventoryCoreMethods> & {
+  withTx?: (tx: any) => any;
+};
+
 class ReservationService implements ReservationServiceContract {
   private readonly orderReleaseLocks = new Map<number, Promise<void>>();
 
   constructor(
     private readonly db: DrizzleDb,
-    private readonly inventoryCore: any,
+    private readonly inventoryCore: ReservationInventoryCore,
     private readonly channelSync: ChannelSync,
     private readonly atpService: AtpService,
     private readonly recipeBuildPromise?: RecipeBuildPromise,
@@ -1776,11 +1795,18 @@ class ReservationService implements ReservationServiceContract {
  */
 export function createReservationService(
   db: any,
-  inventoryCore: any,
+  inventoryCore: ReservationInventoryCoreInput,
   channelSync: any,
   atpService: any,
   recipeBuildPromise?: RecipeBuildPromise,
   clock?: () => Date,
 ): ReservationServiceContract {
-  return new ReservationService(db, inventoryCore, channelSync, atpService, recipeBuildPromise, clock);
+  return new ReservationService(
+    db,
+    inventoryCore as ReservationInventoryCore,
+    channelSync,
+    atpService,
+    recipeBuildPromise,
+    clock,
+  );
 }

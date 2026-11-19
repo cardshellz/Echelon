@@ -207,7 +207,12 @@ export async function startWebhookRetryWorker(
  */
 export async function enqueueShipStationRetry(
   dbArg: any,
-  payload: { resource_url: string }
+  payload: { resource_url: string },
+  options?: {
+    sourceInboxId?: number | null;
+    lastError?: string | null;
+    nextRetryAt?: Date;
+  },
 ): Promise<void> {
   if (!payload || typeof payload.resource_url !== "string" || payload.resource_url.length === 0) {
     throw new Error("enqueueShipStationRetry: payload.resource_url required");
@@ -225,13 +230,15 @@ export async function enqueueShipStationRetry(
     provider: "shipstation",
     topic: "SHIP_NOTIFY",
     payload: { resource_url: payload.resource_url },
+    ...(options?.sourceInboxId ? { sourceInboxId: options.sourceInboxId } : {}),
+    ...(options?.lastError ? { lastError: options.lastError } : {}),
     // attempts defaults to 0, status defaults to 'pending' via schema defaults,
     // but set them explicitly so tests don't depend on DB defaults.
     attempts: 0,
     status: "pending",
-    // First retry ~5 minutes out. Worker's exponential backoff takes over
+    // First retry ~5 minutes out by default. Worker's exponential backoff takes over
     // on subsequent failures (2^attempts minutes).
-    nextRetryAt: new Date(Date.now() + 5 * 60_000),
+    nextRetryAt: options?.nextRetryAt ?? new Date(Date.now() + 5 * 60_000),
   });
 }
 
@@ -2838,10 +2845,17 @@ async function processPendingWebhooks(
         continue;
       }
 
-      const FULFILLMENT_TOPICS = new Set(["fulfillments/create", "fulfillments/update"]);
+      const SHOPIFY_ROUTE_TOPICS = new Set([
+        "fulfillments/create",
+        "fulfillments/update",
+        "products/create",
+        "products/update",
+        "products/delete",
+      ]);
       const KNOWN_TOPICS = new Set([
         "orders/paid", "orders/updated", "orders/cancelled", "orders/fulfilled",
         "refunds/create", "fulfillments/create", "fulfillments/update",
+        "products/create", "products/update", "products/delete",
       ]);
 
       // Unknown topic → dead immediately (non-retryable bad data)
@@ -2854,7 +2868,7 @@ async function processPendingWebhooks(
       try {
         console.log(`${LOG_PREFIX} Retrying shopify item ${item.id} (${item.topic}), attempt ${item.attempts + 1}`);
 
-        const basePath = FULFILLMENT_TOPICS.has(item.topic)
+        const basePath = SHOPIFY_ROUTE_TOPICS.has(item.topic)
           ? "/api/shopify/webhooks"
           : "/api/oms/webhooks";
         const url = `http://127.0.0.1:${process.env.PORT || 5000}${basePath}/${item.topic}`;

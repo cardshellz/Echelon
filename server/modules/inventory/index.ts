@@ -25,6 +25,25 @@ export const inventoryStorage: InventoryModuleStorage = {
 
 // Use Cases (Replaces core.service and source.service)
 export { InventoryUseCases } from "./application/inventory.use-cases";
+export type InventoryCore = import("./application/inventory.use-cases").InventoryUseCases;
+export interface InventorySourceContract {
+  syncWarehouse(warehouseId: number): Promise<{
+    warehouseId: number;
+    warehouseCode: string;
+    synced: number;
+    skipped: number;
+    errors: string[];
+  }>;
+  syncAll(): Promise<
+    Array<{
+      warehouseId: number;
+      warehouseCode: string;
+      synced: number;
+      skipped: number;
+      errors: string[];
+    }>
+  >;
+}
 
 // Services
 export { createRecipeCapacityService, RecipeCapacityService } from "./recipe-capacity.service";

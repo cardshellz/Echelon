@@ -600,3 +600,5 @@ export function createChannelSyncService(
 ) {
   return new ChannelSyncService(db, atpService, identityServiceFactory);
 }
+
+export type ChannelSyncServiceContract = ReturnType<typeof createChannelSyncService>;

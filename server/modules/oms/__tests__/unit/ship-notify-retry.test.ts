@@ -2386,7 +2386,7 @@ describe("ship-notify retry :: wiring in server/index.ts", () => {
 
   it("calls enqueueShipStationRetry inside the ship-notify handler", () => {
     // Ensure the call site is present and references resource_url
-    expect(SRC).toMatch(/enqueueShipStationRetry\s*\(\s*db\s*,\s*\{\s*resource_url\s*\}\s*\)/);
+    expect(SRC).toMatch(/enqueueShipStationRetry\s*\(\s*db\s*,\s*\{\s*resource_url\s*\}/);
   });
 
   it("stashes the ShipStation service on db for the retry worker to find", () => {

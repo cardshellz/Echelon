@@ -8,3 +8,9 @@ export * from "./shipment-execution-and-projection.api";
 export * from "./assembly-and-packing.api";
 export * from "./returns-receipt.api";
 export * from "./cutover-and-dispatch.api";
+
+export interface WmsApi {
+  readonly recipeBuildPromise: import("./assembly-and-packing.api").RecipeBuildPromiseService;
+  readonly dispatchSourceOwner: import("./cutover-and-dispatch.api").WmsCanonicalClaimDispatchSourceOwner;
+  readonly operationalShipmentSourceOwner: import("./cutover-and-dispatch.api").WmsOperationalShipmentSourceOwner;
+}

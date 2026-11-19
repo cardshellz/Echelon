@@ -85,16 +85,16 @@ type DrizzleDb = {
 type InventoryCore = {
   getLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel | null>;
   getLevelsByVariant: (productVariantId: number) => Promise<InventoryLevel[]>;
-  upsertLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel>;
-  adjustLevel: (levelId: number, deltas: Record<string, number | undefined>) => Promise<InventoryLevel>;
+  upsertLevel?: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel>;
+  adjustLevel?: (levelId: number, deltas: Record<string, number | undefined>) => Promise<InventoryLevel>;
   adjustInventory: (params: {
     productVariantId: number;
     warehouseLocationId: number;
     qtyDelta: number;
     reason: string;
     userId?: string;
-  }) => Promise<void>;
-  logTransaction: (txn: any) => Promise<void>;
+  }) => Promise<unknown>;
+  logTransaction: (txn: any) => Promise<unknown>;
   pickItem: (params: {
     productVariantId: number;
     warehouseLocationId: number;
@@ -3118,7 +3118,7 @@ export class PickingUseCases {
     const loc = allLocations.find(l => l.id === pickLocationId);
 
     console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickLocationId}`);
-    
+
     return {
       success: true,
       productVariantId: productVariant.id,

@@ -394,7 +394,7 @@ function routingConcurrency(connectionPool: ClientPool): number {
 export function createAuthorityAwareReservationService(
   dependencies: {
     db: DrizzleDb;
-    inventoryCore: any;
+    inventoryCore: import("../../channels/reservation.service").ReservationInventoryCore;
     channelSync: ChannelSync;
     recipeBuildPromise?: RecipeBuildPromise;
     canonical: InventoryAvailabilityClaimService;
@@ -407,7 +407,7 @@ export function createAuthorityAwareReservationService(
 export function createAuthorityAwareReservationRuntime(
   dependencies: {
     db: DrizzleDb;
-    inventoryCore: any;
+    inventoryCore: import("../../channels/reservation.service").ReservationInventoryCore;
     channelSync: ChannelSync;
     recipeBuildPromise?: RecipeBuildPromise;
     canonical: InventoryAvailabilityClaimService;

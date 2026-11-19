@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import { BuildDomainError } from "../domain/build.domain";
 
 type QueryDb = {
-  execute: (query: unknown) => Promise<{ rows: any[] }>;
+  execute: (query: any) => Promise<{ rows: any[] }>;
 };
 
 export type BuildRecipeComponentView = {
