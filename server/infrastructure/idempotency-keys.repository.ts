@@ -1,5 +1,5 @@
 import { idempotencyKeys } from "@shared/schema";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 
 /**
  * Sole persistence owner for `public.idempotency_keys` writes across HTTP
@@ -34,6 +34,35 @@ export async function deleteUnclaimedIdempotencyKeyDrizzle(
   await executor
     .delete(idempotencyKeys)
     .where(and(eq(idempotencyKeys.key, key), isNull(idempotencyKeys.responseBody)));
+}
+
+export async function deleteIdempotencyKeyDrizzle(
+  executor: { delete: (...args: any[]) => any },
+  key: string,
+): Promise<void> {
+  await executor
+    .delete(idempotencyKeys)
+    .where(eq(idempotencyKeys.key, key));
+}
+
+export async function purgeExpiredIdempotencyKeysDrizzle(
+  executor: { execute?: (...args: any[]) => any },
+  now: Date = new Date(),
+  limit = 200,
+): Promise<void> {
+  if (typeof executor.execute !== "function") {
+    return;
+  }
+  await executor.execute(sql`
+    DELETE FROM public.idempotency_keys
+    WHERE key IN (
+      SELECT key
+      FROM public.idempotency_keys
+      WHERE expires_at IS NOT NULL
+        AND expires_at <= ${now}
+      LIMIT ${limit}
+    )
+  `);
 }
 
 export async function insertIdempotencyKeyPgQuery(

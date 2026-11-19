@@ -68,108 +68,103 @@ export const router = express.Router();
         .from(ebayCategoryMappings)
         .where(eq(ebayCategoryMappings.channelId, EBAY_CHANNEL_ID));
 
-      // Product types with product counts
-      const client = await pool.connect();
-      try {
-        const typesResult = await client.query(`
-          SELECT pt.id, pt.slug, pt.name, pt.sort_order,
-                 COUNT(p.id)::int AS product_count
-          FROM product_types pt
-          LEFT JOIN catalog.products p ON p.product_type = pt.slug AND p.is_active = true
-          GROUP BY pt.id, pt.slug, pt.name, pt.sort_order
-          ORDER BY pt.sort_order ASC
-        `);
+      // Product types with product counts (stateless pool queries — no pinned PoolClient)
+      const typesResult = await pool.query(`
+        SELECT pt.id, pt.slug, pt.name, pt.sort_order,
+               COUNT(p.id)::int AS product_count
+        FROM product_types pt
+        LEFT JOIN catalog.products p ON p.product_type = pt.slug AND p.is_active = true
+        GROUP BY pt.id, pt.slug, pt.name, pt.sort_order
+        ORDER BY pt.sort_order ASC
+      `);
 
-        // Build per-type aspect readiness: for each type that has a browse category,
-        // check if all required aspects have corresponding type defaults
-        const aspectReadiness: Record<string, { aspectsReady: boolean; missingRequiredCount: number }> = {};
-        for (const m of mappings) {
-          const slug = m.productTypeSlug || m.product_type_slug;
-          const catId = m.ebayBrowseCategoryId || m.ebay_browse_category_id;
-          if (!catId) continue;
+      // Build per-type aspect readiness: for each type that has a browse category,
+      // check if all required aspects have corresponding type defaults
+      const aspectReadiness: Record<string, { aspectsReady: boolean; missingRequiredCount: number }> = {};
+      for (const m of mappings) {
+        const slug = m.productTypeSlug || m.product_type_slug;
+        const catId = m.ebayBrowseCategoryId || m.ebay_browse_category_id;
+        if (!catId) continue;
 
-          // Get required aspects for this category
-          const reqResult = await client.query(
-            `SELECT aspect_name FROM ebay_category_aspects
-             WHERE category_id = $1 AND aspect_required = true`,
+        // Get required aspects for this category
+        const reqResult = await pool.query(
+          `SELECT aspect_name FROM ebay_category_aspects
+           WHERE category_id = $1 AND aspect_required = true`,
+          [catId],
+        );
+        if (reqResult.rows.length === 0) {
+          // No cached aspects — check if ANY aspects exist for this category
+          const anyAspects = await pool.query(
+            `SELECT COUNT(*) as cnt FROM ebay_category_aspects WHERE category_id = $1`,
             [catId],
           );
-          if (reqResult.rows.length === 0) {
-            // No cached aspects — check if ANY aspects exist for this category
-            const anyAspects = await client.query(
-              `SELECT COUNT(*) as cnt FROM ebay_category_aspects WHERE category_id = $1`,
-              [catId],
-            );
-            if (parseInt(anyAspects.rows[0].cnt) === 0) {
-              // Aspects never fetched for this category — unknown state, not ready
-              aspectReadiness[slug] = { aspectsReady: false, missingRequiredCount: -1 };
-              continue;
-            }
-            // Aspects cached but none are required — genuinely ready
-            aspectReadiness[slug] = { aspectsReady: true, missingRequiredCount: 0 };
+          if (parseInt(anyAspects.rows[0].cnt) === 0) {
+            // Aspects never fetched for this category — unknown state, not ready
+            aspectReadiness[slug] = { aspectsReady: false, missingRequiredCount: -1 };
             continue;
           }
-
-          // Get filled type defaults for this slug
-          const tdResult = await client.query(
-            `SELECT aspect_name FROM ebay_type_aspect_defaults
-             WHERE product_type_slug = $1`,
-            [slug],
-          );
-          const filledSet = new Set(tdResult.rows.map((r: any) => r.aspect_name));
-
-          let missing = 0;
-          for (const r of reqResult.rows) {
-            if (!filledSet.has(r.aspect_name)) missing++;
-          }
-          aspectReadiness[slug] = { aspectsReady: missing === 0, missingRequiredCount: missing };
+          // Aspects cached but none are required — genuinely ready
+          aspectReadiness[slug] = { aspectsReady: true, missingRequiredCount: 0 };
+          continue;
         }
 
-        res.json({
-          connected: !!tokenRow?.accessToken,
-          channel: channel || null,
-          ...connectionHealth,
-          tokenInfo: tokenRow ? {
-            accessTokenExpiresAt: tokenRow.accessTokenExpiresAt || tokenRow.access_token_expires_at,
-            refreshTokenExpiresAt: tokenRow.refreshTokenExpiresAt || tokenRow.refresh_token_expires_at,
-            lastRefreshedAt: tokenRow.lastRefreshedAt || tokenRow.last_refreshed_at,
-            environment: tokenRow.environment,
-          } : null,
-          config: {
-            marketplaceId: typeof metadata.marketplaceId === "string" && metadata.marketplaceId.trim()
-              ? metadata.marketplaceId.trim()
-              : "EBAY_US",
-            merchantLocationKey: metadata.merchantLocationKey || null,
-            fulfillmentPolicyId: metadata.fulfillmentPolicyId ?? null,
-            returnPolicyId: metadata.returnPolicyId ?? null,
-            paymentPolicyId: metadata.paymentPolicyId ?? null,
-            merchantLocation: metadata.merchantLocation || null,
-          },
-          categoryMappings: mappings.map((m: any) => {
-            const slug = m.productTypeSlug || m.product_type_slug;
-            const readiness = aspectReadiness[slug];
-            return {
-              id: m.id,
-              productTypeSlug: slug,
-              ebayBrowseCategoryId: m.ebayBrowseCategoryId || m.ebay_browse_category_id,
-              ebayBrowseCategoryName: m.ebayBrowseCategoryName || m.ebay_browse_category_name,
-              ebayStoreCategoryId: m.ebayStoreCategoryId || m.ebay_store_category_id,
-              ebayStoreCategoryName: m.ebayStoreCategoryName || m.ebay_store_category_name,
-              fulfillmentPolicyOverride: m.fulfillmentPolicyOverride ?? m.fulfillment_policy_override ?? null,
-              returnPolicyOverride: m.returnPolicyOverride ?? m.return_policy_override ?? null,
-              paymentPolicyOverride: m.paymentPolicyOverride ?? m.payment_policy_override ?? null,
-              listingEnabled: m.listingEnabled ?? m.listing_enabled ?? true,
-              aspectsReady: readiness?.aspectsReady ?? null,
-              missingRequiredCount: readiness?.missingRequiredCount ?? null,
-            };
-          }),
-          productTypes: typesResult.rows,
-          lastSyncAt: conn?.lastSyncAt || conn?.last_sync_at || null,
-          syncStatus: conn?.syncStatus || conn?.sync_status || "never",
-        });
-      } finally {
-        client.release();
+        // Get filled type defaults for this slug
+        const tdResult = await pool.query(
+          `SELECT aspect_name FROM ebay_type_aspect_defaults
+           WHERE product_type_slug = $1`,
+          [slug],
+        );
+        const filledSet = new Set(tdResult.rows.map((r: any) => r.aspect_name));
+
+        let missing = 0;
+        for (const r of reqResult.rows) {
+          if (!filledSet.has(r.aspect_name)) missing++;
+        }
+        aspectReadiness[slug] = { aspectsReady: missing === 0, missingRequiredCount: missing };
       }
+
+      res.json({
+        connected: !!tokenRow?.accessToken,
+        channel: channel || null,
+        ...connectionHealth,
+        tokenInfo: tokenRow ? {
+          accessTokenExpiresAt: tokenRow.accessTokenExpiresAt || tokenRow.access_token_expires_at,
+          refreshTokenExpiresAt: tokenRow.refreshTokenExpiresAt || tokenRow.refresh_token_expires_at,
+          lastRefreshedAt: tokenRow.lastRefreshedAt || tokenRow.last_refreshed_at,
+          environment: tokenRow.environment,
+        } : null,
+        config: {
+          marketplaceId: typeof metadata.marketplaceId === "string" && metadata.marketplaceId.trim()
+            ? metadata.marketplaceId.trim()
+            : "EBAY_US",
+          merchantLocationKey: metadata.merchantLocationKey || null,
+          fulfillmentPolicyId: metadata.fulfillmentPolicyId ?? null,
+          returnPolicyId: metadata.returnPolicyId ?? null,
+          paymentPolicyId: metadata.paymentPolicyId ?? null,
+          merchantLocation: metadata.merchantLocation || null,
+        },
+        categoryMappings: mappings.map((m: any) => {
+          const slug = m.productTypeSlug || m.product_type_slug;
+          const readiness = aspectReadiness[slug];
+          return {
+            id: m.id,
+            productTypeSlug: slug,
+            ebayBrowseCategoryId: m.ebayBrowseCategoryId || m.ebay_browse_category_id,
+            ebayBrowseCategoryName: m.ebayBrowseCategoryName || m.ebay_browse_category_name,
+            ebayStoreCategoryId: m.ebayStoreCategoryId || m.ebay_store_category_id,
+            ebayStoreCategoryName: m.ebayStoreCategoryName || m.ebay_store_category_name,
+            fulfillmentPolicyOverride: m.fulfillmentPolicyOverride ?? m.fulfillment_policy_override ?? null,
+            returnPolicyOverride: m.returnPolicyOverride ?? m.return_policy_override ?? null,
+            paymentPolicyOverride: m.paymentPolicyOverride ?? m.payment_policy_override ?? null,
+            listingEnabled: m.listingEnabled ?? m.listing_enabled ?? true,
+            aspectsReady: readiness?.aspectsReady ?? null,
+            missingRequiredCount: readiness?.missingRequiredCount ?? null,
+          };
+        }),
+        productTypes: typesResult.rows,
+        lastSyncAt: conn?.lastSyncAt || conn?.last_sync_at || null,
+        syncStatus: conn?.syncStatus || conn?.sync_status || "never",
+      });
     } catch (err: any) {
       console.error("[eBay Channel Config] Error:", err.message);
       res.status(500).json({ error: err.message });

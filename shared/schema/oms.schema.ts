@@ -298,7 +298,7 @@ export type OmsOrderLineAdjustment = typeof omsOrderLineAdjustments.$inferSelect
 
 export const omsOrderEvents = omsSchema.table("oms_order_events", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
-  orderId: bigint("order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "cascade" }),
+  orderId: bigint("order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "restrict" }),
   eventType: varchar("event_type", { length: 50 }).notNull(),
   details: jsonb("details"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
@@ -394,10 +394,10 @@ export const orderItemCosts = omsSchema.table("order_item_costs", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   orderId: integer("order_id").notNull().references(() => orders.id, { onDelete: "cascade" }),
   orderItemId: integer("order_item_id").notNull().references(() => orderItems.id, { onDelete: "cascade" }),
-  inventoryLotId: integer("inventory_lot_id").notNull(), 
+  inventoryLotId: integer("inventory_lot_id").notNull(),
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
-  qty: integer("qty").notNull(), 
-  unitCostCents: bigint("unit_cost_cents", { mode: "number" }).notNull(), 
+  qty: integer("qty").notNull(),
+  unitCostCents: bigint("unit_cost_cents", { mode: "number" }).notNull(),
   totalCostCents: bigint("total_cost_cents", { mode: "number" }).notNull(),
   // Mills mirrors (1/100 cent) — authoritative COGS precision. Backfilled from
   // *_cents (× 100) on startup; written authoritatively by the FIFO pick path

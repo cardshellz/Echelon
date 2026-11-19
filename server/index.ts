@@ -56,7 +56,8 @@ import {
   startOmsWmsCancelReconcileScheduler,
   startShopifyReconciliation,
 } from "./modules/orders/reconciliation-and-repair.api";
-import { db } from "./db";
+import { db, pool as dbPool } from "./db";
+import { resolvePostgresPoolSslConfig } from "./database-pool-config";
 import { createServices } from "./services";
 import {
   startEbayOrderPolling,
@@ -138,7 +139,6 @@ import {
   startWmsShipStationReconcileScheduler,
   toEngineRef,
 } from "./modules/shipping/engine-and-reconcile.api";
-import { pool as dbPool } from "./db";
 import { createEbayAuthConfig, EbayAuthService } from "./modules/channels/adapters/ebay/ebay-auth.service";
 import { createEbayApiClient } from "./modules/channels/adapters/ebay/ebay-api.client";
 import { requirePermission } from "./routes/middleware";
@@ -195,10 +195,9 @@ if (!process.env.SESSION_SECRET) {
 // Set up PostgreSQL session store for persistent sessions
 const PgSession = connectPgSimple(session);
 const dbConnectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
-const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "production";
 const sessionPool = new Pool({
   connectionString: dbConnectionString,
-  ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+  ssl: resolvePostgresPoolSslConfig(dbConnectionString),
   max: 2, // Limit session pool connections (Heroku Hobby = 20 total)
 });
 
