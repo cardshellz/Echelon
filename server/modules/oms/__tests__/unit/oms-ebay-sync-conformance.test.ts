@@ -22,6 +22,8 @@ function sourceBlock(source: string, startMarker: string, endMarker?: string): s
 }
 
 const EBAY_INGESTION_SRC = readSource("../../ebay-order-ingestion.ts");
+const EBAY_ADAPTER_SRC = readSource("../../adapters/ebay-order-intake.adapter.ts");
+const INGEST_AND_ROUTE_SRC = readSource("../../channel-order-ingest-and-route.ts");
 const EBAY_RECONCILER_SRC = readSource("../../reconcilers/ebay.reconciler.ts");
 const FULFILLMENT_PUSH_SRC = readSource("../../fulfillment-push.service.ts");
 const WEBHOOK_RETRY_SRC = readSource("../../webhook-retry.worker.ts");
@@ -37,10 +39,10 @@ const C2_TX_AWARE_PIPELINE_TEST_SRC = readSource("c2-tx-aware-pipeline.test.ts")
 
 describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
   it("keeps WMS sync retries durable after eBay ingest and partial sync failures", () => {
-    const ensureEbaySyncBlock = sourceBlock(
-      EBAY_INGESTION_SRC,
-      "async function ensureEbayOrderQueuedForWmsSync",
-      "function dollarsToCents",
+    const ensureSyncBlock = sourceBlock(
+      INGEST_AND_ROUTE_SRC,
+      "export async function ensureChannelOrderQueuedForWmsSync",
+      "export function validatedChannelOrderToOrderData",
     );
     const retryEnqueueBlock = sourceBlock(
       WEBHOOK_RETRY_SRC,
@@ -64,14 +66,11 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
     expect(C2_TX_AWARE_PIPELINE_TEST_SRC).toContain(
       "syncOmsOrderToWms runs reservation OUTSIDE the create transaction",
     );
-    // P0.1c (revised 2026-09-14): provider work crosses the authority-aware
-    // order reservation boundary; explicit shortfalls do not hold the order,
-    // while thrown authority/infrastructure failures retry before handoff.
     expect(WMS_SYNC_SRC).toContain('reserveBeforeShipmentProcessing(\n      wmsOrderId,');
     expect(WMS_SYNC_SRC).toContain('"existing_order_reconciliation"');
     expect(WMS_SYNC_SRC).toContain("Reservation shortfall for WMS order");
-    expect(ensureEbaySyncBlock).toContain("enqueueOmsWmsSyncRetry(database, omsOrderId, err)");
-    expect(ensureEbaySyncBlock).toContain("sync intentionally skipped");
+    expect(ensureSyncBlock).toContain("await enqueueOmsWmsSyncRetry(db, omsOrderId, err)");
+    expect(ensureSyncBlock).toContain("sync intentionally skipped");
     expect(retryEnqueueBlock).toContain('topic: "oms_wms_sync"');
     expect(retryEnqueueBlock).toContain("payload: { omsOrderId }");
     expect(retryDispatchBlock).toContain("wmsSync.syncOmsOrderToWms(omsOrderId)");
@@ -81,9 +80,9 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
 
   it("maps eBay ingest into OMS line authority and final commercial states", () => {
     const mapBlock = sourceBlock(
-      EBAY_INGESTION_SRC,
-      "function mapEbayOrderToOrderData",
-      "let pollInterval",
+      EBAY_ADAPTER_SRC,
+      "export function mapEbayOrderToOrderData",
+      "function readHeader",
     );
 
     expect(mapBlock).toContain('sourceTopic: "ebay/order"');
@@ -105,27 +104,17 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
     expect(EBAY_ROUTING_TEST_SRC).toContain(
       "routes existing orders that do not have warehouse assignment yet",
     );
-    expect(EBAY_INGESTION_SRC).toContain(
-      "await omsService.ingestOrder(EBAY_CHANNEL_ID, ebayOrder.orderId, orderData)",
-    );
-    expect(EBAY_INGESTION_SRC).toContain(
-      "await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData)",
-    );
+    expect(INGEST_AND_ROUTE_SRC).toContain("await input.omsService.ingestOrder(");
+    expect(EBAY_INGESTION_SRC.match(/await ingestAndRoute\(\{/g)?.length).toBe(3);
     expect(EBAY_INGESTION_SRC).toContain("async function recordEbayOrderIngested");
     expect(EBAY_INGESTION_SRC).toContain('status: "ingested"');
     expect(EBAY_INGESTION_SRC).toContain("omsOrderId");
     expect(EBAY_INGESTION_SRC).toContain("incrementObservation: false");
     expect(EBAY_INGESTION_SRC).toContain(
-      'await recordEbayOrderIngested(db, ebayOrder, "manual_reingest", result.id)',
+      'await recordEbayOrderIngested(db, ebayOrder, "manual_reingest", omsOrder.id)',
     );
     expect(EBAY_INGESTION_SRC).toMatch(
-      /await recordEbayOrderIngested\(\s*db,\s*ebayOrder,\s*"webhook_fetch",\s*result\.id/,
-    );
-    expect(EBAY_INGESTION_SRC).toMatch(
-      /await ensureEbayOrderQueuedForWmsSync\(\s*_wmsSyncService,\s*result\.id,\s*ebayOrder\.orderId,\s*database/,
-    );
-    expect(EBAY_INGESTION_SRC).toContain(
-      "await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, orderId)",
+      /await recordEbayOrderIngested\(\s*db,\s*ebayOrder,\s*"webhook_fetch",\s*omsOrder\.id/,
     );
     expect(EBAY_INGESTION_SRC).toContain("recordWebhookReceived");
     expect(EBAY_INGESTION_SRC).toContain("markWebhookSucceeded");
@@ -139,7 +128,7 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
       "export function createEbayOrderWebhookHandler",
     );
 
-    expect(pollBlock).toContain('orderData.status === "cancelled"');
+    expect(pollBlock).toContain("defaultEbayIntakeAdapter.normalizeCancel(");
     expect(pollBlock).toContain("transitionOmsOrderStatus(");
     expect(pollBlock).toContain("cancelWmsOrder");
     expect(pollBlock).toContain('"ebay_cancel"');
