@@ -199,7 +199,7 @@ async function cancelInEngine(input: DropshipMarketplaceCancelStopInput, rows: M
  */
 async function cancelOmsOrderWithEvent(db: any, input: DropshipMarketplaceCancelStopInput, now: Date): Promise<{ beforeStatus: string } | null> {
   const result = await db.execute(sql`WITH previous AS (
-      SELECT id, status FROM oms.oms_orders WHERE id = ${input.omsOrderId} AND status NOT IN ('cancelled', 'refunded') FOR UPDATE),
+      SELECT id, status FROM oms.oms_orders WHERE id = ${input.omsOrderId} AND status NOT IN ('cancelled', 'refunded', 'shipped', 'partially_shipped', 'delivered') FOR UPDATE),
     flipped AS (
       UPDATE oms.oms_orders o SET status = 'cancelled', cancelled_at = ${now}, updated_at = ${now}
       FROM previous WHERE o.id = previous.id RETURNING o.id, previous.status AS before_status)

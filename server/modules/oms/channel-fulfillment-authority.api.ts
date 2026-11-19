@@ -43,3 +43,24 @@ export { PackageReconciliationService } from "./package-reconciliation.service";
 export { startFulfillmentSweeper } from "./fulfillment-sweeper.scheduler";
 export { startChannelFulfillmentCommandWorker } from "./channel-fulfillment-command.worker";
 export { startArchonOrderDelivery } from "./archon-order-delivery.worker";
+export {
+  OMS_ORDER_LIFECYCLE_STATUS_VALUES,
+  TERMINAL_OMS_ORDER_STATUSES,
+  NON_CANCELLABLE_OMS_ORDER_STATUSES,
+  OMS_TRANSITION_DRIVERS,
+  OMS_ORDER_STATUS_TRANSITION_MATRIX,
+  OMS_DRIVER_ALLOWED_TARGETS,
+  isTerminalOmsOrderStatus,
+  isNonCancellableOmsOrderStatus,
+  isOmsOrderTransitionAllowed,
+  allowedOmsOrderFromStatuses,
+  transitionOmsOrderStatus,
+  recordShipmentOutcome,
+  recordShipmentOutcomeInOms,
+  type OmsOrderLifecycleStatus,
+  type OmsTransitionDriver,
+  type TransitionOmsOrderStatusRequest,
+  type TransitionOmsOrderStatusResult,
+  type RecordShipmentOutcomeInput,
+  type RecordShipmentOutcomeResult,
+} from "./oms-order-status-core";

@@ -42,6 +42,7 @@ import {
   markEbayOrderPollStarted,
   markEbayOrderPollSucceeded,
 } from "./ebay-order-poll-heartbeat";
+import { transitionOmsOrderStatus } from "./oms-order-status-core";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -541,24 +542,31 @@ async function runEbayOrderPoll(
             // Status changed on eBay — update OMS
             if (orderData.status === "cancelled" && existing.status !== "cancelled") {
               console.log(`[eBay Orders] Order ${ebayOrder.orderId} cancelled on eBay — updating OMS`);
-              await database.execute(sql`
-                UPDATE oms_orders SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
-                WHERE id = ${result.id} AND status != 'cancelled'
-              `);
-              // Release WMS reservation
-              try {
-                const wmsOrder = await database.execute(sql`
-                  SELECT id FROM wms.orders
-                  WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(result.id)})
-                     OR source_table_id = ${String(result.id)}
-                  LIMIT 1
-                `);
-                if (wmsOrder.rows.length > 0) {
-                  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-lifecycle-and-cancellation.api");
-                  await cancelWmsOrder(database, Number(wmsOrder.rows[0].id), "ebay_cancel");
+              const cancelVerdict = await transitionOmsOrderStatus(database, result.id, {
+                to: "cancelled",
+                driver: "channel",
+                reason: "ebay_cancel",
+              });
+              if (cancelVerdict.outcome === "blocked_by_state") {
+                console.warn(
+                  `[eBay Orders] Blocked late eBay cancellation on OMS order ${result.id} (${ebayOrder.orderId}): ${cancelVerdict.reason}`,
+                );
+              } else {
+                // Release WMS reservation
+                try {
+                  const wmsOrder = await database.execute(sql`
+                    SELECT id FROM wms.orders
+                    WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(result.id)})
+                       OR source_table_id = ${String(result.id)}
+                    LIMIT 1
+                  `);
+                  if (wmsOrder.rows.length > 0) {
+                    const { cancelOrder: cancelWmsOrder } = await import("../orders/order-lifecycle-and-cancellation.api");
+                    await cancelWmsOrder(database, Number(wmsOrder.rows[0].id), "ebay_cancel");
+                  }
+                } catch (e: any) {
+                  console.error(`[eBay Orders] Failed to cancel WMS order for ${ebayOrder.orderId}: ${e.message}`);
                 }
-              } catch (e: any) {
-                console.error(`[eBay Orders] Failed to cancel WMS order for ${ebayOrder.orderId}: ${e.message}`);
               }
             }
             if ((orderData.financialStatus === "refunded" || orderData.financialStatus === "partially_refunded")
@@ -568,7 +576,7 @@ async function runEbayOrderPoll(
               // partial = 0 (best-effort until eBay returns API exposes amounts).
               const refundAmountCents = orderData.financialStatus === "refunded" ? (existing.totalCents ?? 0) : 0;
               await database.execute(sql`
-                UPDATE oms_orders
+                UPDATE oms.oms_orders
                 SET financial_status = ${orderData.financialStatus},
                     refunded_at = NOW(),
                     refund_amount_cents = ${refundAmountCents},
