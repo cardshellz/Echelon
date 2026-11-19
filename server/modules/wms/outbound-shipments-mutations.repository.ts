@@ -46,6 +46,8 @@ export async function cancelDuplicateOutboundShipmentInWms(
     UPDATE wms.outbound_shipments
     SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
     WHERE id = ${shipmentId}
+      AND status NOT IN ('shipped', 'returned', 'lost')
+      AND shipped_at IS NULL
   `);
 }
 
@@ -144,6 +146,7 @@ export async function markOutboundShipmentShippedRowInWms(
       END,
       updated_at = ${input.now}
     WHERE id = ${input.shipmentId}
+      AND status NOT IN ('returned', 'lost')
   `);
 }
 
@@ -191,6 +194,7 @@ export async function markOutboundShipmentVoidedRowInWms(
       tracking_url = NULL,
       updated_at = ${input.now}
     WHERE id = ${input.shipmentId}
+      AND status IN ('planned', 'queued', 'labeled', 'shipped')
   `);
 }
 
@@ -279,7 +283,10 @@ export async function consolidateOrderEditHeldOutboundShipmentsInWms(
     on_hold_reason=CASE WHEN parent.held THEN parent.on_hold_reason ELSE child.on_hold_reason END,updated_at=${input.now}
     FROM wms.outbound_shipments child WHERE parent.id=${input.parentShipmentId} AND child.id=${input.heldShipmentId}`);
   await executor.execute(sql`UPDATE wms.outbound_shipments SET status='cancelled',cancelled_at=${input.now},
-    voided_reason='order_edit_held_partition_consolidated',updated_at=${input.now} WHERE id=${input.heldShipmentId}`);
+    voided_reason='order_edit_held_partition_consolidated',updated_at=${input.now}
+    WHERE id=${input.heldShipmentId}
+      AND status NOT IN ('shipped', 'returned', 'lost')
+      AND shipped_at IS NULL`);
 }
 
 export async function adoptProvenShipStationOrderOnOutboundShipmentInWms(
@@ -422,7 +429,8 @@ export async function cancelEmptiedByLineHoldOutboundShipmentInWms(
         voided_reason = 'emptied_by_line_item_hold',
         updated_at = NOW()
     WHERE id = ${shipmentId}
-      AND status NOT IN ('shipped', 'voided', 'cancelled')
+      AND status NOT IN ('shipped', 'returned', 'lost', 'voided', 'cancelled')
+      AND shipped_at IS NULL
   `);
 }
 
@@ -712,6 +720,7 @@ export async function voidSupersededCandidateOutboundShipmentInWms(
         review_reason = 'shipstation_superseded_label_reconciled',
         updated_at = NOW()
     WHERE id = ${input.supersededCandidateShipmentId}
+      AND status IN ('planned', 'queued', 'labeled', 'shipped')
   `);
 }
 
@@ -840,6 +849,8 @@ export async function reclassifyCandidateAsReplacementOutboundShipmentInWms(
           review_reason = 'shipstation_reship_adoption_pending',
           updated_at = NOW()
       WHERE id = ${input.candidateShipmentId}
+        AND status IN ('planned', 'queued', 'voided')
+        AND shipped_at IS NULL
     `);
     return;
   }
@@ -909,6 +920,7 @@ export async function voidAdditionalProviderLabelCandidateOutboundShipmentInWms(
         review_reason = NULL,
         updated_at = NOW()
     WHERE id = ${input.candidateShipmentId}
+      AND status IN ('planned', 'queued', 'labeled', 'shipped')
   `);
 }
 
@@ -1048,5 +1060,7 @@ export async function markOutboundShipmentQueuedAfterShipStationPushInWms(
         voided_reason = NULL,
         updated_at = ${input.now}
     WHERE id = ${input.shipmentId}
+      AND status IN ('planned', 'queued', 'voided')
+      AND shipped_at IS NULL
   `);
 }

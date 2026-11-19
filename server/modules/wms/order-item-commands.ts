@@ -639,7 +639,8 @@ export async function persistCanonicalWmsPickProgress(
        WHERE item.order_id = $1
        GROUP BY item.order_id
      ) AS rollup
-     WHERE order_header.id = rollup.order_id`,
+     WHERE order_header.id = rollup.order_id
+       AND order_header.warehouse_status NOT IN ('shipped', 'cancelled')`,
     [input.orderId],
   );
 }

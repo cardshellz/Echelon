@@ -5,7 +5,7 @@ import {
   orders,
 } from "@shared/schema";
 import { getDefaultFulfillmentWarehouse } from "../warehouse/infrastructure/warehouse.repository";
-import { updateWmsOrderByIdInWms } from "../wms/wms-order-mutations.api";
+import { assignWmsOrderToWarehouseInWms } from "../wms/wms-order-mutations.api";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -149,17 +149,11 @@ class FulfillmentRouterService {
    * For operations warehouses: keeps existing status logic.
    */
   async assignWarehouseToOrder(orderId: number, routing: RoutingResult): Promise<void> {
-    const updates: Record<string, any> = {
+    await assignWmsOrderToWarehouseInWms(this.db, orderId, {
       warehouseId: routing.warehouseId,
+      routeTo3pl: routing.warehouseType === "3pl",
       updatedAt: new Date(),
-    };
-
-    // 3PL orders get a different status — they don't enter the pick/pack workflow
-    if (routing.warehouseType === "3pl") {
-      updates.warehouseStatus = "awaiting_3pl";
-    }
-
-    await updateWmsOrderByIdInWms(this.db, orderId, updates);
+    });
   }
 }
 
