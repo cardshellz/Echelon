@@ -63,13 +63,18 @@ describe("ShipStation WMS hold/release sync", () => {
     expect(WEBHOOK_RETRY_WORKER_SRC).toMatch(/updateSortRank!?\(wmsOrderId\)/);
   });
 
-  it("queues ShipStation sync after startup sort-rank recompute changes active WMS rows", () => {
+  it("queues ShipStation sync after one-shot sort-rank recompute changes active WMS rows", () => {
+    const oneShotRepairsSrc = readFileSync(
+      resolve(__dirname, "../../../orders/one-shot-repairs.ts"),
+      "utf8",
+    );
     expect(ORDER_STORAGE_SRC).toMatch(/export async function recomputeAllActiveSortRanksDetailed/);
     expect(ORDER_STORAGE_SRC).toMatch(/if \(row\.sortRank === rank && sameDateTime/);
-    expect(SERVER_INDEX_SRC).toMatch(/recomputeAllActiveSortRanksDetailed/);
-    expect(SERVER_INDEX_SRC).toMatch(
+    expect(oneShotRepairsSrc).toMatch(/recomputeAllActiveSortRanksDetailed/);
+    expect(oneShotRepairsSrc).toMatch(
       /enqueueShipStationSortRankSyncRetry\(\s*db,\s*orderId,\s*"startup sort_rank recompute"/,
     );
+    expect(SERVER_INDEX_SRC).not.toMatch(/recomputeAllActiveSortRanksDetailed/);
   });
 
   it("queues ShipStation sync after pick-priority settings change active sort ranks", () => {

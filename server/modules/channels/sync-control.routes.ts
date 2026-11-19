@@ -224,6 +224,9 @@ export function registerSyncControlRoutes(app: Express) {
         .where(eqOp(channelsTable.status, "active"));
 
       const summary = await syncSettingsSvc.getSyncLogSummary(24);
+      const { getRegisteredJobsStatusSnapshot } = await import("../../infrastructure/job-registry");
+      const { getSchedulerLockPoolSnapshot } = await import("../../infrastructure/scheduler-lock");
+      const registeredJobs = await getRegisteredJobsStatusSnapshot(db);
 
       res.json({
         global,
@@ -236,6 +239,8 @@ export function registerSyncControlRoutes(app: Express) {
           sweepIntervalMinutes: c.sweepIntervalMinutes ?? 15,
         })),
         summary,
+        registeredJobs,
+        schedulerLockPool: getSchedulerLockPoolSnapshot(),
       });
     } catch (error: any) {
       console.error("Error fetching sync status:", error);
