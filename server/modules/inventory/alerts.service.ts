@@ -164,6 +164,22 @@ class InventoryAlertService {
       details: { levelId: r.id, sku: r.sku, location: r.location_code, pickedQty: r.picked_qty },
     }));
   }
+
+  /** Emit a startup warning if any inventory level carries a negative `variant_qty`. */
+  async warnNegativeInventoryBalances(): Promise<number> {
+    const res = await this.db.execute<{ id: number }>(sql`
+      SELECT id
+      FROM inventory.inventory_levels
+      WHERE variant_qty < 0
+    `);
+    const count = Array.isArray(res?.rows) ? res.rows.length : 0;
+    if (count > 0) {
+      console.warn(
+        `[Startup Warning] Found ${count} negative inventory levels. They have NOT been cleared.`,
+      );
+    }
+    return count;
+  }
 }
 
 export function createInventoryAlertService(db: any) {

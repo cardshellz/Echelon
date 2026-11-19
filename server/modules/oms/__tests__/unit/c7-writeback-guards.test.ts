@@ -95,13 +95,18 @@ describe("D-SINGLEWRITER: physical shipment projection has one authority", () =>
   });
 
   it("does not infer WMS shipped state from an OMS aggregate", () => {
-    const reconcileBlock = SERVER_INDEX_SRC.slice(
-      SERVER_INDEX_SRC.indexOf("OMS<->WMS cancellation reconciliation"),
-      SERVER_INDEX_SRC.indexOf("Startup reconciliation for orders"),
+    const omsWmsCancelReconcileSrc = readFileSync(
+      fileURLToPath(
+        new URL("../../../orders/oms-wms-cancel-reconcile.scheduler.ts", import.meta.url),
+      ),
+      "utf8",
     );
-    expect(reconcileBlock).toContain('omsWarehouseCancellationSql("oms")');
-    expect(reconcileBlock).not.toContain("markOrderShipped");
-    expect(reconcileBlock).not.toContain("oms.status IN ('cancelled', 'shipped', 'refunded')");
+    expect(SERVER_INDEX_SRC).toContain("startOmsWmsCancelReconcileScheduler(");
+    expect(omsWmsCancelReconcileSrc).toContain('omsWarehouseCancellationSql("oms")');
+    expect(omsWmsCancelReconcileSrc).not.toContain("markOrderShipped");
+    expect(omsWmsCancelReconcileSrc).not.toContain(
+      "oms.status IN ('cancelled', 'shipped', 'refunded')",
+    );
   });
 
   it("does not force item fulfillment quantities during application startup", () => {
@@ -112,9 +117,18 @@ describe("D-SINGLEWRITER: physical shipment projection has one authority", () =>
   });
 
   it("always uses physical-shipment reconciliation without a legacy flag fallback", () => {
+    const wmsReconcileSrc = readFileSync(
+      fileURLToPath(
+        new URL("../../../shipping/wms-shipstation-reconcile.scheduler.ts", import.meta.url),
+      ),
+      "utf8",
+    );
+    expect(SERVER_INDEX_SRC).toContain("startWmsShipStationReconcileScheduler(");
     expect(SERVER_INDEX_SRC).not.toContain("runShipStationReconcileV1");
     expect(SERVER_INDEX_SRC).not.toContain("process.env.RECONCILE_V2");
-    expect(SERVER_INDEX_SRC).toContain("await runShipStationReconcileV2()");
+    expect(wmsReconcileSrc).not.toContain("runShipStationReconcileV1");
+    expect(wmsReconcileSrc).not.toContain("process.env.RECONCILE_V2");
+    expect(wmsReconcileSrc).toContain("await runShipStationReconcileV2()");
   });
 });
 

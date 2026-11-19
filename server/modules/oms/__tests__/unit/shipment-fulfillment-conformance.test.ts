@@ -427,6 +427,9 @@ describe("shipment and fulfillment hardening target runtime behavior", () => {
       "server/modules/oms/oms-flow-reconciliation.service.ts",
       "server/modules/oms/reconcilers/shopify.reconciler.ts",
       "server/modules/oms/reconcilers/ebay.reconciler.ts",
+      "server/modules/oms/reconcilers/ebay-fulfillment-stuck-order.scheduler.ts",
+      "server/modules/orders/oms-wms-cancel-reconcile.scheduler.ts",
+      "server/modules/shipping/wms-shipstation-reconcile.scheduler.ts",
     ];
     const forbiddenCalls = [
       /\.pushShopifyFulfillment\s*\(/,
