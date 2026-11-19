@@ -27,3 +27,8 @@ export {
 export { backfillMemberTiers } from "./member-tier-enrichment";
 export { registerFinanceAnalyticsRoutes } from "./finance-analytics.routes";
 export { readOmsCutoverReconstruction } from "./inventory-cutover-reconstruction.reader";
+export {
+  EBAY_FULFILLMENT_RECONCILE_LOCK_ID,
+  startEbayFulfillmentStuckOrderScheduler,
+  type EbayFulfillmentStuckOrderSchedulerDeps,
+} from "./reconcilers/ebay-fulfillment-stuck-order.scheduler";

@@ -2394,15 +2394,22 @@ describe("ship-notify retry :: wiring in server/index.ts", () => {
   });
 
   it("routes eBay startup reconciliation through physical-package authority", () => {
+    const ebayReconcilerSrc = readFileSync(
+      resolve(__dirname, "../../reconcilers/ebay-fulfillment-stuck-order.scheduler.ts"),
+      "utf8",
+    );
+    expect(SRC).toContain("startEbayFulfillmentStuckOrderScheduler(");
     expect(SRC).not.toMatch(/enqueueEbayReconcileTrackingRetry/);
     expect(SRC).not.toMatch(/services\.fulfillmentPush\.pushTracking\s*\(/);
-    expect(SRC).toMatch(
+    expect(ebayReconcilerSrc).not.toMatch(/enqueueEbayReconcileTrackingRetry/);
+    expect(ebayReconcilerSrc).not.toMatch(/fulfillmentPush\.pushTracking\s*\(/);
+    expect(ebayReconcilerSrc).toMatch(
       /if \(!engine\.applyInboundShipmentAuthority \|\| !orderNumber\)/,
     );
-    expect(SRC).toMatch(
+    expect(ebayReconcilerSrc).toMatch(
       /await engine\.applyInboundShipmentAuthority\(\{\s*engineRef: ref,\s*orderNumber,\s*\}\)/,
     );
-    expect(SRC).toMatch(/EBAY_RECONCILE_PHYSICAL_AUTHORITY_UNAVAILABLE/);
+    expect(ebayReconcilerSrc).toMatch(/EBAY_RECONCILE_PHYSICAL_AUTHORITY_UNAVAILABLE/);
   });
 });
 

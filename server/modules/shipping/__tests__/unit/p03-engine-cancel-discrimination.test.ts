@@ -22,6 +22,17 @@ const read = (p: string) =>
   readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8");
 
 const INDEX_SRC = read("../../../../index.ts");
+const OMS_WMS_RECONCILE_SRC = read(
+  "../../../orders/oms-wms-cancel-reconcile.scheduler.ts",
+);
+const WMS_SHIPSTATION_RECONCILE_SRC = read(
+  "../../wms-shipstation-reconcile.scheduler.ts",
+);
+const RECONCILERS_SRC = [
+  INDEX_SRC,
+  OMS_WMS_RECONCILE_SRC,
+  WMS_SHIPSTATION_RECONCILE_SRC,
+].join("\n");
 const omsDir = fileURLToPath(new URL("../../../oms", import.meta.url));
 const shipStationSubDir = resolve(omsDir, "shipstation");
 const SS_SRC = [
@@ -47,18 +58,18 @@ describe("P0.3 — engine-cancel discrimination", () => {
   });
 
   it("reconcilers record shipped ONLY on already_shipped — never on already_cancelled", () => {
-    const branches = INDEX_SRC.match(/cancelResult\?\.state === "already_shipped"/g) ?? [];
+    const branches = RECONCILERS_SRC.match(/cancelResult\?\.state === "already_shipped"/g) ?? [];
     // Hourly OMS<->WMS cancellation cascade and canonical V2 outbound sync.
     // The legacy V1 sweep is deliberately retired.
     expect(branches.length).toBe(2);
     // the old conflated branch shape must be gone
-    expect(INDEX_SRC).not.toMatch(/if \(cancelResult\?\.alreadyInState\)/);
+    expect(RECONCILERS_SRC).not.toMatch(/if \(cancelResult\?\.alreadyInState\)/);
   });
 
   it("the hourly cascade's cancelled UPDATE carries a shipped-guard predicate", () => {
-    const cascade = INDEX_SRC.slice(
-      INDEX_SRC.indexOf("[OMS<->WMS Reconcile] Engine order"),
-      INDEX_SRC.indexOf("[OMS<->WMS Reconcile] Cancelled engine order"),
+    const cascade = OMS_WMS_RECONCILE_SRC.slice(
+      OMS_WMS_RECONCILE_SRC.indexOf("[OMS<->WMS Reconcile] Engine order"),
+      OMS_WMS_RECONCILE_SRC.indexOf("[OMS<->WMS Reconcile] Cancelled engine order"),
     );
     expect(cascade).toContain("cancelOutboundShipmentAfterEngineCascadeInWms(");
     const wmsShipmentsRepoSrc = read("../../../wms/outbound-shipments-mutations.repository.ts");
