@@ -80,6 +80,7 @@ export function createSideChannelPool(config: {
 }
 
 export const db = drizzle(pool, { schema });
+export type DrizzleDb = typeof db;
 
 // This file never changes table structure or seeds rows. Schema lives only in
 // the tracked migrations under migrations/, applied in the release phase

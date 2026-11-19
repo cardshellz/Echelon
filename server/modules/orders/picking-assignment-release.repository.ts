@@ -3,7 +3,7 @@ import { orders, type Order } from "@shared/schema";
 import type { db } from "../../db";
 import { readPickingReleaseActor } from "../identity";
 import { insertWmsPickingLogEventInTx } from "../wms/picking-logs.api";
-import { updateWmsOrderByIdReturningInWms } from "../wms/wms-order-mutations.api";
+import { releaseLockedPickingAssignmentInWms } from "../wms/wms-order-mutations.api";
 import type { PickingAssignmentReleaseRepository } from "./picking-assignment-release.service";
 
 type Database = Pick<typeof db, "transaction">;
@@ -26,9 +26,7 @@ export function createPickingAssignmentReleaseRepository(database: Database): Pi
       lockOrder: async orderId => (await tx.select().from(orders)
         .where(eq(orders.id, orderId)).for("update"))[0],
       clearAssignment: async orderId => {
-        const [order] = await updateWmsOrderByIdReturningInWms(tx, orderId, {
-          warehouseStatus: "ready", assignedPickerId: null, startedAt: null,
-        });
+        const [order] = await releaseLockedPickingAssignmentInWms(tx, orderId);
         if (!order) throw new Error("Locked picking order disappeared during release");
         return order;
       },

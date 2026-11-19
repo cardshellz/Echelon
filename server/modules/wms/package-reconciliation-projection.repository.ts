@@ -98,6 +98,7 @@ export async function projectReconciledLegacyHeaders(
         carrier = ${carriers.size === 1 ? first.carrier : null},
         external_fulfillment_id = ${externalFulfillmentId}, shipped_at = ${first.ship_date}, updated_at = ${now}
       WHERE id = ${headerId}
+        AND status NOT IN ('returned', 'lost')
     `);
   }
 }

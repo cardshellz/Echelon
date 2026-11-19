@@ -27,7 +27,7 @@ import {
 } from "../domain/transformation-execution-authority";
 
 type Db = {
-  execute: (query: unknown) => Promise<{ rows: any[] }>;
+  execute: (query: any) => Promise<{ rows: any[] }>;
   update: (...args: any[]) => any;
   transaction: <T>(work: (tx: Db) => Promise<T>) => Promise<T>;
 };

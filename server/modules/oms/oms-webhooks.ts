@@ -34,6 +34,10 @@ import { guardOrderEditShopifyIngress } from "../order-edits/oms-coordination.ap
 import { syncWmsOrderAddressAndFinancialFromShopifyWebhookInWms } from "../wms/wms-order-mutations.api";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
 import {
+  isNonCancellableOmsOrderStatus,
+  transitionOmsOrderStatus,
+} from "./oms-order-status-core";
+import {
   applyShopifyRefundCascade,
   extractRefundLineAdjustments,
   RefundsCreateBadPayloadError,
@@ -594,7 +598,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): ShopifyOrderData {
   // Use normalizer to extract line items with full discount splitting
   const discountApplications = shopifyOrder.discount_applications || [];
   const normalizedItems = normalizeShopifyLineItems(
-    shopifyOrder.line_items || [], 
+    shopifyOrder.line_items || [],
     discountApplications,
     shopifyOrder.order_number
   );
@@ -1183,7 +1187,7 @@ export function registerOmsWebhooks(
       if (isNew) {
         pushToMissionControl(omsOrder.id, "order.created");
       }
-      
+
       // M18: Trigger real-time backfill bridge
       await db.execute(sql`NOTIFY shopify_order_ingested`);
       await markInboxSucceeded(inbox.receipt);
@@ -1274,16 +1278,17 @@ export function registerOmsWebhooks(
         });
       }
 
-      // Update OMS order fields
+      // Update OMS order fields (P1.2: never regress dispatched/refunded orders to cancelled)
+      const cancelledAtCandidate = shopifyOrder.cancelled_at
+        ? new Date(shopifyOrder.cancelled_at)
+        : now;
       await db
         .update(omsOrders)
         .set({
           ...(isCancelledPayload
             ? {
-                status: "cancelled",
-                cancelledAt: shopifyOrder.cancelled_at
-                  ? new Date(shopifyOrder.cancelled_at)
-                  : now,
+                status: sql`CASE WHEN ${omsOrders.status} NOT IN ('shipped', 'partially_shipped', 'delivered', 'refunded') AND ${omsOrders.shippedAt} IS NULL THEN 'cancelled' ELSE ${omsOrders.status} END`,
+                cancelledAt: sql`CASE WHEN ${omsOrders.status} NOT IN ('shipped', 'partially_shipped', 'delivered', 'refunded') AND ${omsOrders.shippedAt} IS NULL THEN COALESCE(${omsOrders.cancelledAt}, ${cancelledAtCandidate}) ELSE ${omsOrders.cancelledAt} END`,
               }
             : {}),
           financialStatus: shopifyOrder.financial_status || existing.financialStatus,
@@ -1353,7 +1358,11 @@ export function registerOmsWebhooks(
           customerEmail: shopifyOrder.email || existing.customerEmail || null,
         });
 
-        if (isCancelledByChannel) {
+        if (
+          isCancelledByChannel &&
+          !isNonCancellableOmsOrderStatus(existing.status) &&
+          !existing.shippedAt
+        ) {
           await cancelOrderCascade(db, existing.id, {
             wmsServices,
             shipStationService,
@@ -1825,23 +1834,38 @@ export function registerOmsWebhooks(
       }
 
       const now = new Date();
+      const cancelReason = shopifyOrder.cancel_reason || "cancelled_by_shopify";
+      const nextFinancialStatus = shopifyOrder.financial_status || existing.financialStatus;
 
-      // Update OMS order
-      await db
-        .update(omsOrders)
-        .set({
-          status: "cancelled",
-          cancelledAt: now,
-          financialStatus: shopifyOrder.financial_status || existing.financialStatus,
-          updatedAt: now,
-        })
-        .where(eq(omsOrders.id, existing.id));
+      // P1.2: Route OMS status transition through the state-machine chokepoint
+      const cancelVerdict = await transitionOmsOrderStatus(db, existing.id, {
+        to: "cancelled",
+        driver: "channel",
+        reason: cancelReason,
+        financialStatus: nextFinancialStatus,
+        now,
+      });
+
+      if (cancelVerdict.outcome === "blocked_by_state") {
+        if (nextFinancialStatus && nextFinancialStatus !== cancelVerdict.financialStatus) {
+          await db
+            .update(omsOrders)
+            .set({ financialStatus: nextFinancialStatus, updatedAt: now })
+            .where(eq(omsOrders.id, existing.id));
+        }
+        console.warn(
+          `${LOG_PREFIX} Blocked orders/cancelled regression on OMS order ${existing.id} (${shopifyOrder.name}): ${cancelVerdict.reason}`,
+        );
+        await markInboxSucceeded(inbox.receipt);
+        acknowledgeProcessed(req, res);
+        return;
+      }
 
       await cancelOrderCascade(db, existing.id, {
         wmsServices,
         shipStationService,
         source: "shopify_cancel_webhook",
-        reason: shopifyOrder.cancel_reason || "cancelled_by_shopify",
+        reason: cancelReason,
         logPrefix: LOG_PREFIX,
       });
 

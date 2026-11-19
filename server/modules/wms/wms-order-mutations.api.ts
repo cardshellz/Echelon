@@ -8,6 +8,7 @@ export {
 } from "./allocation-exceptions-mutations.repository";
 export {
   applyWmsOrderShippingRollupStatusInWms,
+  assignWmsOrderToWarehouseInWms,
   backfillWmsOrdersAddressBatchFromOmsInWms,
   claimWmsOrderForPickerInWms,
   clearWmsOrderAssignedPickerInWms,
@@ -15,11 +16,13 @@ export {
   executeGuardedWmsOrderStatusTransitionInWms,
   recomputeWmsOrderStatusAndCountsAfterLineSyncInWms,
   refreshWmsOrderItemAggregateCountsOnRefundInWms,
+  releaseLockedPickingAssignmentInWms,
   releaseWmsOrderHoldIfHeldInWms,
   restoreStoppedRefundEditWmsOrderInWms,
   sweepWmsOrderSlaStatusesInWms,
   syncWmsOrderAddressAndFinancialFromShopifyWebhookInWms,
   syncWmsOrdersCompletedFromFulfilledOmsInWms,
+  transitionWmsOrderStatusByMatrixReturningInWms,
   updateActiveWmsOrderFieldsReturningInWms,
   updateWmsOrderAggregateCountsInWms,
   updateWmsOrderByIdInWms,
@@ -27,4 +30,12 @@ export {
   updateWmsOrderCombinedGroupByIdInWms,
   updateWmsOrderSlaAndPromotionInWms,
   updateWmsOrdersWarehouseStatusByCombinedGroupInWms,
+  type NonStatusWmsOrderUpdates,
 } from "./wms-order-mutations.repository";
+export {
+  TERMINAL_WMS_WAREHOUSE_STATUSES,
+  WMS_WAREHOUSE_STATUS_TRANSITION_MATRIX,
+  allowedWmsOrderFromStatuses,
+  isTerminalWmsOrderStatus,
+  isWmsOrderTransitionAllowed,
+} from "./wms-order-status-core";

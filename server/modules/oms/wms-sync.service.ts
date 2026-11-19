@@ -43,6 +43,7 @@ import {
   hasDropshipAcceptanceStamp,
   isDropshipOmsOrder,
 } from "./dropship-order-warehouse";
+import { transitionOmsOrderStatus } from "./oms-order-status-core";
 import {
   decidePickPriorityPlanSource,
   NO_PICK_PRIORITY_PLAN,
@@ -549,7 +550,7 @@ interface WmsSyncServices {
   readChannelMerchandise?: (input: { channelId: number; orderId: string }) => Promise<ShopifyMerchandiseSnapshot>;
   /** Exact channel-owned warehouse assignments, such as a Walmart ship node. */
   resolveChannelWarehouse?: (channelId: number) => Promise<{ warehouseId: number; warehouseType: string } | null>;
-  inventoryCore: any;
+  inventoryCore?: import("../inventory").InventoryCore | unknown;
   reservation: any;
   fulfillmentRouter: any;
   /** Resolves the static internal Dropship OMS channel; Dropship orders bypass the router. */
@@ -3861,14 +3862,19 @@ export class WmsSyncService {
 
     for (const row of rows) {
       try {
-        await db.execute(sql`
-          UPDATE oms.oms_orders SET
-            status = 'cancelled',
-            cancelled_at = ${now},
-            updated_at = ${now}
-          WHERE id = ${row.oms_id}
-            AND status NOT IN ('cancelled', 'refunded')
-        `);
+        const verdict = await transitionOmsOrderStatus(db, row.oms_id, {
+          to: "cancelled",
+          driver: "reconciler",
+          reason: "cancel_reconciliation",
+          now,
+        });
+
+        if (verdict.outcome === "blocked_by_state") {
+          console.warn(
+            `[WMS Sync] Cancel reconcile: skipped OMS ${row.oms_id} (${row.external_order_number}): ${verdict.reason}`,
+          );
+          continue;
+        }
 
         await cancelOrderCascade(db, row.oms_id, {
           wmsServices: this.services,
@@ -4039,7 +4045,7 @@ export class WmsSyncService {
   ): Promise<{ ordersFixed: number; ordersFailed: number; details: any[] }> {
     // Find WMS orders linked to OMS where item counts don't match
     const broken = await db.execute<{ wms_id: number; wms_order_number: string; wms_item_count: number; oms_line_count: number; oms_order_id: number }>(sql`
-      SELECT 
+      SELECT
         o.id as wms_id,
         o.order_number as wms_order_number,
         COUNT(oi.id) as wms_item_count,

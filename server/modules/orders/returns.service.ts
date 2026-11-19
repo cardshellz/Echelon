@@ -367,8 +367,12 @@ function sqlRows(result: unknown): Record<string, unknown>[] {
  * await returns.processReturn({ orderId, items: [...], warehouseLocationId, userId, commandKey });
  * ```
  */
-export function createReturnsService(db: any, _legacyInventoryCore?: any, options: { clock?: () => Date; newCommandKey?: () => string } = {}) {
+export function createReturnsService(
+  db: Pick<DrizzleDb, "transaction"> & Partial<DrizzleDb>,
+  _legacyInventoryCore?: unknown,
+  options: { clock?: () => Date; newCommandKey?: () => string } = {},
+) {
   // Keep the existing factory call contract. The return owner now receives the
   // actual transaction directly; no unused transaction-bound service is created.
-  return new ReturnsService(db,options.clock,options.newCommandKey);
+  return new ReturnsService(db as DrizzleDb, options.clock, options.newCommandKey);
 }

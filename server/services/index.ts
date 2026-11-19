@@ -55,7 +55,10 @@ import {
   createReplenishmentService,
   createCycleCountService,
   createInventoryAlertService,
+  type InventoryCore,
+  type InventorySourceContract,
 } from "../modules/inventory";
+import type { DrizzleDb } from "../db";
 import {
   createRecipeBuildPromiseService,
   type RecipeBuildPromiseService,
@@ -247,7 +250,7 @@ import { PostgresInventoryConversionReader } from "../modules/inventory-planning
 const systemCanonicalClaimClock = (): Date => new Date();
 
 export function createServices(
-  db: any,
+  db: DrizzleDb,
   databasePool: Pick<Pool, "connect" | "query">,
 ) {
   // Foundation
@@ -326,14 +329,14 @@ export function createServices(
     db,
     recipeCapacity,
     builds,
-    inventoryCore as any,
+    inventoryCore,
   );
 
   // Depends on inventoryCore (+ channelSync for reservation).
   const breakAssembly = createBreakAssemblyService(db, inventoryCore, transformationExecutionAuthority);
   const reservationRuntime = createAuthorityAwareReservationRuntime({
     db,
-    inventoryCore: inventoryCore as any,
+    inventoryCore,
     channelSync,
     recipeBuildPromise,
     canonical: inventoryAvailabilityClaims,
@@ -349,10 +352,10 @@ export function createServices(
     systemCanonicalClaimClock,
     transformationExecutionAuthority,
   );
-  const returns = createReturnsService(db, inventoryCore as any);
+  const returns = createReturnsService(db, inventoryCore);
 
   // Depends on inventoryCore + replenishment + multi-module storage
-  const picking = createPickingService(db, inventoryCore as any, replenishment, {
+  const picking = createPickingService(db, inventoryCore, replenishment, {
     ...ordersStorage,
     ...catalogStorage,
     ...warehouseStorage,
@@ -365,7 +368,7 @@ export function createServices(
   // Standalone
   const inventoryAlerts = createInventoryAlertService(db);
   const fulfillmentRouter = createFulfillmentRouterService(db);
-  const inventorySource = null as any; // Removed, handled cleanly in picking and core now
+  const inventorySource: InventorySourceContract = inventoryCore;
   const slaMonitor = createSLAMonitorService(db);
   const orderCombining = createOrderCombiningService(db);
 
@@ -813,7 +816,7 @@ export function createServices(
   // WMS Sync — bridges OMS → WMS for fulfillment
   const wmsSync = new WmsSyncService({
     resolveChannelWarehouse: channelId => walmart.repository.resolveWarehouse(channelId),
-    inventoryCore: inventoryCore as any,
+    inventoryCore,
     reservation,
     fulfillmentRouter,
     // Dropship orders ship from the warehouse acceptance pinned, never the router.
@@ -959,3 +962,8 @@ export { createCOGSService } from "../modules/inventory/cogs.service";
 export type { COGSService, OrderCOGSResult, InventoryValuationResult, CostAdjustmentLog } from "../modules/inventory/cogs.service";
 export { createShipStationService } from "../modules/oms/shipstation-execution.api";
 export type { ShipStationService } from "../modules/oms/shipstation-execution.api";
+export type { DrizzleDb } from "../db";
+export type { InventoryCore, InventorySourceContract } from "../modules/inventory";
+export type { WmsApi } from "../modules/wms";
+export type { OmsApi } from "../modules/oms";
+export type { ChannelsApi } from "../modules/channels";
