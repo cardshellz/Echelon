@@ -71,7 +71,8 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
       const updateStart = storageSrc.indexOf("async updateOrderStatus(");
       const updateEnd = storageSrc.indexOf("async resolveException(", updateStart);
       const updateBlock = storageSrc.slice(updateStart, updateEnd);
-      expect(updateBlock).toContain("updateActiveWmsOrderFieldsReturningInWms(");
+      expect(updateBlock).toContain("transitionWmsOrderStatusByMatrixReturningInWms(");
+      expect(wmsOrderMutationsSrc).toContain("inArray(orders.warehouseStatus, legalStates)");
       expect(wmsOrderMutationsSrc).toContain('notInArray(orders.warehouseStatus, ["shipped", "cancelled"])');
 
       const channelsRoutesSrc = readRepoFile("server/modules/channels/channels.routes.ts");
