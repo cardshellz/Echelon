@@ -130,6 +130,7 @@ export function createChannelFulfillmentProjector(db: any, clock: () => Date = (
             END,
             status = CASE
               WHEN oms_order.status IN ('cancelled', 'refunded')
+                OR oms_order.status = 'delivered'
                 OR ${omsWarehouseFinancialStopSql(sql`oms_order.channel_id`, sql`oms_order.financial_status`)}
                 THEN oms_order.status
               WHEN rollup.required_lines > 0 AND rollup.fulfilled_lines = rollup.required_lines THEN 'shipped'

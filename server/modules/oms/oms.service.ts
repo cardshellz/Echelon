@@ -5,7 +5,7 @@
  * and fulfillment tracking. All channel orders normalize through this service.
  */
 
-import { eq, and, sql, desc, asc, gte, lte, or, ilike, count } from "drizzle-orm";
+import { eq, and, sql, desc, asc, gte, lte, or, ilike, count, inArray } from "drizzle-orm";
 import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
 import {
   omsOrders, omsOrderLines, omsOrderEvents,
@@ -18,6 +18,11 @@ import {
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
+import {
+  allowedOmsOrderFromStatuses,
+  isTerminalOmsOrderStatus,
+  recordShipmentOutcome,
+} from "./oms-order-status-core";
 import { guardOrderEditShopifyIngress } from "../order-edits/oms-coordination.api";
 import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity, orderLineInventoryIdentitySnapshot } from "./order-line-catalog-identity.service";
 import { isShopifyOrderSource, normalizeShopifyCustomerId, ShopifyCustomerIdentityError, validateShopifyCustomerIdentityCopy } from "./shopify-customer-identity";
@@ -695,7 +700,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
       .where(
         and(
           eq(omsOrders.id, orderId),
-          sql`${omsOrders.status} NOT IN ('cancelled', 'shipped', 'partially_shipped', 'refunded')`,
+          sql`${omsOrders.status} NOT IN ('cancelled', 'shipped', 'partially_shipped', 'delivered', 'refunded')`,
         ),
       );
     const updated =
@@ -714,7 +719,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
   }
 
   /**
-   * Mark an order as shipped with tracking info.
+   * Mark an order as shipped with tracking info (P1.2: delegates to `recordShipmentOutcome`).
    */
   async function markShipped(
     orderId: number,
@@ -723,6 +728,31 @@ export function createOmsService(db: any, reservationService?: any, options: { c
   ): Promise<OmsOrder> {
     const now = new Date();
 
+    if (typeof db.execute === "function") {
+      const outcome = await recordShipmentOutcome(db, {
+        omsOrderId: orderId,
+        status: "shipped",
+        trackingNumber,
+        carrier,
+        shippedAt: now,
+        now,
+        markAllLinesFulfilled: true,
+      });
+      if (outcome.outcome === "not_found") {
+        throw new Error(`OMS order ${orderId} not found`);
+      }
+      const [reloaded] = await db
+        .select()
+        .from(omsOrders)
+        .where(eq(omsOrders.id, orderId))
+        .limit(1);
+      if (!reloaded) {
+        throw new Error(`OMS order ${orderId} not found`);
+      }
+      return reloaded;
+    }
+
+    const legalFrom = allowedOmsOrderFromStatuses("shipped", "engine");
     const [updated] = await db
       .update(omsOrders)
       .set({
@@ -736,7 +766,7 @@ export function createOmsService(db: any, reservationService?: any, options: { c
       .where(
         and(
           eq(omsOrders.id, orderId),
-          sql`${omsOrders.status} <> 'cancelled'`,
+          inArray(omsOrders.status, legalFrom),
         ),
       )
       .returning();
@@ -1105,8 +1135,8 @@ export function createOmsService(db: any, reservationService?: any, options: { c
       return null; // Order not in OMS yet (possible if bridge hasn't run)
     }
 
-    // Skip if already shipped or cancelled
-    if (order.status === "shipped" || order.status === "cancelled") {
+    // Skip if already shipped or terminal
+    if (order.status === "shipped" || isTerminalOmsOrderStatus(order.status)) {
       return order;
     }
 

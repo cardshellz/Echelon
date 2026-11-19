@@ -140,7 +140,7 @@ describe("OMS/WMS authority conformance :: eBay and WMS sync retries", () => {
     );
 
     expect(pollBlock).toContain('orderData.status === "cancelled"');
-    expect(pollBlock).toContain("UPDATE oms_orders SET status = 'cancelled'");
+    expect(pollBlock).toContain("transitionOmsOrderStatus(");
     expect(pollBlock).toContain("cancelWmsOrder");
     expect(pollBlock).toContain('"ebay_cancel"');
     expect(pollBlock).toContain("Failed to cancel WMS order");

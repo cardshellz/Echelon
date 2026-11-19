@@ -1913,7 +1913,8 @@ export async function remediateOmsFlowIssue(
             OR (wo.source_table_id = oo.id::text)
           )
           AND wo.warehouse_status = 'cancelled'
-          AND oo.status NOT IN ('cancelled', 'shipped', 'partially_shipped', 'refunded')
+          AND oo.status NOT IN ('cancelled', 'shipped', 'partially_shipped', 'delivered', 'refunded')
+          AND oo.shipped_at IS NULL
         RETURNING oo.id
       `);
 
