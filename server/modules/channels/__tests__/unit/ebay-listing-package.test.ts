@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { resolveEbayListingPackage, prepareEbayListingPackages, assertEbayPackagePreservation } from "../../adapters/ebay/ebay-listing-package";
 import type { EbayInventoryItem } from "../../adapters/ebay/ebay-types";
+import { findEbaySyncContentMismatch } from "../../ebay-listing-sync-content";
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
 import { syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
 
@@ -83,6 +84,28 @@ describe("eBay package transport", () => {
       heightMm: "25.40" } }, sku: "P5", observed }).payload).toEqual({
         ...observed, weight: { value: 5, unit: "OUNCE" }, dimensions: { length: 15.24, width: 10.16, height: 2.54, unit: "CENTIMETER" },
         packageType: "MAILING_BOX" });
+  });
+  // Production 2026-11-17: GLV-MAG-180PT-P50 (152.40 x 101.60 x 6.35 mm) was sent as height 0.635 cm, eBay stored
+  // 0.64, and the exact read-back after every update failed with "Waiting for eBay to expose ... dimensions.height".
+  it("sends dimensions at eBay's two-decimal precision so eBay's stored value reads back as sent", () => {
+    const payload = resolveEbayListingPackage({ source: { ...source, facts: { ...source.facts, lengthMm: "152.40",
+      widthMm: "101.60", heightMm: "6.35" } }, sku: "GLV-MAG-180PT-P50" }).payload;
+    expect(payload.dimensions).toEqual({ length: 15.24, width: 10.16, height: 0.64, unit: "CENTIMETER" });
+    const storedByEbay = { ...payload, dimensions: { width: 10.16, length: 15.24, height: 0.64, unit: "CENTIMETER" as const } };
+    expect(findEbaySyncContentMismatch(storedByEbay, payload, "packageWeightAndSize")).toBeNull();
+  });
+  it.each([
+    ["rounds a fraction of a hundredth up, never understating the package", "0.001", 0.01],
+    ["keeps an exact hundredth", "6.30", 0.63],
+    ["rounds just above a hundredth up", "6.301", 0.64],
+  ])("%s", (_name, heightMm, height) => {
+    const payload = resolveEbayListingPackage({ source: { ...source, facts: { ...source.facts, lengthMm: "152.40",
+      widthMm: "101.60", heightMm } }, sku: "P5" }).payload;
+    expect(payload.dimensions?.height).toBe(height);
+  });
+  it("does not round dimensions eBay already holds when the catalog has none", () => {
+    const preserved = { ...observed, dimensions: { length: 6.125, width: 4, height: 1, unit: "INCH" as const } };
+    expect(resolveEbayListingPackage({ source, sku: "P5", observed: preserved }).payload.dimensions).toEqual(preserved.dimensions);
   });
   it("does not fabricate package type or dimensions for a new item", () => {
     const missing = resolveEbayListingPackage({ source, sku: "P5" });
