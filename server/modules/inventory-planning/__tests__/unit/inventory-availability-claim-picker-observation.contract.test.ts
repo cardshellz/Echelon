@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -12,13 +12,23 @@ const migration = readFileSync(
   resolve(process.cwd(), "migrations/0648_inventory_availability_claim_picker_observation.sql"),
   "utf8",
 );
-const claimRepository = readFileSync(
-  resolve(
-    process.cwd(),
-    "server/modules/inventory-planning/infrastructure/inventory-availability-claim.repository.ts",
-  ),
-  "utf8",
+const claimRepositoryDir = resolve(
+  process.cwd(),
+  "server/modules/inventory-planning/infrastructure/claim-repository",
 );
+const claimRepository = [
+  readFileSync(
+    resolve(
+      process.cwd(),
+      "server/modules/inventory-planning/infrastructure/inventory-availability-claim.repository.ts",
+    ),
+    "utf8",
+  ),
+  ...readdirSync(claimRepositoryDir)
+    .filter((entry) => entry.endsWith(".ts"))
+    .sort()
+    .map((entry) => readFileSync(resolve(claimRepositoryDir, entry), "utf8")),
+].join("\n");
 const inventoryRepository = readFileSync(
   resolve(
     process.cwd(),

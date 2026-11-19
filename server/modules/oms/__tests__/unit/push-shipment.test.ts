@@ -2064,15 +2064,23 @@ describe("pushShipment :: error cases", () => {
 // The items query MUST filter the commercial quantity so ShipStation never receives a
 // quantity:0 line. The hand-rolled db mock stubs `.where()`, so this is a
 // source-regression guard (same pattern as the refund idempotency guard).
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 describe("pushShipment :: never sends a zeroed line to ShipStation", () => {
   it("restricts the shipment-items query to shippable AND commercially requested qty > 0", () => {
-    const src = readFileSync(
-      resolve(__dirname, "../../shipstation.service.ts"),
-      "utf-8",
-    );
+    const omsDir = resolve(__dirname, "../..");
+    const subDir = resolve(omsDir, "shipstation");
+    const subFiles = existsSync(subDir)
+      ? readdirSync(subDir)
+          .filter((f) => f.endsWith(".ts"))
+          .sort()
+          .map((f) => readFileSync(resolve(subDir, f), "utf-8"))
+      : [];
+    const src = [
+      readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf-8"),
+      ...subFiles,
+    ].join("\n");
     expect(src).toMatch(/COALESCE\(\$\{wmsOrderItems\.requiresShipping\}, 1\) = 1/);
     expect(src).toMatch(/COALESCE\(\$\{outboundShipmentItems\.commercialRequestedQty\}, \$\{outboundShipmentItems\.qty\}\) > 0/);
   });

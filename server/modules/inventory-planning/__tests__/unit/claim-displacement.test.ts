@@ -103,14 +103,16 @@ describe("displaceClaimsForConfirmedShipment", () => {
 });
 
 describe("displacement repository contract", () => {
-  const repository = readFileSync(resolve(process.cwd(),
+  const facade = readFileSync(resolve(process.cwd(),
     "server/modules/inventory-planning/infrastructure/inventory-availability-claim.repository.ts"), "utf8");
+  const repository = readFileSync(resolve(process.cwd(),
+    "server/modules/inventory-planning/infrastructure/claim-repository/claim-displacement-operations.ts"), "utf8");
   const donors = repository.slice(repository.indexOf("async function loadDisplacementDonors"),
     repository.indexOf("function displacedClaimIdempotencyKey"));
-  const method = repository.slice(repository.indexOf("  async displaceForConfirmedShipment("),
-    repository.indexOf("  async reconcileCycleCount("));
+  const method = repository.slice(repository.indexOf("export async function executeDisplaceForConfirmedShipment("));
 
   it("only takes from unstarted, unheld, normal-priority orders, newest first", () => {
+    expect(facade).toContain("executeDisplaceForConfirmedShipment(this.deps(), rawCommand)");
     expect(donors).toContain("o.warehouse_status = 'ready'");
     expect(donors).toContain("COALESCE(o.on_hold, 0) = 0");
     expect(donors).toContain("COALESCE(o.priority, 0) < $4");

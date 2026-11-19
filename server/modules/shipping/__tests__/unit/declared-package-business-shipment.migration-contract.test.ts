@@ -1,10 +1,24 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 function source(...segments: string[]): string {
   return readFileSync(join(process.cwd(), ...segments), "utf8")
     .replace(/\r\n/g, "\n");
+}
+
+function shipStationSource(): string {
+  const subDir = join(process.cwd(), "server", "modules", "oms", "shipstation");
+  const subFiles = existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => source("server", "modules", "oms", "shipstation", f))
+    : [];
+  return [
+    source("server", "modules", "oms", "shipstation.service.ts"),
+    ...subFiles,
+  ].join("\n");
 }
 
 const migration = source(
@@ -24,12 +38,7 @@ const carrierRepository = source(
   "shipping",
   "carrier-tracking.repository.ts",
 );
-const shipStationService = source(
-  "server",
-  "modules",
-  "oms",
-  "shipstation.service.ts",
-);
+const shipStationService = shipStationSource();
 const integrationSetup = source("test", "setup-integration.ts");
 const normalizedMigration = migration.replace(/\s+/g, " ").trim();
 

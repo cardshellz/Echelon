@@ -12,10 +12,17 @@ const migration = readFileSync(
   resolve(process.cwd(), "migrations/0649_inventory_availability_claim_replacement.sql"),
   "utf8",
 );
-const repository = readFileSync(
+const facade = readFileSync(
   resolve(
     process.cwd(),
     "server/modules/inventory-planning/infrastructure/inventory-availability-claim.repository.ts",
+  ),
+  "utf8",
+);
+const repository = readFileSync(
+  resolve(
+    process.cwd(),
+    "server/modules/inventory-planning/infrastructure/claim-repository/claim-order-commands.ts",
   ),
   "utf8",
 );
@@ -94,8 +101,9 @@ describe("canonical availability claim replacement contract", () => {
   });
 
   it("keeps release, replan, successor reservation, receipt, and events in one serializable transaction", () => {
-    const start = repository.indexOf("async replaceOrderClaim(");
-    const replacement = repository.slice(start, repository.indexOf("async pickClaimLine(", start));
+    expect(facade).toContain("executeReplaceOrderClaim(this.deps(), rawCommand)");
+    const start = repository.indexOf("export async function executeReplaceOrderClaim(");
+    const replacement = repository.slice(start, repository.indexOf("export async function executeReleaseOrderClaim(", start));
     expect(replacement).toContain("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
     expect(replacement).toContain("expectedClaimId");
     expect(replacement).toContain("cancelOpenBuildHandoffs");
