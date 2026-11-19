@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { transitionOrderStatus } from "../../../orders/order-status-core";
 import { createOrderCombiningService } from "../../../orders/combining.service";
@@ -71,7 +71,8 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
       const updateStart = storageSrc.indexOf("async updateOrderStatus(");
       const updateEnd = storageSrc.indexOf("async resolveException(", updateStart);
       const updateBlock = storageSrc.slice(updateStart, updateEnd);
-      expect(updateBlock).toContain("updateActiveWmsOrderFieldsReturningInWms(");
+      expect(updateBlock).toContain("transitionWmsOrderStatusByMatrixReturningInWms(");
+      expect(wmsOrderMutationsSrc).toContain("inArray(orders.warehouseStatus, legalStates)");
       expect(wmsOrderMutationsSrc).toContain('notInArray(orders.warehouseStatus, ["shipped", "cancelled"])');
 
       const channelsRoutesSrc = readRepoFile("server/modules/channels/channels.routes.ts");
@@ -254,7 +255,14 @@ describe("Priority 10 Batch WMS-1 — Warehouse Execution Safeguards", () => {
 
   describe("OP-02..OP-10: Picking, Replenishment, and PickCorrections operator safeguards", () => {
     it("enforces pre-effect 409 command rejection, fresh item merge, grab-next fresh data, replen guidance error toast, and batch button guard in Picking.tsx", () => {
-      const pickingPageSrc = readRepoFile("client/src/pages/Picking.tsx");
+      const pickingDir = resolve(repoRoot, "client/src/pages/picking");
+      const pickingPageSrc = [
+        readRepoFile("client/src/pages/Picking.tsx"),
+        ...readdirSync(pickingDir)
+          .filter((name) => /\.(ts|tsx)$/.test(name))
+          .sort()
+          .map((name) => readFileSync(join(pickingDir, name), "utf8")),
+      ].join("\n");
       expect(pickingPageSrc).toContain("function isDefiniteCommandRejection(");
       expect(pickingPageSrc).toContain("sourcePlan: apiItem.sourcePlan ?? localItem.sourcePlan");
       expect(pickingPageSrc).toContain("const refreshed = await refetch();");

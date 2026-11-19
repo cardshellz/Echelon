@@ -8,7 +8,11 @@ import { describe, expect, it } from "vitest";
  * with Retry, the two Mark resolved choices and the required reason, and with every request and word from its own
  * client lib (client/src/lib/dropship-listing-end-ops.ts), whose answers go through readDropshipAnswer.
  */
-const source = readFileSync(join(__dirname, "..", "Dropship.tsx"), "utf8");
+const pageSource = readFileSync(join(__dirname, "..", "Dropship.tsx"), "utf8");
+const source = readFileSync(
+  join(__dirname, "..", "dropship-admin", "ListingPushOpsTab.tsx"),
+  "utf8",
+);
 
 function componentSource(start: string, end: string): string {
   const from = source.indexOf(start);
@@ -19,6 +23,16 @@ function componentSource(start: string, end: string): string {
 }
 
 describe("Dropship admin: eBay listings that couldn't be ended", () => {
+  it("wires ListingPushOpsTab onto the listing-pushes tab of Dropship.tsx", () => {
+    expect(pageSource).toContain(
+      'import("./dropship-admin/ListingPushOpsTab")',
+    );
+    expect(pageSource).toContain(
+      '<TabsContent value="listing-pushes" className="m-0">',
+    );
+    expect(pageSource).toContain("<ListingPushOpsTab");
+  });
+
   it("sits on the listing push tab, after the push jobs table", () => {
     const tab = componentSource("function ListingPushOpsTab", "\nfunction ");
     const table = tab.indexOf("<ListingPushJobsTable");

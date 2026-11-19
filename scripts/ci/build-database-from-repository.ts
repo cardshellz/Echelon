@@ -14,68 +14,18 @@
  *   node --import tsx scripts/ci/build-database-from-repository.ts
  */
 import { randomUUID } from "node:crypto";
-import { spawnSync } from "node:child_process";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { validateMigrationDirectory } from "../migrations/migration-policy.mjs";
-
-const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-const MIGRATIONS_DIR = resolve(REPOSITORY_ROOT, "migrations");
-const LOCAL_HOSTS = ["localhost", "127.0.0.1"];
-const RUNNER_TIMEOUT_MS = 5 * 60_000;
-const ADMIN_STATEMENT_TIMEOUT_MS = 60_000;
-
-class BuildCheckError extends Error {
-  constructor(readonly code: string, message: string, readonly context: Record<string, unknown> = {}) {
-    super(message);
-  }
-}
-
-function adminUrlFromEnv(env: NodeJS.ProcessEnv): URL {
-  if (env.ECHELON_TEST_DATABASE_DISPOSABLE !== "true") {
-    throw new BuildCheckError("DATABASE_NOT_DISPOSABLE", "Set ECHELON_TEST_DATABASE_DISPOSABLE=true: this check creates and drops a database.");
-  }
-  let url: URL;
-  try {
-    url = new URL(env.ECHELON_TEST_DATABASE_URL ?? "");
-  } catch {
-    throw new BuildCheckError("DATABASE_URL_INVALID", "ECHELON_TEST_DATABASE_URL must be an explicit local PostgreSQL URL.");
-  }
-  if (!["postgres:", "postgresql:"].includes(url.protocol) || !LOCAL_HOSTS.includes(url.hostname)) {
-    throw new BuildCheckError("DATABASE_NOT_LOCAL", "This check only runs against PostgreSQL on localhost.");
-  }
-  return url;
-}
-
-function sslFromEnv(env: NodeJS.ProcessEnv): { rejectUnauthorized: false } | undefined {
-  return env.MIGRATION_DATABASE_SSL === "disable" ? undefined : { rejectUnauthorized: false };
-}
-
-function runRunner(databaseUrl: string, env: NodeJS.ProcessEnv): string {
-  const result = spawnSync(process.execPath, ["--import", "tsx", "migrations/run-migrations.ts"], {
-    cwd: REPOSITORY_ROOT,
-    encoding: "utf8",
-    timeout: RUNNER_TIMEOUT_MS,
-    maxBuffer: 64 * 1024 * 1024,
-    env: { ...env, DATABASE_URL: databaseUrl, EXTERNAL_DATABASE_URL: "" },
-  });
-  if (result.error || result.status !== 0) {
-    throw new BuildCheckError("MIGRATION_RUNNER_FAILED", "The migration runner failed against the new database.", {
-      status: result.status,
-      error: result.error?.message ?? null,
-      output: `${result.stdout ?? ""}\n${result.stderr ?? ""}`.split("\n").filter((line) => !line.includes("already applied")).slice(-40),
-    });
-  }
-  return result.stdout ?? "";
-}
+import {
+  ADMIN_STATEMENT_TIMEOUT_MS, CheckError, MIGRATIONS_DIR,
+  adminUrlFromEnv, databaseUrlOn, localSslFromEnv, runMigrationRunner,
+} from "./disposable-database";
 
 async function main(): Promise<void> {
   const adminUrl = adminUrlFromEnv(process.env);
-  const ssl = sslFromEnv(process.env);
+  const ssl = localSslFromEnv(process.env);
   const databaseName = `echelon_from_repository_${randomUUID().replace(/-/g, "")}`;
-  const databaseUrl = new URL(adminUrl.toString());
-  databaseUrl.pathname = `/${databaseName}`;
+  const databaseUrl = databaseUrlOn(adminUrl, databaseName);
   const files = validateMigrationDirectory(MIGRATIONS_DIR);
 
   const admin = new pg.Client({ connectionString: adminUrl.toString(), ssl, statement_timeout: ADMIN_STATEMENT_TIMEOUT_MS });
@@ -84,9 +34,9 @@ async function main(): Promise<void> {
     // The name is generated above from hex digits only; identifiers cannot be bound as parameters.
     await admin.query(`CREATE DATABASE ${databaseName}`);
     try {
-      const firstRun = runRunner(databaseUrl.toString(), process.env);
+      const firstRun = runMigrationRunner(databaseUrl.toString(), process.env);
       if (!firstRun.includes('"action":"migration_baseline","outcome":"applied"')) {
-        throw new BuildCheckError("BASELINE_NOT_APPLIED", "The runner did not load the schema baseline into the empty database.");
+        throw new CheckError("BASELINE_NOT_APPLIED", "The runner did not load the schema baseline into the empty database.");
       }
 
       const built = new pg.Client({ connectionString: databaseUrl.toString(), ssl, statement_timeout: ADMIN_STATEMENT_TIMEOUT_MS });
@@ -106,14 +56,14 @@ async function main(): Promise<void> {
       const recordedSet = new Set(recorded);
       const unrecorded = files.filter((file) => !recordedSet.has(file));
       if (unrecorded.length > 0 || recorded.length !== files.length) {
-        throw new BuildCheckError("MIGRATION_RECORDS_INCOMPLETE", "The built database does not record every repository migration exactly once.", {
+        throw new CheckError("MIGRATION_RECORDS_INCOMPLETE", "The built database does not record every repository migration exactly once.", {
           unrecorded, recorded: recorded.length, files: files.length,
         });
       }
 
-      const secondRun = runRunner(databaseUrl.toString(), process.env);
+      const secondRun = runMigrationRunner(databaseUrl.toString(), process.env);
       if (!secondRun.includes("Applied 0 new migration(s)") || secondRun.includes('"action":"migration_baseline"')) {
-        throw new BuildCheckError("SECOND_RUN_NOT_IDLE", "Running the migrations again on the built database changed it.");
+        throw new CheckError("SECOND_RUN_NOT_IDLE", "Running the migrations again on the built database changed it.");
       }
 
       console.log(JSON.stringify({
@@ -129,7 +79,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  const failure = error instanceof BuildCheckError ? error : null;
+  const failure = error instanceof CheckError ? error : null;
   console.error(JSON.stringify({
     level: "error", action: "build_database_from_repository", outcome: "failed",
     error_code: failure?.code ?? "BUILD_CHECK_CRASHED",

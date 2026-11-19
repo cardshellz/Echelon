@@ -28,15 +28,21 @@ describe("canonical cycle-count reconciliation source contract", () => {
   });
 
   it("locks selected owners before sorted inventory resources and mutates only afterward", () => {
-    const repository = source(
+    const facade = source(
       "server/modules/inventory-planning/infrastructure/inventory-availability-claim.repository.ts",
     );
-    const reconciliation = methodBody(repository, "async reconcileCycleCount(", "async pickClaimLine(");
+    const repository = source(
+      "server/modules/inventory-planning/infrastructure/claim-repository/claim-cycle-count.ts",
+    );
+    expect(facade).toContain("executeReconcileCycleCount(this.deps(), rawCommand)");
+    const startIndex = repository.indexOf("export async function executeReconcileCycleCount(");
+    expect(startIndex).toBeGreaterThanOrEqual(0);
+    const reconciliation = repository.slice(startIndex);
     const selectedClaimLock = reconciliation.indexOf("loadActiveClaimById(client, owner.claimId, true)");
     const resourceLock = reconciliation.indexOf("await lockSnapshotResources(client, preliminarySnapshot)");
     const levelVerification = reconciliation.lastIndexOf("const lockedLevel = rows(await client.query(");
     const claimRelease = reconciliation.indexOf("await releaseClaimResources(client, {");
-    const physicalAdjustment = reconciliation.lastIndexOf("await this.inventoryWriter.applyCycleCountAdjustment({");
+    const physicalAdjustment = reconciliation.lastIndexOf("await deps.inventoryWriter.applyCycleCountAdjustment({");
     const replan = reconciliation.indexOf("const plan = planCanonicalClaim(snapshot, request)");
     const approval = reconciliation.lastIndexOf("return approveAndCommit(");
     const approvalHelper = methodBody(reconciliation, "const approveAndCommit = async (", "if (levelRow == null)");
@@ -50,7 +56,7 @@ describe("canonical cycle-count reconciliation source contract", () => {
     expect(claimRelease).toBeLessThan(physicalAdjustment);
     expect(physicalAdjustment).toBeLessThan(replan);
     expect(replan).toBeLessThan(approval);
-    expect(approvalHelper.indexOf("await this.inventoryWriter.approveCycleCountItem({"))
+    expect(approvalHelper.indexOf("await deps.inventoryWriter.approveCycleCountItem({"))
       .toBeLessThan(approvalHelper.indexOf('await client.query("COMMIT")'));
     expect(reconciliation).toContain("loadOpenClaimsAtLevel(client, inventoryLevelId, false)");
     expect(reconciliation).not.toContain("loadOpenClaimsAtLevel(client, inventoryLevelId, true)");
@@ -58,7 +64,7 @@ describe("canonical cycle-count reconciliation source contract", () => {
 
   it("derives exact open ownership and deterministically displaces newest claims first", () => {
     const repository = source(
-      "server/modules/inventory-planning/infrastructure/inventory-availability-claim.repository.ts",
+      "server/modules/inventory-planning/infrastructure/claim-repository/claim-cycle-count.ts",
     );
     const selection = methodBody(
       repository,

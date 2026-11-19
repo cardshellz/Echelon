@@ -27,18 +27,10 @@ import type { PoolClient } from "pg";
 import { z } from "zod";
 import {
   executeGuardedWmsOrderStatusTransitionInWms,
+  isTerminalWmsOrderStatus,
+  isWmsOrderTransitionAllowed,
   restoreStoppedRefundEditWmsOrderInWms,
 } from "../wms/wms-order-mutations.api";
-
-// ─── Terminal states ────────────────────────────────────────────────
-// These states cannot be exited by normal transitions.
-// Exception: cancelled → shipped (truth wins — if engine says shipped,
-// we record it regardless of our local cancel state).
-
-const TERMINAL_STATES: ReadonlySet<WmsWarehouseStatus> = new Set([
-  "shipped",
-  "cancelled",
-]);
 
 /**
  * Narrow correction of empty, unstarted work stopped during an owned refund
@@ -54,59 +46,6 @@ export async function restoreStoppedRefundEditOrder(
     operationId: z.string().uuid(), now: z.date() }).strict().parse(input);
   return restoreStoppedRefundEditWmsOrderInWms(client, input);
 }
-
-// ─── Transition matrix ──────────────────────────────────────────────
-// Key = target state. Value = set of states that may transition TO it.
-// If a from-state is not listed for a target, the transition is illegal.
-//
-// This is intentionally permissive for Phase 1 — the goal is to funnel
-// all writers through one gate, not to immediately restrict every
-// transition. Tighten iteratively as each caller migrates.
-
-const TRANSITION_MATRIX: Record<WmsWarehouseStatus, ReadonlySet<WmsWarehouseStatus>> = {
-  ready: new Set(["on_hold", "exception", "awaiting_3pl"]),
-  in_progress: new Set(["ready", "on_hold", "exception"]),
-  picking: new Set(["ready"]),
-  picked: new Set(["picking"]),
-  packing: new Set(["picked"]),
-  packed: new Set(["packing"]),
-  completed: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "ready_to_ship", "partially_shipped",
-    "on_hold", "exception", "awaiting_3pl",
-  ]),
-  ready_to_ship: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "on_hold", "exception", "awaiting_3pl",
-  ]),
-  partially_shipped: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "ready_to_ship",
-    "on_hold", "exception", "awaiting_3pl",
-  ]),
-  shipped: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "ready_to_ship", "partially_shipped",
-    "on_hold", "exception", "awaiting_3pl",
-    "cancelled", // truth wins: engine says shipped
-  ]),
-  on_hold: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "ready_to_ship", "partially_shipped",
-    "exception", "awaiting_3pl",
-  ]),
-  exception: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "ready_to_ship",
-    "on_hold", "awaiting_3pl",
-  ]),
-  cancelled: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "ready_to_ship", "partially_shipped",
-    "on_hold", "exception", "awaiting_3pl",
-  ]),
-  awaiting_3pl: new Set(["ready", "on_hold"]),
-};
 
 // ─── Public API ─────────────────────────────────────────────────────
 
@@ -136,17 +75,14 @@ export function isTransitionAllowed(
   from: WmsWarehouseStatus,
   to: WmsWarehouseStatus,
 ): boolean {
-  if (from === to) return false;
-  const allowedFrom = TRANSITION_MATRIX[to];
-  if (!allowedFrom) return false;
-  return allowedFrom.has(from);
+  return isWmsOrderTransitionAllowed(from, to);
 }
 
 /**
  * Check whether a status is terminal.
  */
 export function isTerminalStatus(status: WmsWarehouseStatus): boolean {
-  return TERMINAL_STATES.has(status);
+  return isTerminalWmsOrderStatus(status);
 }
 
 /**

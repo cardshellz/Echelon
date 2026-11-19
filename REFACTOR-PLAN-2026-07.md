@@ -453,8 +453,12 @@ scope (order/line), released_by; picking + push + release all consult it; boot w
     the runbook's §2b list is out of date.
   - Still owed: (a) reference rows. The snapshot holds no rows, and 75 legacy migrations insert
     some (notification types, permissions, shipping configuration, settings); which tables are
-    reference data needs a table-by-table review. (b) A repeatable drift check that builds from
-    the repository and compares with production's structure. (c) Retiring the legacy files the
+    reference data needs a table-by-table review. (b) DONE: a nightly drift check
+    (`.github/workflows/schema-drift.yml`, `scripts/ci/check-schema-drift.ts`) builds from the
+    repository and compares with production's structure, which a Heroku Scheduler job publishes
+    to the `production-structure` branch so no database credential leaves Heroku. It needs
+    three one-time settings before it reports anything but "could not run": the Heroku job and
+    its GitHub token, and the alert webhook secret in GitHub. (c) Retiring the legacy files the
     baseline covers, once CI has built from it for a while; that needs the frozen-legacy rule in
     `migration-policy.mjs` changed. (d) The integration suites still build their own fixtures on
     PostgreSQL 16; the baseline has not been tried on 16.

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -15,10 +15,16 @@ const repository = readFileSync(
   ),
   "utf8",
 );
-const shipStationService = readFileSync(
-  resolve(process.cwd(), "server/modules/oms/shipstation.service.ts"),
-  "utf8",
-);
+const shipStationSubDir = resolve(process.cwd(), "server/modules/oms/shipstation");
+const shipStationService = [
+  readFileSync(resolve(process.cwd(), "server/modules/oms/shipstation.service.ts"), "utf8"),
+  ...(existsSync(shipStationSubDir)
+    ? readdirSync(shipStationSubDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(shipStationSubDir, f), "utf8"))
+    : []),
+].join("\n");
 const wmsShipmentItemsRepo = readFileSync(
   resolve(process.cwd(), "server/modules/wms/outbound-shipment-items-mutations.repository.ts"),
   "utf8",

@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve, dirname } from "node:path";
 
@@ -19,6 +19,17 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../..");
 
 function readSrc(relPath: string): string {
   return readFileSync(resolve(ROOT, relPath), "utf8");
+}
+
+function readShipStationSrc(): string {
+  const subDir = resolve(ROOT, "server/modules/oms/shipstation");
+  const subFiles = existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(subDir, f), "utf8"))
+    : [];
+  return [readSrc("server/modules/oms/shipstation.service.ts"), ...subFiles].join("\n");
 }
 
 function sourceBetween(source: string, startMarker: string, endMarker: string): string {
@@ -77,7 +88,7 @@ describe("D-NOENGINE: migration adds engine columns", () => {
 // ─── pushShipment dual-writes ────────────────────────────────────────
 
 describe("D-NOENGINE: pushShipment writes engine columns", () => {
-  const ssSrc = readSrc("server/modules/oms/shipstation.service.ts");
+  const ssSrc = readShipStationSrc();
   const wmsShipmentsRepoSrc = readSrc("server/modules/wms/outbound-shipments-mutations.repository.ts");
 
   it("writes shipping_engine in the same UPDATE as shipstation_order_id", () => {
@@ -100,7 +111,7 @@ describe("D-NOENGINE: pushShipment writes engine columns", () => {
 // ─── Split/combined shipment INSERTs ─────────────────────────────────
 
 describe("D-NOENGINE: split/combined shipment creation includes engine columns", () => {
-  const ssSrc = readSrc("server/modules/oms/shipstation.service.ts");
+  const ssSrc = readShipStationSrc();
   const wmsShipmentsRepoSrc = readSrc("server/modules/wms/outbound-shipments-mutations.repository.ts");
 
   it("split shipment INSERT includes engine triple", () => {
@@ -135,38 +146,41 @@ describe("D-NOENGINE: split/combined shipment creation includes engine columns",
 
 describe("D-NOENGINE: reconciler cancel/markShipped uses engine", () => {
   const indexSrc = readSrc("server/index.ts");
+  const omsWmsReconcileSrc = readSrc("server/modules/orders/oms-wms-cancel-reconcile.scheduler.ts");
+  const oneShotRepairsSrc = readSrc("server/modules/orders/one-shot-repairs.ts");
+  const wmsShipStationReconcileSrc = readSrc("server/modules/shipping/wms-shipstation-reconcile.scheduler.ts");
 
-  it("imports engineRefFromRow from shipping module", () => {
-    expect(indexSrc).toContain('import { engineRefFromRow, toEngineRef } from "./modules/shipping"');
+  it("imports engineRefFromRow from shipping module in extracted reconcilers", () => {
+    expect(omsWmsReconcileSrc).toContain("engineRefFromRow");
+    expect(omsWmsReconcileSrc).toContain('from "../shipping/engine-and-reconcile.api"');
+    expect(wmsShipStationReconcileSrc).toContain('import { engineRefFromRow } from "./adapters/shipstation.adapter"');
   });
 
   it("reconciler #4 cancel uses engine.cancel, not ss.cancelOrder", () => {
-    const block = indexSrc.substring(
-      indexSrc.indexOf("OMS<->WMS Reconcile"),
-      indexSrc.indexOf("OMS<->WMS Reconcile") + 1500,
-    );
-    expect(block).toContain("engine.cancel(ref)");
-    expect(block).not.toContain("ss.cancelOrder");
+    expect(omsWmsReconcileSrc).toContain("engine.cancel(ref)");
+    expect(omsWmsReconcileSrc).not.toContain("ss.cancelOrder");
   });
 
   it("data repair cancel uses engine.cancel", () => {
-    const start = indexSrc.indexOf("Duplicate shipment cleanup");
-    const block = indexSrc.substring(start - 1500, start);
-    expect(block).toContain("engine.cancel(ref)");
+    expect(oneShotRepairsSrc).toContain("engine.cancel(ref)");
   });
 
   it("V2 reconciler outbound sync uses engine.markShipped", () => {
-    const block = indexSrc.substring(
-      indexSrc.indexOf("Outbound sync: marked engine order"),
-      indexSrc.indexOf("Outbound sync: marked engine order") + 200,
+    const block = wmsShipStationReconcileSrc.substring(
+      wmsShipStationReconcileSrc.indexOf("Outbound sync: marked engine order"),
+      wmsShipStationReconcileSrc.indexOf("Outbound sync: marked engine order") + 200,
     );
     expect(block).toBeDefined();
+    expect(wmsShipStationReconcileSrc).toContain("await engine.markShipped(ref, {");
   });
 
   it("retires the legacy order-level reconciliation fallback", () => {
+    expect(indexSrc).toContain("startWmsShipStationReconcileScheduler(");
     expect(indexSrc).not.toContain("runShipStationReconcileV1");
     expect(indexSrc).not.toContain("process.env.RECONCILE_V2");
-    expect(indexSrc).toContain("await runShipStationReconcileV2()");
+    expect(wmsShipStationReconcileSrc).not.toContain("runShipStationReconcileV1");
+    expect(wmsShipStationReconcileSrc).not.toContain("process.env.RECONCILE_V2");
+    expect(wmsShipStationReconcileSrc).toContain("await runShipStationReconcileV2()");
   });
 
   it("webhook registration uses engine.registerWebhook", () => {
@@ -253,8 +267,9 @@ describe("D-NOENGINE: engineRefFromRow helper", () => {
 
 describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
   const indexSrc = readSrc("server/index.ts");
+  const wmsReconcileSrc = readSrc("server/modules/shipping/wms-shipstation-reconcile.scheduler.ts");
   const v2Block = sourceBetween(
-    indexSrc,
+    wmsReconcileSrc,
     "const runShipStationReconcileV2 = async () => {",
     "const runShipStationReconcile = async () => {",
   );
@@ -313,19 +328,18 @@ describe("D-NOENGINE Phase 4: V2 reconciler uses engine interface", () => {
 
   it("no longer imports SS-specific reconcile functions", () => {
     expect(indexSrc).not.toContain('from "./modules/oms/shipstation-reconcile-state"');
+    expect(wmsReconcileSrc).not.toContain("shipstation-reconcile-state");
   });
 
-  it("imports deriveReconcileEvent from shipping module", () => {
+  it("imports deriveReconcileEvent inside shipping module reconciler", () => {
+    expect(wmsReconcileSrc).toContain('import { deriveReconcileEvent } from "./reconcile-derive"');
     expect(indexSrc).toContain('from "./modules/shipping/engine-and-reconcile.api"');
   });
 });
 
 describe("D-NOENGINE Phase 4: eBay reconciler uses engine interface", () => {
-  const indexSrc = readSrc("server/index.ts");
-  const ebayBlock = sourceBetween(
-    indexSrc,
-    "eBay order reconciliation",
-    "OMS<->WMS cancellation reconciliation",
+  const ebayBlock = readSrc(
+    "server/modules/oms/reconcilers/ebay-fulfillment-stuck-order.scheduler.ts",
   );
 
   it("eBay reconciler calls engine.getState not ss.getOrderById", () => {
@@ -346,16 +360,17 @@ describe("D-NOENGINE Phase 4: eBay reconciler uses engine interface", () => {
 
 describe("D-NOENGINE Phase 4: legacy V1 reconciler is retired", () => {
   const indexSrc = readSrc("server/index.ts");
+  const wmsReconcileSrc = readSrc("server/modules/shipping/wms-shipstation-reconcile.scheduler.ts");
 
   it("always invokes the canonical V2 reconciler without a feature flag fallback", () => {
-    const schedulerBlock = sourceBetween(
-      indexSrc,
-      "const runShipStationReconcile = async () => {",
-      "setTimeout(runObservedShipStationReconcile, 30_000)",
+    const schedulerBlock = wmsReconcileSrc.slice(
+      wmsReconcileSrc.indexOf("const runShipStationReconcile = async () => {"),
     );
     expect(schedulerBlock).toContain("await runShipStationReconcileV2()");
-    expect(schedulerBlock).toContain('observeRuntimeWork("shipping.wms_reconcile", runShipStationReconcile)');
+    expect(schedulerBlock).toContain('name: "shipping.wms_reconcile"');
+    expect(schedulerBlock).toContain("registerScheduledJob({");
     expect(schedulerBlock).not.toContain("runShipStationReconcileV1");
+    expect(wmsReconcileSrc).not.toContain("RECONCILE_V2");
     expect(indexSrc).not.toContain("RECONCILE_V2");
     expect(indexSrc).not.toContain("V1: legacy order-based reconcile");
   });

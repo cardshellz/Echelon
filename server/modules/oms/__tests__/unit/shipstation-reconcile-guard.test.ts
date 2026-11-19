@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const INDEX_PATH = resolve(__dirname, "../../../../index.ts");
+const RECONCILER_PATH = resolve(
+  __dirname,
+  "../../../shipping/wms-shipstation-reconcile.scheduler.ts",
+);
 
 function sourceBetween(source: string, startMarker: string, endMarker: string): string {
   const start = source.indexOf(startMarker);
@@ -13,7 +16,7 @@ function sourceBetween(source: string, startMarker: string, endMarker: string): 
 }
 
 describe("ShipStation reconciliation canonical identity guard", () => {
-  const source = readFileSync(INDEX_PATH, "utf8");
+  const source = readFileSync(RECONCILER_PATH, "utf8");
   const reconcileBlock = sourceBetween(
     source,
     "const runShipStationReconcileV2 = async () => {",

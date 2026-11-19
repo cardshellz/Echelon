@@ -1,4 +1,5 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
@@ -7,6 +8,18 @@ function readSource(relativePath: string): string {
     fileURLToPath(new URL(relativePath, import.meta.url)),
     "utf8",
   );
+}
+
+function readShipStationSource(): string {
+  const omsDir = fileURLToPath(new URL("../..", import.meta.url));
+  const subDir = resolve(omsDir, "shipstation");
+  const subFiles = existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(subDir, f), "utf8"))
+    : [];
+  return [readSource("../../shipstation.service.ts"), ...subFiles].join("\n");
 }
 
 function sourceBlock(source: string, startMarker: string, endMarker?: string): string {
@@ -21,7 +34,7 @@ function sourceBlock(source: string, startMarker: string, endMarker?: string): s
   return source.slice(start, end);
 }
 
-const SHIPSTATION_SRC = readSource("../../shipstation.service.ts");
+const SHIPSTATION_SRC = readShipStationSource();
 const FULFILLMENT_PUSH_SRC = readSource("../../fulfillment-push.service.ts");
 const WMS_SHIPMENTS_REPO_SRC = readSource("../../../wms/outbound-shipments-mutations.repository.ts");
 const WMS_SHIPMENT_ITEMS_REPO_SRC = readSource("../../../wms/outbound-shipment-items-mutations.repository.ts");

@@ -32,9 +32,17 @@ export * from "./shopify-identity.api";
 export * from "./ebay-connector.api";
 
 // Service types
-export type { SyncResult } from "./sync.service";
-export type { ReservationResult } from "./reservation.service";
+export type { SyncResult, ChannelSyncServiceContract } from "./sync.service";
+export type { ReservationResult, ReservationInventoryCore } from "./reservation.service";
 export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "./product-push.service";
+
+export interface ChannelsApi {
+  readonly channelSync: import("./sync.service").ChannelSyncServiceContract;
+  readonly channelProductPush: import("./product-push.service").ChannelProductPushService;
+  readonly syncSettings: import("./sync-settings.service").SyncSettingsService;
+  readonly allocationEngine: import("./allocation-engine.service").AllocationEngine;
+  readonly sourceLockService: import("./source-lock.service").SourceLockService;
+}
 
 // Channel Adapter Interface (Phase 1)
 export type {
@@ -52,8 +60,27 @@ export type {
   FulfillmentPushResult,
   CancellationPayload,
   CancellationPushResult,
+  ChannelOrderAdapter,
+  ChannelOrderNormalizeContext,
+  ChannelWebhookVerifyInput,
+  ChannelWebhookVerifyResult,
+  ValidatedChannelCancelEvent,
+  ValidatedChannelOrder,
+  ValidatedChannelOrderLine,
+  ValidatedChannelRefundEvent,
 } from "./channel-adapter.interface";
-export { ChannelAdapterRegistry } from "./channel-adapter.interface";
+export {
+  ChannelAdapterRegistry,
+  ChannelOrderAdapterRegistry,
+  ChannelOrderBoundaryValidationError,
+  channelIntakeCancelSchema,
+  channelIntakeOrderLineSchema,
+  channelIntakeOrderSchema,
+  channelIntakeRefundSchema,
+  parseValidatedChannelCancel,
+  parseValidatedChannelOrder,
+  parseValidatedChannelRefund,
+} from "./channel-adapter.interface";
 
 // Source Lock System (Phase 1)
 export { createSourceLockService } from "./source-lock.service";

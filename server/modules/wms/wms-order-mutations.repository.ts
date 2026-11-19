@@ -2,9 +2,21 @@ import { and, eq, inArray, isNull, ne, notInArray, or, sql } from "drizzle-orm";
 import type { PoolClient } from "pg";
 import { orders, type Order } from "@shared/schema";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
+import {
+  allowedWmsOrderFromStatuses,
+  isTerminalWmsOrderStatus,
+} from "./wms-order-status-core";
 
 type SqlExecutor = { execute: (...args: any[]) => any };
 type DrizzleUpdateExecutor = { update: (...args: any[]) => any };
+export type NonStatusWmsOrderUpdates = Omit<Partial<typeof orders.$inferInsert>, "warehouseStatus">;
+
+function stripWarehouseStatusField(
+  updates: NonStatusWmsOrderUpdates,
+): NonStatusWmsOrderUpdates {
+  const { warehouseStatus: _omitted, ...safe } = updates as Record<string, unknown>;
+  return safe as NonStatusWmsOrderUpdates;
+}
 
 export async function clearWmsOrderAssignedPickerInWms(
   executor: SqlExecutor,
@@ -101,7 +113,11 @@ export async function updateWmsOrderSlaAndPromotionInWms(
       sortRank: updates.sortRank,
       updatedAt: updates.updatedAt ?? new Date(),
     })
-    .where(eq(orders.id, wmsOrderId));
+    .where(
+      updates.promoted
+        ? and(eq(orders.id, wmsOrderId), eq(orders.warehouseStatus, "pending"))
+        : eq(orders.id, wmsOrderId),
+    );
 }
 
 export async function recomputeWmsOrderStatusAndCountsAfterLineSyncInWms(
@@ -122,7 +138,7 @@ export async function recomputeWmsOrderStatusAndCountsAfterLineSyncInWms(
                  AND COALESCE(pending_items.quantity, 0) > COALESCE(pending_items.fulfilled_quantity, 0)
                  AND pending_items.status NOT IN ('cancelled', 'completed')
              ) THEN 'ready'
-             WHEN (
+             WHEN w.warehouse_status <> 'shipped' AND (
                SELECT COUNT(*) FROM wms.order_items all_items
                WHERE all_items.order_id = w.id
              ) = 0 THEN 'cancelled'
@@ -193,33 +209,49 @@ export async function dissolveWmsOrderCombinedGroupInWms(
 export async function updateWmsOrdersWarehouseStatusByCombinedGroupInWms(
   client: DrizzleUpdateExecutor,
   groupId: number,
-  warehouseStatus: string,
+  warehouseStatus: WmsWarehouseStatus,
 ): Promise<void> {
+  const legalFrom = allowedWmsOrderFromStatuses(warehouseStatus);
+  if (legalFrom.length === 0) return;
+  const now = new Date();
   await client
     .update(orders)
-    .set({ warehouseStatus })
-    .where(eq(orders.combinedGroupId, groupId));
+    .set({
+      warehouseStatus,
+      updatedAt: now,
+      ...(warehouseStatus === "shipped" ? { completedAt: now } : {}),
+    })
+    .where(
+      and(
+        eq(orders.combinedGroupId, groupId),
+        inArray(orders.warehouseStatus, legalFrom),
+      ),
+    );
 }
 
 export async function updateWmsOrderByIdInWms(
   client: DrizzleUpdateExecutor,
   orderId: number,
-  updates: Partial<typeof orders.$inferInsert>,
+  updates: NonStatusWmsOrderUpdates,
 ): Promise<void> {
+  const safeUpdates = stripWarehouseStatusField(updates);
+  if (Object.keys(safeUpdates).length === 0) return;
   await client
     .update(orders)
-    .set(updates)
+    .set(safeUpdates)
     .where(eq(orders.id, orderId));
 }
 
 export async function updateWmsOrderByIdReturningInWms(
   client: DrizzleUpdateExecutor,
   orderId: number,
-  updates: Partial<typeof orders.$inferInsert>,
+  updates: NonStatusWmsOrderUpdates,
 ): Promise<Order[]> {
+  const safeUpdates = stripWarehouseStatusField(updates);
+  if (Object.keys(safeUpdates).length === 0) return [];
   return client
     .update(orders)
-    .set(updates)
+    .set(safeUpdates)
     .where(eq(orders.id, orderId))
     .returning();
 }
@@ -227,13 +259,105 @@ export async function updateWmsOrderByIdReturningInWms(
 export async function updateActiveWmsOrderFieldsReturningInWms(
   client: DrizzleUpdateExecutor,
   orderId: number,
-  updates: Partial<typeof orders.$inferInsert>,
+  updates: NonStatusWmsOrderUpdates,
+): Promise<Order[]> {
+  const safeUpdates = stripWarehouseStatusField(updates);
+  if (Object.keys(safeUpdates).length === 0) return [];
+  return client
+    .update(orders)
+    .set(safeUpdates)
+    .where(and(eq(orders.id, orderId), notInArray(orders.warehouseStatus, ["shipped", "cancelled"])))
+    .returning();
+}
+
+export async function transitionWmsOrderStatusByMatrixReturningInWms(
+  client: DrizzleUpdateExecutor,
+  orderId: number,
+  targetStatus: WmsWarehouseStatus,
+  extraUpdates: NonStatusWmsOrderUpdates = {},
+): Promise<Order[]> {
+  const matrixFrom = allowedWmsOrderFromStatuses(targetStatus);
+  const legalStates: string[] = isTerminalWmsOrderStatus(targetStatus)
+    ? [...matrixFrom]
+    : Array.from(
+        new Set([
+          ...matrixFrom,
+          targetStatus,
+          ...(targetStatus === "ready" ? ["pending"] : []),
+        ]),
+      );
+  if (legalStates.length === 0) return [];
+  const safeExtra = stripWarehouseStatusField(extraUpdates);
+  return client
+    .update(orders)
+    .set({
+      ...safeExtra,
+      warehouseStatus: targetStatus,
+    })
+    .where(
+      and(
+        eq(orders.id, orderId),
+        inArray(orders.warehouseStatus, legalStates),
+      ),
+    )
+    .returning();
+}
+
+export async function releaseLockedPickingAssignmentInWms(
+  client: DrizzleUpdateExecutor,
+  orderId: number,
 ): Promise<Order[]> {
   return client
     .update(orders)
-    .set(updates)
-    .where(and(eq(orders.id, orderId), notInArray(orders.warehouseStatus, ["shipped", "cancelled"])))
+    .set({
+      warehouseStatus: "ready",
+      assignedPickerId: null,
+      startedAt: null,
+    })
+    .where(
+      and(
+        eq(orders.id, orderId),
+        eq(orders.warehouseStatus, "in_progress"),
+      ),
+    )
     .returning();
+}
+
+export async function assignWmsOrderToWarehouseInWms(
+  client: DrizzleUpdateExecutor,
+  orderId: number,
+  input: {
+    warehouseId: number;
+    routeTo3pl: boolean;
+    updatedAt?: Date;
+  },
+): Promise<void> {
+  const now = input.updatedAt ?? new Date();
+  if (!input.routeTo3pl) {
+    await client
+      .update(orders)
+      .set({ warehouseId: input.warehouseId, updatedAt: now })
+      .where(eq(orders.id, orderId));
+    return;
+  }
+  const legalFor3pl = [
+    ...allowedWmsOrderFromStatuses("awaiting_3pl"),
+    "pending",
+    "awaiting_3pl",
+  ];
+  await client
+    .update(orders)
+    .set({
+      warehouseId: input.warehouseId,
+      warehouseStatus: "awaiting_3pl",
+      updatedAt: now,
+    })
+    .where(
+      and(
+        eq(orders.id, orderId),
+        inArray(orders.warehouseStatus, legalFor3pl),
+      ),
+    );
 }
 
 export async function claimWmsOrderForPickerInWms(
@@ -330,12 +454,14 @@ export async function syncWmsOrdersCompletedFromFulfilledOmsInWms(
 ): Promise<void> {
   await executor.execute(sql`
     UPDATE wms.orders o SET
-      status = 'completed',
-      completed_at = COALESCE(o.completed_at, NOW())
+      warehouse_status = 'completed',
+      completed_at = COALESCE(o.completed_at, NOW()),
+      updated_at = NOW()
     FROM oms.oms_orders oms
     WHERE o.order_number = oms.external_order_number
       AND (oms.fulfillment_status = 'fulfilled' OR oms.status = 'shipped')
-      AND o.warehouse_status != 'completed'
+      AND o.warehouse_status NOT IN ('completed', 'shipped', 'cancelled')
+      AND o.order_edit_operation_id IS NULL
   `);
 }
 
@@ -385,6 +511,7 @@ export async function applyWmsOrderShippingRollupStatusInWms(
           completed_at = ${input.now},
           updated_at = ${input.now}
         WHERE id = ${input.wmsOrderId}
+          AND (warehouse_status <> 'cancelled' OR ${input.derived}::text = 'shipped')
         RETURNING id
       ),
       closed_blockers AS (
@@ -417,6 +544,7 @@ export async function applyWmsOrderShippingRollupStatusInWms(
           warehouse_status = ${input.derived},
           updated_at = ${input.now}
         WHERE id = ${input.wmsOrderId}
+          AND (warehouse_status <> 'cancelled' OR ${input.derived}::text = 'shipped')
         RETURNING id
       ),
       closed_blockers AS (

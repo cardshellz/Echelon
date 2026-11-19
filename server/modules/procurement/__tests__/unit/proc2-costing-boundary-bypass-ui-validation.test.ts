@@ -22,6 +22,18 @@ function readRepoFile(relativePath: string): string {
   return fs.readFileSync(path.join(repoRoot, relativePath), "utf8");
 }
 
+function readPurchasingServiceSource(): string {
+  const subDir = path.join(repoRoot, "server/modules/procurement/purchasing");
+  const subFiles = fs.existsSync(subDir)
+    ? fs
+        .readdirSync(subDir)
+        .filter((name) => name.endsWith(".ts"))
+        .sort()
+        .map((name) => fs.readFileSync(path.join(subDir, name), "utf8"))
+    : [];
+  return [readRepoFile("server/modules/procurement/purchasing.service.ts"), ...subFiles].join("\n");
+}
+
 describe("PROC-2: costing boundary decoupling, legacy bypass retirement, and shared UI validation", () => {
   describe("PROC-02 (PROC-B2): procurement and inventory costing public contracts", () => {
     it("reads receiving line cost provenance via procurement public contract", async () => {
@@ -133,7 +145,7 @@ describe("PROC-2: costing boundary decoupling, legacy bypass retirement, and sha
 
   describe("PROC-08 (PROC-B6): legacy allocator and AP payment bypass retirement", () => {
     it("retires getAllocatedLineCostsForPo from purchasing and receiving services", () => {
-      const purchasingSource = readRepoFile("server/modules/procurement/purchasing.service.ts");
+      const purchasingSource = readPurchasingServiceSource();
       const receivingSource = readRepoFile("server/modules/procurement/receiving.service.ts");
 
       expect(purchasingSource).not.toContain("getAllocatedLineCostsForPo");

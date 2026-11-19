@@ -17,7 +17,7 @@ const RECIPE_PROMISE_LOCK_NS = 918410;
 const AUTOMATION_ACTOR = "recipe-atp";
 
 type TransactionExecutor = {
-  execute: (query: unknown) => Promise<{ rows: any[] }>;
+  execute: (query: any) => Promise<{ rows: any[] }>;
   update: (...args: any[]) => any;
 };
 

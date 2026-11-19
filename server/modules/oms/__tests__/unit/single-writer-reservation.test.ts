@@ -82,10 +82,9 @@ describe("P0.1c — cancels release, shortfalls log, detector re-reserves", () =
   });
 
   it("the hourly OMS↔WMS sweep cancels via the single entrypoint", () => {
-    // Anchored to the sweep's own reason: the earlier one-line literal was only
-    // ever satisfied by the startup zombie repair, which now lives in
-    // zombie-order-repair.ts.
-    expect(INDEX_SRC).toMatch(
+    const omsWmsSweepSrc = read("../../../orders/oms-wms-cancel-reconcile.scheduler.ts");
+    expect(INDEX_SRC).toContain("startOmsWmsCancelReconcileScheduler(");
+    expect(omsWmsSweepSrc).toMatch(
       /cancelWmsOrderAndRelease\(\s*db,\s*services\.reservation,\s*row\.id,\s*"oms_wms_reconcile"/,
     );
   });

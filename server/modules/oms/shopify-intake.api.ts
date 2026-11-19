@@ -26,3 +26,12 @@ export {
   type RepairShopifyOmsOrderCustomerScope,
   type RepairShopifyOmsOrderCustomerData,
 } from "./shopify-customer-repair.command";
+export {
+  buildShopifyWebhookInboxInput,
+  enqueueWebhookInboxRetry,
+  markWebhookFailed,
+  markWebhookProcessing,
+  markWebhookSucceeded,
+  recordWebhookReceived,
+  type WebhookInboxReceipt,
+} from "./webhook-inbox.service";

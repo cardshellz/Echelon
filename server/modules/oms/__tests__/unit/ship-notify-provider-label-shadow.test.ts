@@ -1,10 +1,20 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const source = readFileSync(join(here, "..", "..", "shipstation.service.ts"), "utf8");
+const omsDir = join(here, "..", "..");
+const subDir = join(omsDir, "shipstation");
+const source = [
+  readFileSync(join(omsDir, "shipstation.service.ts"), "utf8"),
+  ...(existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(join(subDir, f), "utf8"))
+    : []),
+].join("\n");
 
 describe("SHIP_NOTIFY provider-label authority boundary", () => {
   it("records every fetched label without invoking the shipment transition", () => {

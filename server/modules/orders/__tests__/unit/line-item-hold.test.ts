@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { pickingReadinessBlockers, type WmsPickingProgressLine } from "@shared/wms-picking-progress";
@@ -10,7 +10,17 @@ const ORDER_ITEM_COMMANDS_SRC = readFileSync(
   "utf8",
 );
 const SPLIT_SRC = readFileSync(resolve(__dirname, "../../../wms/line-item-hold.ts"), "utf8");
-const SHIPSTATION_SRC = readFileSync(resolve(__dirname, "../../../oms/shipstation.service.ts"), "utf8");
+const omsDir = resolve(__dirname, "../../../oms");
+const shipStationSubDir = resolve(omsDir, "shipstation");
+const SHIPSTATION_SRC = [
+  readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"),
+  ...(existsSync(shipStationSubDir)
+    ? readdirSync(shipStationSubDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(shipStationSubDir, f), "utf8"))
+    : []),
+].join("\n");
 const PICKING_SRC = readFileSync(resolve(__dirname, "../../picking.use-cases.ts"), "utf8");
 const FLOW_WATERFALL_SRC = readFileSync(resolve(__dirname, "../../../oms/flow-waterfall.service.ts"), "utf8");
 const OPS_HEALTH_SRC = readFileSync(resolve(__dirname, "../../../oms/ops-health.service.ts"), "utf8");

@@ -42,12 +42,23 @@ import {
   markEbayOrderPollStarted,
   markEbayOrderPollSucceeded,
 } from "./ebay-order-poll-heartbeat";
+import { transitionOmsOrderStatus } from "./oms-order-status-core";
+import {
+  createEbayOrderIntakeAdapter,
+  ebayDollarsToCents,
+  mapEbayOrderToOrderData,
+} from "./adapters/ebay-order-intake.adapter";
+import {
+  ensureChannelOrderQueuedForWmsSync,
+  ingestAndRoute,
+} from "./channel-order-ingest-and-route";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const EBAY_CHANNEL_ID = 67;
+const defaultEbayIntakeAdapter = createEbayOrderIntakeAdapter();
 const POLL_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes — NON-NEGOTIABLE
 
 const POLL_OVERLAP_MINUTES = envPositiveInteger(
@@ -250,133 +261,22 @@ async function ensureEbayOrderQueuedForWmsSync(
   externalOrderId: string,
   database: any = db,
 ): Promise<void> {
-  if (!wmsSyncService) {
-    const err = new Error(
-      "[eBay Orders] _wmsSyncService must be initialized; legacy createWmsOrderFromEbay fallback removed (plan §6 C10)",
-    );
-    await enqueueOmsWmsSyncRetry(database, omsOrderId, err);
-    throw err;
-  }
-
-  try {
-    const wmsOrderId = await wmsSyncService.syncOmsOrderToWms(omsOrderId);
-    if (!wmsOrderId) {
-      // `null` = sync intentionally skipped (order already final/fulfilled out-of-band) —
-      // a no-op, not a failure. Do NOT re-queue it (that just dead-letters a harmless skip).
-      console.log(`[eBay Orders] WMS sync skipped for ${externalOrderId} (omsOrder ${omsOrderId}) — already fulfilled out-of-band; no-op`);
-    }
-  } catch (err: any) {
-    await enqueueOmsWmsSyncRetry(database, omsOrderId, err);
-    console.error(`[eBay Orders] WMS sync failed for ${externalOrderId}: ${err.message}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// eBay Order → OMS OrderData mapping
-// ---------------------------------------------------------------------------
-
-// eBay reports pricingSummary.priceDiscount as a negative amount ("-1.50").
-// 7493a0b96 read it unsigned, so every eBay order with a seller discount threw
-// at intake and was retried forever. Signed keeps the pre-10-25 values exactly.
-export function dollarsToCents(value: string | undefined | null): number {
-  if (!value) return 0;
-  return parseDecimalCents(value, "dollarsToCents", true);
-}
-
-function mapEbayOrderToOrderData(ebayOrder: EbayOrder): OrderData {
-  const shippingStep = ebayOrder.fulfillmentStartInstructions?.[0]?.shippingStep;
-  const shipTo = shippingStep?.shipTo;
-  const address = shipTo?.contactAddress;
-  const pricingSummary = ebayOrder.pricingSummary;
-
-  const channelShipByDate = extractEbayShipByDate(ebayOrder);
-
-  const lineItems: LineItemData[] = (ebayOrder.lineItems || []).map((item) => {
-    // lineItemCost = total product cost for this line (unit price × qty)
-    // item.total = lineItemCost + shipping + tax (NOT what we want for line total)
-    // For unit price: lineItemCost / quantity
-    const lineItemCostCents = dollarsToCents(item.lineItemCost?.value);
-    const qty = item.quantity || 1;
-    const paidPriceCents = Math.round(lineItemCostCents / qty);
-    const discountCents = item.discountedLineItemCost
-      ? lineItemCostCents - dollarsToCents(item.discountedLineItemCost?.value)
-      : 0;
-
-    // Tax: eBay collects and remits — omit from line items
-    const taxCents = 0;
-
-    return {
-      externalLineItemId: item.lineItemId,
-      externalProductId: item.legacyItemId || null, // eBay product ID
-      sku: item.sku,
-      title: item.title,
-      name: item.title,
-      quantity: qty,
-      fulfillmentProvider: "ebay",
-      paidPriceCents,
-      totalCents: lineItemCostCents, // product cost only, no shipping/tax
-      taxCents,
-      discountCents,
-    };
+  await ensureChannelOrderQueuedForWmsSync({
+    db: database,
+    wmsSyncService,
+    omsOrderId,
+    label: externalOrderId,
+    logPrefix: "[eBay Orders]",
+    enqueueRetryWhenServiceMissing: true,
   });
+}
 
-  // Map eBay payment status → financial_status
-  let financialStatus = "paid";
-  if (ebayOrder.orderPaymentStatus === "PENDING") financialStatus = "pending";
-  else if (ebayOrder.orderPaymentStatus === "FAILED") financialStatus = "failed";
-  else if (ebayOrder.orderPaymentStatus === "FULLY_REFUNDED") financialStatus = "refunded";
-  else if (ebayOrder.orderPaymentStatus === "PARTIALLY_REFUNDED") financialStatus = "partially_refunded";
+// ---------------------------------------------------------------------------
+// eBay Order → OMS OrderData mapping (delegated to EbayOrderIntakeAdapter)
+// ---------------------------------------------------------------------------
 
-  // Map eBay fulfillment status
-  let fulfillmentStatus = "unfulfilled";
-  if (ebayOrder.orderFulfillmentStatus === "FULFILLED") fulfillmentStatus = "fulfilled";
-  else if (ebayOrder.orderFulfillmentStatus === "IN_PROGRESS") fulfillmentStatus = "partially_fulfilled";
-
-  // Determine initial status
-  let status = "pending";
-  if (ebayOrder.cancelStatus?.cancelState === "CANCELED") {
-    status = "cancelled";
-  } else if (financialStatus === "paid") {
-    status = "confirmed";
-  }
-
-  return {
-    sourceTopic: "ebay/order",
-    externalOrderNumber: ebayOrder.orderId,
-    status,
-    financialStatus,
-    fulfillmentStatus,
-    customerName: shipTo?.fullName || ebayOrder.buyer?.username,
-    customerEmail: shipTo?.email,
-    customerPhone: shipTo?.primaryPhone?.phoneNumber,
-    // Channel-agnostic customer id — for eBay this is the buyer username (eBay's stable buyer identifier).
-    externalCustomerId: ebayOrder.buyer?.username || undefined,
-    shipToName: shipTo?.fullName,
-    shipToCompany: (shipTo as any)?.companyName || (address as any)?.companyName || null,
-    shipToAddress1: address?.addressLine1,
-    shipToAddress2: address?.addressLine2,
-    shipToCity: address?.city,
-    shipToState: address?.stateOrProvince,
-    shipToZip: address?.postalCode,
-    shipToCountry: address?.countryCode,
-    // Subtotal = sum of product costs (no shipping/tax)
-    subtotalCents: dollarsToCents(pricingSummary?.priceSubtotal?.value),
-    // Shipping = deliveryCost - deliveryDiscount (net shipping the buyer paid)
-    shippingCents: dollarsToCents(pricingSummary?.deliveryCost?.value),
-    // Tax: eBay collects and remits — we never see this money. Omit from OMS totals.
-    // Raw tax data preserved in raw_payload for reference.
-    taxCents: 0,
-    // Discounts: product discounts
-    discountCents: dollarsToCents(pricingSummary?.priceDiscount?.value),
-    // Total: subtotal + net shipping (no tax — eBay handles it)
-    totalCents: dollarsToCents(pricingSummary?.priceSubtotal?.value) +
-      dollarsToCents(pricingSummary?.deliveryCost?.value),
-    currency: pricingSummary?.total?.currency || "USD",
-    rawPayload: ebayOrder as unknown,
-    orderedAt: new Date(ebayOrder.creationDate),
-    channelShipByDate,
-    lineItems,
-  };
+export function dollarsToCents(value: string | undefined | null): number {
+  return ebayDollarsToCents(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -524,89 +424,89 @@ async function runEbayOrderPoll(
           isShippable: ebayOrderIsShippable(ebayOrder),
           sourceOrderedAt: ebayOrder.creationDate,
         });
-        const orderData = mapEbayOrderToOrderData(ebayOrder);
-        const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, ebayOrder.orderId, orderData);
-        await recordEbayOrderIngested(
-          database,
-          ebayOrder,
-          window.deepScan ? "ebay_deep_scan" : "ebay_poll",
-          result.id,
-        );
+        const normalizedOrder = defaultEbayIntakeAdapter.normalizeOrder(ebayOrder, {
+          channelId: EBAY_CHANNEL_ID,
+          sourceTopic: "ebay/order",
+        });
 
-        // Check if existing order needs status update (cancelled, refunded)
-        const isNew = result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000;
-        if (!isNew && result.id) {
-          const existing = await omsService.getOrderById(result.id);
-          if (existing && existing.status !== orderData.status) {
-            // Status changed on eBay — update OMS
-            if (orderData.status === "cancelled" && existing.status !== "cancelled") {
-              console.log(`[eBay Orders] Order ${ebayOrder.orderId} cancelled on eBay — updating OMS`);
-              await database.execute(sql`
-                UPDATE oms_orders SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
-                WHERE id = ${result.id} AND status != 'cancelled'
-              `);
-              // Release WMS reservation
-              try {
-                const wmsOrder = await database.execute(sql`
-                  SELECT id FROM wms.orders
-                  WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(result.id)})
-                     OR source_table_id = ${String(result.id)}
-                  LIMIT 1
-                `);
-                if (wmsOrder.rows.length > 0) {
-                  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-lifecycle-and-cancellation.api");
-                  await cancelWmsOrder(database, Number(wmsOrder.rows[0].id), "ebay_cancel");
+        const { omsOrder: result, isNew, routed } = await ingestAndRoute({
+          db: database,
+          omsService,
+          wmsSyncService: _wmsSyncService,
+          order: normalizedOrder,
+          logPrefix: "[eBay Orders]",
+          label: ebayOrder.orderId,
+          enqueueRetryWhenSyncServiceMissing: true,
+          afterIngested: async ({ omsOrder: result, isNew: newlyCreated }) => {
+            await recordEbayOrderIngested(
+              database,
+              ebayOrder,
+              window.deepScan ? "ebay_deep_scan" : "ebay_poll",
+              result.id,
+            );
+
+            // Check if existing order needs status update (cancelled, refunded)
+            if (!newlyCreated && result.id) {
+              const existing = await omsService.getOrderById(result.id);
+              const cancelEvent = defaultEbayIntakeAdapter.normalizeCancel(ebayOrder, {
+                channelId: EBAY_CHANNEL_ID,
+                observedAt: now,
+              });
+              const refundEvent = defaultEbayIntakeAdapter.normalizeRefund(ebayOrder, {
+                channelId: EBAY_CHANNEL_ID,
+                observedAt: now,
+              });
+
+              if (existing && existing.status !== normalizedOrder.status) {
+                if (cancelEvent && existing.status !== "cancelled") {
+                  console.log(`[eBay Orders] Order ${ebayOrder.orderId} cancelled on eBay — updating OMS`);
+                  const cancelVerdict = await transitionOmsOrderStatus(database, result.id, {
+                    to: "cancelled",
+                    driver: "channel",
+                    reason: cancelEvent.reason ?? "ebay_cancel",
+                  });
+                  if (cancelVerdict.outcome === "blocked_by_state") {
+                    console.warn(
+                      `[eBay Orders] Blocked late eBay cancellation on OMS order ${result.id} (${ebayOrder.orderId}): ${cancelVerdict.reason}`,
+                    );
+                  } else {
+                    try {
+                      const wmsOrder = await database.execute(sql`
+                        SELECT id FROM wms.orders
+                        WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(result.id)})
+                           OR source_table_id = ${String(result.id)}
+                        LIMIT 1
+                      `);
+                      if (wmsOrder.rows.length > 0) {
+                        const { cancelOrder: cancelWmsOrder } = await import("../orders/order-lifecycle-and-cancellation.api");
+                        await cancelWmsOrder(database, Number(wmsOrder.rows[0].id), "ebay_cancel");
+                      }
+                    } catch (e: any) {
+                      console.error(`[eBay Orders] Failed to cancel WMS order for ${ebayOrder.orderId}: ${e.message}`);
+                    }
+                  }
                 }
-              } catch (e: any) {
-                console.error(`[eBay Orders] Failed to cancel WMS order for ${ebayOrder.orderId}: ${e.message}`);
+                if (refundEvent && existing.financialStatus !== refundEvent.financialStatus) {
+                  console.log(`[eBay Orders] Order ${ebayOrder.orderId} ${refundEvent.financialStatus} on eBay — updating OMS`);
+                  const refundAmountCents =
+                    refundEvent.financialStatus === "refunded"
+                      ? (existing.totalCents ?? refundEvent.refundAmountCents)
+                      : 0;
+                  await database.execute(sql`
+                    UPDATE oms.oms_orders
+                    SET financial_status = ${refundEvent.financialStatus},
+                        refunded_at = NOW(),
+                        refund_amount_cents = ${refundAmountCents},
+                        updated_at = NOW()
+                    WHERE id = ${result.id}
+                  `);
+                }
               }
             }
-            if ((orderData.financialStatus === "refunded" || orderData.financialStatus === "partially_refunded")
-                && existing.financialStatus !== orderData.financialStatus) {
-              console.log(`[eBay Orders] Order ${ebayOrder.orderId} ${orderData.financialStatus} on eBay — updating OMS`);
-              // eBay polls don't provide refund dollar amounts; full refund = total_cents,
-              // partial = 0 (best-effort until eBay returns API exposes amounts).
-              const refundAmountCents = orderData.financialStatus === "refunded" ? (existing.totalCents ?? 0) : 0;
-              await database.execute(sql`
-                UPDATE oms_orders
-                SET financial_status = ${orderData.financialStatus},
-                    refunded_at = NOW(),
-                    refund_amount_cents = ${refundAmountCents},
-                    updated_at = NOW()
-                WHERE id = ${result.id}
-              `);
-            }
-          }
-        }
+          },
+        });
 
-        // If this was a new order, or an existing order that never got
-        // routed, run the fulfillment path. Polling can see an order after a
-        // webhook inserted it, so "already existed" must not mean "already
-        // reached WMS".
-        if (isNew || !result.warehouseId) {
-          await ensureEbayOrderQueuedForWmsSync(
-            _wmsSyncService,
-            result.id,
-            ebayOrder.orderId,
-            database,
-          );
-
-          if (!result.warehouseId) {
-            // OMS-level reservation (delegates to WMS reservation service)
-            try {
-              await omsService.reserveInventory(result.id);
-              await omsService.assignWarehouse(result.id);
-            } catch (e: any) {
-              console.error(`[eBay Orders] Post-ingest processing failed for ${ebayOrder.orderId}: ${e.message}`);
-            }
-          }
-
-          await ensureEbayOrderQueuedForWmsSync(
-            _wmsSyncService,
-            result.id,
-            ebayOrder.orderId,
-            database,
-          );
+        if (routed && (isNew || !result.warehouseId)) {
           totalIngested++;
         }
       } catch (err: any) {
@@ -708,42 +608,58 @@ export async function reingestEbayOrder(
     sourceOrderedAt: ebayOrder.creationDate,
   });
 
-  let result;
+  let normalizedOrder;
   try {
-    const orderData = mapEbayOrderToOrderData(ebayOrder);
-    result = await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData);
-    await recordEbayOrderIngested(db, ebayOrder, "manual_reingest", result.id);
-  } catch (error) {
-    await recordChannelOrderFailure(db, {
-      provider: "ebay",
+    normalizedOrder = defaultEbayIntakeAdapter.normalizeOrder(ebayOrder, {
       channelId: EBAY_CHANNEL_ID,
-      externalOrderId: orderId,
-      externalOrderNumber: orderId,
-      observationMethod: "manual_reingest",
-      rawPayload: ebayOrder,
-      isShippable: ebayOrderIsShippable(ebayOrder),
-      sourceOrderedAt: ebayOrder.creationDate,
-    }, error);
+      sourceTopic: "ebay/order",
+    });
+  } catch (error) {
+    await recordChannelOrderFailure(
+      db,
+      {
+        provider: "ebay",
+        channelId: EBAY_CHANNEL_ID,
+        externalOrderId: orderId,
+        externalOrderNumber: orderId,
+        observationMethod: "manual_reingest",
+        rawPayload: ebayOrder,
+        isShippable: ebayOrderIsShippable(ebayOrder),
+        sourceOrderedAt: ebayOrder.creationDate,
+      },
+      error,
+    );
     throw error;
   }
 
-  const wasCreated =
-    result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000;
-
-  if (wasCreated || !result.warehouseId) {
-    await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, orderId);
-
-    if (!result.warehouseId) {
-      try {
-        await omsService.reserveInventory(result.id);
-        await omsService.assignWarehouse(result.id);
-      } catch (err: any) {
-        console.error(`[eBay Reingest] Post-ingest (reserve/assign) failed for ${orderId}: ${err.message}`);
-      }
-    }
-
-    await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, orderId);
-  }
+  const { omsOrder: result, isNew: wasCreated } = await ingestAndRoute({
+    db,
+    omsService,
+    wmsSyncService: _wmsSyncService,
+    order: normalizedOrder,
+    logPrefix: "[eBay Reingest]",
+    label: orderId,
+    enqueueRetryWhenSyncServiceMissing: true,
+    onIngestError: async (error) => {
+      await recordChannelOrderFailure(
+        db,
+        {
+          provider: "ebay",
+          channelId: EBAY_CHANNEL_ID,
+          externalOrderId: orderId,
+          externalOrderNumber: orderId,
+          observationMethod: "manual_reingest",
+          rawPayload: ebayOrder,
+          isShippable: ebayOrderIsShippable(ebayOrder),
+          sourceOrderedAt: ebayOrder.creationDate,
+        },
+        error,
+      );
+    },
+    afterIngested: async ({ omsOrder }) => {
+      await recordEbayOrderIngested(db, ebayOrder, "manual_reingest", omsOrder.id);
+    },
+  });
 
   return {
     status: wasCreated ? "ingested" : "already_existed",
@@ -844,34 +760,29 @@ export function createEbayOrderWebhookHandler(
               isShippable: ebayOrderIsShippable(ebayOrder),
               sourceOrderedAt: ebayOrder.creationDate,
             });
-            const orderData = mapEbayOrderToOrderData(ebayOrder);
-            const result = await omsService.ingestOrder(EBAY_CHANNEL_ID, orderId, orderData);
-            await recordEbayOrderIngested(
+            const normalizedOrder = defaultEbayIntakeAdapter.normalizeOrder(ebayOrder, {
+              channelId: EBAY_CHANNEL_ID,
+              sourceTopic: "ebay/order",
+              sourceInboxId: inbox?.id ?? null,
+            });
+            await ingestAndRoute({
               db,
-              ebayOrder,
-              "webhook_fetch",
-              result.id,
-              inbox?.id ?? null,
-            );
-
-            // Post-ingest if newly created, or if a prior delivery inserted
-            // the OMS order but did not finish routing it to WMS.
-            const isNew = result.createdAt && (Date.now() - new Date(result.createdAt).getTime()) < 5000;
-            if (isNew || !result.warehouseId) {
-              await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, orderId);
-
-              if (!result.warehouseId) {
-                // OMS-level reservation (delegates to WMS reservation service)
-                try {
-                  await omsService.reserveInventory(result.id);
-                  await omsService.assignWarehouse(result.id);
-                } catch (e: any) {
-                  console.error(`[eBay Webhook] Post-ingest processing failed for ${orderId}: ${e.message}`);
-                }
-              }
-
-              await ensureEbayOrderQueuedForWmsSync(_wmsSyncService, result.id, orderId);
-            }
+              omsService,
+              wmsSyncService: _wmsSyncService,
+              order: normalizedOrder,
+              logPrefix: "[eBay Webhook]",
+              label: orderId,
+              enqueueRetryWhenSyncServiceMissing: true,
+              afterIngested: async ({ omsOrder }) => {
+                await recordEbayOrderIngested(
+                  db,
+                  ebayOrder,
+                  "webhook_fetch",
+                  omsOrder.id,
+                  inbox?.id ?? null,
+                );
+              },
+            });
 
             console.log(`[eBay Webhook] Processed order ${orderId}`);
           } catch (err: any) {
