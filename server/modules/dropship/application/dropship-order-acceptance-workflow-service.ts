@@ -12,12 +12,8 @@ import type {
   DropshipShippingQuoteResult,
   DropshipShippingQuoteService,
 } from "./dropship-shipping-quote-service";
-import type {
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipOmsFulfillmentSync,
-  DropshipOmsFulfillmentSyncRetryQueue,
-} from "./dropship-ports";
+import type { DropshipLogger, DropshipOmsFulfillmentSync, DropshipOmsFulfillmentSyncRetryQueue } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 
 const positiveIdSchema = z.number().int().positive();
@@ -148,11 +144,7 @@ export class DropshipOrderAcceptanceWorkflowService {
 }
 
 export function makeDropshipOrderAcceptanceWorkflowLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipOrderAcceptanceWorkflowEvent("info", event),
-    warn: (event) => logDropshipOrderAcceptanceWorkflowEvent("warn", event),
-    error: (event) => logDropshipOrderAcceptanceWorkflowEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.order_acceptance_workflow");
 }
 
 export function deriveShippingQuoteIdempotencyKey(acceptanceIdempotencyKey: string): string {
@@ -312,20 +304,3 @@ function optionalTrimmedString(
   return trimmed;
 }
 
-function logDropshipOrderAcceptanceWorkflowEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

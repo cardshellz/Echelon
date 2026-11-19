@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type {
   DropshipReturnIntakeDraft,
   DropshipReturnIntakeStoreConnection,
@@ -318,28 +319,10 @@ export function hashReturnIntakeDraft(input: {
 }
 
 export function makeDropshipReturnIntakeLogger(): DropshipLogger {
-  return {
-    info: (event) => logReturnIntakeEvent("info", event),
-    warn: (event) => logReturnIntakeEvent("warn", event),
-    error: (event) => logReturnIntakeEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.return_intake");
 }
 
 export const systemDropshipReturnIntakeClock: DropshipClock = {
   now: () => new Date(),
 };
 
-function logReturnIntakeEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

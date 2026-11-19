@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 /**
  * Rewards points expiry (funding design phase 7, migration 0705). On each
@@ -134,11 +135,7 @@ export class DropshipRewardsExpiryService {
 }
 
 export function makeDropshipRewardsExpiryLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipRewardsExpiryEvent("info", event),
-    warn: (event) => logDropshipRewardsExpiryEvent("warn", event),
-    error: (event) => logDropshipRewardsExpiryEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.wallet_rewards_expiry");
 }
 
 export const systemDropshipRewardsExpiryClock: DropshipClock = {
@@ -175,17 +172,3 @@ function describeError(error: unknown): Record<string, unknown> {
   };
 }
 
-function logDropshipRewardsExpiryEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

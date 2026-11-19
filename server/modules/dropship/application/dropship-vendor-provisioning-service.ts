@@ -4,14 +4,8 @@ import {
   resolveDropshipVendorProvisioningStatus,
   type DropshipProvisionedVendorStatus,
 } from "../domain/vendor-provisioning";
-import type {
-  DropshipClock,
-  DropshipEntitlementPort,
-  DropshipEntitlementSnapshot,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipEntitlementPort, DropshipEntitlementSnapshot, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 
@@ -441,33 +435,10 @@ function isBlockedVendorStatus(status: string): boolean {
 }
 
 export function makeDropshipVendorProvisioningLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipVendorProvisioningEvent("info", event),
-    warn: (event) => logDropshipVendorProvisioningEvent("warn", event),
-    error: (event) => logDropshipVendorProvisioningEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.vendor_provisioning");
 }
 
 export const systemDropshipVendorProvisioningClock: DropshipClock = {
   now: () => new Date(),
 };
 
-function logDropshipVendorProvisioningEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-    return;
-  }
-  if (level === "warn") {
-    console.warn(payload);
-    return;
-  }
-  console.info(payload);
-}

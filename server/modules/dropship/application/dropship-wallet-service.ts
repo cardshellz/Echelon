@@ -43,12 +43,8 @@ import {
   sendDropshipNotificationSafely,
 } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type {
   DropshipVendorStandingRecord,
   DropshipVendorStandingService,
@@ -3015,11 +3011,7 @@ export function hashWalletOrderDebitRequest(input: DebitDropshipWalletForOrderIn
 }
 
 export function makeDropshipWalletLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipWalletEvent("info", event),
-    warn: (event) => logDropshipWalletEvent("warn", event),
-    error: (event) => logDropshipWalletEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.wallet");
 }
 
 export const systemDropshipWalletClock: DropshipClock = {
@@ -3068,17 +3060,3 @@ function clampLedgerLimit(value: number | undefined): number {
   return Math.min(value, 100);
 }
 
-function logDropshipWalletEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

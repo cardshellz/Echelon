@@ -7,6 +7,7 @@ import type {
   DropshipLogger,
   DropshipNotificationSender,
 } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type {
   DropshipMarketplaceTrackingLineItem,
   DropshipMarketplaceTrackingProvider,
@@ -328,17 +329,7 @@ export const systemDropshipMarketplaceTrackingClock: DropshipClock = {
 };
 
 export function makeDropshipMarketplaceTrackingLogger(): DropshipLogger {
-  return {
-    info(event) {
-      console.log(`[DropshipMarketplaceTracking] ${event.code}: ${event.message}`, event.context ?? {});
-    },
-    warn(event) {
-      console.warn(`[DropshipMarketplaceTracking] ${event.code}: ${event.message}`, event.context ?? {});
-    },
-    error(event) {
-      console.error(`[DropshipMarketplaceTracking] ${event.code}: ${event.message}`, event.context ?? {});
-    },
-  };
+  return createDropshipPlatformLogger("dropship.marketplace_tracking");
 }
 
 function validatePushInput(input: PushDropshipTrackingForOmsOrderInput): void {

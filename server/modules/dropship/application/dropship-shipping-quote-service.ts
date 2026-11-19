@@ -13,7 +13,8 @@ import {
   type NormalizedDropshipShippingDestination,
   type NormalizedDropshipShippingQuoteItem,
 } from "../domain/shipping-quote";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type {
   DropshipVendorProvisioningService,
 } from "./dropship-vendor-provisioning-service";
@@ -356,11 +357,7 @@ export function hashDropshipShippingQuoteRequest(input: {
 }
 
 export function makeDropshipShippingQuoteLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipShippingQuoteEvent("info", event),
-    warn: (event) => logDropshipShippingQuoteEvent("warn", event),
-    error: (event) => logDropshipShippingQuoteEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.shipping_quote");
 }
 
 export const systemDropshipShippingQuoteClock: DropshipClock = {
@@ -759,22 +756,3 @@ function uniqueCarrierServices(
   return result;
 }
 
-function logDropshipShippingQuoteEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-    return;
-  }
-  if (level === "warn") {
-    console.warn(payload);
-    return;
-  }
-  console.info(payload);
-}

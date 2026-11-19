@@ -26,13 +26,8 @@ import {
   type RetryDropshipOrderOpsWmsSyncInput,
 } from "./dropship-order-ops-dtos";
 import type { DropshipOrderProcessingResult } from "./dropship-order-processing-service";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipOmsFulfillmentSync,
-  DropshipOmsFulfillmentSyncRetryQueue,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipOmsFulfillmentSync, DropshipOmsFulfillmentSyncRetryQueue } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 export const DROPSHIP_OPS_DEFAULT_INTAKE_STATUSES: DropshipOrderIntakeStatus[] = [
   "payment_hold",
@@ -627,11 +622,7 @@ export class DropshipOrderOpsService {
 }
 
 export function makeDropshipOrderOpsLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipOrderOpsEvent("info", event),
-    warn: (event) => logDropshipOrderOpsEvent("warn", event),
-    error: (event) => logDropshipOrderOpsEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.order_ops");
 }
 
 export const systemDropshipOrderOpsClock: DropshipClock = {
@@ -725,17 +716,3 @@ function validationError(code: string, issues: Array<{
   });
 }
 
-function logDropshipOrderOpsEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

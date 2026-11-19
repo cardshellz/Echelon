@@ -3,12 +3,8 @@ import { DropshipError } from "../domain/errors";
 import { DROPSHIP_FUNDING_DECLINED_ERROR_CODE } from "../domain/vendor-standing";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type {
   DropshipVendorStandingChange,
   DropshipVendorStandingService,
@@ -732,31 +728,10 @@ function parseMaintenanceInput(input: unknown): RunDropshipWalletMaintenanceInpu
 }
 
 export function makeDropshipWalletMaintenanceLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipWalletMaintenanceEvent("info", event),
-    warn: (event) => logDropshipWalletMaintenanceEvent("warn", event),
-    error: (event) => logDropshipWalletMaintenanceEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.wallet_maintenance");
 }
 
 export const systemDropshipWalletMaintenanceClock: DropshipClock = {
   now: () => new Date(),
 };
 
-function logDropshipWalletMaintenanceEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

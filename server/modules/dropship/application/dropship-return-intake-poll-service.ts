@@ -1,4 +1,5 @@
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type {
   DropshipReturnIntakeFetchResult,
   DropshipReturnIntakeProvider,
@@ -203,28 +204,10 @@ function applyRecordResult(
 }
 
 export function makeDropshipReturnIntakePollLogger(): DropshipLogger {
-  return {
-    info: (event) => logReturnIntakePollEvent("info", event),
-    warn: (event) => logReturnIntakePollEvent("warn", event),
-    error: (event) => logReturnIntakePollEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.return_intake_poll");
 }
 
 export const systemDropshipReturnIntakePollClock: DropshipClock = {
   now: () => new Date(),
 };
 
-function logReturnIntakePollEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

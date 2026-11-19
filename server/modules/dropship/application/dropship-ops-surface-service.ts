@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 import { STRIPE_BANK_BALANCE_PERMISSION_ENV } from "./dropship-wallet-service";
 import type {
@@ -1656,11 +1657,7 @@ function isLaunchSupportedStorePlatform(platform: string): boolean {
 }
 
 export function makeDropshipOpsSurfaceLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipOpsSurfaceEvent("info", event),
-    warn: (event) => logDropshipOpsSurfaceEvent("warn", event),
-    error: (event) => logDropshipOpsSurfaceEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.ops_surface");
 }
 
 export const systemDropshipOpsSurfaceClock: DropshipClock = {
@@ -1681,17 +1678,3 @@ function parseOpsSurfaceInput<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, in
   return result.data;
 }
 
-function logDropshipOpsSurfaceEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

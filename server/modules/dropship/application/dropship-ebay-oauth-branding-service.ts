@@ -1,11 +1,8 @@
 import { createHash } from "crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 export const DROPSHIP_EBAY_BRANDING_USE_CASE =
   "dropship_vendor_store_oauth" as const;
@@ -404,11 +401,7 @@ export const systemDropshipEbayOAuthBrandingClock: DropshipClock = {
 };
 
 export function makeDropshipEbayOAuthBrandingLogger(): DropshipLogger {
-  return {
-    info: (event) => logBrandingEvent("info", event),
-    warn: (event) => logBrandingEvent("warn", event),
-    error: (event) => logBrandingEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.ebay_oauth_branding");
 }
 
 function resolveEbayEnvironment(
@@ -481,22 +474,3 @@ function containsControlCharacter(value: string): boolean {
   });
 }
 
-function logBrandingEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-    return;
-  }
-  if (level === "warn") {
-    console.warn(payload);
-    return;
-  }
-  console.info(payload);
-}

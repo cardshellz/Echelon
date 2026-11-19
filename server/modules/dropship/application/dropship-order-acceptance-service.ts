@@ -23,13 +23,8 @@ import {
   formatNotificationCurrency,
   sendDropshipNotificationSafely,
 } from "./dropship-notification-dispatch";
-import type {
-  DropshipCanonicalAcceptanceFulfillment,
-  DropshipClock,
-  DropshipInventoryRuntimeAuthorityGate,
-  DropshipLogEvent,
-  DropshipLogger,
-} from "./dropship-ports";
+import type { DropshipCanonicalAcceptanceFulfillment, DropshipClock, DropshipInventoryRuntimeAuthorityGate, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type { DropshipNotificationSender } from "./dropship-ports";
 import type { NormalizedDropshipOrderPayload } from "./dropship-order-intake-service";
 import {
@@ -772,11 +767,7 @@ export function hashDropshipOrderAcceptanceRequest(input: AcceptDropshipOrderInp
 }
 
 export function makeDropshipOrderAcceptanceLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipOrderAcceptanceEvent("info", event),
-    warn: (event) => logDropshipOrderAcceptanceEvent("warn", event),
-    error: (event) => logDropshipOrderAcceptanceEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.order_acceptance");
 }
 
 export const systemDropshipOrderAcceptanceClock: DropshipClock = {
@@ -1190,17 +1181,3 @@ function normalizeString(value: string | null | undefined): string | null {
   return normalized ? normalized : null;
 }
 
-function logDropshipOrderAcceptanceEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

@@ -27,6 +27,7 @@ import {
   wmsOrderItems,
 } from "@shared/schema";
 import { logger } from "../../platform/observability/logger";
+import { enrichContext } from "../../platform/observability";
 import { readChannelMerchandiseCapability, type ChannelMerchandiseCapabilityReader } from "./infrastructure/channel-merchandise-policy";
 import { isMerchandiseOrderCancelled } from "./domain/order-merchandise-state";
 import { assertChannelMerchandiseDispatchQuantities } from "./domain/channel-merchandise-dispatch";
@@ -853,6 +854,7 @@ export class WmsSyncService {
     mode: WmsSyncMode,
     expectedDropshipWarehouseId?: number,
   ): Promise<number | null> {
+    enrichContext({ omsOrderId });
     try {
       const omsOrderResult = await db
         .select()
@@ -931,6 +933,7 @@ export class WmsSyncService {
           throw new WmsShipmentPrerequisiteError("Existing warehouse order differs from the channel's configured fulfillment center", { omsOrderId });
         }
         const wmsOrderId = existingWmsOrder[0].id;
+        enrichContext({ wmsOrderId });
         if (isTerminalResidualRecovery) {
           await this.refreshOmsLineMaterializedQuantities(omsOrderId);
           console.log(
@@ -1411,6 +1414,10 @@ export class WmsSyncService {
       // so the row is inserted with its warehouse_id and a warehouse-correct
       // SLA, instead of being patched afterward.)
       await this.refreshOmsLineMaterializedQuantities(omsOrderId);
+      enrichContext({
+        wmsOrderId: newWmsOrder.id,
+        ...(shipmentIdForPush !== null ? { shipmentId: shipmentIdForPush } : {}),
+      });
 
       if (isDropshipAcceptanceClaim) {
         return newWmsOrder.id;
