@@ -17,7 +17,6 @@ export * from "./bin-assignment.api";
 export * from "./inventory-governance.api";
 export * from "./cutover-work.api";
 export {
-  getReplenishmentSettingsForWarehouse,
   getSettingsForWarehouse,
   getSlaCutoffConfig,
   type SlaCutoffConfig,
