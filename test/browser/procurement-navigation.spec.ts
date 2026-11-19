@@ -9,7 +9,7 @@ test("purchase -> shipment Costs -> invoice, native history, reload and copied-l
   const failures = await installFixtures(page);
   await page.goto("/purchase-orders/17?tab=shipments");
   await selectedTab(page, /^Shipments/);
-  const shipmentLink = page.getByRole("link", { name: "TEST-SHIP-42", exact: true });
+  const shipmentLink = page.getByRole("link", { name: "Shipment TEST-SHIP-42", exact: true });
   await shipmentLink.focus();
   await page.keyboard.press("Enter");
   await page.getByRole("tab", { name: /^Costs/ }).click();
@@ -18,21 +18,21 @@ test("purchase -> shipment Costs -> invoice, native history, reload and copied-l
   await expect(page.getByRole("heading", { name: "Invoice #TEST-INV-71", exact: true })).toBeVisible();
   const invoiceUrl = page.url();
   await page.reload();
-  await expect(page.getByRole("link", { name: "Back to shipment #42", exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "Back to shipment #42", exact: true }).click();
+  await expect(page.getByRole("link", { name: "Back to TEST-SHIP-42", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Back to TEST-SHIP-42", exact: true }).click();
   await expect(page).toHaveURL(costsUrl);
   await selectedTab(page, /^Costs/);
   await page.goBack();
   await expect(page).toHaveURL(invoiceUrl);
   await page.goForward();
   await selectedTab(page, /^Costs/);
-  await page.getByRole("link", { name: "Back to purchase #17", exact: true }).first().click();
+  await page.getByRole("link", { name: "Return to TEST-PO-17", exact: true }).first().click();
   await selectedTab(page, /^Shipments/);
 
   const copied = await context.newPage();
   const copiedFailures = await installFixtures(copied);
   await copied.goto(invoiceUrl);
-  await copied.getByRole("link", { name: "Back to purchase #17", exact: true }).click();
+  await copied.getByRole("link", { name: "Return to TEST-PO-17", exact: true }).click();
   await selectedTab(copied, /^Shipments/);
   expect(failures.concat(copiedFailures)).toEqual([]);
 });
@@ -40,7 +40,7 @@ test("purchase -> shipment Costs -> invoice, native history, reload and copied-l
 test("shared shipment -> other PO -> receipt absent from list retains original purchase", async ({ page }) => {
   const failures = await installFixtures(page);
   await page.goto("/purchase-orders/17?tab=shipments");
-  await page.getByRole("link", { name: "TEST-SHIP-42", exact: true }).click();
+  await page.getByRole("link", { name: "Shipment TEST-SHIP-42", exact: true }).click();
   await page.locator('a[href^="/purchase-orders/99"]').first().click();
   await page.getByRole("tab", { name: /^Receipts/ }).click();
   await page.getByRole("link", { name: "RO #31", exact: true }).click();
@@ -49,13 +49,13 @@ test("shared shipment -> other PO -> receipt absent from list retains original p
   await expect(dialog.getByRole("heading", { name: /^Receipt TEST-RECEIPT-31/ })).toBeVisible();
   await page.reload();
   await expect(dialog.getByRole("heading", { name: /^Receipt TEST-RECEIPT-31/ })).toBeVisible();
-  await expect(dialog.getByRole("link", { name: "Back to purchase #17", exact: true })).toBeVisible();
+  await expect(dialog.getByRole("link", { name: "Return to TEST-PO-17", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await selectedTab(page, /^Receipts/);
   await page.goBack();
   await expect(page).toHaveURL(receiptUrl);
   await expect(dialog.getByRole("heading", { name: /^Receipt TEST-RECEIPT-31/ })).toBeVisible();
-  await dialog.getByRole("link", { name: "Back to purchase #17", exact: true }).click();
+  await dialog.getByRole("link", { name: "Return to TEST-PO-17", exact: true }).click();
   await selectedTab(page, /^Shipments/);
   expect(failures).toEqual([]);
 });

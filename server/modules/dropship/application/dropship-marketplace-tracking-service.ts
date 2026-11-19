@@ -13,6 +13,7 @@ import type {
   DropshipMarketplaceTrackingRequest,
   DropshipMarketplaceTrackingResult,
 } from "./dropship-marketplace-tracking-provider";
+import { vendorPlatformName } from "../domain/vendor-platform-name";
 
 /** Longest marketplace line item id accepted: oms.oms_order_lines.external_line_item_id is varchar(100). */
 const MAX_EXTERNAL_LINE_ITEM_ID_LENGTH = 100;
@@ -244,8 +245,8 @@ export class DropshipMarketplaceTrackingService {
       eventType: DROPSHIP_NOTIFICATION_EVENTS.TRACKING_PUSHED,
       critical: false,
       channels: ["email", "in_app"],
-      title: "Dropship tracking pushed",
-      message: `Tracking ${push.trackingNumber} was pushed to ${push.platform} for order ${push.externalOrderId}.`,
+      title: "Tracking sent",
+      message: `Tracking ${push.trackingNumber} was sent to ${vendorPlatformName(push.platform)} for order ${push.externalOrderId}.`,
       payload: buildTrackingNotificationPayload(push),
       idempotencyKey: `tracking-pushed:${push.pushId}`,
     }, {
@@ -275,8 +276,11 @@ export class DropshipMarketplaceTrackingService {
       eventType: DROPSHIP_NOTIFICATION_EVENTS.TRACKING_PUSH_FAILED,
       critical: !failure.willRetry,
       channels: ["email", "in_app"],
-      title: failure.willRetry ? "Dropship tracking push retrying" : "Dropship tracking push failed",
-      message: `Tracking ${push.trackingNumber} could not be pushed to ${push.platform} for order ${push.externalOrderId}: ${failure.message}`,
+      // Vendor words: the failure's own message stays in the payload for staff.
+      title: failure.willRetry ? "Tracking not sent yet" : "Tracking couldn't be sent",
+      message: failure.willRetry
+        ? `We couldn't send tracking ${push.trackingNumber} to ${vendorPlatformName(push.platform)} for order ${push.externalOrderId} yet. We'll keep trying.`
+        : `We couldn't send tracking ${push.trackingNumber} to ${vendorPlatformName(push.platform)} for order ${push.externalOrderId}. Card Shellz is looking into it.`,
       payload: {
         ...buildTrackingNotificationPayload(push),
         failureCode: failure.code,

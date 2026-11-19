@@ -1,3 +1,5 @@
+import { allocateDocumentNumber } from "../../platform/document-numbering/document-number.repository";
+import { captureDocumentNumberTime, documentNumberPrefix } from "../../platform/document-numbering/document-number";
 import { readInventoryValuation } from "./application/read-inventory-valuation";
 import { CostEvidenceError, lockInventoryCostGraph, recordLotCostContribution } from "./infrastructure/cost-evidence.repository";
 import type { OperationalQuantityPosting } from "./infrastructure/operational-quantity-posting";
@@ -31,6 +33,7 @@ import {
   calculateLotPickableOnHand,
   calculateUnreservedLotOnHand,
 } from "./domain/inventory.domain";
+import { updateVariantReceiptCostRollupInCatalog } from "../catalog/cross-module-product-mutations.api";
 import { millsToCents, centsToMills } from "@shared/utils/money";
 import { AppError, IntegrityError, ValidationError } from "../../../shared/errors";
 import { normalizeLotCosts as normalizeBuildLotCosts, lotCostRecord, recordedUnitCostMills,
@@ -81,33 +84,18 @@ type DrizzleDb = {
 };
 
 export class InventoryLotService {
-  constructor(private readonly db: DrizzleDb, private readonly clock: () => Date = () => new Date()) {}
+  constructor(
+    private readonly db: DrizzleDb,
+    private readonly clock: () => Date = () => new Date(),
+    private readonly transactionBound = false,
+  ) {}
 
   // ---------------------------------------------------------------------------
   // LOT NUMBER GENERATION
   // ---------------------------------------------------------------------------
 
-  async generateLotNumber(): Promise<string> {
-    const now = this.clock();
-    const datePart = now.toISOString().slice(0, 10).replace(/-/g, "");
-    const prefix = `LOT-${datePart}-`;
-
-    // Find the highest existing lot number for today
-    const [latest] = await this.db
-      .select({ lotNumber: inventoryLots.lotNumber })
-      .from(inventoryLots)
-      .where(sql`${inventoryLots.lotNumber} LIKE ${prefix + "%"}`)
-      .orderBy(sql`${inventoryLots.lotNumber} DESC`)
-      .limit(1);
-
-    let seq = 1;
-    if (latest) {
-      const parts = latest.lotNumber.split("-");
-      const lastSeq = parseInt(parts[parts.length - 1], 10);
-      if (!isNaN(lastSeq)) seq = lastSeq + 1;
-    }
-
-    return `${prefix}${String(seq).padStart(3, "0")}`;
+  private async generateLotNumber(now: Date): Promise<string> {
+    return allocateDocumentNumber(this.db, { kind: "lot", prefix: documentNumberPrefix("LOT", now, "utc") });
   }
 
   // ---------------------------------------------------------------------------
@@ -138,7 +126,19 @@ export class InventoryLotService {
     quantityPosting?: OperationalQuantityPosting | null;
     exactTotals?: LotCosts;
   }): Promise<InventoryLot> {
-    const lotNumber = await this.generateLotNumber();
+    const now = captureDocumentNumberTime(this.clock());
+    if (this.transactionBound) return this.createLotInsideTransaction(params, now);
+    // A bound owner must retain its caller's executor. Standalone imports and
+    // adjustments hold allocation and every lot write in one transaction.
+    return this.db.transaction((tx) => new InventoryLotService(tx, this.clock, true)
+      .createLotInsideTransaction(params, now));
+  }
+
+  private async createLotInsideTransaction(
+    params: Parameters<InventoryLotService["createLot"]>[0],
+    now: Date,
+  ): Promise<InventoryLot> {
+    const lotNumber = await this.generateLotNumber(now);
 
     // Cost is tracked in MILLS (1/100 cent) as the source of truth: total = product
     // (po) + packaging + landed. Carrying mills means per-unit × qty (FIFO/valuation)
@@ -200,7 +200,7 @@ export class InventoryLotService {
         qtyOnHand: params.quantityPosting ? 0 : params.qty,
         qtyReserved: 0,
         qtyPicked: 0,
-        receivedAt: params.receivedAt ?? this.clock(),
+        receivedAt: params.receivedAt ?? now,
         receivingOrderId: params.receivingOrderId ?? null,
         purchaseOrderId: params.purchaseOrderId ?? null,
         inboundShipmentId: params.inboundShipmentId ?? null,
@@ -517,6 +517,14 @@ export class InventoryLotService {
       }
     }
 
+    const clockValue = this.clock();
+    if (!(clockValue instanceof Date) || !Number.isFinite(clockValue.getTime())) {
+      throw new ValidationError("The lot-pick clock must return a valid date");
+    }
+    // Freeze one instant for quantity evidence and COGS. Drizzle serializes this
+    // Date as UTC, independently of the database session's timestamp default.
+    const occurredAt = new Date(clockValue.getTime());
+
     await lockInventoryCostGraph(this.db);
     const lots = await this.db
       .select()
@@ -572,7 +580,7 @@ export class InventoryLotService {
       // Every exact-cost consumption owns quantity intervals, including
       // replacement picks that intentionally do not post another COGS row.
       const exactAllocation = hasExactLotCostTotals(lotCostRecord(lot))
-        ? await allocateLotQuantityCost(this.db, lot.id, take, "system:lot-pick", this.clock(), {
+        ? await allocateLotQuantityCost(this.db, lot.id, take, "system:lot-pick", occurredAt, {
             orderId: params.orderId, orderItemId: params.orderItemId,
           })
         : null;
@@ -600,6 +608,7 @@ export class InventoryLotService {
           packagingTotalCostMills:exactAllocation?moneyToSafeNumber(exactAllocation.costs.packagingMills,"cogs.packagingTotal"):null,
           landedTotalCostMills:exactAllocation?moneyToSafeNumber(exactAllocation.costs.landedMills,"cogs.landedTotal"):null,
           costPrecisionVersion: 1,
+          createdAt: occurredAt,
         });
       }
 
@@ -1276,14 +1285,11 @@ export class InventoryLotService {
 
     const avgCost = agg.totalQty > 0 ? Math.round(agg.totalCost / agg.totalQty) : receiptCostCents;
 
-    await this.db
-      .update(productVariants)
-      .set({
-        lastCostCents: receiptCostCents,
-        avgCostCents: avgCost,
-        updatedAt: new Date(),
-      })
-      .where(eq(productVariants.id, productVariantId));
+    await updateVariantReceiptCostRollupInCatalog(this.db, {
+      productVariantId,
+      lastCostCents: receiptCostCents,
+      avgCostCents: avgCost,
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1403,7 +1409,7 @@ export class InventoryLotService {
   // ---------------------------------------------------------------------------
 
   withTx(tx: any): InventoryLotService {
-    return new InventoryLotService(tx);
+    return new InventoryLotService(tx, this.clock, true);
   }
 }
 

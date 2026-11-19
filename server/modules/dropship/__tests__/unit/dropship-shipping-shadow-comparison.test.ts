@@ -14,6 +14,9 @@ import {
 import type {
   DropshipShippingQuoteSnapshotRecord,
 } from "../../application/dropship-shipping-quote-service";
+import type {
+  DropshipShippingShadowRolloutPolicy,
+} from "../../application/dropship-shipping-shadow-rollout";
 
 const now = new Date("2026-07-26T12:00:00.000Z");
 
@@ -191,8 +194,8 @@ describe("DropshipShippingShadowComparisonService", () => {
 
 function createHarness(
   result: DropshipSharedShippingQuoteResult | Error,
-  rolloutPolicy = {
-    mode: "test" as const,
+  rolloutPolicy: DropshipShippingShadowRolloutPolicy = {
+    mode: "test",
     storeConnectionIds: new Set([22]),
   },
 ) {
@@ -360,6 +363,7 @@ function snapshot(
         totalShippingCents: 1122,
       },
     },
+    warnings: null,
     createdAt: new Date("2026-07-26T11:00:00.000Z"),
     ...overrides,
   };

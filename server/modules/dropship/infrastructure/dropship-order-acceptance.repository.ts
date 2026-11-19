@@ -23,18 +23,30 @@ import { costScheduleTimingFromPolicy, planCostScheduleReconciliation } from "..
 import { createDropshipCostChangePolicyServiceFromEnv } from "./dropship-cost-change-policy.factory";
 import { PgDropshipCostScheduleRepository, lockVendorSchedule, mapCostScheduleError } from "./dropship-cost-schedule.repository";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
+import {
+  admittedWhilePushing,
+  decideListingOrderAcceptability,
+  assertNoMarketplaceVariationLines,
+  listingEndedBeforeOrderError,
+  parseIntakeOrderedAt,
+} from "../domain/order-listing-acceptability";
+import { logger } from "../../../platform/observability/logger";
 import type { NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
 import type { DropshipProductCostReader } from "../application/dropship-product-cost";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 import { isWarehouseEnabledForChannelWithClient } from "./dropship-oms-warehouse-assignments.reader";
 import {
+  confirmStagedDropshipOrderPaidInTransaction,
+  createDropshipOrderInTransaction,
   dropshipAcceptanceAuthorityEventId,
+  DropshipOmsOrderCommandError,
   grantDropshipAcceptanceLineAuthorityWithClient,
   OmsLineAuthorityGrantError,
   type GrantedOmsLineAuthority,
-} from "../../oms/oms-line-authority-grant.repository";
+} from "../../oms/dropship-order-authority.api";
 import {
   DROPSHIP_OMS_LINE_AUTHORITY_REFUSED_CODE,
+  belowCostSaleLinesOf,
   buildDropshipOrderAcceptancePlan,
   assertDropshipQuoteDestinationMatchesShipTo,
   requireDropshipAcceptanceShipTo,
@@ -121,6 +133,11 @@ interface ListingCandidateRow {
   variant_is_active: boolean;
   sales_eligibility: "sellable" | "internal_only";
   catalog_retail_price_cents: string | number | null;
+  marketplace_ended_at: Date | null;
+  /** PR C: when Card Shellz's newest end of this listing finished (its ended end request), or null. */
+  listing_end_ended_at: Date | null;
+  /** Item numbers the listing had before a relist (plan v4 §7.3 step 7). */
+  previous_external_listing_ids: string[] | null;
 }
 
 interface PricingPolicyRow {
@@ -435,11 +452,7 @@ async function acceptOrderWithClient(
     return paymentHoldResult(plan, plan.funding.rewardsCents);
   }
 
-  const omsOrderId = await createOmsOrderWithClient(client, plan, intake, vendor);
-  const omsLines = await createOmsOrderLinesWithClient(client, {
-    omsOrderId,
-    plan,
-  });
+  const omsOrderId = await createDropshipOmsOrderAndLinesWithClient(client, plan, intake, vendor);
   // P0.1a — SINGLE-WRITER RESERVATION: acceptance no longer writes
   // reserved_qty. The old raw-SQL reserve here double-reserved every order
   // (WMS sync reserves again with WMS ids and cannot see these rows) and had
@@ -508,7 +521,14 @@ async function acceptOrderWithClient(
     paymentHoldReason: null,
     advance: debit.advance,
     idempotentReplay: false,
+    ...belowCostSaleField(plan),
   };
+}
+
+/** A fresh acceptance's below-cost lines (plan v3 §7.4), only when there are any: the service warns after the commit. */
+function belowCostSaleField(plan: Pick<DropshipOrderAcceptancePlan, "lines">): Pick<DropshipOrderAcceptanceResult, "belowCostSaleLines"> {
+  const lines = belowCostSaleLinesOf(plan);
+  return lines.length > 0 ? { belowCostSaleLines: lines } : {};
 }
 
 async function prepareCanonicalOrderWithClient(
@@ -613,12 +633,12 @@ async function prepareCanonicalOrderWithClient(
     const paymentHoldExpired = intake.paymentHoldExpiresAt != null
       && intake.paymentHoldExpiresAt <= input.acceptedAt;
     if (existingStage.state === "inventory_claimed"
-      && (intake.status === "payment_hold" || paymentHoldExpired)) {
+      && (intake.status === "payment_hold" || intake.status === "cancelled" || paymentHoldExpired)) {
       const compensation = await markCanonicalCompensationPendingWithClient(
         client,
         existingStage,
         input.acceptedAt,
-        paymentHoldExpired
+        intake.status === "cancelled" || paymentHoldExpired
           ? "payment_hold_expired_before_finalization"
           : "wallet_balance_changed_before_finalization",
       );
@@ -655,10 +675,9 @@ async function prepareCanonicalOrderWithClient(
     return paymentHoldResult(plan, plan.funding.rewardsCents);
   }
 
-  const omsOrderId = await createOmsOrderWithClient(client, plan, intake, vendor, {
+  const omsOrderId = await createDropshipOmsOrderAndLinesWithClient(client, plan, intake, vendor, {
     stagedForCanonicalAcceptance: true,
   });
-  await createOmsOrderLinesWithClient(client, { omsOrderId, plan });
   await insertCanonicalAcceptanceStageWithClient(client, {
     plan,
     vendor,
@@ -691,6 +710,8 @@ async function prepareCanonicalOrderWithClient(
     warehouseId: plan.warehouseId,
     omsOrderId,
     idempotentReplay: false,
+    // The finalize reads the frozen totals only, so the lines' below-cost facts come from here (plan v3 §7.4).
+    ...belowCostSaleField(plan),
   };
 }
 
@@ -1039,9 +1060,11 @@ async function markCanonicalInventoryClaimReleasedWithClient(
     ["compensation_pending"],
   );
   assertCanonicalClaimIdMatchesInput(stage.intake_id, claimAttempt, input.inventoryClaimId);
-  const expired = intake.paymentHoldExpiresAt == null
-    ? false
-    : intake.paymentHoldExpiresAt <= input.acceptance.acceptedAt;
+  const expired = intake.status === "cancelled" || (
+    intake.paymentHoldExpiresAt == null
+      ? false
+      : intake.paymentHoldExpiresAt <= input.acceptance.acceptedAt
+  );
   // Decided here, not in SQL: a parameter both assigned to a varchar column and
   // compared with a text literal makes PostgreSQL refuse the statement
   // ("inconsistent types deduced for parameter").
@@ -1527,6 +1550,9 @@ async function planAcceptanceWithClient(
   }
   const lines = await resolveAcceptanceLinesWithClient(client, {
     vendor,
+    intakeId: intake.intakeId,
+    platform: intake.platform,
+    orderedAt: parseIntakeOrderedAt(intake.normalizedPayload.orderedAt),
     storeConnectionId: input.storeConnectionId,
     rawLines: intake.normalizedPayload.lines,
     costReaders,
@@ -1742,6 +1768,12 @@ async function resolveAcceptanceLinesWithClient(
   client: PoolClient,
   input: {
     vendor: DropshipAcceptanceVendorContext;
+    /** Correlation only: the intake being accepted, carried on the acceptability log line. */
+    intakeId: number;
+    /** The intake's marketplace: an eBay variation line is refused (plan v4 §7.3 step 7). */
+    platform: string;
+    /** The order's own time: an ended listing takes an order placed before its end (§7.3 step 8). */
+    orderedAt: Date | null;
     storeConnectionId: number;
     rawLines: NormalizedDropshipOrderPayload["lines"];
     costReaders: AcceptanceCostReaders;
@@ -1755,6 +1787,7 @@ async function resolveAcceptanceLinesWithClient(
       "Dropship order acceptance requires at least one line.",
     );
   }
+  assertNoMarketplaceVariationLines(input.rawLines, { intakeId: input.intakeId });
 
   const productVariantIds = uniquePositiveIntegers(
     input.rawLines.map((line) => line.productVariantId).filter((value): value is number => Number.isInteger(value)),
@@ -1773,6 +1806,12 @@ async function resolveAcceptanceLinesWithClient(
        dl.status AS listing_status,
        dl.external_listing_id,
        dl.external_offer_id,
+       dl.marketplace_ended_at,
+       (SELECT er.ended_at FROM dropship.dropship_listing_end_requests er
+        WHERE er.listing_id = dl.id AND er.state = 'ended'
+        ORDER BY er.ended_at DESC, er.id DESC LIMIT 1) AS listing_end_ended_at,
+       ARRAY(SELECT prev.external_listing_id FROM dropship.dropship_listing_previous_marketplace_ids prev
+             WHERE prev.listing_id = dl.id ORDER BY prev.id)::text[] AS previous_external_listing_ids,
        dl.vendor_retail_price_cents,
        p.sku AS product_sku,
        pv.sku AS variant_sku,
@@ -1806,6 +1845,8 @@ async function resolveAcceptanceLinesWithClient(
        AND (
          dl.product_variant_id = ANY($3::int[])
          OR dl.external_listing_id = ANY($4::text[])
+         OR EXISTS (SELECT 1 FROM dropship.dropship_listing_previous_marketplace_ids prev
+                    WHERE prev.listing_id = dl.id AND prev.external_listing_id = ANY($4::text[]))
          OR dl.external_offer_id = ANY($5::text[])
          OR UPPER(pv.sku) = ANY($6::text[])
          OR UPPER(p.sku) = ANY($6::text[])
@@ -1841,6 +1882,8 @@ async function resolveAcceptanceLinesWithClient(
     assertListingCandidateCanAccept(candidate, index, {
       catalogRules,
       now: input.observedAt,
+      intakeId: input.intakeId,
+      orderedAt: input.orderedAt,
     });
     return { line, index, candidate };
   });
@@ -2162,7 +2205,7 @@ async function markIntakePaymentHoldWithClient(
   });
 }
 
-async function createOmsOrderWithClient(
+async function createDropshipOmsOrderAndLinesWithClient(
   client: PoolClient,
   plan: DropshipOrderAcceptancePlan,
   intake: DropshipAcceptanceIntakeRecord,
@@ -2170,138 +2213,63 @@ async function createOmsOrderWithClient(
   options: { stagedForCanonicalAcceptance?: boolean } = {},
 ): Promise<number> {
   const country = requireDropshipOrderCountry(plan.shipTo.country);
-  const omsState = options.stagedForCanonicalAcceptance
-    ? "'pending', 'pending'"
-    : "'confirmed', 'paid'";
-  const result = await client.query<OmsOrderRow>(
-    `INSERT INTO oms.oms_orders
-      (channel_id, external_order_id, external_order_number, status,
-       financial_status, fulfillment_status, customer_name, customer_email,
-       customer_phone, ship_to_name, ship_to_address1, ship_to_address2,
-       ship_to_city, ship_to_state, ship_to_zip, ship_to_country,
-       subtotal_cents, shipping_cents, tax_cents, discount_cents, total_cents,
-       currency, warehouse_id, raw_payload, notes, tags, ordered_at, created_at, updated_at)
-     VALUES ($1, $2, $3, ${omsState},
-       'unfulfilled', $4, $5,
-       $6, $7, $8, $9,
-       $10, $11, $12, $13,
-       $14, $15, 0, 0, $16,
-       $17, $18, $19::jsonb, $20, $21, $22, $23, $23)
-     ON CONFLICT (channel_id, external_order_id) DO NOTHING
-     RETURNING id`,
-    [
-      plan.channelId,
-      plan.omsExternalOrderId,
-      plan.externalOrderNumber ?? intake.externalOrderId,
-      plan.shipTo.name,
-      plan.shipTo.email || null,
-      plan.shipTo.phone || null,
-      plan.shipTo.name,
-      plan.shipTo.address1,
-      plan.shipTo.address2 || null,
-      plan.shipTo.city,
-      plan.shipTo.region,
-      plan.shipTo.postalCode,
-      country,
-      plan.wholesaleSubtotalCents,
-      plan.shippingCents,
-      plan.totalDebitCents,
-      plan.currency,
-      plan.warehouseId,
-      JSON.stringify({
-        dropship: {
-          intakeId: plan.intakeId,
-          vendorId: plan.vendorId,
-          storeConnectionId: plan.storeConnectionId,
-          // On a Dropship order the Card Shellz member is the vendor, not the
-          // marketplace buyer, so WMS sync scores pick priority from this plan
-          // (decidePickPriorityPlanSource, server/modules/oms).
-          vendorMembershipPlanId: acceptanceMembershipPlanId(vendor),
-          externalOrderId: intake.externalOrderId,
-          ...(options.stagedForCanonicalAcceptance
-            ? { acceptanceState: "inventory_claim_required" }
-            : {}),
-          // The service the buyer paid the marketplace for. Kept on the OMS
-          // order (not only inside the marketplace blob) so fulfillment and
-          // reconciliation can read it without parsing platform-specific
-          // payloads. oms_orders has no migrated column for it, so raw_payload
-          // is the durable home until a dedicated column ships.
-          buyerShippingServiceCode: intake.normalizedPayload.buyerShippingServiceCode ?? null,
-        },
-        marketplace: intake.rawPayload,
-      }),
-      `Dropship order intake ${plan.intakeId}`,
-      JSON.stringify(["dropship", `vendor:${plan.vendorId}`, `store:${plan.storeConnectionId}`]),
-      readOrderedAt(intake.normalizedPayload) ?? plan.acceptedAt,
-      plan.acceptedAt,
-    ],
-  );
-  const row = result.rows[0];
-  if (!row) {
-    throw new DropshipError(
-      "DROPSHIP_OMS_ORDER_ID_CONFLICT",
-      "Dropship OMS order external key already exists before intake acceptance.",
-      {
-        intakeId: plan.intakeId,
-        channelId: plan.channelId,
-        omsExternalOrderId: plan.omsExternalOrderId,
+  try {
+    const created = await createDropshipOrderInTransaction(client, {
+      channelId: plan.channelId,
+      omsExternalOrderId: plan.omsExternalOrderId,
+      externalOrderNumber: plan.externalOrderNumber,
+      externalOrderId: intake.externalOrderId,
+      intakeId: plan.intakeId,
+      vendorId: plan.vendorId,
+      storeConnectionId: plan.storeConnectionId,
+      vendorMembershipPlanId: acceptanceMembershipPlanId(vendor),
+      buyerShippingServiceCode: intake.normalizedPayload.buyerShippingServiceCode ?? null,
+      marketplaceRawPayload: intake.rawPayload,
+      shipTo: {
+        name: plan.shipTo.name,
+        email: plan.shipTo.email || null,
+        phone: plan.shipTo.phone || null,
+        address1: plan.shipTo.address1,
+        address2: plan.shipTo.address2 || null,
+        city: plan.shipTo.city,
+        region: plan.shipTo.region,
+        postalCode: plan.shipTo.postalCode,
+        country,
       },
-    );
+      wholesaleSubtotalCents: plan.wholesaleSubtotalCents,
+      shippingCents: plan.shippingCents,
+      totalDebitCents: plan.totalDebitCents,
+      currency: plan.currency,
+      warehouseId: plan.warehouseId,
+      orderedAt: readOrderedAt(intake.normalizedPayload) ?? plan.acceptedAt,
+      acceptedAt: plan.acceptedAt,
+      stagedForCanonicalAcceptance: options.stagedForCanonicalAcceptance,
+      lines: plan.lines.map((line) => ({
+        productVariantId: line.productVariantId,
+        productId: line.productId,
+        externalLineItemId: line.externalLineItemId,
+        sku: line.sku,
+        title: line.title,
+        quantity: line.quantity,
+        wholesaleUnitCostCents: line.wholesaleUnitCostCents,
+        wholesaleLineTotalCents: line.wholesaleLineTotalCents,
+      })),
+    });
+    return created.omsOrderId;
+  } catch (error) {
+    if (error instanceof DropshipOmsOrderCommandError && error.code === "OMS_DROPSHIP_ORDER_EXTERNAL_KEY_CONFLICT") {
+      throw new DropshipError(
+        "DROPSHIP_OMS_ORDER_ID_CONFLICT",
+        "Dropship OMS order external key already exists before intake acceptance.",
+        {
+          intakeId: plan.intakeId,
+          channelId: plan.channelId,
+          omsExternalOrderId: plan.omsExternalOrderId,
+        },
+      );
+    }
+    throw error;
   }
-  const omsOrderId = toSafeInteger(row.id, "oms_order_id");
-  await client.query(
-    `INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-     VALUES ($1, 'created', $2::jsonb, $3)`,
-    [
-      omsOrderId,
-      JSON.stringify({
-        source: "dropship_order_acceptance",
-        intakeId: plan.intakeId,
-        storeConnectionId: plan.storeConnectionId,
-      }),
-      plan.acceptedAt,
-    ],
-  );
-  return omsOrderId;
-}
-
-async function createOmsOrderLinesWithClient(
-  client: PoolClient,
-  input: {
-    omsOrderId: number;
-    plan: DropshipOrderAcceptancePlan;
-  },
-): Promise<OmsLineRow[]> {
-  const rows: OmsLineRow[] = [];
-  for (const line of input.plan.lines) {
-    const result = await client.query<OmsLineRow>(
-      `INSERT INTO oms.oms_order_lines
-        (order_id, product_variant_id, external_line_item_id, external_product_id,
-         sku, title, variant_title, quantity, paid_price_cents, total_price_cents,
-         total_discount_cents, taxable, requires_shipping, fulfillable_quantity,
-         fulfillment_provider, fulfillment_status, order_number, created_at, updated_at)
-       VALUES ($1, $2, $3, $4,
-         $5, $6, NULL, $7, $8, $9,
-         0, true, true, $7,
-         'dropship', 'unfulfilled', $10, $11, $11)
-       RETURNING id, product_variant_id, quantity`,
-      [
-        input.omsOrderId,
-        line.productVariantId,
-        line.externalLineItemId,
-        String(line.productId),
-        line.sku,
-        line.title,
-        line.quantity,
-        line.wholesaleUnitCostCents,
-        line.wholesaleLineTotalCents,
-        input.plan.externalOrderNumber,
-        input.plan.acceptedAt,
-      ],
-    );
-    rows.push(requiredRow(result.rows[0], "OMS order line insert did not return a row."));
-  }
-  return rows;
 }
 
 /**
@@ -2872,6 +2840,9 @@ function mapListingCandidateRow(
   productIsActive: boolean;
   variantIsActive: boolean;
   customerSellable: boolean;
+  marketplaceEndedAt: Date | null;
+  listingEndedAt: Date | null;
+  previousExternalListingIds: string[];
 } {
   const catalogRetailPriceCents = row.catalog_retail_price_cents === null
     ? null
@@ -2903,6 +2874,9 @@ function mapListingCandidateRow(
     productIsActive: row.product_is_active,
     variantIsActive: row.variant_is_active,
     customerSellable: row.sales_eligibility === "sellable",
+    marketplaceEndedAt: row.marketplace_ended_at ?? null,
+    listingEndedAt: row.listing_end_ended_at ?? null,
+    previousExternalListingIds: row.previous_external_listing_ids ?? [],
   };
 }
 
@@ -2917,7 +2891,10 @@ function findCandidateForOrderLine(
     return candidates.find((candidate) => candidate.externalOfferId === line.externalOfferId) ?? null;
   }
   if (line.externalListingId) {
-    return candidates.find((candidate) => candidate.externalListingId === line.externalListingId) ?? null;
+    // The current item number first; else one the listing had before a relist (plan v4 §7.3 step 7).
+    return candidates.find((candidate) => candidate.externalListingId === line.externalListingId)
+      ?? candidates.find((candidate) => candidate.previousExternalListingIds.includes(line.externalListingId as string))
+      ?? null;
   }
   const normalizedSku = line.sku?.trim().toUpperCase();
   if (normalizedSku) {
@@ -2932,9 +2909,39 @@ function assertListingCandidateCanAccept(
   catalog: {
     catalogRules: readonly DropshipCatalogExposureRule[];
     now: Date;
+    intakeId: number;
+    orderedAt: Date | null;
   },
 ): void {
-  if (!["active", "drift_detected", "paused"].includes(candidate.listingStatus)) {
+  // A listing being re-sent is live on the marketplace while its Echelon status
+  // shows push progress (step 1 plan S2-5 §4.7); an ended listing takes an order
+  // placed before its end (plan v4 §7.3 step 8); see decideListingOrderAcceptability.
+  const acceptability = decideListingOrderAcceptability({
+    status: candidate.listingStatus,
+    externalListingId: candidate.externalListingId,
+    marketplaceEndedAt: candidate.marketplaceEndedAt,
+    listingEndedAt: candidate.listingEndedAt,
+    orderedAt: catalog.orderedAt,
+  });
+  if (!acceptability.acceptable && acceptability.reason === "listing_ended") {
+    // DC14 (PLAN-C v4.1 §8 step 3): eBay sold on a listing recorded as ended. ERROR: a person decides the order.
+    const refusal = listingEndedBeforeOrderError({ context: { intakeId: catalog.intakeId }, lineIndex,
+      listingId: candidate.listingId, listingStatus: candidate.listingStatus, marketplaceEndedAt: candidate.marketplaceEndedAt,
+      listingEndedAt: candidate.listingEndedAt, orderedAt: catalog.orderedAt });
+    logger.error("dropship.order.listing_ended_before_order", {
+      outcome: "requires_review",
+      error_code: refusal.code,
+      listing_id: candidate.listingId,
+      intake_id: catalog.intakeId,
+      line_index: lineIndex,
+      ended_at: refusal.context?.endedAt ?? null,
+      ordered_at: refusal.context?.orderedAt ?? null,
+      end_source: refusal.context?.endSource ?? null,
+      path: "acceptance",
+    });
+    throw refusal;
+  }
+  if (!acceptability.acceptable) {
     throw new DropshipError(
       "DROPSHIP_ORDER_LISTING_NOT_ACCEPTABLE",
       "Dropship order line listing is not in an acceptable status.",
@@ -2967,6 +2974,31 @@ function assertListingCandidateCanAccept(
         catalogReason: availability.reason,
       },
     );
+  }
+  if (admittedWhilePushing(acceptability)) {
+    // INFO: the line passed only because of the push-progress rule (CLAUDE.md
+    // §10 state transition). The acceptance transaction can still refuse the
+    // order later (funding, stock); this line records which rule let it in.
+    logger.info("dropship.order.listing_acceptable_while_pushing", {
+      outcome: "listing_check_passed",
+      listing_id: candidate.listingId,
+      status: candidate.listingStatus,
+      intake_id: catalog.intakeId,
+      line_index: lineIndex,
+      path: "acceptance",
+    });
+  }
+  if (acceptability.acceptable && acceptability.reason === "ordered_before_listing_ended") {
+    // INFO: an ended listing took the order only because it was placed before the end (plan v4 §7.3 step 8).
+    logger.info("dropship.order.listing_acceptable_before_end", {
+      outcome: "listing_check_passed",
+      listing_id: candidate.listingId,
+      intake_id: catalog.intakeId,
+      line_index: lineIndex,
+      marketplace_ended_at: candidate.marketplaceEndedAt?.toISOString() ?? null,
+      listing_end_ended_at: candidate.listingEndedAt?.toISOString() ?? null,
+      path: "acceptance",
+    });
   }
 }
 
@@ -3055,7 +3087,10 @@ function assertCanonicalStageIntakeCanResume(
   acceptedAt: Date,
   stageState: CanonicalAcceptanceStageRow["state"],
 ): void {
-  if (!["received", "retrying", "failed", "payment_hold", "processing"].includes(intake.status)) {
+  const canResumeCancelledForCompensation = intake.status === "cancelled"
+    && (stageState === "compensation_pending" || stageState === "inventory_claimed");
+  if (!["received", "retrying", "failed", "payment_hold", "processing"].includes(intake.status)
+    && !canResumeCancelledForCompensation) {
     throw new DropshipError(
       "DROPSHIP_ORDER_INTAKE_NOT_ACCEPTABLE",
       "Dropship order intake is not in a status that can resume canonical acceptance.",
@@ -3234,23 +3269,20 @@ async function markOmsOrderAcceptedWithClient(
   omsOrderId: number,
   acceptedAt: Date,
 ): Promise<void> {
-  const result = await client.query<{ id: string | number }>(
-    `UPDATE oms.oms_orders
-     SET status = 'confirmed',
-         financial_status = 'paid',
-         updated_at = $2
-     WHERE id = $1
-       AND status = 'pending'
-       AND financial_status = 'pending'
-     RETURNING id`,
-    [omsOrderId, acceptedAt],
-  );
-  if (result.rows.length !== 1) {
-    throw new DropshipError(
-      "DROPSHIP_CANONICAL_OMS_STAGE_INVALID",
-      "Canonical dropship acceptance could not promote its staged OMS order.",
-      { omsOrderId },
-    );
+  try {
+    await confirmStagedDropshipOrderPaidInTransaction(client, {
+      omsOrderId,
+      acceptedAt,
+    });
+  } catch (error) {
+    if (error instanceof DropshipOmsOrderCommandError && error.code === "OMS_DROPSHIP_ORDER_STAGE_PROMOTION_FAILED") {
+      throw new DropshipError(
+        "DROPSHIP_CANONICAL_OMS_STAGE_INVALID",
+        "Canonical dropship acceptance could not promote its staged OMS order.",
+        { omsOrderId },
+      );
+    }
+    throw error;
   }
 }
 

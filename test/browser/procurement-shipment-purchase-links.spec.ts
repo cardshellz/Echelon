@@ -51,23 +51,25 @@ test("shipment list shows single, shared and split purchase numbers and links in
   await purchases(42).getByRole("link", { name: "TEST-PO-99", exact: true }).click();
   await expect(page).toHaveURL(/\/purchase-orders\/99\?tab=shipments/);
   await expect(page.getByRole("tab", { name: /^Shipments/ })).toHaveAttribute("data-state", "active");
-  await page.getByRole("link", { name: "Back to shipment #42", exact: true }).first().click();
-  await expect(page.getByRole("heading", { name: "TEST-SHIP-42", exact: true })).toBeVisible();
-  await expect(page.getByTestId("shipment-purchase-links").getByRole("link")).toHaveCount(2);
+  await page.getByRole("link", { name: "Back to shipments", exact: true }).first().click();
+  await expect(page.getByRole("region", { name: "Shipment results" })).toBeVisible();
+  await expect(purchases(42).getByRole("link")).toHaveCount(2);
   expect(failures).toEqual([]);
 });
 
 test("shipment detail names every purchase and preserves its tab across purchase navigation and reload", async ({ page }) => {
   const failures = await installShipmentFixtures(page);
   await page.goto("/shipments/42?tab=tracking");
-  const shipmentUrl = page.url();
+  const expectedReturn = new URL(page.url());
+  expectedReturn.searchParams.set("document", "TEST-SHIP-42");
+  const shipmentUrl = expectedReturn.toString();
   const links = page.getByTestId("shipment-purchase-links");
   await expect(links.getByRole("link", { name: "TEST-PO-17", exact: true })).toBeVisible();
   await links.getByRole("link", { name: "TEST-PO-99", exact: true }).focus();
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/\/purchase-orders\/99\?tab=shipments/);
   await page.reload();
-  await page.getByRole("link", { name: "Back to shipment #42", exact: true }).first().click();
+  await page.getByRole("link", { name: "Back to TEST-SHIP-42", exact: true }).first().click();
   await expect(page).toHaveURL(shipmentUrl);
   await expect(page.getByRole("tab", { name: /^Tracking/ })).toHaveAttribute("data-state", "active");
   await page.goBack();

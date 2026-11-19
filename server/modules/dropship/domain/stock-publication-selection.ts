@@ -9,7 +9,6 @@ import {
 } from "./catalog-exposure";
 import {
   evaluateDropshipVendorCatalogSelection,
-  type DropshipVendorSelectionRule,
   type DropshipVendorVariantOverride,
 } from "./vendor-selection";
 
@@ -21,6 +20,13 @@ export interface DropshipStockListingState {
   externalOfferId: string | null;
   /** Only a saved, noncancelled live push intent for this exact destination. */
   livePushItemId: number | null;
+  /** eBay sync-back (owner rule 1): the vendor's limit on this listing; absent or null when it has none. */
+  vendorQuantityLimit?: number | null;
+  /**
+   * PR C (PLAN-C v4.1 §7, D42): Card Shellz is ending this listing on eBay (an end request is pending, ending, or
+   * failed and waiting for staff). Absent or false when none is open.
+   */
+  endOpen?: boolean;
 }
 
 export interface DropshipStockSelectionConfig {
@@ -31,18 +37,22 @@ export interface DropshipStockSelectionConfig {
 
 type VariantSelection = StockPublicationSelection["variants"][number];
 
+/** The catalog facts of one size a stock decision reads. */
+export type DropshipStockSelectionCandidate = DropshipCatalogVariantCandidate & {
+  requiresShipping: boolean | null;
+  trackInventory: boolean | null;
+  salesEligibility: VariantSalesEligibility | null;
+  productStatus?: string | null;
+};
+
 /** Listing intent only. ATP, destination mapping, standing/tier holds and provider
  * readiness retain their existing owners and are deliberately not computed here. */
 export function decideDropshipStockPublicationSelection(input: {
   productVariantId: number;
-  candidate: (DropshipCatalogVariantCandidate & {
-    requiresShipping: boolean | null;
-    trackInventory: boolean | null;
-    salesEligibility: VariantSalesEligibility | null;
-    productStatus?: string | null;
-  }) | null;
+  candidate: DropshipStockSelectionCandidate | null;
   rules: readonly DropshipCatalogExposureRule[];
-  vendorRules: readonly DropshipVendorSelectionRule[];
+  /** Whether the vendor picked this size (one-time picks, PR B); unread without a candidate. */
+  picked: boolean;
   override: DropshipVendorVariantOverride | null;
   listing: DropshipStockListingState | null;
   config: DropshipStockSelectionConfig | null;
@@ -73,13 +83,18 @@ export function decideDropshipStockPublicationSelection(input: {
 
   const exposure = evaluateDropshipCatalogExposure(input.candidate, input.rules, input.now);
   const selection = evaluateDropshipVendorCatalogSelection({
-    candidate: input.candidate, adminExposureDecision: exposure, rules: input.vendorRules,
+    candidate: input.candidate, adminExposureDecision: exposure, picked: input.picked,
     override: input.override,
     // The selection resolver's quantity output is intentionally unused. This is
     // the same selection-only invocation used by catalog preview before ATP.
     rawAtpUnits: 0, applyMarketplaceQuantityCap: false,
   });
   listingSelected = selection.selected && isCustomerSellableVariant(input.candidate);
+  // While Card Shellz ends the listing on eBay nothing may sell on it, whatever the vendor picks meanwhile (PLAN-C
+  // v4.1 §7, D42). After the archived and ended rules, so retirement and a finished end keep their outcomes; after
+  // listingSelected, which the lifecycle reader reads. `zero` carries no publish limit, so the vendor's limit
+  // pauses with it.
+  if (listing?.endOpen) return result(retainedDuty ? "zero" : "none", "listing_end_in_progress");
   const stockEligible = input.candidate.requiresShipping === true
     && input.candidate.trackInventory !== false
     && isCustomerSellableVariant(input.candidate);
@@ -98,6 +113,11 @@ export function decideDropshipStockPublicationSelection(input: {
   if (!managedLive) return result(retainedDuty ? "zero" : "read_only", "managed_live_publication_not_enabled");
   // Merely creating a failed/preview row is not consent to publish. A saved live
   // intent or retained destination does carry duty through queued/failed/blocked.
-  if (retainedDuty) return result("publish", savedLivePush ? "saved_live_push" : "selected_existing_listing");
+  if (retainedDuty) {
+    const published = result("publish", savedLivePush ? "saved_live_push" : "selected_existing_listing");
+    // Owner rule 1: inventory planning publishes min(its quantity, the vendor's limit). No limit, no field.
+    const limit = listing?.vendorQuantityLimit ?? null;
+    return limit === null ? published : { ...published, publishLimitUnits: limit };
+  }
   return result("read_only", "selected_catalog_preview");
 }

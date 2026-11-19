@@ -36,7 +36,7 @@ describe("explicit replacement forecast intervals", () => {
     [{ ...range, reference: " " }],
     [{ ...range, startDate: "9999-12-01", endDate: "9999-12-31" }],
     [range, { ...range, startDate: "2026-09-30", endDate: "2026-10-31" }],
-  ])("rejects invalid or overlapping ranges: %j", (ranges) => {
+  ] as unknown[][])("rejects invalid or overlapping ranges: %j", (ranges: unknown) => {
     expect(purchaseReplacementForecastsSchema.safeParse(ranges).success).toBe(false);
   });
   it("uses the replacement demand in the receipt sequence and the order-by calculation", () => {

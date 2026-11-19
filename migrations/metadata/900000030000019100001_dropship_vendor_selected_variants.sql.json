@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000030000019100001_dropship_vendor_selected_variants.sql",
+  "generation": 30,
+  "pr": 1910,
+  "ordinal": 1,
+  "after": [
+    "900000029000019070001_rfq_creation_audit_guard.sql"
+  ]
+}

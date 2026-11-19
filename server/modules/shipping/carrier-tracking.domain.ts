@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { normalizeShipStationPackageDimensions } from "./shipstation-package-dimensions.domain";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { normalizeShipStationDate, normalizeShipStationV1Date, ShipStationDateError } from "@shared/utils/shipstation-date";
@@ -226,7 +227,7 @@ export interface NormalizedShippingProviderLabelObservation {
   voidedAt: Date | null;
   providerOccurredAt: Date | null;
   shipmentContentsEvidence: ShipStationShipmentContentsEvidence;
-  observationSource: typeof SHIPSTATION_LABEL_OBSERVATION_SOURCE;
+  observationSource: typeof SHIPSTATION_LABEL_OBSERVATION_SOURCE | "shipstation_status_observation";
   sourceObservationHash: string;
   eventHash: string;
   sanitizedPayload: Record<string, unknown>;
@@ -234,6 +235,7 @@ export interface NormalizedShippingProviderLabelObservation {
 }
 
 const shipStationLabelObservationSchema = z.object({
+  dimensions: z.unknown().optional(),
   shipmentId: positiveSafeIntegerSchema,
   orderId: positiveSafeIntegerSchema.nullish(),
   orderKey: boundedOptionalString(200),
@@ -588,6 +590,8 @@ function redactShipStationSourceItems(rawItems: unknown): Readonly<Record<string
 }
 
 export interface CarrierTrackingMatchCandidate {
+  /** Read-only status capture can never authorize outbound dispatch. */
+  statusOnly?: boolean;
   shippingProviderLabelId: number;
   providerLabelId: string;
   labelStatus: ShippingProviderLabelStatus;
@@ -956,8 +960,12 @@ export function normalizeShipStationLabelObservation(
     isReturnLabel: shipment.isReturnLabel ?? null,
     shipmentItems: redactShipStationSourceItems(shipment.shipmentItems),
   }));
+  const packageDimensions = normalizeShipStationPackageDimensions(shipment.dimensions);
   const sanitizedPayload = {
     payloadSchemaVersion: 2,
+    // Additive, independently versioned package evidence. Keep the existing
+    // contents-authority hash unchanged: box size cannot authorize units/dispatch.
+    ...(packageDimensions === null ? {} : { packageDimensions }),
     providerLabelId: String(shipment.shipmentId),
     providerOrderId: shipment.orderId == null ? null : String(shipment.orderId),
     providerOrderKey: nullableString(shipment.orderKey),
@@ -1043,6 +1051,7 @@ function mergeCandidate(
         ? "superseded"
         : "unknown";
   return {
+    ...(existing.statusOnly || incoming.statusOnly ? { statusOnly: true } : {}),
     shippingProviderLabelId: existing.shippingProviderLabelId,
     providerLabelId: existing.providerLabelId,
     labelStatus: status,
@@ -1100,6 +1109,7 @@ export function resolveCarrierTrackingMatch(
     reasonCode,
     candidates: candidates.map((candidate) => ({
       identity: candidateIdentity(candidate),
+      ...(candidate.statusOnly ? { statusOnly: true } : {}),
       labelStatus: candidate.labelStatus,
       labelDirection: candidate.labelDirection,
       shippingProviderLabelId: candidate.shippingProviderLabelId,

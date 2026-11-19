@@ -9,13 +9,28 @@
  * decide the wording and the action.
  */
 
-import { formatCents, formatStatus, type DropshipOnboardingState, type DropshipOnboardingStep } from "./dropship-ops-surface";
+import { formatCents, type DropshipOnboardingState, type DropshipOnboardingStep } from "./dropship-ops-surface";
+import { humanizeCode } from "./dropship-vendor-labels";
 
 /** The one vendor status the checklist applies to. Every other status is past it, or blocked out of it. */
 export const ONBOARDING_VENDOR_STATUS = "onboarding";
 
 export function isOnboardingVendor(vendorStatus: string): boolean {
   return vendorStatus === ONBOARDING_VENDOR_STATUS;
+}
+
+/**
+ * The vendor's chosen sizes in words, on the onboarding checklist and the
+ * dashboard alike (PLAN-B v4.1 V18): "12 items chosen to sell". With no count
+ * (an older server never sends `vendorSelectedItemCount`, and the onboarding
+ * state is read without a schema), the words carry no number, never
+ * "undefined" (FIDELITY-10).
+ */
+export function describeChosenItems(count: number | undefined): string {
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. `onboardingChosen`: no count known.
+  if (typeof count !== "number" || !Number.isSafeInteger(count) || count < 0) return "Items chosen to sell";
+  // Stage 3/5 (step 1 plan S2-5): PROPOSED. `onboardingCount`.
+  return count === 1 ? "1 item chosen to sell" : `${count.toLocaleString("en-US")} items chosen to sell`;
 }
 
 export type OnboardingStepTone = "complete" | "todo" | "waiting" | "blocked";
@@ -126,11 +141,11 @@ function describeCatalogSelection(
   catalog: DropshipOnboardingState["catalog"],
 ): StepBody {
   if (complete) {
-    const count = catalog.vendorSelectionRuleCount;
     return {
       tone: "complete",
       badge: BADGE_BY_TONE.complete,
-      detail: `${count} product selection ${count === 1 ? "rule" : "rules"} saved. Change them any time in Catalog.`,
+      // One-time picks (PR B): the count is of sizes chosen, not of rules.
+      detail: `${describeChosenItems(catalog.vendorSelectedItemCount)}. Change them any time in Catalog.`,
       action: { kind: "navigate", label: "Open catalog", path: "/catalog" },
     };
   }
@@ -260,10 +275,10 @@ export function describeAccountSummary(vendorStatus: string): AccountSummary {
       return { title: "Selling is paused", detail: "Your account is paused. Your store connection is managed below." };
     case "lapsed":
     case "suspended":
-      return { title: `Your .ops membership is ${formatStatus(vendorStatus).toLowerCase()}`, detail: "Renew it at Card Shellz to keep selling. Your store connection is managed below." };
+      return { title: `Your .ops membership is ${humanizeCode(vendorStatus).toLowerCase()}`, detail: "Renew it at Card Shellz to keep selling. Your store connection is managed below." };
     case "closed":
       return { title: "This account is closed", detail: "Contact Card Shellz support if you expected to be able to sell." };
     default:
-      return { title: `Your account is ${formatStatus(vendorStatus).toLowerCase()}`, detail: "Your store connection is managed below." };
+      return { title: `Your account is ${humanizeCode(vendorStatus).toLowerCase()}`, detail: "Your store connection is managed below." };
   }
 }

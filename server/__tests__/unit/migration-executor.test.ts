@@ -4,6 +4,7 @@ import {
   acquireMigrationAdvisoryLock,
   executeMigrationWithRetry,
   migrationRetryOptionsFromEnv,
+  migrationSslFromEnv,
   releaseMigrationAdvisoryLock,
   type MigrationQueryClient,
 } from "../../../migrations/migration-executor";
@@ -129,6 +130,25 @@ describe("migration executor", () => {
       ["SELECT pg_advisory_lock(hashtext($1))", [MIGRATION_ADVISORY_LOCK_NAME]],
       ["SELECT pg_advisory_unlock(hashtext($1))", [MIGRATION_ADVISORY_LOCK_NAME]],
     ]);
+  });
+
+  it("throws when PostgreSQL reports pg_advisory_unlock=false so the session is disposed", async () => {
+    const query = vi.fn(async () => ({ rows: [{ pg_advisory_unlock: false }] }));
+    const client: MigrationQueryClient = { query };
+
+    await expect(releaseMigrationAdvisoryLock(client)).rejects.toThrow(
+      "PostgreSQL reported pg_advisory_unlock=false",
+    );
+  });
+
+  it("keeps TLS on unless a disposable database opts out explicitly", () => {
+    expect(migrationSslFromEnv({})).toEqual({ rejectUnauthorized: false });
+    expect(migrationSslFromEnv({ MIGRATION_DATABASE_SSL: "  " })).toEqual({ rejectUnauthorized: false });
+    expect(migrationSslFromEnv({ MIGRATION_DATABASE_SSL: "disable" })).toBeUndefined();
+    for (const value of ["false", "off", "0", "require", "DISABLE"]) {
+      expect(() => migrationSslFromEnv({ MIGRATION_DATABASE_SSL: value }))
+        .toThrow('MIGRATION_DATABASE_SSL must be unset or "disable".');
+    }
   });
 
   it("loads bounded retry defaults and rejects unsafe configuration", () => {

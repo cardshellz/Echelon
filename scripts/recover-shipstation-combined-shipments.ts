@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { db } from "../server/db";
 import { createServices } from "../server/services";
 import { createShipStationPhysicalRecoveryService } from "../server/modules/oms/shipstation-physical-recovery.service";
-import { createShipStationPhysicalRecoveryClient } from "../server/modules/shipping/shipstation-physical-recovery.client";
+import { createShipStationPhysicalRecoveryClient } from "../server/modules/shipping/shipstation-provider-reconciliation.api";
 
 interface Flags {
   mode: "dry-run" | "execute";

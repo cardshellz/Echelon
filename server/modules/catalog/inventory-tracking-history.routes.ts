@@ -2,7 +2,7 @@ import type { Express } from "express";
 import { z } from "zod";
 import { db } from "../../db";
 import { requirePermission } from "../../routes/middleware";
-import { exportTrackingStopHistory, listTrackingStopHistory } from "../inventory/infrastructure/tracking-stop.repository";
+import { exportTrackingStopHistory, listTrackingStopHistory } from "../inventory/catalog-inventory.api";
 
 const productIdSchema = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(z.number().int().positive().safe());
 const historyIdSchema = z.string().regex(/^[1-9]\d{0,18}$/)

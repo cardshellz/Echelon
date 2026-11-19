@@ -30,7 +30,7 @@ function onboardingJson(state: StubState) {
       standingReason: state.vendorStandingReason, pausedAt: state.vendorStatus === "paused" ? "2026-09-16T00:00:00.000Z" : null },
     entitlement: { memberId: "m-1", cardShellzEmail: "vendor@example.com", status: "active", planId: "ops", planName: "Ops", subscriptionId: "sub-1", includesDropship: true, reasonCode: "active" },
     storeConnections: { activeCount: 1, connectedCount: 1, launchReadyConnectedCount: 1, credentialAttentionCount: 0, needsAttentionCount: 0, totalCount: 1, includedLimit: 1, canConnectStore: false },
-    catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
+    catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, vendorSelectedItemCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
     wallet: { availableBalanceCents: state.availableBalanceCents, pendingBalanceCents: 0, activeFundingMethodCount: 1, activeStripeFundingMethodCount: 1, activeStripeCardFundingMethodCount: 1, activeUsdcBaseFundingMethodCount: 0,
       autoReloadEnabled: true, autoReloadFundingMethodId: 10, autoReloadFundingMethodActive: true, autoReloadFundingMethodReady: true, autoReloadFundingMethodIsCard: true },
     steps: [],
@@ -156,12 +156,12 @@ test("an accepted order's detail shows shipping as one amount, with no insurance
   await page.getByRole("row", { name: /10-03/ }).getByRole("button", { name: "Details" }).click();
 
   const sheet = page.getByRole("dialog");
-  const economics = sheet.locator("section").filter({ has: page.getByRole("heading", { name: "Acceptance Economics" }) });
-  await expect(economics).toContainText("Wholesale");
+  const economics = sheet.locator("section").filter({ has: page.getByRole("heading", { name: "Your cost" }) });
+  await expect(economics).toContainText("Products");
   await expect(economics).toContainText("$6.99");
   await expect(economics).toContainText("Shipping");
   await expect(economics).toContainText("$9.25");
-  await expect(economics).toContainText("Total debit");
+  await expect(economics).toContainText("Total");
   await expect(economics).toContainText("$16.24");
   await expect(sheet).not.toContainText("Insurance pool");
   await expect(sheet).not.toContainText("$0.18");

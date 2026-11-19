@@ -287,9 +287,10 @@ function canonicalRouting(
 }
 
 function quotedResult(
-  parcelPlan: Awaited<
-    ReturnType<ShipmentParcelProvider["plan"]>
-  > extends { ok: true; plan: infer Plan } ? Plan : never,
+  parcelPlan: Extract<
+    Awaited<ReturnType<ShipmentParcelProvider["plan"]>>,
+    { ok: true }
+  >["plan"],
 ): ShipmentQuoteResult {
   return {
     ok: true,

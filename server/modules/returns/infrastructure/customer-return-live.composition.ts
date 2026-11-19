@@ -5,7 +5,10 @@ import { PostgresCustomerReturnLocalInspectionReader } from "./customer-return-l
 import { ShopifyCustomerReturnSnapshotReader } from "./customer-return-shopify-snapshot.reader";
 import { createCustomerReturnShipStationDimensionsReader } from "./customer-return-shipstation-dimensions.reader";
 import { PostgresCustomerReturnPortalPolicyReader } from "./customer-return-policy.reader";
-import { createShipStationReturnRateAdapter } from "../../shipping-engine/infrastructure/shipstation-return-rate.adapter";
+import { PostgresCustomerReturnBoxMeasurements } from "./customer-return-box-measurements.repository";
+import { createShipStationReturnRateAdapter } from "../../shipping-engine/return-shipping-and-labels.api";
+import { ShippingPackageDimensionsReader } from "../../shipping/package-history-and-delivery.api";
+import { PostgresPackageHistoryStore } from "../../shipping/package-history-and-delivery.api";
 
 /** Explicit scope: neither the default channel nor a shop name/currency establishes the approved store. */
 export function parseCustomerReturnShopDomains(raw: string | undefined): readonly string[] {
@@ -25,9 +28,13 @@ export async function createCustomerReturnLiveService(): Promise<CustomerReturnL
     import("../../../db"), import("../../channels/channel-identity.service"),
   ]);
   const identity = new ChannelIdentityService(db);
+  const storedDimensions = new ShippingPackageDimensionsReader(pool);
   const now = (): Date => new Date();
   return new CustomerReturnLiveService({
     policies: new PostgresCustomerReturnPortalPolicyReader(db),
+    measurements: new PostgresCustomerReturnBoxMeasurements(pool),
+    packageHistory: new PostgresPackageHistoryStore(pool, now),
+    storedDimensions: { read: input => storedDimensions.read({ provider: "shipstation", ...input }) },
     rates: process.env.SHIPSTATION_V2_API_KEY?.trim() ? createShipStationReturnRateAdapter({ apiKey: process.env.SHIPSTATION_V2_API_KEY.trim() }) : undefined,
     local: new PostgresCustomerReturnLocalInspectionReader(pool, { approvedShopDomains, clock: now }),
     shopify: new ShopifyCustomerReturnSnapshotReader({ resolveConnection: channelId => identity.shopifyConnection(channelId), request: fetch, now }),

@@ -1,4 +1,8 @@
 import { useState } from "react";
+import { useAuth } from "@/lib/auth";
+import { hasStaffCapability, SHIPMENT_CAPABILITIES } from "@shared/staff-capabilities";
+import { outboundShipmentListSchema, type OutboundShipmentsResponse } from "@shared/shipment-access";
+import { readShipmentResource, retryShipmentRead } from "@/lib/shipment-reads";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { Card, CardContent } from "@/components/ui/card";
@@ -34,30 +38,6 @@ import {
 // Types (API contract: GET /api/outbound-shipments)
 // ---------------------------------------------------------------------------
 
-type OutboundShipmentRow = {
-  id: number;
-  orderId: number;
-  orderNumber: string | null;
-  customerName: string | null;
-  channelName: string | null;
-  status: string;
-  carrier: string | null;
-  trackingNumber: string | null;
-  trackingUrl: string | null;
-  shippedAt: string | null;
-  carrierCostCents: number | null;
-};
-
-type OutboundShipmentsResponse = {
-  rows: OutboundShipmentRow[];
-  total: number;
-  summary: {
-    byCarrier: Array<{ carrier: string | null; count: number }>;
-    byStatus: Array<{ status: string; count: number }>;
-  };
-};
-
-// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
@@ -128,11 +108,16 @@ function renderStatusBadge(status: string) {
 // ---------------------------------------------------------------------------
 
 export default function OutboundShipments() {
-  const [search, setSearch] = useState("");
-  const [carrierFilter, setCarrierFilter] = useState("all");
-  const [statusFilter, setStatusFilter] = useState("all");
-  const [days, setDays] = useState("30");
-  const [page, setPage] = useState(1);
+  const { permissions, hasPermission } = useAuth();
+  const canReadCosts = hasStaffCapability(permissions, SHIPMENT_CAPABILITIES.costs);
+  const canReadOrder = hasStaffCapability(permissions, SHIPMENT_CAPABILITIES.orderContext);
+  const initial = new URLSearchParams(window.location.search);
+  const [search, setSearch] = useState(initial.get("search") ?? "");
+  const [carrierFilter, setCarrierFilter] = useState(initial.get("carrier") ?? "all");
+  const [statusFilter, setStatusFilter] = useState(initial.get("status") ?? "all");
+  const [days, setDays] = useState(initial.get("days") ?? "30");
+  const requestedPage = Number(initial.get("page"));
+  const [page, setPage] = useState(Number.isSafeInteger(requestedPage) && requestedPage >= 1 ? Math.min(100000,requestedPage) : 1);
 
   const debouncedSearch = useDebounce(search.trim(), 300);
 
@@ -146,13 +131,13 @@ export default function OutboundShipments() {
   params.set("pageSize", String(PAGE_SIZE));
   const url = `/api/outbound-shipments?${params.toString()}`;
 
-  const { data, isLoading, isError } = useQuery<OutboundShipmentsResponse>({
+  const { data, isLoading, isError, refetch } = useQuery<OutboundShipmentsResponse>({
     queryKey: [url],
+    enabled: hasPermission("shipments", "view"),
+    retry: retryShipmentRead,
     meta: { handlesLoadError: true },
     queryFn: async ({ signal }) => {
-      const res = await fetch(url, { credentials: "include", signal });
-      if (!res.ok) throw new Error("Failed to fetch outbound shipments");
-      return res.json();
+      return readShipmentResource(url,outboundShipmentListSchema,signal);
     },
   });
 
@@ -296,7 +281,7 @@ export default function OutboundShipments() {
                 <TableHead className="w-[100px]">Carrier</TableHead>
                 <TableHead>Tracking</TableHead>
                 <TableHead className="w-[170px]">Shipped</TableHead>
-                <TableHead className="w-[100px] text-right">Cost</TableHead>
+                {canReadCosts && <TableHead className="w-[100px] text-right">Cost</TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -309,18 +294,19 @@ export default function OutboundShipments() {
                     <TableCell><Skeleton className="h-4 w-12" /></TableCell>
                     <TableCell><Skeleton className="h-4 w-40" /></TableCell>
                     <TableCell><Skeleton className="h-4 w-28" /></TableCell>
-                    <TableCell><Skeleton className="h-4 w-12 ml-auto" /></TableCell>
+                    {canReadCosts && <TableCell><Skeleton className="h-4 w-12 ml-auto" /></TableCell>}
                   </TableRow>
                 ))
               ) : isError ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
-                    Failed to load shipments. Try refreshing the page.
+                  <TableCell colSpan={canReadCosts ? 7 : 6} className="text-center py-8 text-muted-foreground">
+                    <p role="alert">Shipments could not be loaded.</p>
+                    <Button variant="outline" onClick={() => { void refetch(); }} data-testid="retry-shipments">Try again</Button>
                   </TableCell>
                 </TableRow>
               ) : rows.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={7} className="text-center py-8 text-muted-foreground">
+                  <TableCell colSpan={canReadCosts ? 7 : 6} className="text-center py-8 text-muted-foreground">
                     {hasActiveFilters
                       ? "No shipments match your filters."
                       : "No outbound shipments found in this time range."}
@@ -330,9 +316,9 @@ export default function OutboundShipments() {
                 rows.map((row) => (
                   <TableRow key={row.id}>
                     <TableCell>
-                      {row.orderId ? (
+                      {row.orderId && canReadOrder ? (
                         <Link
-                          href={`/orders?orderId=${row.orderId}`}
+                          href={`/outbound-shipments/${row.id}/order?${params.toString()}`}
                           className="font-mono text-sm text-primary hover:underline"
                         >
                           {row.orderNumber || `#${row.orderId}`}
@@ -371,7 +357,7 @@ export default function OutboundShipments() {
                     <TableCell className="text-sm text-muted-foreground">
                       {row.shippedAt ? formatShippedDate(row.shippedAt) : "—"}
                     </TableCell>
-                    <TableCell className="text-right font-mono">
+                    {canReadCosts && <TableCell className="text-right font-mono">
                       {row.carrierCostCents ? (
                         formatCents(row.carrierCostCents)
                       ) : (
@@ -382,7 +368,7 @@ export default function OutboundShipments() {
                           —
                         </span>
                       )}
-                    </TableCell>
+                    </TableCell>}
                   </TableRow>
                 ))
               )}

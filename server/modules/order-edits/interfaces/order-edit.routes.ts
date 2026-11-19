@@ -28,12 +28,14 @@ import {
 } from "@shared/order-edits/order-edit-catalog";
 import { OrderEditError } from "../domain/order-edit-error";
 import { OrderEditProviderError } from "../application/order-edit-provider";
+import { extractPublicOrderEditCodeErrorParams } from "@shared/order-edits/order-edit-code-errors";
+import { customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
 import {
   ORDER_EDIT_PRICING_DISPLAY_HEADER,
   orderEditPricingDisplayVersionSchema,
   type OrderEditFinancials,
 } from "@shared/order-edits/order-edit-financials";
-import { orderEditResponsePresentation } from "../application/order-edit-response-presentation";
+import { orderEditResponsePresentation, orderEditOrderManagementPresentation } from "../application/order-edit-response-presentation";
 import {
   orderEditPreviewInputSchema,
   orderEditPreviewScopeSchema,
@@ -165,6 +167,14 @@ export function registerOrderEditRoutes(
           method: req.method,
           route: req.route?.path ?? ORDER_EDIT_API,
         });
+        const publicParams = known
+          ? extractPublicOrderEditCodeErrorParams(
+              code,
+              error instanceof OrderEditError
+                ? error.params
+                : error.context,
+            )
+          : undefined;
         res
           .status(
             validation
@@ -183,6 +193,7 @@ export function registerOrderEditRoutes(
                 : known
                   ? error.message
                   : "The order editor is unavailable. Check the saved operation before retrying.",
+              ...(publicParams ? { params: publicParams } : {}),
             },
           });
       }
@@ -225,18 +236,19 @@ export function registerOrderEditRoutes(
         .object({
           connectionId: positiveId,
           codeEntryVersion: z.literal("v1").optional(),
+          managementVersion: z.enum(["v1", "v2"]).optional(),
         })
         .strict()
         .parse(req.query);
       res.json(
         orderEditResponsePresentation(
-          orderEditOrderSchema.parse(
+          orderEditOrderManagementPresentation(orderEditOrderSchema.parse(
             await service.order(
               query.connectionId,
               positiveId.parse(req.params.omsOrderId),
               query.codeEntryVersion,
             ),
-          ),
+          ), query.managementVersion),
           orderEditPricingDisplayVersionSchema.safeParse(
             req.get(ORDER_EDIT_PRICING_DISPLAY_HEADER),
           ).data,
@@ -373,6 +385,18 @@ export function registerOrderEditRoutes(
       );
     }),
   );
+  app.get(`${ORDER_EDIT_API}/cancellations/:operationId`, handle(false, async (req, res) => {
+    z.object({}).strict().parse(req.query);
+    if (!service.cancellations) throw new OrderEditError("ORDER_CANCELLATION_UNAVAILABLE", "Cancellation status is unavailable.", 503);
+    res.json(customerOrderCancellationSchema.parse(await service.cancellations.staffGet(operationId.parse(req.params.operationId))));
+  }));
+  app.post(`${ORDER_EDIT_API}/cancellations/:operationId/reconcile`, handle(false, async (req, res, actor) => {
+    emptyBody.parse(req.body);
+    if (!service.cancellations) throw new OrderEditError("ORDER_CANCELLATION_UNAVAILABLE", "Cancellation status is unavailable.", 503);
+    const id = operationId.parse(req.params.operationId);
+    await service.cancellations.reconcile(id, actor);
+    res.json(customerOrderCancellationSchema.parse(await service.cancellations.staffGet(id)));
+  }));
   for (const action of ["commit", "reconcile", "abandon", "resume"] as const) {
     app.post(
       `${ORDER_EDIT_API}/operations/:operationId/${action}`,

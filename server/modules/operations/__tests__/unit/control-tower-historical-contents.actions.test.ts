@@ -55,7 +55,7 @@ describe("Control Tower historical package-content actions", () => {
       tracking_number: "1ZHISTORICALREVIEW",
       shipping_engine: null,
       engine_order_ref: null,
-    });
+    }, new Date("2026-08-28T12:00:00.000Z"));
 
     expect(item).toMatchObject({
       title: "ShipStation and WMS package contents disagree",

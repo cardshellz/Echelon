@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useLocation } from "wouter";
+import { useAuth } from "@/lib/auth";
 import { z } from "zod";
 import {
   ArrowRight,
@@ -46,6 +47,7 @@ export function DailyBuyingReview({
   useNewPoEditor: boolean;
 }) {
   const [, navigate] = useLocation();
+  const { hasPermission } = useAuth();
   const result = useMemo(() => reviewSchema.safeParse(data), [data]);
   if (!result.success)
     return (
@@ -217,6 +219,7 @@ export function DailyBuyingReview({
                   onClick={() =>
                     navigate(
                       useNewPoEditor &&
+                        hasPermission("purchasing", "edit") &&
                         !isImmutableRecommendationPurchaseOrder(po)
                         ? `/purchase-orders/${po.id}/edit`
                         : `/purchase-orders/${po.id}?tab=lifecycle`,

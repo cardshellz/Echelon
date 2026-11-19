@@ -173,6 +173,8 @@ describe("destination-group editor selection", () => {
     id,
     destinationGroupId,
     destinationGroupLockVersion: 1,
+    sourceDestinationScopeId: null,
+    sourceDestinationScopeLockVersion: null,
     name,
     originWarehouseId,
     regions,
@@ -326,6 +328,8 @@ describe("pricing program coverage aggregation", () => {
         status: "active",
         sortOrder: 0,
         lockVersion: 3,
+        sourceDestinationScopeId: null,
+        sourceDestinationScopeLockVersion: null,
         destinations: [
           {
             destinationCountry: "US",
@@ -467,6 +471,8 @@ describe("pricing program coverage aggregation", () => {
           status: "active" as const,
           sortOrder: index,
           lockVersion: 1,
+          sourceDestinationScopeId: null,
+          sourceDestinationScopeLockVersion: null,
           destinations: group.regions.map(destination),
         })),
       rateTables: [active, draft, historical],

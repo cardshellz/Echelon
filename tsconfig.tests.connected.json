@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.tests.json",
+  "include": [
+    "test/connected/**/*.ts",
+    "playwright.procurement-connected.config.ts",
+    "server/types.d.ts",
+    "server/index.ts"
+  ]
+}

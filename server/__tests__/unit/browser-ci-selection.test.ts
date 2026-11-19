@@ -7,18 +7,28 @@ import {
   BROWSER_SUITES, dependencyClosure, parseChangedFiles, runSelection, selectBrowserSuite,
 } from "../../../scripts/ci/browser-suite-impact.mjs";
 import { DROPSHIP_BROWSER_FEATURES } from "../../../scripts/ci/dropship-browser-features.mjs";
+import { appRouteRoots } from "../../../scripts/ci/app-route-roots.mjs";
+import { selectBrowserFeatures } from "../../../scripts/ci/browser-feature-impact.mjs";
 
 function fixture(extra: Record<string, string> = {}) {
   const sources: Record<string, string> = {
-    "package.json": JSON.stringify({ dependencies: { react: "1", "@playwright/test": "1" } }),
-    "client/src/App.tsx": 'import "@/components/layout/AppShell"; import "@/pages/Unrelated"; import "@/pages/PurchaseOrders";',
+    "package.json": JSON.stringify({ dependencies: { react: "1", wouter: "1", "@playwright/test": "1" } }),
+    "client/src/App.tsx": `import { Route } from "wouter";
+      import "@/components/layout/AppShell";
+      import Unrelated from "@/pages/Unrelated";
+      import PurchaseOrders from "@/pages/PurchaseOrders";
+      import OrderEdits from "@/pages/OrderEdits";
+      export default function App() { return <><Route path="/unrelated" component={Unrelated}/>
+        <Route path="/purchase-orders" component={PurchaseOrders}/><Route path="/order-edits" component={OrderEdits}/></>; }`,
     "client/src/components/layout/AppShell.tsx": 'import "@/components/SharedBanner";',
     "client/src/components/SharedBanner.tsx": "export const banner = true;",
     "client/src/pages/Unrelated.tsx": 'import "@/components/shipping/BoxSuitesPanel"; export const unrelated = true;',
     "client/src/pages/PurchaseOrders.tsx": "export const purchases = true;",
+    "client/src/pages/OrderEdits.tsx": "export const edits = true;",
     "client/src/features/unrelated/Isolated.ts": "export const isolated = true;",
     "client/src/components/shipping/BoxSuitesPanel.tsx": "export const boxes = true;",
     "test/browser/procurement-navigation.spec.ts": 'import "@playwright/test";',
+    "test/browser/app-bootstrap.spec.ts": 'import "@playwright/test";',
     "test/browser/order-edits.spec.ts": 'import "@playwright/test";',
     "test/browser/dropship-pricing-rules.spec.ts": 'import "@playwright/test";',
     ...Object.fromEntries(Object.values(BROWSER_SUITES).flatMap((suite) => suite.roots.map((root: string) => [root, ""]))),
@@ -35,20 +45,115 @@ function selection(file: string, suite = "procurement", extra: Record<string, st
   return selectBrowserSuite({ suite, changes: [{ status: "M", paths: [file] }], ...fixture(extra) });
 }
 
+let cachedRepoSources: {
+  files: Set<string>;
+  readSource: (file: string) => string;
+  dependencyCache: Map<(file: string) => string, Map<string, string[]>>;
+} | undefined;
 function repositorySources() {
   // Include new, non-ignored dependencies when running before a commit too.
-  const files = new Set(execFileSync(
-    "git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "utf8" },
-  ).split("\0").filter(Boolean));
-  return { files, readSource: (file: string) => readFileSync(file, "utf8") };
+  if (!cachedRepoSources) {
+    const files = new Set(execFileSync(
+      "git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "utf8" },
+    ).split("\0").filter(Boolean));
+    const sourceCache = new Map<string, string>();
+    cachedRepoSources = {
+      files,
+      readSource: (file: string) => {
+        let cached = sourceCache.get(file);
+        if (cached === undefined) {
+          cached = readFileSync(file, "utf8");
+          sourceCache.set(file, cached);
+        }
+        return cached;
+      },
+      dependencyCache: new Map(),
+    };
+  }
+  return cachedRepoSources;
+}
+
+function connectedDiscovery(shard?: { current: number; total: number }): JSONReport {
+  return JSON.parse(execFileSync(process.execPath, [
+    createRequire(import.meta.url).resolve("@playwright/test/cli"), "test",
+    "--config", BROWSER_SUITES.procurementConnected.config, "--list", "--reporter=json", "--forbid-only",
+    ...(shard ? [`--shard=${shard.current}/${shard.total}`] : []),
+  ], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 30_000 }));
+}
+
+function discoveredTestIds(report: JSONReport): string[] {
+  const collect = (suites: JSONReport["suites"]): string[] => suites.flatMap(suite => [
+    ...suite.specs.flatMap(spec => spec.tests.map(test => `${test.projectId}/${spec.id}`)),
+    ...collect(suite.suites ?? []),
+  ]);
+  return collect(report.suites);
 }
 
 describe("browser CI impact selection", () => {
+
+  it.each([
+    "test/connected/procurement/server.ts",
+    "test/connected/procurement/authority.spec.ts",
+    "server/modules/procurement/receiving.service.ts",
+    "migrations/900000027000019030001_receiving_entry_audit_guard.sql",
+    "tsconfig.tests.connected.json",
+  ])("runs connected acceptance for its owned path: %s", file => {
+    expect(selection(file, "procurementConnected", {
+      "test/connected/procurement/receiving-recovery.spec.ts": 'import "@playwright/test";',
+      [file]: "",
+    }).run).toBe(true);
+  });
+
+  it("follows the child server's real authority dependencies", () => {
+    const path = "server/modules/identity/infrastructure/command-authority.repository.ts";
+    expect(selection(path, "procurementConnected", {
+      "test/connected/procurement/receiving-recovery.spec.ts": 'import "@playwright/test";',
+      "test/connected/procurement/server.ts": 'import "../../../server/modules/identity/infrastructure/command-authority.repository";',
+      [path]: "export const authority = true;",
+    })).toEqual({ run: true, reason: "Transitive suite dependency: " + path });
+  });
+
+  it("discovers every connected spec without starting its database or server", () => {
+    const report = connectedDiscovery();
+    expect(report.errors).toEqual([]);
+    const discovered = [...new Set(report.suites.map(suite => "test/connected/procurement/" + suite.file))].sort();
+    const registered = [...repositorySources().files].filter(file => BROWSER_SUITES.procurementConnected.tests.test(file)).sort();
+    expect(discovered.length).toBeGreaterThan(0);
+    expect(discovered).toEqual(registered);
+  });
+
+  it("partitions every connected desktop/mobile case exactly once across the actual CI shards", () => {
+    const workflow = readFileSync(".github/workflows/procurement-connected.yml", "utf8");
+    const indices: number[] = JSON.parse(workflow.match(/^        shard: (\[[\d, ]+\])$/m)?.[1] ?? "[]");
+    expect(indices).toEqual([1, 2, 3, 4]);
+    const full = connectedDiscovery();
+    expect(full.errors).toEqual([]);
+    expect(full.config.fullyParallel).toBe(true);
+    expect(full.config.workers).toBe(1);
+    expect(full.config.globalTimeout).toBe(12 * 60_000);
+    const expected = discoveredTestIds(full);
+    expect(expected.length).toBeGreaterThan(indices.length);
+    expect(new Set(expected).size).toBe(expected.length);
+    const shards = indices.map(current => {
+      const report = connectedDiscovery({ current, total: indices.length });
+      expect(report.errors).toEqual([]);
+      return discoveredTestIds(report);
+    });
+    const assigned = shards.flat();
+    expect(new Set(assigned).size, "A case must not appear in more than one shard").toBe(assigned.length);
+    expect(assigned.sort(), "No discovered project/case may be omitted or invented").toEqual(expected.sort());
+    const counts = shards.map(shard => shard.length);
+    expect(Math.max(...counts) - Math.min(...counts), "Split individual cases rather than whole spec files").toBeLessThanOrEqual(1);
+  }, 60_000);
+
   it.each([
     ".github/workflows/order-edits.yml",
     "playwright.order-edits.config.ts",
     "test/browser/order-edits.spec.ts",
     "test/browser/customer-order-edit-resume.spec.ts",
+    "test/browser/customer-order-edit-payment.spec.ts",
+    "test/browser/customer-order-edit-rewards.spec.ts",
+    "test/browser/customer-order-cancellation.spec.ts",
     "test/browser/fixtures/customer-order-edit-harness.tsx",
     "client/src/customer-account/entry.tsx",
     "client/src/pages/OrderEdits.tsx",
@@ -64,12 +169,13 @@ describe("browser CI impact selection", () => {
     },
   );
 
-  it("keeps the full application startup graph for the order editor and skips unrelated server work", () => {
+  it("keeps full eager startup coverage in the bootstrap owner and scopes order journeys to their routes", () => {
     expect(BROWSER_SUITES.orderEdits.roots).toEqual([
-      "client/src/main.tsx", "client/src/customer-account/entry.tsx", "test/browser/fixtures/customer-order-edit-harness.tsx",
+      "client/src/customer-account/entry.tsx", "test/browser/fixtures/customer-order-edit-harness.tsx",
     ]);
     const startupDependency = "client/src/components/shipping/BoxSuitesPanel.tsx";
-    expect(selection(startupDependency, "orderEdits")).toEqual({ run: true, reason: `Transitive suite dependency: ${startupDependency}` });
+    expect(selection(startupDependency, "appBootstrap")).toEqual({ run: true, reason: `Transitive suite dependency: ${startupDependency}` });
+    expect(selection(startupDependency, "orderEdits").run).toBe(false);
     const unrelated = "server/modules/inventory/unrelated.service.ts";
     expect(selection(unrelated, "orderEdits", { [unrelated]: "export const unrelated = true;" })).toEqual({
       run: false, reason: "Only known paths outside this suite's dependency graph changed",
@@ -86,9 +192,10 @@ describe("browser CI impact selection", () => {
     }
   });
 
-  it("preserves eagerly imported packaging startup dependencies in procurement", () => {
+  it("does not repeat startup coverage as unrelated procurement journeys", () => {
     const source = "client/src/components/shipping/BoxSuitesPanel.tsx";
-    expect(selection(source).reason).toBe(`Transitive suite dependency: ${source}`);
+    expect(selection(source).run).toBe(false);
+    expect(selection(source, "appBootstrap").reason).toBe(`Transitive suite dependency: ${source}`);
     expect(selection(source, "dropship").run).toBe(true);
   });
 
@@ -116,9 +223,10 @@ describe("browser CI impact selection", () => {
     }).reason).toBe(`Transitive suite dependency: ${changed}`);
   });
 
-  it("tracks shared shell and eager page imports but can skip a genuinely unimported feature", () => {
+  it("tracks shared shell changes while excluding pages outside the journey's route scope", () => {
     expect(selection("client/src/components/SharedBanner.tsx").reason).toContain("Transitive suite dependency");
-    expect(selection("client/src/pages/Unrelated.tsx").run).toBe(true);
+    expect(selection("client/src/pages/Unrelated.tsx").run).toBe(false);
+    expect(selection("client/src/pages/PurchaseOrders.tsx").run).toBe(true);
     expect(selection("client/src/features/unrelated/Isolated.ts").run).toBe(false);
   });
 
@@ -165,7 +273,7 @@ describe("browser CI impact selection", () => {
     expect(selection("client/src/pages/Removed.tsx").run).toBe(true);
     expect(selection("new-runtime/entry.js", "procurement", { "new-runtime/entry.js": "" }).run).toBe(true);
     const missingRoot = fixture();
-    missingRoot.files.delete(BROWSER_SUITES.procurement.roots[0]);
+    missingRoot.files.delete("client/src/App.tsx");
     expect(selectBrowserSuite({ suite: "procurement", changes: [{ status: "M", paths: ["client/src/pages/Unrelated.tsx"] }], ...missingRoot }).run).toBe(true);
     const missingTests = fixture();
     missingTests.files.delete("test/browser/procurement-navigation.spec.ts");
@@ -199,10 +307,107 @@ describe("browser CI impact selection", () => {
     expect(graph.has("attached_assets/logo.svg")).toBe(true);
   });
 
-  it("preserves the current real application startup graph for packaging-only changes", () => {
+  it("assigns real eager-only dependencies to startup coverage instead of every business journey", () => {
     const result = selectBrowserSuite({ suite: "procurement", changes: [{ status: "M", paths: ["client/src/components/shipping/BoxSuitesPanel.tsx"] }],
       ...repositorySources() });
-    expect(result).toEqual({ run: true, reason: "Transitive suite dependency: client/src/components/shipping/BoxSuitesPanel.tsx" });
+    expect(result.run).toBe(false);
+    expect(selectBrowserSuite({ suite: "appBootstrap", changes: [{ status: "M", paths: ["client/src/components/shipping/BoxSuitesPanel.tsx"] }],
+      ...repositorySources() })).toEqual({ run: true, reason: "Transitive suite dependency: client/src/components/shipping/BoxSuitesPanel.tsx" });
+  });
+
+  it("selects catalog coverage and startup, without procurement, returns or order journeys for the actual Shopify UI change", () => {
+    // These decisions share one immutable repository snapshot. Reuse the
+    // supported dependency cache instead of reparsing the same files per suite.
+    const evidence = { ...repositorySources(), changes: [{ status: "M", paths: ["client/src/components/catalog/ShopifyProductConnection.tsx"] }] };
+    for (const suite of ["procurement", "procurementConnected", "orderEdits"])
+      expect(selectBrowserSuite({ suite, ...evidence }), suite).toEqual({ run: false, reason: "Only known paths outside this suite's dependency graph changed" });
+    expect(selectBrowserSuite({ suite: "appBootstrap", ...evidence }).run).toBe(true);
+    expect(selectBrowserFeatures("returns", evidence).run).toBe(false);
+    expect(selectBrowserFeatures("inventory", evidence).decisions.filter(decision => decision.run).map(decision => decision.feature)).toEqual(["catalog"]);
+  });
+
+  it("preserves both procurement suites for every existing procurement route entrypoint", () => {
+    const sources = repositorySources();
+    for (const page of [
+      "PurchaseOrders", "PurchaseOrderDetail", "PurchaseOrderEdit", "PurchasingDashboard", "PurchasingView", "ReorderEngine",
+      "ProcurementAutomation", "ProcurementRuns", "ProcurementRfqs", "Receiving", "Suppliers", "InboundShipments",
+      "InboundShipmentDetail", "CostDashboard", "APDashboard", "APInvoices", "APInvoiceDetail", "APPayments",
+      "SupplierCredits", "SupplierReturns", "ProcurementSettings", "ProcurementPromiseSafetySettings",
+    ]) {
+      const file = `client/src/pages/${page}.tsx`;
+      for (const suite of ["procurement", "procurementConnected"])
+        expect(selectBrowserSuite({ suite, ...sources, changes: [{ status: "M", paths: [file] }] }), file)
+          .toEqual({ run: true, reason: "Transitive suite dependency: " + file });
+    }
+  });
+
+  it("preserves returns coverage for every existing returns route entrypoint", () => {
+    const sources = repositorySources();
+    for (const page of ["Returns", "ReturnCases", "ReturnPolicies", "ReturnLabelSettings", "CustomerReturnPortalPreview",
+      "CustomerReturnCustomerPortal", "CustomerReturnPortalAccess"]) {
+      const evidence = { ...sources, changes: [{ status: "M", paths: [`client/src/pages/${page}.tsx`] }] };
+      expect(selectBrowserFeatures("returns", evidence).run, page).toBe(true);
+    }
+  });
+
+  it("follows route-local wrappers, aliases and both branches of feature flag switches", () => {
+    const sources = fixture({ "client/src/App.tsx": `import { Route as Page } from "wouter";
+      import A from "@/pages/PurchaseOrders"; import B from "@/pages/Unrelated";
+      const First = () => <Second/>; function Second() { return enabled ? <A/> : <B/>; }
+      export default function App() { return <Page path="/purchase-orders/:id"><First/></Page>; }` });
+    expect(appRouteRoots(sources, ["/purchase-orders"])).toEqual(["client/src/pages/PurchaseOrders.tsx", "client/src/pages/Unrelated.tsx"]);
+  });
+
+  it("keeps dynamic and pathless route dependencies shared rather than guessing their ownership", () => {
+    const sources = fixture({ "client/src/App.tsx": `import { Route } from "wouter";
+      import A from "@/pages/PurchaseOrders"; import B from "@/pages/Unrelated";
+      export default function App() { return <><Route path="/purchase-orders" component={A}/><Route path={unknownPath} component={B}/><Route component={B}/></>; }` });
+    expect(appRouteRoots(sources, ["/purchase-orders"])).toContain("client/src/pages/Unrelated.tsx");
+  });
+
+  it("keeps components rendered around authenticated routes common, including local router wrappers", () => {
+    const sources = fixture({ "client/src/App.tsx": `import { Route } from "wouter";
+      import A from "@/pages/PurchaseOrders"; import B from "@/pages/Unrelated";
+      function Router() { return <><B/><Route path="/purchase-orders" component={A}/></>; }
+      export default function App() { return <Router/>; }` });
+    expect(appRouteRoots(sources, ["/purchase-orders"])).toEqual(["client/src/pages/PurchaseOrders.tsx", "client/src/pages/Unrelated.tsx"]);
+  });
+
+  it("follows inline lazy imports in selected routes", () => {
+    const sources = fixture({ "client/src/App.tsx": `import { Route } from "wouter";
+      import { lazy } from "react";
+      export default function App() { return <Route path="/purchase-orders" component={lazy(() => import("@/pages/PurchaseOrders"))}/>; }` });
+    expect(appRouteRoots(sources, ["/purchase-orders"])).toContain("client/src/pages/PurchaseOrders.tsx");
+  });
+
+  it.each([
+    'import { Route } from "wouter"; export default () => <Route {...props}/>;',
+    'import { Route } from "wouter"; export default () => <Route path="/unrelated"/>;',
+    'const broken = (;',
+  ])("runs broadly when the route scope cannot be proven: %s", source => {
+    const result = selection("client/src/pages/Unrelated.tsx", "procurement", { "client/src/App.tsx": source });
+    expect(result.run).toBe(true);
+    expect(result.reason).toContain("Dependency analysis was uncertain");
+  });
+
+  it("retains dependencies removed from the current router through the previous snapshot", () => {
+    const previous = fixture({ "client/src/pages/PurchaseOrders.tsx": 'import "@/features/logistics/Old";',
+      "client/src/features/logistics/Old.ts": "export const old = true;" });
+    const current = fixture();
+    expect(selectBrowserSuite({ suite: "procurement", ...current, previous,
+      changes: [{ status: "D", paths: ["client/src/features/logistics/Old.ts"] }] })).toEqual({
+      run: true, reason: "Transitive suite dependency: client/src/features/logistics/Old.ts",
+    });
+  });
+
+  it("registers every spec discovered by the order editor configuration", () => {
+    const report: JSONReport = JSON.parse(execFileSync(process.execPath, [
+      createRequire(import.meta.url).resolve("@playwright/test/cli"), "test", "--config", BROWSER_SUITES.orderEdits.config,
+      "--list", "--reporter=json", "--forbid-only",
+    ], { encoding: "utf8", maxBuffer: 16 * 1024 * 1024, timeout: 30_000 }));
+    expect(report.errors).toEqual([]);
+    const discovered = [...new Set(report.suites.map(suite => "test/browser/" + suite.file))].sort();
+    expect(discovered).toEqual([...repositorySources().files].filter(file => BROWSER_SUITES.orderEdits.tests.test(file)).sort());
   });
 
   it.each([

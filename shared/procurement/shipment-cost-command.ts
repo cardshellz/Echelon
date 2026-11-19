@@ -1,8 +1,8 @@
 import { z } from "zod";
 
-// These values are the existing shipment cost controls, not new cost categories.
+// Tax uses the existing charge/allocation owner with an explicit saved rule.
 export const SHIPMENT_COST_TYPES = [
-  "freight", "dimensions_adjustment", "duty", "insurance", "brokerage",
+  "freight", "dimensions_adjustment", "duty", "tax", "insurance", "brokerage",
   "platform_fee", "port_handling", "drayage", "warehousing", "inspection", "other",
 ] as const;
 
@@ -22,6 +22,7 @@ const evidenceDate = z.union([
 
 const editableShape = {
   costType: z.enum(SHIPMENT_COST_TYPES),
+  taxTypeId: shipmentCostResourceIdSchema.nullable(),
   description: z.string().nullable(),
   estimatedCents: cents,
   actualCents: cents,
@@ -44,7 +45,12 @@ const editableSchema = z.object(editableShape).partial();
 export const shipmentCostCreateSchema = editableSchema.extend({
   costType: editableShape.costType,
   reason,
-}).strict();
+}).strict().superRefine((value, context) => {
+  if (["tax", "duty"].includes(value.costType) && value.taxTypeId == null) context.addIssue({ code: "custom", path: ["taxTypeId"], message: "Choose a configured tax type." });
+  if (value.taxTypeId != null && !["duty", "tax"].includes(value.costType)) context.addIssue({ code: "custom", path: ["taxTypeId"], message: "Only tax and duty charges use a tax type." });
+  if (value.taxTypeId != null && [value.actualCents, value.estimatedCents].some(amount => amount != null && amount < 0))
+    context.addIssue({ code: "custom", message: "Record a supplier tax credit against its original charge; a tax charge cannot assume a refund allocation." });
+});
 
 export const shipmentCostPatchSchema = editableSchema.extend({
   expectedVersion: shipmentCostVersionSchema,

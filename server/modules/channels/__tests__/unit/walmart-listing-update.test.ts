@@ -91,6 +91,18 @@ function setup() {
 }
 
 describe("Walmart existing-listing maintenance", () => {
+  it.each([[0.01, 0.063], [0.1, 0.125]] as const)("uses shared ounce rounding for %s lb maintenance without changing the saved command", async (weight, expected) => {
+    const { provider, account, record } = setup();
+    const command = structuredClone(record.intent.command);
+    command.changes.attributes = { ...command.changes.attributes,
+      Orderable: { ...command.changes.attributes?.Orderable, ShippingWeight: weight } };
+    const before = structuredClone(command);
+    const prepared = await provider.prepare(account, updateSource, command);
+    expect(prepared.issues).toEqual([]);
+    expect(prepared.payload).toMatchObject({ MPItem: [{ Orderable: { ShippingWeight: expected } }] });
+    expect((await provider.prepare(account, updateSource, command)).payload).toEqual(prepared.payload);
+    expect(command).toEqual(before);
+  });
   it("blocks queued content, price and shipping maintenance after a publication stop", async () => {
     const { provider, account, record, api, channels } = setup();
     const prepared = await provider.prepare(account, updateSource, record.intent.command);

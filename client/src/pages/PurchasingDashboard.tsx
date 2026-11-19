@@ -1,4 +1,5 @@
-import { landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
+import { costHealthTitle, landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
+import { CostReviewTaskSummary } from "@/features/purchasing/CostReviewTaskSummary";
 import { DailyBuyingReview } from "@/features/purchasing/DailyBuyingReview";
 import { PurchasePipeline } from "@/features/purchasing/PurchasePipeline";
 import { useState } from "react";
@@ -21,6 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth";
 import { ExclusionRulesModal } from "@/components/purchasing/ExclusionRulesModal";
 
 interface ForecastDiagnostics {
@@ -465,7 +467,7 @@ function formatRelativeTime(dateStr: string): string {
 }
 
 function formatHealthType(type: string): string {
-  return type.replace(/_/g, " ");
+  return costHealthTitle(type);
 }
 
 function formatForecastMethod(method?: string | null): string {
@@ -641,6 +643,11 @@ export default function PurchasingDashboard() {
   const [, navigate] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const { hasPermission, hasSystemRole } = useAuth();
+  // Match the auto-draft POST boundary: adjustment permission alone does not
+  // authorize starting the job; the server also requires the assigned system role.
+  const canRunAutoDraft = hasSystemRole("admin") && hasPermission("inventory", "adjust");
+  const canManagePlanningPolicy = hasPermission("inventory", "adjust") || hasPermission("purchasing", "edit");
   const [exclusionModalOpen, setExclusionModalOpen] = useState(false);
   const [runHistorySearch, setRunHistorySearch] = useState("");
 
@@ -700,6 +707,7 @@ export default function PurchasingDashboard() {
 
   const runAutoDraftMutation = useMutation({
     mutationFn: async (): Promise<{ runId: number; interruptedRunIds: number[] }> => {
+      if (!canRunAutoDraft) throw new Error("Admin role and inventory adjustment permission are required to run auto-draft.");
       const res = await fetch("/api/purchasing/auto-draft/run", { method: "POST" });
       const payload = await res.json().catch(() => null);
       if (!res.ok) throw new Error(payload?.error ?? "Failed to trigger auto-draft");
@@ -1063,10 +1071,10 @@ export default function PurchasingDashboard() {
                         </span>
                         <span className="text-[10px] text-muted-foreground">{item.shipmentStatus}</span>
                       </div>
-                      <div className="text-xs text-muted-foreground mt-1 break-words">{item.detail}</div>
+                      <div className="text-xs text-muted-foreground mt-1 break-words"><CostReviewTaskSummary item={item} /></div>
                     </div>
                     <Button size="sm" variant="outline" className="text-[11px] h-7 flex-shrink-0" onClick={() => navigate(landedCostHealthHref(item))}>
-                      Review
+                      Review costs
                     </Button>
                   </div>
                 ))}
@@ -1468,7 +1476,7 @@ export default function PurchasingDashboard() {
               ) : (
                 <div className="text-xs text-muted-foreground">Never run</div>
               )}
-              <Button
+              {canRunAutoDraft && <Button
                 variant="outline"
                 size="sm"
                 className="w-full mt-3 text-xs justify-center"
@@ -1477,14 +1485,14 @@ export default function PurchasingDashboard() {
               >
                 <Zap className="h-3 w-3 mr-1.5" />
                 {runAutoDraftMutation.isPending || autoDraftRunActive ? "Auto-Draft Running" : "Run Auto-Draft Now"}
-              </Button>
+              </Button>}
               <Button
                 variant="ghost"
                 size="sm"
                 className="w-full mt-1 text-[11px] justify-center text-muted-foreground"
                 onClick={() => setExclusionModalOpen(true)}
               >
-                ⚙️ Manage Planning Policy
+                {canManagePlanningPolicy ? "⚙️ Manage Planning Policy" : "Review Planning Policy"}
               </Button>
             </Card>
           </div>

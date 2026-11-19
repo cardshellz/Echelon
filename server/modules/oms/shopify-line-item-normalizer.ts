@@ -8,6 +8,7 @@
 
 import { buildChannelLineDisplayName } from "./line-display-name";
 import { normalizeShopifyLineVariantId } from "./domain/order-line-catalog-identity";
+import { parseDecimalCents } from "@shared/money-read";
 
 // Rewards redemption detection constants
 const REWARDS_REDEMPTION_LABEL = process.env.REWARDS_REDEMPTION_LABEL || "Shellz Rewards Redemption";
@@ -64,8 +65,7 @@ export function readShopifyLineCurrentQuantity(
 }
 
 function dollarsToCents(value: string | number | undefined | null): number {
-  if (value === null || value === undefined) return 0;
-  return Math.round(parseFloat(String(value)) * 100);
+  return parseDecimalCents(value, "Shopify line amount");
 }
 
 function splitDiscountAllocations(item: any, discountApplications: any[]): LineDiscountSplit {

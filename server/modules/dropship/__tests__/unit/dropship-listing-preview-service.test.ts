@@ -64,17 +64,10 @@ import type {
   DropshipVendorProvisioningService,
 } from "../../application/dropship-vendor-provisioning-service";
 import type { DropshipCatalogExposureRule } from "../../domain/catalog-exposure";
-import type {
-  DropshipVendorSelectionRule,
-  DropshipVendorVariantOverride,
-} from "../../domain/vendor-selection";
+import type { DropshipVendorVariantOverride } from "../../domain/vendor-selection";
 import { ConfigDrivenDropshipMarketplaceListingProvider } from "../../infrastructure/dropship-config-driven-marketplace-listing.provider";
 import { toDropshipVendorListingPreview } from "../../application/dropship-listing-dtos";
-import {
-  buildListingQueueRequest,
-  type DropshipCatalogRow as ClientCatalogRow,
-  type DropshipListingPreviewResult as ClientListingPreviewResult,
-} from "../../../../../client/src/lib/dropship-ops-surface";
+import type { DropshipListingPreviewResult as ClientListingPreviewResult } from "../../../../../client/src/lib/dropship-ops-surface";
 import { registerDropshipListingRoutes } from "../../interfaces/http/dropship-listing.routes";
 
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
@@ -150,9 +143,9 @@ describe("DropshipListingPreviewService", () => {
       ebayFulfillmentPolicyGuard: {
         evaluateForStoreConnection: async (input) => {
           evaluatedFulfillmentPolicyIds.push(input.fulfillmentPolicyId);
-          return { ...ebayPolicyPreflight, fulfillmentPolicyId: input.fulfillmentPolicyId };
+          return { originWarehouseId: null, ...ebayPolicyPreflight, fulfillmentPolicyId: input.fulfillmentPolicyId };
         },
-        evaluateWithAccessToken: async () => ebayPolicyPreflight,
+        evaluateWithAccessToken: async () => ({ originWarehouseId: null, ...ebayPolicyPreflight }),
       },
       ebayReturnPaymentPolicies: {
         check: async (input) => {
@@ -173,6 +166,18 @@ describe("DropshipListingPreviewService", () => {
       },
     };
     service = new DropshipListingPreviewService(serviceDeps);
+  });
+
+  it("blocks a size the vendor did not pick, by its picks of the previewed sizes only (PLAN-B v4.1 §9 row 2)", async () => {
+    const picked = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(picked.rows[0].blockers.filter((blocker) => blocker.startsWith("selection:"))).toEqual([]);
+    expect(repository.pickReads.at(-1)?.productVariantIds).toEqual([101]);
+
+    repository.unpickedVariantIds = new Set([101]);
+    const unpicked = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(unpicked.rows[0].previewStatus).toBe("blocked");
+    expect(unpicked.rows[0].blockers).toContain("selection:missing_vendor_include_rule");
+    expect(unpicked.rows[0].selectionDecision).toMatchObject({ picked: false, selected: false });
   });
 
   it("reports the tier a SKU sells in and leaves an on-sale tier alone", async () => {
@@ -249,6 +254,17 @@ describe("DropshipListingPreviewService", () => {
       priceSettingRevisionId: 7,
     });
     expect(repository.lastCreatedInput?.preview.rows[0].listingIntent?.description).toBe(content.descriptionHtml);
+    // Only the push sweep names a publish run's chunk (step 1 plan S2-5, §4.3): every other caller's job has none.
+    expect(repository.lastCreatedInput).not.toHaveProperty("run");
+  });
+
+  it("passes a publish run's chunk through to the job it queues (the push sweep's internal input)", async () => {
+    await service.createListingPushJob({
+      vendorId: 10, storeConnectionId: 22, productVariantIds: [101], reviewMode: "current_preview",
+      idempotencyKey: "dropship-run:10:4:0", requestedBy: { actorType: "vendor", actorId: "member-1" },
+      run: { runId: 4, chunkIndex: 0 },
+    });
+    expect(repository.lastCreatedInput).toMatchObject({ idempotencyKey: "dropship-run:10:4:0", run: { runId: 4, chunkIndex: 0 } });
   });
 
   it("replays a one-step push by its key even when stock moved in between", async () => {
@@ -313,10 +329,11 @@ describe("DropshipListingPreviewService", () => {
       return content;
     }
 
-    it("queues the vendor page's one-click request", async () => {
+    // Step 1 plan S2-5 PR A: the page now publishes through runs, so its builder is gone. A tab of the page before A
+    // still sends this exact one-step body (buildListingQueueRequest's answer at stage 1), and the route still serves it.
+    it("queues the one-click request a page of stage 1 sends", async () => {
       const content = withEvidenceOnEveryKind();
-      const selected = { productVariantId: 101, selectionDecision: { selected: true } } as unknown as ClientCatalogRow;
-      const body = buildListingQueueRequest({ storeConnectionId: 22, rows: [selected], idempotencyKey: "http-one-step" });
+      const body = { storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "http-one-step", reviewMode: "current_preview" };
 
       const response = await post("/api/dropship/listing-push-jobs", body);
 
@@ -349,6 +366,15 @@ describe("DropshipListingPreviewService", () => {
 
       expect(response.status).toBe(201);
       expect((await response.json()).job.status).toBe("queued");
+    });
+
+    it("answers a vendor key in the publish runs' reserved prefix with a 400, before any job is written (review CT8)", async () => {
+      const response = await post("/api/dropship/listing-push-jobs", {
+        storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "dropship-run:10:4:0", reviewMode: "current_preview",
+      });
+      expect(response.status).toBe(400);
+      expect((await response.json()).error).toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_KEY_RESERVED" });
+      expect(repository.lastCreatedInput).toBeNull();
     });
 
     it("answers a mixed request with a 400 that names the conflict", async () => {
@@ -1036,6 +1062,49 @@ describe("DropshipListingPreviewService", () => {
     });
   });
 
+  // eBay sync-back's live-policy rule (plan v4 SB10, owner rule 4): the vendor's policy already live on this listing never freezes pushes.
+  describe("the vendor's shipping policy already live on the listing (SB10)", () => {
+    const livePolicyPreview = async (listing: Partial<DropshipExistingVendorListing>) => {
+      repository.context = { ...repository.context, platform: "ebay" };
+      repository.config = { ...repository.config!, platform: "ebay", marketplaceConfig: { profileId: "profile-1", marketplaceId: "EBAY_US",
+        businessPolicies: { fulfillmentPolicyId: "fulfillment-policy" } } };
+      ebayPolicyPreflight = { compatible: false, fulfillmentPolicyId: "fulfillment-policy", capabilityEvidenceHash: "capability-hash-2",
+        issues: [{ code: "shipping_service_unsupported:VendorCourier", message: "VendorCourier is unsupported." }] };
+      repository.existingListings = [{ productVariantId: 101, listingId: 1, status: "active", vendorRetailPriceCents: null, quantityCap: null,
+        externalListingId: "110000000001", observedFulfillmentPolicyId: "fulfillment-policy", ...listing }];
+      return (await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299 })).rows[0]!;
+    };
+
+    it("keeps it as a warning, not a blocker, while it is the very policy live on the listing", async () => {
+      const row = await livePolicyPreview({});
+      expect(row.blockers).not.toContain("ebay_fulfillment_policy:shipping_service_unsupported:VendorCourier");
+      expect(row.warnings).toContain("ebay_fulfillment_policy_live:shipping_service_unsupported:VendorCourier");
+    });
+
+    it.each([
+      ["a policy Card Shellz would introduce", { observedFulfillmentPolicyId: "another-policy" }],
+      ["a listing never read", { observedFulfillmentPolicyId: null }],
+      ["an ended listing", { status: "ended" }],
+      ["a listing not on eBay yet", { externalListingId: null }],
+    ])("still blocks %s", async (_name, listing) => {
+      const row = await livePolicyPreview(listing as Partial<DropshipExistingVendorListing>);
+      expect(row.blockers).toContain("ebay_fulfillment_policy:shipping_service_unsupported:VendorCourier");
+    });
+  });
+
+  // eBay sync-back owner rule 1 (plan v4 SB29, legacy authority): the push publishes min(ATP as today, the vendor's limit).
+  it.each([
+    [null, 4],
+    [2, 2],
+    [10, 4],
+  ])("keeps ATP on the row and pushes min(ATP, limit) for a vendor limit of %s", async (vendorQuantityLimit, pushed) => {
+    repository.existingListings = [{ productVariantId: 101, listingId: 1, status: "active", vendorRetailPriceCents: null, quantityCap: null,
+      externalListingId: "ebay-1", vendorQuantityLimit }];
+    const row = (await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1299 })).rows[0]!;
+    expect(row.marketplaceQuantity).toBe(4);
+    expect(row.listingIntent).toMatchObject({ quantity: pushed });
+  });
+
   it("applies store-and-variant policy overrides and validates the effective fulfillment policy", async () => {
     repository.context = { ...repository.context, platform: "ebay" };
     repository.config = {
@@ -1053,6 +1122,7 @@ describe("DropshipListingPreviewService", () => {
     };
     repository.listingPolicyOverrides = [{
       productVariantId: 101,
+      revisionId: 1,
       fulfillmentPolicyId: "fulfillment-override",
       returnPolicyId: "return-override",
       paymentPolicyId: null,
@@ -1899,7 +1969,7 @@ describe("DropshipListingPreviewService", () => {
         generatePreview: (input) => service.generatePreview(input),
         resolveCostChangePolicy: async () => ({ policyId: null, settings: DEFAULT_DROPSHIP_COST_CHANGE_POLICY }),
         logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      }, { jobId: 30, jobItemId: 1, vendorId: 10, storeConnectionId: 22, productVariantId: 101, queuedPriceCents: 1152 });
+      }, { jobId: 30, jobItemId: 1, vendorId: 10, storeConnectionId: 22, productVariantId: 101, queuedPriceCents: 1152, queuedMarketplaceCategory: null });
       separateReads();
       const separate = await refresh();
 
@@ -2149,15 +2219,13 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
     return [{ id: 1, scopeType: "catalog", action: "include" }];
   }
 
-  async listSelectionRules(): Promise<DropshipVendorSelectionRule[]> {
-    return [{
-      id: 2,
-      scopeType: "catalog",
-      action: "include",
-      autoConnectNewSkus: true,
-      autoListNewSkus: true,
-      isActive: true,
-    }];
+  /** Sizes the vendor did not pick; every other requested size is picked. */
+  unpickedVariantIds = new Set<number>();
+  readonly pickReads: Array<{ vendorId: number; productVariantIds: number[] }> = [];
+
+  async listPickedVariantIds(vendorId: number, productVariantIds: readonly number[]): Promise<Set<number>> {
+    this.pickReads.push({ vendorId, productVariantIds: [...productVariantIds] });
+    return new Set(productVariantIds.filter((id) => !this.unpickedVariantIds.has(id)));
   }
 
   async listCatalogCandidates(): Promise<DropshipListingCatalogCandidate[]> {
@@ -2233,7 +2301,7 @@ function availableCost(unitCostCents: number): DropshipProductCost {
   return { status: "available", unitCostCents, planId: "ops", source: "variant_fixed_price", overrideId: "fixed", issue: null, retailPriceCents: null, discountBps: null };
 }
 function rulePrice(): ListingRulePrice {
-  return { priceCents: 1152, ruleName: "Store default rule", ruleId: null, issue: null, profileRevisionId: 1,
+  return { priceCents: 1152, ruleName: "Store default rule", ruleId: null, issue: null, basis: "product_cost", profileRevisionId: 1,
     evidenceHash: "a".repeat(64), productCost: { status: "available", unitCostCents: 809, planId: "ops", source: "variant_fixed_price", overrideId: "fixed", issue: null, retailPriceCents: null, discountBps: null } };
 }
 function makeCandidate(): DropshipListingCatalogCandidate {

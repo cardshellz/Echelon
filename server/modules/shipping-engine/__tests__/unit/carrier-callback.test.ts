@@ -535,6 +535,12 @@ const QUOTES: RateQuoteLine[] = [
     promiseMaxBusinessDays: 7,
     ratedMeasure: 500,
     maxShipmentWeightGrams: null,
+    chargeModel: "fixed_band",
+    perStartedPoundCents: null,
+    billablePounds: null,
+    rateTableId: 1,
+    productPolicyApplied: false,
+    calculationTrace: [],
   },
   {
     serviceLevelId: 2,
@@ -549,6 +555,12 @@ const QUOTES: RateQuoteLine[] = [
     promiseMaxBusinessDays: 3,
     ratedMeasure: 500,
     maxShipmentWeightGrams: null,
+    chargeModel: "fixed_band",
+    perStartedPoundCents: null,
+    billablePounds: null,
+    rateTableId: 1,
+    productPolicyApplied: false,
+    calculationTrace: [],
   },
 ];
 

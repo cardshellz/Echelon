@@ -80,4 +80,84 @@ describe("SyncRecoveryService ordering", () => {
       "wms_to_shipstation_after_shopify_reconcile",
     ]);
   });
+
+  it("reports skipped: true and allOk: false when overlapping an in-flight run", async () => {
+    const service = new SyncRecoveryService({}, {});
+    let releaseFirstRun!: () => void;
+    vi.spyOn(service, "runShopifyToOmsBackfill").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseFirstRun = () => resolve(stage("shopify_to_oms"));
+        }),
+    );
+    vi.spyOn(service, "runOmsToWmsBackfill").mockResolvedValue(stage("oms_to_wms"));
+    vi.spyOn(service, "runWmsToShipStationBackfill").mockResolvedValue(stage("wms_to_shipstation"));
+    vi.spyOn(service, "runShopifyReconcile").mockResolvedValue(stage("shopify_reconcile"));
+
+    const firstRunPromise = service.runAll();
+    const overlappingResult = await service.runAll();
+
+    expect(overlappingResult.skipped).toBe(true);
+    expect(overlappingResult.allOk).toBe(false);
+    expect(overlappingResult.stages[0]?.name).toBe("skipped");
+
+    releaseFirstRun();
+    const firstResult = await firstRunPromise;
+    expect(firstResult.allOk).toBe(true);
+    expect(firstResult.skipped).toBeUndefined();
+  });
+
+  it("stamps scheduler_runs completion only when boot and interval runs succeed without skipping", async () => {
+    vi.useFakeTimers();
+    try {
+      const execute = vi.fn().mockResolvedValue({ rows: [] });
+      const service = new SyncRecoveryService({ execute }, {});
+
+      // 1st run (boot catch-up): stage fails -> must NOT stamp scheduler_runs
+      const runAllSpy = vi
+        .spyOn(service, "runAll")
+        .mockResolvedValueOnce({
+          startedAt: new Date().toISOString(),
+          durationMs: 5,
+          stages: [{ name: "shopify_to_oms", ok: false, error: "db error" }],
+          allOk: false,
+        })
+        // 2nd run (first interval tick): skipped -> must NOT stamp scheduler_runs
+        .mockResolvedValueOnce({
+          startedAt: new Date().toISOString(),
+          durationMs: 0,
+          stages: [{ name: "skipped", ok: true, data: { reason: 0 } }],
+          allOk: false,
+          skipped: true,
+        })
+        // 3rd run (second interval tick): allOk -> MUST stamp scheduler_runs
+        .mockResolvedValueOnce({
+          startedAt: new Date().toISOString(),
+          durationMs: 5,
+          stages: [{ name: "shopify_to_oms", ok: true }],
+          allOk: true,
+        });
+
+      const handle = service.startScheduled(1, 100);
+
+      // Boot catch-up fires at 100ms: 1 DB execute for getLastRunAt, 0 for recordRunCompleted
+      await vi.advanceTimersByTimeAsync(100);
+      expect(runAllSpy).toHaveBeenCalledTimes(1);
+      expect(execute).toHaveBeenCalledTimes(1);
+
+      // First interval tick at +60_000ms: skipped -> 0 additional DB executes
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(runAllSpy).toHaveBeenCalledTimes(2);
+      expect(execute).toHaveBeenCalledTimes(1);
+
+      // Second interval tick at +60_000ms: succeeded -> 1 additional DB execute for recordRunCompleted
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(runAllSpy).toHaveBeenCalledTimes(3);
+      expect(execute).toHaveBeenCalledTimes(2);
+
+      handle.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

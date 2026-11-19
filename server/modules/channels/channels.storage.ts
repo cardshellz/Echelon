@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import { assertEbayStorePolicyMetadataWriteOwned, EBAY_BUSINESS_POLICY_CHANNEL_ID } from "@shared/ebay-business-policies";
 import {
   db,
@@ -38,6 +39,14 @@ import {
   buildProductScopeCondition,
   type ProductScope,
 } from "./product-line-scope";
+import {
+  replaceProductLineProductsInCatalog,
+  addProductToProductLineInCatalog,
+  removeProductFromProductLineInCatalog,
+  addProductsToProductLineInCatalog,
+  removeProductsFromLineInCatalog,
+  removeProductsFromAllLinesInCatalog,
+} from "../catalog/product-line-membership.api";
 
 export interface IChannelStorage {
   getAllChannels(): Promise<Channel[]>;
@@ -491,53 +500,27 @@ export const channelMethods: IChannelStorage = {
   },
 
   async replaceProductLineProducts(lineId: number, productIds: number[]): Promise<void> {
-    await db.delete(productLineProducts).where(eq(productLineProducts.productLineId, lineId));
-    if (productIds.length > 0) {
-      await db.insert(productLineProducts).values(
-        productIds.map((pid: number) => ({ productLineId: lineId, productId: pid }))
-      ).onConflictDoNothing();
-    }
+    await replaceProductLineProductsInCatalog(db, lineId, productIds);
   },
 
   async addProductToProductLine(lineId: number, productId: number): Promise<ProductLineProduct | null> {
-    const [created] = await db.insert(productLineProducts).values({
-      productLineId: lineId,
-      productId,
-    }).onConflictDoNothing().returning();
-    return created || null;
+    return addProductToProductLineInCatalog(db, lineId, productId);
   },
 
   async removeProductFromProductLine(lineId: number, productId: number): Promise<void> {
-    await db.delete(productLineProducts).where(
-      and(eq(productLineProducts.productLineId, lineId), eq(productLineProducts.productId, productId))
-    );
+    await removeProductFromProductLineInCatalog(db, lineId, productId);
   },
 
   async addProductsToProductLine(lineId: number, productIds: number[]): Promise<number> {
-    if (productIds.length === 0) return 0;
-    const result = await db.insert(productLineProducts).values(
-      productIds.map((pid: number) => ({ productLineId: lineId, productId: pid }))
-    ).onConflictDoNothing().returning({ id: productLineProducts.id });
-    return result.length;
+    return addProductsToProductLineInCatalog(db, lineId, productIds);
   },
 
   async removeProductsFromLine(lineId: number, productIds: number[]): Promise<number> {
-    if (productIds.length === 0) return 0;
-    const result = await db.delete(productLineProducts).where(
-      and(
-        eq(productLineProducts.productLineId, lineId),
-        inArray(productLineProducts.productId, productIds),
-      )
-    ).returning({ id: productLineProducts.id });
-    return result.length;
+    return removeProductsFromLineInCatalog(db, lineId, productIds);
   },
 
   async removeProductsFromAllLines(productIds: number[]): Promise<number> {
-    if (productIds.length === 0) return 0;
-    const result = await db.delete(productLineProducts)
-      .where(inArray(productLineProducts.productId, productIds))
-      .returning({ id: productLineProducts.id });
-    return result.length;
+    return removeProductsFromAllLinesInCatalog(db, productIds);
   },
 
   async getProductLineProductIds(lineId: number, executor: any = db): Promise<number[]> {
@@ -676,7 +659,7 @@ export const channelMethods: IChannelStorage = {
     const invByProduct = new Map<number, { qty: number; valueCents: number }>();
     for (const r of invRows as any[]) {
       const qty = Number(r.qty ?? 0);
-      const cost = Number(r.avgCostCents ?? 0);
+      const cost = readIntegerCents(r.avgCostCents ?? 0, "cost", true);
       const existing = invByProduct.get(r.productId) ?? { qty: 0, valueCents: 0 };
       existing.qty += qty;
       existing.valueCents += qty * cost;
@@ -760,7 +743,7 @@ export const channelMethods: IChannelStorage = {
       ));
     const variantIds = (variantRows as any[]).map((v) => v.id as number);
     const costById = new Map<number, number>();
-    for (const v of variantRows as any[]) costById.set(v.id, Number(v.avgCostCents ?? 0));
+    for (const v of variantRows as any[]) costById.set(v.id, readIntegerCents(v.avgCostCents ?? 0, "computed amount", true));
 
     if (variantIds.length === 0) {
       return { productCount: productIds.length, variantCount: 0, inventoryQty: 0, inventoryValueCents: 0 };

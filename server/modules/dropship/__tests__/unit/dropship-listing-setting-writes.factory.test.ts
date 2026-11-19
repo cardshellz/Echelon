@@ -92,7 +92,7 @@ function w12Transaction(requestKey: string): ListingSettingWriteTransaction {
       loadStoreContext: async () => ({ vendorId: 10, vendorStatus: "active", entitlementStatus: "active", storeConnectionId: STORE,
         storeStatus: "connected", setupStatus: "ready", platform: "ebay", storeLaunchReady: true }),
       listCatalogExposureRules: async () => [{ id: 1, scopeType: "catalog", action: "include" }],
-      listSelectionRules: async () => [{ id: 2, scopeType: "catalog", action: "include", isActive: true }],
+      listPickedVariantIds: async (_vendorId: number, ids: readonly number[]) => new Set(ids),
       listCatalogCandidates: async (ids: readonly number[]) => ids.map((productVariantId) => ({ productId: 7, productVariantId,
         productLineIds: [], category: "Toploaders", categoryId: CATEGORY, ebayBrowseCategoryId: null, ebayBrowseCategoryName: null,
         productIsActive: true, variantIsActive: true, variantUomType: "pack", unitsPerVariant: 1, defaultRetailPriceCents: 999, sku: null,

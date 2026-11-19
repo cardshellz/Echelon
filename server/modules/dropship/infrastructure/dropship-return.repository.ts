@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import { createHash } from "crypto";
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
@@ -387,11 +388,13 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
         input.vendorId,
         input.storeConnectionId ?? null,
       );
-      await assertIntakeBelongsToVendor(
-        client,
-        input.vendorId,
-        input.intakeId ?? null,
-      );
+      const lockedOrder = await lockIntakeAndAssertEntitlementForCreate(client, {
+        vendorId: input.vendorId,
+        intakeId: input.intakeId ?? null,
+        omsOrderId: input.omsOrderId ?? null,
+        items: input.items,
+      });
+      const effectiveOmsOrderId = input.omsOrderId ?? lockedOrder.omsOrderId ?? null;
       const insert = await client.query<{ id: number; rma_number: string }>(
         `INSERT INTO dropship.dropship_rmas
           (vendor_id, store_connection_id, intake_id, oms_order_id,
@@ -404,7 +407,7 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
           input.vendorId,
           input.storeConnectionId ?? null,
           input.intakeId ?? null,
-          input.omsOrderId ?? null,
+          effectiveOmsOrderId,
           input.reasonCode ?? null,
           input.faultCategory ?? null,
           input.returnWindowDays,
@@ -640,6 +643,20 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
         reason: input.notes ?? null,
       });
 
+      if (input.outcome === "approved" && !input.settlement.overrideReason) {
+        const rejectedItemIds = new Set(
+          input.items
+            .filter((item) => item.status === "rejected")
+            .map((item) => item.rmaItemId),
+        );
+        await assertNoCanonicalSettlementOvercreditForRma(client, {
+          rmaId: input.rmaId,
+          intakeId: rma.intake_id,
+          omsOrderId: rma.oms_order_id === null ? null : Number(rma.oms_order_id),
+          rejectedRmaItemIds: rejectedItemIds,
+        });
+      }
+
       const inspection = await insertInspection(client, {
         rmaId: input.rmaId,
         outcome: input.outcome,
@@ -765,8 +782,8 @@ export class PgDropshipReturnRepository implements DropshipReturnRepository {
     if (!row) return null;
     return {
       intakeId: row.intake_id,
-      wholesaleSubtotalCents: Number(row.wholesale_subtotal_cents),
-      shippingCents: Number(row.shipping_cents),
+      wholesaleSubtotalCents: readIntegerCents(row.wholesale_subtotal_cents, "wholesale subtotal", true),
+      shippingCents: readIntegerCents(row.shipping_cents, "shipping", true),
       currency: row.currency,
       lines: mapEconomicsWholesaleLines(row.pricing_snapshot),
     };
@@ -1098,6 +1115,8 @@ async function loadRmaForUpdate(
 ): Promise<{
   id: number;
   vendor_id: number;
+  intake_id: number | null;
+  oms_order_id: string | number | null;
   status: DropshipRmaStatus;
 } | null> {
   const params: unknown[] = [rmaId];
@@ -1106,9 +1125,11 @@ async function loadRmaForUpdate(
   const result = await client.query<{
     id: number;
     vendor_id: number;
+    intake_id: number | null;
+    oms_order_id: string | number | null;
     status: DropshipRmaStatus;
   }>(
-    `SELECT id, vendor_id, status
+    `SELECT id, vendor_id, intake_id, oms_order_id, status
      FROM dropship.dropship_rmas
      WHERE id = $1
        ${vendorClause}
@@ -1448,8 +1469,8 @@ async function getOrCreateWalletAccountForUpdate(
   return {
     walletAccountId: row.id,
     vendorId: row.vendor_id,
-    availableBalanceCents: Number(row.available_balance_cents),
-    pendingBalanceCents: Number(row.pending_balance_cents),
+    availableBalanceCents: readIntegerCents(row.available_balance_cents, "available balance", true),
+    pendingBalanceCents: readIntegerCents(row.pending_balance_cents, "pending balance", true),
     currency: row.currency,
     status: row.status,
   };
@@ -1496,8 +1517,8 @@ async function updateWalletAccountBalance(
   return {
     walletAccountId: row.id,
     vendorId: row.vendor_id,
-    availableBalanceCents: Number(row.available_balance_cents),
-    pendingBalanceCents: Number(row.pending_balance_cents),
+    availableBalanceCents: readIntegerCents(row.available_balance_cents, "available balance", true),
+    pendingBalanceCents: readIntegerCents(row.pending_balance_cents, "pending balance", true),
     currency: row.currency,
     status: row.status,
   };
@@ -1612,25 +1633,417 @@ async function assertStoreConnectionBelongsToVendor(
   }
 }
 
-async function assertIntakeBelongsToVendor(
+const RETURN_QUANTITY_LOCK_NAMESPACE = 918413;
+const POSTGRES_INTEGER_MAX = 2_147_483_647;
+
+function normalizeDropshipLineIdentity(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.replace(/^gid:\/\/shopify\/LineItem\//i, "");
+}
+
+async function lockIntakeAndAssertEntitlementForCreate(
   client: PoolClient,
-  vendorId: number,
-  intakeId: number | null,
-): Promise<void> {
-  if (!intakeId) return;
-  const result = await client.query(
-    `SELECT 1
-     FROM dropship.dropship_order_intake
-     WHERE id = $1
-       AND vendor_id = $2
-     LIMIT 1`,
-    [intakeId, vendorId],
+  input: {
+    vendorId: number;
+    intakeId: number | null;
+    omsOrderId: number | null;
+    items: CreateRepositoryInput["items"];
+  },
+): Promise<{ omsOrderId: number | null }> {
+  if (!input.intakeId && !input.omsOrderId) {
+    return { omsOrderId: null };
+  }
+
+  let preloadedOmsOrderId = input.omsOrderId;
+  if (input.intakeId) {
+    const peek = await client.query<{ oms_order_id: string | number | null }>(
+      `SELECT oms_order_id
+       FROM dropship.dropship_order_intake
+       WHERE id = $1
+         AND vendor_id = $2
+       LIMIT 1`,
+      [input.intakeId, input.vendorId],
+    );
+    if (peek.rowCount !== 1) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_INTAKE_NOT_FOUND",
+        "Dropship order intake was not found for the vendor.",
+        { vendorId: input.vendorId, intakeId: input.intakeId },
+      );
+    }
+    const rawOms = peek.rows[0]?.oms_order_id;
+    if (preloadedOmsOrderId === null && rawOms !== null && rawOms !== undefined) {
+      preloadedOmsOrderId = safeInteger(rawOms, "oms_order_id");
+    }
+  }
+
+  if (
+    preloadedOmsOrderId !== null &&
+    preloadedOmsOrderId > 0 &&
+    preloadedOmsOrderId <= POSTGRES_INTEGER_MAX
+  ) {
+    await client.query(
+      `SELECT pg_advisory_xact_lock($1, $2)`,
+      [RETURN_QUANTITY_LOCK_NAMESPACE, preloadedOmsOrderId],
+    );
+  }
+
+  let lockedIntake: {
+    id: number;
+    omsOrderId: number | null;
+    lines: DropshipRmaOrderReference["lines"];
+  } | null = null;
+  if (input.intakeId) {
+    const locked = await client.query<{
+      id: number;
+      oms_order_id: string | number | null;
+      normalized_payload: Record<string, unknown> | null;
+    }>(
+      `SELECT id, oms_order_id, normalized_payload
+       FROM dropship.dropship_order_intake
+       WHERE id = $1
+         AND vendor_id = $2
+       LIMIT 1
+       FOR UPDATE`,
+      [input.intakeId, input.vendorId],
+    );
+    const row = locked.rows[0];
+    if (!row) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_INTAKE_NOT_FOUND",
+        "Dropship order intake was not found for the vendor.",
+        { vendorId: input.vendorId, intakeId: input.intakeId },
+      );
+    }
+    lockedIntake = {
+      id: row.id,
+      omsOrderId: row.oms_order_id === null ? null : safeInteger(row.oms_order_id, "oms_order_id"),
+      lines: mapRmaOrderReferenceLines(row.normalized_payload),
+    };
+  }
+
+  const effectiveOmsOrderId = input.omsOrderId ?? lockedIntake?.omsOrderId ?? null;
+  const orderItems = input.items.filter((item) => item.source === "order");
+  if (orderItems.length === 0 || !lockedIntake) {
+    return { omsOrderId: effectiveOmsOrderId };
+  }
+
+  const buckets = lockedIntake.lines.map((line) => ({
+    lineIndex: line.lineIndex,
+    externalLineId: normalizeDropshipLineIdentity(line.externalLineItemId),
+    productVariantId: line.productVariantId,
+    orderedQty: line.quantity,
+    claimedQty: 0,
+  }));
+
+  const allocateExistingClaim = (claim: {
+    quantity: number;
+    orderLineIndex: number | null;
+    externalLineId: string | null;
+    productVariantId: number | null;
+  }) => {
+    let remaining = claim.quantity;
+    if (remaining <= 0) return;
+    if (
+      claim.orderLineIndex !== null &&
+      claim.orderLineIndex >= 0 &&
+      claim.orderLineIndex < buckets.length
+    ) {
+      const target = buckets[claim.orderLineIndex];
+      const consumed = Math.min(Math.max(target.orderedQty - target.claimedQty, 0), remaining);
+      target.claimedQty += consumed;
+      remaining -= consumed;
+      if (remaining > 0) {
+        target.claimedQty += remaining;
+        return;
+      }
+    }
+    const passes: Array<(bucket: (typeof buckets)[number]) => boolean> = [];
+    if (claim.externalLineId !== null) {
+      passes.push((bucket) => bucket.externalLineId === claim.externalLineId);
+    }
+    if (claim.productVariantId !== null) {
+      passes.push((bucket) => bucket.productVariantId === claim.productVariantId);
+    }
+    passes.push(() => true);
+    for (const matches of passes) {
+      if (remaining <= 0) break;
+      for (const bucket of buckets) {
+        if (remaining <= 0) break;
+        if (!matches(bucket)) continue;
+        const available = Math.max(bucket.orderedQty - bucket.claimedQty, 0);
+        if (available <= 0) continue;
+        const consumed = Math.min(available, remaining);
+        bucket.claimedQty += consumed;
+        remaining -= consumed;
+      }
+    }
+    if (remaining > 0 && buckets.length > 0) {
+      const fallback =
+        (claim.externalLineId !== null
+          ? buckets.find((bucket) => bucket.externalLineId === claim.externalLineId)
+          : undefined) ??
+        (claim.productVariantId !== null
+          ? buckets.find((bucket) => bucket.productVariantId === claim.productVariantId)
+          : undefined) ??
+        buckets[0];
+      fallback.claimedQty += remaining;
+    }
+  };
+
+  const existingLegacy = await client.query<{
+    quantity: number;
+    order_line_index: number | null;
+    external_line_item_id: string | null;
+    product_variant_id: number | null;
+  }>(
+    `SELECT ri.quantity, ri.order_line_index, ri.external_line_item_id, ri.product_variant_id
+     FROM dropship.dropship_rma_items ri
+     JOIN dropship.dropship_rmas r ON r.id = ri.rma_id
+     WHERE (r.intake_id = $1 OR ($2::bigint IS NOT NULL AND r.oms_order_id = $2))
+       AND (r.status NOT IN ('rejected', 'closed') OR r.credited_at IS NOT NULL)
+       AND ri.status <> 'rejected'
+       AND ri.source = 'order'
+       AND NOT EXISTS (
+         SELECT 1
+         FROM returns.return_cases rc
+         WHERE rc.source_provider = 'dropship'
+           AND rc.source_event_type = 'legacy_rma'
+           AND rc.source_event_id = r.id::text
+       )
+     ORDER BY r.id ASC, ri.id ASC`,
+    [lockedIntake.id, effectiveOmsOrderId],
   );
-  if (result.rowCount !== 1) {
+  for (const row of existingLegacy.rows) {
+    allocateExistingClaim({
+      quantity: safeInteger(row.quantity, "legacy_rma_item_quantity"),
+      orderLineIndex: row.order_line_index === null ? null : Number(row.order_line_index),
+      externalLineId: normalizeDropshipLineIdentity(row.external_line_item_id),
+      productVariantId: nullablePositiveInteger(row.product_variant_id),
+    });
+  }
+
+  if (effectiveOmsOrderId !== null) {
+    const canonicalWmsClaims = await client.query<{
+      claimed_quantity: string | number;
+      external_line_item_id: string | null;
+      product_variant_id: number | null;
+    }>(
+      `SELECT
+         crcq.claimed_quantity,
+         COALESCE(ol.external_line_item_id, oi.source_item_id) AS external_line_item_id,
+         ol.product_variant_id
+       FROM wms.orders wo
+       JOIN wms.order_items oi ON oi.order_id = wo.id
+       LEFT JOIN oms.oms_order_lines ol
+         ON ol.id = oi.oms_order_line_id
+        AND ol.order_id = $1
+       JOIN returns.customer_return_claimed_quantities crcq
+         ON crcq.wms_order_item_id = oi.id
+       WHERE wo.oms_fulfillment_order_id = $1::text
+         AND oi.requires_shipping <> 0
+       ORDER BY wo.id ASC, oi.id ASC`,
+      [effectiveOmsOrderId],
+    );
+    for (const row of canonicalWmsClaims.rows) {
+      allocateExistingClaim({
+        quantity: safeInteger(row.claimed_quantity, "canonical_claimed_quantity"),
+        orderLineIndex: null,
+        externalLineId: normalizeDropshipLineIdentity(row.external_line_item_id),
+        productVariantId: nullablePositiveInteger(row.product_variant_id),
+      });
+    }
+
+    const unlinkedCanonicalClaims = await client.query<{
+      quantity: string | number;
+      external_line_item_id: string | null;
+      product_variant_id: number | null;
+    }>(
+      `SELECT rci.quantity, rci.external_line_item_id, ol.product_variant_id
+       FROM returns.return_case_items rci
+       JOIN returns.return_cases rc ON rc.id = rci.return_case_id
+       LEFT JOIN oms.oms_order_lines ol
+         ON ol.id = rci.oms_order_line_id
+        AND ol.order_id = $1
+       WHERE rc.oms_order_id = $1
+         AND rc.case_status <> 'cancelled'
+         AND rc.approval_status <> 'rejected'
+         AND rci.wms_order_item_id IS NULL
+       ORDER BY rc.id ASC, rci.id ASC`,
+      [effectiveOmsOrderId],
+    );
+    for (const row of unlinkedCanonicalClaims.rows) {
+      allocateExistingClaim({
+        quantity: safeInteger(row.quantity, "unlinked_canonical_claimed_quantity"),
+        orderLineIndex: null,
+        externalLineId: normalizeDropshipLineIdentity(row.external_line_item_id),
+        productVariantId: nullablePositiveInteger(row.product_variant_id),
+      });
+    }
+  }
+
+  for (const item of orderItems) {
+    const extId = normalizeDropshipLineIdentity(item.externalLineItemId);
+    const variantId = item.productVariantId ?? null;
+    const matchedBucket =
+      (item.orderLineIndex != null && item.orderLineIndex >= 0 && item.orderLineIndex < buckets.length
+        ? buckets[item.orderLineIndex]
+        : undefined) ??
+      (extId !== null ? buckets.find((bucket) => bucket.externalLineId === extId) : undefined) ??
+      (variantId !== null ? buckets.find((bucket) => bucket.productVariantId === variantId) : undefined);
+
+    if (!matchedBucket) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_QUANTITY_EXCEEDED",
+        "Requested return item could not be matched to a returnable source order line.",
+        {
+          intakeId: lockedIntake.id,
+          omsOrderId: effectiveOmsOrderId,
+          orderLineIndex: item.orderLineIndex ?? null,
+          externalLineItemId: item.externalLineItemId ?? null,
+          productVariantId: variantId,
+        },
+      );
+    }
+
+    const remaining = Math.max(matchedBucket.orderedQty - matchedBucket.claimedQty, 0);
+    if (item.quantity > remaining) {
+      throw new DropshipError(
+        "DROPSHIP_RETURN_QUANTITY_EXCEEDED",
+        "Requested return quantity exceeds remaining returnable quantity across dropship and canonical return cases.",
+        {
+          intakeId: lockedIntake.id,
+          omsOrderId: effectiveOmsOrderId,
+          lineIndex: matchedBucket.lineIndex,
+          externalLineItemId: matchedBucket.externalLineId,
+          productVariantId: matchedBucket.productVariantId,
+          orderedQuantity: matchedBucket.orderedQty,
+          alreadyClaimedQuantity: matchedBucket.claimedQty,
+          requestedQuantity: item.quantity,
+          remainingQuantity: remaining,
+        },
+      );
+    }
+    matchedBucket.claimedQty += item.quantity;
+  }
+
+  return { omsOrderId: effectiveOmsOrderId };
+}
+
+export async function assertNoCanonicalSettlementOvercreditForRma(
+  client: PoolClient,
+  input: {
+    rmaId: number;
+    intakeId: number | null;
+    omsOrderId: number | null;
+    rejectedRmaItemIds?: ReadonlySet<number>;
+  },
+): Promise<void> {
+  let effectiveOmsOrderId = input.omsOrderId;
+  let normalizedPayload: Record<string, unknown> | null = null;
+
+  if (input.intakeId) {
+    const intake = await client.query<{
+      oms_order_id: string | number | null;
+      normalized_payload: Record<string, unknown> | null;
+    }>(
+      `SELECT oms_order_id, normalized_payload
+       FROM dropship.dropship_order_intake
+       WHERE id = $1
+       LIMIT 1`,
+      [input.intakeId],
+    );
+    const row = intake.rows[0];
+    if (row) {
+      normalizedPayload = row.normalized_payload;
+      if (effectiveOmsOrderId === null && row.oms_order_id !== null) {
+        effectiveOmsOrderId = safeInteger(row.oms_order_id, "oms_order_id");
+      }
+    }
+  } else if (effectiveOmsOrderId !== null) {
+    const intake = await client.query<{
+      normalized_payload: Record<string, unknown> | null;
+    }>(
+      `SELECT normalized_payload
+       FROM dropship.dropship_order_intake
+       WHERE oms_order_id = $1
+       ORDER BY id ASC
+       LIMIT 1`,
+      [effectiveOmsOrderId],
+    );
+    normalizedPayload = intake.rows[0]?.normalized_payload ?? null;
+  }
+
+  if (effectiveOmsOrderId === null) return;
+
+  if (effectiveOmsOrderId > 0 && effectiveOmsOrderId <= POSTGRES_INTEGER_MAX) {
+    await client.query(
+      `SELECT pg_advisory_xact_lock($1, $2)`,
+      [RETURN_QUANTITY_LOCK_NAMESPACE, effectiveOmsOrderId],
+    );
+  }
+
+  const canonicalSettled = await client.query<{ settled_qty: string | number }>(
+    `SELECT COALESCE(SUM(rci.quantity), 0)::int AS settled_qty
+     FROM returns.return_case_vendor_settlements rcvs
+     JOIN returns.return_cases rc ON rc.id = rcvs.return_case_id
+     JOIN returns.return_case_items rci ON rci.return_case_id = rc.id
+     WHERE rc.oms_order_id = $1`,
+    [effectiveOmsOrderId],
+  );
+  const canonicalSettledQty = safeInteger(canonicalSettled.rows[0]?.settled_qty ?? 0, "canonical_settled_qty");
+  if (canonicalSettledQty === 0) return;
+
+  const rmaItems = await client.query<{ id: number; quantity: number; source: string; status: string }>(
+    `SELECT id, quantity, source, status
+     FROM dropship.dropship_rma_items
+     WHERE rma_id = $1`,
+    [input.rmaId],
+  );
+  const thisRmaOrderQty = rmaItems.rows.reduce((sum, item) => {
+    if (item.source !== "order") return sum;
+    if (item.status === "rejected" || input.rejectedRmaItemIds?.has(item.id)) return sum;
+    return sum + safeInteger(item.quantity, "rma_item_quantity");
+  }, 0);
+  if (thisRmaOrderQty === 0) return;
+
+  const otherLegacyCredited = await client.query<{ credited_qty: string | number }>(
+    `SELECT COALESCE(SUM(ri.quantity), 0)::int AS credited_qty
+     FROM dropship.dropship_rma_items ri
+     JOIN dropship.dropship_rmas r ON r.id = ri.rma_id
+     LEFT JOIN dropship.dropship_order_intake doi ON doi.id = r.intake_id
+     WHERE r.id <> $1
+       AND (r.oms_order_id = $2 OR doi.oms_order_id = $2)
+       AND r.credited_at IS NOT NULL
+       AND ri.status <> 'rejected'
+       AND ri.source = 'order'
+       AND NOT EXISTS (
+         SELECT 1
+         FROM returns.return_cases rc
+         WHERE rc.source_provider = 'dropship'
+           AND rc.source_event_type = 'legacy_rma'
+           AND rc.source_event_id = r.id::text
+       )`,
+    [input.rmaId, effectiveOmsOrderId],
+  );
+  const otherCreditedQty = safeInteger(otherLegacyCredited.rows[0]?.credited_qty ?? 0, "other_credited_qty");
+  const orderedLines = mapRmaOrderReferenceLines(normalizedPayload);
+  const totalOrderedQty = orderedLines.reduce((sum, line) => sum + line.quantity, 0);
+
+  if (totalOrderedQty === 0 || canonicalSettledQty + otherCreditedQty + thisRmaOrderQty > totalOrderedQty) {
     throw new DropshipError(
-      "DROPSHIP_ORDER_INTAKE_NOT_FOUND",
-      "Dropship order intake was not found for the vendor.",
-      { vendorId, intakeId },
+      "DROPSHIP_RETURN_CANONICAL_SETTLEMENT_CONFLICT",
+      "A canonical return case vendor settlement has already credited overlapping units for this order.",
+      {
+        rmaId: input.rmaId,
+        omsOrderId: effectiveOmsOrderId,
+        canonicalSettledQuantity: canonicalSettledQty,
+        otherLegacyCreditedQuantity: otherCreditedQty,
+        requestedCreditQuantity: thisRmaOrderQty,
+        orderedQuantity: totalOrderedQty,
+      },
     );
   }
 }
@@ -1980,10 +2393,10 @@ function mapRmaItemRow(row: RmaItemRow): DropshipRmaItemRecord {
     requestedCreditCents:
       row.requested_credit_cents === null
         ? null
-        : Number(row.requested_credit_cents),
+        : readIntegerCents(row.requested_credit_cents, "requested credit", true),
     finalCreditCents:
-      row.final_credit_cents === null ? null : Number(row.final_credit_cents),
-    feeCents: row.fee_cents === null ? null : Number(row.fee_cents),
+      row.final_credit_cents === null ? null : readIntegerCents(row.final_credit_cents, "final credit", true),
+    feeCents: row.fee_cents === null ? null : readIntegerCents(row.fee_cents, "fee", true),
     createdAt: row.created_at,
   };
 }
@@ -1998,8 +2411,8 @@ function mapRmaInspectionRow(
     faultCategory: row.fault_category,
     notes: row.notes,
     photos: row.photos ?? [],
-    creditCents: Number(row.credit_cents),
-    feeCents: Number(row.fee_cents),
+    creditCents: readIntegerCents(row.credit_cents, "credit", true),
+    feeCents: readIntegerCents(row.fee_cents, "fee", true),
     feeBreakdown: row.fee_breakdown ?? {},
     inspectedBy: row.inspected_by,
     idempotencyKey: row.idempotency_key,
@@ -2015,20 +2428,20 @@ function mapWalletLedgerRow(row: WalletLedgerRow): DropshipWalletLedgerRecord {
     vendorId: row.vendor_id,
     type: row.type,
     status: row.status,
-    amountCents: Number(row.amount_cents),
+    amountCents: readIntegerCents(row.amount_cents, "amount", true),
     currency: row.currency,
     availableBalanceAfterCents:
       row.available_balance_after_cents === null
         ? null
-        : Number(row.available_balance_after_cents),
+        : readIntegerCents(row.available_balance_after_cents, "available balance after", true),
     pendingBalanceAfterCents:
       row.pending_balance_after_cents === null
         ? null
-        : Number(row.pending_balance_after_cents),
+        : readIntegerCents(row.pending_balance_after_cents, "pending balance after", true),
     rewardsBalanceAfterCents:
       row.rewards_balance_after_cents === null || row.rewards_balance_after_cents === undefined
         ? null
-        : Number(row.rewards_balance_after_cents),
+        : readIntegerCents(row.rewards_balance_after_cents, "rewards balance after", true),
     referenceType: row.reference_type,
     referenceId: row.reference_id,
     idempotencyKey: row.idempotency_key,

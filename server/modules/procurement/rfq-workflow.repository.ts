@@ -1,5 +1,6 @@
 import { supplierSelectionEvidenceSchema } from "@shared/procurement/supplier-sourcing";
 import { sql, type SQL } from "drizzle-orm";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 import { z } from "zod";
 import {
   RFQ_WORKFLOW_MAX_LINES,
@@ -33,7 +34,7 @@ const lineSchema = z.object({
   warehouse_id: nullableId, vendor_product_id: dbId, sku: z.string(), product_name: z.string(), requested_pieces: dbId,
 });
 
-function isoTimestamp(value: unknown): string {
+export function isoTimestamp(value: unknown): string {
   if (value instanceof Date) return value.toISOString();
   // Echelon's PostgreSQL parser preserves timestamptz as text. Require an
   // explicit zone, then normalize its space separator to the API ISO contract.
@@ -115,7 +116,14 @@ export async function updateRfqQuoteMirrors(executor: RfqWorkflowExecutor, rfqId
 }
 
 export async function appendRfqAudit(executor: RfqWorkflowExecutor, input: { actorId: string; action: string; rfqId: number; before: unknown; after: unknown; at: Date; context?: Record<string, unknown> }): Promise<void> {
-  await executor.execute(sql`INSERT INTO public.audit_events (timestamp, level, actor, action, target, changes, context) VALUES (${input.at}, 'AUDIT', ${input.actorId}, ${input.action}, ${`request_for_quote:${input.rfqId}`}, ${JSON.stringify({ before: input.before, after: input.after })}::jsonb, ${JSON.stringify(input.context ?? {})}::jsonb)`);
+  await insertAuditEventSql(executor, {
+    timestamp: input.at,
+    actor: input.actorId,
+    action: input.action,
+    target: `request_for_quote:${input.rfqId}`,
+    changesJson: JSON.stringify({ before: input.before, after: input.after }),
+    contextJson: JSON.stringify(input.context ?? {}),
+  });
 }
 
 export async function loadCreatedPurchaseLines(executor: RfqWorkflowExecutor, purchaseOrderId: number): Promise<Array<{ id: number; lineNumber: number }>> {

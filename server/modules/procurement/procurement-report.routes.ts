@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import type { Express } from "express";
 import { requirePermission } from "../../routes/middleware";
 import { procurementStorage } from "../procurement";
@@ -64,7 +65,7 @@ export function registerProcurementReportRoutes(app: Express) {
       const total = (rows as any[]).reduce(
         (acc: any, r: any) => ({
           poCount: acc.poCount + Number(r.po_count),
-          valueCents: acc.valueCents + Number(r.total_value_cents || 0),
+          valueCents: acc.valueCents + readIntegerCents(r.total_value_cents ?? 0, "value", true),
         }),
         { poCount: 0, valueCents: 0 },
       );

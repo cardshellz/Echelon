@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { customerReturnProgressSchema } from "../customer-account/order-progress";
 import {
   customerReturnLabelStatusSchema,
   customerReturnLabelSubmitInputSchema,
@@ -27,6 +28,11 @@ export type CustomerReturnCustomerLabelStatus = z.infer<typeof customerReturnCus
 export const customerReturnCustomerHistoryInputSchema = z.object({
   beforeAuthorizationId: z.number().int().positive().safe().optional(),
   pageSize: z.number().int().min(1).max(20).default(10),
+  includeProgress: z.boolean().optional(),
+}).strict();
+export const customerReturnCustomerHistoryQuerySchema = z.object({
+  before: z.coerce.number().int().positive().safe().optional(),
+  progress: z.literal("1").optional(),
 }).strict();
 export const customerReturnCustomerHistoryItemSchema = z.object({
   authorizationId: z.number().int().positive().safe(),
@@ -34,6 +40,9 @@ export const customerReturnCustomerHistoryItemSchema = z.object({
   omsOrderId: z.number().int().positive().safe(),
   orderReference: z.string().min(1).max(100).nullable(),
   createdAt: z.string().datetime({ offset: true }),
+  // Optional during a rolling deployment; missing progress must never be
+  // presented as a label, physical receipt, or financial settlement.
+  progress: customerReturnProgressSchema.nullable().optional(),
 }).strict();
 export const customerReturnCustomerHistorySchema = z.object({
   returns: z.array(customerReturnCustomerHistoryItemSchema).max(20),

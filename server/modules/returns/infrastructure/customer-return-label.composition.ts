@@ -12,15 +12,15 @@ import {
 import { CustomerReturnLabelsService } from "../application/customer-return-labels.service";
 import { CustomerReturnSubmissionService } from "../application/customer-return-submission.service";
 import { CustomerReturnIntakeError } from "../application/customer-return-intake.ports";
-import { createShipStationReturnLabelAdapter } from "../../shipping-engine/infrastructure/shipstation-return-label.adapter";
-import { createShipStationReturnRateAdapter } from "../../shipping-engine/infrastructure/shipstation-return-rate.adapter";
-import { ReturnRateProviderError } from "../../shipping-engine/application/return-rate-provider.port";
-import { isReturnRateCatalogServiceEligible } from "../../shipping-engine/application/return-rate-catalog";
-import { createShipStationV2RatingAdapter } from "../../shipping-engine/infrastructure/shipstation-v2-rating.adapter";
+import { createShipStationReturnLabelAdapter } from "../../shipping-engine/return-shipping-and-labels.api";
+import { createShipStationReturnRateAdapter } from "../../shipping-engine/return-shipping-and-labels.api";
+import { ReturnRateProviderError } from "../../shipping-engine/return-shipping-and-labels.api";
+import { isReturnRateCatalogServiceEligible } from "../../shipping-engine/return-shipping-and-labels.api";
+import { createShipStationV2RatingAdapter } from "../../shipping-engine/return-shipping-and-labels.api";
 import {
   ReturnLabelProviderError,
   type ReturnLabelProvider,
-} from "../../shipping-engine/application/return-label-provider.port";
+} from "../../shipping-engine/return-shipping-and-labels.api";
 
 /** Instantiated after staff authorization or inside the exact customer ownership
  * wrapper. These internal services must never be exposed directly to customers. */

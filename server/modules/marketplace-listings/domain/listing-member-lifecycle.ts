@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import type { ListingMemberIdentity, ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
+import { listingMemberObservationSchema, type ListingMemberIdentity, type ListingMemberRetirement } from "@shared/types/listing-member-lifecycle";
 import type { StockPublicationSelection } from "@shared/types/stock-publication-selection";
 
 export function listingMemberIdentityKey(identity: ListingMemberIdentity): string {
@@ -38,6 +38,16 @@ export function archivedListingMemberSelection(input: {
       externalInventoryItemId: retirement.identity.externalInventoryItemId ?? retirement.identity.externalSku,
     } } : {}),
   };
+}
+
+/** Validate the normalized read before it can prove removal or authorize a retry. */
+export function validateListingMemberObservation(value: unknown, identity: ListingMemberIdentity) {
+  const result = listingMemberObservationSchema.safeParse(value);
+  if (!result.success) throw new ListingMemberLifecycleError("LISTING_MEMBER_OBSERVATION_INVALID",
+    "The channel returned an unreadable removal status. No new removal was authorized. Refresh the recovery review.");
+  if (listingMemberIdentityKey(result.data.identity) !== listingMemberIdentityKey(identity))
+    throw new ListingMemberLifecycleError("LISTING_MEMBER_IDENTITY_CHANGED", "The provider returned a different listing identity.");
+  return result.data;
 }
 
 export class ListingMemberLifecycleError extends Error {

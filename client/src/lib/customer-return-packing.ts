@@ -374,7 +374,7 @@ export function movePreviewPackingItems(
     const items = changedItems.get(parcel.key);
     // Reconcile once, using final contents rather than intermediate transfers.
     return [
-      items ? reconcilePreviewParcelSize(order, { ...parcel, items }) : parcel,
+      items ? reconcilePreviewParcelSize(order, { ...parcel, packedWeightOunces: undefined, items }) : parcel,
     ];
   });
   if (isNew) {
@@ -463,6 +463,7 @@ export function changePreviewPackingQuantity(
         ? parcel
         : reconcilePreviewParcelSize(order, {
             ...parcel,
+            packedWeightOunces: undefined,
             items: parcel.items.map((item) =>
               item.lineId === lineId ? { ...item, quantity: raw } : item,
             ),

@@ -3,6 +3,7 @@ import type { CostIssue, CostSourceReference } from "@shared/procurement/cost-so
 import { costFingerprint, costInteger } from "../../inventory/infrastructure/cost-evidence-values";
 import { allocateCentsFromNumericBasis } from "./shipment-allocation-basis";
 import { supplierCreditDispositionMatches, supplierCreditInvoiceSourceFingerprint, supplierCreditIssue, supplierCreditSourceEvidenceSchema, type SupplierCreditCostRow } from "./supplier-credit-source";
+import { supplierInvoiceTaxSource } from "./supplier-invoice-amounts";
 
 /** A credit reduces a specific positive original charge. Its cents are allocated
  * over that charge's saved positive allocations, with the existing exact integer
@@ -13,6 +14,7 @@ export function resolveShipmentSupplierCredits(input: {
   allocations: readonly Record<string, unknown>[];
   invoices: readonly Record<string, unknown>[];
   credits: readonly SupplierCreditCostRow[];
+  purpose?: "inventory" | "supplier_balance";
 }) {
   const issues: CostIssue[] = [];
   const sources: CostSourceReference[] = [];
@@ -20,6 +22,7 @@ export function resolveShipmentSupplierCredits(input: {
   const creditedCentsByLine = new Map<number, number>();
   const totals = new Map<number, bigint>();
   const identities = new Set<number>();
+  const taxTotals = new Map<string, { refunded: bigint; capacity: bigint }>();
   for (const credit of input.credits) {
     if (supplierCreditDispositionSchema.safeParse(credit.disposition).data?.kind === "accepted_stock_return") continue;
     const creditLineId = costInteger(credit.id, "creditLineId", 1);
@@ -50,6 +53,16 @@ export function resolveShipmentSupplierCredits(input: {
     issues.push(...evidence.issues);
     const amount = costInteger(credit.amount_cents, "creditAmountCents", 1);
     if (evidence.issues.length) continue;
+    if (evidence.taxCredit) {
+      const tax = supplierInvoiceTaxSource(invoice, evidence.taxCredit.key);
+      if (!tax || tax.taxTypeId !== evidence.taxCredit.taxTypeId || tax.amountMills !== evidence.taxCredit.sourceAmountMills) {
+        issues.push(supplierCreditIssue("CREDIT_TAX_SOURCE_CHANGED", "Review the landed refund's original tax source.")); continue;
+      }
+      const key = `${invoice.id}:${tax.key}`, total = taxTotals.get(key) ?? { refunded: BigInt(0), capacity: BigInt(tax.amountMills) };
+      total.refunded += BigInt(evidence.taxCredit.amountMills); taxTotals.set(key, total);
+      if (tax.treatment === "inventory" || input.purpose === "supplier_balance") totals.set(evidence.freightCostId!, (totals.get(evidence.freightCostId!) ?? BigInt(0)) + BigInt(amount));
+      continue;
+    }
     if (evidence.reduction.productMills !== 0 || evidence.reduction.packagingMills !== 0 || evidence.reduction.basePieces !== 0
       || BigInt(evidence.reduction.landedMills) !== BigInt(amount) * BigInt(100)) {
       issues.push(supplierCreditIssue("CREDIT_LANDED_AMOUNT_MISMATCH", "The landed credit must reconcile exactly to its recorded original charge reduction."));
@@ -58,6 +71,8 @@ export function resolveShipmentSupplierCredits(input: {
     const chargeId = evidence.freightCostId!;
     totals.set(chargeId, (totals.get(chargeId) ?? BigInt(0)) + BigInt(amount));
   }
+  for (const total of taxTotals.values()) if (total.refunded > total.capacity)
+    issues.push(supplierCreditIssue("CREDIT_TAX_EXCEEDED", "Cumulative refunds exceed the original shipment tax source."));
   for (const [chargeId, credited] of totals) {
     const charge = input.charges.find(row => Number(row.id) === chargeId);
     const saved = input.allocations.filter(row => Number(row.shipment_cost_id) === chargeId);

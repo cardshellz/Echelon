@@ -1,3 +1,5 @@
+import { customerAccountOverviewSchema } from "@shared/customer-account/account-overview";
+import { dispatchCustomerReturn } from "../../returns/customer-account-http.api";
 import type { Express, Response } from "express";
 import { rateLimit } from "express-rate-limit";
 import { z } from "zod";
@@ -13,6 +15,7 @@ import {
   orderEditOrderSchema,
   orderEditOperationSchema,
 } from "@shared/order-edits/order-edit.contract";
+import { extractPublicOrderEditCodeErrorParams } from "@shared/order-edits/order-edit-code-errors";
 import {
   orderEditPreviewSchema,
   orderEditPreviewWarmSchema,
@@ -25,14 +28,18 @@ import {
 import {
   CustomerReturnCustomerAccessError,
   type CustomerReturnCustomerSession,
-} from "../../returns/application/customer-return-customer-auth.service";
-import { createCustomerReturnCustomerAuth } from "../../returns/infrastructure/customer-return-customer-auth.composition";
+} from "../../returns/customer-return-access-contracts.api";
 import {
+  createCustomerReturnCustomerAuth,
   returnCustomerError,
   returnCustomerPrivateResponse,
-} from "../../returns/interfaces/http/customer-return-customer-auth.routes";
-import { OrderEditError } from "../../order-edits/domain/order-edit-error";
-import { OrderEditProviderError } from "../../order-edits/application/order-edit-provider";
+} from "../../returns/customer-account-http.api";
+import {
+  OrderEditError,
+  orderEditOrderManagementPresentation,
+  OrderEditProviderError,
+  orderEditResponsePresentation,
+} from "../../order-edits/customer-account.api";
 import {
   CustomerAccountOriginAccessError,
   readCustomerAccountStagingConfig,
@@ -42,8 +49,11 @@ import {
 } from "../domain/customer-account-staging";
 import type { customerAccountServices } from "../infrastructure/customer-account.composition";
 import { orderEditPricingDisplayVersionSchema } from "@shared/order-edits/order-edit-financials";
-import { orderEditResponsePresentation } from "../../order-edits/application/order-edit-response-presentation";
 import { rewardWidgetStateSchema, rewardWidgetIssueResultSchema, rewardWidgetManagementStateSchema, rewardWidgetCancelResultSchema } from "@shared/customer-account/reward-widget";
+import { customerOrderCancellationReviewSchema, customerOrderCancellationSchema } from "@shared/customer-account/order-cancellation";
+import { CUSTOMER_ORDER_PROGRESS_VERSION } from "@shared/customer-account/order-progress";
+import { customerAccountOrderDetailsSchema, customerAccountOrderSummariesSchema } from "@shared/customer-account/customer-account-orders";
+import { customerOrderActionPageSchema } from "@shared/customer-account/order-actions";
 
 type Services = ReturnType<ReturnType<typeof customerAccountServices>>;
 export interface CustomerAccountRouteDependencies {
@@ -124,11 +134,21 @@ export function registerCustomerAccountRoutes(
         ? { context: error.context }
         : {}),
     });
-    if (known)
+    if (known) {
+      const publicParams = extractPublicOrderEditCodeErrorParams(
+        error.code,
+        error instanceof OrderEditError ? error.params : error.context,
+      );
       res
         .status(error instanceof OrderEditError ? error.status : 409)
-        .json({ error: { code: error.code, message: error.message } });
-    else returnCustomerError(res, error);
+        .json({
+          error: {
+            code: error.code,
+            message: error.message,
+            ...(publicParams ? { params: publicParams } : {}),
+          },
+        });
+    } else returnCustomerError(res, error);
   };
   app.post(
     CUSTOMER_ACCOUNT_PROXY_API,
@@ -164,7 +184,7 @@ export function registerCustomerAccountRoutes(
           sessionKey: input.sessionKey,
         });
         if (
-          input.path !== "/account/bootstrap" &&
+          input.path !== "/account/bootstrap" && input.path !== "/account/overview" &&
           input.sessionKey !== principal.sessionKey
         ) {
           throw new CustomerReturnCustomerAccessError(
@@ -234,11 +254,53 @@ async function dispatch(
       connection: await services.edits.connection(),
     });
   }
+  if (path === "/account/overview" && !read) {
+    empty.parse(query);
+    const [connection, summaries, actions] = await Promise.all([
+      services.edits.connection(), services.orders.summaries(body, { progress: true, saved: true }), services.orders.actions(body, { allowUnavailable: true }),
+    ]);
+    return customerAccountOverviewSchema.parse({
+      bootstrap: { session: { authenticated: true, privateTesting: true, sessionKey: principal.sessionKey }, connection },
+      summaries, actions,
+    });
+  }
+  if (path === "/account/saved-summaries" && !read) {
+    empty.parse(query);
+    return customerAccountOrderSummariesSchema.parse(await services.orders.summaries(body, { progress: true, saved: true }));
+  }
   if (path === "/account/resolve" && !read) {
     empty.parse(query);
     return services.edits.resolve(body);
   }
+  if (path === "/account/order-summaries" && !read) {
+    const version = z.object({ statusDisplayVersion: z.literal(CUSTOMER_ORDER_PROGRESS_VERSION).optional() }).strict().parse(query);
+    return customerAccountOrderSummariesSchema.parse(version.statusDisplayVersion ? await services.orders.summaries(body, { progress: true }) : await services.orders.summaries(body));
+  }
+  if (path === "/account/order-actions" && !read) {
+    empty.parse(query);
+    return customerOrderActionPageSchema.parse(await services.orders.actions(body));
+  }
+  if (path === "/account/order-actions/refresh" && !read) {
+    empty.parse(query);
+    return customerOrderActionPageSchema.parse(await services.orders.refreshActions(body));
+  }
+  if (path === "/account/order-details" && !read) {
+    empty.parse(query);
+    return customerAccountOrderDetailsSchema.parse(await services.orders.details(body));
+  }
   const order = /^\/order-edits\/orders\/([1-9][0-9]*)$/.exec(path);
+  const cancellation = /^\/account\/orders\/([1-9][0-9]*)\/cancellation(?:\/(review|status))?$/.exec(path);
+  if (cancellation) {
+    const omsOrderId = id.parse(cancellation[1]);
+    if (read && cancellation[2] === "status") {
+      const params = connectionQuery.extend({ requestKey: z.string().uuid() }).strict().parse(query);
+      return customerOrderCancellationSchema.parse(await services.edits.cancellationStatus(params.connectionId, omsOrderId, params.requestKey));
+    }
+    const params = connectionQuery.parse(query);
+    if (read && cancellation[2] === "review") return customerOrderCancellationReviewSchema.parse(await services.edits.cancellationReview(params.connectionId, omsOrderId));
+    if (!read && !cancellation[2]) return customerOrderCancellationSchema.parse(await services.edits.submitCancellation(params.connectionId, omsOrderId, body, commandKey(input)));
+    throw notFound();
+  }
   const rewards = /^\/order-edits\/orders\/([1-9][0-9]*)\/rewards(?:\/(issue|manage|cancel))?$/.exec(path);
   if (rewards) {
     const params = connectionQuery.parse(query);
@@ -250,16 +312,16 @@ async function dispatch(
   }
   if (order && read) {
     const params = connectionQuery
-      .extend({ codeEntryVersion: z.literal("v1").optional() })
+      .extend({ codeEntryVersion: z.literal("v1").optional(), managementVersion: z.enum(["v1", "v2"]).optional() })
       .parse(query);
     return orderEditResponsePresentation(
-      orderEditOrderSchema.parse(
+      orderEditOrderManagementPresentation(orderEditOrderSchema.parse(
         await services.edits.order(
           params.connectionId,
           id.parse(order[1]),
           params.codeEntryVersion,
         ),
-      ),
+      ), params.managementVersion),
       pricingDisplay,
     );
   }
@@ -310,12 +372,12 @@ async function dispatch(
     const operationId = z.string().uuid().parse(operation[1]);
     if (!operation[2] && read) {
       const params = z
-        .object({ codeEntryVersion: z.literal("v1").optional() })
+        .object({ codeEntryVersion: z.literal("v1").optional(), observationVersion: z.literal("v1").optional() })
         .strict()
         .parse(query);
       return orderEditResponsePresentation(
         orderEditOperationSchema.parse(
-          await services.edits.operation(operationId, params.codeEntryVersion),
+          await services.edits.operation(operationId, params.codeEntryVersion, params.observationVersion),
         ),
         pricingDisplay,
       );
@@ -335,60 +397,9 @@ async function dispatch(
       );
     }
   }
-  if (!path.startsWith("/returns/")) throw notFound();
-  const returns = await services.returns();
-  const returnOrder =
-    /^\/returns\/orders\/([1-9][0-9]*)(?:\/(review|returns))?$/.exec(path);
-  if (returnOrder) {
-    empty.parse(query);
-    const omsOrderId = id.parse(returnOrder[1]);
-    if (!returnOrder[2] && read) return returns.orders.order(omsOrderId);
-    if (!read && returnOrder[2] === "review")
-      return returns.orders.review(omsOrderId, body);
-    if (!read && returnOrder[2] === "returns")
-      return returns.operations.submit(omsOrderId, body);
-  }
-  if (path === "/returns/returns" && read) {
-    const parsed = z.object({ before: id.optional() }).strict().parse(query);
-    return returns.operations.listReturns(
-      parsed.before ? { beforeAuthorizationId: parsed.before } : {},
-    );
-  }
-  const command = /^\/returns\/commands\/([a-f0-9-]+)(?:\/(resume))?$/.exec(
-    path,
-  );
-  if (command) {
-    empty.parse(query);
-    const key = z.string().uuid().parse(command[1]);
-    if (!command[2] && read) return returns.operations.submissionStatus(key);
-    if (command[2] && !read) {
-      empty.parse(body);
-      return returns.operations.resumeSubmission(key);
-    }
-  }
-  const label =
-    /^\/returns\/returns\/([1-9][0-9]*)(?:\/(progress)|\/parcels\/([1-9][0-9]*)\/download)?$/.exec(
-      path,
-    );
-  if (label) {
-    empty.parse(query);
-    const authorizationId = id.parse(label[1]);
-    if (label[3] && read) {
-      const artifact = await returns.operations.artifact(
-        authorizationId,
-        id.parse(label[3]),
-      );
-      return returns.download(artifact.downloadUrl);
-    }
-    if (label[2] && !read) {
-      empty.parse(body);
-      return returns.operations.progressLabels(authorizationId);
-    }
-    if (!label[2] && !label[3] && read)
-      return returns.operations.labelStatus(authorizationId);
-  }
-  throw notFound();
+  return dispatchCustomerReturn(input, await services.returns());
 }
+
 function commandKey(input: CustomerAccountRequest): string {
   return z.string().uuid().parse(input.commandKey);
 }

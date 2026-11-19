@@ -16,7 +16,7 @@ export interface ReturnCaseOperationAggregate {
   caseNumber: string;
   omsOrderId: number;
   wmsReturnId: number;
-  wmsOrderId: number;
+  wmsOrderId: number | null;
   items: Array<{
     returnCaseItemId: number;
     omsOrderLineId: number | null;

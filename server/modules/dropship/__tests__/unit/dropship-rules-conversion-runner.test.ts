@@ -170,7 +170,7 @@ describe("the rules conversion worker (PR 11e2, plan 9.2, 9.4, 13.1)", () => {
 
   it("starts after the first-mark worker's phase, on a phase and a lock no other worker uses", () => {
     const names = ["listingPush", "orderProcessing", "ebayOrderIntake", "returnIntake", "returnsMaintenance", "usdcWatcher", "costDetection",
-      "categoryMarks", "rulesConversion"] as const;
+      "categoryMarks", "rulesConversion", "catalogArrivals", "listingEnd"] as const;
     const delays = names.map((name) => resolveDropshipWorkerSchedule(name, {}).initialDelayMs);
     expect(new Set(delays).size).toBe(names.length);
     expect(resolveDropshipWorkerSchedule("rulesConversion", {}).initialDelayMs)
@@ -188,7 +188,10 @@ describe("the rules conversion worker (PR 11e2, plan 9.2, 9.4, 13.1)", () => {
     const block = /if \(!schedulersDisabled\(\)\) \{\n([\s\S]*?)\n\s*\} else \{\n\s*logSchedulerDisabled\("scheduler", "Dropship workers"\);/.exec(index);
     expect(block).not.toBeNull();
     const started = block![1].split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
-    expect(started.slice(-2)).toEqual(["startDropshipCategoryMarksWorker();", "startDropshipRulesConversionWorker();"]);
+    // eBay sync-back's worker starts after it (dropship-marketplace-sync-runner.test.ts pins that).
+    const rulesConversion = started.indexOf("startDropshipRulesConversionWorker();");
+    expect(started.slice(rulesConversion - 1, rulesConversion + 1)).toEqual(["startDropshipCategoryMarksWorker();",
+      "startDropshipRulesConversionWorker();"]);
     // Started nowhere else (one start per process).
     expect(index.match(/startDropshipRulesConversionWorker\(\)/g)).toHaveLength(1);
   });

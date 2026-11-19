@@ -14,12 +14,13 @@ const NOW = new Date("2026-08-21T12:00:00.000Z");
 
 function createDb(line: Record<string, unknown>) {
   const updates: Record<string, unknown>[] = [];
+  const persisted = { channelCurrentQuantity: line.quantity, channelQuantityUpdatedAt: NOW, ...line };
   const tx = {
     execute: vi.fn(async () => ({ rows: [] })),
     select: () => ({
       from: () => ({
         where: () => ({
-          for: async () => [line],
+          for: async () => [persisted],
         }),
       }),
     }),
@@ -42,6 +43,29 @@ function createDb(line: Record<string, unknown>) {
 }
 
 describe("reconcileShopifyLineReadiness", () => {
+  it("records a dated channel observation even when paid dispatch quantity has not increased", async () => {
+    const { db, updates } = createDb({ id: 101, orderId: 55, externalLineItemId: "9001", quantity: 2,
+      requiresShipping: true, paidQuantity: 1, authorityFulfillableQuantity: 1, wmsMaterializedQuantity: 1,
+      channelCurrentQuantity: null, channelQuantityUpdatedAt: null,
+      cancelledQuantity: 0, refundedQuantity: 1, authorizationStatus: "partially_refunded" });
+    const result = await reconcileShopifyLineReadiness({ db, omsOrderId: 55, financialStatus: "partially_refunded",
+      sourceEventId: "native:dated", channelUpdatedAt: NOW, now: NOW,
+      lineItems: [{ externalLineItemId: "9001", quantity: 2, currentQuantity: 1, fulfillableQuantity: 1 }] });
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ channelCurrentQuantity: 1, channelQuantityUpdatedAt: NOW, paidQuantity: 1, authorityFulfillableQuantity: 1 });
+    expect(result).toMatchObject({ advancedLines: 0, advancedQuantity: 0, wmsSyncRequired: true });
+  });
+  it("uses a lower current quantity without granting payment authority or subtracting refund history twice", async () => {
+    const { db, updates } = createDb({ id: 101, orderId: 55, externalLineItemId: "9001", quantity: 2,
+      requiresShipping: true, paidQuantity: 2, authorityFulfillableQuantity: 2, wmsMaterializedQuantity: 2,
+      channelQuantityUpdatedAt: new Date("2026-08-21T11:59:59.000Z"),
+      cancelledQuantity: 0, refundedQuantity: 1, authorizationStatus: "partially_refunded" });
+    const result = await reconcileShopifyLineReadiness({ db, omsOrderId: 55, financialStatus: "partially_refunded",
+      sourceEventId: "native:lower", channelUpdatedAt: NOW, now: NOW,
+      lineItems: [{ externalLineItemId: "9001", quantity: 2, currentQuantity: 1, fulfillableQuantity: 1 }] });
+    expect(updates[0]).toMatchObject({ channelCurrentQuantity: 1, paidQuantity: 2, authorityFulfillableQuantity: 1 });
+    expect(result).toMatchObject({ advancedQuantity: 0, wmsSyncRequired: true });
+  });
   beforeEach(() => {
     recordAuthorityEvent.mockReset();
     recordAuthorityEvent.mockResolvedValue(undefined);
@@ -70,9 +94,9 @@ describe("reconcileShopifyLineReadiness", () => {
       financialStatus: "paid",
       sourceEventId: "shopify-reconcile:order:version",
       lineItems: [
-        { externalLineItemId: "9001", quantity: 4, fulfillableQuantity: 4 },
+        { externalLineItemId: "9001", quantity: 4, currentQuantity: 4, fulfillableQuantity: 4 },
       ],
-      now: NOW,
+      channelUpdatedAt: NOW, now: NOW,
     });
 
     expect(result).toMatchObject({
@@ -114,9 +138,9 @@ describe("reconcileShopifyLineReadiness", () => {
       financialStatus: "paid",
       sourceEventId: "shopify-reconcile:order:retry",
       lineItems: [
-        { externalLineItemId: "9002", quantity: 4, fulfillableQuantity: 4 },
+        { externalLineItemId: "9002", quantity: 4, currentQuantity: 4, fulfillableQuantity: 4 },
       ],
-      now: NOW,
+      channelUpdatedAt: NOW, now: NOW,
     });
 
     expect(result.advancedLines).toBe(0);
@@ -146,9 +170,9 @@ describe("reconcileShopifyLineReadiness", () => {
       financialStatus: "paid",
       sourceEventId: "shopify-reconcile:order:unpaid",
       lineItems: [
-        { externalLineItemId: "9003", quantity: 4, fulfillableQuantity: 4 },
+        { externalLineItemId: "9003", quantity: 4, currentQuantity: 4, fulfillableQuantity: 4 },
       ],
-      now: NOW,
+      channelUpdatedAt: NOW, now: NOW,
     });
 
     expect(result.advancedLines).toBe(0);
@@ -156,7 +180,7 @@ describe("reconcileShopifyLineReadiness", () => {
     expect(updates).toHaveLength(0);
   });
 
-  it("restores a paid cumulative ceiling from current_quantity without rematerializing existing WMS work", async () => {
+  it("refreshes the previously paid ceiling from a dated native current quantity", async () => {
     const { db, updates } = createDb({
       id: 104, orderId: 58, externalLineItemId: "9004", quantity: 3,
       requiresShipping: true, paidQuantity: 3, authorityFulfillableQuantity: 1,
@@ -165,9 +189,9 @@ describe("reconcileShopifyLineReadiness", () => {
     });
     const result = await reconcileShopifyLineReadiness({
       db, omsOrderId: 58, financialStatus: "paid", sourceEventId: "shopify-reconcile:split:version",
-      lineItems: [{ externalLineItemId: "9004", quantity: 3, currentQuantity: 3, fulfillableQuantity: 1 }], now: NOW,
+      lineItems: [{ externalLineItemId: "9004", quantity: 3, currentQuantity: 3, fulfillableQuantity: 1 }], channelUpdatedAt: NOW, now: NOW,
     });
-    expect(result).toMatchObject({ advancedLines: 1, advancedQuantity: 2, wmsSyncRequired: false });
+    expect(result).toMatchObject({ advancedLines: 1, advancedQuantity: 2, wmsSyncRequired: true });
     expect(updates).toHaveLength(1);
     expect(updates[0]).toMatchObject({ paidQuantity: 3, authorityFulfillableQuantity: 3, fulfillableQuantity: 1 });
     expect(recordAuthorityEvent).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
@@ -183,20 +207,19 @@ describe("reconcileShopifyLineReadiness", () => {
       requiresShipping: true, paidQuantity: 3, authorityFulfillableQuantity: 1,
       wmsMaterializedQuantity: 3, authorizationStatus: "authorized",
     });
-    const result = await reconcileShopifyLineReadiness({
+    await expect(reconcileShopifyLineReadiness({
       db, omsOrderId: 58, financialStatus: "paid", sourceEventId: "shopify-reconcile:split:unknown",
-      lineItems: [{ externalLineItemId: "9004", quantity: 3, fulfillableQuantity: 1 }], now: NOW,
-    });
-    expect(result).toMatchObject({ advancedLines: 0, wmsSyncRequired: false });
+      lineItems: [{ externalLineItemId: "9004", quantity: 3, fulfillableQuantity: 1 }], channelUpdatedAt: NOW, now: NOW,
+    })).rejects.toThrow("requires the native current quantity");
     expect(updates).toHaveLength(0);
     expect(recordAuthorityEvent).not.toHaveBeenCalled();
   });
 
   it.each([
-    { cancelledQuantity: 1, authorizationStatus: "partially_cancelled" },
-    { refundedQuantity: 1, authorizationStatus: "partially_refunded" },
-    { authorizationStatus: "review" },
-  ])("preserves disposition protection despite full current_quantity: %j", async protection => {
+    { cancelledQuantity: 1, authorizationStatus: "partially_cancelled", expectedProtected: 0 },
+    { refundedQuantity: 1, authorizationStatus: "partially_refunded", expectedProtected: 0 },
+    { authorizationStatus: "review", expectedProtected: 1 },
+  ])("preserves dispatch limits and manual review while observing current quantity: %j", async ({ expectedProtected, ...protection }) => {
     const { db, updates } = createDb({
       id: 104, orderId: 58, externalLineItemId: "9004", quantity: 3,
       requiresShipping: true, paidQuantity: 3, authorityFulfillableQuantity: 1,
@@ -204,9 +227,9 @@ describe("reconcileShopifyLineReadiness", () => {
     });
     const result = await reconcileShopifyLineReadiness({
       db, omsOrderId: 58, financialStatus: "paid", sourceEventId: "shopify-reconcile:split:protected",
-      lineItems: [{ externalLineItemId: "9004", quantity: 3, currentQuantity: 3, fulfillableQuantity: 1 }], now: NOW,
+      lineItems: [{ externalLineItemId: "9004", quantity: 3, currentQuantity: 3, fulfillableQuantity: 1 }], channelUpdatedAt: NOW, now: NOW,
     });
-    expect(result).toMatchObject({ protectedLines: 1, advancedLines: 0, wmsSyncRequired: false });
+    expect(result).toMatchObject({ protectedLines: expectedProtected, advancedLines: 0, wmsSyncRequired: false });
     expect(updates).toHaveLength(0);
     expect(recordAuthorityEvent).not.toHaveBeenCalled();
   });
@@ -215,7 +238,7 @@ describe("reconcileShopifyLineReadiness", () => {
     const transaction = vi.fn();
     await expect(reconcileShopifyLineReadiness({
       db: { transaction }, omsOrderId: 58, financialStatus: "paid", sourceEventId: "invalid-quantity",
-      lineItems: [{ externalLineItemId: "9004", quantity: 3, currentQuantity, fulfillableQuantity: 1 }], now: NOW,
+      lineItems: [{ externalLineItemId: "9004", quantity: 3, currentQuantity, fulfillableQuantity: 1 }], channelUpdatedAt: NOW, now: NOW,
     })).rejects.toThrow("currentQuantity must be a non-negative integer");
     expect(transaction).not.toHaveBeenCalled();
   });

@@ -368,7 +368,7 @@ describe("the per-size description editor follows the same settings as the previ
         entitlementStatus: "active", storeStatus: "connected" as const, setupStatus: "ready", storeLaunchReady: true })),
       listCatalogCandidates: vi.fn(async () => [inCategory()]),
       listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog" as const, action: "include" as const }]),
-      listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog" as const, action: "include" as const }]),
+      listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)),
       listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
     },
     loadProfile: vi.fn(async () => noContentProfile), loadSaved: vi.fn(async () => saved), findReplay: vi.fn(async () => false),

@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -9,10 +10,13 @@ const mocks = vi.hoisted(() => ({
     getAllReceivingOrders: vi.fn(),
     getReceivingOrdersByStatus: vi.fn(),
     getAllVendors: vi.fn(),
+    getVendorsByIds: undefined as any,
   },
   notifications: {
     notify: vi.fn(),
   },
+  entry: { create: vi.fn(), execute: vi.fn() },
+  requireAnyPermission: vi.fn(),
 }));
 
 vi.mock("../../../../routes/middleware", () => {
@@ -22,6 +26,10 @@ vi.mock("../../../../routes/middleware", () => {
   };
   return {
     requirePermission: () => pass,
+    requireAnyPermission: (...grants: unknown[]) => {
+      mocks.requireAnyPermission(...grants);
+      return pass;
+    },
     requireAuth: pass,
   };
 });
@@ -35,14 +43,20 @@ vi.mock("../../../../modules/catalog", () => ({ catalogStorage: {} }));
 vi.mock("../../../../modules/warehouse", () => ({ warehouseStorage: {} }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
-vi.mock("../../../notifications/notifications.service", () => mocks.notifications);
+vi.mock("../../../notifications/in-app-notifications.api", () => mocks.notifications);
 
-import { registerReceivingRoutes } from "../../receiving.routes";
+vi.mock("../../receiving-entry.commands", async original => ({
+  ...await original<typeof import("../../receiving-entry.commands")>(),
+  createReceivingEntryCommands: mocks.entry.create,
+}));
+
+import { registerReceivingRoutes, RECEIVING_READ_GRANTS, MAX_RECEIVING_LIST_LIMIT } from "../../receiving.routes";
+import { hashReceivingEntryCommandIdentity, receivingEntryCommandScope, RECEIVING_ENTRY_COMMAND_PRINCIPAL } from "../../receiving-entry.commands";
 
 function buildApp(services: Record<string, any> = {}): Express {
   const app = express();
   app.use(express.json());
-  app.locals.services = services;
+  app.locals.services = services as any;
   registerReceivingRoutes(app);
   return app;
 }
@@ -59,10 +73,10 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
   });
 }
 
-async function requestJson(baseUrl: string, method: string, path: string, body?: any) {
-  const res = await fetch(`${baseUrl}${path}`, {
+async function requestJson(baseUrl: string, method: string, path: string, body?: any, key = "test-key") {
+  const res = await requestLocalHttp(`${baseUrl}${path}`, {
     method,
-    headers: { "content-type": "application/json", "idempotency-key": "test-key" },
+    headers: { "content-type": "application/json", "idempotency-key": key },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const text = await res.text();
@@ -74,7 +88,10 @@ describe("receiving routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.storage.getVendorsByIds = undefined;
     mocks.notifications.notify.mockResolvedValue(undefined);
+    mocks.entry.create.mockImplementation(() => ({ execute: mocks.entry.execute }));
+    mocks.entry.execute.mockResolvedValue({ replayed: false, terminalState: "succeeded", httpStatus: 201, body: { id: 20 } });
   });
 
   afterEach(async () => {
@@ -91,6 +108,7 @@ describe("receiving routes", () => {
     const { status, body } = await requestJson(server.url, "GET", "/api/receiving?status=open");
 
     expect(status).toBe(200);
+    expect(mocks.requireAnyPermission).toHaveBeenCalledWith(...RECEIVING_READ_GRANTS);
     expect(mocks.storage.getReceivingOrdersByStatus).toHaveBeenCalledWith("open");
     expect(body).toEqual([
       {
@@ -98,6 +116,30 @@ describe("receiving routes", () => {
         receiptNumber: "RCV-10",
         vendorId: 3,
         vendor: { id: 3, name: "Acme Supplies" },
+      },
+    ]);
+  });
+
+  it("bounds pagination parameters on GET /api/receiving", async () => {
+    mocks.storage.getAllReceivingOrders.mockResolvedValue([
+      { id: 11, receiptNumber: "RCV-11", vendorId: null },
+    ]);
+    mocks.storage.getAllVendors.mockResolvedValue([]);
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/receiving?limit=9999&offset=10");
+
+    expect(status).toBe(200);
+    expect(mocks.storage.getAllReceivingOrders).toHaveBeenCalledWith({
+      limit: MAX_RECEIVING_LIST_LIMIT,
+      offset: 10,
+    });
+    expect(body).toEqual([
+      {
+        id: 11,
+        receiptNumber: "RCV-11",
+        vendorId: null,
+        vendor: null,
       },
     ]);
   });
@@ -145,9 +187,16 @@ describe("receiving routes", () => {
     const confirm = await requestJson(server.url, "PATCH", "/api/receiving/lines/7", confirmation);
     expect(create.status).toBe(201);
     expect(confirm.status).toBe(200);
-    expect(receiving.addLine).toHaveBeenCalledWith(20, expect.objectContaining({
-      productVariantId: 100, expectedUnitsPerVariant: 250, receivedQty: 0,
-    }));
+    const command = { action: "add-line", targetId: 20, payload: {
+      productVariantId: 100, productId: 5, expectedUnitsPerVariant: 250, expectedQty: 4, receivedQty: 0,
+    } };
+    expect(mocks.entry.create).toHaveBeenCalledExactlyOnceWith(receiving);
+    expect(mocks.entry.execute).toHaveBeenCalledExactlyOnceWith(command, "test-user", {
+      ...receivingEntryCommandScope(), actorType: "service", actorId: RECEIVING_ENTRY_COMMAND_PRINCIPAL,
+      idempotencyKey: "test-key", contractVersion: 1,
+      requestHash: hashReceivingEntryCommandIdentity(command, "test-user"),
+    });
+    expect(receiving.addLine).not.toHaveBeenCalled();
     expect(receiving.updateLine).toHaveBeenCalledWith(7, confirmation, "test-user");
   });
 
@@ -181,7 +230,7 @@ describe("receiving routes", () => {
       vendorId: 3,
       warehouseId: 1,
       notes: "dock 1",
-    });
+    }, "receiving-route-create-order");
     const orderPatch = await requestJson(server.url, "PATCH", "/api/receiving/20", {
       notes: "dock 2",
     });
@@ -189,7 +238,7 @@ describe("receiving routes", () => {
       sku: "SKU-1",
       expectedQty: 5,
       unit_cost_mills: 125,
-    });
+    }, "receiving-route-add-line");
     const linePatch = await requestJson(server.url, "PATCH", "/api/receiving/lines/7", {
       receivedQty: 3,
     });
@@ -202,22 +251,27 @@ describe("receiving routes", () => {
     expect(linePatch.status).toBe(200);
     expect(lineDelete.status).toBe(200);
     expect(orderDelete.status).toBe(200);
-    expect(receiving.createOrder).toHaveBeenCalledWith({
-      sourceType: "blind",
-      vendorId: 3,
-      warehouseId: 1,
-      poNumber: undefined,
-      asnNumber: undefined,
-      expectedDate: undefined,
-      notes: "dock 1",
-    }, "test-user");
+    const orderCommand = { action: "create", targetId: null, payload: {
+      sourceType: "blind", vendorId: 3, warehouseId: 1, notes: "dock 1",
+    } };
+    const lineCommand = { action: "add-line", targetId: 20, payload: {
+      sku: "SKU-1", expectedQty: 5, unit_cost_mills: 125,
+    } };
+    expect(mocks.entry.create).toHaveBeenCalledTimes(2);
+    expect(mocks.entry.create).toHaveBeenNthCalledWith(1, receiving);
+    expect(mocks.entry.create).toHaveBeenNthCalledWith(2, receiving);
+    for (const [index, command, idempotencyKey] of [
+      [1, orderCommand, "receiving-route-create-order"], [2, lineCommand, "receiving-route-add-line"],
+    ] as const) {
+      expect(mocks.entry.execute).toHaveBeenNthCalledWith(index, command, "test-user", {
+        ...receivingEntryCommandScope(), actorType: "service", actorId: RECEIVING_ENTRY_COMMAND_PRINCIPAL,
+        idempotencyKey, contractVersion: 1,
+        requestHash: hashReceivingEntryCommandIdentity(command, "test-user"),
+      });
+    }
+    expect(receiving.createOrder).not.toHaveBeenCalled();
+    expect(receiving.addLine).not.toHaveBeenCalled();
     expect(receiving.updateOrderDetails).toHaveBeenCalledWith(20, { notes: "dock 2" }, "test-user");
-    expect(receiving.addLine).toHaveBeenCalledWith(20, expect.objectContaining({
-      sku: "SKU-1",
-      expectedQty: 5,
-      unitCost: 1,
-      unitCostMills: 125,
-    }));
     expect(receiving.updateLine).toHaveBeenCalledWith(7, { receivedQty: 3 }, "test-user");
     expect(receiving.deleteLine).toHaveBeenCalledWith(7);
     expect(receiving.deleteOrder).toHaveBeenCalledWith(20, "test-user");

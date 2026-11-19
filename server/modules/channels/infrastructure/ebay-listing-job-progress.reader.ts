@@ -49,7 +49,7 @@ export async function withEbayListingJobProgress<
       CASE WHEN job.state='queued' THEN NULL ELSE stage.event END AS stage_event,
       CASE WHEN job.state='queued' THEN (
         SELECT count(*)::integer FROM channels.ebay_listing_sync_jobs preceding
-        WHERE preceding.state IN('queued','running','recovering','awaiting_evidence')
+        WHERE preceding.state IN('queued','running','recovering','awaiting_evidence') AND NOT preceding.read_retry_paused
           AND preceding.next_attempt_at<=CURRENT_TIMESTAMP
           AND (preceding.next_attempt_at,preceding.id)<(job.next_attempt_at,job.id)
       ) ELSE NULL END AS queued_ahead
@@ -110,7 +110,7 @@ export async function withEbayListingJobProgress<
         ] as const;
       }),
   );
-  const policyIssues = new Map(
+  const diagnosticIssues = new Map(
     rows.flatMap((row) => {
       const snapshot = snapshots.get(row.id);
       if (
@@ -129,7 +129,7 @@ export async function withEbayListingJobProgress<
       if (
         !diagnostic.success ||
         diagnostic.data.code !== snapshot.code ||
-        !diagnostic.data.context.policySource
+        !(diagnostic.data.context.policySource || diagnostic.data.context.validation || diagnostic.data.context.failure)
       )
         return [];
       return [
@@ -142,6 +142,8 @@ export async function withEbayListingJobProgress<
             jobId: snapshot.id,
             state: snapshot.state,
             policySource: diagnostic.data.context.policySource,
+            validation: diagnostic.data.context.validation,
+            failure: diagnostic.data.context.failure,
           }),
         ] as const,
       ];
@@ -150,6 +152,6 @@ export async function withEbayListingJobProgress<
   return jobs.map((job) => ({
     ...job,
     ...(progress.has(job.id) ? { progress: progress.get(job.id)! } : {}),
-    ...(policyIssues.has(job.id) ? { issue: policyIssues.get(job.id)! } : {}),
+    ...(diagnosticIssues.has(job.id) ? { issue: diagnosticIssues.get(job.id)! } : {}),
   }));
 }

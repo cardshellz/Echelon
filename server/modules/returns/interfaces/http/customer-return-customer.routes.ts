@@ -1,5 +1,7 @@
+import { registerCustomerReturnGuestRoutes } from "./customer-return-guest.routes";
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
+import { customerReturnCustomerHistoryQuerySchema } from "@shared/returns/customer-return-customer.contract";
 import { rateLimit } from "express-rate-limit";
 import { CUSTOMER_RETURNS_API, CUSTOMER_RETURNS_PAGE } from "@shared/returns/customer-return-access.contract";
 import { createCustomerReturnCustomerAuth } from "../../infrastructure/customer-return-customer-auth.composition";
@@ -14,6 +16,7 @@ export interface CustomerReturnCustomerRouteDependencies extends CustomerReturnC
 const id = (raw: unknown) => z.string().regex(/^[1-9][0-9]*$/).transform(Number).pipe(z.number().int().positive().safe()).parse(raw);
 const cursor = (raw: unknown) => z.object({ before: z.string().optional() }).strict().parse(raw).before;
 export function registerCustomerReturnCustomerRoutes(app: Express, dependencies: CustomerReturnCustomerRouteDependencies = {}) {
+  registerCustomerReturnGuestRoutes(app);
   const context = dependencies.context ?? createCustomerReturnCustomerAuth;
   const services = dependencies.services ?? createCustomerReturnCustomerServices;
   registerCustomerReturnShopifyProxyRoutes(app, { context });
@@ -38,6 +41,10 @@ export function registerCustomerReturnCustomerRoutes(app: Express, dependencies:
   };
   const noQuery = (req: Request) => z.object({}).strict().parse(req.query);
   const emptyCommand = (req: Request) => { noQuery(req); z.object({}).strict().parse(req.body); };
+  app.get(`${CUSTOMER_RETURNS_API}/order-options`, handle(false, (req, value) => {
+    const before = cursor(req.query);
+    return value.orders.choices(before === undefined ? {} : { beforeOmsOrderId: id(before) });
+  }));
   app.get(`${CUSTOMER_RETURNS_API}/orders`, handle(false, (req, value) => {
     const before = cursor(req.query);
     return value.orders.list(before === undefined ? {} : { beforeOmsOrderId: id(before) });
@@ -49,9 +56,27 @@ export function registerCustomerReturnCustomerRoutes(app: Express, dependencies:
   app.post(`${CUSTOMER_RETURNS_API}/orders/:omsOrderId/returns`, handle(true, (req, value) => {
     noQuery(req); return value.operations.submit(id(req.params.omsOrderId), req.body);
   }));
+  app.get(`${CUSTOMER_RETURNS_API}/orders/:omsOrderId/label-requests`, handle(false, (req, value) => {
+    noQuery(req); return value.operations.orderWorkflow(id(req.params.omsOrderId));
+  }));
+  app.post(`${CUSTOMER_RETURNS_API}/orders/:omsOrderId/label-requests`, handle(true, (req, value) => {
+    noQuery(req); return value.operations.queueLabels(id(req.params.omsOrderId), req.body);
+  }));
+  app.get(`${CUSTOMER_RETURNS_API}/label-requests/:key`, handle(false, (req, value) => {
+    noQuery(req); return value.operations.workflowStatus(req.params.key);
+  }));
+  app.post(`${CUSTOMER_RETURNS_API}/label-requests/:key/retry`, handle(true, (req, value) => {
+    emptyCommand(req); return value.operations.retryWorkflow(req.params.key);
+  }));
+  app.get(`${CUSTOMER_RETURNS_API}/returns/:authorizationId/label-requests`, handle(false, (req, value) => {
+    noQuery(req); return value.operations.authorizationWorkflow(id(req.params.authorizationId));
+  }));
+  app.post(`${CUSTOMER_RETURNS_API}/returns/:authorizationId/label-requests`, handle(true, (req, value) => {
+    emptyCommand(req); return value.operations.queueExistingLabels(id(req.params.authorizationId));
+  }));
   app.get(`${CUSTOMER_RETURNS_API}/returns`, handle(false, (req, value) => {
-    const before = cursor(req.query);
-    return value.operations.listReturns(before === undefined ? {} : { beforeAuthorizationId: id(before) });
+    const parsed = customerReturnCustomerHistoryQuerySchema.parse(req.query);
+    return value.operations.listReturns({ ...(parsed.before ? { beforeAuthorizationId: parsed.before } : {}), ...(parsed.progress ? { includeProgress: true } : {}) });
   }));
   const commandPath = `${CUSTOMER_RETURNS_API}/commands/:key`;
   app.get(commandPath, handle(false, (req, value) => { noQuery(req); return value.operations.submissionStatus(req.params.key); }));

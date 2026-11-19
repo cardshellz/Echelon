@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { test, expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
 import type { ProductInventoryStrategy } from "../../shared/catalog/inventory-strategy";
@@ -36,11 +37,8 @@ async function setup(page: Page, options: { strategy?: ProductInventoryStrategy;
   await page.route("**/api/**", async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: {
-      user: { id: "operator", username: "operator", role: "admin" },
-      permissions: options.permission === "none" ? [] : options.permission === "view"
-        ? ["inventory_planning:view"] : ["inventory_planning:view", "inventory_planning:edit", "inventory:adjust", ...(options.permission === "activate" ? ["inventory_planning:activate"] : [])], roles: [],
-    } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator", username: "operator", role: "admin" }, permissions: options.permission === "none" ? [] : options.permission === "view"
+        ? ["inventory_planning:view"] : ["inventory_planning:view", "inventory_planning:edit", "inventory:adjust", ...(options.permission === "activate" ? ["inventory_planning:activate"] : [])], systemRoles: [], assignedRoles: [{ id: 101, name: "Catalog operator", isSystem: false }] }) });
     if (path === "/api/inventory-planning/admin/products") return route.fulfill({ json: { products: [{ id: 17, sku: "SLEEVE", name: "Sleeves" }] } });
     if (path === "/api/inventory-planning/admin/supply-transformations/17/shadow-runs/latest"
       || path === "/api/inventory-planning/admin/migration-queue/17/channel-preview") return route.fulfill({ status: 404, json: {} });
@@ -84,7 +82,7 @@ async function setupSafety(page: Page, permissions: string[]) {
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "operator", username: "operator", role: "admin" }, permissions, roles: [] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator", username: "operator", role: "admin" }, permissions: permissions, systemRoles: [], assignedRoles: [{ id: 101, name: "Catalog operator", isSystem: false }] }) });
     if (path === "/api/inventory-planning/admin/promise-safety/17") {
       state.reads++;
       return route.fulfill({ json: { product: { id: 17, sku: "P20", name: "Sleeves" },

@@ -9,7 +9,7 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import { warehouseSettings } from "@shared/schema/inventory.schema";
 import { readProcurementSettings } from "./procurement-settings.repository";
 import type { PurchaseApprovalSnapshot } from "./purchase-order-approval.policy";
-import { readPurchaseApprovalActor } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor } from "../identity/purchase-approval-authority.api";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { recomputePurchaseOrderInvoiceMatchesInTransaction } from "./ap-ledger.service";
 import { replacePurchaseOrderMatchExceptions } from "./purchase-order-match-exceptions.repository";
@@ -19,12 +19,22 @@ import { readPoAmendmentDependencies } from "./po-amendment-dependencies.reposit
 import { replacePurchaseOrderQuantityExceptions } from "./purchase-order-quantity-exceptions.repository";
 import { poAmendmentHistorySchema } from "@shared/procurement/po-quantity-amendment";
 import { costInteger } from "../inventory/infrastructure/cost-evidence-values";
+import { readPoLineProductChangeBlocks, readPoLineRemovalBlocks } from "./po-line-composition.repository";
 
 // Changes to reviewed behavior invalidate uncommitted previews; committed receipts still replay.
-const PO_LINE_REVIEW_VERSION = 3;
+const PO_LINE_REVIEW_VERSION = 5;
+/** Same event type the catalog product merge writes, so one query returns every
+ * product-identity correction on a PO, whichever owner made it. */
+const PRODUCT_IDENTITY_EVENT = "product_identity_corrected";
 
 export type AmendmentDatabase = Pick<typeof db, "transaction">;
 export type AmendmentTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+/** Anything beyond a quantity correction is a PO edit for audit naming. */
+function isLineEdit(plan: AmendmentPlan): boolean {
+  return !!(plan.additions?.length || plan.removals?.length || plan.productChanges?.length)
+    || plan.preview.lines.some(line => ["edit_line", "edit_charge"].includes(line.priceTreatment));
+}
 
 export async function readPoAmendmentHistory(tx: AmendmentTransaction, purchaseOrderId: number, beforeId: number | null) {
   const result = await tx.execute(sql`SELECT event.id,event.actor_id,event.created_at,event.payload_json,
@@ -65,7 +75,9 @@ export async function readQuantityAmendmentSource(tx: AmendmentTransaction, purc
   const policy = (await readProcurementSettings(tx, "share")).settings;
   const requireApproval = policy.requireApproval;
   const approvalTiers = await tx.select().from(poApprovalTiers).where(eq(poApprovalTiers.active, 1)).orderBy(asc(poApprovalTiers.id)).for("share");
-  const facts = { header, lines, invoices, invoiceLines, recommendationOwned: handoffs.length > 0 };
+  const removalBlocks = await readPoLineRemovalBlocks(tx, lines.map(line => line.id));
+  const productChangeBlocks = await readPoLineProductChangeBlocks(tx, lines.filter(line => line.lineType === "product").map(line => line.id));
+  const facts = { header, lines, invoices, invoiceLines, recommendationOwned: handoffs.length > 0, removalBlocks, productChangeBlocks };
   // Full row versions cover price metadata, counters, invoice void/payment changes,
   // receipt evidence and variance approvals. No client amount is authoritative.
   const sourceVersion = createHash("sha256").update(canonicalJson({ reviewVersion: PO_LINE_REVIEW_VERSION, facts, actor, links, handoffs, receipts, exceptions, dependencies, requireApproval, procurementPolicyRevision: policy.revision, approvalTiers })).digest("hex");
@@ -81,10 +93,24 @@ export async function persistQuantityAmendment(
   approvalEvidence: PurchaseApprovalSnapshot,
 ) {
   const { header, lines } = source.facts;
-  const lineEdit = plan.preview.lines.some(line => ["edit_line", "edit_charge"].includes(line.priceTreatment));
+  const lineEdit = isLineEdit(plan);
   const actionName = lineEdit ? "PO edit" : "quantity correction";
   const revisionNumber = (header.revisionNumber ?? 0) + 1;
   if (!Number.isSafeInteger(revisionNumber) || revisionNumber > 2_147_483_647) throw new PoQuantityAmendmentError("The revision limit has been reached.", "PO_AMENDMENT_REVISION_LIMIT");
+  for (const addition of plan.additions ?? []) {
+    const [line] = await tx.insert(purchaseOrderLines).values({ ...addition.values, receiptCostingEnabled: 1, createdAt: approvedAt, updatedAt: approvedAt }).returning();
+    if (!line) throw new PoQuantityAmendmentError("The new PO line could not be saved.", "PO_AMENDMENT_UPDATE_FAILED");
+    await tx.insert(poRevisions).values({ purchaseOrderId: header.id, revisionNumber, changedBy: actorId,
+      changeType: "line_added", fieldChanged: "line", oldValue: null, newValue: JSON.stringify(line), lineId: line.id, notes: plan.preview.reason, createdAt: approvedAt });
+  }
+  for (const id of plan.removals ?? []) {
+    const before = lines.find(line => line.id === id)!;
+    const [line] = await tx.update(purchaseOrderLines).set({ status: "cancelled", cancelledQty: before.orderQty, updatedAt: approvedAt })
+      .where(and(eq(purchaseOrderLines.id, id), eq(purchaseOrderLines.purchaseOrderId, header.id))).returning();
+    if (!line) throw new PoQuantityAmendmentError("The removed PO line could not be recorded.", "PO_AMENDMENT_UPDATE_FAILED");
+    await tx.insert(poRevisions).values({ purchaseOrderId: header.id, revisionNumber, changedBy: actorId,
+      changeType: "line_removed", fieldChanged: "status", oldValue: before.status, newValue: "cancelled", lineId: id, notes: plan.preview.reason, createdAt: approvedAt });
+  }
   for (const change of plan.patches) {
     const before = lines.find((line) => line.id === change.id)!;
     const [updated] = await tx.update(purchaseOrderLines).set({
@@ -107,11 +133,34 @@ export async function persistQuantityAmendment(
       });
     }
   }
+  for (const change of plan.productChanges ?? []) {
+    const before = lines.find((line) => line.id === change.id)!;
+    // The product guard makes the identity write conditional on the locked
+    // source row, so a concurrent identity change can never be overwritten.
+    const [updated] = await tx.update(purchaseOrderLines).set({
+      ...change.patch,
+      updatedAt: sql`GREATEST(${approvedAt}::timestamp, ${before.updatedAt}::timestamp + interval '1 millisecond')`,
+    }).where(and(eq(purchaseOrderLines.id, change.id), eq(purchaseOrderLines.purchaseOrderId, header.id), eq(purchaseOrderLines.productId, before.productId!)))
+      .returning({ id: purchaseOrderLines.id });
+    if (!updated) throw new PoQuantityAmendmentError("The locked PO line could not be updated.", "PO_AMENDMENT_UPDATE_FAILED");
+    const fields = Object.keys(change.patch) as (keyof typeof change.patch)[];
+    const identityBefore: Record<string, unknown> = {}, identityAfter: Record<string, unknown> = {};
+    for (const field of fields) {
+      const oldValue = before[field], newValue = change.patch[field];
+      identityBefore[field] = oldValue ?? null; identityAfter[field] = newValue ?? null;
+      if (newValue === undefined || oldValue === newValue) continue;
+      await tx.insert(poRevisions).values({ purchaseOrderId: header.id, revisionNumber, changedBy: actorId, changeType: "product_changed", fieldChanged: field,
+        oldValue: oldValue === null ? null : String(oldValue), newValue: newValue === null ? null : String(newValue), lineId: change.id, notes: plan.preview.reason, createdAt: approvedAt });
+    }
+    await tx.insert(poEvents).values({ poId: header.id, eventType: PRODUCT_IDENTITY_EVENT, actorType: "user", actorId, createdAt: approvedAt,
+      payloadJson: { contractVersion: 1, source: "po_amendment", revisionNumber, lineId: change.id, reason: plan.preview.reason, before: identityBefore, after: identityAfter } });
+  }
   const statusChanged = header.status !== plan.preview.afterStatus;
   const [afterHeader] = await tx.update(purchaseOrders).set({
     subtotalCents: plan.subtotalCents, totalCents: plan.preview.afterTotalCents, revisionNumber,
     approvalTierId: approvalEvidence.tier?.id ?? null, approvedBy: actorId, approvedAt, approvalNotes: plan.preview.reason,
     receivedLineCount: plan.receivedLineCount,
+    ...(plan.lineCount !== undefined ? { lineCount: plan.lineCount } : {}),
     status: plan.preview.afterStatus,
     physicalStatus: plan.preview.closedPurchaseOrder ? header.physicalStatus : plan.preview.afterStatus === "received" ? "received" : plan.preview.afterStatus === "partially_received" ? "receiving" : header.physicalStatus,
     updatedBy: actorId, updatedAt: sql`GREATEST(${approvedAt}::timestamp, ${header.updatedAt}::timestamp + interval '1 millisecond')`,
@@ -138,7 +187,7 @@ export async function recordQuantityAmendmentResult(tx: AmendmentTransaction,
   approvedAt: Date, approvalEvidence: PurchaseApprovalSnapshot) {
   const { header, lines } = source.facts;
   const { revisionNumber, afterHeader, afterLines } = saved;
-  const lineEdit = plan.preview.lines.some(line => ["edit_line", "edit_charge"].includes(line.priceTreatment));
+  const lineEdit = isLineEdit(plan);
   const [event] = await tx.insert(poEvents).values({
     poId: header.id, eventType: lineEdit ? "line_amendment_approved" : "quantity_amendment_approved", actorType: "user", actorId, createdAt: approvedAt,
     payloadJson: {

@@ -17,6 +17,15 @@ const evidence = (overrides: Partial<ChannelFulfillmentQuantityEvidence> = {}): 
 });
 
 describe("cumulative channel fulfillment quantity authority", () => {
+  it("does not subtract historical refund counters again from verified current paid merchandise", () => {
+    expect(deriveChannelFulfillmentQuantityAuthority(evidence({ lifetimePaidQuantity: 3, paidQuantity: 2,
+      channelRemainingQuantity: 2, refundedQuantity: 1, refundOtherQuantity: 1,
+      useChannelQuantities: true, channelCurrentQuantity: 2, channelQuantityUpdatedAt: "2026-10-24T12:00:00Z" })))
+      .toMatchObject({ commercialAuthorizedQuantity: 2, quantityCancelled: 1 });
+  });
+  it.each([null, 3])("does not accept unverified or unpaid channel quantity %s", channelCurrentQuantity => {
+    expect(() => deriveChannelFulfillmentQuantityAuthority(evidence({ useChannelQuantities: true, channelCurrentQuantity }))).toThrow();
+  });
   it.each([0, 1, 2])("does not count %s remaining as cancellations or reduce the cumulative cap", (remaining) => {
     const result = deriveChannelFulfillmentQuantityAuthority(evidence({ channelRemainingQuantity: remaining }));
     expect(result).toMatchObject({ commercialAuthorizedQuantity: 2, quantityCancelled: 0 });

@@ -24,6 +24,8 @@ function sourceBlock(source: string, startMarker: string, endMarker?: string): s
 const OMS_WEBHOOKS_SRC = readSource("../../oms-webhooks.ts");
 const SHOPIFY_REFUND_SRC = readSource("../../shopify-refund-cascade.service.ts");
 const SHIPMENT_ROLLUP_SRC = readSource("../../../orders/shipment-rollup.ts");
+const WMS_SHIPMENT_ITEMS_REPO_SRC = readSource("../../../wms/outbound-shipment-items-mutations.repository.ts");
+const WMS_SHIPMENTS_REPO_SRC = readSource("../../../wms/outbound-shipments-mutations.repository.ts");
 const C8_CANCEL_REFUND_GUARDS_TEST_SRC = readSource("c8-cancel-refund-guards.test.ts");
 const ORDERS_CANCELLED_CASCADE_TEST_SRC = readSource("orders-cancelled-cascade.test.ts");
 const REFUND_RECONCILE_SHIPMENTS_TEST_SRC = readSource("refund-reconcile-shipments.test.ts");
@@ -55,11 +57,10 @@ describe("OMS/WMS authority conformance :: Shopify cancel and refund finality", 
     expect(C8_CANCEL_REFUND_GUARDS_TEST_SRC).toContain(
       "reconcileCancellations calls cancelOrderCascade",
     );
-    expect(finalityBlock).toContain("Boolean(payload.cancelled_at)");
-    expect(finalityBlock).toContain('payload.financial_status === "refunded"');
-    expect(finalityBlock).toContain('payload.financial_status === "voided"');
+    expect(finalityBlock).toContain("if (payload.cancelled_at) return { cancelNow: true, isFinal: true }");
+    expect(finalityBlock).toContain("channelMerchandise?.verifiedCancelled === true");
     expect(finalityBlock).toContain('existingStatus === "cancelled"');
-    expect(finalityBlock).toContain('existingStatus === "refunded"');
+    expect(finalityBlock).not.toContain('existingStatus === "refunded"');
   });
 
   it("cancels Shopify orders before pick or before ship without creating hold states", () => {
@@ -125,7 +126,8 @@ describe("OMS/WMS authority conformance :: Shopify cancel and refund finality", 
       "zeroes active commercial demand without erasing shipment-item identity",
     );
     expect(refundAdjustmentBlock).not.toContain("DELETE FROM wms.outbound_shipment_items");
-    expect(refundAdjustmentBlock).toContain("SET commercial_requested_qty = ${allocation.nextQuantity}");
+    expect(refundAdjustmentBlock).toContain("updateShipmentItemCommercialRequestedQtyInWms(");
+    expect(WMS_SHIPMENT_ITEMS_REPO_SRC).toContain("SET commercial_requested_qty = ${input.nextQuantity}");
     expect(refundAdjustmentBlock).not.toContain("SET qty = GREATEST(0");
     expect(SHOPIFY_REFUND_SRC).toContain('plan.status === "queued"');
     expect(SHOPIFY_REFUND_SRC).toContain("helpers.pushShipment(plan.shipmentId)");
@@ -146,7 +148,8 @@ describe("OMS/WMS authority conformance :: Shopify cancel and refund finality", 
     );
     expect(refundAdjustmentBlock).toContain('String(shipment.status) === "labeled"');
     expect(refundAdjustmentBlock).toContain('"refund_after_label"');
-    expect(refundAdjustmentBlock).toContain("requires_review = true");
+    expect(refundAdjustmentBlock).toContain("setOutboundShipmentReviewFlagInWms(");
+    expect(WMS_SHIPMENTS_REPO_SRC).toContain("SET requires_review = true");
     expect(refundAdjustmentBlock).not.toContain("pushShipment");
   });
 

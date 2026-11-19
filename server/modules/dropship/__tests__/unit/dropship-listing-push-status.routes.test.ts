@@ -32,7 +32,7 @@ class FakeService {
       createdAt: NOW, updatedAt: NOW, completedAt: NOW,
       items: [{ itemId: 1, listingId: 100, productVariantId: 101, sku: "ARM-ENV-SGL-P50", productName: "Armalope Envelope Single Pocket",
         variantName: "Pack of 50", status: "completed", errorCode: null, errorMessage: null, retryable: null,
-        externalListingId: "123456789012", published: true, listingUrl: "https://www.ebay.com/itm/123456789012" }],
+        externalListingId: "123456789012", published: true, automaticRetryPending: false, listingUrl: "https://www.ebay.com/itm/123456789012" }],
     };
   }
 }

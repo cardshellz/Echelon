@@ -1,5 +1,6 @@
 import type { DropshipListingPresentation, DropshipListingEconomics } from "@shared/dropship/listing-presentation";
 import type { EbayCategorySource } from "@shared/dropship/ebay-category-rules";
+import type { ZodType, ZodTypeDef } from "zod";
 
 export type DropshipSectionStatus =
   "ready" | "attention_required" | "coming_soon";
@@ -289,7 +290,10 @@ export interface DropshipOnboardingState {
   };
   catalog: {
     adminExposureRuleCount: number;
+    /** One release only (PLAN-B v4.1 V17): the same value as `vendorSelectedItemCount` from PR B's server. */
     vendorSelectionRuleCount: number;
+    /** The sizes the vendor picked (PR B); absent from an older server's answer, so it is never printed as a number then. */
+    vendorSelectedItemCount?: number;
     adminCatalogAvailable: boolean;
     hasVendorSelection: boolean;
   };
@@ -603,7 +607,10 @@ export interface DropshipDogfoodReadinessItem {
     dropshipOmsChannelCount: number;
     defaultWarehouseId: number | null;
     adminCatalogIncludeRuleCount: number;
+    /** One release only (PLAN-B v4.1 V17): the same value as `vendorSelectedItemCount` from PR B's server. */
     vendorSelectionIncludeRuleCount: number;
+    /** The sizes the vendor picked (PR B); absent from an older server's answer. */
+    vendorSelectedItemCount?: number;
     activeShippingBoxCount: number;
     activeShippingZoneRuleCount: number;
     activeShippingRateTableCount: number;
@@ -1865,49 +1872,6 @@ export interface DropshipEbayShipFromRepairRequest {
   idempotencyKey: string;
 }
 
-export type DropshipVendorSelectionScope =
-  "catalog" | "product_line" | "category" | "product" | "variant";
-export type DropshipVendorSelectionAction = "include" | "exclude";
-
-export interface DropshipVendorSelectionRule {
-  id?: number;
-  revisionId?: number | null;
-  vendorId?: number;
-  scopeType: DropshipVendorSelectionScope;
-  action: DropshipVendorSelectionAction;
-  productLineId?: number | null;
-  productId?: number | null;
-  productVariantId?: number | null;
-  category?: string | null;
-  autoConnectNewSkus?: boolean;
-  autoListNewSkus?: boolean;
-  priority?: number;
-  metadata?: Record<string, unknown> | null;
-  isActive?: boolean;
-  createdAt?: string;
-  updatedAt?: string;
-}
-
-export interface DropshipVendorSelectionRuleInput {
-  scopeType: DropshipVendorSelectionScope;
-  action: DropshipVendorSelectionAction;
-  productLineId?: number | null;
-  productId?: number | null;
-  productVariantId?: number | null;
-  category?: string | null;
-  autoConnectNewSkus: boolean;
-  autoListNewSkus: boolean;
-  priority: number;
-  metadata?: Record<string, unknown>;
-}
-
-export type DropshipVendorSelectionScopeTarget =
-  | { scopeType: "catalog" }
-  | { scopeType: "product_line"; productLineId: number }
-  | { scopeType: "category"; category: string }
-  | { scopeType: "product"; productId: number }
-  | { scopeType: "variant"; productVariantId: number };
-
 export interface DropshipOrderListItem {
   intakeId: number;
   vendor: DropshipAdminOrderOpsVendorSummary;
@@ -2807,6 +2771,67 @@ export async function putJson<T>(url: string, body: unknown): Promise<T> {
     throw await responseError(response);
   }
   return response.json() as Promise<T>;
+}
+
+// Stage 2 (step 1 plan S2-5): PROPOSED words (§4.11 siteUpdating), shown while the page tries again.
+export const DROPSHIP_SITE_UPDATING_MESSAGE =
+  "Card Shellz is updating the site. This page will try again in a moment; nothing you did is lost.";
+/** A client-made code (§4.9 item 3, D38): an answer from code older than this page. Transient: retry the same request. */
+export const DROPSHIP_SITE_UPDATING_CODE = "DROPSHIP_SITE_UPDATING";
+/** The status the client gives that error: "unavailable, try again", as a server would. */
+const DROPSHIP_SITE_UPDATING_STATUS = 503;
+
+/**
+ * The answer of a request this page added (step 1 plan S2-5 §4.9 item 3). While
+ * Card Shellz deploys, an older server can answer a route it does not know with
+ * the app's HTML and status 200 (F25), which `response.json()` cannot read. An
+ * answer that is not JSON therefore throws the transient
+ * `DROPSHIP_SITE_UPDATING`, and the caller retries the same request (with the
+ * same idempotency key: the old server did nothing). JSON answers, errors
+ * included, read as fetchJson reads them. The existing helpers keep their
+ * behaviour; every request stages 2-5 add uses this.
+ */
+export async function readDropshipJson(response: Response): Promise<unknown> {
+  if (!isJsonContentType(response.headers.get("content-type"))) {
+    throw siteUpdatingError({ reason: "not_json", status: response.status });
+  }
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+  return response.json();
+}
+
+/**
+ * readDropshipJson, then the answer's own schema. A JSON answer of the wrong
+ * shape comes from an older server that does not know a value this page sent
+ * (an existing route ignores query values it does not know, so an older
+ * server answers without the field the newer page requires): the same
+ * transient `DROPSHIP_SITE_UPDATING` (§4.8, CHK7).
+ */
+/** `schema` may take defaults (its input differs from its output, PR C's answer fields); the answer is its output. */
+export async function readDropshipAnswer<T>(response: Response, schema: ZodType<T, ZodTypeDef, unknown>): Promise<T> {
+  const parsed = schema.safeParse(await readDropshipJson(response));
+  if (!parsed.success) throw siteUpdatingError({ reason: "answer_shape", status: response.status });
+  return parsed.data;
+}
+
+export function isDropshipSiteUpdatingError(error: unknown): boolean {
+  return error instanceof DropshipApiError && error.code === DROPSHIP_SITE_UPDATING_CODE;
+}
+
+function siteUpdatingError(context: { reason: "not_json" | "answer_shape"; status: number }): DropshipApiError {
+  return new DropshipApiError({
+    message: DROPSHIP_SITE_UPDATING_MESSAGE,
+    status: DROPSHIP_SITE_UPDATING_STATUS,
+    code: DROPSHIP_SITE_UPDATING_CODE,
+    context: { reason: context.reason, answerStatus: context.status },
+  });
+}
+
+function isJsonContentType(value: string | null): boolean {
+  if (!value) return false;
+  const mediaType = value.split(";")[0]?.trim().toLowerCase() ?? "";
+  return mediaType === "application/json" || (mediaType.startsWith("application/") && mediaType.endsWith("+json"));
 }
 
 export function queryErrorCode(error: unknown): string | null {
@@ -4552,74 +4577,6 @@ export function buildListingPreviewRequest(input: {
   };
 }
 
-/** The server's per-request bound (`createListingPushJobInputSchema.productVariantIds`). */
-export const MAX_LISTING_QUEUE_VARIANTS = 500;
-
-/** Mirrors the server's idempotency key bounds. */
-const MIN_LISTING_QUEUE_KEY_LENGTH = 8;
-const MAX_LISTING_QUEUE_KEY_LENGTH = 200;
-
-/**
- * One-step listing push (`reviewMode: "current_preview"`): the server builds
- * the preview for the selected items when the request arrives and queues what
- * it shows. Nothing from an earlier preview is echoed, so a preview is never a
- * prerequisite and can never be "out of date" for queueing.
- */
-export function buildListingQueueRequest(input: {
-  storeConnectionId: number;
-  rows: readonly DropshipCatalogRow[];
-  idempotencyKey: string;
-}): {
-  storeConnectionId: number;
-  productVariantIds: number[];
-  idempotencyKey: string;
-  reviewMode: "current_preview";
-} {
-  const storeConnectionId = assertPositiveInteger(input.storeConnectionId, "storeConnectionId");
-  const productVariantIds = uniqueSelectedVariantIds(input.rows);
-  if (productVariantIds.length === 0) {
-    throw new Error("Select at least one catalog item before queueing listings.");
-  }
-  if (productVariantIds.length > MAX_LISTING_QUEUE_VARIANTS) {
-    throw new Error(`Queue at most ${MAX_LISTING_QUEUE_VARIANTS} listings at a time.`);
-  }
-  const idempotencyKey = input.idempotencyKey.trim();
-  if (idempotencyKey.length < MIN_LISTING_QUEUE_KEY_LENGTH || idempotencyKey.length > MAX_LISTING_QUEUE_KEY_LENGTH) {
-    throw new Error(
-      `Idempotency key must be between ${MIN_LISTING_QUEUE_KEY_LENGTH} and ${MAX_LISTING_QUEUE_KEY_LENGTH} characters.`,
-    );
-  }
-  return { storeConnectionId, productVariantIds, idempotencyKey, reviewMode: "current_preview" };
-}
-
-export interface ListingQueueResultDescription {
-  /** "queued" when at least one listing went into the job, "nothing_queued" otherwise. */
-  outcome: "queued" | "nothing_queued";
-  message: string;
-}
-
-/** What a one-step push did, in the vendor's words. Counts come from the server's own preview. */
-export function describeListingQueueResult(response: DropshipListingPushResponse): ListingQueueResultDescription {
-  const total = response.preview.rows.length;
-  const notQueued = response.preview.rows.filter((row) => row.previewStatus === "blocked").length;
-  const queued = total - notQueued;
-  if (queued === 0) {
-    const reason = total === 1
-      ? "the selected listing is not ready"
-      : `none of the ${plural(total, "selected listing")} are ready`;
-    return { outcome: "nothing_queued", message: `Nothing was queued: ${reason}. The table below shows why.` };
-  }
-  // The page then follows the job and replaces this line with the outcome.
-  const message = notQueued === 0
-    ? `Sending ${plural(queued, "listing")} to your store now. This usually takes under a minute; the result shows here.`
-    : `Sending ${queued} of ${plural(total, "listing")} to your store now. ${notQueued} not queued: the table below shows why.`;
-  return { outcome: "queued", message };
-}
-
-function plural(count: number, noun: string): string {
-  return `${count.toLocaleString("en-US")} ${noun}${count === 1 ? "" : "s"}`;
-}
-
 export function buildAutoReloadConfigInput(input: {
   enabled: boolean;
   fundingMethodId: string;
@@ -4762,127 +4719,6 @@ function parseNullableDollarInputToCents(
 ): number | null {
   const normalized = value.trim();
   return normalized ? parseDollarInputToCents(normalized, field) : null;
-}
-
-export function buildScopedSelectionReplacement(input: {
-  existingRules: readonly DropshipVendorSelectionRule[];
-  target: DropshipVendorSelectionScopeTarget;
-  action: DropshipVendorSelectionAction;
-}): DropshipVendorSelectionRuleInput[] {
-  const actionRule = scopedSelectionRuleInput(input.target, input.action);
-  const activeRules = input.existingRules
-    .filter((rule) => rule.isActive !== false)
-    .map(toReplaceableSelectionRule)
-    .filter((rule) => !isSameSelectionTarget(rule, actionRule));
-
-  return [...activeRules, actionRule];
-}
-
-function toReplaceableSelectionRule(
-  rule: DropshipVendorSelectionRule,
-): DropshipVendorSelectionRuleInput {
-  return {
-    scopeType: rule.scopeType,
-    action: rule.action,
-    productLineId: rule.productLineId ?? null,
-    productId: rule.productId ?? null,
-    productVariantId: rule.productVariantId ?? null,
-    category: rule.category?.trim() || null,
-    autoConnectNewSkus: rule.autoConnectNewSkus !== false,
-    autoListNewSkus: rule.autoListNewSkus === true,
-    priority: Number.isInteger(rule.priority) ? rule.priority! : 0,
-    metadata: rule.metadata ?? {},
-  };
-}
-
-function scopedSelectionRuleInput(
-  target: DropshipVendorSelectionScopeTarget,
-  action: DropshipVendorSelectionAction,
-): DropshipVendorSelectionRuleInput {
-  const base = {
-    action,
-    productLineId: null,
-    productId: null,
-    productVariantId: null,
-    category: null,
-    autoConnectNewSkus: action === "include",
-    autoListNewSkus: false,
-    priority: action === "include" ? 50 : 150,
-    metadata: {
-      source: "portal_catalog_scope",
-    },
-  };
-
-  if (target.scopeType === "catalog") {
-    return {
-      ...base,
-      scopeType: "catalog",
-    };
-  }
-  if (target.scopeType === "product_line") {
-    return {
-      ...base,
-      scopeType: "product_line",
-      productLineId: assertPositiveInteger(
-        target.productLineId,
-        "productLineId",
-      ),
-    };
-  }
-  if (target.scopeType === "category") {
-    const category = target.category.trim();
-    if (!category) {
-      throw new Error("category is required for category selection.");
-    }
-    return {
-      ...base,
-      scopeType: "category",
-      category,
-    };
-  }
-  if (target.scopeType === "product") {
-    return {
-      ...base,
-      scopeType: "product",
-      productId: assertPositiveInteger(target.productId, "productId"),
-    };
-  }
-  return {
-    ...base,
-    scopeType: "variant",
-    productVariantId: assertPositiveInteger(
-      target.productVariantId,
-      "productVariantId",
-    ),
-  };
-}
-
-function isSameSelectionTarget(
-  left: Pick<
-    DropshipVendorSelectionRuleInput,
-    | "scopeType"
-    | "productLineId"
-    | "productId"
-    | "productVariantId"
-    | "category"
-  >,
-  right: Pick<
-    DropshipVendorSelectionRuleInput,
-    | "scopeType"
-    | "productLineId"
-    | "productId"
-    | "productVariantId"
-    | "category"
-  >,
-): boolean {
-  return (
-    left.scopeType === right.scopeType &&
-    (left.productLineId ?? null) === (right.productLineId ?? null) &&
-    (left.productId ?? null) === (right.productId ?? null) &&
-    (left.productVariantId ?? null) === (right.productVariantId ?? null) &&
-    (left.category?.trim().toLowerCase() ?? null) ===
-      (right.category?.trim().toLowerCase() ?? null)
-  );
 }
 
 function uniquePositiveVariantIds(

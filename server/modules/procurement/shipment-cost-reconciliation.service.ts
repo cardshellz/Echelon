@@ -17,7 +17,7 @@ import {
 import {
   readPurchaseApprovalActor,
   readPurchaseApproverName,
-} from "../identity/infrastructure/purchase-approval-access.repository";
+} from "../identity/purchase-approval-authority.api";
 import { COGSService } from "../inventory/cogs.service";
 import { applyCostRevision } from "../inventory/application/apply-cost-revision";
 import { costFingerprint, lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";

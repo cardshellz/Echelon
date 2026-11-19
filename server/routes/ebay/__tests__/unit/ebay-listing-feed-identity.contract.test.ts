@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 
 describe("eBay listing feed identity selection", () => {
   const source = readFileSync(
-    resolve(process.cwd(), "server/routes/ebay/ebay-listings.routes.ts"),
+    resolve(process.cwd(), "server/modules/channels/infrastructure/ebay-listing-feed.reader.ts"),
     "utf8",
   );
 

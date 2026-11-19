@@ -61,6 +61,14 @@ describe("dollarsToCents (legacy)", () => {
   it("returns 0 on empty input", () => {
     expect(dollarsToCents("")).toBe(0);
   });
+
+  it("preserves signed sub-dollar input and the form's truncation policy", () => {
+    expect(dollarsToCents("-0.46")).toBe(-46);
+    expect(dollarsToCents("-.46")).toBe(-46);
+    expect(dollarsToCents("$1,234.569")).toBe(123456);
+    expect(() => dollarsToCents("1.00junk")).toThrow(RangeError);
+    expect(() => dollarsToCents("90071992547409.92")).toThrow(RangeError);
+  });
 });
 
 describe("dollarsToMills", () => {

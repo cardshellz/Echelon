@@ -1,12 +1,17 @@
 import { z } from "zod";
 import { costInventoryEffectSchema } from "./cost-source-contracts";
 import { paymentCalendarDateSchema } from "./ap-payment-contract";
+import { receiptCreditAttributionSchema, receiptCreditAttributionKey, validateReceiptCreditAttribution } from "./receipt-credit-attribution";
+import { supplierCreditCostPreviewSchema, supplierCreditCostApprovalSchema } from "./supplier-credit-cost-review";
+import { acceptedReturnCreditSourceSchema } from "./supplier-return-credit";
 export const supplierCreditIdSchema = z.number().int().positive().max(2_147_483_647);
 const id = supplierCreditIdSchema;
 const cents = z.number().int().nonnegative().safe();
 const positiveCents = cents.positive();
 const version = z.string().regex(/^[a-f0-9]{64}$/);
 const reason = z.string().trim().min(3).max(2000);
+export const quarantineCreditAttributionSchema = z.object({ returnDispositionId: id, quantity: id,
+  invoiceStartPiece: cents, evidenceReference: z.string().trim().min(1).max(200) }).strict();
 export const supplierCreditIssueSchema = z.object({
   code: z.string().min(1),
   message: z.string().min(1)
@@ -14,16 +19,22 @@ export const supplierCreditIssueSchema = z.object({
 export const supplierCreditCostStateSchema = z.enum(["pending", "posted", "review_required", "not_applicable"]);
 export const supplierCreditDispositionSchema = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("price_reduction"),
-  component: z.enum(["product", "packaging", "landed"])
+  component: z.enum(["product", "packaging", "landed"]),
+  receiptAllocation: receiptCreditAttributionSchema.optional(),
+}).strict(), z.object({
+  kind: z.literal("tax_reduction"), taxSourceKey: z.string().min(1).max(200), taxTypeId: id,
+  receiptAllocation: receiptCreditAttributionSchema.optional(),
+  quarantineAllocation: quarantineCreditAttributionSchema.optional(),
 }).strict(), z.object({
   kind: z.literal("quarantine_return"),
   returnDispositionId: id,
   quantity: id,
-  evidenceReference: z.string().trim().min(1).max(200)
+  evidenceReference: z.string().trim().min(1).max(200), invoiceStartPiece: cents.optional()
 }).strict(), z.object({
   kind: z.literal("accepted_stock_return"), supplierReturnLineId: id, quantity: id,
   evidenceReference: z.string().trim().min(1).max(1000),
   component: z.enum(["product", "packaging", "landed", "unassigned"]), entitlementId: id.optional(),
+  taxRefund: z.object({ taxSourceKey: z.string().min(1).max(200), taxTypeId: id }).strict().optional(),
 }).strict()]);
 export const supplierCreditSourceLineInputSchema = z.object({
   invoiceLineId: id,
@@ -31,11 +42,24 @@ export const supplierCreditSourceLineInputSchema = z.object({
   disposition: supplierCreditDispositionSchema
 }).strict();
 export type SourceLineInput = z.infer<typeof supplierCreditSourceLineInputSchema>;
+/** The API, cost owner and UI share the same review requirement. This is a
+ * workflow gate; current assigned authority is still checked by the server. */
+export function supplierCreditLineRequiresCostReview(line: { disposition: unknown; sourceEvidence?: unknown }): boolean {
+  const disposition = supplierCreditDispositionSchema.safeParse(line.disposition);
+  if (!disposition.success) return false;
+  const value = disposition.data;
+  if (value.kind === "tax_reduction") return true;
+  if (value.kind === "price_reduction") return value.receiptAllocation !== undefined;
+  if (value.kind === "quarantine_return") return value.invoiceStartPiece !== undefined;
+  const source = z.object({ acceptedReturnSource: acceptedReturnCreditSourceSchema }).passthrough().safeParse(line.sourceEvidence);
+  return source.success && source.data.acceptedReturnSource.invoiceAttribution !== undefined;
+}
 export function supplierCreditLineSourceKey(line: SourceLineInput): string {
   const disposition = line.disposition;
-  if (disposition.kind === "price_reduction") return `price_reduction:${disposition.component}`;
+  if (disposition.kind === "price_reduction") return `price_reduction:${disposition.component}${disposition.receiptAllocation ? `:${receiptCreditAttributionKey(disposition.receiptAllocation)}` : ""}`;
+  if (disposition.kind === "tax_reduction") return `tax_reduction:${disposition.taxSourceKey}${disposition.receiptAllocation ? `:${receiptCreditAttributionKey(disposition.receiptAllocation)}` : disposition.quarantineAllocation ? `:return:${disposition.quarantineAllocation.returnDispositionId}:${disposition.quarantineAllocation.invoiceStartPiece}` : ""}`;
   if (disposition.kind === "quarantine_return") return `quarantine_return:${disposition.returnDispositionId}`;
-  return `accepted_stock_return:${disposition.supplierReturnLineId}:${disposition.entitlementId ?? "new"}:${disposition.component}`;
+  return `accepted_stock_return:${disposition.supplierReturnLineId}:${disposition.entitlementId ?? "new"}:${disposition.component}${disposition.taxRefund ? `:tax:${disposition.taxRefund.taxSourceKey}` : ""}`;
 }
 export const supplierCreditCreateInputSchema = z.object({
   sourceInvoiceId: id,
@@ -60,7 +84,8 @@ export const supplierCreditCreateInputSchema = z.object({
 export type SupplierCreditCreateInput = z.infer<typeof supplierCreditCreateInputSchema>;
 export const supplierCreditReviewInputSchema = z.object({
   expectedVersion: version,
-  reason
+  reason,
+  previewVersion: version.optional(),
 }).strict();
 export const supplierCreditApplyInputSchema = supplierCreditReviewInputSchema.extend({
   allocations: z.array(z.object({
@@ -147,6 +172,7 @@ export const supplierCreditDetailSchema = z.object({
   voidedAt: timestamp.nullable(),
   voidReason: z.string().nullable(),
   lines: z.array(supplierCreditLineSchema),
+  costApprovals: z.array(supplierCreditCostApprovalSchema).optional(),
   applications: z.array(supplierCreditApplicationSchema),
   capabilities: z.object({
     approve: supplierCreditCapabilitySchema,
@@ -197,8 +223,13 @@ export const supplierCreditOptionsSchema = z.object({
     creditedAmountCents: cents,
     availableAmountCents: cents,
     components: z.array(z.enum(["product", "packaging", "landed"])),
+    combinedGoods: z.boolean().optional(),
+    taxSources: z.array(z.object({ key: z.string(), label: z.string().optional(), taxTypeId: id, amountCents: cents, treatment: z.enum(["inventory", "recoverable"]) }).strict()).optional(),
+    receiptCosting: z.boolean().optional(),
+    receiptAllocations: z.array(receiptCreditAttributionSchema.innerType().extend({ receiptNumber: z.string() }).superRefine(validateReceiptCreditAttribution)).max(1000).optional(),
     acceptedReturns: z.array(z.object({
       supplierReturnId: id, supplierReturnLineId: id, quantityAvailable: cents,
+      receiptAttributed: z.boolean().optional(),
       unitsPerVariant: id, evidenceReference: z.string(), label: z.string(),
       components: z.array(z.enum(["product", "packaging", "landed", "unassigned"])),
       entitlements: z.array(z.object({ id, quantity: id }).strict()),
@@ -224,7 +255,8 @@ export const supplierCreditCommandResultSchema = z.object({
   request: z.union([supplierCreditCreateInputSchema, supplierCreditApplyInputSchema, supplierCreditReviewInputSchema]),
   applicationIds: z.array(id),
   reversedApplicationId: id.nullable(),
-  credit: supplierCreditDetailSchema
+  credit: supplierCreditDetailSchema,
+  costPreview: supplierCreditCostPreviewSchema.optional(),
 }).strict().refine(value => value.credit.id === value.creditId, {
   message: "Credit command identity does not match its result."
 });

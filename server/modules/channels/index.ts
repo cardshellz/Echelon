@@ -14,7 +14,7 @@ export { ChannelIdentityService } from "./channel-identity.service";
 export { ChannelIdentityError } from "./channel-identity.domain";
 export type { ChannelItemIdentity } from "./channel-identity.domain";
 export { type IChannelStorage, channelMethods } from "./channels.storage";
-export { type IChannelCatalogStorage, channelCatalogMethods } from "./channel-catalog.storage";
+export { type IChannelCatalogStorage } from "./channel-catalog.storage";
 
 import { type IChannelStorage, channelMethods } from "./channels.storage";
 import { type IChannelCatalogStorage, channelCatalogMethods } from "./channel-catalog.storage";
@@ -25,10 +25,24 @@ export const channelsStorage: ChannelsModuleStorage = {
   ...channelCatalogMethods,
 };
 
+// Internal API Facades (CI-03 / CHN-2)
+export * from "./product-identity.api";
+export * from "./ebay-maintenance-evidence.api";
+export * from "./shopify-identity.api";
+export * from "./ebay-connector.api";
+
 // Service types
-export type { SyncResult } from "./sync.service";
-export type { ReservationResult } from "./reservation.service";
+export type { SyncResult, ChannelSyncServiceContract } from "./sync.service";
+export type { ReservationResult, ReservationInventoryCore } from "./reservation.service";
 export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "./product-push.service";
+
+export interface ChannelsApi {
+  readonly channelSync: import("./sync.service").ChannelSyncServiceContract;
+  readonly channelProductPush: import("./product-push.service").ChannelProductPushService;
+  readonly syncSettings: import("./sync-settings.service").SyncSettingsService;
+  readonly allocationEngine: import("./allocation-engine.service").AllocationEngine;
+  readonly sourceLockService: import("./source-lock.service").SourceLockService;
+}
 
 // Channel Adapter Interface (Phase 1)
 export type {
@@ -46,8 +60,27 @@ export type {
   FulfillmentPushResult,
   CancellationPayload,
   CancellationPushResult,
+  ChannelOrderAdapter,
+  ChannelOrderNormalizeContext,
+  ChannelWebhookVerifyInput,
+  ChannelWebhookVerifyResult,
+  ValidatedChannelCancelEvent,
+  ValidatedChannelOrder,
+  ValidatedChannelOrderLine,
+  ValidatedChannelRefundEvent,
 } from "./channel-adapter.interface";
-export { ChannelAdapterRegistry } from "./channel-adapter.interface";
+export {
+  ChannelAdapterRegistry,
+  ChannelOrderAdapterRegistry,
+  ChannelOrderBoundaryValidationError,
+  channelIntakeCancelSchema,
+  channelIntakeOrderLineSchema,
+  channelIntakeOrderSchema,
+  channelIntakeRefundSchema,
+  parseValidatedChannelCancel,
+  parseValidatedChannelOrder,
+  parseValidatedChannelRefund,
+} from "./channel-adapter.interface";
 
 // Source Lock System (Phase 1)
 export { createSourceLockService } from "./source-lock.service";

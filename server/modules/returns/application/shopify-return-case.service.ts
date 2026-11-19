@@ -1,3 +1,4 @@
+import { MoneyInputError, readIntegerCents } from "@shared/money-read";
 import { sql } from "drizzle-orm";
 import type {
   ReturnBusinessContext,
@@ -88,6 +89,19 @@ function requirePositiveInteger(value: number, field: string): number {
     });
   }
   return value;
+}
+
+function readSnapshotCents(value: unknown, field: string, wmsReturnItemId: number): number {
+  try {
+    return readIntegerCents(value, field);
+  } catch (error) {
+    if (!(error instanceof MoneyInputError)) throw error;
+    throw new ReturnCaseDomainError(
+      "RETURN_CASE_ITEM_MONEY_INVALID",
+      "Return Case item money must be non-negative safe integers.",
+      { wmsReturnItemId, field },
+    );
+  }
 }
 
 function requireSourceEventId(value: string): string {
@@ -188,8 +202,8 @@ async function loadItemSnapshots(
     oms_order_line_id: row.oms_order_line_id == null ? null : Number(row.oms_order_line_id),
     wms_order_item_id: row.wms_order_item_id == null ? null : Number(row.wms_order_item_id),
     quantity: Number(row.quantity),
-    unit_paid_price_cents: Number(row.unit_paid_price_cents),
-    source_line_total_cents: Number(row.source_line_total_cents),
+    unit_paid_price_cents: readSnapshotCents(row.unit_paid_price_cents, "unit paid price", Number(row.wms_return_item_id)),
+    source_line_total_cents: readSnapshotCents(row.source_line_total_cents, "source line total", Number(row.wms_return_item_id)),
   }));
 }
 

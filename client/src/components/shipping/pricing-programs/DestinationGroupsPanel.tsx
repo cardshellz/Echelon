@@ -79,6 +79,7 @@ interface DestinationGroupsPanelProps {
   savingDraft: boolean;
   availableDestinationGroups: ProgramDestinationGroup[];
   availableDestinationScopes: ShippingDestinationScopeSummary[];
+  onProductRulesMutated?: () => void;
 }
 
 export function DestinationGroupsPanel({
@@ -94,6 +95,7 @@ export function DestinationGroupsPanel({
   savingDraft,
   availableDestinationGroups,
   availableDestinationScopes,
+  onProductRulesMutated,
 }: DestinationGroupsPanelProps) {
   const { toast } = useToast();
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
@@ -440,6 +442,7 @@ export function DestinationGroupsPanel({
               warehouses={warehouses}
               onSaveDraft={onSaveDraft}
               savingDraft={savingDraft}
+              onProductRulesMutated={onProductRulesMutated}
             />
           )}
 

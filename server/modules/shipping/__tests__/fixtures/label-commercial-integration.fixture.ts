@@ -33,6 +33,7 @@ export async function installProviderExecutionTestRelations(pool: Pool): Promise
       ADD COLUMN channel_id INTEGER REFERENCES channels.channels(id) ON DELETE SET NULL,
       ADD COLUMN source VARCHAR(20) NOT NULL DEFAULT 'shopify',
       ADD COLUMN external_order_id VARCHAR(100),
+      ADD COLUMN source_table_id VARCHAR(100),
       ADD COLUMN combined_group_id INTEGER,
       ADD COLUMN combined_role VARCHAR(20),
       ADD COLUMN picked_count INTEGER NOT NULL DEFAULT 0,
@@ -60,6 +61,7 @@ export async function installProviderExecutionTestRelations(pool: Pool): Promise
       UNIQUE (physical_shipment_id, request_hash)
     );
     ALTER TABLE wms.outbound_shipments
+      ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT now(),
       ADD COLUMN channel_id INTEGER REFERENCES channels.channels(id),
       ADD COLUMN engine_shipment_ref VARCHAR(100),
       ADD COLUMN shopify_fulfillment_id VARCHAR(100);
@@ -324,8 +326,12 @@ export async function installLabelCommercialIntegrationFixtures(pool: Pool): Pro
   const foundation = readFileSync(resolve(process.cwd(), "migrations/0593_fulfillment_authority_cutover_foundation.sql"), "utf8");
   const receiptStart = foundation.indexOf("CREATE TABLE IF NOT EXISTS oms.channel_fulfillment_receipts (");
   const receiptEnd = foundation.indexOf("CREATE TABLE IF NOT EXISTS oms.channel_fulfillment_receipt_attempts (");
-  if (receiptStart < 0 || receiptEnd <= receiptStart) throw new Error("Production receipt fixture markers are missing");
+  const itemStart = foundation.indexOf("CREATE TABLE IF NOT EXISTS oms.channel_fulfillment_receipt_items (");
+  const itemEnd = foundation.indexOf("CREATE TABLE IF NOT EXISTS wms.physical_shipment_tracking_amendments (");
+  if (receiptStart < 0 || receiptEnd <= receiptStart || itemStart < 0 || itemEnd <= itemStart) throw new Error("Production receipt fixture markers are missing");
   await pool.query(foundation.slice(receiptStart, receiptEnd));
+  await pool.query(foundation.slice(itemStart, itemEnd));
+  await pool.query(readFileSync(resolve(process.cwd(), "migrations/0078_webhook_retry_queue.sql"), "utf8"));
   await pool.query(shipmentQuantityEvidenceFixtureSql);
   await installProviderExecutionTestRelations(pool);
   await pool.query(readFileSync(resolve(process.cwd(), "migrations/0675_channel_fulfillment_silent_review_retry.sql"), "utf8"));

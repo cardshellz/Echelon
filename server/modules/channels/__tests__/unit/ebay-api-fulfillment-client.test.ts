@@ -46,6 +46,26 @@ function expectQuantityAdmission(externalInventoryItemId: string, kind: "item" |
   expect(admission.owner.group).not.toHaveBeenCalled();
 }
 
+describe("EbayApiClient package discovery", () => {
+  it("keeps malformed successful reads separate from a genuinely empty offer collection", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({}));
+    await expect(makeClient().getOffers("BOX-P5")).rejects.toMatchObject({ code: "EBAY_SYNC_PROVIDER_RESPONSE_INVALID",
+      cause: { context: { providerRead: { provider: "ebay", resource: "offers", kind: "invalid_response" } } } });
+  });
+  it("accepts only the documented missing-offer response as absence", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ errors: [{ errorId: 25713 }] }, { status: 404 }));
+    await expect(makeClient().getOffers("BOX-P5")).resolves.toEqual({ offers: [] });
+  });
+  it.each([
+    [404, { errors: [{ errorId: 2003 }] }],
+    [404, { errors: [{ errorId: 25713 }, { errorId: 2003 }] }],
+    [400, { errors: [{ errorId: 2003, message: "unrelated 404 in the diagnostic" }] }],
+  ])("keeps HTTP %s and unknown offer responses as failures", async (status, body) => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(body, { status: status as number }));
+    await expect(makeClient().getOffers("BOX-P5")).rejects.toMatchObject({ statusCode: status });
+  });
+});
+
 describe("EbayApiClient.createShippingFulfillment", () => {
   it("verifies that a 201 Created fulfillment is readable before returning success", async () => {
     const fetchMock = vi

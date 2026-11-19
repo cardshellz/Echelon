@@ -134,7 +134,7 @@ describeDatabase.sequential("cutover receipt acknowledgment PostgreSQL query gua
     ["missing OMS order", { omsOrderId: null }],
     ["missing physical package", { physicalShipmentId: null }],
   ] satisfies Array<[string, Partial<ReceiptSeed>]>) (
-    "keeps %s evidence individual even next to a matching recorded package", async (_label, change) => {
+    "keeps %s evidence individual even next to a matching recorded package", async (_label, change: Partial<ReceiptSeed>) => {
       await seedReceipt({ id: "1" });
       await seedReceipt({ id: "2", ...change });
       const captured = await capture();

@@ -1,8 +1,9 @@
+import { readIntegerMills } from "@shared/money-read";
 import type { ReservedInventoryTransferOwner, ReservedTransferPlan } from "../../inventory-planning/application/reserved-inventory-transfer.port";
-import { repointCanonicalTransferPickLines } from "../../wms/order-item-commands";
+import { repointCanonicalTransferPickLines } from "../../wms/order-intake-and-items.api";
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
-import { assertShipmentNotRetired } from "../../inventory-planning/infrastructure/inventory-cutover-retired-work";
-import { assertNoOpenPickCorrection } from "../../wms/pick-correction.repository";
+import { assertShipmentNotRetired } from "../../inventory-planning/cutover-retired-work.api";
+import { assertNoOpenPickCorrection } from "../../wms/pick-corrections-and-holds.api";
 import { openOperationalQuantityPosting, quantityTransactionFromDrizzle, type OperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
 import { assertLegacyQuantityImportAllowed } from "./legacy-quantity-import";
 import { assertReceivingCustodyCountable } from "./receiving-custody-count-guard";
@@ -21,12 +22,16 @@ import { AuditLogger } from "../../../infrastructure/auditLogger";
 import { AppError, IntegrityError, ValidationError } from "../../../../shared/errors";
 import { resolveCost } from "../cost-resolver";
 import { centsToMills, millsToCents } from "../../../../shared/utils/money";
-import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-item-commands";
+import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-intake-and-items.api";
 import { allocateBuildCostLayers } from "../domain/build.domain";
 import {
   planReplenishmentExecution,
 } from "../domain/replenishment-execution.domain";
 import { InventoryQuantityError } from "../domain/quantity-ledger";
+import {
+  insertVirtual3plWarehouseLocationInWarehouse,
+  updateWarehouseInventorySyncStatusInWarehouse,
+} from "../../warehouse/cross-module-warehouse-mutations.api";
 
 export class FreezeViolationError extends AppError {
   constructor(locationId: number) {
@@ -132,7 +137,7 @@ type DrizzleDb = {
   select: (...args: any[]) => any;
   update: (...args: any[]) => any;
   insert: (...args: any[]) => any;
-  execute: <T = any>(query: any) => Promise<{ rows: T[] }>;
+  execute: NodePgDatabase["execute"];
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
 
@@ -313,6 +318,8 @@ export class InventoryUseCases {
     purchaseOrderLineId?: number;
     inboundShipmentId?: number;
     costProvisional?: number;
+    /** Internal transaction orchestration hook; effects run only after the caller commits. */
+    deferUntilCommit?: (effect: () => Promise<void>) => void;
   }, externalTx?: any): Promise<void> {
     if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
 
@@ -465,7 +472,11 @@ export class InventoryUseCases {
       await this.db.transaction(doWork);
     }
 
-    if (!replayed) this.triggerNotifyChange(params.productVariantId, "receive");
+    if (!replayed) {
+      const notifyAfterCommit = async () => this.triggerNotifyChange(params.productVariantId, "receive");
+      if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
+      else this.triggerNotifyChange(params.productVariantId, "receive");
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -576,7 +587,7 @@ export class InventoryUseCases {
           }
 
           if (lotUnitCostMills === null && lot.unit_cost_mills !== null) {
-            lotUnitCostMills = Number(lot.unit_cost_mills);
+            lotUnitCostMills = readIntegerMills(lot.unit_cost_mills, "lot unit cost", true);
           }
 
           if (quantityPosting) {
@@ -1512,35 +1523,72 @@ export class InventoryUseCases {
 
     const doWork = async (tx: any) => {
       // One order item may have multiple supply segments (finished stock and
-      // recipe-built shortfall). Each segment remains independently idempotent.
+      // recipe-built shortfall). Each segment remains independently idempotent,
+      // while allowing demand-revision or restock replacements after an unreserve
+      // or partial reserve without violating uq_inventory_transactions_reserve_dedup (A-01/A-02).
       const existingReserve = await tx.execute(sql`
-        SELECT id
+        SELECT
+          id,
+          transaction_type AS "transactionType",
+          reserved_qty_delta AS "reservedQtyDelta",
+          reference_id AS "referenceId"
         FROM inventory.inventory_transactions
-        WHERE transaction_type = 'reserve'
+        WHERE transaction_type IN ('reserve', 'unreserve')
           AND order_id = ${params.orderId}
           AND order_item_id = ${params.orderItemId}
           AND COALESCE(reference_type, 'order') = ${referenceType}
-          AND COALESCE(reference_id, order_id::text) = ${referenceId}
+          AND (
+            COALESCE(reference_id, order_id::text) = ${referenceId}
+            OR COALESCE(reference_id, order_id::text) LIKE ${`${referenceId}:rev:%`}
+          )
           AND voided_at IS NULL
-        LIMIT 1
       `);
-      if (existingReserve.rows.length > 0) {
+      const existingRows: any[] = existingReserve?.rows ?? [];
+      let reserveCount = 0;
+      let netReservedQty = 0;
+      for (const row of existingRows) {
+        const rawType = row.transactionType ?? row.transaction_type;
+        const rawDelta = row.reservedQtyDelta ?? row.reserved_qty_delta;
+        if (rawType === undefined && rawDelta === undefined) {
+          // Synthetic/legacy row stub without type/delta metadata represents an active reserve
+          return true;
+        }
+        const txType = rawType ?? "reserve";
+        if (txType === "reserve") {
+          reserveCount += 1;
+        }
+        if (rawDelta !== undefined && rawDelta !== null) {
+          netReservedQty += Number(rawDelta);
+        } else if (txType === "reserve") {
+          netReservedQty += params.qty;
+        } else if (txType === "unreserve") {
+          netReservedQty -= params.qty;
+        }
+      }
+
+      const openReservedQty = Math.max(0, netReservedQty);
+      if (reserveCount > 0 && openReservedQty >= params.qty) {
         return true;
       }
+
+      const qtyToReserve = params.qty - openReservedQty;
+      const effectiveReferenceId = reserveCount === 0
+        ? referenceId
+        : `${referenceId}:rev:${reserveCount + 1}`.slice(0, 100);
 
       const level = await this.storage.upsertInventoryLevel({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
       }, tx);
 
-      await this.storage.adjustInventoryLevel(level.id, { reservedQty: params.qty }, tx);
+      await this.storage.adjustInventoryLevel(level.id, { reservedQty: qtyToReserve }, tx);
 
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
         await lotSvc.reserveFromLots({
           productVariantId: params.productVariantId,
           warehouseLocationId: params.warehouseLocationId,
-          qty: params.qty,
+          qty: qtyToReserve,
         });
       }
 
@@ -1552,13 +1600,13 @@ export class InventoryUseCases {
           variantQtyDelta: 0,
           variantQtyBefore: level.variantQty,
           variantQtyAfter: level.variantQty,
-          reservedQtyDelta: params.qty,
+          reservedQtyDelta: params.qty - openReservedQty,
           sourceState: "on_hand",
           targetState: "committed",
           orderId: params.orderId,
           orderItemId: params.orderItemId,
           referenceType,
-          referenceId,
+          referenceId: effectiveReferenceId,
           userId: params.userId ?? null,
         }, tx);
       } catch (err: any) {
@@ -1983,17 +2031,20 @@ export class InventoryUseCases {
      * never silently follow stock around.
      */
     moveReserved?: boolean;
-    /** Explicit completed physical move, not dispatch/in-transit work. Automated
-     * replenishment and other callers remain same-warehouse unless they opt in. */
-    crossWarehouseArrivalConfirmed?: boolean;
+    /** Server-only workflow evidence. Public manual-transfer requests never
+     * receive this capability; cross-warehouse custody must use a transfer order. */
+    interwarehouseTransfer?: { transferId: number; stage: "dispatch" | "receive" };
   }): Promise<{ reservedMoved: number; orderItemsRepointed: number; transferReceiptId: number | null }> {
     for (const field of ["productVariantId", "fromLocationId", "toLocationId", "qty"] as const) {
       if (!Number.isSafeInteger(params[field]) || params[field] <= 0 || params[field] > 2_147_483_647) {
         throw new ValidationError(`${field} must be a positive safe integer within PostgreSQL bounds`);
       }
     }
-    if (params.crossWarehouseArrivalConfirmed !== undefined && typeof params.crossWarehouseArrivalConfirmed !== "boolean") {
-      throw new ValidationError("Cross-warehouse arrival confirmation must be a boolean");
+    if (params.interwarehouseTransfer &&
+        (!Number.isSafeInteger(params.interwarehouseTransfer.transferId) || params.interwarehouseTransfer.transferId <= 0 ||
+         params.interwarehouseTransfer.transferId > 2_147_483_647 ||
+         !["dispatch", "receive"].includes(params.interwarehouseTransfer.stage))) {
+      throw new ValidationError("Inter-warehouse workflow evidence is invalid");
     }
     if (params.fromLocationId === params.toLocationId) throw new Error("Source and destination must differ");
 
@@ -2046,19 +2097,51 @@ export class InventoryUseCases {
       if (fromLoc.warehouseId == null) throw new Error(`Source location ${fromLoc.code} is not assigned to a warehouse`);
       if (toLoc.warehouseId == null) throw new Error(`Destination location ${toLoc.code} is not assigned to a warehouse`);
       if (fromLoc.warehouseId !== toLoc.warehouseId) {
-        if (!params.crossWarehouseArrivalConfirmed) throw new InventoryQuantityError(
-          "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED",
-          "This transfer crosses warehouses. Confirm the stock has arrived at the destination.",
+        if (!params.interwarehouseTransfer || params.referenceType !== "interwarehouse_transfer") throw new InventoryQuantityError(
+          "INTERWAREHOUSE_TRANSFER_WORKFLOW_REQUIRED",
+          "Create an inter-warehouse transfer order so stock is tracked in transit and received at the destination.",
           { fromWarehouseId: fromLoc.warehouseId, toWarehouseId: toLoc.warehouseId },
         );
         if (!quantityPosting || !params.userId?.trim()) throw new InventoryQuantityError(
           "TRANSFER_QUANTITY_AUTHORITY_REQUIRED", "Cross-warehouse transfers require the quantity ledger and an authenticated actor.",
         );
-        const activeWarehouses = await tx.execute(sql`SELECT id, is_active FROM warehouse.warehouses
+        const activeWarehouses = await tx.execute(sql`SELECT id, is_active, warehouse_type FROM warehouse.warehouses
           WHERE id IN (${fromLoc.warehouseId}, ${toLoc.warehouseId}) ORDER BY id FOR SHARE`);
         if (activeWarehouses.rows.length !== 2 || activeWarehouses.rows.some((row: { is_active?: unknown }) => row.is_active !== 1)) {
           throw new InventoryQuantityError("TRANSFER_WAREHOUSE_INACTIVE", "Both transfer warehouses must be active.");
         }
+        const warehouseType = new Map(activeWarehouses.rows.map((row: any) => [Number(row.id), row.warehouse_type]));
+        const fromTransit = warehouseType.get(fromLoc.warehouseId) === "system_transit" && fromLoc.locationType === "in_transit";
+        const toTransit = warehouseType.get(toLoc.warehouseId) === "system_transit" && toLoc.locationType === "in_transit";
+        const validLeg = params.interwarehouseTransfer.stage === "dispatch"
+          ? !fromTransit && toTransit
+          : fromTransit && !toTransit;
+        if (!validLeg) throw new InventoryQuantityError(
+          "INTERWAREHOUSE_CUSTODY_ROUTE_INVALID",
+          "Inter-warehouse stock must move through its isolated in-transit custody node.",
+          { transferId: params.interwarehouseTransfer.transferId, stage: params.interwarehouseTransfer.stage },
+        );
+        const evidence = await tx.execute(sql`
+          SELECT transfer.status,transfer.source_location_id,transfer.destination_location_id,transfer.transit_location_id
+          FROM inventory.interwarehouse_transfers transfer
+          JOIN inventory.interwarehouse_transfer_lines line ON line.transfer_id=transfer.id
+          WHERE transfer.id=${params.interwarehouseTransfer.transferId}
+            AND line.product_variant_id=${params.productVariantId}
+          FOR SHARE OF transfer,line
+        `);
+        const workflow = evidence.rows[0] as any;
+        const routeMatchesOrder = workflow && (params.interwarehouseTransfer.stage === "dispatch"
+          ? Number(workflow.source_location_id) === params.fromLocationId
+            && Number(workflow.transit_location_id) === params.toLocationId
+            && workflow.status === "ready"
+          : Number(workflow.transit_location_id) === params.fromLocationId
+            && Number(workflow.destination_location_id) === params.toLocationId
+            && ["in_transit", "partially_received", "exception"].includes(String(workflow.status)));
+        if (!routeMatchesOrder || evidence.rows.length !== 1) throw new InventoryQuantityError(
+          "INTERWAREHOUSE_CUSTODY_EVIDENCE_INVALID",
+          "The inventory movement does not match the locked transfer order and SKU.",
+          { transferId: params.interwarehouseTransfer.transferId, stage: params.interwarehouseTransfer.stage },
+        );
       }
 
       if (quantityPosting) await tx.execute(sql`SELECT id FROM inventory.inventory_levels
@@ -2326,7 +2409,7 @@ export class InventoryUseCases {
         ORDER BY il.warehouse_location_id, il.product_variant_id, il.id
         FOR UPDATE OF il
       `);
-      
+
       const sourceInventory = sourceInventoryResp.rows;
       if (sourceInventory.length === 0) {
         throw new IntegrityError("No inventory found for source variant");
@@ -2349,9 +2432,9 @@ export class InventoryUseCases {
           warehouseLocationId: inv.warehouse_location_id,
         }, tx);
         if (quantityPosting) await this.assertNotFrozen(inv.warehouse_location_id, tx);
-        
+
         if (!quantityPosting) await this.storage.adjustInventoryLevel(sourceLevel.id, { variantQty: -qtyToConvert }, tx);
-        
+
         await this.storage.createInventoryTransaction({
           productVariantId: params.fromVariantId,
           fromLocationId: inv.warehouse_location_id,
@@ -2373,7 +2456,7 @@ export class InventoryUseCases {
           productVariantId: params.toVariantId,
           warehouseLocationId: inv.warehouse_location_id,
         }, tx);
-        
+
         if (quantityPosting) {
           const lotService = this.lotService!.withTx(tx);
           const consumed = await lotService.adjustLots({ productVariantId: params.fromVariantId,
@@ -2398,7 +2481,7 @@ export class InventoryUseCases {
             outputStartQty += layer.qty;
           }
         } else await this.storage.adjustInventoryLevel(destLevel.id, { variantQty: qtyToConvert }, tx);
-        
+
         await this.storage.createInventoryTransaction({
           productVariantId: params.toVariantId,
           toLocationId: inv.warehouse_location_id,
@@ -2433,7 +2516,7 @@ export class InventoryUseCases {
         conversions.push({ locationCode: inv.location_code, qty: qtyToConvert });
         remaining -= qtyToConvert;
       }
-      
+
       const result = { totalConverted: conversions.reduce((s, c) => s + c.qty, 0), conversions, batchId };
       if (quantityPosting && !sharedPosting) {
         await quantityPosting.post({ idempotencyKey: params.commandKey!, kind: "transform",
@@ -2494,9 +2577,7 @@ export class InventoryUseCases {
     }
 
     try {
-      await this.db.update(warehouses)
-        .set({ inventorySyncStatus: "syncing", updatedAt: new Date() })
-        .where(eq(warehouses.id, warehouseId));
+      await updateWarehouseInventorySyncStatusInWarehouse(this.db, warehouseId, "syncing");
 
       const config = (wh.inventorySourceConfig as Record<string, any>) || {};
       const channelId = config?.channelId;
@@ -2556,14 +2637,11 @@ export class InventoryUseCases {
 
       let virtualLocationId = existingLoc?.id;
       if (!virtualLocationId) {
-        const [createdLoc] = await this.db.insert(warehouseLocations).values({
+        const createdLoc = await insertVirtual3plWarehouseLocationInWarehouse(this.db, {
           warehouseId,
           code: virtualCode,
           name: `${wh.code} Virtual Inventory`,
-          locationType: "3pl_virtual",
-          binType: "floor",
-          isPickable: 0,
-        }).returning();
+        });
         virtualLocationId = createdLoc.id;
       }
 
@@ -2604,26 +2682,79 @@ export class InventoryUseCases {
         }
       }
 
-      await this.db.update(warehouses)
-        .set({ inventorySyncStatus: "ok", lastInventorySyncAt: new Date(), updatedAt: new Date() })
-        .where(eq(warehouses.id, warehouseId));
+      await updateWarehouseInventorySyncStatusInWarehouse(this.db, warehouseId, "ok", {
+        lastInventorySyncAt: new Date(),
+      });
 
     } catch (err: any) {
-      await this.db.update(warehouses)
-        .set({ inventorySyncStatus: "error", updatedAt: new Date() })
-        .where(eq(warehouses.id, warehouseId));
+      await updateWarehouseInventorySyncStatusInWarehouse(this.db, warehouseId, "error");
       result.errors.push(err.message);
     }
 
     return result;
   }
 
+  async syncAll(): Promise<
+    Array<{
+      warehouseId: number;
+      warehouseCode: string;
+      synced: number;
+      skipped: number;
+      errors: string[];
+    }>
+  > {
+    await assertLegacyQuantityImportAllowed(this.db, "Legacy external inventory sync");
+    const channelWarehouses = await this.db
+      .select({ id: warehouses.id })
+      .from(warehouses)
+      .where(eq(warehouses.inventorySourceType, "channel"));
+    const results = [];
+    for (const wh of channelWarehouses) {
+      results.push(await this.syncWarehouse(wh.id));
+    }
+    return results;
+  }
+
   // ---------------------------------------------------------------------------
-  // LEDGER — direct transaction logging
+  // LEDGER — direct transaction logging & administrative level maintenance
   // ---------------------------------------------------------------------------
 
   async logTransaction(txn: InsertInventoryTransaction): Promise<InventoryTransaction> {
     return this.storage.createInventoryTransaction(txn);
+  }
+
+  async undoTransfer(transactionId: number, userId: string): Promise<InventoryTransaction> {
+    if (!Number.isSafeInteger(transactionId) || transactionId <= 0) {
+      throw new ValidationError("Invalid transfer transaction ID", { transactionId });
+    }
+    const txn = await this.storage.undoTransfer(transactionId, userId);
+    if (txn.productVariantId) {
+      this.triggerNotifyChange(txn.productVariantId, "undo_transfer");
+    }
+    return txn;
+  }
+
+  async deleteEmptyUnassignedLevel(id: number): Promise<{
+    deleted: boolean;
+    error?: string;
+    statusCode?: number;
+  }> {
+    const level = await this.storage.getInventoryLevelById(id);
+    if (!level) {
+      return { deleted: false, error: "Inventory level not found", statusCode: 404 };
+    }
+    if (level.variantQty !== 0 || level.reservedQty !== 0) {
+      return { deleted: false, error: "Cannot delete — row still has quantity or reservations", statusCode: 400 };
+    }
+    const hasAssignment = await this.storage.hasProductLocationAssignment(
+      level.productVariantId,
+      level.warehouseLocationId,
+    );
+    if (hasAssignment) {
+      return { deleted: false, error: "Cannot delete — variant is assigned to this location", statusCode: 400 };
+    }
+    await this.storage.deleteInventoryLevel(id);
+    return { deleted: true };
   }
 
   // ---------------------------------------------------------------------------
@@ -2642,7 +2773,7 @@ export class InventoryUseCases {
       select: (...args: any[]) => tx.select(...args),
       update: (...args: any[]) => tx.update(...args),
       insert: (...args: any[]) => tx.insert(...args),
-      execute: (query: any) => tx.execute(query),
+      execute: ((query: any) => tx.execute(query)) as NodePgDatabase["execute"],
       transaction: async <T>(fn: (innerTx: any) => Promise<T>) => fn(tx),
     };
 

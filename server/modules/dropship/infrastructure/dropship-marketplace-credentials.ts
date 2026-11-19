@@ -17,6 +17,7 @@ import {
 } from "../application/dropship-store-connection-service";
 import { createDropshipNotificationServiceFromEnv } from "./dropship-notification.factory";
 import { MARKETPLACE_PROVIDER_IDENTITY_SCHEME } from "../../marketplace-listings/domain/listing-registration-plan";
+import { vendorPlatformName } from "../domain/vendor-platform-name";
 
 /**
  * The only stored identity scheme. The database CHECK
@@ -518,8 +519,8 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
       eventType: DROPSHIP_NOTIFICATION_EVENTS.STORE_NEEDS_REAUTH,
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship store needs reauthorization",
-      message: `Your ${input.platform} dropship store needs to be reauthorized before order intake, listing pushes, and tracking updates can continue.`,
+      title: "Reconnect your store",
+      message: `Your ${vendorPlatformName(input.platform)} store needs to be reconnected. Until then, new orders, listing updates and tracking can't go through.`,
       payload: {
         vendorId: input.vendorId,
         storeConnectionId: input.storeConnectionId,

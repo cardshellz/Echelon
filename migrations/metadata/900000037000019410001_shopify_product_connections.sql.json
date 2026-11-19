@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000037000019410001_shopify_product_connections.sql",
+  "generation": 37,
+  "pr": 1941,
+  "ordinal": 1,
+  "after": [
+    "900000036000019340001_stock_links.sql"
+  ]
+}

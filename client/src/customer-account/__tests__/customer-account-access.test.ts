@@ -15,9 +15,19 @@ describe("order page access presentation", () => {
       expect(customerAccountAccessNotice(new CustomerAccountRequestError(code, "Sign in to view your returns. private detail")))
         .toEqual({ message: "We couldn't load the options for your order. Please try again.", action: "retry" });
     });
+  it("recognizes a verified sign-in error passed from the separately built preload bundle", () => {
+    expect(customerAccountAccessNotice({ code: "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", message: "private upstream text" }, "history"))
+      .toEqual({ message: "Your sign-in is no longer active. Sign in again to make changes.", action: "sign_in" });
+  });
   it("does not expose raw network errors", () => {
     expect(customerAccountAccessNotice(new TypeError("Failed to fetch"))).toMatchObject({ action: "retry" });
     expect(customerAccountAccessNotice(null).message).not.toMatch(/tools|returns|sign.in/i);
+  });
+  it("uses order history copy for lookup failures while preserving verified sign-in handling", () => {
+    expect(customerAccountAccessNotice(new TypeError("Private upstream detail"), "history"))
+      .toEqual({ message: "We couldn’t load your orders. Please try again.", action: "retry" });
+    expect(customerAccountAccessNotice(new CustomerAccountRequestError("CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", "Private session detail"), "history"))
+      .toEqual({ message: "Your sign-in is no longer active. Sign in again to make changes.", action: "sign_in" });
   });
   it("preserves the exact order and staging preview after sign-in using Shopify's localized route", () => {
     const link = customerAccountSignInUrl("/en-us/account/login", "/en-us/account/orders/fixture?preview_theme_id=174740308127");

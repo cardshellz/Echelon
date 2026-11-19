@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { createApSummaryReadBarrier } from "./ap-summary-read-barrier";
 import { readFileSync } from "node:fs";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { supplierCreditCommandResultSchema, supplierCreditDetailSchema, supplierCreditOptionsSchema, supplierCreditListSchema,
@@ -15,7 +16,19 @@ const migrationPath = "migrations/900000017000018610001_supplier_credit_completi
 // their cost effect remains review-required, never manufacture posted cost proof.
 databaseTests.sequential("supplier credit financial ownership and recovery", () => {
   const fixture = new PaymentAcceptanceFixture(migrationPath);
-  beforeAll(() => fixture.start(url!));
+  beforeAll(async () => {
+    await fixture.start(url!);
+    // Parent declarations already use today's schema. Install the actual
+    // receipt table/constraints, then the forward credit guard extension.
+    const receiptMigration = readFileSync("migrations/900000047000019790001_receipt_invoice_cost_allocations.sql", "utf8");
+    const start = receiptMigration.indexOf("CREATE TABLE procurement.receipt_invoice_cost_allocations (");
+    if (start < 0) throw new Error("Receipt allocation migration boundary changed");
+    await fixture.pool.query(receiptMigration.slice(start));
+    await fixture.pool.query(readFileSync("migrations/900000052000019930001_receipt_supplier_credit_sources.sql", "utf8"));
+    expect((await fixture.pool.query("SELECT count(*)::int AS count FROM procurement.supplier_header_cost_reviews")).rows).toEqual([{ count: 0 }]);
+    await fixture.pool.query("DROP TABLE procurement.supplier_header_cost_reviews");
+    await fixture.pool.query(readFileSync("migrations/900000055000020000001_supplier_header_tax_return_sources.sql", "utf8"));
+  });
   beforeEach(async () => {
     await fixture.reset();
     await fixture.pool.query(`UPDATE procurement.vendor_invoice_lines SET cost_component_evidence=
@@ -82,6 +95,44 @@ databaseTests.sequential("supplier credit financial ownership and recovery", () 
     });
   }
 
+  it("migration preserves legacy credit keys and rejects malformed receipt identities", async () => {
+    for (const [disposition, expected] of [
+      [{ kind: "price_reduction", component: "product" }, "price_reduction:product"],
+      [{ kind: "quarantine_return", returnDispositionId: 3 }, "quarantine_return:3"],
+      [{ kind: "accepted_stock_return", supplierReturnLineId: 4, component: "packaging" }, "accepted_stock_return:4:new:packaging"],
+      [{ kind: "price_reduction", component: "product", receiptAllocation: { receivingLineId: 1, receiptStartPiece: 0, invoiceStartPiece: 2, pieces: 3 } }, "price_reduction:product:1:0:2:3"],
+    ] as const) expect((await fixture.pool.query("SELECT procurement.supplier_credit_line_source_key($1::jsonb) AS key", [JSON.stringify(disposition)])).rows[0].key).toBe(expected);
+    for (const receiptAllocation of [null, {}, { receivingLineId: 1, receiptStartPiece: -1, invoiceStartPiece: 0, pieces: 1 },
+      { receivingLineId: 1, receiptStartPiece: 0, invoiceStartPiece: 0, pieces: "1" },
+      { receivingLineId: 1, receiptStartPiece: 0, invoiceStartPiece: 0, pieces: 1.5 },
+      { receivingLineId: 1, receiptStartPiece: 0, invoiceStartPiece: 0, pieces: 9007199254740992 }]) {
+      await expect(fixture.pool.query("SELECT procurement.supplier_credit_line_source_key($1::jsonb)", [JSON.stringify({ kind: "price_reduction", component: "product", receiptAllocation })])).rejects.toMatchObject({ code: "23514" });
+    }
+  });
+  it("migration admits a receipt-specific key only for its exact saved assignment and preserves immutable source history", async () => {
+    const credit = await create(), invoiceLineId = credit.lines[0].invoiceLineId;
+    const receipt = (await fixture.pool.query("INSERT INTO procurement.receiving_orders(receipt_number,purchase_order_id,source_type,status) VALUES('RECEIPT-CREDIT-MIGRATION',11,'po','closed') RETURNING id")).rows[0];
+    const line = (await fixture.pool.query("INSERT INTO procurement.receiving_lines(receiving_order_id,product_id,product_variant_id,purchase_order_line_id,received_qty,units_per_variant_snapshot) VALUES($1,21,31,51,1,1) RETURNING id", [receipt.id])).rows[0];
+    await fixture.pool.query("UPDATE procurement.purchase_order_lines SET receipt_costing_enabled=1 WHERE id=51");
+    await fixture.pool.query(`INSERT INTO procurement.receipt_invoice_cost_allocations
+      (purchase_order_line_id,receiving_line_id,invoice_line_id,receipt_start_piece,invoice_start_piece,pieces,approved_by,approved_at)
+      VALUES(51,$1,$2,0,0,1,$3,'2026-11-03T12:00:00Z')`, [line.id, invoiceLineId, PAYMENT_ACTORS.owner]);
+    const allocation = { receivingLineId: line.id, receiptStartPiece: 0, invoiceStartPiece: 0, pieces: 1 };
+    const disposition = { kind: "price_reduction", component: "product", receiptAllocation: allocation };
+    const insert = (source: unknown, evidence: unknown) => fixture.pool.query(`INSERT INTO procurement.supplier_credit_lines
+      (supplier_credit_id,invoice_line_id,source_key,amount_cents,disposition,source_evidence,created_at)
+      VALUES($1,$2,procurement.supplier_credit_line_source_key($3::jsonb),1,$3::jsonb,$4::jsonb,'2026-11-03T12:00:00Z') RETURNING id`,
+    [credit.id, invoiceLineId, JSON.stringify(source), JSON.stringify(evidence)]);
+    await expect(insert(disposition, { receiptAllocation: { ...allocation, pieces: 2 } })).rejects.toMatchObject({ code: "23514" });
+    const wrong = { ...disposition, receiptAllocation: { ...allocation, invoiceStartPiece: 1 } };
+    await expect(insert(wrong, { receiptAllocation: wrong.receiptAllocation })).rejects.toMatchObject({ code: "23514" });
+    const inserted = (await insert(disposition, { receiptAllocation: allocation })).rows[0];
+    await expect(fixture.pool.query("UPDATE procurement.supplier_credit_lines SET amount_cents=2 WHERE id=$1", [inserted.id])).rejects.toMatchObject({ code: "23514" });
+    await expect(fixture.pool.query("DELETE FROM procurement.supplier_credit_lines WHERE id=$1", [inserted.id])).rejects.toMatchObject({ code: "23514" });
+    await fixture.pool.query("DELETE FROM procurement.receipt_invoice_cost_allocations WHERE receiving_line_id=$1", [line.id]);
+    await expect(fixture.pool.query("UPDATE procurement.supplier_credits SET status='approved',approved_by=$2,approved_at='2026-11-03T12:00:00Z',version=version+1 WHERE id=$1", [credit.id, PAYMENT_ACTORS.owner])).rejects.toThrow(/exact saved invoice assignment/);
+  });
+
   it("records a dated supplier document separately from cash and preserves unsupported inventory history", async () => {
     const before = await fixture.graph();
     const draft = await create();
@@ -107,6 +158,41 @@ databaseTests.sequential("supplier credit financial ownership and recovery", () 
     await expectSettlement(200_000, 10_000, 0);
     expect((await fixture.graph()).payments.map(row => row.total_amount_cents)).toEqual(["200000"]);
     expect((await detail(credit.id)).unappliedAmountCents).toBe(0);
+  });
+
+  it.each(["apply", "reverse"] as const)("keeps AP summary snapshot coherent during concurrent supplier credit %s", async command => {
+    let credit = await approved(10_000);
+    if (command === "reverse") credit = result(await apply(credit, 10_000)).credit;
+    const { pool: modulePool } = await import("../../../../db");
+    const { getApSummary } = await import("../../ap-ledger.service");
+    const at = new Date("2026-10-13T12:00:00Z");
+    const before = await getApSummary({ now: at });
+    const barrier = createApSummaryReadBarrier(modulePool);
+    const pending = getApSummary({ now: at });
+    try {
+      await barrier.waitForRead(pending);
+      if (command === "apply") {
+        result(await apply(credit, 10_000));
+      } else {
+        result(await fixture.request(`/api/supplier-credits/${credit.id}/applications/${credit.applications[0].id}/reverse`, {
+          key: randomUUID(), body: { expectedVersion: credit.version, reason: "Synthetic concurrent summary credit reversal" },
+        }));
+      }
+      const afterCommit = await getApSummary({ now: at });
+      const committedState = await creditGraph();
+      expect(afterCommit).toMatchObject({
+        totalOutstandingCents: command === "apply" ? 410_000 : 420_000,
+        creditedAllTimeCents: command === "apply" ? 10_000 : 0,
+        paidAllTimeCents: 0,
+      });
+      expect(afterCommit).not.toEqual(before);
+      barrier.resume();
+      expect(await pending).toEqual(before);
+      expect(barrier.snapshot).toMatchObject({ isolation: "repeatable read", readOnly: "on" });
+      expect(barrier.readerReleaseCount).toBe(1);
+      expect(await getApSummary({ now: at })).toEqual(afterCommit);
+      expect(await creditGraph()).toEqual(committedState);
+    } finally { await barrier.close(pending); }
   });
 
   it("can apply a supplier credit to another payable of the same supplier while retaining its original source", async () => {

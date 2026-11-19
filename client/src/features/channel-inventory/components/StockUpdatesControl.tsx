@@ -20,6 +20,7 @@ import { PUBLISHER_LABELS, describeDestination, summarizePendingChanges, type Ch
 import { describeStockUpdates } from "../publishing-presentation";
 import { Callout, KeyValue, StatePill } from "./primitives";
 import { GlobalPublishingControl } from "./GlobalPublishingControl";
+import { StockLinkDetails, StockLinkSwitchRow, StockLinkTurnOffDialog, useStockLinkControls } from "./StockLinkControls";
 
 type Command = "stop";
 type SettingsTab = "supply" | "rules" | "quantities";
@@ -45,6 +46,8 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
   const enableRequest = useRef<EnableInventoryPublicationTargetRequest | null>(null);
   const [enableError, setEnableError] = useState<string | null>(null);
   const managedHere = target.publicationAuthority === "echelon";
+  // PLAN-CH2 v4.1 §9: a second switch row for automatic linking, only where the server reports it supported.
+  const stockLink = useStockLinkControls(identity);
   const canEnable = managedHere && target.state !== "live" && view.runtimeAuthority === "canonical";
 
   const openCommand = (command: Command) => {
@@ -108,6 +111,8 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
             else onDetailsOpenChange(true);
           }} />
       </div>}
+      <StockLinkSwitchRow presentation={stockLink.presentation} identity={identity} canActivate={canActivate}
+        busy={stockLink.busy} onToggle={stockLink.toggle} />
       <div className="flex items-center justify-between gap-3">
         <span id={`${switchId}-status`}><StatePill tone={publishing.tone}>{publishing.label}</StatePill></span>
         <Button type="button" variant="link" size="sm" className="h-auto min-h-0 p-0 text-xs"
@@ -153,6 +158,8 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
           </Button>}
         </div>}
 
+        <StockLinkDetails presentation={stockLink.presentation} canActivate={canActivate} busy={stockLink.busy}
+          retrying={stockLink.retrying} onContinue={stockLink.continueLinking} onCheckAgain={stockLink.checkAgain} onRetry={stockLink.retry} />
 
         <nav aria-label="Stock setup" className="flex flex-wrap gap-2 border-t pt-4">
           <Button type="button" size="sm" variant="outline" onClick={() => { onDetailsOpenChange(false); onOpenTab("supply"); }}>Edit warehouses</Button>
@@ -173,6 +180,9 @@ export function StockUpdatesControl({ view, channel, target, canActivate, detail
 
       </DialogContent>
     </Dialog>
+
+    <StockLinkTurnOffDialog open={stockLink.confirmOff} store={identity.title} busy={stockLink.busy}
+      onCancel={stockLink.cancelOff} onConfirm={stockLink.confirmTurnOff} />
 
     <AlertDialog open={dialog === "stop"} onOpenChange={open => { if (!open && !stop.isPending) setDialog(null); }}>
       <AlertDialogContent>

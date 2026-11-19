@@ -2,7 +2,7 @@ import { z } from "zod";
 import { customerReturnDimensionsSchema, customerReturnParcelWeightSchema } from "@shared/returns/customer-return-parcel";
 import type { CustomerReturnAuthorizationAllocation, ReturnAuthorizationSnapshot } from "./customer-return-authorization.ports";
 import type { ReturnPolicySnapshot } from "../domain/return-case";
-import { returnLabelAddressSchema } from "../../shipping-engine/application/return-label-provider.port";
+import { returnLabelAddressSchema } from "../../shipping-engine/return-shipping-and-labels.api";
 
 const id = z.number().int().positive().safe();
 const text = (length: number) => z.string().trim().min(1).max(length);
@@ -48,7 +48,7 @@ export interface PreparedCustomerReturnIntake {
 
 export const customerReturnIntakeResultSchema = z.object({
   authorizationId: id, authorizationNumber: text(32), replayed: z.boolean(),
-  cases: z.array(z.object({ caseId: id, caseNumber: text(32), wmsOrderId: id, wmsReturnId: id }).strict()).min(1).max(200),
+  cases: z.array(z.object({ caseId: id, caseNumber: text(32), wmsOrderId: id.nullable(), wmsReturnId: id }).strict()).min(1).max(200),
   parcels: z.array(z.object({
     parcelId: id, parcelKey: text(64), providerExternalShipmentId: text(100),
     dimensions: customerReturnDimensionsSchema, weightGrams: customerReturnParcelWeightSchema,
@@ -62,7 +62,7 @@ export interface CustomerReturnIntakeStore {
   persist(input: PreparedCustomerReturnIntake & { now: Date }): Promise<CustomerReturnIntakeResult>;
 }
 export class CustomerReturnIntakeError extends Error {
-  constructor(readonly code: string, message: string, readonly status = 409) {
+  constructor(readonly code: string, message: string, readonly status = 409, readonly reasonCode?: string) {
     super(message);
     this.name = "CustomerReturnIntakeError";
   }

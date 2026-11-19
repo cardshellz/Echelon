@@ -1,25 +1,27 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
 async function setup(page: Page, options: { fixed?: boolean; warehouseFailure?: boolean; lostResponse?: boolean } = {}) {
-  const state = { writes: [] as Record<string, unknown>[], errors: [] as string[], unexpected: [] as string[], warehouseFailure: options.warehouseFailure ?? false };
+  const state = { writes: [] as Record<string, unknown>[], writePaths: [] as string[], errors: [] as string[], unexpected: [] as string[], warehouseFailure: options.warehouseFailure ?? false };
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
-    if (request.method() === "POST" && path === "/api/inventory/transfer") {
+    if (request.method() === "POST" && ["/api/inventory/transfer", "/api/inventory/interwarehouse-transfers"].includes(path)) {
       state.writes.push(request.postDataJSON());
+      state.writePaths.push(path);
       if (options.lostResponse && state.writes.length === 1) return route.abort("failed");
-      return route.fulfill({ json: { success: true, reservedMoved: 0, orderItemsRepointed: 0 } });
+      return route.fulfill({ json: path.endsWith("interwarehouse-transfers")
+        ? { id: 1, transferNumber: "WT-00000001", status: "in_transit", inTransitQuantity: 50 }
+        : { success: true, reservedMoved: 0, orderItemsRepointed: 0 } });
     }
     if (request.method() !== "GET") {
       state.unexpected.push(`${request.method()} ${path}`);
       return route.fulfill({ status: 500, json: { error: "Unexpected write" } });
     }
-    if (path === "/api/auth/me") return route.fulfill({ json: {
-      user: { id: "operator", username: "operator", role: "admin" }, permissions: ["inventory:view", "inventory:adjust"], roles: ["admin"],
-    } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator", username: "operator", role: "admin" }, permissions: ["inventory:view", "inventory:adjust"], systemRoles: ["admin"] }) });
     if (path === "/api/warehouses") return state.warehouseFailure
       ? route.fulfill({ status: 503, json: { error: "Unavailable" } })
       : route.fulfill({ json: [
@@ -62,7 +64,7 @@ async function selectDestination(page: Page, warehouse = "LEON — 20 Leonberg",
   await locationOption(page, location).click();
 }
 
-test("shows both buildings and records an explicitly arrived cross-warehouse transfer", async ({ page }, testInfo) => {
+test("dispatches cross-warehouse stock into transit without an arrival checkbox", async ({ page }, testInfo) => {
   const state = await setup(page);
   await expect(page.getByLabel("From Warehouse", { exact: true })).toHaveValue("RTE-19 — Route 19 reserve");
   await expect(page.getByLabel("From Location", { exact: true })).toHaveValue("FLOOR-01");
@@ -70,14 +72,15 @@ test("shows both buildings and records an explicitly arrived cross-warehouse tra
   await selectDestination(page);
   await expect(page.getByTestId("transfer-route")).toContainText("RTE-19 — Route 19 reserve · FLOOR-01 (reserve)");
   await expect(page.getByTestId("transfer-route")).toContainText("LEON — 20 Leonberg · FLOOR-03 (pick)");
-  const transfer = page.getByRole("button", { name: "Transfer", exact: true });
-  await expect(transfer).toBeDisabled();
-  await page.getByLabel("The stock has arrived at the destination location.").check();
+  const transfer = page.getByRole("button", { name: "Dispatch transfer", exact: true });
+  await expect(transfer).toBeEnabled();
+  await expect(page.getByText(/dispatches stock into/i)).toBeVisible();
   await page.screenshot({ path: testInfo.outputPath("warehouse-transfer.png"), fullPage: true });
   await transfer.click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(state.writes).toEqual([expect.objectContaining({ fromLocationId: 9, toLocationId: 10, variantId: 174,
-    quantity: 50, crossWarehouseArrivalConfirmed: true, commandKey: expect.any(String) })]);
+    quantity: 50, commandKey: expect.any(String) })]);
+  expect(state.writePaths).toEqual(["/api/inventory/interwarehouse-transfers"]);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
@@ -85,21 +88,18 @@ test("clears destination when warehouse changes and leaves same-warehouse moves 
   const state = await setup(page);
   await page.getByLabel(/^Quantity/).fill("1.5");
   await selectDestination(page);
-  await page.getByLabel("The stock has arrived at the destination location.").check();
-  await expect(page.getByRole("button", { name: "Transfer", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Dispatch transfer", exact: true })).toBeDisabled();
   await page.getByLabel(/^Quantity/).fill("50");
-  await expect(page.getByLabel("The stock has arrived at the destination location.")).not.toBeChecked();
   await page.getByLabel("To Warehouse", { exact: true }).click();
   await page.getByRole("option", { name: "RTE-19 — Route 19 reserve", exact: true }).click();
   await expect(page.getByLabel("To Location", { exact: true })).toContainText("Select location");
-  await expect(page.getByRole("button", { name: "Transfer", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Move inventory", exact: true })).toBeDisabled();
   await page.getByLabel("To Location", { exact: true }).click();
   await locationOption(page, "FLOOR-02").click();
-  await expect(page.getByLabel("The stock has arrived at the destination location.")).toHaveCount(0);
-  await page.getByRole("button", { name: "Transfer", exact: true }).click();
+  await page.getByRole("button", { name: "Move inventory", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(state.writes[0]).toMatchObject({ fromLocationId: 9, toLocationId: 11, quantity: 50 });
-  expect(state.writes[0]).not.toHaveProperty("crossWarehouseArrivalConfirmed");
+  expect(state.writePaths).toEqual(["/api/inventory/transfer"]);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
@@ -123,7 +123,7 @@ test("chooses a source warehouse first and keeps source and destination searches
 test("blocks transfer when warehouse lookup fails and can reload it", async ({ page }) => {
   const state = await setup(page, { warehouseFailure: true });
   await expect(page.getByRole("alert")).toContainText("Could not load warehouse");
-  await expect(page.getByRole("button", { name: "Transfer", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Move inventory", exact: true })).toBeDisabled();
   state.warehouseFailure = false;
   await page.getByRole("button", { name: "Retry loading", exact: true }).click();
   await expect(page.getByLabel("From Warehouse", { exact: true })).toHaveValue("RTE-19 — Route 19 reserve");
@@ -135,8 +135,7 @@ test("reuses the same transfer command after a lost response", async ({ page }) 
   const state = await setup(page, { lostResponse: true });
   await page.getByLabel(/^Quantity/).fill("50");
   await selectDestination(page);
-  await page.getByLabel("The stock has arrived at the destination location.").check();
-  const transfer = page.getByRole("button", { name: "Transfer", exact: true });
+  const transfer = page.getByRole("button", { name: "Dispatch transfer", exact: true });
   await transfer.click();
   await expect(page.getByText("Transfer failed", { exact: true })).toBeVisible();
   await transfer.click();
@@ -190,7 +189,7 @@ test("keeps selection on Escape and resets search and destination when the wareh
   await locationSearch(page, "to").press("ArrowDown");
   await locationSearch(page, "to").press("Enter");
   await expect(destination).toContainText("FLOOR-02");
-  await expect(page.getByRole("button", { name: "Transfer", exact: true })).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Move inventory", exact: true })).toBeEnabled();
 
   await destination.click();
   await expect(locationSearch(page, "to")).toHaveValue("");
@@ -204,7 +203,7 @@ test("keeps selection on Escape and resets search and destination when the wareh
   await page.getByLabel("To Warehouse", { exact: true }).click();
   await page.getByRole("option", { name: "LEON — 20 Leonberg", exact: true }).click();
   await expect(destination).toContainText("Select location");
-  await expect(page.getByRole("button", { name: "Transfer", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Move inventory", exact: true })).toBeDisabled();
   await destination.click();
   await expect(locationSearch(page, "to")).toHaveValue("");
   await expect(locationOption(page, "FLOOR-02")).toHaveCount(0);
@@ -212,8 +211,8 @@ test("keeps selection on Escape and resets search and destination when the wareh
   await locationSearch(page, "to").press("ArrowDown");
   await locationSearch(page, "to").press("Enter");
   await expect(destination).toContainText("FLOOR-03");
-  await expect(page.getByLabel("The stock has arrived at the destination location.")).not.toBeChecked();
-  await expect(page.getByRole("button", { name: "Transfer", exact: true })).toBeDisabled();
+  await expect(page.getByLabel("The stock has arrived at the destination location.")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Dispatch transfer", exact: true })).toBeEnabled();
   expect(state.writes).toEqual([]);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });

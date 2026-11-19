@@ -4,8 +4,8 @@ import { requirePermission } from "../../routes/middleware";
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { financialCommandFromRequest } from "../../platform/commands/http-command";
 import { supplierCreditIdSchema, type SupplierCreditCommand } from "@shared/procurement/supplier-credit";
-import { supplierCreditReader } from "./supplier-credit.service";
-import { supplierCreditCommands } from "./supplier-credit.commands";
+import { supplierCreditReader, previewSupplierCreditCosts } from "./supplier-credit.service";
+import { supplierCreditCommands, classifySupplierCreditFailure } from "./supplier-credit.commands";
 import { SupplierCreditError } from "./supplier-credit.repository";
 const actor = (req: Request): string => String((req as Request & {
   user?: {
@@ -47,6 +47,8 @@ function failure(res: Response, error: unknown) {
       code: "SUPPLIER_CREDIT_VALIDATION_REQUIRED"
     }
   });
+  const classified = classifySupplierCreditFailure(error);
+  if (classified.kind === "rejected") return res.status(classified.httpStatus).json(classified.body);
   console.error("Supplier credit operation failed", {
     code: "SUPPLIER_CREDIT_OPERATION_FAILED",
     error
@@ -59,6 +61,12 @@ function failure(res: Response, error: unknown) {
   });
 }
 export function registerSupplierCreditRoutes(app: Express) {
+  for (const action of ["approve", "void", "reconcile_costs"] as const) {
+    app.post(`/api/supplier-credits/:id/${action}/preview`, requirePermission("purchasing", "approve"), async (req, res) => {
+      try { res.json(await previewSupplierCreditCosts(id(req.params.id), action, req.body, actor(req))); }
+      catch (error) { failure(res, error); }
+    });
+  }
   app.get("/api/supplier-credits", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       res.json(await supplierCreditReader.list(req.query, actor(req)));

@@ -12,7 +12,28 @@ import {
 } from "../fixtures/ebay-listing-sync.fixture";
 import { safeEbayErrorMessage } from "../../adapters/ebay/ebay-quantity-http";
 import { syncContentIntentHash } from "../../ebay-listing-sync-content";
+import { ChannelProviderReadError } from "@shared/channel-provider-read";
 describe("existing eBay listing sync execution", () => {
+  it.each(["EBAY_SYNC_READBACK_PENDING", "EBAY_PUBLICATION_READBACK_PENDING"])("uses a separate, bounded readback mismatch budget for %s", code => {
+    const now = new Date("2026-10-17T12:00:00Z");
+    const mismatch = new EbayListingSyncError(code, "The published listing still differs.");
+    expect(syncFailure(mismatch, 1, now, 4, "EBAY_OTHER_READ_INVALID"))
+      .toMatchObject({ state: "recovering", readRetry: { failures: 1, paused: false },
+        resetAttempts: code === "EBAY_PUBLICATION_READBACK_PENDING", nextAttemptAt: new Date(now.getTime() + 60_000) });
+    expect(syncFailure(mismatch, 5, now, 4, code))
+      .toMatchObject({ state: "recovering", readRetry: { failures: 5, paused: true },
+        resetAttempts: code === "EBAY_PUBLICATION_READBACK_PENDING" });
+    const readFailure = new EbayListingSyncError("EBAY_OTHER_READ_INVALID", "Read failed", {
+      cause: new ChannelProviderReadError({ provider: "ebay", resource: "listing", method: "GET", kind: "invalid_response" }),
+    });
+    expect(syncFailure(readFailure, 5, now, 4, code))
+      .toMatchObject({ state: "recovering", readRetry: { failures: 1, paused: false } });
+    const wrappedRead = new EbayListingSyncError(code, "Read failed", { cause: readFailure.cause });
+    expect(syncFailure(wrappedRead, 5, now, 4, code, true))
+      .toMatchObject({ state: "needs_attention", readRetry: { failures: 5, paused: true } });
+    expect(syncFailure(mismatch, 5, now, 4, code, true))
+      .toMatchObject({ state: "recovering", readRetry: { failures: 1, paused: false } });
+  });
   it("keeps proven pre-publication outages automatically retryable beyond the ordinary retry budget", () => {
     const now = new Date("2026-10-17T12:00:00Z");
     const failure = new EbayListingSyncError("EBAY_PUBLICATION_PREFLIGHT_RETRY", "No publication was sent; retrying automatically.");
@@ -99,12 +120,12 @@ describe("existing eBay listing sync execution", () => {
       "start:recover_prior_requests",
       "done:recover_prior_requests",
       "start:inspection",
-      "start:offer:offer-101",
-      "done:offer:offer-101",
       "start:item:P5",
       "done:item:P5",
       "start:group:PACK",
       "done:group:PACK",
+      "start:offer:offer-101",
+      "done:offer:offer-101",
       "start:verification",
       "done:verification",
     ]);
@@ -315,6 +336,20 @@ describe("existing eBay listing sync execution", () => {
     expect(fixture.client.updateOffer).not.toHaveBeenCalled();
     expect(fixture.client.createOrReplaceInventoryItem).not.toHaveBeenCalled();
     expect(fixture.client.createOrReplaceInventoryItemGroup).not.toHaveBeenCalled();
+  });
+  // Channels PR4: a read-only Sync nudges the stock-link engine, and a failed nudge never fails the Sync.
+  it.each([["succeeds", null], ["fails", Object.assign(new Error("db down"), { code: "57P01" })]] as const)(
+    "a read-only Sync completes when its stock-link nudge %s, with no new eBay write", async (_label, failure) => {
+    const fixture = syncProviderFixture();
+    const nudge = vi.fn(async () => { if (failure) throw failure; });
+    const prepare = async () => ({ ...(await fixture.prepare()), requestStockLinkCheck: nudge });
+    const executor = new EbayExistingListingSyncExecution(prepare, recovered(), new EbayMarketplaceListingConnector());
+    await executor.execute(syncIdentity, async (_key, _hash, work) => work());
+    nudge.mockClear();
+    vi.mocked(fixture.client.updateOffer).mockClear();
+    await expect(executor.execute(syncIdentity, async (_key, _hash, work) => work())).resolves.toMatchObject({ synced: 1 });
+    expect(nudge).toHaveBeenCalledTimes(1);
+    expect(fixture.client.updateOffer).not.toHaveBeenCalled();
   });
   it("recovers a saved listing with no local offer ID through its unique exact published SKU and listing", async () => {
     const fixture = syncProviderFixture();

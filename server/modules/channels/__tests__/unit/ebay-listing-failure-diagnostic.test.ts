@@ -41,7 +41,21 @@ describe("saved listing failure diagnostics", () => {
   it.each([null, "secret", Object.assign(new Error("secret"), { code: "password=secret",
     context: { productId: 0, productVariantId: 1.5, publicationTargetId: "3", blockerCodes: ["private value"] } })])(
     "does not persist invalid diagnostic input", error => {
-      expect(ebayListingFailureDiagnostic(error)).toEqual({ code: "EBAY_LISTING_SYNC_FAILED", context: {} });
+      const diagnostic = ebayListingFailureDiagnostic(error);
+      expect(diagnostic.code).toBe("EBAY_LISTING_SYNC_FAILED");
+      expect(Object.keys(diagnostic.context)).toEqual(error instanceof Error ? ["failure"] : []);
+      expect(JSON.stringify(diagnostic)).not.toContain("secret");
     },
   );
+  it("retains a safe fingerprint and exact cause classification for an uncoded pool timeout", () => {
+    const cause = new Error("timeout exceeded when trying to connect");
+    const error = new Error("SQL with password=private", { cause });
+    const diagnostic = ebayListingFailureDiagnostic(error);
+    expect(diagnostic).toMatchObject({ code: "DATABASE_POOL_ACQUIRE_TIMEOUT", context: { failure: {
+      category: "pool_acquisition_timeout", errorType: "Error", codes: [], fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+    } } });
+    expect(JSON.stringify(diagnostic)).not.toMatch(/SQL|password|private/);
+    expect(ebayListingFailureDiagnostic(error)).toEqual(diagnostic);
+    expect(syncFailure(error, 1, new Date("2026-10-23T12:00:00Z"))).toMatchObject({ state: "recovering", code: "DATABASE_POOL_ACQUIRE_TIMEOUT" });
+  });
 });

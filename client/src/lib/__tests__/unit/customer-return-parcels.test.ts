@@ -194,7 +194,7 @@ describe("customer return box dimensions and product-only weight", () => {
       buildPreviewReviewInput(missing, selections, [parcel()]),
     ).toMatchObject({
       ok: false,
-      message: expect.stringContaining("verify the product weight"),
+      message: expect.stringContaining("measured packed weight"),
     });
     const input = buildPreviewReviewInput(order, selections, [parcel()]);
     if (!input.ok) throw new Error(input.message);

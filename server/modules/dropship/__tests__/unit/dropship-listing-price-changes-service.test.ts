@@ -159,7 +159,7 @@ class World {
   private readonly catalog = {
     loadStoreContext: vi.fn(async () => { this.calls.push("gate"); return storeContext; }),
     listCatalogExposureRules: vi.fn(async () => { this.calls.push("exposureRules"); return [{ id: 1, scopeType: "catalog", action: "include" }]; }),
-    listSelectionRules: vi.fn(async () => { this.calls.push("selectionRules"); return [{ id: 2, scopeType: "catalog", action: "include", isActive: true }]; }),
+    listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => { this.calls.push("picks"); return new Set(ids); }),
     listCatalogCandidates: vi.fn(async (ids: readonly number[]) => {
       this.calls.push("candidates");
       return ids.flatMap((id) => this.candidates.get(id) ?? []);
@@ -503,7 +503,7 @@ describe("DropshipListingPriceChangesService.reviewForMember (W7 review, plan 9.
     expect(repository.order).toEqual(["gate:enter", `executeReview:${MEMBER}:${STORE}`, "gate:leave"]);
     // No request lock, no lockCatalog, no probe, no writer (the review transaction has none of them).
     expect(repository.world.calls).toEqual([
-      "gate", "productSizes", "exposureRules", "selectionRules", "candidates", "overrides", "settingFacts",
+      "gate", "productSizes", "exposureRules", "candidates", "overrides", "picks", "settingFacts",
       "pricingProfile", "savedPrices", "existingListings", "costs", "pricingPolicies", "textBytes", "storeReview",
     ]);
     expect(chosen.spy).toHaveBeenCalledWith(expect.anything(), [101, 102, 104], NOW, { keepCandidates: "pricing", stopAbove: 10_000 });
@@ -649,7 +649,7 @@ describe("DropshipListingPriceChangesService.reviewForMember (W7 review, plan 9.
 
     expect(repository.world.calls).toEqual([
       "gate", "groups", "categoryNames", "categoryRow", "categoryProducts", "productSizes",
-      "exposureRules", "selectionRules", "candidates", "overrides", "settingFacts", "leftovers",
+      "exposureRules", "candidates", "overrides", "picks", "settingFacts", "leftovers",
       "pricingProfile", "savedPrices", "existingListings", "costs", "pricingPolicies", "textBytes", "storeReview",
     ]);
     const stored = repository.world.load(answer.reviewId, VENDOR, STORE)!;
@@ -795,7 +795,7 @@ describe("DropshipListingPriceChangesService.applyForMember (W7 apply, plan 9.7)
     expect(repository.order).toEqual(["gate:enter", `execute:${KEY}`, "gate:leave"]);
     expect(repository.world.calls).toEqual([
       "gate", "probe", "byReview", "loadReview", "settingFacts", "lockCatalog",
-      "productSizes", "exposureRules", "selectionRules", "candidates", "overrides", "settingFacts",
+      "productSizes", "exposureRules", "candidates", "overrides", "picks", "settingFacts",
       "pricingProfile", "savedPrices", "existingListings", "costs", "pricingPolicies",
       "textBytes", "saveProductsBulk", "sizePrice:102", "w9:102",
     ]);
@@ -840,7 +840,7 @@ describe("DropshipListingPriceChangesService.applyForMember (W7 apply, plan 9.7)
       categoryRevisionId: 41 });
     expect(repository.world.calls).toEqual([
       "gate", "probe", "byReview", "loadReview", "groups", "categoryProducts", "lockCatalog",
-      "categoryProducts", "productSizes", "exposureRules", "selectionRules", "candidates", "overrides", "settingFacts",
+      "categoryProducts", "productSizes", "exposureRules", "candidates", "overrides", "picks", "settingFacts",
       "pricingProfile", "savedPrices", "existingListings", "costs", "pricingPolicies",
       "leftovers", "textBytes", "saveCategory", "saveProductsBulk", "clearSizeLeftovers",
     ]);

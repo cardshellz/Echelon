@@ -46,6 +46,8 @@ describe("WmsSyncService required dropship acceptance claim", () => {
     await expect(service.reserveRequired(9901, 9001, "test_safety_shortfall"))
       .rejects.toMatchObject({
         code: "WMS_REQUIRED_INVENTORY_CLAIM_FAILED",
+        // ARCH-6: the published classification dropship reads (no context shape, no class name).
+        shortfall: true,
         context: {
           wmsOrderId: 9901,
           omsOrderId: 9001,
@@ -59,6 +61,11 @@ describe("WmsSyncService required dropship acceptance claim", () => {
       "dropship_acceptance",
       { expectedCanonicalClaimId: "70" },
     );
+  });
+
+  it("ARCH-6: publishes shortfall false on every other whole-order claim refusal", () => {
+    expect(new WmsRequiredInventoryClaimError("warehouse mismatch", { wmsOrderId: 1 })).toMatchObject({
+      code: "WMS_REQUIRED_INVENTORY_CLAIM_FAILED", shortfall: false });
   });
 
   it("compensates and preserves the canonical claim error when claim execution throws", async () => {

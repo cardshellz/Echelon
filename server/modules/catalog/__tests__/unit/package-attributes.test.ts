@@ -48,6 +48,16 @@ describe("catalog package attributes", () => {
     })).toEqual({});
   });
 
+  it.each(["shippingPackageType", "shipping_package_type"])("rejects retired %s writes explicitly instead of silently retaining a hidden writer", key => {
+    for (const value of ["parcel", "letter", null, "", 1]) {
+      const payload = { [key]: value, weightGrams: 120.25 };
+      expect(() => extractPackageAttributeUpdates(payload)).toThrow(/no longer a catalog field/);
+      expect(() => coercePackageAttributesOnVariantPayload(payload)).toThrow(PackageAttributeValidationError);
+      expect(() => parsePackageAttributeBulkRows([{ variantId: 10, updates: payload }])).toThrow(/Refresh the page/);
+    }
+    expect(coercePackageAttributesOnVariantPayload({ name: "Unrelated edit" })).toEqual({});
+  });
+
   it("rejects bulk rows with no package field updates", () => {
     expect(() => parsePackageAttributeBulkRows([
       { variantId: 10, updates: { sku: "NOT-A-PACKAGE-FIELD" } },

@@ -13,7 +13,6 @@ describe("manual transfer input boundary", () => {
     { quantity: 1.5 },
     { quantity: 0 },
     { quantity: "50cases" },
-    { crossWarehouseArrivalConfirmed: "true" },
     { toLocationId: 9 },
     { commandKey: undefined },
     { variantId: -1 },

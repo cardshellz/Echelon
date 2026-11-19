@@ -40,9 +40,10 @@ export const customerReturnShopifyAddressSchema = z.object({
 
 export const customerReturnShopifyOrderSchema = z.object({
   id: customerReturnShopifyGidSchema("Order"), name: z.string().min(1).max(255),
-  // Older staff-only snapshot fixtures may omit this evidence. Customer access
-  // requires a non-null provider owner; the actual Shopify reader always sets it.
+  // Older staff-only fixtures may omit identity. Customer access verifies the
+  // attached customer; guest access verifies the purchase email and exact order.
   customerId: customerReturnShopifyGidSchema("Customer").nullable().optional(),
+  email: z.string().email().max(254).nullable().optional(),
   createdAt: customerReturnShopifyTimestampSchema, processedAt: customerReturnShopifyTimestampSchema,
   updatedAt: customerReturnShopifyTimestampSchema, cancelledAt: customerReturnShopifyTimestampSchema.nullable(),
   destinationCountryCode: z.string().regex(/^[A-Z]{2}$/).nullable(),

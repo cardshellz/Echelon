@@ -203,3 +203,41 @@ describe("shared eBay absolute inventory quantity protocol", () => {
     expect(url.searchParams.get("marketplace_id")).toBe(market);
   });
 });
+
+// Fix PR 2a-2 (plan F2 2.9.3): an owner identity check on the resolved PUBLISHED offer.
+describe("expectOffer identity check", () => {
+  it("runs inside the preflight: a refusal is a not-sent preflight error and nothing is read or written after it", async () => {
+    const client = fixture();
+    const refusal = Object.assign(new Error("not this listing's offer"), { code: "OWNER_OFFER_IDENTITY_CHANGED" });
+    const expectOffer = vi.fn(() => { throw refusal; });
+    await expect(publishEbayInventoryQuantity(client, sku, market, 38, { expectOffer })).rejects.toMatchObject({
+      name: "EbayInventoryQuantityPreflightError", effect: "not_sent", cause: refusal,
+    });
+    expect(expectOffer).toHaveBeenCalledExactlyOnceWith({ offerId: "offer-1", sku, marketplaceId: market, availableQuantity: 38 });
+    expect(client.getInventoryItem).not.toHaveBeenCalled();
+    expect(client.bulkUpdatePriceQuantity).not.toHaveBeenCalled();
+  });
+  it("lets the expected offer through to the write, unchanged", async () => {
+    const client = fixture();
+    const expectOffer = vi.fn();
+    await expect(publishEbayInventoryQuantity(client, sku, market, 7, { expectOffer })).resolves.toMatchObject({ offerId: "offer-1", effect: "updated" });
+    expect(expectOffer).toHaveBeenCalledOnce();
+    expect(client.bulkUpdatePriceQuantity).toHaveBeenCalledOnce();
+  });
+  // eBay sync-back review OR-2: the Dropship owner's pre-write quantity guard compares the offer's quantity before any write.
+  it("hands the owner the offer's quantity, or null when eBay sent no whole number", async () => {
+    for (const [sent, seen] of [[4, 4], [0, 0], ["4", null], [undefined, null], [-1, null], [1.5, null]] as const) {
+      const client = fixture();
+      client.getInventoryOffersPage.mockResolvedValue({ total: 1, offers: [{ ...offer(), availableQuantity: sent }] });
+      const expectOffer = vi.fn();
+      await publishEbayInventoryQuantity(client, sku, market, 7, { expectOffer }).catch(() => undefined);
+      expect(expectOffer).toHaveBeenCalledExactlyOnceWith({ offerId: "offer-1", sku, marketplaceId: market, availableQuantity: seen });
+    }
+  });
+  it("checks the read path too, before the item read", async () => {
+    const client = fixture();
+    const refusal = new Error("unproven");
+    await expect(readEbayInventoryQuantity(client, sku, market, { expectOffer: () => { throw refusal; } })).rejects.toBe(refusal);
+    expect(client.getInventoryItem).not.toHaveBeenCalled();
+  });
+});

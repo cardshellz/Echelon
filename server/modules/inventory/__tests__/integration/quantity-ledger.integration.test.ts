@@ -231,6 +231,41 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
       .toEqual([{ qty: 2, total_cost_mills: (originalCost * BigInt(2)).toString() }, { qty: -1, total_cost_mills: (-originalCost).toString() }]);
   });
 
+  it("stores canonical pick and unpick COGS in UTC with a New York database session", async () => {
+    // The reduced cutover fixture declares COGS time as timestamptz. Exercise
+    // this writer against the actual production/schema timestamp-without-zone
+    // contract; preserve the seeded row's UTC wall time before opening custody.
+    const typeQuery = `SELECT data_type FROM information_schema.columns
+      WHERE table_schema='oms' AND table_name='order_item_costs' AND column_name='created_at'`;
+    if ((await pool.query(typeQuery)).rows[0]?.data_type === "timestamp with time zone") {
+      await pool.query(`ALTER TABLE oms.order_item_costs ALTER COLUMN created_at
+        TYPE timestamp without time zone USING created_at AT TIME ZONE 'UTC'`);
+    }
+    expect((await pool.query(typeQuery)).rows).toEqual([{ data_type: "timestamp without time zone" }]);
+    await open();
+    const pickedAt = new Date("2026-09-10T16:00:00.123Z");
+    const unpickedAt = new Date("2026-09-10T16:01:00.456Z");
+    await transaction(async client => {
+      await client.query("SET LOCAL TIME ZONE 'America/New_York'");
+      expect((await client.query("SELECT current_setting('TimeZone') AS zone")).rows)
+        .toEqual([{ zone: "America/New_York" }]);
+      await canonical.pickResources({ ...canonicalAudit, client, occurredAt: pickedAt,
+        commandKey: "canonical:timestamp:pick", claimLineId: BigInt(1), resources: [pickResource(2)] });
+      await canonical.unpickResources({ ...canonicalAudit, client, occurredAt: unpickedAt,
+        commandKey: "canonical:timestamp:unpick", claimLineId: BigInt(1), restoreReservation: true,
+        resources: [{ ...resource, unpickQty: BigInt(1), lotAllocations: [{ claimLotAllocationId: BigInt(1),
+          inventoryLotId: 4, unpickQty: BigInt(1), reversesPickMovementId: BigInt(9), unitCostMills: originalCost }] }] });
+    });
+    // Query PostgreSQL text so neither pg's Date parser nor the test runtime
+    // timezone can conceal an incorrectly stored timestamp-without-time-zone.
+    expect((await pool.query(`SELECT qty,total_cost_mills::text,
+      to_char(created_at,'YYYY-MM-DD"T"HH24:MI:SS.US') AS recorded_wall_time
+      FROM oms.order_item_costs WHERE id<>9 ORDER BY id`)).rows).toEqual([
+      { qty: 2, total_cost_mills: (originalCost * BigInt(2)).toString(), recorded_wall_time: "2026-09-10T16:00:00.123000" },
+      { qty: -1, total_cost_mills: (-originalCost).toString(), recorded_wall_time: "2026-09-10T16:01:00.456000" },
+    ]);
+  });
+
   it("rejects missing canonical command identity and rolls back low-level replay or later receipt failure", async () => {
     await open();
     const before = await state();
@@ -363,23 +398,37 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     // The reduced cutover fixture uses timestamptz here; production inventoryLots
     // defines a timestamp without time zone. Exercise Drizzle against that type.
     await pool.query("ALTER TABLE inventory.inventory_lots ALTER COLUMN received_at TYPE timestamp USING received_at AT TIME ZONE 'UTC'");
-    await pool.query(`INSERT INTO warehouse.warehouses(id,code,is_active) VALUES(2,'REMOTE',${active ? 1 : 0});
-      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code,is_active,is_pickable)
-        VALUES(102,2,'REMOTE-FLOOR',1,1)`);
+    await pool.query(`INSERT INTO warehouse.warehouses(id,code,is_active,warehouse_type) VALUES
+        (2,'SYSTEM-TRANSIT',${active ? 1 : 0},'system_transit'),(3,'DESTINATION',1,'operations');
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code,is_active,is_pickable,location_type)
+        VALUES(102,2,'IWT-TEST',1,0,'in_transit'),(103,3,'DEST',1,1,'pick');
+      CREATE TABLE inventory.interwarehouse_transfers(
+        id integer PRIMARY KEY,status text NOT NULL,source_location_id integer NOT NULL,
+        destination_location_id integer NOT NULL,transit_location_id integer NOT NULL
+      );
+      CREATE TABLE inventory.interwarehouse_transfer_lines(
+        transfer_id integer NOT NULL,product_variant_id integer NOT NULL
+      );
+      INSERT INTO inventory.interwarehouse_transfers(id,status,source_location_id,destination_location_id,transit_location_id)
+        VALUES(1,'ready',100,103,102);
+      INSERT INTO inventory.interwarehouse_transfer_lines(transfer_id,product_variant_id) VALUES(1,101)`);
     await prepareOperationalMetadata();
     return { commandKey: "operational:cross-warehouse:1", productVariantId: 101,
-      fromLocationId: 100, toLocationId: 102, qty: 7, userId: "operator", crossWarehouseArrivalConfirmed: true };
+      fromLocationId: 100, toLocationId: 102, qty: 7, userId: "operator",
+      referenceType: "interwarehouse_transfer", referenceId: "1:dispatch",
+      interwarehouseTransfer: { transferId: 1, stage: "dispatch" as const } };
   }
 
-  it("requires explicit arrival confirmation before a cross-warehouse transfer", async () => {
+  it("requires the durable workflow owner before a cross-warehouse transfer", async () => {
     const input = await prepareCrossWarehouseTransfer();
     const before = await state();
-    await expect(transaction(client => operationalOwner(client).transfer({ ...input, crossWarehouseArrivalConfirmed: false })))
-      .rejects.toMatchObject({ code: "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED" });
+    const { interwarehouseTransfer: _workflow, ...manualInput } = input;
+    await expect(transaction(client => operationalOwner(client).transfer(manualInput)))
+      .rejects.toMatchObject({ code: "INTERWAREHOUSE_TRANSFER_WORKFLOW_REQUIRED" });
     expect(await state()).toEqual(before);
   });
 
-  it("posts a cross-warehouse transfer once with exact warehouse, quantity and cost identities", async () => {
+  it("posts a workflow-owned dispatch once with exact warehouse, quantity and cost identities", async () => {
     const input = await prepareCrossWarehouseTransfer();
     await transaction(client => operationalOwner(client).transfer(input));
     await transaction(client => operationalOwner(client).transfer(input));

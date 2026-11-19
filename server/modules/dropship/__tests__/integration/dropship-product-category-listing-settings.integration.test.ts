@@ -40,7 +40,7 @@ const PR8_MIGRATIONS = [
  */
 const OBJECTS: ReadonlySet<string> = new Set([
   "dropship.dropship_vendors", "dropship.dropship_store_connections", "dropship.dropship_audit_events",
-  "dropship.dropship_catalog_rules", "dropship.dropship_vendor_selection_rules", "dropship.dropship_vendor_variant_overrides",
+  "dropship.dropship_catalog_rules", "dropship.dropship_vendor_selected_variants", "dropship.dropship_vendor_variant_overrides",
   "dropship.dropship_listing_price_revisions", "dropship.dropship_listing_price_settings",
   "dropship.dropship_pricing_profile_revisions", "dropship.dropship_pricing_profiles",
   "dropship.dropship_pricing_reviews", "dropship.dropship_pricing_applications",
@@ -308,7 +308,9 @@ describeDatabase.sequential("product and category listing settings (migrations 0
         name text NOT NULL DEFAULT 'Size', inventory_tracking_override boolean);
       CREATE TABLE catalog.product_line_products (product_id integer NOT NULL, product_line_id integer NOT NULL);
       CREATE TABLE dropship.dropship_catalog_rules (id integer PRIMARY KEY);
-      CREATE TABLE dropship.dropship_vendor_selection_rules (id integer PRIMARY KEY);
+      -- The vendor's picks, which the selection SHARE lock names (PLAN-B v4.1 §9 row 11); reduced.
+      CREATE TABLE dropship.dropship_vendor_selected_variants (vendor_id integer NOT NULL, product_variant_id integer NOT NULL,
+        PRIMARY KEY (vendor_id, product_variant_id));
       CREATE TABLE dropship.dropship_vendor_variant_overrides (id integer PRIMARY KEY);
     `);
     for (const file of [...PRIOR_MIGRATIONS, ...PR8_MIGRATIONS]) await execute(migration(file));

@@ -2,10 +2,14 @@ import type { ChannelPricing, ChannelPricingRule } from "@shared/schema";
 import {
   ChannelPricingError, expectedPricingRuleSchema, parsePricingContext, parsePricingId,
   pricingRuleValueSchema, saveChannelPriceSchema, saveChannelPricingRuleSchema,
+  expectedChannelPriceSchema,
   type ExpectedPricingRule,
+  type ExpectedChannelPrice,
 } from "./channel-pricing.domain";
 import type { ChannelPricingStore, ChannelPricingTransaction, ListedChannelPricingRule, StoredChannelPrice } from "./channel-pricing.store";
 import { PgChannelPricingRepository, type ChannelPricingDatabase } from "./infrastructure/channel-pricing.repository";
+
+export type { ExpectedChannelPrice } from "./channel-pricing.domain";
 
 /** Channels is the sole command owner for hierarchical rules and explicit prices.
  * The existing database trigger captures propagation in these same transactions;
@@ -53,11 +57,12 @@ export class ChannelPricingService {
     });
   }
 
-  async savePrice(channelId: number, variantId: number, input: unknown, actor: string, now: Date):
+  async savePrice(channelId: number, variantId: number, input: unknown, actor: string, now: Date, expected?: ExpectedChannelPrice | null):
     Promise<{ price: ChannelPricing; created: boolean }> {
     const context = parsePricingContext(channelId, actor, now);
     const id = parsePricingId(variantId);
     const command = saveChannelPriceSchema.parse(input);
+    const expectation = expectedChannelPriceSchema.nullable().optional().parse(expected);
     return this.store.withChannel(context.channelId, async transaction => {
       if (!await transaction.targetExists({ scope: "variant", scopeId: String(id) })) {
         throw new ChannelPricingError("CHANNEL_PRICING_TARGET_MISSING",
@@ -76,6 +81,10 @@ export class ChannelPricingService {
         && before.cost === (resolved.cost === null ? null : String(resolved.cost)) && before.currency === resolved.currency) {
         return { price: { ...before, ...resolved, compareAtPrice: resolved.compareAtPrice ?? null,
           cost: resolved.cost ?? null, currency: resolved.currency ?? "USD" }, created: false };
+      }
+      if (expectation !== undefined && (expectation === null ? before !== null : !before
+        || before.price !== expectation.price || before.compareAtPrice !== expectation.compareAtPrice || before.currency !== expectation.currency)) {
+        throw new ChannelPricingError("CHANNEL_PRICING_CONFLICT", "This channel price changed after the Shopify creation review. Refresh and review the current price before continuing.", 409);
       }
       const price = await transaction.savePrice(id, resolved, context.now);
       await audit(transaction, context, "price_saved", `variant:${id}`, before, exactPriceSnapshot(price));

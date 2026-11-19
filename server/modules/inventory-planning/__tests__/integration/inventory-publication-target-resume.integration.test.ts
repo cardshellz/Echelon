@@ -560,7 +560,7 @@ dbDescribe.sequential("scoped inventory publication target resume composition", 
     const resumed = await service.resume(request, "operator-7");
     expect(resumed).toMatchObject({
       publicationTargetId,
-      revision: (BigInt(publicationTargetRevision) + 1n).toString(),
+      revision: (BigInt(publicationTargetRevision) + BigInt(1)).toString(),
       state: "live",
       resumeReviewId: review.resumeReviewId,
       evidenceHash: review.evidenceHash,

@@ -21,6 +21,21 @@ describe("resolveDropshipWorkerSchedule", () => {
       initialDelayMs: 240_000, initialDelayEnvironmentVariable: "DROPSHIP_RULES_CONVERSION_WORKER_INITIAL_DELAY_MS",
     });
     expect(resolveDropshipWorkerSchedule("rulesConversion", { DROPSHIP_RULES_CONVERSION_WORKER_INITIAL_DELAY_MS: "5" }).initialDelayMs).toBe(5);
+    // eBay sync-back (plan v4 §6.1): every 15 minutes, after the rules conversion job's 240 s phase, on a delay no other worker uses.
+    expect(resolveDropshipWorkerSchedule("marketplaceSyncBack", environment)).toEqual({
+      initialDelayMs: 300_000, initialDelayEnvironmentVariable: "DROPSHIP_MARKETPLACE_SYNC_BACK_WORKER_INITIAL_DELAY_MS",
+    });
+    // The catalog arrivals job (PLAN-B v4.1 §11.1): a tick a minute, its first about a minute after boot, on a delay
+    // no other worker uses.
+    expect(resolveDropshipWorkerSchedule("catalogArrivals", environment)).toEqual({
+      initialDelayMs: 60_000, initialDelayEnvironmentVariable: "DROPSHIP_CATALOG_ARRIVALS_WORKER_INITIAL_DELAY_MS",
+    });
+    expect(resolveDropshipWorkerSchedule("catalogArrivals", { DROPSHIP_CATALOG_ARRIVALS_WORKER_INITIAL_DELAY_MS: "0" }).initialDelayMs).toBe(0);
+    // The listing end worker (PLAN-C v4.1 §5.2): every ten seconds like the push worker, 5 s after boot, on a delay no
+    // other worker uses.
+    expect(resolveDropshipWorkerSchedule("listingEnd", environment)).toEqual({
+      initialDelayMs: 5_000, initialDelayEnvironmentVariable: "DROPSHIP_LISTING_END_WORKER_INITIAL_DELAY_MS",
+    });
   });
 
   it("accepts a non-negative per-worker environment override", () => {

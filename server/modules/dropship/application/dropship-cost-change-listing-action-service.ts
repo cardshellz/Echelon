@@ -3,15 +3,20 @@ import type { DropshipCostChangePolicySettings } from "../../../../shared/dropsh
 import type { ListingPricingMode } from "../../../../shared/dropship/listing-price";
 import type { PricingProfileState } from "../../../../shared/dropship/pricing-rules";
 import {
+  COST_ACTIONABLE_LISTING_STATUSES,
   classifyCostChangeListingPrice,
   costChangeHoldIdempotencyKey,
   costChangeListingActionValues,
+  costChangeListingFollowUpNoticeIdempotencyKey,
   costChangeListingNoticeIdempotencyKey,
+  costChangeRecheckHoldIdempotencyKey,
+  costChangeRecheckRepriceIdempotencyKey,
   costChangeReleaseIdempotencyKey,
   costChangeRepriceIdempotencyKey,
   decideCostChangeHoldRelease,
   decideCostChangeListingAction,
   idSetHash,
+  judgeAgainstPublishedPrice,
   type CostChangeHoldReleaseDetail,
   type CostChangeHoldReleaseReason,
   type CostChangeListingAction,
@@ -45,7 +50,17 @@ import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "
  * marks the increase done commits with its listing rows and holds.
  *
  * A second phase reviews live pauses and releases a hold once the price
- * covers the cost in force again, or the listing is no longer live. The SKU
+ * buyers see covers the cost in force again, or the listing is no longer
+ * live. A live listing is judged at the lower of its settings price and the
+ * price its last completed push published (judgeAgainstPublishedPrice): a
+ * queued, blocked or failed update leaves the listing live and orderable at
+ * the published price.
+ *
+ * Before the first phase, a recheck judges once, on the facts in force, an
+ * increase that was skipped because the listing read queued, failed or
+ * blocked and is live now: before the live status fix an earlier queue or
+ * failed push wrote those statuses over listings that stayed live on the
+ * marketplace, and the live status repair has since restored them. The SKU
  * hold at inventory planning has one holder and any release deletes it, so a
  * hold the listing tier reconciler owns is never released from here, and a
  * hold of ours that a tier release deleted is re-asserted.
@@ -92,7 +107,11 @@ export interface CostActionListing {
   storeConnectionId: number;
   productVariantId: number;
   status: string;
+  /** The eBay listing id as stored: a listing being re-sent with one is still live (isCostActionableListing). */
+  externalListingId: string | null;
   vendorRetailPriceCents: number | null;
+  /** The price the listing's last completed push published (buyers see it); null when none is on record. */
+  publishedPriceCents: number | null;
   platform: string;
   variantSku: string | null;
   variantName: string;
@@ -163,6 +182,41 @@ export interface CostChangeListingActionRecord {
   decidedAt: Date;
 }
 
+/**
+ * A listing action recorded as skipped_inactive_listing while the listing
+ * read queued, failed or blocked, whose listing is active now and whose
+ * increase is still the cost in force (listSkippedListingRechecks).
+ */
+export interface SkippedListingRecheckCandidate {
+  actionId: number;
+  /** The status the skipped decision recorded. */
+  skippedListingStatus: string;
+  listingId: number;
+  storeConnectionId: number;
+  /** The increase the skipped action was decided for; it is the one in force. */
+  increase: EffectiveCostIncrease;
+}
+
+/** A recheck's decision for one skipped listing action, recorded as its audit row (recordListingRechecks). */
+export interface CostChangeListingRecheckRecord {
+  actionId: number;
+  entryId: number;
+  storeConnectionId: number;
+  productVariantId: number;
+  listingId: number;
+  skippedListingStatus: string;
+  listingStatus: string;
+  priceSource: CostChangeListingPriceSource;
+  listingPriceCents: number | null;
+  unitCostCents: number;
+  action: CostChangeListingAction;
+  detail: string | null;
+  pushJobId: number | null;
+  holdKey: { storeConnectionId: number; productVariantId: number } | null;
+  policyId: number | null;
+  decidedAt: Date;
+}
+
 export interface CostChangeEntryActionRecord {
   entryId: number;
   productVariantId: number;
@@ -183,6 +237,26 @@ export interface ActiveCostChangeListingHold {
   listingPriceCents: number;
   unitCostCents: number;
   heldAt: Date;
+}
+
+/**
+ * A pause put back because the hold review had released it only as
+ * "listing no longer live" while an earlier queued or failed push had written
+ * a non-live status over a listing that stayed live on its marketplace.
+ */
+export interface RestoredCostChangeListingHold {
+  holdId: number;
+  releasedHoldId: number;
+  vendorId: number;
+  storeConnectionId: number;
+  productVariantId: number;
+  listingId: number;
+  entryId: number;
+  releasedAt: Date;
+  /** The listing's last completed push before the release (published live). */
+  basisJobItemId: number;
+  /** The newer push item, created before the release, whose queue or failure had made the listing read as not live. */
+  demotingJobItemId: number;
 }
 
 /** A listing action as the vendor's portal shows it. */
@@ -243,6 +317,23 @@ export interface DropshipCostChangeListingActionRepository {
     holds: readonly NewCostChangeListingHold[];
   }): Promise<{ entriesRecorded: number; listingActionsRecorded: number; holdsRecorded: number }>;
   listActiveHolds(input: { limit: number }): Promise<ActiveCostChangeListingHold[]>;
+  /**
+   * Puts back (as a new live hold, with its audit row) a pause released as
+   * listing_inactive only because a queued or failed push had demoted a
+   * listing that stayed live; the review then judges it like any other hold.
+   * Idempotent: a released hold with any later hold for its listing is never
+   * restored again.
+   */
+  restoreHoldsReleasedWhileListingDemoted(input: { now: Date; workerId: string; limit: number }): Promise<RestoredCostChangeListingHold[]>;
+  /** Skipped listing actions to judge again (see SkippedListingRecheckCandidate), oldest first per vendor. */
+  listSkippedListingRechecks(input: { now: Date; limit: number }): Promise<SkippedListingRecheckCandidate[]>;
+  /** One vendor's recheck decisions and the holds they placed, in one transaction; a replay records nothing twice. */
+  recordListingRechecks(input: {
+    vendorId: number;
+    workerId: string;
+    rechecks: readonly CostChangeListingRecheckRecord[];
+    holds: readonly NewCostChangeListingHold[];
+  }): Promise<{ rechecksRecorded: number; holdsRecorded: number }>;
   /** The cost in force per variant (the latest entry in effect and not withdrawn); absent when the variant has no schedule. */
   costInForce(input: { vendorId: number; productVariantIds: readonly number[]; now: Date }): Promise<Map<number, number>>;
   releaseHolds(input: {
@@ -290,10 +381,22 @@ export interface DropshipCostListingActionPassResult {
   repriceJobsQueued: number;
   holdsPlaced: number;
   noticesSent: number;
+  /** Increases skipped while a listing read as not live, judged again now that it is live. */
+  rechecks: DropshipCostRecheckResult;
   holds: DropshipCostHoldReviewResult;
 }
 
+export interface DropshipCostRecheckResult {
+  rechecked: number;
+  vendorsFailed: number;
+  repriceJobsQueued: number;
+  holdsPlaced: number;
+  noticesSent: number;
+}
+
 export interface DropshipCostHoldReviewResult {
+  /** Pauses put back before the review because a demoted (still live) listing had released them; reviewed in the same pass. */
+  restored: number;
   reviewed: number;
   released: number;
   reasserted: number;
@@ -322,6 +425,50 @@ interface PendingDecision {
   detail: string | null;
   pushJobId: number | null;
   hold: NewCostChangeListingHold | null;
+  /** Set when the decision re-judges a skipped listing action (the recheck pass). */
+  recheck?: SkippedListingRecheckCandidate;
+}
+
+/**
+ * The idempotency keys of a decision's sends: its reprice push job, its hold
+ * command and its notices. A first decision keys them by the increases; a
+ * recheck by the skipped actions it re-judges, apart from any first decision.
+ */
+interface DecisionKeys {
+  reprice(storeConnectionId: number, chunk: readonly PendingDecision[]): string;
+  hold(storeConnectionId: number, chunk: readonly PendingDecision[], productVariantIds: readonly number[]): string;
+  notice(kind: CostChangeListingNoticeKind, rows: readonly PendingDecision[]): string;
+}
+
+function firstDecisionKeys(vendorId: number): DecisionKeys {
+  return {
+    reprice: (storeConnectionId, chunk) => costChangeRepriceIdempotencyKey({
+      vendorId, storeConnectionId, entryIds: chunk.map((decision) => decision.entry.entryId),
+    }),
+    hold: (storeConnectionId, chunk, productVariantIds) => costChangeHoldIdempotencyKey({
+      storeConnectionId, entryIds: chunk.map((decision) => decision.entry.entryId), productVariantIds,
+    }),
+    notice: (kind, rows) => costChangeListingNoticeIdempotencyKey({ vendorId, kind, ids: rows.map((decision) => decision.entry.entryId) }),
+  };
+}
+
+function recheckDecisionKeys(vendorId: number): DecisionKeys {
+  const actionIds = (rows: readonly PendingDecision[]) => rows.map((decision) => recheckOf(decision).actionId);
+  return {
+    reprice: (storeConnectionId, chunk) => costChangeRecheckRepriceIdempotencyKey({ vendorId, storeConnectionId, actionIds: actionIds(chunk) }),
+    hold: (storeConnectionId, chunk, productVariantIds) => costChangeRecheckHoldIdempotencyKey({
+      storeConnectionId, actionIds: actionIds(chunk), productVariantIds,
+    }),
+    notice: (kind, rows) => costChangeListingFollowUpNoticeIdempotencyKey({ vendorId, kind, basis: "recheck", ids: actionIds(rows) }),
+  };
+}
+
+function recheckOf(decision: PendingDecision): SkippedListingRecheckCandidate {
+  if (!decision.recheck) {
+    throw new DropshipError("DROPSHIP_COST_CHANGE_RECHECK_MISSING", "A recheck decision lost the skipped action it re-judges.",
+      { classification: "fatal", listingId: decision.listing.listingId, entryId: decision.entry.entryId });
+  }
+  return decision.recheck;
 }
 
 export class DropshipCostChangeListingActionService {
@@ -342,6 +489,11 @@ export class DropshipCostChangeListingActionService {
     const policy = await this.deps.policy.resolvePolicy();
     const now = this.deps.clock.now();
     const result = emptyPassResult();
+    // First, so a listing the live status repair restored is judged in the
+    // first pass after it (it takes orders again from that repair on).
+    result.rechecks = await this.recheckSkippedListings({
+      now, workerId: parsed.workerId, policy, limit: parsed.entriesPerPass ?? DEFAULT_COST_LISTING_ACTION_ENTRIES_PER_PASS,
+    });
     const entries = await this.deps.repository.listEffectiveIncreasesWithoutAction({
       now, limit: parsed.entriesPerPass ?? DEFAULT_COST_LISTING_ACTION_ENTRIES_PER_PASS,
     });
@@ -372,7 +524,8 @@ export class DropshipCostChangeListingActionService {
       }
     }
     result.holds = await this.reviewHolds({ limit: parsed.holdsPerPass ?? DEFAULT_COST_LISTING_HOLDS_PER_PASS, now, workerId: parsed.workerId });
-    if (result.vendorsProcessed > 0 || result.vendorsFailed > 0 || result.holds.reviewed > 0 || result.holds.vendorsFailed > 0) {
+    if (result.vendorsProcessed > 0 || result.vendorsFailed > 0 || result.holds.reviewed > 0 || result.holds.vendorsFailed > 0
+      || result.rechecks.rechecked > 0 || result.rechecks.vendorsFailed > 0) {
       this.deps.logger.info({
         code: "DROPSHIP_COST_CHANGE_LISTING_ACTION_PASS_COMPLETED",
         message: "Dropship cost change listing action pass completed.",
@@ -397,7 +550,7 @@ export class DropshipCostChangeListingActionService {
     entries: readonly EffectiveCostIncrease[],
     policy: PolicyInForce,
     now: Date,
-  ): Promise<Omit<DropshipCostListingActionPassResult, "vendorsProcessed" | "vendorsFailed" | "holds">> {
+  ): Promise<Omit<DropshipCostListingActionPassResult, "vendorsProcessed" | "vendorsFailed" | "holds" | "rechecks">> {
     const superseded = entries.filter((entry) => entry.inForceEntryId !== entry.entryId);
     const live = entries.filter((entry) => entry.inForceEntryId === entry.entryId);
     const facts = live.length > 0
@@ -413,17 +566,19 @@ export class DropshipCostChangeListingActionService {
     const decisions: PendingDecision[] = [];
     for (const entry of live) {
       for (const listing of facts.listings.filter((candidate) => candidate.productVariantId === entry.productVariantId)) {
-        const price = classifyListing(facts, listing, entry.unitCostCents);
+        const price = judgedListingPrice(facts, listing, entry.unitCostCents);
         const action = decideCostChangeListingAction({
-          listingStatus: listing.status, price, unitCostCents: entry.unitCostCents, settings: policy.settings,
+          listingStatus: listing.status, externalListingId: listing.externalListingId, price, unitCostCents: entry.unitCostCents,
+          settings: policy.settings,
         });
         decisions.push({ entry, listing, price, action, detail: null, pushJobId: null, hold: null });
       }
     }
 
-    const repriceJobsQueued = await this.queueReprices(vendorId, decisions.filter((decision) => decision.action === "reprice_queued"));
-    const holdsPlaced = await this.placeHolds(decisions.filter((decision) => decision.action === "below_cost_paused"), now);
-    const noticesSent = await this.notifyVendor(vendorId, decisions, policy);
+    const keys = firstDecisionKeys(vendorId);
+    const repriceJobsQueued = await this.queueReprices(vendorId, decisions.filter((decision) => decision.action === "reprice_queued"), keys);
+    const holdsPlaced = await this.placeHolds(decisions.filter((decision) => decision.action === "below_cost_paused"), now, keys);
+    const noticesSent = await this.notifyVendor(vendorId, decisions, policy, keys);
 
     const decidedAt = now;
     const entryRecords: CostChangeEntryActionRecord[] = [
@@ -461,15 +616,14 @@ export class DropshipCostChangeListingActionService {
   }
 
   /** One system push job per store connection and chunk of increases; a store that cannot take a push turns the chunk into refusals. */
-  private async queueReprices(vendorId: number, decisions: PendingDecision[]): Promise<number> {
+  private async queueReprices(vendorId: number, decisions: PendingDecision[], keys: DecisionKeys): Promise<number> {
     let jobs = 0;
     for (const [storeConnectionId, storeDecisions] of groupBy(decisions, (decision) => decision.listing.storeConnectionId)) {
       for (const chunk of chunked(storeDecisions, COST_REPRICE_VARIANTS_PER_JOB)) {
-        const entryIds = chunk.map((decision) => decision.entry.entryId);
         const outcome = await this.deps.reprice.queueReprice({
           vendorId, storeConnectionId,
           productVariantIds: unique(chunk.map((decision) => decision.listing.productVariantId)),
-          idempotencyKey: costChangeRepriceIdempotencyKey({ vendorId, storeConnectionId, entryIds }),
+          idempotencyKey: keys.reprice(storeConnectionId, chunk),
           actorId: COST_CHANGE_PUSH_ACTOR_ID,
         });
         if (!outcome.queued) {
@@ -492,7 +646,7 @@ export class DropshipCostChangeListingActionService {
   }
 
   /** Pause through the inventory-planning SKU hold, chunked to its command size; a refusal for now retries the whole vendor next pass. */
-  private async placeHolds(decisions: PendingDecision[], now: Date): Promise<number> {
+  private async placeHolds(decisions: PendingDecision[], now: Date, keys: DecisionKeys): Promise<number> {
     if (decisions.length === 0) return 0;
     const gate = this.deps.holdGate;
     if (!gate) {
@@ -503,9 +657,7 @@ export class DropshipCostChangeListingActionService {
     for (const [storeConnectionId, storeDecisions] of groupBy(decisions, (decision) => decision.listing.storeConnectionId)) {
       for (const chunk of chunked(storeDecisions, gate.maxVariantsPerCommand)) {
         const productVariantIds = unique(chunk.map((decision) => decision.listing.productVariantId));
-        const idempotencyKey = costChangeHoldIdempotencyKey({
-          storeConnectionId, entryIds: chunk.map((decision) => decision.entry.entryId), productVariantIds,
-        });
+        const idempotencyKey = keys.hold(storeConnectionId, chunk, productVariantIds);
         const outcome = await gate.holdVariants({ storeConnectionId, productVariantIds, reason: COST_CHANGE_HOLD_REASON, idempotencyKey });
         if (!outcome.applied) {
           throw new DropshipError("DROPSHIP_COST_CHANGE_HOLD_DEFERRED", "Inventory planning deferred a cost change pause; the vendor is retried next pass.",
@@ -526,7 +678,7 @@ export class DropshipCostChangeListingActionService {
   }
 
   /** One notice per kind the pass produced, under a key of the increases involved; nothing goes when the policy sends on no channel. */
-  private async notifyVendor(vendorId: number, decisions: readonly PendingDecision[], policy: PolicyInForce): Promise<number> {
+  private async notifyVendor(vendorId: number, decisions: readonly PendingDecision[], policy: PolicyInForce, keys: DecisionKeys): Promise<number> {
     const channels = costChangeNoticeChannels(policy.settings);
     if (channels.length === 0) return 0;
     const kinds: Array<[CostChangeListingNoticeKind, CostChangeListingAction]> = [
@@ -544,8 +696,11 @@ export class DropshipCostChangeListingActionService {
       });
       await this.send({
         vendorId, kind, notice, channels,
-        idempotencyKey: costChangeListingNoticeIdempotencyKey({ vendorId, kind, ids: rows.map((decision) => decision.entry.entryId) }),
-        payload: { entryIds: unique(rows.map((decision) => decision.entry.entryId)), policyId: policy.policyId },
+        idempotencyKey: keys.notice(kind, rows),
+        payload: {
+          entryIds: unique(rows.map((decision) => decision.entry.entryId)), policyId: policy.policyId,
+          ...(rows.some((decision) => decision.recheck) ? { recheckedActionIds: unique(rows.map((decision) => recheckOf(decision).actionId)) } : {}),
+        },
       });
       sent += 1;
     }
@@ -583,7 +738,9 @@ export class DropshipCostChangeListingActionService {
    * re-assert a hold of ours that inventory planning no longer carries.
    */
   private async reviewHolds(input: { limit: number; now: Date; workerId: string }): Promise<DropshipCostHoldReviewResult> {
-    const result: DropshipCostHoldReviewResult = { reviewed: 0, released: 0, reasserted: 0, deferred: 0, vendorsFailed: 0, noticesSent: 0 };
+    const result: DropshipCostHoldReviewResult = { restored: 0, reviewed: 0, released: 0, reasserted: 0, deferred: 0, vendorsFailed: 0, noticesSent: 0 };
+    const restoredHoldIds = await this.restoreHoldsReleasedWhileListingDemoted(input);
+    result.restored = restoredHoldIds.size;
     const holds = await this.deps.repository.listActiveHolds({ limit: input.limit });
     if (holds.length === 0) return result;
     const gate = this.deps.holdGate;
@@ -594,7 +751,7 @@ export class DropshipCostChangeListingActionService {
     const policy = await this.deps.policy.resolvePolicy();
     for (const [vendorId, vendorHolds] of groupBy(holds, (hold) => hold.vendorId)) {
       try {
-        const outcome = await this.reviewVendorHolds(vendorId, vendorHolds, gate, policy, input.now);
+        const outcome = await this.reviewVendorHolds(vendorId, vendorHolds, gate, policy, input.now, restoredHoldIds);
         result.reviewed += vendorHolds.length;
         result.released += outcome.released;
         result.reasserted += outcome.reasserted;
@@ -617,12 +774,54 @@ export class DropshipCostChangeListingActionService {
     return result;
   }
 
+  /**
+   * Before the review: pauses the review released while an earlier push had
+   * made a still-live listing read as not live are put back, so the review
+   * below judges them on the facts in force now (release if the price covers
+   * the cost, otherwise re-assert the hold at inventory planning). A failure
+   * here is logged and retried next pass; the review still runs.
+   */
+  private async restoreHoldsReleasedWhileListingDemoted(input: { limit: number; now: Date; workerId: string }): Promise<ReadonlySet<number>> {
+    try {
+      const restored = await this.deps.repository.restoreHoldsReleasedWhileListingDemoted({
+        now: input.now, workerId: input.workerId, limit: input.limit,
+      });
+      for (const hold of restored) {
+        // WARN: an anomaly an earlier push left behind, recovered automatically.
+        this.deps.logger.warn({
+          code: "DROPSHIP_COST_CHANGE_HOLD_RESTORED",
+          message: "A below-cost pause released while an earlier push made a live listing read as not live was put back for review.",
+          context: {
+            action: "cost_change_hold_restore", outcome: "restored", workerId: input.workerId,
+            vendorId: hold.vendorId, storeConnectionId: hold.storeConnectionId, productVariantId: hold.productVariantId,
+            listingId: hold.listingId, entryId: hold.entryId, holdId: hold.holdId, releasedHoldId: hold.releasedHoldId,
+            releasedAt: hold.releasedAt.toISOString(), basisJobItemId: hold.basisJobItemId, demotingJobItemId: hold.demotingJobItemId,
+            before: { holdId: null }, after: { holdId: hold.holdId },
+          },
+        });
+      }
+      return new Set(restored.map((hold) => hold.holdId));
+    } catch (error) {
+      this.deps.logger.error({
+        code: "DROPSHIP_COST_CHANGE_HOLD_RESTORE_FAILED",
+        message: "Pauses released while a live listing read as not live could not be put back; tried again on the next pass.",
+        context: {
+          action: "cost_change_hold_restore", outcome: "failed", classification: classificationOf(error), workerId: input.workerId,
+          error: error instanceof Error ? error.message : String(error),
+          errorCode: error instanceof DropshipError ? error.code : null,
+        },
+      });
+      return new Set();
+    }
+  }
+
   private async reviewVendorHolds(
     vendorId: number,
     holds: readonly ActiveCostChangeListingHold[],
     gate: DropshipCostChangeHoldGate,
     policy: PolicyInForce,
     now: Date,
+    restoredHoldIds: ReadonlySet<number>,
   ): Promise<{ released: number; reasserted: number; deferred: number; noticesSent: number }> {
     const productVariantIds = unique(holds.map((hold) => hold.productVariantId));
     const [facts, costs] = await Promise.all([
@@ -634,6 +833,9 @@ export class DropshipCostChangeListingActionService {
     let deferred = 0;
     const resumed: Array<{ listing: CostActionListing; listingPriceCents: number | null; unitCostCents: number }> = [];
     const resumedHoldIds: number[] = [];
+    // Put back this pass and kept: the vendor is told the listing is paused again.
+    const repaused: Array<{ listing: CostActionListing; listingPriceCents: number | null; unitCostCents: number }> = [];
+    const repausedHoldIds: number[] = [];
 
     for (const [storeConnectionId, storeHolds] of groupBy(holds, (hold) => hold.storeConnectionId)) {
       const heldNow = await gate.listHeldVariants({ storeConnectionId, productVariantIds: unique(storeHolds.map((hold) => hold.productVariantId)) });
@@ -643,11 +845,19 @@ export class DropshipCostChangeListingActionService {
         const listing = facts.listings.find((candidate) => candidate.listingId === hold.listingId) ?? null;
         const costInForce = costs.get(hold.productVariantId) ?? null;
         const price = listing && costInForce !== null ? classifyListing(facts, listing, costInForce) : null;
+        // Released for its price only once the price buyers see covers the cost: the settings price
+        // and the price the last completed push published (a queued or failed raise is not on eBay).
         const reason = decideCostChangeHoldRelease({
-          listingStatus: listing?.status ?? "not_listed", priceCents: price?.priceCents ?? null, costInForceCents: costInForce,
+          listingStatus: listing?.status ?? "not_listed", externalListingId: listing?.externalListingId ?? null,
+          priceCents: price?.priceCents ?? null, publishedPriceCents: listing?.publishedPriceCents ?? null,
+          costInForceCents: costInForce,
         });
         if (!reason) {
           keep.push(hold);
+          if (restoredHoldIds.has(hold.holdId) && listing) {
+            repaused.push({ listing, listingPriceCents: judgedPriceCents(price, listing) ?? hold.listingPriceCents, unitCostCents: costInForce ?? hold.unitCostCents });
+            repausedHoldIds.push(hold.holdId);
+          }
           continue;
         }
         const holder = heldNow.get(hold.productVariantId)?.heldBy ?? null;
@@ -656,7 +866,8 @@ export class DropshipCostChangeListingActionService {
         byDetail.set(detail, [...(byDetail.get(detail) ?? []), hold]);
         releases.set(reason, byDetail);
         if (reason === "price_covers_cost" && listing) {
-          resumed.push({ listing, listingPriceCents: price?.priceCents ?? null, unitCostCents: costInForce ?? hold.unitCostCents });
+          // Listed at what buyers see: the published price (both prices cover the cost).
+          resumed.push({ listing, listingPriceCents: listing.publishedPriceCents, unitCostCents: costInForce ?? hold.unitCostCents });
           resumedHoldIds.push(hold.holdId);
         }
       }
@@ -706,10 +917,131 @@ export class DropshipCostChangeListingActionService {
         idempotencyKey: costChangeListingNoticeIdempotencyKey({ vendorId, kind: "resumed", ids: resumedHoldIds }),
         payload: { holdIds: resumedHoldIds, policyId: policy.policyId },
       });
-      noticesSent = 1;
+      noticesSent += 1;
+    }
+    if (repaused.length > 0 && channels.length > 0) {
+      await this.send({
+        vendorId, kind: "paused", notice: buildCostChangeListingNotice({ kind: "paused", listings: repaused }), channels,
+        idempotencyKey: costChangeListingFollowUpNoticeIdempotencyKey({ vendorId, kind: "paused", basis: "restored_hold", ids: repausedHoldIds }),
+        payload: { holdIds: repausedHoldIds, policyId: policy.policyId },
+      });
+      noticesSent += 1;
     }
     return { released, reasserted, deferred, noticesSent };
   }
+
+  /**
+   * Judges once, on the facts in force, each increase recorded as skipped
+   * because the listing read queued, failed or blocked, now that the listing
+   * is active (listSkippedListingRechecks). It goes through the same paths
+   * as a first decision (reprice push job, inventory-planning hold, notices),
+   * keyed by the skipped actions so a replay reuses them, and records each
+   * decision with the holds it placed in one transaction. Whatever made the
+   * listing read as not live then (before the live status fix, mostly an
+   * update queued or failed over a listing that stayed live), it sells now
+   * and the increase was never judged against it. A vendor that fails is
+   * retried next pass; nothing was recorded for it.
+   */
+  private async recheckSkippedListings(input: { now: Date; workerId: string; policy: PolicyInForce; limit: number }): Promise<DropshipCostRecheckResult> {
+    const result: DropshipCostRecheckResult = { rechecked: 0, vendorsFailed: 0, repriceJobsQueued: 0, holdsPlaced: 0, noticesSent: 0 };
+    const candidates = await this.deps.repository.listSkippedListingRechecks({ now: input.now, limit: input.limit });
+    for (const [vendorId, vendorCandidates] of groupBy(candidates, (candidate) => candidate.increase.vendorId)) {
+      try {
+        const outcome = await this.recheckVendor(vendorId, vendorCandidates, input);
+        result.rechecked += outcome.rechecked;
+        result.repriceJobsQueued += outcome.repriceJobsQueued;
+        result.holdsPlaced += outcome.holdsPlaced;
+        result.noticesSent += outcome.noticesSent;
+      } catch (error) {
+        result.vendorsFailed += 1;
+        this.deps.logger.warn({
+          code: "DROPSHIP_COST_CHANGE_RECHECK_VENDOR_FAILED",
+          message: "A vendor's skipped cost change listing actions could not be judged again; they are retried on the next pass.",
+          context: {
+            action: "cost_change_listing_recheck", outcome: "failed", classification: classificationOf(error), workerId: input.workerId,
+            vendorId, actionIds: vendorCandidates.map((candidate) => candidate.actionId),
+            error: error instanceof Error ? error.message : String(error),
+            errorCode: error instanceof DropshipError ? error.code : null,
+          },
+        });
+      }
+    }
+    return result;
+  }
+
+  private async recheckVendor(
+    vendorId: number,
+    candidates: readonly SkippedListingRecheckCandidate[],
+    input: { now: Date; workerId: string; policy: PolicyInForce },
+  ): Promise<Omit<DropshipCostRecheckResult, "vendorsFailed">> {
+    const facts = await this.deps.repository.loadVendorFacts({
+      vendorId, productVariantIds: unique(candidates.map((candidate) => candidate.increase.productVariantId)),
+    });
+    const decisions: PendingDecision[] = [];
+    for (const candidate of candidates) {
+      const listing = facts.listings.find((row) => row.listingId === candidate.listingId);
+      // Selected while active; one that changed since is judged once it is active again. Kept to `active` (PR 1b): the
+      // recheck is for listings the live-status repair restored, so a listing still re-sent waits for its push.
+      if (!listing || !COST_ACTIONABLE_LISTING_STATUSES.includes(listing.status)) continue;
+      const price = judgedListingPrice(facts, listing, candidate.increase.unitCostCents);
+      const action = decideCostChangeListingAction({
+        listingStatus: listing.status, externalListingId: listing.externalListingId, price,
+        unitCostCents: candidate.increase.unitCostCents, settings: input.policy.settings,
+      });
+      decisions.push({ entry: candidate.increase, listing, price, action, detail: null, pushJobId: null, hold: null, recheck: candidate });
+    }
+    if (decisions.length === 0) return { rechecked: 0, repriceJobsQueued: 0, holdsPlaced: 0, noticesSent: 0 };
+
+    const keys = recheckDecisionKeys(vendorId);
+    const repriceJobsQueued = await this.queueReprices(vendorId, decisions.filter((decision) => decision.action === "reprice_queued"), keys);
+    const holdsPlaced = await this.placeHolds(decisions.filter((decision) => decision.action === "below_cost_paused"), input.now, keys);
+    const noticesSent = await this.notifyVendor(vendorId, decisions, input.policy, keys);
+    const recorded = await this.deps.repository.recordListingRechecks({
+      vendorId,
+      workerId: input.workerId,
+      rechecks: decisions.map((decision): CostChangeListingRecheckRecord => ({
+        actionId: recheckOf(decision).actionId, entryId: decision.entry.entryId, storeConnectionId: decision.listing.storeConnectionId,
+        productVariantId: decision.listing.productVariantId, listingId: decision.listing.listingId,
+        skippedListingStatus: recheckOf(decision).skippedListingStatus, listingStatus: decision.listing.status,
+        priceSource: decision.price.source, listingPriceCents: decision.price.priceCents, unitCostCents: decision.entry.unitCostCents,
+        action: decision.action, detail: decision.detail, pushJobId: decision.pushJobId,
+        holdKey: decision.hold ? { storeConnectionId: decision.hold.storeConnectionId, productVariantId: decision.hold.productVariantId } : null,
+        policyId: input.policy.policyId, decidedAt: input.now,
+      })),
+      holds: decisions.flatMap((decision) => (decision.hold ? [decision.hold] : [])),
+    });
+    for (const decision of decisions) {
+      // WARN: a decision an earlier push's demotion had skipped, made now automatically.
+      this.deps.logger.warn({
+        code: "DROPSHIP_COST_CHANGE_LISTING_RECHECKED",
+        message: "A cost increase skipped while the listing read as not live was judged again now that the listing is live.",
+        context: {
+          action: "cost_change_listing_recheck", outcome: decision.action, workerId: input.workerId, vendorId,
+          storeConnectionId: decision.listing.storeConnectionId, listingId: decision.listing.listingId,
+          productVariantId: decision.listing.productVariantId, entryId: decision.entry.entryId, actionId: recheckOf(decision).actionId,
+          pushJobId: decision.pushJobId, listingPriceCents: decision.price.priceCents, unitCostCents: decision.entry.unitCostCents,
+          before: { action: "skipped_inactive_listing", listingStatus: recheckOf(decision).skippedListingStatus },
+          after: { action: decision.action, listingStatus: decision.listing.status },
+        },
+      });
+    }
+    return { rechecked: recorded.rechecksRecorded, repriceJobsQueued, holdsPlaced, noticesSent };
+  }
+}
+
+/**
+ * The price a live listing is judged at: its settings price (classifyListing)
+ * held against the price its last completed push published
+ * (judgeAgainstPublishedPrice).
+ */
+export function judgedListingPrice(facts: CostActionVendorFacts, listing: CostActionListing, costCents: number): CostChangeListingPriceClassification {
+  return judgeAgainstPublishedPrice(classifyListing(facts, listing, costCents), listing.publishedPriceCents);
+}
+
+/** The lower of a settings price and the published one, for a notice; null when the settings price is unknown. */
+function judgedPriceCents(price: CostChangeListingPriceClassification | null, listing: CostActionListing): number | null {
+  if (!price || price.priceCents === null) return null;
+  return listing.publishedPriceCents === null ? price.priceCents : Math.min(price.priceCents, listing.publishedPriceCents);
 }
 
 /** The listing's price as the preview would resolve it, with the rule price computed at the cost being judged. */
@@ -827,7 +1159,8 @@ function emptyPassResult(): DropshipCostListingActionPassResult {
   return {
     vendorsProcessed: 0, vendorsFailed: 0, entriesDecided: 0, entriesSuperseded: 0, listingsDecided: 0, actions: emptyActionCounts(),
     repriceJobsQueued: 0, holdsPlaced: 0, noticesSent: 0,
-    holds: { reviewed: 0, released: 0, reasserted: 0, deferred: 0, vendorsFailed: 0, noticesSent: 0 },
+    rechecks: { rechecked: 0, vendorsFailed: 0, repriceJobsQueued: 0, holdsPlaced: 0, noticesSent: 0 },
+    holds: { restored: 0, reviewed: 0, released: 0, reasserted: 0, deferred: 0, vendorsFailed: 0, noticesSent: 0 },
   };
 }
 

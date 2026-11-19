@@ -273,6 +273,60 @@ export async function updateWmsOrderItemCatalogSnapshot(
   return updated;
 }
 
+/**
+ * Move one unstarted WMS order item from a retired catalog variant to the
+ * variant that replaced it (catalog product merge). The guard re-checks the
+ * item inside the caller's transaction: it must still point at the source
+ * variant and have no picked or shipped units, so a picker who started the
+ * line after the merge preview causes a rollback instead of a split custody.
+ * Reservations are NOT touched here; the caller releases and re-claims them.
+ */
+export async function reassignWmsOrderItemVariant(
+  executor: WmsOrderItemExecutor,
+  args: {
+    itemId: number;
+    fromVariantId: number;
+    toVariantId: number;
+    toCatalogProductId: number;
+    sku: string;
+    location?: string;
+    zone?: string;
+  },
+): Promise<WmsOrderItem> {
+  assertPositiveInteger(args.itemId, "itemId");
+  assertPositiveInteger(args.fromVariantId, "fromVariantId");
+  assertPositiveInteger(args.toVariantId, "toVariantId");
+  assertPositiveInteger(args.toCatalogProductId, "toCatalogProductId");
+  if (!args.sku.trim()) {
+    throw new WmsOrderItemCommandError("INVALID_INPUT", "sku is required", { itemId: args.itemId });
+  }
+  const patch: Record<string, unknown> = {
+    productId: args.toVariantId,
+    catalogProductId: args.toCatalogProductId,
+    sku: args.sku,
+  };
+  if (args.location !== undefined) patch.location = args.location;
+  if (args.zone !== undefined) patch.zone = args.zone;
+  const [updated] = await executor
+    .update(wmsOrderItems)
+    .set(patch)
+    .where(and(
+      eq(wmsOrderItems.id, args.itemId),
+      eq(wmsOrderItems.productId, args.fromVariantId),
+      eq(wmsOrderItems.pickedQuantity, 0),
+      eq(wmsOrderItems.fulfilledQuantity, 0),
+    ))
+    .returning();
+  if (!updated) {
+    throw new WmsOrderItemCommandError(
+      "ORDER_ITEM_REASSIGN_CONFLICT",
+      `WMS order item ${args.itemId} changed (picked, shipped or re-pointed) before it could be moved`,
+      { itemId: args.itemId, fromVariantId: args.fromVariantId },
+    );
+  }
+  return updated;
+}
+
 export async function persistWmsOrderItemPickProgress(
   executor: WmsOrderItemExecutor,
   args: {
@@ -585,7 +639,8 @@ export async function persistCanonicalWmsPickProgress(
        WHERE item.order_id = $1
        GROUP BY item.order_id
      ) AS rollup
-     WHERE order_header.id = rollup.order_id`,
+     WHERE order_header.id = rollup.order_id
+       AND order_header.warehouse_status NOT IN ('shipped', 'cancelled')`,
     [input.orderId],
   );
 }
@@ -598,6 +653,7 @@ export async function setWmsOrderItemLocation(
     zone: string;
     barcode?: string | null;
     imageUrl?: string | null;
+    onlyIfPendingUnpicked?: boolean;
   },
 ): Promise<WmsOrderItem | null> {
   assertPositiveInteger(args.itemId, "itemId");
@@ -614,10 +670,18 @@ export async function setWmsOrderItemLocation(
   if (args.barcode !== undefined) patch.barcode = args.barcode;
   if (args.imageUrl !== undefined) patch.imageUrl = args.imageUrl;
 
+  const whereClause = args.onlyIfPendingUnpicked
+    ? and(
+        eq(wmsOrderItems.id, args.itemId),
+        eq(wmsOrderItems.status, "pending"),
+        eq(wmsOrderItems.pickedQuantity, 0),
+      )
+    : eq(wmsOrderItems.id, args.itemId);
+
   const [updated] = await executor
     .update(wmsOrderItems)
     .set(patch)
-    .where(eq(wmsOrderItems.id, args.itemId))
+    .where(whereClause)
     .returning();
   return updated ?? null;
 }
@@ -817,8 +881,12 @@ export async function repointPendingWmsOrderItemsForInventoryTransfer(
 
 export async function backfillUnassignedWmsOrderItemBin(
   executor: WmsOrderItemExecutor,
-  args: { sku: string; locationCode: string; zone: string },
+  args: { sku: string; locationCode: string; zone: string; warehouseId?: number | null },
 ): Promise<number> {
+  const warehouseFilter =
+    args.warehouseId != null
+      ? sql`AND (o.warehouse_id = ${args.warehouseId} OR o.warehouse_id IS NULL)`
+      : sql``;
   const result = await executor.execute(sql`
     UPDATE wms.order_items oi
     SET location = ${args.locationCode}, zone = ${args.zone}
@@ -828,6 +896,7 @@ export async function backfillUnassignedWmsOrderItemBin(
       AND oi.picked_quantity < oi.quantity
       AND o.warehouse_status NOT IN ('shipped', 'cancelled', 'completed')
       AND UPPER(oi.sku) = UPPER(${args.sku})
+      ${warehouseFilter}
     RETURNING oi.id
   `);
   return affectedRowCount(result);
@@ -1011,3 +1080,24 @@ export async function repointCanonicalTransferPickLines(
   if (count !== input.orderItemIds.length) throw new WmsOrderItemCommandError("WMS_TRANSFER_PICK_PROGRESS_CHANGED", "A reserved transfer pick line changed before its location was updated", { orderItemIds: input.orderItemIds });
   return count;
 }
+
+export async function reopenShortWmsOrderItemsForRepick(
+  executor: WmsOrderItemExecutor,
+  args: { orderId: number },
+): Promise<number> {
+  assertPositiveInteger(args.orderId, "orderId");
+  const result = await executor.execute(sql`
+    UPDATE wms.order_items
+    SET status = CASE
+      WHEN COALESCE(picked_quantity, 0) >= quantity THEN 'completed'
+      WHEN COALESCE(picked_quantity, 0) > 0 THEN 'in_progress'
+      ELSE 'pending'
+    END,
+    short_reason = NULL
+    WHERE order_id = ${args.orderId}
+      AND status = 'short'
+    RETURNING id
+  `);
+  return affectedRowCount(result);
+}
+

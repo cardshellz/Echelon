@@ -3,7 +3,7 @@ import { z } from "zod";
 import type {
   ReconcileOrderDemandCommand,
   ReconcileOrderDemandResult,
-} from "../../channels/reservation.service";
+} from "../../inventory-planning/reservation-authority.api";
 import {
   assessHistoricalIdentityRepairLine,
   extractHistoricalRepairSourceLine,

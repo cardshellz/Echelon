@@ -14,7 +14,7 @@ const API = CUSTOMER_RETURN_PREVIEW_API_PATH;
 const PAGE = CUSTOMER_RETURN_PORTAL_PATH;
 const ACCESS = CUSTOMER_RETURN_PORTAL_ACCESS_PATH;
 const LEGACY = CUSTOMER_RETURN_PORTAL_LEGACY_PATH;
-const admin = () => ({ id: "admin-1", active: 1, role: "admin", roles: [{ name: "Administrator", isSystem: 1 }] });
+const admin = () => ({ id: "admin-1", active: 1, roles: [{ name: "Administrator", isSystem: 1 }] });
 const identityStorage = vi.hoisted(() => ({ getUser: vi.fn(), getUserRoles: vi.fn() }));
 vi.mock("../../../identity", () => ({ identityStorage }));
 type IdentityReader = NonNullable<CustomerReturnPreviewRouteDependencies["identityReader"]>;
@@ -120,11 +120,10 @@ describe("private customer return preview HTTP boundaries", () => {
       expect(readIdentity).not.toHaveBeenCalled(); expect(fallback).not.toHaveBeenCalled(); expectNoService();
     });
 
-  it.each(["staff", "inactive", "legacy_demoted", "rbac_demoted", "custom_administrator", "wrong_role_name", "missing_account", "wrong_identity"])(
+  it.each(["staff", "inactive", "rbac_demoted", "custom_administrator", "wrong_role_name", "missing_account", "wrong_identity"])(
     "rejects current %s evidence despite cached admin session values", async kind => {
-      identity = kind === "staff" ? { ...admin(), role: "lead", roles: [{ name: "Team Lead", isSystem: 1 }] }
+      identity = kind === "staff" ? { ...admin(), roles: [{ name: "Team Lead", isSystem: 1 }] }
         : kind === "inactive" ? { ...admin(), active: 0 }
-        : kind === "legacy_demoted" ? { ...admin(), role: "picker" }
         : kind === "rbac_demoted" ? { ...admin(), roles: [] }
         : kind === "custom_administrator" ? { ...admin(), roles: [{ name: "Administrator", isSystem: 0 }] }
         : kind === "wrong_role_name" ? { ...admin(), roles: [{ name: "administrator", isSystem: 1 }] }
@@ -167,7 +166,8 @@ describe("private customer return preview HTTP boundaries", () => {
 
   it("defaults to fresh existing Identity readers and projects only authorization fields", async () => {
     await close();
-    identityStorage.getUser.mockResolvedValue({ ...admin(), password: "must-not-leave-identity", username: "private-name" });
+    // Explicit assignment wins even when the old account label says picker.
+    identityStorage.getUser.mockResolvedValue({ ...admin(), role: "picker", password: "must-not-leave-identity", username: "private-name" });
     identityStorage.getUserRoles.mockResolvedValue([{ id: 1, name: "Administrator", isSystem: 1, description: "Full access" }]);
     await start(true);
     expect((await request()).status).toBe(200);
@@ -306,7 +306,7 @@ describe("private customer return preview HTTP boundaries", () => {
     const authorized = await request(path);
     expect(authorized.status).toBe(404); expectPrivate(authorized);
     expect(readIdentity).toHaveBeenCalledExactlyOnceWith("admin-1");
-    identity = { ...admin(), role: "picker" };
+    identity = { ...admin(), roles: [{ name: "Picker", isSystem: 1 }] };
     expect((await request(path)).status).toBe(403);
     session = {};
     const anonymous = await request(path);

@@ -23,69 +23,29 @@
 
 import { sql } from "drizzle-orm";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
+import type { PoolClient } from "pg";
+import { z } from "zod";
+import {
+  executeGuardedWmsOrderStatusTransitionInWms,
+  isTerminalWmsOrderStatus,
+  isWmsOrderTransitionAllowed,
+  restoreStoppedRefundEditWmsOrderInWms,
+} from "../wms/wms-order-mutations.api";
 
-// ─── Terminal states ────────────────────────────────────────────────
-// These states cannot be exited by normal transitions.
-// Exception: cancelled → shipped (truth wins — if engine says shipped,
-// we record it regardless of our local cancel state).
-
-const TERMINAL_STATES: ReadonlySet<WmsWarehouseStatus> = new Set([
-  "shipped",
-  "cancelled",
-]);
-
-// ─── Transition matrix ──────────────────────────────────────────────
-// Key = target state. Value = set of states that may transition TO it.
-// If a from-state is not listed for a target, the transition is illegal.
-//
-// This is intentionally permissive for Phase 1 — the goal is to funnel
-// all writers through one gate, not to immediately restrict every
-// transition. Tighten iteratively as each caller migrates.
-
-const TRANSITION_MATRIX: Record<WmsWarehouseStatus, ReadonlySet<WmsWarehouseStatus>> = {
-  ready: new Set(["on_hold", "exception", "awaiting_3pl"]),
-  in_progress: new Set(["ready", "on_hold", "exception"]),
-  picking: new Set(["ready"]),
-  picked: new Set(["picking"]),
-  packing: new Set(["picked"]),
-  packed: new Set(["packing"]),
-  completed: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "ready_to_ship", "partially_shipped",
-    "on_hold", "exception", "awaiting_3pl",
-  ]),
-  ready_to_ship: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "on_hold", "exception", "awaiting_3pl",
-  ]),
-  partially_shipped: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "ready_to_ship",
-    "on_hold", "exception", "awaiting_3pl",
-  ]),
-  shipped: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "ready_to_ship", "partially_shipped",
-    "on_hold", "exception", "awaiting_3pl",
-    "cancelled", // truth wins: engine says shipped
-  ]),
-  on_hold: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "ready_to_ship", "partially_shipped",
-    "exception", "awaiting_3pl",
-  ]),
-  exception: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "ready_to_ship",
-    "on_hold", "awaiting_3pl",
-  ]),
-  cancelled: new Set([
-    "ready", "in_progress", "picking", "picked", "packing", "packed",
-    "completed", "ready_to_ship", "partially_shipped",
-    "on_hold", "exception", "awaiting_3pl",
-  ]),
-  awaiting_3pl: new Set(["ready", "on_hold"]),
-};
+/**
+ * Narrow correction of empty, unstarted work stopped during an owned refund
+ * edit. The caller proves native settlement and appends the immutable edit
+ * audit in this transaction. This does not relax ordinary terminal transitions
+ * or release either the dedicated edit hold or an independent manual hold.
+ */
+export async function restoreStoppedRefundEditOrder(
+  client: Pick<PoolClient, "query">,
+  input: { orderId: number; omsOrderId: number; operationId: string; now: Date },
+): Promise<boolean> {
+  z.object({ orderId: z.number().int().positive().safe(), omsOrderId: z.number().int().positive().safe(),
+    operationId: z.string().uuid(), now: z.date() }).strict().parse(input);
+  return restoreStoppedRefundEditWmsOrderInWms(client, input);
+}
 
 // ─── Public API ─────────────────────────────────────────────────────
 
@@ -95,6 +55,8 @@ export interface TransitionRequest {
   reason: string;
   setCompletedAt?: boolean;
   setCancelledAt?: boolean;
+  /** Background cleanup must not close an order owned by an edit in progress. */
+  requireNoOrderEdit?: boolean;
 }
 
 export interface TransitionResult {
@@ -113,17 +75,14 @@ export function isTransitionAllowed(
   from: WmsWarehouseStatus,
   to: WmsWarehouseStatus,
 ): boolean {
-  if (from === to) return false;
-  const allowedFrom = TRANSITION_MATRIX[to];
-  if (!allowedFrom) return false;
-  return allowedFrom.has(from);
+  return isWmsOrderTransitionAllowed(from, to);
 }
 
 /**
  * Check whether a status is terminal.
  */
 export function isTerminalStatus(status: WmsWarehouseStatus): boolean {
-  return TERMINAL_STATES.has(status);
+  return isTerminalWmsOrderStatus(status);
 }
 
 /**
@@ -146,7 +105,7 @@ export async function transitionOrderStatus(
   request: TransitionRequest,
   clock: () => Date = () => new Date(),
 ): Promise<TransitionResult> {
-  const { from, to, reason, setCompletedAt, setCancelledAt } = request;
+  const { from, to, reason, setCompletedAt, setCancelledAt, requireNoOrderEdit } = request;
 
   // Filter `from` states to only those with a legal transition to `to`
   const legalFrom = from.filter((f) => isTransitionAllowed(f, to));
@@ -163,28 +122,19 @@ export async function transitionOrderStatus(
     };
   }
 
-  // Build the UPDATE with guarded WHERE
+  // Build the UPDATE with guarded WHERE and atomic prior-status capture
   const now = clock();
   const fromList = legalFrom.map((s) => `'${s}'`).join(", ");
 
-  let setClauses = `warehouse_status = '${to}', updated_at = '${now.toISOString()}'`;
-  if (setCompletedAt) {
-    setClauses += `, completed_at = '${now.toISOString()}'`;
-  }
-  if (setCancelledAt) {
-    setClauses += `, cancelled_at = COALESCE(cancelled_at, '${now.toISOString()}')`;
-  }
-
-  const result: any = await db.execute(sql`
-    UPDATE wms.orders
-    SET warehouse_status = ${to},
-        updated_at = ${now}
-        ${setCompletedAt ? sql`, completed_at = ${now}` : sql``}
-        ${setCancelledAt ? sql`, cancelled_at = COALESCE(cancelled_at, ${now})` : sql``}
-    WHERE id = ${orderId}
-      AND warehouse_status IN (${sql.raw(fromList)})
-    RETURNING warehouse_status AS new_status
-  `);
+  const result: any = await executeGuardedWmsOrderStatusTransitionInWms(db, {
+    orderId,
+    fromListRaw: fromList,
+    to,
+    now,
+    setCompletedAt,
+    setCancelledAt,
+    requireNoOrderEdit,
+  });
 
   const updated = result?.rows?.[0];
   if (!updated) {
@@ -202,7 +152,7 @@ export async function transitionOrderStatus(
 
   return {
     transitioned: true,
-    previousStatus: legalFrom[0],
+    previousStatus: (updated.previous_status as WmsWarehouseStatus | undefined) ?? legalFrom[0],
     newStatus: to,
     orderId,
     reason,
@@ -216,6 +166,7 @@ export async function cancelOrder(
   db: any,
   orderId: number,
   reason: string,
+  guards?: Pick<TransitionRequest, "requireNoOrderEdit">,
 ): Promise<TransitionResult> {
   return transitionOrderStatus(db, orderId, {
     from: [
@@ -226,6 +177,7 @@ export async function cancelOrder(
     to: "cancelled",
     reason,
     setCancelledAt: true,
+    ...guards,
   });
 }
 
@@ -259,6 +211,7 @@ export async function completeOrder(
   db: any,
   orderId: number,
   reason: string,
+  guards?: Pick<TransitionRequest, "requireNoOrderEdit">,
 ): Promise<TransitionResult> {
   return transitionOrderStatus(db, orderId, {
     from: [
@@ -269,6 +222,7 @@ export async function completeOrder(
     to: "completed",
     reason,
     setCompletedAt: true,
+    ...guards,
   });
 }
 

@@ -43,6 +43,10 @@ import {
 import { resolveEbayCategoryMapping } from "../modules/channels/adapters/ebay/ebay-category-map";
 import { atpService as ebayChannelQuantityReader, ebayListingPhotoResolver } from "./ebay/ebay-utils";
 import { readExistingEbayListingPhotos } from "../modules/channels/adapters/ebay/ebay-listing-photos.reader";
+import {
+  insertDefaultEbayChannelConnection,
+  mergeEbayChannelConnectionMerchantLocation,
+} from "../modules/channels/ebay-route-admin.api";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -82,16 +86,7 @@ async function getChannelConnection() {
 async function getOrCreateChannelConnection() {
   let conn = await getChannelConnection();
   if (!conn) {
-    const [newConn] = await (db as any)
-      .insert(channelConnections)
-      .values({
-        channelId: EBAY_CHANNEL_ID,
-        metadata: {},
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .returning();
-    conn = newConn;
+    conn = await insertDefaultEbayChannelConnection(EBAY_CHANNEL_ID, db);
   }
   return conn;
 }
@@ -268,24 +263,22 @@ export function registerEbaySettingsRoutes(app: Express): void {
 
       // Save location key to channel connection metadata
       const conn = await getOrCreateChannelConnection();
-      await (db as any)
-        .update(channelConnections)
-        .set({
-          metadata: sql`COALESCE(${channelConnections.metadata}, '{}'::jsonb) || ${JSON.stringify({
-            merchantLocationKey: locationKey,
-            merchantLocation: {
-              name,
-              addressLine1,
-              addressLine2,
-              city,
-              stateOrProvince,
-              postalCode,
-              country: country || "US",
-            },
-          })}::jsonb`,
-          updatedAt: new Date(),
-        })
-        .where(eq(channelConnections.id, conn.id));
+      await mergeEbayChannelConnectionMerchantLocation(
+        conn.id,
+        {
+          merchantLocationKey: locationKey,
+          merchantLocation: {
+            name,
+            addressLine1,
+            addressLine2,
+            city,
+            stateOrProvince,
+            postalCode,
+            country: country || "US",
+          },
+        },
+        db,
+      );
 
       res.json({
         success: true,

@@ -1,3 +1,4 @@
+import { parseDecimalCents, sumCents, readIntegerCents } from "@shared/money-read";
 /**
  * Shopify Channel Adapter
  *
@@ -37,6 +38,12 @@ import type {
   CancellationPushResult,
 } from "../channel-adapter.interface";
 import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
+import {
+  SHOPIFY_INVENTORY_WRITE_PATH,
+  ShopifyInventoryWriteRejectedError,
+  isShopifyInventoryWrite,
+  shopifyInventoryWriteRejectionCode,
+} from "./shopify-inventory-write.error";
 import { providerRestIdentitySchema } from "../channel-identity.domain";
 import { ShopifyMarketplaceListingConnector } from "../listing-connectors/shopify-listing.connector";
 import type { QuantityPublicationAdmission } from "../../inventory-planning/application/quantity-publication-admission.port";
@@ -209,7 +216,9 @@ export class ShopifyAdapter implements IChannelAdapter {
           pushedQty: 0,
           status: "error",
           error: error instanceof Error ? error.message : String(error),
-          ...(error instanceof InventoryPublicationConfigurationError
+          // Permanent for this exact request: the outbox dead-letters it instead
+          // of retrying (configuration errors, and Shopify's 404/422 stock write).
+          ...(error instanceof InventoryPublicationConfigurationError || error instanceof ShopifyInventoryWriteRejectedError
             ? { errorCode: error.code, retryable: false }
             : {}),
         });
@@ -283,7 +292,7 @@ export class ShopifyAdapter implements IChannelAdapter {
     locationId: string,
     available: number,
   ): Promise<void> {
-    await this.shopifyPost(creds, "/inventory_levels/set.json", {
+    await this.shopifyPost(creds, SHOPIFY_INVENTORY_WRITE_PATH, {
       location_id: shopifyRestId(locationId, "location ID"),
       inventory_item_id: shopifyRestId(inventoryItemId, "inventory item ID"),
       available,
@@ -418,20 +427,17 @@ export class ShopifyAdapter implements IChannelAdapter {
       sku: item.sku || "",
       title: item.title || item.name || "",
       quantity: item.quantity,
-      priceCents: Math.round(parseFloat(item.price || "0") * 100),
-      discountCents: Math.round(
-        (item.discount_allocations || []).reduce(
-          (sum: number, d: any) => sum + parseFloat(d.amount || "0"),
-          0,
-        ) * 100,
+      priceCents: parseDecimalCents(item.price ?? "0", "lineItems"),
+      discountCents: sumCents((item.discount_allocations || []).map(
+        (discount: any) => parseDecimalCents(discount.amount, "Shopify allocation"),
+      )),
+      taxCents: sumCents((item.tax_lines || []).map(
+        (tax: any) => parseDecimalCents(tax.price, "Shopify line tax"),
+      )),
+      totalCents: readIntegerCents(
+        BigInt(parseDecimalCents(item.price, "Shopify line price")) * BigInt(item.quantity),
+        "Shopify line total",
       ),
-      taxCents: Math.round(
-        (item.tax_lines || []).reduce(
-          (sum: number, t: any) => sum + parseFloat(t.price || "0"),
-          0,
-        ) * 100,
-      ),
-      totalCents: Math.round(parseFloat(item.price || "0") * item.quantity * 100),
     }));
 
     const shipping = shopifyOrder.shipping_address || {};
@@ -455,16 +461,13 @@ export class ShopifyAdapter implements IChannelAdapter {
         phone: shipping.phone || null,
       },
       lineItems,
-      subtotalCents: Math.round(parseFloat(shopifyOrder.subtotal_price || "0") * 100),
-      taxCents: Math.round(parseFloat(shopifyOrder.total_tax || "0") * 100),
-      shippingCents: Math.round(
-        (shopifyOrder.shipping_lines || []).reduce(
-          (sum: number, sl: any) => sum + parseFloat(sl.price || "0"),
-          0,
-        ) * 100,
-      ),
-      discountCents: Math.round(parseFloat(shopifyOrder.total_discounts || "0") * 100),
-      totalCents: Math.round(parseFloat(shopifyOrder.total_price || "0") * 100),
+      subtotalCents: parseDecimalCents(shopifyOrder.subtotal_price ?? "0", "provider amount"),
+      taxCents: parseDecimalCents(shopifyOrder.total_tax ?? "0", "provider amount"),
+      shippingCents: sumCents((shopifyOrder.shipping_lines || []).map(
+        (shippingLine: any) => parseDecimalCents(shippingLine.price, "Shopify shipping"),
+      )),
+      discountCents: parseDecimalCents(shopifyOrder.total_discounts ?? "0", "provider amount"),
+      totalCents: parseDecimalCents(shopifyOrder.total_price ?? "0", "provider amount"),
       currency: shopifyOrder.currency || "USD",
       financialStatus: shopifyOrder.financial_status || null,
       fulfillmentStatus: shopifyOrder.fulfillment_status || null,
@@ -693,7 +696,7 @@ export class ShopifyAdapter implements IChannelAdapter {
     path: string,
     body?: any,
   ): Promise<any> {
-    if (method !== "GET" && path === "/inventory_levels/set.json") {
+    if (isShopifyInventoryWrite(method, path)) {
       if (!this.quantityAdmission) throw new Error("QUANTITY_PUBLICATION_ADMISSION_REQUIRED: Shopify quantity writes require an admitted owner.");
       return this.quantityAdmission.run({ destinationKind: "channel_connection", connectionId: creds.channelConnectionId!,
         providerKey: "shopify", providerScopeType: "location", externalScopeId: String(body.location_id),
@@ -736,7 +739,11 @@ export class ShopifyAdapter implements IChannelAdapter {
           await this.delay(backoff);
           continue;
         }
-        throw new Error(`Shopify API ${method} ${path} failed (${response.status}): ${errorBody}`);
+        const failure = `Shopify API ${method} ${path} failed (${response.status}): ${errorBody}`;
+        // Only the stock write's 404/422 are typed (permanent); every other answer keeps its plain Error.
+        const rejection = shopifyInventoryWriteRejectionCode(method, path, response.status);
+        if (rejection) throw new ShopifyInventoryWriteRejectedError(rejection, failure, response.status);
+        throw new Error(failure);
       }
 
       return await response.json();

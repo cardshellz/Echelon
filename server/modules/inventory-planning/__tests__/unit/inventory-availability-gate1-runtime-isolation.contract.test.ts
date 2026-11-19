@@ -17,7 +17,6 @@ describe("inventory availability Phase 1 runtime isolation", () => {
     )].map((match) => match[1]);
 
     expect([...new Set(mutationTargets)].sort()).toEqual([
-      "idempotencyKeys",
       "locationPromisePolicyHeads",
       "locationPromisePolicyVersions",
       "promiseSafetyPolicyHeads",
@@ -30,6 +29,8 @@ describe("inventory availability Phase 1 runtime isolation", () => {
     ]);
     expect(repository).not.toMatch(/sql`\s*(?:INSERT|UPDATE|DELETE)\b/i);
     expect(repository).toContain("draftUpdateReceiptKey");
+    expect(repository).toContain("insertIdempotencyKeyDrizzle(tx");
+    expect(repository).toContain("updateIdempotencyKeyDrizzle(tx");
     expect(repository).toContain("persistAuditEvent(tx");
   });
 

@@ -12,7 +12,10 @@ export type DropshipWorkerScheduleName =
   | "usdcWatcher"
   | "costDetection"
   | "categoryMarks"
-  | "rulesConversion";
+  | "rulesConversion"
+  | "marketplaceSyncBack"
+  | "catalogArrivals"
+  | "listingEnd";
 
 interface DropshipWorkerScheduleDefinition {
   initialDelayEnvironmentVariable: string;
@@ -70,6 +73,26 @@ const SCHEDULE_DEFINITIONS: Record<
   rulesConversion: {
     initialDelayEnvironmentVariable: "DROPSHIP_RULES_CONVERSION_WORKER_INITIAL_DELAY_MS",
     defaultInitialDelayMs: 240_000,
+  },
+  // eBay sync-back (plan v4 §6.1) ticks every 15 minutes; it boots after the
+  // rules conversion job, in a phase of its own.
+  marketplaceSyncBack: {
+    initialDelayEnvironmentVariable: "DROPSHIP_MARKETPLACE_SYNC_BACK_WORKER_INITIAL_DELAY_MS",
+    defaultInitialDelayMs: 300_000,
+  },
+  // The catalog arrivals job (PLAN-B v4.1 §11.1) ticks every minute: its
+  // first tick runs the conversion follow-up about a minute after boot, on a
+  // phase no other worker uses (between the USDC watcher's 45 s and the
+  // return intake's 90 s).
+  catalogArrivals: {
+    initialDelayEnvironmentVariable: "DROPSHIP_CATALOG_ARRIVALS_WORKER_INITIAL_DELAY_MS",
+    defaultInitialDelayMs: 60_000,
+  },
+  // The listing end worker (PLAN-C v4.1 §5.2) ticks every ten seconds like the push worker, on a phase of that
+  // cycle no other worker uses (between the push worker's 2 s and order processing's 7 s).
+  listingEnd: {
+    initialDelayEnvironmentVariable: "DROPSHIP_LISTING_END_WORKER_INITIAL_DELAY_MS",
+    defaultInitialDelayMs: 5_000,
   },
 };
 

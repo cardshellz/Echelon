@@ -1,7 +1,10 @@
+import { readIntegerCents } from "@shared/money-read";
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { LISTING_PUSH_RUN_CODES } from "../domain/listing-push-run";
 import { parseCatalogVariantUomType } from "../domain/listing-tiers";
+import { LIVE_LISTING_STATUSES } from "../domain/listing-live-status";
 import type {
   CreateDropshipListingPushJobRepositoryInput,
   CreateDropshipListingPushJobRepositoryResult,
@@ -20,7 +23,7 @@ import type { DropshipStoreListingConfig } from "../application/dropship-marketp
 import type { DropshipEbayListingPolicyOverride } from "../application/dropship-ebay-listing-policy-override";
 import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
-import type { DropshipVendorSelectionRule, DropshipVendorVariantOverride } from "../domain/vendor-selection";
+import type { DropshipVendorVariantOverride } from "../domain/vendor-selection";
 import type { SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import {
   EMPTY_LISTING_SETTING_LAYERS,
@@ -76,19 +79,6 @@ interface CatalogRuleRow {
   ends_at: Date | null;
 }
 
-interface SelectionRuleRow {
-  id: number;
-  scope_type: string;
-  action: string;
-  product_line_id: number | null;
-  product_id: number | null;
-  product_variant_id: number | null;
-  category: string | null;
-  auto_connect_new_skus: boolean;
-  auto_list_new_skus: boolean;
-  is_active: boolean;
-}
-
 interface CandidateRow {
   product_id: number;
   product_variant_id: number;
@@ -129,6 +119,8 @@ interface ExistingListingRow {
   vendor_retail_price_cents: string | number | null;
   quantity_cap: number | null;
   external_listing_id: string | null;
+  vendor_quantity_limit: number | null;
+  observed_fulfillment_policy_id: string | null;
 }
 
 interface PricingPolicyRow {
@@ -160,6 +152,9 @@ interface JobRow {
   request_hash: string | null;
   created_at: Date;
   updated_at: Date;
+  /** bigint: node-postgres returns it as text. Read only by the key replay. */
+  run_id?: string | number | null;
+  run_chunk_index?: number | null;
 }
 
 interface JobItemRow {
@@ -343,19 +338,24 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     }
   }
 
-  async listSelectionRules(vendorId: number): Promise<DropshipVendorSelectionRule[]> {
+  /**
+   * Which of these sizes the vendor picked (one-time picks, PLAN-B v4.1 §9
+   * row 2): a bounded primary-key lookup over the sizes the caller holds,
+   * never the vendor's whole selection. A pick is the vendor's choice only;
+   * exposure, the override and the sellable filter stay with the evaluator.
+   */
+  async listPickedVariantIds(vendorId: number, productVariantIds: readonly number[]): Promise<Set<number>> {
+    if (productVariantIds.length === 0) return new Set();
     const client = await this.dbPool.connect();
     try {
-      const result = await client.query<SelectionRuleRow>(
-        `SELECT id, scope_type, action, product_line_id, product_id,
-                product_variant_id, category, auto_connect_new_skus,
-                auto_list_new_skus, is_active
-         FROM dropship.dropship_vendor_selection_rules
-         WHERE vendor_id = $1 AND is_active = true
-         ORDER BY priority DESC, id ASC`,
-        [vendorId],
+      const result = await client.query<{ product_variant_id: number }>(
+        `SELECT product_variant_id
+         FROM dropship.dropship_vendor_selected_variants
+         WHERE vendor_id = $1
+           AND product_variant_id = ANY($2::int[])`,
+        [vendorId, [...new Set(productVariantIds)]],
       );
-      return result.rows.map(mapSelectionRuleRow);
+      return new Set(result.rows.map((row) => row.product_variant_id));
     } finally {
       client.release();
     }
@@ -495,7 +495,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     try {
       const result = await client.query<ExistingListingRow>(
         `SELECT id, product_variant_id, status, vendor_retail_price_cents,
-                quantity_cap, external_listing_id
+                quantity_cap, external_listing_id, vendor_quantity_limit, observed_fulfillment_policy_id
          FROM dropship.dropship_vendor_listings
          WHERE store_connection_id = $1
            AND product_variant_id = ANY($2::int[])`,
@@ -742,9 +742,27 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
       const existingJob = await findJobByIdempotencyKeyForUpdate(client, {
         vendorId: input.vendorId,
         idempotencyKey: input.idempotencyKey,
+        withRunColumns: input.run !== undefined,
       });
       if (existingJob) {
+        // A publish run's chunk adopts only its own job (step 1 plan S2-5, SAFETY14):
+        // a job under the same key that carries out another chunk, or none, is
+        // never replayed as this chunk's job.
+        if (input.run && !jobCarriesRunChunk(existingJob, input.run)) {
+          throw new DropshipError(LISTING_PUSH_RUN_CODES.keyConflict,
+            "A listing push job already holds this publish run chunk's key.",
+            { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, runId: input.run.runId,
+              chunkIndex: input.run.chunkIndex, existingJobId: existingJob.id, classification: "permanent" });
+        }
         if (existingJob.request_hash !== input.requestHash) {
+          if (input.run) {
+            // This chunk's own job, queued first by another expansion whose pre-filter left out other sizes: it is
+            // adopted by (run, chunk) at the next sweep, never a conflict that fails the chunk's sizes (review MC5).
+            throw new DropshipError(LISTING_PUSH_RUN_CODES.chunkExists,
+              "This publish run chunk already has its job; the next sweep adopts it.",
+              { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, runId: input.run.runId,
+                chunkIndex: input.run.chunkIndex, existingJobId: existingJob.id, retryable: true });
+          }
           throw new DropshipError(
             "DROPSHIP_IDEMPOTENCY_CONFLICT",
             "Dropship listing push job idempotency key was reused with a different request.",
@@ -801,11 +819,13 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
         }
       }
       const jobStatus = queuedItemCount > 0 ? "queued" : "failed";
-      const jobResult = await client.query<JobRow>(
+      // The run columns are written with the job, in its own transaction, so a
+      // crash can never leave a chunk's job that the sweep cannot adopt.
+      const jobResult = await withRunChunkUniqueness(input, () => client.query<JobRow>(
         `INSERT INTO dropship.dropship_listing_push_jobs
           (vendor_id, store_connection_id, job_type, status, requested_scope,
-           requested_by, idempotency_key, request_hash, error_message, created_at, updated_at)
-         VALUES ($1, $2, 'push', $3, $4::jsonb, $5, $6, $7, $8, $9, $9)
+           requested_by, idempotency_key, request_hash, error_message, created_at, updated_at${input.run ? ", run_id, run_chunk_index" : ""})
+         VALUES ($1, $2, 'push', $3, $4::jsonb, $5, $6, $7, $8, $9, $9${input.run ? ", $10, $11" : ""})
          RETURNING id, vendor_id, store_connection_id, status, idempotency_key,
                    request_hash, created_at, updated_at`,
         [
@@ -823,19 +843,28 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
           input.requestHash,
           queuedItemCount > 0 ? null : "No listing items were ready to push.",
           input.now,
+          ...(input.run ? [input.run.runId, input.run.chunkIndex] : []),
         ],
-      );
+      ));
       const job = requiredRow(jobResult.rows[0], "Dropship listing push job insert did not return a row.");
 
       for (const row of input.preview.rows) {
+        // A run chunk's item records the listing's status before this queue, so a stop that cancels the item before it
+        // reaches eBay puts the listing back instead of leaving it `queued` (verify V7). Only a run's items are
+        // cancelled by a stop; other jobs write what they always wrote.
+        const listingStatusBeforeQueue = input.run ? await readListingStatusForQueue(client, input, row) : undefined;
         const listingId = await upsertVendorListingForPreview(client, input, row);
-        await insertJobItemForPreview(client, {
+        await withRunChunkUniqueness(input, () => insertJobItemForPreview(client, {
           jobId: job.id,
           listingId,
           idempotencyKey: `${input.idempotencyKey}:${row.productVariantId}`,
           row,
           now: input.now,
-        });
+          // eBay sync-back SB9: only the vendor's own press (a push or a publish run they started) may relist a
+          // listing they ended on eBay; every automatic or staff push leaves it ended (isVendorRelistAllowed).
+          relistAllowed: input.requestedBy.actorType === "vendor",
+          ...(listingStatusBeforeQueue !== undefined ? { listingStatusBeforeQueue } : {}),
+        }));
       }
 
       await recordListingJobAuditEvent(client, input, job.id);
@@ -855,16 +884,55 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
   }
 }
 
+/** True when a job found by a run chunk's key is that chunk's own job. */
+function jobCarriesRunChunk(job: JobRow, run: { runId: number; chunkIndex: number }): boolean {
+  return job.run_id !== null && job.run_id !== undefined && Number(job.run_id) === run.runId
+    && job.run_chunk_index === run.chunkIndex;
+}
+
+/**
+ * A run chunk's job or item insert that collides with a unique key. The
+ * chunk's own (run_id, run_chunk_index) means its job already exists (another
+ * attempt committed it): the next sweep adopts it, so the collision passes.
+ * Any other key (the job key, an item key) belongs to some other job: never
+ * adopted, permanent (SAFETY14). Jobs without a run keep their errors as is.
+ */
+async function withRunChunkUniqueness<T>(
+  input: Pick<CreateDropshipListingPushJobRepositoryInput, "run" | "vendorId" | "storeConnectionId">,
+  write: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    const pgError = error as { code?: unknown; constraint?: unknown };
+    if (!input.run || pgError?.code !== "23505") throw error;
+    const context = { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId,
+      runId: input.run.runId, chunkIndex: input.run.chunkIndex, constraint: pgError.constraint ?? null };
+    if (pgError.constraint === "dropship_listing_job_run_chunk_idx") {
+      throw new DropshipError(LISTING_PUSH_RUN_CODES.chunkExists,
+        "This publish run chunk already has its job; the next sweep adopts it.", { ...context, retryable: true });
+    }
+    throw new DropshipError(LISTING_PUSH_RUN_CODES.keyConflict,
+      "A publish run chunk's job or item key is already used by another job.", { ...context, classification: "permanent" });
+  }
+}
+
+/**
+ * The job a request key already names, locked. Only a publish run's chunk
+ * reads the run columns (to adopt nothing but its own job); every other
+ * caller's statement is the one it has always sent.
+ */
 async function findJobByIdempotencyKeyForUpdate(
   client: Pick<PoolClient, "query">,
   input: {
     vendorId: number;
     idempotencyKey: string;
+    withRunColumns: boolean;
   },
 ): Promise<JobRow | null> {
   const result = await client.query<JobRow>(
     `SELECT id, vendor_id, store_connection_id, status, idempotency_key,
-            request_hash, created_at, updated_at
+            request_hash, created_at, updated_at${input.withRunColumns ? ", run_id, run_chunk_index" : ""}
      FROM dropship.dropship_listing_push_jobs
      WHERE vendor_id = $1
        AND idempotency_key = $2
@@ -872,6 +940,26 @@ async function findJobByIdempotencyKeyForUpdate(
     [input.vendorId, input.idempotencyKey],
   );
   return result.rows[0] ?? null;
+}
+
+/**
+ * The listing's status before a run chunk queues it, locked so it is the
+ * latest committed one; `not_listed` (the column's default) when the size has
+ * no listing yet. Null for a size the queue writes no listing for.
+ */
+async function readListingStatusForQueue(
+  client: Pick<PoolClient, "query">,
+  input: CreateDropshipListingPushJobRepositoryInput,
+  row: CreateDropshipListingPushJobRepositoryInput["preview"]["rows"][number],
+): Promise<string | null> {
+  if (row.productId <= 0) return null;
+  const result = await client.query<{ status: string }>(
+    `SELECT status FROM dropship.dropship_vendor_listings
+     WHERE store_connection_id = $1 AND product_variant_id = $2
+     FOR UPDATE`,
+    [input.storeConnectionId, row.productVariantId],
+  );
+  return result.rows[0]?.status ?? "not_listed";
 }
 
 async function upsertVendorListingForPreview(
@@ -883,20 +971,48 @@ async function upsertVendorListingForPreview(
     return null;
   }
   const status = row.previewStatus === "blocked" ? "blocked" : "queued";
+  // A listing already live on its marketplace keeps its status: queueing an
+  // update changes nothing buyers see, and orders are accepted only for live
+  // statuses (domain/listing-live-status). Decided on the conflicting row under
+  // the upsert's own row lock, so a concurrent push outcome cannot interleave.
+  // The other columns are still written here on purpose:
+  // - last_preview_hash names the queued item; the worker refuses an item whose
+  //   hash no longer matches it (validateWorkerItemReadiness, PREVIEW_DRIFT);
+  // - vendor_retail_price_cents carries a request-local price to the push-time
+  //   refresh, which rebuilds the preview without request prices and resolves
+  //   the listing's saved price (refreshQueuedListingIntent -> resolveListingPrice
+  //   existingListingPriceCents); keeping the old value would publish the old price.
+  //   A blocked preview queues no push (its item is blocked, and an ops retry
+  //   requeues failed items only), so an existing row keeps its price: no reader
+  //   may take a price nothing will send as the listing's (order acceptance's
+  //   fallback price, the cost change controls' settings price);
+  // - quantity_cap and metadata have no reader that decides anything.
+  // An ended listing stays `ended` with its `updated_at` (PLAN-C v4.1 §6.3, SB8): only a completed push moves a row
+  // off `ended`. The stock reader then counts the new item as a saved push newer than the end (its created_at after
+  // the row's updated_at), and the push's pre-read still sees the end, so no queue can resurrect an ended listing.
   const result = await client.query<{ id: number }>(
-    `INSERT INTO dropship.dropship_vendor_listings
+    `INSERT INTO dropship.dropship_vendor_listings AS existing
       (vendor_id, store_connection_id, product_variant_id, platform, status,
        vendor_retail_price_cents, pushed_quantity, quantity_cap, last_preview_hash,
        metadata, created_at, updated_at)
      VALUES ($1, $2, $3, $4, $5, $6, 0, $7, $8, $9::jsonb, $10, $10)
      ON CONFLICT (store_connection_id, product_variant_id)
      DO UPDATE SET
-       status = EXCLUDED.status,
-       vendor_retail_price_cents = EXCLUDED.vendor_retail_price_cents,
+       status = CASE
+         WHEN existing.status = 'ended' THEN 'ended'
+         WHEN NULLIF(BTRIM(existing.external_listing_id), '') IS NOT NULL
+           AND existing.status = ANY($11::text[])
+         THEN existing.status
+         ELSE EXCLUDED.status
+       END,
+       vendor_retail_price_cents = CASE
+         WHEN EXCLUDED.status = 'blocked' THEN existing.vendor_retail_price_cents
+         ELSE EXCLUDED.vendor_retail_price_cents
+       END,
        quantity_cap = EXCLUDED.quantity_cap,
        last_preview_hash = EXCLUDED.last_preview_hash,
        metadata = EXCLUDED.metadata,
-       updated_at = EXCLUDED.updated_at
+       updated_at = CASE WHEN existing.status = 'ended' THEN existing.updated_at ELSE EXCLUDED.updated_at END
      RETURNING id`,
     [
       input.vendorId,
@@ -915,6 +1031,7 @@ async function upsertVendorListingForPreview(
          businessPolicySelection: row.businessPolicySelection,
        }),
       input.now,
+      [...LIVE_LISTING_STATUSES],
     ],
   );
   return result.rows[0]?.id ?? null;
@@ -928,6 +1045,10 @@ async function insertJobItemForPreview(
     idempotencyKey: string;
     row: CreateDropshipListingPushJobRepositoryInput["preview"]["rows"][number];
     now: Date;
+    /** A run chunk's item only: the listing's status before the queue (verify V7). */
+    listingStatusBeforeQueue?: string | null;
+    /** The vendor's own press queued it (SB9). */
+    relistAllowed?: boolean;
   },
 ): Promise<void> {
   const status = input.row.previewStatus === "blocked" ? "blocked" : "queued";
@@ -949,6 +1070,8 @@ async function insertJobItemForPreview(
         blockers: input.row.blockers,
         warnings: input.row.warnings,
         listingIntent: input.row.listingIntent,
+        ...(input.listingStatusBeforeQueue ? { listingStatusBeforeQueue: input.listingStatusBeforeQueue } : {}),
+        ...(input.relistAllowed === true ? { relistAllowed: true } : {}),
       }),
       input.idempotencyKey,
       input.now,
@@ -1031,21 +1154,6 @@ function mapCatalogRuleRow(row: CatalogRuleRow): DropshipCatalogExposureRule {
   };
 }
 
-function mapSelectionRuleRow(row: SelectionRuleRow): DropshipVendorSelectionRule {
-  return {
-    id: row.id,
-    scopeType: row.scope_type as DropshipVendorSelectionRule["scopeType"],
-    action: row.action as DropshipVendorSelectionRule["action"],
-    productLineId: row.product_line_id,
-    productId: row.product_id,
-    productVariantId: row.product_variant_id,
-    category: row.category,
-    autoConnectNewSkus: row.auto_connect_new_skus,
-    autoListNewSkus: row.auto_list_new_skus,
-    isActive: row.is_active,
-  };
-}
-
 function mapCandidateRow(row: CandidateRow): DropshipListingCatalogCandidate {
   return {
     productId: row.product_id,
@@ -1060,7 +1168,7 @@ function mapCandidateRow(row: CandidateRow): DropshipListingCatalogCandidate {
     variantUomType: parseCatalogVariantUomType(row.uom_type, { productVariantId: row.product_variant_id }),
     unitsPerVariant: Math.max(1, row.units_per_variant),
     catalogUnitsPerVariant: row.units_per_variant,
-    defaultRetailPriceCents: row.default_retail_price_cents === null ? null : Number(row.default_retail_price_cents),
+    defaultRetailPriceCents: row.default_retail_price_cents === null ? null : readIntegerCents(row.default_retail_price_cents, "default retail price", true),
     sku: row.variant_sku ?? row.product_sku,
     productName: row.product_name,
     variantName: row.variant_name,
@@ -1082,9 +1190,11 @@ function mapExistingListingRow(row: ExistingListingRow): DropshipExistingVendorL
     listingId: row.id,
     productVariantId: row.product_variant_id,
     status: row.status,
-    vendorRetailPriceCents: row.vendor_retail_price_cents === null ? null : Number(row.vendor_retail_price_cents),
+    vendorRetailPriceCents: row.vendor_retail_price_cents === null ? null : readIntegerCents(row.vendor_retail_price_cents, "vendor retail price", true),
     quantityCap: row.quantity_cap,
     externalListingId: row.external_listing_id,
+    vendorQuantityLimit: row.vendor_quantity_limit,
+    observedFulfillmentPolicyId: row.observed_fulfillment_policy_id,
   };
 }
 
@@ -1097,8 +1207,8 @@ function mapPricingPolicyRow(row: PricingPolicyRow): DropshipPricingPolicyRecord
     productVariantId: row.product_variant_id,
     category: row.category,
     mode: row.mode,
-    floorPriceCents: row.floor_price_cents === null ? null : Number(row.floor_price_cents),
-    ceilingPriceCents: row.ceiling_price_cents === null ? null : Number(row.ceiling_price_cents),
+    floorPriceCents: row.floor_price_cents === null ? null : readIntegerCents(row.floor_price_cents, "floor price", true),
+    ceilingPriceCents: row.ceiling_price_cents === null ? null : readIntegerCents(row.ceiling_price_cents, "ceiling price", true),
   };
 }
 

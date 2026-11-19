@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000040000019450002_purchase_return_receiving.sql",
+  "generation": 40,
+  "pr": 1945,
+  "ordinal": 2,
+  "after": [
+    "900000039000019450001_historical_return_sources.sql"
+  ]
+}

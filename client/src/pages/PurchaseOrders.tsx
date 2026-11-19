@@ -1,4 +1,9 @@
-import { useRef, useState } from "react";
+import { useAuth } from "@/lib/auth";
+import { usePurchaseOrderEntry } from "@/hooks/use-purchase-order-entry";
+import { PurchaseOrderEntryRecoveryNotice } from "@/features/purchasing/PurchaseOrderEntryRecovery";
+import { PurchaseOrderStatusBadge } from "@/features/purchasing/PurchaseOrderStatusBadge";
+import { purchaseOrderStatus, resolveCurrentPhysicalStatus } from "@shared/procurement/purchase-order-status";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { formatProcurementScheduleDate } from "@/lib/procurement-schedule-date";
@@ -63,19 +68,6 @@ import {
   AlertCircle,
   Trash2,
 } from "lucide-react";
-
-// Status badge config
-const STATUS_BADGES: Record<string, { variant: "default" | "secondary" | "outline" | "destructive"; label: string; color?: string }> = {
-  draft: { variant: "secondary", label: "Draft" },
-  pending_approval: { variant: "outline", label: "Pending Approval", color: "text-amber-600 border-amber-300" },
-  approved: { variant: "default", label: "Approved" },
-  sent: { variant: "default", label: "Sent", color: "bg-blue-500" },
-  acknowledged: { variant: "default", label: "Acknowledged", color: "bg-indigo-500" },
-  partially_received: { variant: "outline", label: "Partial Receipt", color: "text-orange-600 border-orange-300" },
-  received: { variant: "default", label: "Received", color: "bg-green-600" },
-  closed: { variant: "secondary", label: "Closed" },
-  cancelled: { variant: "destructive", label: "Cancelled" },
-};
 
 function formatCents(cents: number | null | undefined): string {
   if (!cents) return "$0.00";
@@ -159,7 +151,7 @@ function DualTrackCell({ po }: { po: PurchaseOrder }) {
     <div className="space-y-1">
       <div className="grid grid-cols-[50px_1fr] items-center gap-1.5">
         <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Phys</span>
-        {po.physicalStatus === "cancelled" ? <span className="text-xs text-red-700">Cancelled</span> : <MiniTrack segments={physicalSegments(po.physicalStatus)} />}
+        {resolveCurrentPhysicalStatus(po) === "cancelled" ? <span className="text-xs text-red-700">Cancelled</span> : <MiniTrack segments={physicalSegments(resolveCurrentPhysicalStatus(po))} />}
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
         <span className="text-[10px] uppercase tracking-wide text-muted-foreground">Financial</span>
@@ -205,15 +197,11 @@ function formatCentsShort(cents: number | null | undefined): string {
   return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
-function genPoCreateIdempotencyKey(): string {
-  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-    return (crypto as any).randomUUID();
-  }
-  return `po-create-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-}
-
 export default function PurchaseOrders() {
   const { toast } = useToast();
+  const purchaseEntry = usePurchaseOrderEntry();
+  const { hasPermission } = useAuth();
+  const entryBlocked = !purchaseEntry.ready || !purchaseEntry.allowed("create") || purchaseEntry.pending || Boolean(purchaseEntry.recovery || purchaseEntry.error);
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
 
@@ -241,6 +229,7 @@ export default function PurchaseOrders() {
   const useNewPoEditor = procurementSettings?.useNewPoEditor === true;
 
   function handleNewPoClick() {
+    if (entryBlocked) return;
     if (useNewPoEditor) {
       navigate("/purchase-orders/new");
       return;
@@ -254,7 +243,7 @@ export default function PurchaseOrders() {
   // existing detail page where receipts/invoices/shipments/history tabs
   // still live.
   function poHref(po: PurchaseOrder): string {
-    if (useNewPoEditor && canUseFullPurchaseOrderEditor(po)) {
+    if (useNewPoEditor && hasPermission("purchasing", "edit") && canUseFullPurchaseOrderEditor(po)) {
       return `/purchase-orders/${po.id}/edit`;
     }
     return `/purchase-orders/${po.id}`;
@@ -386,17 +375,17 @@ export default function PurchaseOrders() {
     awaitingReceipt: purchaseOrders.filter(po => ["sent", "acknowledged"].includes(po.status)).length,
   };
 
-  // Keep the same command identity after an uncertain response or a retry.
-  const createIntent = useRef<{ body: string; key: string } | null>(null);
-
   // Create atomically, then optionally prepare the supplier document for review.
   const createMutation = useMutation({
+    // Persist immediately even offline; reconnecting must never auto-submit a saved form.
+    networkMode: "always",
+    onMutate: () => purchaseEntry.captureVisit(),
     mutationFn: async ({ poData, lines, prepareForSupplier }: { poData: typeof newPO; lines: InlineLineItem[]; prepareForSupplier: boolean }) => {
       if (lines.length === 0) {
         throw new Error("Add at least one line before creating the purchase order.");
       }
       // Header and lines are one atomic, idempotent purchasing command.
-      const body = JSON.stringify({
+      const body = {
         vendorId: poData.vendorId,
         poType: poData.poType,
         priority: poData.priority,
@@ -420,26 +409,12 @@ export default function PurchaseOrders() {
             : {}),
         })),
         prepare_for_supplier: prepareForSupplier,
-      });
-      if (createIntent.current?.body !== body) {
-        createIntent.current = { body, key: genPoCreateIdempotencyKey() };
-      }
-      const res = await fetch("/api/purchase-orders", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": createIntent.current.key,
-        },
-        body,
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to create PO");
-      }
-      return parseSupplierSaveResult(await res.json(), prepareForSupplier);
+      };
+      if (entryBlocked) throw new Error("Recover the saved purchase request before creating another purchase.");
+      return parseSupplierSaveResult(await purchaseEntry.execute({ action: "create", targetId: null, payload: body }), prepareForSupplier);
     },
-    onSuccess: ({ po, preparationError }) => {
-      createIntent.current = null;
+    onSuccess: ({ po, preparationError }, _variables, visit) => {
+      if (!visit?.isCurrent()) return;
       queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
       setShowCreateDialog(false);
       setNewPO({ vendorId: 0, poType: "standard", priority: "normal", incoterms: "", expectedDeliveryDate: "", vendorNotes: "", internalNotes: "" });
@@ -457,10 +432,36 @@ export default function PurchaseOrders() {
       // to the detail page as today.
       navigate(`/purchase-orders/${po.id}`);
     },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    onError: (err: Error, _variables, visit) => {
+      if (visit?.isCurrent()) toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
+
+  const priorOperator = useRef(purchaseEntry.operatorId);
+  useEffect(() => {
+    if (priorOperator.current === purchaseEntry.operatorId) return;
+    priorOperator.current = purchaseEntry.operatorId;
+    setShowCreateDialog(false); setVendorOpen(false); setShowNewVendorDialog(false);
+    setInlineLines([]);
+    setNewPO({ vendorId: 0, poType: "standard", priority: "normal", incoterms: "", expectedDeliveryDate: "", vendorNotes: "", internalNotes: "" });
+    resetInlineLineForm();
+  }, [purchaseEntry.operatorId]);
+
+  async function recoverPurchaseEntry() {
+    const saved = purchaseEntry.recovery;
+    if (!saved) return;
+    const visit = purchaseEntry.captureVisit();
+    try {
+      const result = await purchaseEntry.execute(saved.body, saved);
+      queryClient.invalidateQueries({ queryKey: ["/api/purchase-orders"] });
+      if (!visit.isCurrent()) return;
+      setShowCreateDialog(false);
+      navigate(`/purchase-orders/${result.po.id}`);
+    } catch { /* Recovery retains the exact request and displays the error. */ }
+  }
+  const recoveryPanel = <PurchaseOrderEntryRecoveryNotice recovery={purchaseEntry.recovery} storageError={purchaseEntry.error}
+    error={purchaseEntry.commandError} pending={purchaseEntry.pending} allowed={purchaseEntry.recovery ? purchaseEntry.allowed(purchaseEntry.recovery.body.action) : false}
+    onRecover={recoverPurchaseEntry} onRead={purchaseEntry.refresh} />;
 
   const createVendorMutation = useMutation({
     mutationFn: async (data: typeof newVendor) => {
@@ -587,6 +588,7 @@ export default function PurchaseOrders() {
 
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
+      {!showCreateDialog && recoveryPanel}
       {/* Header */}
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
@@ -598,7 +600,7 @@ export default function PurchaseOrders() {
             Create and manage purchase orders
           </p>
         </div>
-        <Button onClick={handleNewPoClick} className="min-h-[44px] w-full sm:w-auto">
+        <Button onClick={handleNewPoClick} disabled={entryBlocked} className="min-h-[44px] w-full sm:w-auto">
           <Plus className="h-4 w-4 mr-2" />
           New Purchase Order
         </Button>
@@ -753,12 +755,7 @@ export default function PurchaseOrders() {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-mono font-medium text-sm">{po.poNumber}</span>
-                      <Badge
-                        variant={STATUS_BADGES[po.status]?.variant || "secondary"}
-                        className={`text-xs ${STATUS_BADGES[po.status]?.color || ""}`}
-                      >
-                        {STATUS_BADGES[po.status]?.label || po.status}
-                      </Badge>
+                      <PurchaseOrderStatusBadge purchaseOrder={po} />
                       {po.priority === "rush" && <Badge variant="destructive" className="text-xs">Rush</Badge>}
                       {po.priority === "high" && <Badge variant="outline" className="text-xs text-orange-600 border-orange-300">High</Badge>}
                     </div>
@@ -842,11 +839,7 @@ export default function PurchaseOrders() {
                         separate Status column. Cancelled / closed POs are
                         labeled explicitly. */}
                     <div className="text-[10px] text-muted-foreground mt-1 leading-tight">
-                      {po.status === "cancelled"
-                        ? "cancelled"
-                        : po.status === "closed"
-                        ? "closed"
-                        : po.physicalStatus ?? "draft"}
+                      {purchaseOrderStatus(po).label}
                     </div>
                   </TableCell>
                   <TableCell className="text-right">{po.lineCount || 0}</TableCell>
@@ -880,6 +873,7 @@ export default function PurchaseOrders() {
 
       {/* Create PO Dialog — Full page style with inline line items */}
       <Dialog open={showCreateDialog} onOpenChange={(open) => {
+        if (purchaseEntry.pending) return;
         setShowCreateDialog(open);
         if (!open) {
           setNewPO({ vendorId: 0, poType: "standard", priority: "normal", incoterms: "", expectedDeliveryDate: "", vendorNotes: "", internalNotes: "" });
@@ -893,6 +887,8 @@ export default function PurchaseOrders() {
             <DialogDescription>Select a vendor and add line items. Create &amp; Review prepares the PO; it does not send it to the supplier.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 overflow-y-auto flex-1 px-4 pb-4 sm:px-6">
+            {recoveryPanel}
+            <fieldset disabled={entryBlocked} className="contents">
             {/* Vendor typeahead */}
             <div className="space-y-2">
               <Label>Vendor *</Label>
@@ -1383,15 +1379,16 @@ export default function PurchaseOrders() {
               </div>
             )}
 
+            </fieldset>
             {/* Action buttons */}
             <div className="flex gap-2 justify-end pt-2 border-t">
-              <Button variant="outline" className="min-h-[44px]" onClick={() => setShowCreateDialog(false)}>Cancel</Button>
+              <Button variant="outline" className="min-h-[44px]" disabled={purchaseEntry.pending} onClick={() => setShowCreateDialog(false)}>Cancel</Button>
               {isSoloMode && inlineLines.length > 0 && (
                 <Button
                   variant="outline"
                   className="min-h-[44px]"
                   onClick={() => createMutation.mutate({ poData: newPO, lines: inlineLines, prepareForSupplier: false })}
-                  disabled={!newPO.vendorId || inlineLines.length === 0 || createMutation.isPending}
+                  disabled={entryBlocked || !newPO.vendorId || inlineLines.length === 0 || createMutation.isPending}
                 >
                   {createMutation.isPending ? "Creating..." : "Save Draft"}
                 </Button>
@@ -1399,7 +1396,7 @@ export default function PurchaseOrders() {
               <Button
                 className="min-h-[44px]"
                 onClick={() => createMutation.mutate({ poData: newPO, lines: inlineLines, prepareForSupplier: isSoloMode && inlineLines.length > 0 })}
-                disabled={!newPO.vendorId || inlineLines.length === 0 || createMutation.isPending}
+                disabled={entryBlocked || !newPO.vendorId || inlineLines.length === 0 || createMutation.isPending}
               >
                 {createMutation.isPending ? "Creating..." : (
                   isSoloMode && inlineLines.length > 0 ? "Create & Review" : "Create Draft"

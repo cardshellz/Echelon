@@ -25,6 +25,7 @@ export async function createIntakeTestSchema(pool: Pool, options: { carrierSelec
   await pool.query(readFileSync("migrations/059_wms_order_items_prices.sql", "utf8"));
   await pool.query(readFileSync("migrations/251_customer_return_label_settings.sql", "utf8"));
   await pool.query(readFileSync("migrations/256_customer_return_command_order.sql", "utf8"));
+  await pool.query(readFileSync("migrations/900000045000019690001_customer_order_progress_capture.sql", "utf8").split("-- Existing successful labels")[0]);
   if (options.carrierSelection !== false) {
     await pool.query(readFileSync("migrations/252_customer_return_carrier_selection.sql", "utf8"));
     await pool.query(readFileSync("migrations/254_customer_return_policy_resolution.sql", "utf8"));
@@ -195,4 +196,21 @@ export function preparedIntake(): PreparedCustomerReturnIntake & { now: Date } {
       items: [{ omsOrderLineId: 101, quantity: 1 }, { omsOrderLineId: 102, quantity: 1 }]
     }],
   };
+}
+
+/** Include the canonical cache triggers in connected intake tests. Source writes
+ * must invalidate presentation without blocking the return transaction. */
+export async function createIntakeActionProjectionSchema(pool: Pool): Promise<void> {
+  await pool.query("CREATE SCHEMA IF NOT EXISTS identity; CREATE TABLE IF NOT EXISTS identity.users(id varchar(255) PRIMARY KEY)");
+  const migration = readFileSync("migrations/0723_shopify_order_edit_pilot.sql", "utf8").replace(/\r\n/g, "\n");
+  for (const relation of ["order_edit_operations", "order_edit_settings"]) {
+    const marker = `CREATE TABLE oms.${relation} (`;
+    const start = migration.indexOf(marker);
+    const end = migration.indexOf("\n);", start);
+    if (start < 0 || end < 0) throw new Error(`Missing canonical table: ${relation}`);
+    await pool.query(migration.slice(start, end + 3));
+  }
+  await pool.query(readFileSync("migrations/900000033000019220001_customer_order_action_projection.sql", "utf8"));
+  await pool.query(readFileSync("migrations/900000042000019600001_order_action_trigger_variable_qualification.sql", "utf8"));
+  await pool.query(readFileSync("migrations/900000043000019600002_customer_return_workflow.sql", "utf8"));
 }

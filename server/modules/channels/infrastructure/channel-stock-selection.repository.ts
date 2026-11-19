@@ -59,10 +59,16 @@ export async function readChannelStockSelectionFacts(client: StockSelectionQuery
   const job = jobRows.length ? jobSchema.parse(jobRows[0]) : null;
   if (job && (job.identity.channelId !== input.channelId || job.identity.connectionId !== input.channelConnectionId || job.identity.productId !== input.productId))
     throw new ChannelStockSelectionError("CHANNEL_SELECTION_JOB_SCOPE_CHANGED", "The saved listing request has a different product or connection identity. Review it before publishing stock.");
+  // Sizes a reviewed listing update or rebuild is adding (migration 900000065). Open rows only.
+  const reviewedAdditions = provider === "ebay" ? z.array(z.object({ product_variant_id: id })).parse((await client.query(
+    `SELECT product_variant_id FROM channels.ebay_listing_change_intents
+      WHERE channel_id=$1 AND connection_id=$2 AND product_id=$3 AND closed_at IS NULL AND product_variant_id=ANY($4::integer[])
+      ORDER BY product_variant_id`, [input.channelId, input.channelConnectionId, input.productId, input.productVariantIds])).rows) : [];
   if (productOverrides.length > 1 || types.length > 1 || [feeds, listings, variantOverrides].some(rows => new Set(rows.map(row => row.product_variant_id)).size !== rows.length))
     throw new ChannelStockSelectionError("CHANNEL_SELECTION_AMBIGUOUS", "Multiple saved channel selections or identities describe one variant. Review those mappings before publishing stock.");
   const facts: ChannelStockSelectionFacts = { ...input, provider, catalog,
     productIsListed: productOverrides[0]?.is_listed ?? null, typeListingEnabled: types[0]?.listing_enabled ?? null,
+    reviewedAdditionVariantIds: reviewedAdditions.map(row => row.product_variant_id),
     latestJob: job ? { id: job.id, operation: job.operation, state: job.state, accountId: job.identity.accountId, members: job.identity.variants,
       verifiedMembers: job.provider_identity?.channelId === input.channelId && job.provider_identity.connectionId === input.channelConnectionId
         && job.provider_identity.productId === input.productId && job.provider_identity.accountId === job.identity.accountId
@@ -79,11 +85,25 @@ export async function readChannelStockSelectionFacts(client: StockSelectionQuery
   return facts;
 }
 
+import { hasListingWorkObligation, type ListingWorkPhase } from "../../marketplace-listings/domain/listing-work-obligation";
+
 /** The sync owner explicitly supersedes only idle jobs without a publication
  * barrier. Those retained historical refusals carry no remaining execution duty. */
 export async function hasOutstandingEbayListingWork(client: StockSelectionQueryClient,
   input: {channelId:number;connectionId:number;productId:number}):Promise<boolean> {
-  const rows=await client.query("SELECT 1 FROM channels.ebay_listing_sync_jobs WHERE channel_id=$1 AND connection_id=$2 AND product_id=$3 AND state<>'completed' AND error_code IS DISTINCT FROM 'EBAY_SYNC_SOURCE_SUPERSEDED' LIMIT 1",
+  return (await readOutstandingEbayListingWork(client,input)).length>0;
+}
+
+export async function readOutstandingEbayListingWork(client: StockSelectionQueryClient,
+  input: {channelId:number;connectionId:number;productId:number}) {
+  const rows = await client.query<{ id:string; operation:string; state:string; error_code:string|null; settled:boolean }>(
+    `SELECT j.id::text,j.operation,j.state,j.error_code,
+      EXISTS(SELECT 1 FROM channels.ebay_listing_sync_settlements s WHERE s.failed_job_id=j.id) settled
+      FROM channels.ebay_listing_sync_jobs j WHERE channel_id=$1 AND connection_id=$2 AND product_id=$3`,
     [id.parse(input.channelId),id.parse(input.connectionId),id.parse(input.productId)]);
-  return rows.rows.length>0;
+  return rows.rows.filter(row => {
+    const phase: ListingWorkPhase = row.settled || row.error_code === "EBAY_SYNC_SOURCE_SUPERSEDED" ? "settled"
+      : row.state === "completed" ? "completed" : row.state === "needs_attention" ? "attention" : "pending";
+    return hasListingWorkObligation(phase);
+  });
 }

@@ -9,7 +9,8 @@ const source = readFileSync(
 
 describe("open return case repository contract", () => {
   it("excludes non-shipping lines from source search, counts, and detail eligibility", () => {
-    expect(source.match(/AND oi\.requires_shipping <> 0/g) ?? []).toHaveLength(4);
+    expect(source.match(/AND oi\.requires_shipping <> 0/g) ?? []).toHaveLength(3);
+    expect(source.match(/\$\{eligibleOrdersCte\}/g) ?? []).toHaveLength(3);
   });
 
   it("resolves provider line identity from the OMS line constrained to the source order", () => {

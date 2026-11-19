@@ -1,4 +1,6 @@
-import { useLayoutEffect, useRef, useState, type DragEvent } from "react";
+import { previewParcelLabelWeight } from "@/lib/customer-return-parcels";
+import { useContext, useLayoutEffect, useRef, useState, type DragEvent } from "react";
+import { CustomerReturnEmbeddedContext } from "./CustomerReturnSurface";
 import {
   ArrowLeft,
   ArrowRight,
@@ -66,6 +68,7 @@ export function CustomerReturnPacking({
   onContinue: () => void;
   onBack: () => void;
 }) {
+  const embedded = useContext(CustomerReturnEmbeddedContext);
   const boxesHeading = useRef<HTMLHeadingElement>(null);
 
   const boxHeadings = useRef(new Map<number, HTMLHeadingElement>());
@@ -92,6 +95,12 @@ export function CustomerReturnPacking({
   const [request, setRequest] = useState<CustomerReturnMoveRequest | null>(
     null,
   );
+  const wasEditingInline = useRef(false);
+  useLayoutEffect(() => {
+    if (!embedded) return;
+    if (wasEditingInline.current && !request) restoreDialogFocus();
+    wasEditingInline.current = request !== null;
+  }, [embedded, request]);
   const [notice, setNotice] = useState<PackingNotice | null>(null);
   const summary = summarizePreviewPacking(selections, parcels);
   const allocations = previewPackingAllocations(selections, parcels);
@@ -100,7 +109,7 @@ export function CustomerReturnPacking({
   const currentNotice = notice?.after === parcels ? notice : null;
   const weightNeedsVerification = parcels.some(
     (parcel) =>
-      previewParcelProductWeight(order, parcel).status === "unverified",
+      previewParcelLabelWeight(order, parcel).status === "unverified",
   );
   const guardrailIssues = parcels.map(parcel => previewPackingGuardrailIssue(order, parcel));
   function splitToFit(parcel: PreviewParcelDraft) {
@@ -342,6 +351,7 @@ export function CustomerReturnPacking({
 
   return (
     <div className="space-y-5">
+      <div hidden={embedded && request !== null} className="space-y-5">
       <CustomerReturnPackingSummary
         order={order}
         summary={summary}
@@ -547,11 +557,22 @@ export function CustomerReturnPacking({
               onChange={(next) =>
                 onChange(
                   parcels.map((candidate) =>
-                    candidate.key === parcel.key ? next : candidate,
+                    candidate.key === parcel.key ? { ...next, packedWeightOunces: undefined } : candidate,
                   ),
                 )
               }
             />
+            {previewParcelProductWeight(order, parcel).status === "unverified" && (
+              <div className="my-4 max-w-sm space-y-2">
+                <label htmlFor={`packed-weight-${parcel.key}`} className="block text-sm font-medium">Packed box weight (ounces)</label>
+                <input id={`packed-weight-${parcel.key}`} type="text" inputMode="decimal" disabled={busy}
+                  value={parcel.packedWeightOunces ?? ""} className="h-11 w-full rounded-md border px-3 text-sm"
+                  aria-describedby={`packed-weight-help-${parcel.key}`}
+                  onChange={event => onChange(parcels.map(candidate => candidate.key === parcel.key
+                    ? { ...candidate, packedWeightOunces: event.target.value } : candidate))} />
+                <p id={`packed-weight-help-${parcel.key}`} className="text-xs text-muted-foreground">Weigh the sealed box, including packing materials. We need this measurement because the original item weights aren't recorded.</p>
+              </div>
+            )}
             <CustomerReturnBoxContents
               order={order}
               selections={selections}
@@ -597,7 +618,7 @@ export function CustomerReturnPacking({
           </div>
         )}
       </section>
-      <div className="flex flex-col-reverse gap-3 border-t pt-6 sm:flex-row sm:justify-between">
+      <div className="csz-return-actions border-t">
         <Button variant="ghost" className="min-h-11" onClick={onBack}>
           <ArrowLeft aria-hidden="true" className="mr-2 h-4 w-4" /> Back to
           items
@@ -623,6 +644,7 @@ export function CustomerReturnPacking({
           )}
         </Button>
       </div>
+      </div>
       {request && (
         <CustomerReturnMoveItemsDialog
           order={order}
@@ -633,6 +655,7 @@ export function CustomerReturnPacking({
           onApply={applyMove}
           onClose={() => setRequest(null)}
           onCloseAutoFocus={restoreDialogFocus}
+          inline={embedded}
         />
       )}
     </div>

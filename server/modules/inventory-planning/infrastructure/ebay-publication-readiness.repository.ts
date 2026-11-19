@@ -1,5 +1,4 @@
 import type { Pool, PoolClient } from "pg";
-import { drizzle } from "drizzle-orm/node-postgres";
 import { z } from "zod";
 import {
   inventoryEbayPublicationReadinessInputSchema, inventoryEbayPublicationReadinessApplySchema,
@@ -9,11 +8,11 @@ import {
 } from "@shared/types/ebay-publication-readiness";
 import { InventoryPublicationMembershipError } from "../application/inventory-publication-membership.service";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
-import { PublicationMappingPreparationStore, applyMappingPreparation, reviewMappingPreparation } from "./publication-mapping-preparation.repository";
-import { PostgresInventoryChannelExposureAdminStore } from "./inventory-channel-exposure-admin.repository";
-import { promoteInventoryCutoverDefinitionsInsideTransaction } from "./inventory-cutover-definitions.repository";
+import { PublicationMappingPreparationStore, readTargets } from "./publication-mapping-preparation.repository";
+import { applyExactEbaySkuMappingsInsideTransaction } from "./exact-ebay-sku-mapping.apply";
 import { captureEbayPublicationReadiness, readinessDigest } from "./ebay-publication-readiness.read";
 import { lockEbayListingPreparationScope, validateEbayListingPreparationScope, type VerifiedEbayListingPreparation } from "../../channels/ebay-listing-preparation-scope";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 
 type ConnectionPool = Pick<Pool, "connect">;
 const fail = (code: string, message: string): never => { throw new InventoryPublicationMembershipError(code, message); };
@@ -40,9 +39,19 @@ export async function assertEbayPublicationReady(pool: ConnectionPool, input: In
 
 /** Normal publication already has durable listing intent and verified provider
  * identities. Prepare its exact mappings automatically; selection, holds, ATP,
- * source/model/policy and provider admission remain with their existing owners. */
+ * source/model/policy and provider admission remain with their existing owners.
+ * Channels PR4 (PLAN-CH-v3 §5 "New listing"): an opt-in no-fence fast path
+ * (`fastPath: true`, used only by the stock-link engine's own callers,
+ * channel-ebay-stock-link.ts). When the read-only review finds every member
+ * already linked exactly (currentlyReady: nothing to seal, promote or enqueue),
+ * no configuration transaction, fence, receipt or audit row is written.
+ * Publication and maintenance callers do not opt in: their saved job's command
+ * always gets its immutable receipt (and verified-scope proof), as before.
+ * `alreadyReady` = this call changed nothing (the fast path, or a replay of this
+ * command's saved receipt). A saved receipt is still honoured (and checked) first. */
 export async function ensureEbayPublicationReady(pool: ConnectionPool, input: InventoryEbayPublicationReadinessInput,
-  context: { commandKey: string; actor: string; now: Date; verifiedListing?: VerifiedEbayListingPreparation }): Promise<void> {
+  context: { commandKey: string; actor: string; now: Date; verifiedListing?: VerifiedEbayListingPreparation; fastPath?: boolean }):
+  Promise<{ alreadyReady: boolean }> {
   const source = normalize(input);
   const verifiedScope = context.verifiedListing ? validateEbayListingPreparationScope(source, context.verifiedListing) : null;
   const legacyContextHash = readinessDigest(source);
@@ -59,6 +68,7 @@ export async function ensureEbayPublicationReady(pool: ConnectionPool, input: In
   const previous = await findCompatibleReceipt();
   if (!previous) {
     const review = await reviewEbayPublicationReadiness(pool, source, context.verifiedListing);
+    if (context.fastPath === true && review.currentlyReady) return { alreadyReady: true };
     if (!review.ready) fail(review.blockers[0]?.code ?? "STOCK_MAPPING_NOT_READY", review.blockers.map(row => row.message).join(" "));
     try {
       await withEbayPublicationReadinessApplied(pool, { source, commandKey: context.commandKey, contextHash,
@@ -73,6 +83,41 @@ export async function ensureEbayPublicationReady(pool: ConnectionPool, input: In
     }
   }
   await assertEbayPublicationReady(pool, source, context.verifiedListing);
+  // A recorded receipt of this command means this call applied nothing new (a replay).
+  return { alreadyReady: previous !== null };
+}
+
+const gapQuerySchema = z.object({ channelId: z.number().int().positive(), connectionId: z.number().int().positive(),
+  accountId: z.string().trim().min(1).max(255),
+  variants: z.array(z.object({ productVariantId: z.number().int().positive(), sku: z.string().trim().min(1).max(100) }).strict()).max(500),
+}).strict();
+
+/**
+ * Channels PR4 (PLAN-CH-v3 §5 "Edit / rebuild / relist"): of these Card Shellz eBay sizes, the ones the listing
+ * change must link before its first eBay mutation: no sealed link to exactly this SKU on the account's one eBay stock
+ * destination, and not on hold (a held size gets no positive quantity, so it never blocks the change). Read-only; an
+ * account without one exact live eBay destination has nothing to link (no target, no sizes).
+ */
+export async function readEbayStockLinkGaps(pool: ConnectionPool, raw: z.infer<typeof gapQuerySchema>):
+  Promise<{ publicationTargetId: number | null; productVariantIds: number[] }> {
+  const input = gapQuerySchema.parse(raw);
+  const none = { publicationTargetId: null, productVariantIds: [] };
+  if (input.variants.length === 0) return none;
+  return new PublicationMappingPreparationStore(pool).transaction(false, async client => {
+    const targets = await readTargets(client, input.channelId, input.connectionId);
+    const target = targets.length === 1 ? targets[0]! : null;
+    if (!target || target.provider_key !== "ebay" || target.destination_kind !== "channel_connection"
+      || target.provider_scope_type !== "account" || target.external_scope_id !== input.accountId || target.state !== "live") return none;
+    const rows = await client.query<{ id: number }>(`SELECT c.id FROM unnest($2::integer[], $3::text[]) AS c(id, sku)
+      WHERE NOT EXISTS (SELECT 1 FROM inventory.publication_variant_mapping_heads h
+          JOIN inventory.publication_variant_mapping_versions m ON m.id = h.active_mapping_id
+          WHERE h.publication_target_id = $1 AND h.product_variant_id = c.id AND m.lifecycle_status = 'sealed'
+            AND m.external_inventory_item_id = c.sku)
+        AND NOT EXISTS (SELECT 1 FROM inventory.inventory_publication_target_variant_holds x
+          WHERE x.publication_target_id = $1 AND x.product_variant_id = c.id AND x.held_at IS NOT NULL)
+      ORDER BY c.id`, [target.id, input.variants.map(row => row.productVariantId), input.variants.map(row => row.sku)]);
+    return { publicationTargetId: target.id, productVariantIds: rows.rows.map(row => Number(row.id)) };
+  });
 }
 
 const receiptQuerySchema = z.object({ channelId: z.number().int().positive(), productId: z.number().int().positive(),
@@ -173,46 +218,32 @@ export async function withEbayPublicationReadinessApplied<T>(pool: ConnectionPoo
     if (evidence.review.reviewHash !== input.expectedReviewHash) fail("EBAY_PUBLICATION_STOCK_REVIEW_STALE", "Stock, mappings, or publication settings changed. Review the current plan again.");
     if (!evidence.review.ready || !evidence.target) fail("EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", evidence.review.blockers.map(row => row.message).join(" "));
     const target = evidence.target!;
-    const definitions = new PostgresInventoryChannelExposureAdminStore();
-    const selectors = [];
-    for (const variant of evidence.review.variants) {
-      const row = evidence.rows.find(candidate => candidate.id === variant.productVariantId)!;
-      if (variant.mappingAction === "create") {
-        const saved = await definitions.saveVariantMappingDraftInsideTransaction(drizzle(client), {
-          publicationTargetId: target.id, productVariantId: variant.productVariantId,
-          externalInventoryItemId: variant.sku, externalSku: variant.sku,
-          expectedHeadRevision: row.head_revision ?? "0", expectedDraftMappingId: null, expectedDraftDefinitionHash: null,
-          changeReason: "Reviewed exact eBay SKU stock enrollment before publication.",
-          idempotencyKey: `ebay-stock:${input.commandKey}:${variant.productVariantId}`,
-          requestHash, actorId: actor, occurredAt: now,
-        }, { allowRetainedZero: input.source.purpose === "sync" });
-        selectors.push({ kind: "variant_mapping" as const, key: `${target.id}:${variant.productVariantId}`,
-          definitionId: saved.definitionId, definitionHash: saved.definitionHash });
-      } else if (variant.mappingAction === "promote_draft") selectors.push({ kind: "variant_mapping" as const,
-        key: `${target.id}:${variant.productVariantId}`, definitionId: row.mapping_id!, definitionHash: row.mapping_hash! });
-    }
-    if (selectors.length) await promoteInventoryCutoverDefinitionsInsideTransaction(client, {
-      contractVersion: "inventory_cutover_selection_manifest_v1", productIds: [], publicationTargetIds: [target.id], selections: selectors,
-    }, { actor, reason: "Reviewed exact eBay SKU stock enrollment before publication.", occurredAt: now });
-    const promoted = await captureEbayPublicationReadiness(client, input.source, true, verifiedListing);
-    if (!promoted.review.ready) fail("EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", promoted.review.blockers.map(row => row.message).join(" "));
-    const command = { publicationTargetId: target.id, expectedTargetRevision: target.revision, productId: input.source.productId,
-      productVariantIds: input.source.variants.map(row => row.productVariantId), allowRetainedZero: input.source.purpose === "sync",
-      ...(evidence.listingScope ? { verifiedListingScopeHash: evidence.listingScope.fingerprint } : {}) };
-    const reviewed = (await reviewMappingPreparation(client, command, true)).review;
-    const applied = await applyMappingPreparation(client, scopeKeys, { ...command, expectedReviewHash: reviewed.reviewHash,
-      idempotencyKey: `ebay-stock:${input.commandKey}` }, actor, requestHash, now,
-      evidence.review.variants.filter(row => row.mappingAction !== "none").map(row => row.productVariantId));
+    const applied = await applyExactEbaySkuMappingsInsideTransaction(client, scopeKeys, {
+      target, variants: evidence.review.variants, rows: evidence.rows, productId: input.source.productId,
+      allowRetainedZero: input.source.purpose === "sync", exactVariantScope: false,
+      ...(evidence.listingScope ? { verifiedListingScopeHash: evidence.listingScope.fingerprint } : {}),
+      idempotencyPrefix: "ebay-stock", commandKey: input.commandKey, requestHash, actor, now,
+      changeReason: "Reviewed exact eBay SKU stock enrollment before publication.",
+      afterPromotion: async promotedClient => {
+        const promoted = await captureEbayPublicationReadiness(promotedClient, input.source, true, verifiedListing);
+        if (!promoted.review.ready) fail("EBAY_PUBLICATION_STOCK_REVIEW_BLOCKED", promoted.review.blockers.map(row => row.message).join(" "));
+      },
+    });
     const receipt = inventoryEbayPublicationReadinessReceiptSchema.parse({ channelId: input.source.channelId,
       productId: input.source.productId, commandKey: input.commandKey, reviewHash: input.expectedReviewHash,
       contextHash: input.contextHash, appliedAt: now.toISOString(), appliedBy: actor, mappingPreparation: applied, alreadyApplied: false });
     await client.query(`INSERT INTO inventory.ebay_publication_readiness_applications(command_key,channel_id,product_id,request_hash,actor,occurred_at,source,review,receipt)
       VALUES($1::uuid,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb)`, [input.commandKey, input.source.channelId, input.source.productId,
       requestHash, actor, now, JSON.stringify(verifiedListing ? { ...input.source, verifiedListing } : input.source), JSON.stringify(evidence.review), JSON.stringify(receipt)]);
-    await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-      VALUES($1,'AUDIT',$2,'inventory_availability.ebay_publication_stock.enrolled',$3,$4::jsonb,$5::jsonb)`,
-    [now, actor, `inventory.inventory_publication_target:${target.id}`, JSON.stringify({ before: evidence.review, after: receipt }),
-      JSON.stringify({ commandKey: input.commandKey, requestHash })]);
+    await insertAuditEventPgQuery(client, {
+      timestamp: now,
+      actor,
+      action: "inventory_availability.ebay_publication_stock.enrolled",
+      target: `inventory.inventory_publication_target:${target.id}`,
+      changesJson: JSON.stringify({ before: evidence.review, after: receipt }),
+      contextJson: JSON.stringify({ commandKey: input.commandKey, requestHash }),
+      inlineAction: true,
+    });
     return { receipt, result: await followUp(client, receipt) };
   });
 }

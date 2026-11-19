@@ -1,5 +1,6 @@
 import { ebayListingIssueSchema, type EbayListingIssue } from "@shared/types/ebay-listing-issue";
 import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
+import { ChannelListingInventoryScopeError } from "@shared/types/channel-listing-inventory";
 
 /** Feed reads expose only the server's validated public issue, never raw database
  * or proxy errors. Reloading this read must not become a listing command retry. */
@@ -16,6 +17,15 @@ export function listingFeedIssueFromError(error: unknown): EbayListingIssue {
     }
   }
   return resolveEbayListingIssue({ code: "EBAY_LISTING_FEED_UNAVAILABLE" });
+}
+
+/** An inventory read retains its server reference but never renders a raw proxy error. */
+export function listingInventoryIssueFromError(error: unknown, productId: number): EbayListingIssue {
+  if (error instanceof ChannelListingInventoryScopeError)
+    return resolveEbayListingIssue({ code: error.code, productId });
+  const issue = listingFeedIssueFromError(error);
+  return issue.code === "EBAY_LISTING_FEED_UNAVAILABLE"
+    ? resolveEbayListingIssue({ code: "EBAY_FEED_QUANTITY_UNAVAILABLE", productId }) : issue;
 }
 
 /** apiRequest retains the JSON response in Error.message; validate before rendering it. */

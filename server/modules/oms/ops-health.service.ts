@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { omsWarehouseCancellationSql } from "./order-merchandise-state.sql";
 import {
   collectOmsFlowReconciliationIssues,
   getOmsFlowReconciliationSchedulerHeartbeat,
@@ -13,6 +14,27 @@ import { getOmsOpsAlertSchedulerHeartbeat } from "./oms-ops-alert-heartbeat";
 import { getEbayOrderPollHeartbeat } from "./ebay-order-poll-heartbeat";
 import { getWebhookRetryWorkerHeartbeat } from "./webhook-retry.worker";
 import {
+  DROPSHIP_EBAY_STOCK_OFFER_UNVERIFIED_CODE,
+  DROPSHIP_EBAY_STOCK_OFFER_UNVERIFIED_MESSAGE,
+  DROPSHIP_STOCK_DESTINATION_HELD_CODE,
+  DROPSHIP_STOCK_DESTINATION_HELD_MESSAGE,
+  dropshipEbayStockOfferUnverifiedCountSql,
+  dropshipEbayStockOfferUnverifiedSampleSql,
+  DROPSHIP_STOCK_DESTINATION_MISSING_CODE,
+  DROPSHIP_STOCK_DESTINATION_MISSING_MESSAGE,
+  dropshipStockDestinationHeldCountSql,
+  dropshipStockDestinationHeldSampleSql,
+  dropshipStockDestinationMissingCountSql,
+  dropshipStockDestinationMissingSampleSql,
+} from "./dropship-stock-destination-health";
+import {
+  channelStockUpdateDeadLetterDestinationCountSql,
+  channelStockUpdateDeadLetterDestinationSampleSql,
+} from "../inventory-planning/channel-stock-update-dead-letters";
+import { DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS } from "../dropship/marketplace-sync-health";
+import { stockLinkHealthChecksForProcess } from "../inventory-planning/stock-link-health";
+import { QUANTITY_CATCHUP_HEALTH_CHECKS } from "../inventory-planning/quantity-catchup-health";
+import {
   HELD_LINE_AGING_DAYS,
   allLinesHeldCountQuery,
   allLinesHeldSampleQuery,
@@ -25,6 +47,21 @@ import {
 // the stock never arrived ("held forever"), so a human should chase the PO or
 // cancel the line. Deliberately conservative: pre-orders can legitimately run
 // weeks out, and this threshold also drives an ops alert, so keep it low-noise.
+
+/**
+ * A store's stock updates were refused for good and stopped (Channels PR1,
+ * PLAN-CH-v3 section 6): the canonical outbox dead-lettered a stock update of one or
+ * more sizes on a live channel store (for example Shopify answered 404/422 for the
+ * item), so those store items keep their last quantity while stock moves. Critical,
+ * so it reaches the ops alert. Counted per store (destination); the sample lists each
+ * store with its refused-size count, error codes, size ids and outbox ids (the
+ * correlation ids of the outbox's dead-letter log lines). Read through
+ * inventory-planning's published reader. It clears only when the store accepts a
+ * newer stock update of that size; a newer update that is merely queued is not enough.
+ */
+export const CHANNEL_STOCK_UPDATE_DEAD_LETTER_CODE = "CHANNEL_STOCK_UPDATE_DEAD_LETTER";
+export const CHANNEL_STOCK_UPDATE_DEAD_LETTER_MESSAGE =
+  "Some stock updates to a store were refused and stopped. Review them.";
 
 export interface OmsOpsIssue {
   code: string;
@@ -144,6 +181,10 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
     allLinesHeldOrders,
     dropshipTrackingNotSent,
     channelListingPublicationBlocked,
+    dropshipStockDestinationMissing,
+    dropshipStockDestinationHeld,
+    dropshipEbayStockOfferUnverified,
+    channelStockUpdateDeadLetter,
   ] = await Promise.all([
     collectOmsFlowReconciliationIssues(db),
     countAndSample(
@@ -406,8 +447,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
           AND NOT EXISTS (
@@ -443,8 +483,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
           AND NOT EXISTS (
@@ -581,8 +620,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
           AND NOT EXISTS (
@@ -613,8 +651,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
           AND NOT EXISTS (
@@ -659,8 +696,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
       `,
@@ -695,8 +731,7 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
                 OR (wo.source_table_id = oo.id::text)
               )
               AND (
-                oo.status IN ('cancelled', 'shipped', 'refunded')
-                OR oo.financial_status = 'refunded'
+                ${omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded"], includeShipped: true })}
               )
           )
         ORDER BY os.created_at ASC
@@ -868,7 +903,49 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
         LIMIT 10
       `,
     ),
+    // A Dropship eBay store that should publish Card Shellz stock has no single
+    // live stock destination: its pushes are refused before any eBay write and
+    // its quantities are frozen until someone sets the destination up (Q1).
+    countAndSample(
+      db,
+      dropshipStockDestinationMissingCountSql(sql`NOW() - INTERVAL '14 days'`),
+      dropshipStockDestinationMissingSampleSql(sql`NOW() - INTERVAL '14 days'`, 10),
+    ),
+    // The same store's one live destination is on hold: shown, not paged (a deliberate operator pause).
+    countAndSample(
+      db,
+      dropshipStockDestinationHeldCountSql(sql`NOW() - INTERVAL '14 days'`),
+      dropshipStockDestinationHeldSampleSql(sql`NOW() - INTERVAL '14 days'`, 10),
+    ),
+    // A published Dropship eBay offer whose stock updates the outbox refuses for good (offer identity): frozen quantity.
+    countAndSample(db, dropshipEbayStockOfferUnverifiedCountSql(), dropshipEbayStockOfferUnverifiedSampleSql(10)),
+    // Channel stores with a stock update the outbox refused for good and no later update the store accepted.
+    countAndSample(db, channelStockUpdateDeadLetterDestinationCountSql(), channelStockUpdateDeadLetterDestinationSampleSql(10)),
   ]);
+  // Dropship eBay sync-back, through dropship's published read port (dropship/marketplace-sync-health.ts): one count and sample each.
+  const marketplaceSyncIssues = await Promise.all(DROPSHIP_MARKETPLACE_SYNC_HEALTH_CHECKS.map(async (check) => issue({
+    code: check.code,
+    severity: check.severity,
+    message: check.message,
+    ...(await countAndSample(db, check.countSql, check.sampleSql)),
+  })));
+  // Channels PR2 stock links (Card Shellz's own Shopify stores), through inventory planning's published read port
+  // (inventory-planning/stock-link-health.ts): one count and sample each. STOCK_LINK_UNLINKED is info: it never alerts.
+  // With the runner's kill switch on, the checks a stopped runner can never clear are left out (review CMP-1).
+  const stockLinkIssues = await Promise.all(stockLinkHealthChecksForProcess().map(async (check) => issue({
+    code: check.code,
+    severity: check.severity,
+    message: check.message,
+    ...(await countAndSample(db, check.countSql, check.sampleSql)),
+  })));
+  // Channels PR5 catch-up parking, through inventory planning's published read port: stock updates waiting for a
+  // link over an hour (warning) and stock updates stopped for review (critical, reaches the alert).
+  const quantityCatchupIssues = await Promise.all(QUANTITY_CATCHUP_HEALTH_CHECKS.map(async (check) => issue({
+    code: check.code,
+    severity: check.severity,
+    message: check.message,
+    ...(await countAndSample(db, check.countSql, check.sampleSql)),
+  })));
   const channelWriteback = await getChannelWritebackHealth(db, {
     windowDays: 14,
     sampleLimit: 50,
@@ -1097,6 +1174,37 @@ export async function getOmsOpsHealth(db: any): Promise<OmsOpsHealthSummary> {
       message: "A channel listing is not safe to publish, so its stock is not updating. Fix the listing mapping; other channels still update.",
       sample: channelListingPublicationBlocked.sample,
     }),
+    issue({
+      code: DROPSHIP_STOCK_DESTINATION_MISSING_CODE,
+      severity: "critical",
+      count: dropshipStockDestinationMissing.count,
+      message: DROPSHIP_STOCK_DESTINATION_MISSING_MESSAGE,
+      sample: dropshipStockDestinationMissing.sample,
+    }),
+    issue({
+      code: DROPSHIP_STOCK_DESTINATION_HELD_CODE,
+      severity: "warning",
+      count: dropshipStockDestinationHeld.count,
+      message: DROPSHIP_STOCK_DESTINATION_HELD_MESSAGE,
+      sample: dropshipStockDestinationHeld.sample,
+    }),
+    issue({
+      code: DROPSHIP_EBAY_STOCK_OFFER_UNVERIFIED_CODE,
+      severity: "critical",
+      count: dropshipEbayStockOfferUnverified.count,
+      message: DROPSHIP_EBAY_STOCK_OFFER_UNVERIFIED_MESSAGE,
+      sample: dropshipEbayStockOfferUnverified.sample,
+    }),
+    issue({
+      code: CHANNEL_STOCK_UPDATE_DEAD_LETTER_CODE,
+      severity: "critical",
+      count: channelStockUpdateDeadLetter.count,
+      message: CHANNEL_STOCK_UPDATE_DEAD_LETTER_MESSAGE,
+      sample: channelStockUpdateDeadLetter.sample,
+    }),
+    ...marketplaceSyncIssues,
+    ...stockLinkIssues,
+    ...quantityCatchupIssues,
     issue({
       code: "CHANNEL_WRITEBACK_MASKED_SPLIT",
       severity: "critical",

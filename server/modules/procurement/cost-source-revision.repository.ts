@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
+import { retainEquivalentPurchaseCostSource } from "./domain/purchase-cost-source-identity";
 import { CostEvidenceError, costFingerprint, costInteger, lockInventoryCostGraph,
   type CostEvidenceTransaction, type CostRevisionInput, type RecordedCostRevision } from "../inventory/infrastructure/cost-evidence.repository";
 
@@ -16,12 +17,19 @@ export async function recordCostRevision(
   const fingerprint = costFingerprint({ input, sourceEvidence });
   const shipmentLineId = input.scope.kind === "shipment_line" ? input.scope.inboundShipmentLineId : null;
   const existing = await tx.execute(sql`
-    SELECT id, contract, fingerprint FROM procurement.cost_source_revisions
+    SELECT id, contract, fingerprint, source_evidence FROM procurement.cost_source_revisions
     WHERE purchase_order_line_id = ${input.scope.purchaseOrderLineId}
       AND inbound_shipment_line_id IS NOT DISTINCT FROM ${shipmentLineId}
       AND component = ${input.component} ORDER BY revision DESC LIMIT 1
   `);
   if (existing.rows[0]?.fingerprint === fingerprint) {
+    return { id: costInteger(existing.rows[0].id, "revision.id", 1), contract: costSourceRevisionSchema.parse(existing.rows[0].contract) };
+  }
+  const current = { input, sourceEvidence };
+  const compatible = retainEquivalentPurchaseCostSource(current, existing.rows[0]);
+  if (compatible !== current) {
+    // Reuse the exact immutable revision. A semantic identity match is not a
+    // migration, replacement approval or a new financial posting.
     return { id: costInteger(existing.rows[0].id, "revision.id", 1), contract: costSourceRevisionSchema.parse(existing.rows[0].contract) };
   }
   const sequence = await tx.execute(sql`

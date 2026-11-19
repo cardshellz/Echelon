@@ -1,4 +1,12 @@
 import { readShipmentPackingUnitOptions, ShipmentUnitOptionsError } from "./shipment-unit-options.service";
+import { registerSupplierHeaderCostRoutes } from "./supplier-header-costs.routes";
+import { createSupplierHeaderCostService } from "./supplier-header-cost-review.service";
+import { registerFreightInvoiceCostRoutes } from "./freight-invoice-costs.routes";
+import { createFreightInvoiceCostService } from "./freight-invoice-costs.service";
+import { registerShipmentEditorRoutes } from "./shipment-editor.routes";
+import { createShipmentEditorService } from "./shipment-editor.service";
+import { registerShipmentHistoryCorrectionRoutes } from "./shipment-history-correction.routes";
+import { createShipmentHistoryCorrectionService } from "./shipment-history-correction.service";
 import { registerReceiptShipmentQuantityCorrectionRoutes } from "./receipt-shipment-quantity-correction.routes";
 import { createReceiptShipmentQuantityCorrectionService } from "./receipt-shipment-quantity-correction.service";
 import { db } from "../../db";
@@ -16,25 +24,32 @@ import { requireAuth, requirePermission } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
 import * as apLedger from "./ap-ledger.service";
-import * as notificationService from "../notifications/notifications.service";
+import * as notificationService from "../notifications/in-app-notifications.api";
 import { shipmentCostWorkflowIdSchema } from "@shared/procurement/shipment-cost-workflow";
 import { createShipmentCostUpdateCommands, shipmentCostUpdateScope, SHIPMENT_COST_UPDATE_PRINCIPAL } from "./shipment-cost-update.commands";
 import { registerShipmentCostExceptionRoutes } from "./shipment-cost-exception.routes";
+import { registerShipmentMeasurementRoutes } from "./shipment-measurement-correction.routes";
+import { createShipmentMeasurementCorrectionService } from "./shipment-measurement-correction.service";
 
 function getActorId(req: any): string | undefined {
   return req.user?.id ?? req.session?.user?.id;
 }
 
 export function registerInboundShipmentRoutes(app: Express) {
+  registerShipmentHistoryCorrectionRoutes(app, createShipmentHistoryCorrectionService(db, () => new Date()));
   registerShipmentCostExceptionRoutes(app);
   registerShipmentInvoiceRoutes(app);
   const { shipmentTracking } = app.locals.services;
+  registerSupplierHeaderCostRoutes(app, createSupplierHeaderCostService(db, shipmentTracking, () => new Date()));
+  registerFreightInvoiceCostRoutes(app, createFreightInvoiceCostService(db, shipmentTracking, () => new Date()));
+  registerShipmentEditorRoutes(app, createShipmentEditorService(db, shipmentTracking, () => new Date()));
   registerReceiptShipmentQuantityCorrectionRoutes(app, createReceiptShipmentQuantityCorrectionService(db, shipmentTracking, () => new Date()));
   registerReceiptShipmentQuantityCorrectionRoutes(app, createReceiptShipmentQuantityCorrectionService(db, shipmentTracking, () => new Date(), "shipment"), "shipment");
   const shipmentCostCommands = createShipmentCostCommands(shipmentTracking);
   const shipmentCreateCommands = createShipmentCreateCommands(shipmentTracking);
   const shipmentLineCommands = createShipmentLineCommands(shipmentTracking);
   const shipmentCostUpdates = createShipmentCostUpdateCommands(shipmentTracking);
+  registerShipmentMeasurementRoutes(app, createShipmentMeasurementCorrectionService(db, shipmentTracking, () => new Date()));
 
   async function handleCostCommand(req: Request, res: Response, operation: ShipmentCostCommand["operation"]) {
     try {
@@ -161,6 +176,19 @@ export function registerInboundShipmentRoutes(app: Express) {
     }
   });
 
+  app.get("/api/inbound-shipments/:id/receiving-setup", requirePermission("purchasing", "view"), async (req, res) => {
+    try {
+      const id = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentLineResourceIdSchema).parse(req.params.id);
+      res.json(await shipmentTracking.getReceivingSetup(id));
+    } catch (error: unknown) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_RECEIVING_SETUP_INPUT_INVALID", error: "Enter a valid shipment ID." });
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message });
+      console.error(JSON.stringify({ event: "procurement.shipment_receiving_setup.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_RECEIVING_SETUP_UNAVAILABLE",
+        errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(503).json({ code: "SHIPMENT_RECEIVING_SETUP_UNAVAILABLE", error: "Receiving setup could not be verified. Refresh before booking or shipping." });
+    }
+  });
+
   app.post("/api/inbound-shipments", requirePermission("purchasing", "create"), async (req, res) => {
     try {
       const actorId = getActorId(req);
@@ -213,21 +241,27 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   app.post("/api/inbound-shipments/:id/book", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const shipment = await shipmentTracking.book(Number(req.params.id), req.session.user?.id, req.body.notes);
+      const id = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentLineResourceIdSchema).parse(req.params.id);
+      const shipment = await shipmentTracking.book(id, req.session.user?.id, req.body.notes);
       res.json(shipment);
     } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_TRANSITION_INPUT_INVALID", error: "Enter a valid shipment ID." });
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
+      console.error(JSON.stringify({ event: "procurement.shipment_booking.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_BOOKING_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(503).json({ code: "SHIPMENT_BOOKING_UNAVAILABLE", error: "Booking could not be verified. Reload the shipment before retrying." });
     }
   });
 
   app.post("/api/inbound-shipments/:id/in-transit", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const shipment = await shipmentTracking.markInTransit(Number(req.params.id), req.session.user?.id, req.body.notes, req.body.shipDate ? new Date(req.body.shipDate) : undefined);
+      const id = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentLineResourceIdSchema).parse(req.params.id);
+      const shipment = await shipmentTracking.markInTransit(id, req.session.user?.id, req.body.notes, req.body.shipDate ? new Date(req.body.shipDate) : undefined);
       res.json(shipment);
     } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_TRANSITION_INPUT_INVALID", error: "Enter a valid shipment ID." });
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
+      console.error(JSON.stringify({ event: "procurement.shipment_departure.failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null, code: "SHIPMENT_DEPARTURE_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      res.status(503).json({ code: "SHIPMENT_DEPARTURE_UNAVAILABLE", error: "Shipping could not be verified. Reload the shipment before retrying." });
     }
   });
 
@@ -280,11 +314,17 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   app.post("/api/inbound-shipments/:id/close", requirePermission("purchasing", "approve"), async (req, res) => {
     try {
-      const shipment = await shipmentTracking.close(Number(req.params.id), req.session.user?.id, req.body.notes);
+      const shipmentId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentCostWorkflowIdSchema).parse(req.params.id);
+      const actorId = getActorId(req);
+      if (!actorId) return res.status(401).json({ code: "SHIPMENT_CLOSE_ACTOR_REQUIRED", error: "Sign in before closing the shipment." });
+      const shipment = await shipmentTracking.close(shipmentId, actorId, req.body.notes);
       res.json(shipment);
-    } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
+    } catch (error: unknown) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_CLOSE_ID_INVALID", error: "Choose a valid shipment." });
+      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ code: error.details?.code, error: error.message, details: error.details });
+      console.error(JSON.stringify({ event: "procurement.shipment.close_failed", shipmentId: req.params.id, actorId: getActorId(req) ?? null,
+        code: "SHIPMENT_CLOSE_UNAVAILABLE", errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(503).json({ code: "SHIPMENT_CLOSE_UNAVAILABLE", error: "The shipment close could not be confirmed. Reload its saved status before retrying." });
     }
   });
 
@@ -438,7 +478,8 @@ export function registerInboundShipmentRoutes(app: Express) {
       const actorId = getActorId(req);
       if (!actorId) throw new FinancialCommandError("Sign in before updating costs.", 401, "SHIPMENT_COST_UPDATE_ACTOR_REQUIRED");
       const descriptor = financialCommandFromRequest(req, {
-        actorType: "service", actorId: SHIPMENT_COST_UPDATE_PRINCIPAL, ...shipmentCostUpdateScope(shipmentId),
+        actorType: req.body?.measurementCorrection ? "user" : "service",
+        actorId: req.body?.measurementCorrection ? actorId : SHIPMENT_COST_UPDATE_PRINCIPAL, ...shipmentCostUpdateScope(shipmentId),
       });
       const result = await shipmentCostUpdates.execute(shipmentId, req.body, actorId, descriptor);
       res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
@@ -471,7 +512,7 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   app.post("/api/inbound-shipments/:id/allocate", requirePermission("purchasing", "edit"), async (req, res) => {
     try {
-      const result = await shipmentTracking.runAllocation(Number(req.params.id));
+      const result = await shipmentTracking.runAllocation(Number(req.params.id), req.session.user?.id);
       res.json(result);
     } catch (error: any) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });

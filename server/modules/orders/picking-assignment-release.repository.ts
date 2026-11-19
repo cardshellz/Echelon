@@ -1,7 +1,9 @@
 import { eq } from "drizzle-orm";
-import { orders, pickingLogs, type Order } from "@shared/schema";
+import { orders, type Order } from "@shared/schema";
 import type { db } from "../../db";
 import { readPickingReleaseActor } from "../identity";
+import { insertWmsPickingLogEventInTx } from "../wms/picking-logs.api";
+import { releaseLockedPickingAssignmentInWms } from "../wms/wms-order-mutations.api";
 import type { PickingAssignmentReleaseRepository } from "./picking-assignment-release.service";
 
 type Database = Pick<typeof db, "transaction">;
@@ -24,14 +26,12 @@ export function createPickingAssignmentReleaseRepository(database: Database): Pi
       lockOrder: async orderId => (await tx.select().from(orders)
         .where(eq(orders.id, orderId)).for("update"))[0],
       clearAssignment: async orderId => {
-        const [order] = await tx.update(orders).set({
-          warehouseStatus: "ready", assignedPickerId: null, startedAt: null,
-        }).where(eq(orders.id, orderId)).returning();
+        const [order] = await releaseLockedPickingAssignmentInWms(tx, orderId);
         if (!order) throw new Error("Locked picking order disappeared during release");
         return order;
       },
       recordRelease: async (before, after, actor, command, now) => {
-        await tx.insert(pickingLogs).values({
+        await insertWmsPickingLogEventInTx(tx, {
           timestamp: now, actionType: "order_released",
           pickerId: actor.id, pickerName: actor.name, pickerRole: actor.role,
           orderId: before.id, orderNumber: before.orderNumber,

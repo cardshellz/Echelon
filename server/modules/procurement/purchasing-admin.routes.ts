@@ -1,3 +1,4 @@
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import type { Express } from "express";
 import { z } from "zod";
 import { procurementStorage } from "../procurement";
@@ -335,15 +336,15 @@ function resolveVendorCatalogPricing(body: {
     });
   }
   const unitCostMills = rawMills == null
-    ? Number(rawCents) * 100
-    : Number(rawMills);
+    ? readIntegerCents(rawCents, "rawCents", true) * 100
+    : readIntegerMills(rawMills, "rawMills", true);
   if (!Number.isSafeInteger(unitCostMills) || unitCostMills < 0) {
     throw new PurchasingError("unitCostMills or unitCostCents must be a non-negative integer", 400);
   }
   const unitCostCents = millsToCents(unitCostMills);
   if (
     rawCents != null &&
-    (!Number.isSafeInteger(Number(rawCents)) || Number(rawCents) !== unitCostCents)
+    (!Number.isSafeInteger(readIntegerCents(rawCents, "rawCents", true)) || readIntegerCents(rawCents, "rawCents", true) !== unitCostCents)
   ) {
     throw new PurchasingError("unitCostMills and unitCostCents disagree", 400, {
       code: "VENDOR_CATALOG_MONEY_MISMATCH",

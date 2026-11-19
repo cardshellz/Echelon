@@ -45,8 +45,8 @@ export class PgDropshipEbayCategoryRulesRepository implements EbayCategoryRulesR
       }
       const loadState = () => readEbayCategoryRules(client, vendorId, input.storeConnectionId);
       const result = await operation({
-        vendorId,
-        ...selectedCatalogReaderForTransaction(client),
+        // The selected-catalog reads, bound to this vendor (its vendorId included).
+        ...selectedCatalogReaderForTransaction(client, vendorId),
         loadState,
         loadStoreListingConfig: () => PgDropshipListingPreviewRepository.readerForTransaction(client)
           .getStoreListingConfig(input.storeConnectionId),

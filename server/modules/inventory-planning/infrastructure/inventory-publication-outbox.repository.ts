@@ -4,6 +4,7 @@ import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
 
 import { pool } from "../../../db";
+import { logger } from "../../../platform/observability/logger";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { releaseQuantityPublicationSuppressionInsideTransaction } from "./quantity-publication-admission.repository";
 import { readPublicationStockSelection } from "./inventory-publication-selection.reader";
@@ -48,8 +49,24 @@ export class InventoryPublicationOutboxRepositoryError extends Error {
   }
 }
 
+/** ERROR for a dead letter (needs a human); DEBUG for an expected identity supersede (N5). `debug` is optional so a
+ * caller that only watches dead letters can pass `{ error }`. */
+type DeadLetterLogger = Pick<typeof logger, "error"> & Partial<Pick<typeof logger, "debug">>;
+
+/** The outbox error class of a row whose store item is no longer the size's sealed link (channels PR2, PLAN-CH2
+ * v4.1 §4.8 N5, §10): the stock-link retire step supersedes the rows it can see with it, and the worker supersedes
+ * any later one before its provider call. */
+export const PUBLICATION_IDENTITY_RETIRED = "PUBLICATION_IDENTITY_RETIRED";
+const NEWER_REVISION_SUPERSEDE = Object.freeze({ errorClass: "SUPERSEDED_BEFORE_PROVIDER_WRITE",
+  errorMessage: "A newer desired revision exists; no provider request was made." });
+const IDENTITY_RETIRED_SUPERSEDE = Object.freeze({ errorClass: PUBLICATION_IDENTITY_RETIRED,
+  errorMessage: "This store item is no longer the size's linked item; no provider request was made." });
+
 export class PostgresInventoryPublicationOutboxRepository {
-  constructor(private readonly connectionPool: ClientPool = pool) {
+  constructor(
+    private readonly connectionPool: ClientPool = pool,
+    private readonly log: DeadLetterLogger = logger,
+  ) {
     const maximumConnections = connectionPool.options?.max;
     if (maximumConnections !== undefined && maximumConnections < 2) {
       throw new InventoryPublicationOutboxRepositoryError(
@@ -213,6 +230,27 @@ export class PostgresInventoryPublicationOutboxRepository {
         await supersedeStaleClaim(client, claim, ownsLease);
         return { status: "superseded" };
       }
+      // N5 (PLAN-CH2 v4.1 §4.8): the last barrier before the provider call, under the pair lock. A row whose item is
+      // no longer the pair's sealed link (retired or relinked since it was planned, e.g. by a stale SERIALIZABLE
+      // publisher, P-21) is superseded and nothing is sent. Full claims only: a conservative claim belongs to an
+      // activation whose heads may hold only a draft (BUILD-NOTES P0 N5 list item 2).
+      if (claim.publicationPhase === "full") {
+        const identity = await readClaimIdentity(client, claim);
+        if (identity.status === "retired") {
+          await supersedeStaleClaim(client, claim, true, false, IDENTITY_RETIRED_SUPERSEDE);
+          this.log.debug?.("inventory_publication.outbox.identity_retired", {
+            outcome: "superseded", error_code: PUBLICATION_IDENTITY_RETIRED,
+            before: { state: "leased", external_inventory_item_id: claim.externalInventoryItemId },
+            after: { state: "superseded", active_mapping_id: identity.activeMappingId,
+              active_external_inventory_item_id: identity.activeItemId },
+            outbox_id: claim.outboxId, publication_target_id: claim.publicationTargetId,
+            product_variant_id: claim.productVariantId, desired_revision: claim.desiredRevision,
+            destination_kind: claim.destinationKind, channel_connection_id: claim.channelConnectionId,
+            dropship_store_connection_id: claim.dropshipStoreConnectionId, provider_key: claim.providerKey,
+          });
+          return { status: "superseded" };
+        }
+      }
       if (claim.publicationPhase === "full"
         && await supersedeStaleClaim(client, claim, true, true)) return { status: "superseded" };
       return { status: "current", value: await work() };
@@ -359,10 +397,10 @@ export class PostgresInventoryPublicationOutboxRepository {
     claim: ClaimedInventoryPublication,
     input: PublicationAttemptFailure & { completedAt: Date },
   ): Promise<boolean> {
-    return inTransaction(this.connectionPool, async (client) => {
+    const recorded = await inTransaction(this.connectionPool, async (client) => {
       await lockActivationRun(client, claim.activationRunId);
       const current = await lockClaim(client, claim);
-      if (!current) return false;
+      if (!current) return null;
       if (["PUBLICATION_GLOBAL_STOP_ACTIVE", "PUBLICATION_GLOBAL_CONTROL_INVALID"].includes(input.errorClass)) {
         await client.query(
           `UPDATE inventory.inventory_publication_outbox
@@ -374,7 +412,7 @@ export class PostgresInventoryPublicationOutboxRepository {
           [claim.outboxId, claim.leaseToken, input.errorClass.slice(0, 60),
             input.errorMessage.slice(0, 2000), input.completedAt.toISOString()],
         );
-        return true;
+        return "requeued" as const;
       }
       const cancelled = !await publicationCanProceed(client, claim);
       const retryable = !cancelled && input.retryable && claim.attemptNumber < 10;
@@ -406,9 +444,71 @@ export class PostgresInventoryPublicationOutboxRepository {
           [claim.outboxId],
         );
       }
-      return true;
+      return outcome;
     });
+    // Logged only after the dead letter committed. A dead letter needs a person:
+    // that store item keeps its last quantity until the store accepts a newer
+    // stock update (Ops Health CHANNEL_STOCK_UPDATE_DEAD_LETTER for channel stores).
+    if (recorded === "dead_letter") this.log.error("inventory_publication.outbox.dead_lettered", deadLetterLogFields(claim, input));
+    return recorded !== null;
   }
+}
+
+/** Correlation ids for one dead-lettered stock update, so a search on any id
+ * (outbox, destination, size, connection, item) finds this line. */
+function deadLetterLogFields(claim: ClaimedInventoryPublication, input: PublicationAttemptFailure) {
+  return {
+    outcome: "dead_letter",
+    error_code: input.errorClass.slice(0, 60),
+    // A dead letter is never retried, so it is always "permanent" (the platform's closed
+    // vocabulary, server/platform/observability/errors.ts). The reason says how it got there:
+    // refused as non-retryable, or a retryable failure that reached the attempt cap.
+    error_class: "permanent",
+    dead_letter_reason: input.retryable ? "attempts_exhausted" : "non_retryable",
+    error_message: input.errorMessage.slice(0, 500),
+    before: { state: "leased", attempt_number: claim.attemptNumber },
+    after: { state: "dead_letter" },
+    outbox_id: claim.outboxId,
+    activation_run_id: claim.activationRunId,
+    publication_phase: claim.publicationPhase,
+    publication_target_id: claim.publicationTargetId,
+    product_variant_id: claim.productVariantId,
+    desired_revision: claim.desiredRevision,
+    desired_quantity: claim.desiredQuantity,
+    channel_id: claim.channelId,
+    destination_kind: claim.destinationKind,
+    channel_connection_id: claim.channelConnectionId,
+    dropship_store_connection_id: claim.dropshipStoreConnectionId,
+    provider_key: claim.providerKey,
+    provider_scope_type: claim.providerScopeType,
+    external_scope_id: claim.externalScopeId,
+    external_inventory_item_id: claim.externalInventoryItemId,
+    external_sku: claim.externalSku,
+  };
+}
+
+/**
+ * The pair's current sealed link as N5 compares it. No head → "current" (today's behaviour: a destination whose
+ * mappings live elsewhere, or a reduced fixture). A head without a sealed active version, or whose active item is
+ * not the claim's item, → "retired". Items are compared trimmed: the planner trims the mapping's item before it
+ * becomes the outbox snapshot (inventory-channel-exposure-runtime.repository.ts nonblank), while the database only
+ * bounds the trimmed length (migrations/0633_inventory_publication_readiness.sql identity_chk), so an untrimmed
+ * sealed item must not stop its own pair's stock (BUILD-NOTES P0 N5 list item 5).
+ */
+async function readClaimIdentity(client: PoolClient, claim: ClaimedInventoryPublication): Promise<
+  { status: "current" } | { status: "retired"; activeMappingId: number | null; activeItemId: string | null }> {
+  const head = (await client.query<{ active_mapping_id: number | null; external_inventory_item_id: string | null }>(
+    `SELECT mapping.id AS active_mapping_id, mapping.external_inventory_item_id
+     FROM inventory.publication_variant_mapping_heads AS head
+     LEFT JOIN inventory.publication_variant_mapping_versions AS mapping
+       ON mapping.id = head.active_mapping_id AND mapping.lifecycle_status = 'sealed'
+     WHERE head.publication_target_id = $1 AND head.product_variant_id = $2`,
+    [claim.publicationTargetId, claim.productVariantId],
+  )).rows[0];
+  if (!head) return { status: "current" };
+  const activeItemId = head.external_inventory_item_id;
+  if (activeItemId !== null && activeItemId.trim() === claim.externalInventoryItemId.trim()) return { status: "current" };
+  return { status: "retired", activeMappingId: head.active_mapping_id, activeItemId };
 }
 
 async function supersedeStaleClaim(
@@ -416,11 +516,12 @@ async function supersedeStaleClaim(
   claim: ClaimedInventoryPublication,
   ownsLease: boolean,
   requireVerifiedWithdrawal = false,
+  reason: { errorClass: string; errorMessage: string } = NEWER_REVISION_SUPERSEDE,
 ): Promise<boolean> {
   await client.query(requireVerifiedWithdrawal ? "BEGIN ISOLATION LEVEL SERIALIZABLE" : "BEGIN");
   try {
-    let errorClass = "SUPERSEDED_BEFORE_PROVIDER_WRITE";
-    let errorMessage = "A newer desired revision exists; no provider request was made.";
+    let errorClass = reason.errorClass;
+    let errorMessage = reason.errorMessage;
     if (requireVerifiedWithdrawal) {
       // The pair's session lock is already held by runIfCurrent. TRY the shared
       // selection gate so this path cannot reverse a selection/configuration lock.

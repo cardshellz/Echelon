@@ -21,7 +21,7 @@ vi.mock("../../../../middleware/idempotency", () => ({ requireIdempotency: () =>
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: mocks.repository, createDrizzleFinancialCommandRepository: () => mocks.repository }));
 vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../../notifications/notifications.service", () => ({}));
+vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
 import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";

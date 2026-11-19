@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import { readIntegerCents, MoneyInputError } from "@shared/money-read";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import type {
@@ -356,7 +357,14 @@ function mapAssignment(row: AssignmentRow): CarrierProtectionAssignmentRecord {
     isDefault: row.is_default, isActive: row.is_active, createdBy: row.created_by, createdAt: row.created_at, deactivatedAt: row.deactivated_at };
 }
 
-function money(value: string | number): number { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new DropshipError("DROPSHIP_CARRIER_PROTECTION_INVALID_MONEY", "Stored carrier-protection money is invalid."); return parsed; }
+function money(value: string | number): number {
+  try {
+    return readIntegerCents(value, "carrier protection amount");
+  } catch (error) {
+    if (!(error instanceof MoneyInputError)) throw error;
+    throw new DropshipError("DROPSHIP_CARRIER_PROTECTION_INVALID_MONEY", "Stored carrier-protection money is invalid.");
+  }
+}
 function optionalMoney(value: string | number | null): number | null { return value == null ? null : money(value); }
 function required<T>(value: T | undefined, message: string): T { if (value === undefined) throw new DropshipError("DROPSHIP_CARRIER_PROTECTION_NOT_FOUND", message); return value; }
 function entityId(value: string | null): number { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed <= 0) throw new DropshipError("DROPSHIP_CARRIER_PROTECTION_COMMAND_INCOMPLETE", "Carrier-protection command has no valid entity ID."); return parsed; }

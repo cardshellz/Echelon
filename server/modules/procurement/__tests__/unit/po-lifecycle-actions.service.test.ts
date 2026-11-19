@@ -12,6 +12,7 @@ vi.mock("../../po-exceptions.service", () => ({
 }));
 
 import { createPurchasingService } from "../../purchasing.service";
+import { purchaseApprovalLinesFingerprint } from "../../purchase-approval-review";
 
 function buildMockDb(txSelectResults: any[][] = []) {
   const insertedRows: any[] = [];
@@ -183,11 +184,13 @@ describe("PO lifecycle actions", () => {
       status: "pending_approval",
       physicalStatus: "draft",
       approvalTierId: null,
+      updatedAt: new Date("2026-09-01T12:00:00Z"),
+      totalCents: 1000,
       discountCents: 0,
       taxCents: 0,
       shippingCostCents: 0,
     };
-    const db = buildMockDb([[po], [activeProductLine], []]);
+    const db = buildMockDb([[po], [po], [activeProductLine], []]);
     const storage = buildMockStorage({
       getPurchaseOrderById: vi.fn().mockResolvedValue(po),
       updatePurchaseOrderStatusWithHistory: vi.fn().mockResolvedValue({ id: 2, status: "approved" }),
@@ -196,7 +199,7 @@ describe("PO lifecycle actions", () => {
       readApprovalActor: async (_tx, userId) => ({ userId, active: true, roles: [], approvalGrantIds: [1], hasScopedApprovalGrant: false }),
     });
 
-    await svc.approve(2, "user-2", "approved by ops");
+    await svc.approve(2, "user-2", "approved by ops", { expectedUpdatedAt: po.updatedAt.toISOString(), expectedTotalCents: 1000, expectedLinesFingerprint: purchaseApprovalLinesFingerprint([activeProductLine]) });
 
     expect(db.insertedRows).toContainEqual(
       expect.objectContaining({

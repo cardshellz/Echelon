@@ -2,7 +2,8 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getTableColumns } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
-import { inboundShipments } from "@shared/schema";
+import { inboundShipments, inboundShipmentLines, purchaseOrderLines, purchaseOrders } from "@shared/schema";
+import { getTableConfig } from "drizzle-orm/pg-core";
 import { readShipmentList, countShipmentList } from "../../shipment-work-list.repository";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
@@ -19,6 +20,14 @@ suite.sequential("shipment work-list real PostgreSQL predicates and page boundar
     const columns = Object.values(getTableColumns(inboundShipments)).map(column =>
       `"${column.name}" ${column.getSQLType()}${column.primary ? " PRIMARY KEY" : ""}`);
     await client.query(`CREATE TABLE procurement.inbound_shipments (${columns.join(", ")})`);
+    for (const table of [inboundShipmentLines, purchaseOrderLines, purchaseOrders]) {
+      const fields = Object.values(getTableColumns(table)).map(column => `"${column.name}" ${column.getSQLType()}`);
+      await client.query(`CREATE TABLE procurement.${getTableConfig(table).name} (${fields.join(",")})`);
+    }
+    await client.query(`INSERT INTO procurement.purchase_orders(id,po_number) VALUES (17,'SEARCH-PO-17');
+      INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,sku) VALUES (101,17,'PO-SKU');
+      INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,sku) VALUES
+        (1,1,17,101,'SEARCH-SKU'),(2,1,17,101,'SEARCH-SKU'),(3,3,NULL,101,'SEARCH-SKU')`);
     await client.query(`INSERT INTO procurement.inbound_shipments
       (id,shipment_number,status,mode,warehouse_id,carrier_name,container_number,created_at,updated_at)
       SELECT n,'SHP-'||n,CASE WHEN n%2=0 THEN 'cancelled' WHEN n=1 THEN 'closed' ELSE 'booked' END,
@@ -62,6 +71,13 @@ suite.sequential("shipment work-list real PostgreSQL predicates and page boundar
     expect((await readShipmentList(db,{search:"100%_"})).map(row=>row.id)).toEqual([1]);
     expect(await countShipmentList(db,{search:"100%_"})).toBe(1);
     expect(await countShipmentList(db,{search:"' OR 1=1 --"})).toBe(0);
+  });
+  it("searches PO numbers and SKUs without duplicate shipments and includes PO-line-only links", async () => {
+    const db = drizzle(client!);
+    for (const search of ["SEARCH-PO-17", "SEARCH-SKU", "PO-SKU"]) {
+      expect((await readShipmentList(db, { search })).map(row => row.id)).toEqual([3, 1]);
+      expect(await countShipmentList(db, { search })).toBe(2);
+    }
   });
   it("returns a successful empty requested page without losing its matching total", async () => {
     const db=drizzle(client!);

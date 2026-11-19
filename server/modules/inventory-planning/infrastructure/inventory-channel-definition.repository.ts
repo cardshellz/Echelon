@@ -53,6 +53,8 @@ export class PostgresChannelDefinitionStore implements ChannelDefinitionStore {
   }
   progress(channelId: number) {
     return this.transaction(false, async client => {
+      // Single-rule applies (inventory-channel-rule.repository.ts) write the same
+      // receipt shape here, so this is the latest apply of any kind on the channel.
       const latest = (await client.query<{ receipt: unknown }>(
         "SELECT receipt FROM inventory.channel_definition_applications WHERE channel_id=$1 ORDER BY id DESC LIMIT 1", [channelId],
       )).rows[0];
@@ -171,10 +173,10 @@ async function captureReview(client: PoolClient, channelId: number): Promise<Cha
   return channelDefinitionReviewSchema.parse({ ...content, reviewHash: inventoryCutoverEvidenceHash({ content, evidence }) });
 }
 
-async function loadChanges(client: PoolClient, channelId: number): Promise<ChannelDefinitionReview["changes"]> {
-  // Fixed SQL identifiers are not supplied by the request. Full before/after
-  // definitions are retained in the immutable receipt, including source members.
-  const policies = (await client.query(`SELECT h.scope_key AS key,h.revision::text,p.id,p.definition_hash,
+/** Pending channel-rule drafts with their active predecessor, in the shape both
+ * reviews render. Callers append only a parameterized WHERE/ORDER BY. Bigint
+ * quantities travel as text so JSON never rounds them. */
+export const CHANNEL_POLICY_DRAFT_CHANGES_SQL = `SELECT h.scope_key AS key,h.revision::text,p.id,p.definition_hash,
     COALESCE(v.sku,product.name,'Channel default') AS label,
     CASE WHEN a.id IS NULL THEN NULL ELSE to_jsonb(a)||jsonb_build_object(
       'holdback_sellable_units',a.holdback_sellable_units::text,'max_publish_sellable_units',a.max_publish_sellable_units::text,
@@ -185,7 +187,12 @@ async function loadChanges(client: PoolClient, channelId: number): Promise<Chann
     JOIN inventory.channel_exposure_policy_versions p ON p.id=h.draft_policy_id AND p.lifecycle_status='draft'
     LEFT JOIN inventory.channel_exposure_policy_versions a ON a.id=h.active_policy_id
     LEFT JOIN catalog.products product ON product.id=p.product_id
-    LEFT JOIN catalog.product_variants v ON v.id=p.product_variant_id
+    LEFT JOIN catalog.product_variants v ON v.id=p.product_variant_id`;
+
+async function loadChanges(client: PoolClient, channelId: number): Promise<ChannelDefinitionReview["changes"]> {
+  // Fixed SQL identifiers are not supplied by the request. Full before/after
+  // definitions are retained in the immutable receipt, including source members.
+  const policies = (await client.query(`${CHANNEL_POLICY_DRAFT_CHANGES_SQL}
     WHERE h.channel_id=$1 ORDER BY h.scope_key`, [channelId])).rows;
   const bindings = (await client.query(`SELECT h.publication_target_id::text AS key,h.revision::text,b.id,b.definition_hash,
     'Supply: '||t.external_scope_id AS label,

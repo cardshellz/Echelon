@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { executeAdmittedEbayQuantityRequest, type EbayQuantityHttpRequest, type EbayQuantityRequestAdmission } from "../../quantity-publication-request";
+import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
 
 function fixture(options: { quantities?: ReadonlyMap<string, number> | null; blocked?: boolean;
   override?: (request: EbayQuantityHttpRequest) => unknown } = {}) {
@@ -181,6 +182,47 @@ describe("independent eBay publication owner protocol audit", () => {
     const f = fixture({ override: input => input.path.includes("bulk_update_price_quantity") ? response : undefined });
     await expect(executeAdmittedEbayQuantityRequest(offerPublish, f.admission, f.request)).rejects.toMatchObject({ code: "PUBLICATION_LISTING_MEMBERSHIP_UNPROVEN" });
     expect(writes(f.calls).some(row => row.path.endsWith("/publish"))).toBe(false);
+  });
+
+  // Production: adding GLV-MAG-180PT-C2500 to live listing 298148420100 stopped at the group write because the new
+  // size's offer read answered 404/25713 and was treated as a failure (attempt 36158, PROVIDER_PREFLIGHT_NOT_SENT).
+  const noOffer = (body: string) => new EbayApiRequestError(404, "eBay API GET offer failed (404)", body);
+  const groupUpdate = { method: "PUT", path: "/sell/inventory/v1/inventory_item_group/GROUP",
+    body: { inventoryItemGroupKey: "GROUP", variantSKUs: ["SKU-A", "SKU-B"], title: "Group" } };
+
+  it.each([
+    ["the channel transport's 404/25713", () => noOffer(JSON.stringify({ errors: [{ errorId: 25713 }] }))],
+    ["Dropship's classified missing offer collection", () => Object.assign(new Error("no offer"), { context: { offerCollectionMissing: true } })],
+  ])("sets a new member's quantity on its inventory item when it has no offer yet: %s", async (_name, missing) => {
+    const f = fixture({ override: input => {
+      if (input.method === "GET" && input.path.includes("/offer?sku=SKU-A")) throw missing();
+      return undefined;
+    } });
+    await executeAdmittedEbayQuantityRequest(groupUpdate, f.admission, f.request);
+    const sent = writes(f.calls);
+    expect(sent.map(row => `${row.method} ${row.path}`)).toEqual([
+      "PUT /sell/inventory/v1/inventory_item/SKU-A",
+      "POST /sell/inventory/v1/bulk_update_price_quantity",
+      "PUT /sell/inventory/v1/inventory_item_group/GROUP",
+    ]);
+    expect(sent[0].body).toEqual({ condition: "NEW", product: { title: "Retained metadata" },
+      availability: { shipToLocationAvailability: { quantity: 5 } } });
+    expect(sent[1].body).toMatchObject({ requests: [{ sku: "SKU-B", shipToLocationAvailability: { quantity: 2 } }] });
+  });
+
+  it.each([
+    ["a 404 that is not only 25713", () => noOffer(JSON.stringify({ errors: [{ errorId: 25713 }, { errorId: 2003 }] }))],
+    ["a 404 with no provider error id", () => noOffer("")],
+    ["an unavailable provider", () => new EbayApiRequestError(503, "eBay API GET offer failed (503)", JSON.stringify({ errors: [{ errorId: 25713 }] }))],
+    ["an unclassified error", () => new Error("socket closed")],
+  ])("still refuses the group write when the offer read fails with %s", async (_name, failure) => {
+    const thrown = failure();
+    const f = fixture({ override: input => {
+      if (input.method === "GET" && input.path.includes("/offer?sku=SKU-A")) throw thrown;
+      return undefined;
+    } });
+    await expect(executeAdmittedEbayQuantityRequest(groupUpdate, f.admission, f.request)).rejects.toBe(thrown);
+    expect(writes(f.calls)).toEqual([]);
   });
 
   it("rejects truncated offer membership before refreshing or publishing", async () => {

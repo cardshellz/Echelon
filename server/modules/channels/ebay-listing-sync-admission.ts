@@ -35,19 +35,23 @@ export interface EbayListingSyncAdmissionDependencies {
 /** Each product is its own durable command; rejection never discards unrelated accepted work. */
 export async function admitEbayListingSyncProducts(
   products: readonly EbayListingSyncAdmissionProduct[],
-  input: { channelId: number; actor: string; commandKey?: string },
+  input: { channelId: number; actor: string; commandKey?: string; commandKeys?: ReadonlyMap<number, string> },
   dependencies: EbayListingSyncAdmissionDependencies,
 ): Promise<EbayProductSyncResult> {
   if (input.commandKey && products.length !== 1) {
     throw new EbayListingSyncError("EBAY_SYNC_COMMAND_SCOPE_INVALID", "A command key must target one product.");
   }
+  if (input.commandKeys && (input.commandKey || input.commandKeys.size !== products.length
+    || products.some(product => !input.commandKeys!.has(product.productId)))) {
+    throw new EbayListingSyncError("EBAY_SYNC_COMMAND_SCOPE_INVALID", "Saved commands must match every selected product exactly.");
+  }
   const summary = ebayProductSyncResultSchema.parse({ synced: 0, priceChanges: 0, qtyChanges: 0, policyChanges: 0, errors: 0, details: [] });
   for (const product of products) {
-    const commandKey = input.commandKey ?? dependencies.uuid();
+    const commandKey = input.commandKeys?.get(product.productId) ?? input.commandKey ?? dependencies.uuid();
     try {
       // A lost acknowledgement must recover the accepted command before current
       // catalog/mapping changes are captured. A fresh Sync uses a fresh key.
-      const accepted = input.commandKey
+      const accepted = input.commandKey || input.commandKeys
         ? await dependencies.findAcceptedCommand?.(commandKey, product.productId, input.actor) : null;
       const job = accepted ?? await dependencies.enqueue(product.captureIdentity(), input.actor, commandKey);
       addJobResult(summary, job, product.productName);

@@ -3,6 +3,7 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./test/browser",
   testMatch: "procurement-*.spec.ts",
+  forbidOnly: true,
   // Page-local fixtures allow test-level sharding instead of uneven file groups.
   fullyParallel: true,
   workers: 2,

@@ -1,8 +1,10 @@
 import type { Pool, PoolClient } from "pg";
+import { hasListingWorkObligation } from "../domain/listing-work-obligation";
+import type { ListingContentWork } from "../domain/listing-intent-lifecycle";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
   readChannelStockSelection,
-  hasOutstandingEbayListingWork,
+  readOutstandingEbayListingWork,
 } from "../../channels/channel-stock-selection";
 import { readDropshipListingStockSelection } from "../../dropship/stock-publication-selection";
 import {
@@ -57,46 +59,41 @@ async function lockIdentitySources(
 }
 
 /** Thin read adapters retain provider execution status with its existing owner. */
-async function hasPendingContent(
+async function readContentWork(
   client: PoolClient,
   delivery: IntentDelivery,
-): Promise<boolean> {
+): Promise<ListingContentWork[]> {
   const d = delivery.destination;
   if (d.kind === "channel" && d.provider === "ebay")
-    return hasOutstandingEbayListingWork(client, {
-      channelId: d.channelId!,
-      connectionId: d.connectionId,
-      productId: delivery.productId,
+    return (await readOutstandingEbayListingWork(client, {
+      channelId: d.channelId!, connectionId: d.connectionId, productId: delivery.productId,
+    })).map(row => ({ state: row.state === "needs_attention" ? "attention" : "pending",
+      action: { owner: "ebay_listing_sync", operationId: row.id } }));
+  if (d.kind === "dropship") {
+    const rows = await client.query<{id:string;status:string}>(`SELECT j.id::text,i.status
+      FROM dropship.dropship_listing_push_job_items i JOIN dropship.dropship_listing_push_jobs j ON j.id=i.job_id
+      WHERE j.store_connection_id=$1 AND j.vendor_id=$2 AND i.product_variant_id=ANY($3::integer[])`,
+      [d.connectionId,d.vendorId,delivery.variantIds]);
+    return rows.rows.flatMap(row => {
+      const phase = ["completed","skipped","cancelled"].includes(row.status) ? "completed"
+        : ["failed","error","blocked"].includes(row.status) ? "attention" : "pending";
+      return hasListingWorkObligation(phase) ? [{ state: phase === "attention" ? "attention" as const : "pending" as const,
+        action: { owner: "dropship_listing_push" as const, operationId: row.id } }] : [];
     });
-  if (d.kind === "dropship")
-    return (
-      (
-        await client.query(
-          "SELECT 1 FROM dropship.dropship_listing_push_job_items i JOIN dropship.dropship_listing_push_jobs j ON j.id=i.job_id WHERE j.store_connection_id=$1 AND j.vendor_id=$2 AND i.product_variant_id=ANY($3::integer[]) AND i.status NOT IN ('completed','skipped','cancelled') LIMIT 1",
-          [d.connectionId, d.vendorId, delivery.variantIds],
-        )
-      ).rows.length > 0
-    );
-  return (
-    (
-      await client.query(
-        `SELECT 1 FROM marketplace.channel_listing_operations o WHERE o.account_key=$1 AND o.state<>'completed'
-    AND EXISTS(SELECT 1 FROM jsonb_array_elements(o.progress->'items') item WHERE (item->>'variantId')::int=ANY($2::int[]))
-    UNION ALL SELECT 1 FROM marketplace.channel_listing_updates u WHERE u.account_key=$1 AND u.state<>'accepted'
-    AND u.sku IN (SELECT external_sku FROM channels.channel_listings WHERE channel_id=$3 AND product_variant_id=ANY($2::int[])) LIMIT 1`,
-        [
-          canonicalJson([
-            d.provider,
-            d.marketplaceId ?? "shop",
-            d.environment,
-            d.accountId,
-          ]),
-          delivery.variantIds,
-          d.channelId,
-        ],
-      )
-    ).rows.length > 0
-  );
+  }
+  const rows = await client.query<{id:string;state:string;owner:"channel_listing_publication"|"channel_listing_update"}>(
+    `SELECT o.id::text,o.state,'channel_listing_publication' owner FROM marketplace.channel_listing_operations o WHERE o.account_key=$1
+      AND EXISTS(SELECT 1 FROM jsonb_array_elements(o.progress->'items') item WHERE (item->>'variantId')::int=ANY($2::int[]))
+    UNION ALL SELECT u.id::text,u.state,'channel_listing_update' FROM marketplace.channel_listing_updates u WHERE u.account_key=$1
+      AND u.sku IN (SELECT external_sku FROM channels.channel_listings WHERE channel_id=$3 AND product_variant_id=ANY($2::int[]))`,
+    [canonicalJson([d.provider,d.marketplaceId ?? "shop",d.environment,d.accountId]),delivery.variantIds,d.channelId]);
+  return rows.rows.flatMap(row => {
+    const phase = row.state === "reviewed" ? "unsubmitted"
+      : ["accepted","completed"].includes(row.state) ? "completed"
+      : ["needs_attention","uncertain"].includes(row.state) ? "attention" : "pending";
+    return hasListingWorkObligation(phase) ? [{ state: phase === "attention" ? "attention" as const : "pending" as const,
+      action: { owner: row.owner, operationId: row.id } }] : [];
+  });
 }
 
 export class PostgresListingIntentLifecycleReader implements ListingIntentLifecycleReader {
@@ -193,14 +190,14 @@ export class PostgresListingIntentLifecycleReader implements ListingIntentLifecy
             productVariantIds: members,
           })
         : [];
-      const pendingContent = await hasPendingContent(client, delivery);
+      const contentWork = await readContentWork(client, delivery);
       const result = {
         selection,
         accountId: d.accountId!,
         retainedVariantIds: delivery.variantIds,
         retirements,
         stock,
-        pendingContent,
+        contentWork,
         now,
       };
       await client.query("COMMIT");

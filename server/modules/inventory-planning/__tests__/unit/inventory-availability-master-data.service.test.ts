@@ -7,9 +7,9 @@ import type {
 import {
   InventoryAvailabilityMasterDataService,
   type InventoryAvailabilityMasterDataAdminStore,
+  type InventoryAvailabilityMasterDataReplay,
 } from "../../application/inventory-availability-master-data.service";
 import {
-  type InventoryAvailabilityMasterDataReplay,
   calculateRecipeDefinitionHash,
   InventoryAvailabilityMasterDataError,
 } from "../../domain/inventory-availability-master-data.contracts";
@@ -472,6 +472,18 @@ class FakeStore implements InventoryAvailabilityMasterDataAdminStore {
   ) {
     this.updateCommands.push(command);
     return { modelId: command.draftModelId, version: 1, definitionHash: "b".repeat(64), alreadyApplied: false };
+  }
+
+  async supersedeTransformationModelBackfillDraft(
+    command: Parameters<InventoryAvailabilityMasterDataAdminStore["supersedeTransformationModelBackfillDraft"]>[0],
+  ) {
+    return {
+      modelId: 93,
+      version: 1,
+      definitionHash: "c".repeat(64),
+      supersededModelId: command.draftModelId,
+      alreadyApplied: false,
+    };
   }
 
   constructor(private readonly view: SupplyTransformationsAdminView | null) {}

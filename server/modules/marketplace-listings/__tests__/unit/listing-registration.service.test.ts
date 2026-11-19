@@ -107,7 +107,11 @@ describe("MarketplaceListingRegistrationService", () => {
     await expect(
       service.getCurrentRegistrationStatuses([
         command().owner,
-        { ...command().owner, channelId: 8, productId: 44 },
+        {
+          ...(command().owner as Extract<ListingOwnerRef, { kind: "channel" }>),
+          channelId: 8,
+          productId: 44,
+        },
       ]),
     ).rejects.toMatchObject({
       code: "MARKETPLACE_LISTING_REGISTRATION_REQUEST_INVALID",

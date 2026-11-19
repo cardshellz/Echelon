@@ -5,6 +5,7 @@ import { ebayAutomaticRecoveryCommandSchema, publicationBigint, sortedRecoverySc
 export const ebayAutomaticRecoveryResultSchema = z.object({
   superseded: z.array(publicationBigint).max(100), unresolved: z.array(publicationBigint).max(100),
   busy: z.boolean(), watchId: publicationBigint.nullable(),
+  reviewRequired: z.boolean().optional(),
 }).strict();
 export type EbayAutomaticRecoveryResult = z.infer<typeof ebayAutomaticRecoveryResultSchema>;
 export interface EbayAutomaticPublicationRecoveryStore {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { RfqCreatePayload } from "@shared/procurement/rfq-create-command";
 
 export interface RfqAllocationOverrideInput {
   requestedPieces: number;
@@ -65,6 +66,24 @@ export function buildRfqBatchRequestHash(input: RfqBatchRequestIntent): string {
     ),
   };
   return createHash("sha256").update(JSON.stringify(canonical)).digest("hex");
+}
+
+/** Preserve the original interactive creation hash, including JSON field order. */
+export function buildRfqCreationRequestHash(input: RfqCreatePayload, approvedBy: string | null): string {
+  return buildRfqBatchRequestHash({
+    requestNote: input.requestNote?.trim() || null,
+    responseDueDate: input.responseDueDate ?? null,
+    approvedBy,
+    lines: input.lines.map(line => ({
+      recommendationLineId: line.recommendationLineId,
+      vendorId: line.vendorId,
+      ...(line.vendorProductId === undefined ? {} : { vendorProductId: line.vendorProductId }),
+      vendorSku: line.vendorSku?.trim() || null,
+      requestedPieces: line.requestedPieces,
+      quantityOverrideReason: line.quantityOverrideReason?.trim() || null,
+      allocationOverrideApproved: line.allocationOverrideApproved === true,
+    })),
+  });
 }
 
 export function evaluateRfqAllocationOverride(

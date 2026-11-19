@@ -1,3 +1,4 @@
+import type { PoolClient } from "pg";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -164,7 +165,7 @@ describe("historical ShipStation contents audit repository", () => {
       },
     };
 
-    await expect(loadHistoricalShipStationContentsCandidates(client, {
+    await expect(loadHistoricalShipStationContentsCandidates(client as unknown as PoolClient, {
       candidateLimit: 2,
       beforeLabelId: "104",
       statementTimeoutMs: 3_000,
@@ -277,7 +278,7 @@ describe("historical ShipStation contents audit repository", () => {
       },
     };
 
-    await expect(loadHistoricalShipStationContentsCandidates(client, {
+    await expect(loadHistoricalShipStationContentsCandidates(client as unknown as PoolClient, {
       candidateLimit: 2,
     })).resolves.toMatchObject({
       candidates: [
@@ -333,7 +334,7 @@ describe("historical ShipStation contents audit repository", () => {
       },
     };
 
-    await expect(loadHistoricalShipStationContentsCandidates(client, {
+    await expect(loadHistoricalShipStationContentsCandidates(client as unknown as PoolClient, {
       candidateLimit: 2,
     })).resolves.toMatchObject({
       candidates: [
@@ -355,7 +356,7 @@ describe("historical ShipStation contents audit repository", () => {
         return { rows: [] };
       },
     };
-    await expect(loadHistoricalShipStationContentsCandidates(client)).rejects.toMatchObject({
+    await expect(loadHistoricalShipStationContentsCandidates(client as unknown as PoolClient)).rejects.toMatchObject({
       code: "INVALID_DATABASE_EVIDENCE",
       context: { missingRequiredSelectCount: 1 },
     });
@@ -371,7 +372,7 @@ describe("historical ShipStation contents audit repository", () => {
         return { rows: [] };
       },
     };
-    const promise = loadHistoricalShipStationContentsCandidates(client);
+    const promise = loadHistoricalShipStationContentsCandidates(client as unknown as PoolClient);
 
     await expect(promise).rejects.toMatchObject({ code: "ROLLBACK_FAILED" });
     await promise.catch((error: unknown) => {

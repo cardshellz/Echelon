@@ -121,7 +121,7 @@ function allowedCatalog(candidates: readonly DropshipListingCatalogCandidate[], 
   return {
     loadStoreContext: vi.fn(async () => ({ vendorId: VENDOR_ID, vendorStatus: "active", entitlementStatus: "active", storeStatus: "connected" })),
     listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
-    listSelectionRules: vi.fn(async () => [{ id: 2, scopeType: "catalog", action: "include", isActive: true }]),
+    listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)),
     listCatalogCandidates: vi.fn(async (ids: number[]) => candidates.filter((row) => ids.includes(row.productVariantId))),
     listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
     listSavedListingPrices: vi.fn(async () => [...saved]), listPricingPolicies: vi.fn(async () => []),
@@ -321,7 +321,7 @@ describe("every price path gives the golden rule prices", () => {
         candidates: new Map([[row.candidate.productVariantId, row.candidate]]), pricingPolicies: [],
       };
       const listing = { listingId: 1, storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId,
-        status: "active", vendorRetailPriceCents: null, platform: "ebay", variantSku: null, variantName: "Size", productName: row.name };
+        status: "active", externalListingId: null, vendorRetailPriceCents: null, publishedPriceCents: null, platform: "ebay", variantSku: null, variantName: "Size", productName: row.name };
 
       const classification = classifyListing(facts, listing, row.cost!.unitCostCents!);
 
@@ -339,7 +339,7 @@ describe("every price path gives the golden rule prices", () => {
         candidates: new Map([[row.candidate.productVariantId, row.candidate]]), pricingPolicies: [],
       }, { listingId: 1, storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, status: "active",
         // An earlier push saved this price; inherit never falls back to it.
-        vendorRetailPriceCents: 4_321, platform: "ebay", variantSku: null, variantName: "Size", productName: row.name }, row.cost!.unitCostCents!);
+        externalListingId: null, vendorRetailPriceCents: 4_321, publishedPriceCents: null, platform: "ebay", variantSku: null, variantName: "Size", productName: row.name }, row.cost!.unitCostCents!);
 
       const inherit = classify("inherit");
       if (golden.priceCents !== null) {
@@ -361,7 +361,7 @@ describe("every price path gives the golden rule prices", () => {
       savedPrices: [{ storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, overridePriceCents: null, pricingMode: "inherit" }],
       candidates: new Map([[row.candidate.productVariantId, row.candidate]]), pricingPolicies: [],
     }, { listingId: 1, storeConnectionId: STORE_ID, productVariantId: row.candidate.productVariantId, status: "active",
-      vendorRetailPriceCents: 4_321, platform: "ebay", variantSku: null, variantName: "Size", productName: row.name }, 809);
+      externalListingId: null, vendorRetailPriceCents: 4_321, publishedPriceCents: null, platform: "ebay", variantSku: null, variantName: "Size", productName: row.name }, 809);
     expect(classification).toEqual({ source: "catalog_default", priceCents: row.candidate.defaultRetailPriceCents, followsCost: false });
   });
 
@@ -618,7 +618,7 @@ function v2CostActionFacts(input: GoldenRulePriceV2Case): CostActionVendorFacts 
 function v2Listing(input: GoldenRulePriceV2Case) {
   return { listingId: 1, storeConnectionId: STORE_ID, productVariantId: input.productVariantId,
     // An earlier push saved this price; the rules own the listing, so it is never used.
-    status: "active", vendorRetailPriceCents: 4_321, platform: "ebay", variantSku: null, variantName: "Size", productName: input.name };
+    status: "active", externalListingId: null, vendorRetailPriceCents: 4_321, publishedPriceCents: null, platform: "ebay", variantSku: null, variantName: "Size", productName: input.name };
 }
 /** The listing-settings facts inputs for a case's size alone, with the case's layers and nothing else saved. */
 function v2SettingsInputs(input: GoldenRulePriceV2Case): ListingSettingsInputs {

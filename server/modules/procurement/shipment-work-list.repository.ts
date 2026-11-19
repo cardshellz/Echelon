@@ -16,7 +16,13 @@ export function shipmentListPredicate(filters: ShipmentListFilters = {}): SQL | 
   if (filters.search) {
     const pattern = `%${filters.search.replace(/[\\%_]/g, character => `\\${character}`)}%`;
     conditions.push(or(ilike(inboundShipments.shipmentNumber, pattern), ilike(inboundShipments.carrierName, pattern),
-      ilike(inboundShipments.containerNumber, pattern))!);
+      ilike(inboundShipments.containerNumber, pattern), sql`EXISTS (
+        SELECT 1 FROM procurement.inbound_shipment_lines sl
+        LEFT JOIN procurement.purchase_order_lines pol ON pol.id=sl.purchase_order_line_id
+        LEFT JOIN procurement.purchase_orders po ON po.id=sl.purchase_order_id OR po.id=pol.purchase_order_id
+        WHERE sl.inbound_shipment_id=${inboundShipments.id}
+          AND (po.po_number ILIKE ${pattern} OR sl.sku ILIKE ${pattern} OR pol.sku ILIKE ${pattern})
+      )`)!);
   }
   return and(...conditions);
 }

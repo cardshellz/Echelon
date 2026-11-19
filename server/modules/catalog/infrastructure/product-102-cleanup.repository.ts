@@ -6,12 +6,14 @@ import type {
   Product102CleanupTransactionPort,
   StoredCleanupReceipt,
 } from "../application/product-102-cleanup.service";
-import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
-import { correctProduct102CountIdentity } from "../../inventory/infrastructure/product-102-count-identity.repository";
+import {
+  correctProduct102CountIdentity,
+  lockInventoryCostGraph,
+} from "../../inventory/catalog-inventory.api";
 import {
   correctProduct102PurchasingIdentity,
   recordProduct102PurchasingCleanupAudit,
-} from "../../procurement/product-102-identity-cleanup.repository";
+} from "../../procurement/catalog-identity-coordination.api";
 import {
   PRODUCT_102_CLEANUP_KEY,
   PRODUCT_102_COUNT_IDS,

@@ -347,7 +347,7 @@ describe("lockCatalog", () => {
     }));
 
     expect(client.afterOwner()).toEqual([
-      "LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selection_rules, "
+      "LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selected_variants, "
         + "dropship.dropship_vendor_variant_overrides, catalog.product_line_products IN SHARE MODE",
       "SELECT id FROM catalog.product_categories WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE",
       "SELECT id FROM catalog.products WHERE id = ANY($1::int[]) ORDER BY id FOR SHARE",
@@ -580,8 +580,10 @@ describe("sizePrice (W9's own transaction for one size)", () => {
     expect(result).toMatchObject({ saved: { productVariantId: 101, revisionId: 31, overridePriceCents: 1299 }, idempotentReplay: false });
     const insert = client.sql.findIndex((sql) => sql.startsWith("INSERT INTO dropship.dropship_listing_price_revisions"));
     expect(client.params[insert]).toEqual([VENDOR, STORE, 101, null, 1299, childKey, HASH, MEMBER, NOW, "fixed"]);
-    const audit = client.sql.findIndex((sql) => sql.includes("'listing_price_saved','vendor'"));
+    // The audit's actor type is its last parameter (eBay sync-back writes the same row as the system): here the vendor.
+    const audit = client.sql.findIndex((sql) => sql.includes("'listing_price_saved',$7"));
     expect(client.params[audit].slice(0, 4)).toEqual([VENDOR, STORE, "101", MEMBER]);
+    expect(client.params[audit][6]).toBe("vendor");
     expect(client.sql.at(-1)).toBe("COMMIT");
   });
 
@@ -1139,7 +1141,7 @@ describe("the W5 reads (plan PR 9, 6.2 #1, #2, #6)", () => {
   it("types tx.catalog without the readers that commit on the transaction's client (plan 6.2 #2, R9)", () => {
     type Catalog = ListingSettingWriteTransaction["catalog"];
     expectTypeOf<keyof Catalog>().toEqualTypeOf<"loadStoreContext" | "listCatalogCandidates" | "listCatalogExposureRules"
-      | "listSelectionRules" | "listVariantOverrides" | "listExistingListings" | "listSavedListingPrices" | "listPricingPolicies"
+      | "listPickedVariantIds" | "listVariantOverrides" | "listExistingListings" | "listSavedListingPrices" | "listPricingPolicies"
       | "getStoreListingConfig">();
     expectTypeOf<keyof ListingSettingPreflightTransaction["catalog"]>().toEqualTypeOf<"loadStoreContext" | "getStoreListingConfig">();
     // Never called: these lines are checked by the compiler (npm run check:tests). The first three are the

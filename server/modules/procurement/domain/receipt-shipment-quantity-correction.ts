@@ -207,6 +207,7 @@ export function planQuantityCorrection(
       "Received pieces cannot exceed the corrected shipment quantity.",
     );
   if (
+    !input.repairCostLinks &&
     input.shippedPieces === facts.shippedPieces &&
     receipts.every(
       (receipt) =>

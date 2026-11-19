@@ -11,7 +11,7 @@ import {
   type QuantityCorrectionSummary,
   type QuantityCorrectionPurpose,
 } from "@shared/procurement/receipt-shipment-quantity-correction";
-import { readPurchaseApprovalActor } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApprovalActor } from "../identity/purchase-approval-authority.api";
 import {
   costFingerprint,
   costInteger,
@@ -441,6 +441,7 @@ export async function persistQuantityCorrection(
     totalVolumeCbm: string;
     chargeableWeightKg: string;
   },
+  costLinkRepairEvidence?: Record<string, unknown>,
 ): Promise<number> {
   const { shipment, shipmentLines, po, poLines } = source.evidence;
   const line = shipmentLines.find(
@@ -451,7 +452,8 @@ export async function persistQuantityCorrection(
     await tx.execute(sql`INSERT INTO procurement.receipt_shipment_quantity_amendments
     (inbound_shipment_line_id,purchase_order_line_id,source_version,actor_id,actor_name,reason,approved_at,evidence)
     VALUES(${line.id},${poLine.id},${source.sourceVersion},${actorId},${actorName},${input.reason},${now},
-      ${canonicalJson({ contractVersion: 1, purpose, before: source.evidence, input, plan, authority: source.actor })}::jsonb) RETURNING id`);
+      ${canonicalJson({ contractVersion: 1, purpose, before: source.evidence, input, plan, authority: source.actor,
+        ...(costLinkRepairEvidence ? { costLinkRepairEvidence } : {}) })}::jsonb) RETURNING id`);
   const amendmentId = costInteger(audit.rows[0]?.id, "amendmentId", 1);
   for (const receipt of purpose === "receipt" ? plan.receipts : []) {
     await tx.execute(sql`UPDATE procurement.receiving_lines SET units_per_variant_snapshot=${receipt.afterPiecesPerUnit},

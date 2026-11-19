@@ -287,6 +287,7 @@ export function createEbayBusinessPolicyService(
       product: EbayPolicyValues;
       byVariantId: Map<number, EbayAvailablePolicyValues>;
       provenanceByVariantId: Map<number, EbayResolvedPolicies>;
+      packageRequirementsByVariantId: Map<number, import("@shared/catalog/shipping-package").ChannelPackageRequirements>;
     }> {
       const productId = z
           .number()
@@ -358,7 +359,13 @@ export function createEbayBusinessPolicyService(
             ),
           );
         }
-        return { scope, product, byVariantId, provenanceByVariantId };
+        const packageRequirementsByVariantId = new Map([...byVariantId].map(([variantId, policies]) => {
+          const requirements = catalog.fulfillmentPolicies.find(policy => policy.id === policies.fulfillmentPolicyId)?.packageRequirements;
+          if (!requirements) throw new EbayBusinessPolicyError("EBAY_POLICY_CATALOG_UNAVAILABLE",
+            "The selected shipping policy's package requirements could not be verified. Reload policies and retry.", 502);
+          return [variantId, requirements] as const;
+        }));
+        return { scope, product, byVariantId, provenanceByVariantId, packageRequirementsByVariantId };
       });
     },
   };

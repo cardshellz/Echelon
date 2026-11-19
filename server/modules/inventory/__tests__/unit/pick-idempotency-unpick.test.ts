@@ -46,7 +46,8 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
       transaction: vi.fn(),
     } as any;
 
-    const svc = new InventoryLotService(db);
+    const clock = vi.fn(() => { throw new Error("A replay must not read the clock"); });
+    const svc = new InventoryLotService(db, clock);
     const result = await svc.pickFromLots({
       productVariantId: 10,
       warehouseLocationId: 20,
@@ -61,6 +62,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
     ]);
     expect(db.insert).not.toHaveBeenCalled();
     expect(inventoryWrites(db)).toHaveLength(0);
+    expect(clock).not.toHaveBeenCalled();
   });
 
   /**
@@ -109,7 +111,9 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
       transaction: vi.fn(),
     } as any;
 
-    const svc = new InventoryLotService(db);
+    const instant = new Date("2026-10-05T14:54:13.394Z");
+    const clock = vi.fn(() => instant);
+    const svc = new InventoryLotService(db, clock);
     const result = await svc.pickFromLots({
       productVariantId: 10,
       warehouseLocationId: 20,
@@ -128,8 +132,35 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
       qty: 3,
       unitCostCents: 500,
       totalCostCents: 1500,
+      createdAt: instant,
     });
+    expect(clock).toHaveBeenCalledTimes(1);
+    expect(insertedCosts[0].createdAt).not.toBe(instant);
+    const { orderItemCosts } = await import("@shared/schema");
+    expect(orderItemCosts.createdAt.mapToDriverValue(insertedCosts[0].createdAt))
+      .toBe("2026-10-05T14:54:13.394Z");
   });
+
+  it.each([new Date(Number.NaN), undefined, null, "2026-10-05T14:54:13.394Z"])(
+    "rejects invalid injected pick timestamp %s before allocating or changing inventory",
+    async (invalidInstant) => {
+      process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+      const { InventoryLotService } = await import("../../lots.service");
+      const db = {
+        select: vi.fn(() => ({ from: vi.fn().mockReturnThis(), where: vi.fn().mockResolvedValue([]) })),
+        execute: vi.fn(), insert: vi.fn(), update: vi.fn(), delete: vi.fn(), transaction: vi.fn(),
+      } as any;
+      const clock = vi.fn(() => invalidInstant as Date);
+      await expect(new InventoryLotService(db, clock).pickFromLots({
+        productVariantId: 10, warehouseLocationId: 20, qty: 1, orderId: 100, orderItemId: 200,
+      })).rejects.toThrow("The lot-pick clock must return a valid date");
+      expect(clock).toHaveBeenCalledTimes(1);
+      expect(db.execute).not.toHaveBeenCalled();
+      expect(db.insert).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+      expect(db.delete).not.toHaveBeenCalled();
+    },
+  );
 
   it("appends only the next pick delta when prior COGS matches WMS progress", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";

@@ -34,6 +34,7 @@ function command(overrides: Partial<ClaimedChannelFulfillmentCommand> = {}): Cla
     items: Object.freeze([{
       physicalShipmentItemId: 300,
       packageAllocationEntryId: null,
+      packageAllocationEffectIntentId: null,
       shipmentRequestItemId: 250,
       legacyWmsShipmentId: 501,
       legacyWmsShipmentItemId: 700,
@@ -60,6 +61,20 @@ function repositoryMock(
 }
 
 describe("channel fulfillment authority service", () => {
+  it("uses the reconciliation projector for automatic relabel recovery", async () => {
+    const repository = { ...repositoryMock([]),
+      reconcileEbayLabelReplacement: vi.fn().mockResolvedValue({ outcome: "applied", materialized: { physicalShipmentId: 9001 } }),
+      markEbayLabelReplacementProjected: vi.fn() };
+    const projector = { projectPhysicalShipment: vi.fn(), projectReconciledPhysicalShipment: vi.fn() };
+    const now = new Date("2026-10-28T12:00:00Z");
+    const service = createChannelFulfillmentAuthorityService({ repository, projector,
+      providerExecutor: { execute: vi.fn() }, clock: { now: () => now } });
+    await service.reconcileEbayLabelReplacement!(123);
+    expect(projector.projectReconciledPhysicalShipment).toHaveBeenCalledWith(9001);
+    expect(projector.projectPhysicalShipment).not.toHaveBeenCalled();
+    expect(repository.markEbayLabelReplacementProjected).toHaveBeenCalledWith(123, now);
+  });
+
   it("uses a request-bound audited suppression and retains its provenance in the attempt", async () => {
     const notificationSuppression = { requeueId: 11, requestHash: command().requestHash,
       operator: "user:7", reason: "Silent historical recovery", notifyCustomer: false as const };
@@ -313,17 +328,13 @@ describe("channel fulfillment authority service", () => {
       trackingUrl: null,
       serviceCode: null,
       shippedAt: new Date("2026-07-22T12:00:00.000Z"),
-      source: "shipstation",
-      correlationId: null,
-      causationId: null,
-      legacyHeaderPolicy: "strict",
     });
     vi.mocked(repository.materializePhysicalPackage).mockResolvedValue({
       physicalShipmentId: 200,
-      shipmentRequestId: 201,
-      fulfillmentPlanIds: Object.freeze([202]),
+      shippingEngineOrderId: 201,
       channelCommands: Object.freeze([]),
-      replayed: false,
+      customerFulfillmentItemCount: 1,
+      nonCustomerItemCount: 0,
     });
     const projector = { projectPhysicalShipment: vi.fn().mockResolvedValue(undefined) };
     const service = createChannelFulfillmentAuthorityService({
@@ -360,6 +371,7 @@ describe("channel fulfillment authority service", () => {
     const now = new Date("2026-07-22T12:00:00.000Z");
     const service = createChannelFulfillmentAuthorityService({
       repository,
+      projector: { projectPhysicalShipment: vi.fn() },
       providerExecutor,
       clock: { now: () => now },
       createLeaseToken: () => "lease-1",
@@ -377,6 +389,21 @@ describe("channel fulfillment authority service", () => {
     }));
   });
 
+  it("continues authorized commands when replacement recovery discovery fails", async () => {
+    const repository = repositoryMock([command()]);
+    repository.findWaitingEbayLabelReplacements = vi.fn().mockRejectedValue(new Error("Correction discovery unavailable"));
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const execute = vi.fn().mockResolvedValue({ outcome: "success", providerResponseId: "gid://shopify/Fulfillment/1" });
+    const service = createChannelFulfillmentAuthorityService({ repository,
+      projector: { projectPhysicalShipment: vi.fn() },
+      providerExecutor: { execute }, logger,
+      clock: { now: () => new Date("2026-07-22T12:00:00Z") } });
+    expect(await service.runDueBatch()).toMatchObject({ claimed: 1, succeeded: 1 });
+    expect(execute).toHaveBeenCalledOnce();
+    expect(logger.error).toHaveBeenCalledWith({ code: "LABEL_REPLACEMENT_RECOVERY_DISCOVERY_FAILED",
+      error: "Correction discovery unavailable" });
+  });
+
   it("schedules deterministic exponential retry after a transient failure", async () => {
     const repository = repositoryMock([command({ attemptNumber: 3 })]);
     const providerExecutor = {
@@ -385,6 +412,7 @@ describe("channel fulfillment authority service", () => {
     const now = new Date("2026-07-22T12:00:00.000Z");
     const service = createChannelFulfillmentAuthorityService({
       repository,
+      projector: { projectPhysicalShipment: vi.fn() },
       providerExecutor,
       clock: { now: () => now },
       createLeaseToken: () => "lease-1",
@@ -410,6 +438,7 @@ describe("channel fulfillment authority service", () => {
     };
     const service = createChannelFulfillmentAuthorityService({
       repository,
+      projector: { projectPhysicalShipment: vi.fn() },
       providerExecutor,
       createLeaseToken: () => "lease-1",
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -428,6 +457,7 @@ describe("channel fulfillment authority service", () => {
     const repository = repositoryMock([command({ attemptNumber: 12, maxAttempts: 12 })]);
     const service = createChannelFulfillmentAuthorityService({
       repository,
+      projector: { projectPhysicalShipment: vi.fn() },
       providerExecutor: { execute: vi.fn().mockRejectedValue(new Error("provider unavailable")) },
       createLeaseToken: () => "lease-1",
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
@@ -459,6 +489,7 @@ describe("channel fulfillment authority service", () => {
         {
           physicalShipmentItemId: 301,
           packageAllocationEntryId: null,
+          packageAllocationEffectIntentId: null,
           shipmentRequestItemId: 251,
           legacyWmsShipmentId: 502,
           legacyWmsShipmentItemId: 701,
@@ -469,6 +500,7 @@ describe("channel fulfillment authority service", () => {
         {
           physicalShipmentItemId: 300,
           packageAllocationEntryId: null,
+          packageAllocationEffectIntentId: null,
           shipmentRequestItemId: 250,
           legacyWmsShipmentId: 501,
           legacyWmsShipmentItemId: 700,
@@ -553,6 +585,7 @@ describe("channel fulfillment authority service", () => {
         {
           physicalShipmentItemId: 300,
           packageAllocationEntryId: null,
+          packageAllocationEffectIntentId: null,
           shipmentRequestItemId: 250,
           legacyWmsShipmentId: 501,
           legacyWmsShipmentItemId: 700,
@@ -563,6 +596,7 @@ describe("channel fulfillment authority service", () => {
         {
           physicalShipmentItemId: 301,
           packageAllocationEntryId: null,
+          packageAllocationEffectIntentId: null,
           shipmentRequestItemId: 251,
           legacyWmsShipmentId: 502,
           legacyWmsShipmentItemId: 701,
@@ -604,6 +638,7 @@ describe("channel fulfillment authority service", () => {
         items: Object.freeze([{
           physicalShipmentItemId: 300,
           packageAllocationEntryId: null,
+          packageAllocationEffectIntentId: null,
           shipmentRequestItemId: 250,
           legacyWmsShipmentId: 501,
           legacyWmsShipmentItemId: 700,
@@ -733,6 +768,7 @@ describe("channel fulfillment authority service", () => {
       const permanentRepository = repositoryMock([dropshipCommand()]);
       const permanent = createChannelFulfillmentAuthorityService({
         repository: permanentRepository,
+        projector: { projectPhysicalShipment: vi.fn() },
         providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor({
           pushDropshipTrackingForShipmentCommand: vi.fn().mockRejectedValue(
             new ChannelFulfillmentProviderError("DROPSHIP_EBAY_TRACKING_HTTP_ERROR", "HTTP 400", "permanent"),
@@ -751,6 +787,7 @@ describe("channel fulfillment authority service", () => {
       const transientRepository = repositoryMock([dropshipCommand()]);
       const transient = createChannelFulfillmentAuthorityService({
         repository: transientRepository,
+        projector: { projectPhysicalShipment: vi.fn() },
         providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor({
           pushDropshipTrackingForShipmentCommand: vi.fn().mockRejectedValue(
             new ChannelFulfillmentProviderError("DROPSHIP_TRACKING_PUSH_IN_PROGRESS", "busy", "transient"),

@@ -51,6 +51,27 @@ export const DROPSHIP_NOTIFICATION_EVENTS = {
   COST_CHANGE_LISTINGS_PAUSED: "dropship_cost_change_listings_paused",
   /** Paused listings selling again because their price covers the cost (cost change controls, C5). */
   COST_CHANGE_LISTINGS_RESUMED: "dropship_cost_change_listings_resumed",
+  // PROPOSED (sync-back): eBay sync-back's listing notices (owner rule 7a-c). A shipping policy Card Shellz can't ship
+  // under, a changed custom label, or a listing Card Shellz can no longer find: always sent (critical).
+  EBAY_LISTING_ACTION_NEEDED: "dropship_ebay_listing_action_needed",
+  // PROPOSED (sync-back): an eBay price below the Card Shellz cost, or a listing Card Shellz can no longer update.
+  EBAY_LISTING_WARNING: "dropship_ebay_listing_warning",
+  // PROPOSED (sync-back): good news about an eBay listing, e.g. a shipping policy the vendor was told about works again.
+  EBAY_LISTING_UPDATE: "dropship_ebay_listing_update",
+  // PROPOSED (sync-back): an accepted order eBay cancelled that Card Shellz could not stop (owner rule 7d): always sent.
+  EBAY_ORDER_ACTION_NEEDED: "dropship_ebay_order_action_needed",
+  // PROPOSED (sync-back): an order eBay cancelled and Card Shellz refunded to the wallet, or an order on an eBay item
+  // number Card Shellz does not know (owner rule 7d).
+  EBAY_ORDER_UPDATE: "dropship_ebay_order_update",
+  // PROPOSED (step 1 plan B v4): Card Shellz added items to a category the vendor sells from (PLAN-B v4.1 §11.1,
+  // §11.3); at most one a day, never critical, so a vendor may mute it. Nothing is added until the vendor saves.
+  CATALOG_NEW_ITEMS: "dropship_catalog_new_items",
+  // PROPOSED (step 1 plan B v4): the vendor's rule that added new items by itself became one-time picks at PR B's
+  // release (§11.2 d); once per vendor, never critical.
+  SELECTION_RULES_CONVERTED: "dropship_selection_rules_converted",
+  // PROPOSED (Stage 4, step 1 plan S2-5): Card Shellz could not end some eBay listings the vendor removed in step 1
+  // (PLAN-C v4.1 §5.7); critical, one per vendor per worker tick that failed any of its ends.
+  LISTING_END_FAILED: "dropship_listing_end_failed",
 } as const;
 
 export type DropshipNotificationEventType =

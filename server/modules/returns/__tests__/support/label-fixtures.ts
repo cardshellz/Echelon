@@ -55,10 +55,12 @@ export const labelPolicy: ReturnPolicySnapshot = {
 };
 
 export function labelActivePolicy(
-  overrides: Partial<ReturnPolicy> = {},
-): ReturnPolicy {
+  overrides: Partial<ReturnPolicy& { shipping: CustomerReturnLabelSettings | null }
+  > = {},
+): ReturnPolicy & { shipping: CustomerReturnLabelSettings | null } {
   return {
     ...labelPolicy,
+    shipping: labelSettings,
     businessContext: "retail",
     channelId: null,
     vendorId: null,

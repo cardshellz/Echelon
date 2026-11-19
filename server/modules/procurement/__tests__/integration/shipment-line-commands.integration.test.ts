@@ -9,6 +9,9 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
+import { createShipmentEditorService, shipmentEditorScope } from "../../shipment-editor.service";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import type { ShipmentEditorRequest } from "@shared/procurement/shipment-editor";
 import { shipmentLineVersion } from "../../shipment-line-version";
 import type { ShipmentLineCommand } from "../../shipment-line-commands";
 import type { ShipmentTrackingService } from "../../shipment-tracking.service";
@@ -22,11 +25,12 @@ const databaseTests = TEST_DB_URL && DISPOSABLE ? describe : describe.skip;
 const NOW = new Date("2026-09-06T16:00:00.000Z");
 
 const TABLES = [
+  schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
   schema.products, schema.productVariants, schema.vendors, schema.vendorProducts,
   schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory, schema.inventoryLots,
 ] as const;
 
@@ -146,7 +150,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       throw new Error("Shipment line tests require a separate explicitly disposable database");
     }
     pool = new pg.Pool({ connectionString: TEST_DB_URL, max: 8, ssl: /localhost|127\.0\.0\.1/.test(TEST_DB_URL!) ? false : { rejectUnauthorized: false } });
-    for (const name of ["catalog", "procurement", "inventory"]) {
+    for (const name of ["catalog", "procurement", "inventory", "identity"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
     }
@@ -196,7 +200,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       commandModule = commands;
       repositoryFactory = repositoryModule.createDrizzleFinancialCommandRepository;
       defaultModulePool = databaseModule.pool;
-      service = createService(database, storage as Parameters<typeof createService>[1], undefined, () => NOW);
+      service = createService(database, storage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     } finally {
       if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = previousDatabaseUrl;
@@ -206,9 +210,14 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   });
 
   beforeEach(async () => {
-    if (ownedSchemas.length !== 3) throw new Error("Fixture schema ownership was not established");
+    if (ownedSchemas.length !== 4) throw new Error("Fixture schema ownership was not established");
     await resetQuantityAmendmentFixture(pool, `TRUNCATE ${TABLES.map(qualifiedTable).join(", ")} RESTART IDENTITY CASCADE`);
     await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]]);
+    await pool.query("INSERT INTO identity.users(id,username,password,active) VALUES($1,'test-admin','unused',1)", [actorId]);
+    await pool.query(`INSERT INTO identity.auth_roles(id,name,is_system) VALUES(1,'Administrator',1);
+      INSERT INTO identity.auth_permissions(id,resource,action,category) VALUES(1,'purchasing','approve','purchasing');
+      INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,1);`);
+    await pool.query("INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES($1,1)", [actorId]);
     await pool.query(`
       INSERT INTO catalog.products(id,sku,name) VALUES(100,'TEST-PRODUCT','Fixture product'),(101,'TEST-OTHER','Other product');
       INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit)
@@ -234,7 +243,10 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     try {
       if (pool) {
         const cleanup: Array<() => Promise<unknown>> = [];
-        if (commandTablesReady) cleanup.push(() => pool.query("DELETE FROM public.financial_command_results WHERE actor_id=$1 AND idempotency_key LIKE $2", ["procurement.shipment-line", `${runId}-%`]));
+        if (commandTablesReady) cleanup.push(() => pool.query(
+          "DELETE FROM public.financial_command_results WHERE (actor_id=$1 AND idempotency_key LIKE $2) OR (actor_id=$3 AND idempotency_key LIKE $4)",
+          ["procurement.shipment-line", `${runId}-%`, actorId, `editor-${runId}-%`],
+        ));
         if (ownsAudit) cleanup.push(() => pool.query("DROP TABLE public.audit_events"));
         else if (auditReady) cleanup.push(() => pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]]));
         // Both schemas are created only by this suite; never drop pre-existing schemas.
@@ -250,6 +262,102 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     }
   });
 
+  function editorDescriptor(body: unknown, key = `editor-${runId}-${randomUUID()}`): FinancialCommandDescriptor {
+    return { actorType: "user", actorId, ...shipmentEditorScope(1), idempotencyKey: key,
+      requestHash: createHash("sha256").update(canonicalJson(body)).digest("hex"), contractVersion: 1 };
+  }
+  async function editorRequest(): Promise<ShipmentEditorRequest> {
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    return { sourceVersion: (await editor.context(1, actorId)).sourceVersion,
+      reason: "Reviewed supplier manifest with the corrected delivery contents", changes: [], removals: [],
+      additions: [{ clientKey: randomUUID(), purchaseOrderId: 19, purchaseOrderLineId: 29, quantityPieces: 20,
+        unitSelection: { productVariantId: 300, unitsPerVariant: 10, quantity: 2 } }] };
+  }
+  it("previews and approves an atomic multi-PO edit with exact shares and durable replay", async () => {
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request = await editorRequest();
+    request.changes = [{ lineId: 11, fields: { qtyShipped: 400, cartonCount: 3, dimensionBasis: "carton", weightKg: "2.500", notes: "Corrected manifest" } }];
+    const before = await state();
+    const preview = await editor.preview(1, request, actorId);
+    expect(await state()).toEqual(before);
+    expect(preview.review.costShares).toEqual([
+      { purchaseOrderId: 10, poNumber: "TEST-PO", beforeCents: 500, afterCents: 250 },
+      { purchaseOrderId: 19, poNumber: "TEST-OTHER-PO", beforeCents: 0, afterCents: 250 },
+    ]);
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    const command = editorDescriptor(body);
+    const saved = await editor.approve(1, body, actorId, command);
+    expect(saved).toMatchObject({ httpStatus: 200, replayed: false, body: { preview, actorName: "test-admin" } });
+    const after = await state();
+    expect(await editor.approve(1, body, actorId, command)).toMatchObject({ httpStatus: 200, replayed: true, body: saved.body });
+    expect(await state()).toEqual(after);
+    expect((await readLine()).qtyShipped).toBe(400);
+    expect((await pool.query("SELECT actual_cents FROM procurement.inbound_freight_costs WHERE id=31")).rows[0].actual_cents).toBe("500");
+    expect((await pool.query("SELECT changes FROM public.audit_events WHERE action='procurement.shipment.editor.approved'")).rows).toHaveLength(1);
+  });
+  it("replaces the final shipment line in one approval without an empty intermediate allocation", async () => {
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request = { ...await editorRequest(), removals: [11] };
+    const preview = await editor.preview(1, request, actorId);
+    expect(preview.review.after).toMatchObject([{ purchaseOrderId: 19, allocatedCostCents: 500 }]);
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    const outcomes = await Promise.all([editor.approve(1, body, actorId, editorDescriptor(body)), editor.approve(1, body, actorId, editorDescriptor(body))]);
+    expect(outcomes.map(value => value.httpStatus).sort()).toEqual([200, 409]);
+    expect((await pool.query("SELECT purchase_order_id,qty_shipped,allocated_cost_cents FROM procurement.inbound_shipment_lines WHERE inbound_shipment_id=1")).rows).toEqual([{ purchase_order_id: 19, qty_shipped: 20, allocated_cost_cents: "500" }]);
+  });
+  it("uses explicit carton measurements for new volume-allocated lines and preserves the charge", async () => {
+    await pool.query("UPDATE procurement.inbound_freight_costs SET allocation_method='by_volume' WHERE id=31");
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request = { ...await editorRequest(), removals: [11] };
+    request.additions[0].packing = { cartonCount: 2, dimensionBasis: "carton", weightKg: "3.000", lengthCm: "50.00", widthCm: "40.00", heightCm: "30.00" };
+    const preview = await editor.preview(1, request, actorId);
+    expect(preview.review.after).toMatchObject([{ fields: { qtyShipped: 20, cartonCount: 2 }, totalWeightKg: "6.000", totalVolumeCbm: "0.120000", allocatedCostCents: 500 }]);
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    expect(await editor.approve(1, body, actorId, editorDescriptor(body))).toMatchObject({ httpStatus: 200 });
+  });
+  it("protects directly linked receipt lines even when their receipt header has no shipment link", async () => {
+    await pool.query(`INSERT INTO procurement.receiving_orders(id,receipt_number,purchase_order_id,status) VALUES(70,'DIRECT-RECEIPT',10,'draft');
+      INSERT INTO procurement.receiving_lines(receiving_order_id,purchase_order_line_id,inbound_shipment_line_id,product_variant_id,expected_qty) VALUES(70,21,11,200,2)`);
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    expect((await editor.context(1, actorId)).blockedReason).toContain("receiving history");
+    const before = await state();
+    await expect(execute(await remove())).rejects.toMatchObject({ details: { code: "SHIPMENT_LINE_HISTORY_PROTECTED" } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("rejects changed charges, revoked approval and protected receiving history without mutations", async () => {
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request = await editorRequest();
+    const preview = await editor.preview(1, request, actorId);
+    await pool.query("UPDATE procurement.inbound_freight_costs SET actual_cents=600 WHERE id=31");
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    const before = await state();
+    expect(await editor.approve(1, body, actorId, editorDescriptor(body))).toMatchObject({ httpStatus: 409 });
+    expect(await state()).toEqual(before);
+    await pool.query("DELETE FROM identity.auth_role_permissions");
+    await expect(editor.preview(1, await editorRequest(), actorId)).rejects.toMatchObject({ statusCode: 403 });
+    await pool.query("INSERT INTO identity.auth_role_permissions(role_id,permission_id) VALUES(1,1)");
+    await pool.query("INSERT INTO procurement.receiving_orders(receipt_number,inbound_shipment_id,purchase_order_id,status) VALUES('TEST-RECEIPT',1,10,'draft')");
+    const protectedBefore = await state();
+    await expect(editor.preview(1, await editorRequest(), actorId)).rejects.toMatchObject({ details: { code: "SHIPMENT_EDITOR_HISTORY" } });
+    expect(await state()).toEqual(protectedBefore);
+  });
+  it("rolls back all line changes if the final audit history fails", async () => {
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request = { ...await editorRequest(), removals: [11] };
+    const preview = await editor.preview(1, request, actorId);
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    const before = await state();
+    await pool.query(`CREATE FUNCTION procurement.fail_editor_history() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'test audit failure'; END $$;
+      CREATE TRIGGER editor_history_failure BEFORE INSERT ON procurement.inbound_shipment_status_history FOR EACH ROW EXECUTE FUNCTION procurement.fail_editor_history()`);
+    try {
+      await expect(editor.approve(1, body, actorId, editorDescriptor(body))).rejects.toBeDefined();
+      expect(await state()).toEqual(before);
+    } finally {
+      await pool.query("DROP TRIGGER editor_history_failure ON procurement.inbound_shipment_status_history; DROP FUNCTION procurement.fail_editor_history()");
+    }
+  });
+
   it("preserves 501 pieces and the recorded PO receive pack when the catalog pack has changed", async () => {
     await pool.query("DELETE FROM procurement.inbound_shipment_lines WHERE id=11");
     await pool.query("UPDATE catalog.product_variants SET units_per_variant=500 WHERE id=200");
@@ -258,7 +366,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     const [line] = await database.select().from(schema.inboundShipmentLines);
     expect(line.qtyShipped).toBe(501);
     expect(line.cartonCount).toBe(3);
-    expect((await pool.query("SELECT timestamp,actor FROM public.audit_events WHERE actor=$1", [actorId])).rows).toEqual([{ timestamp: NOW, actor: actorId }]);
+    expect((await pool.query("SELECT timestamp,actor FROM public.audit_events WHERE actor=$1 AND action='procurement.shipment_line.add-from-po'", [actorId])).rows).toEqual([{ timestamp: NOW, actor: actorId }]);
   });
 
   it("migrates legacy shipment rows without guessing units or dimensions and safely replays the migration", async () => {
@@ -360,7 +468,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       { sku: "MISSING-SKU" }, { purchaseOrderLineId: 999 },
       { productVariantId: "200" }, null, { productVariantId: 201, qtyShipped: 1 },
     ] });
-    expect(result.rows.map(({ row, units }) => ({ row, code: units.issue?.code }))).toEqual([
+    expect(result.rows.map(({ row, units }: { row: number; units: { issue?: { code: string } | null } }) => ({ row, code: units.issue?.code }))).toEqual([
       { row: 1, code: "SHIPMENT_UNIT_IDENTITY_CONFLICT" },
       { row: 2, code: "SHIPMENT_UNIT_IDENTITY_CONFLICT" },
       { row: 3, code: "SHIPMENT_UNIT_IDENTITY_CONFLICT" },
@@ -563,7 +671,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       await storage.bulkCreateInboundFreightCostAllocations(...args);
       throw new Error("Injected failure after selected-unit allocation insert");
     } };
-    const failingService = createService(database, failingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const failingService = createService(database, failingStorage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     const before = await state();
     await expect(execute(await patch({ unitSelection: { productVariantId: 201, unitsPerVariant: 1, quantity: 501 } }), failingService))
       .rejects.toThrow("Injected failure after selected-unit allocation insert");
@@ -697,7 +805,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       await storage.bulkCreateInboundFreightCostAllocations(...args);
       throw new Error("Injected failure after actual allocation insert");
     } };
-    const failingService = createService(database, failingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const failingService = createService(database, failingStorage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     const before = await state();
     await expect(execute(fromPo(), failingService)).rejects.toThrow("Injected failure after actual allocation insert");
     expect(await state()).toEqual(before);
@@ -832,7 +940,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       // This fixture proves procurement finalization; no inventory lots are posted.
       async getProvisionalLotsByShipment() { return []; },
     };
-    const closingService = createService(database, closingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const closingService = createService(database, closingStorage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     const closing = outcome(closingService.close(1, actorId, "Fixture close"));
     let editing: ReturnType<typeof startObserved> | undefined;
     try {
@@ -867,6 +975,67 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     expect(audit[0].timestamp).toEqual(NOW);
     expect(audit[0].changes.before).toEqual(expect.arrayContaining([expect.objectContaining({ id: 11, qtyShipped: 500 })]));
     expect(audit[0].changes.after).not.toEqual(expect.arrayContaining([expect.objectContaining({ id: 11 })]));
+  });
+
+  it("keeps a dimensional charge unallocated until saved box measurements exist, then closes using them", async () => {
+    await pool.query("UPDATE procurement.inbound_freight_costs SET allocation_method='by_volume' WHERE id=31");
+    const charges = (await pool.query("SELECT * FROM procurement.inbound_freight_costs ORDER BY id")).rows;
+    expect(await service.runAllocation(1)).toMatchObject({ totalAllocated: 0, pendingCostIds: [31] });
+    expect((await pool.query("SELECT * FROM procurement.inbound_freight_allocations")).rows).toEqual([]);
+    expect(await readLine()).toMatchObject({ allocatedCostCents: null, landedUnitCostCents: null });
+    expect(await service.getAllocationStatus(1, database)).toMatchObject({ status: "needs_allocation", allocatedCostCents: 0, unallocatedCents: 500,
+      costs: [expect.objectContaining({ status: "missing_dimensions", usedFallback: false })] });
+    const pending = await state();
+    await expect(service.close(1, actorId)).rejects.toMatchObject({ details: { code: "MISSING_ALLOCATION_DIMENSIONS" } });
+    expect(await state()).toEqual(pending);
+    await execute(await patch({ cartonCount: 2, dimensionBasis: "carton", weightKg: "3.000", lengthCm: "50.00", widthCm: "40.00", heightCm: "30.00" }));
+    expect(await service.getShipment(1, database)).toMatchObject({ totalWeightKg: "6.000", totalVolumeCbm: "0.120000", totalPieces: 500, totalCartons: 2 });
+    expect(await service.getAllocationStatus(1, database)).toMatchObject({ status: "allocated", allocatedCostCents: 500, unallocatedCents: 0 });
+    const closing = createService(database, { ...storage, async getProvisionalLotsByShipment() { return []; } } as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
+    expect(await closing.close(1, actorId)).toMatchObject({ status: "closed" });
+    expect((await pool.query("SELECT freight_allocated_cents,qty FROM procurement.landed_cost_snapshots")).rows).toEqual([{ freight_allocated_cents: "500", qty: 500 }]);
+    expect((await pool.query("SELECT * FROM procurement.inbound_freight_costs ORDER BY id")).rows).toEqual(charges);
+  });
+
+  it("repairs derived totals from saved measurements after receiving and closes a multi-PO shipment without re-entry", async () => {
+    await pool.query(`UPDATE procurement.inbound_freight_costs SET allocation_method='by_volume' WHERE id=31;
+      UPDATE procurement.purchase_order_lines SET total_product_cost_cents=100000 WHERE id=21;
+      UPDATE procurement.purchase_order_lines SET total_product_cost_cents=10000 WHERE id=29;
+      UPDATE procurement.inbound_shipment_lines SET dimension_basis='carton',weight_kg=2,length_cm=50,width_cm=40,height_cm=30,
+        total_weight_kg=999,total_volume_cbm=0,chargeable_weight_kg=0 WHERE id=11;
+      INSERT INTO procurement.inbound_shipment_lines(id,inbound_shipment_id,purchase_order_id,purchase_order_line_id,product_variant_id,sku,qty_shipped,carton_count,
+        dimension_basis,weight_kg,length_cm,width_cm,height_cm,total_weight_kg,total_volume_cbm,chargeable_weight_kg)
+        VALUES(12,1,19,29,300,'TEST-OTHER',20,1,'carton',3,50,40,30,0,0,0);
+      INSERT INTO procurement.receiving_orders(id,receipt_number,purchase_order_id,inbound_shipment_id,status) VALUES(51,'TEST-RECEIVED',10,1,'closed');
+      INSERT INTO procurement.receiving_lines(id,receiving_order_id,purchase_order_line_id,inbound_shipment_line_id,product_variant_id,received_qty,units_per_variant_snapshot)
+        VALUES(61,51,21,11,200,2,250);`);
+    const protectedBefore = (await pool.query("SELECT * FROM procurement.receiving_orders r JOIN procurement.receiving_lines l ON l.receiving_order_id=r.id")).rows;
+    const measurementsBefore = (await pool.query("SELECT id,qty_shipped,carton_count,dimension_basis,weight_kg,length_cm,width_cm,height_cm FROM procurement.inbound_shipment_lines ORDER BY id")).rows;
+    const chargesBefore = (await pool.query("SELECT * FROM procurement.inbound_freight_costs ORDER BY id")).rows;
+    expect(await service.getShipment(1, database)).toMatchObject({ totalWeightKg: "7.000", totalVolumeCbm: "0.180000" });
+    expect(await service.getAllocationStatus(1, database)).toMatchObject({ costs: [expect.objectContaining({ rawBasisTotal: 0.18 })] });
+    const closing = createService(database, { ...storage, async getProvisionalLotsByShipment() { return []; } } as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
+    expect(await closing.close(1, actorId)).toMatchObject({ status: "closed" });
+    expect((await pool.query("SELECT inbound_shipment_line_id,allocated_cents,basis_evidence->>'usedFallback' AS fallback FROM procurement.inbound_freight_allocations ORDER BY inbound_shipment_line_id")).rows)
+      .toEqual([{ inbound_shipment_line_id: 11, allocated_cents: "333", fallback: "false" }, { inbound_shipment_line_id: 12, allocated_cents: "167", fallback: "false" }]);
+    expect((await pool.query("SELECT inbound_shipment_line_id,freight_allocated_cents FROM procurement.landed_cost_snapshots ORDER BY inbound_shipment_line_id")).rows)
+      .toEqual([{ inbound_shipment_line_id: 11, freight_allocated_cents: "333" }, { inbound_shipment_line_id: 12, freight_allocated_cents: "167" }]);
+    expect((await pool.query("SELECT * FROM procurement.receiving_orders r JOIN procurement.receiving_lines l ON l.receiving_order_id=r.id")).rows).toEqual(protectedBefore);
+    expect((await pool.query("SELECT id,qty_shipped,carton_count,dimension_basis,weight_kg,length_cm,width_cm,height_cm FROM procurement.inbound_shipment_lines ORDER BY id")).rows).toEqual(measurementsBefore);
+    expect((await pool.query("SELECT * FROM procurement.inbound_freight_costs ORDER BY id")).rows).toEqual(chargesBefore);
+    expect((await pool.query("SELECT changes FROM public.audit_events WHERE action='procurement.shipment.physical_totals_materialized' AND actor=$1",[actorId])).rows)
+      .toMatchObject([{ changes: { lines: [{ lineId: 11, before: { totalWeightKg: "999.000" }, after: { totalWeightKg: "4.000" } }, { lineId: 12, after: { totalWeightKg: "3.000" } }] } }]);
+    expect(await service.getAllocationStatus(1, database)).toMatchObject({ status: "allocated" });
+  });
+
+  it("rolls derived-total repairs, allocation, audit and snapshots back if closing fails", async () => {
+    await pool.query(`UPDATE procurement.inbound_shipment_lines SET weight_kg=2,length_cm=20,width_cm=10,height_cm=10,
+      total_weight_kg=999,total_volume_cbm=0,chargeable_weight_kg=0 WHERE id=11`);
+    const before = await state();
+    const closing = createService(database, { ...storage, async createInboundShipmentStatusHistory() { throw new Error("Injected close history failure"); }
+    } as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
+    await expect(closing.close(1, actorId)).rejects.toThrow("Injected close history failure");
+    expect(await state()).toEqual(before);
   });
 
   it("resolves only missing dimensions from real catalog data while preserving existing dimensions and pieces", async () => {
@@ -1021,38 +1190,180 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     expect(await state()).toEqual(afterCancellation);
   });
 
-  it("rejects a negative stored line basis even when another positive line masks the shipment aggregate", async () => {
+  it("rejects a negative saved measurement even when another positive line masks the shipment aggregate", async () => {
     const added = await execute(fromPo()) as Array<{ id: number }>;
     await pool.query("UPDATE procurement.inbound_shipment_lines SET weight_kg=1,carton_count=10,total_weight_kg=10,chargeable_weight_kg=10 WHERE id=$1", [added[0].id]);
-    await pool.query("UPDATE procurement.inbound_shipment_lines SET total_weight_kg=-5 WHERE id=11");
+    await pool.query("UPDATE procurement.inbound_shipment_lines SET weight_kg=-5,total_weight_kg=-5 WHERE id=11");
     expect((await pool.query("SELECT SUM(total_weight_kg)::text AS total FROM procurement.inbound_shipment_lines WHERE inbound_shipment_id=1")).rows).toEqual([{ total: "5.000" }]);
     const before = await state();
     await expect(execute({ operation: "import", resourceId: 1, body: { rows: [{ productVariantId: 300, qtyShipped: 1 }] } }))
-      .rejects.toMatchObject({ statusCode: 422, details: { code: "SHIPMENT_LINE_TOTAL_OVERFLOW" } });
+      .rejects.toMatchObject({ statusCode: 422, details: { code: "SHIPMENT_LINE_INPUT_INVALID" } });
     expect(await state()).toEqual(before);
   });
 
-  it("requires explicit repair of inconsistent positive line bases and resolves them without changing physical evidence", async () => {
+  it("refreshes stale derived caches during an edit without changing the saved measurement evidence", async () => {
     await pool.query("UPDATE procurement.inbound_shipment_lines SET weight_kg=2,length_cm=20,width_cm=10,height_cm=10,total_weight_kg=9,total_volume_cbm=0.004,chargeable_weight_kg=4 WHERE id=11");
-    const before = await state();
-    await expect(execute(fromPo())).rejects.toMatchObject({
-      statusCode: 409, details: { code: "SHIPMENT_LINE_TOTALS_REVIEW_REQUIRED", lineId: 11, field: "totalWeightKg" },
-    });
-    expect(await state()).toEqual(before);
-    expect(await execute({ operation: "resolve-dimensions", resourceId: 1, body: {} })).toEqual({ updated: 1, total: 1, reviewRequiredLines: [] });
+    expect(await execute(fromPo())).toMatchObject([{ purchaseOrderLineId: 22, qtyShipped: 40 }]);
     expect(await readLine()).toMatchObject({
       qtyShipped: 500, cartonCount: 2, weightKg: "2.000", lengthCm: "20.00", widthCm: "10.00", heightCm: "10.00",
       totalWeightKg: "4.000", totalVolumeCbm: "0.004000", chargeableWeightKg: "4.000", updatedAt: NOW,
     });
     expect((await pool.query("SELECT total_weight_kg,total_volume_cbm FROM procurement.inbound_shipments WHERE id=1")).rows)
       .toEqual([{ total_weight_kg: "4.000", total_volume_cbm: "0.004000" }]);
-    const audit = (await pool.query("SELECT timestamp,changes FROM public.audit_events WHERE actor=$1 AND action='procurement.shipment_line.resolve-dimensions'", [actorId])).rows;
+    const audit = (await pool.query("SELECT timestamp,changes FROM public.audit_events WHERE actor=$1 AND action='procurement.shipment.physical_totals_materialized'", [actorId])).rows;
     expect(audit).toHaveLength(1);
     expect(audit[0]).toMatchObject({
       timestamp: NOW,
-      changes: { before: [{ id: 11, totalWeightKg: "9.000" }], after: [{ id: 11, totalWeightKg: "4.000", qtyShipped: 500 }] },
+      changes: { lines: [{ lineId: 11, before: { totalWeightKg: "9.000" }, after: { totalWeightKg: "4.000" } }] },
     });
-    expect(await execute(fromPo())).toMatchObject([{ purchaseOrderLineId: 22, qtyShipped: 40 }]);
+  });
+
+  it("allows an incomplete draft, then books and ships only after the reviewed configuration is saved", async () => {
+    await pool.query("UPDATE procurement.purchase_order_lines SET expected_receive_variant_id=NULL,product_variant_id=NULL WHERE id=22");
+    const [added] = await execute(fromPo(2, 40, 22)) as Array<{ id: number }>;
+    expect(await service.getReceivingSetup(2)).toMatchObject({ ready: false, issueCount: 1 });
+    const before = await state();
+    await expect(service.book(2, actorId)).rejects.toMatchObject({ statusCode: 409, details: { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED" } });
+    expect(await state()).toEqual(before);
+    await pool.query("INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,uom_type,is_base_unit) VALUES(900,100,'TEST-RECEIVE-10','Pack of ten',10,'pack',false)");
+    await execute(await patch({ qtyShipped: 40, unitSelection: { productVariantId: 900, unitsPerVariant: 10, quantity: 4 } }, added.id));
+    expect(await service.getReceivingSetup(2)).toMatchObject({ ready: true, lines: [{ pieces: 40, count: 4 }] });
+    await service.book(2, actorId); await service.markInTransit(2, actorId);
+    expect((await pool.query("SELECT status FROM procurement.inbound_shipments WHERE id=2")).rows[0].status).toBe("in_transit");
+    expect(await readLine(added.id)).toMatchObject({ qtyShipped: 40, productVariantId: 900, unitsPerVariantSnapshot: 10 });
+    expect((await pool.query("SELECT to_status FROM procurement.inbound_shipment_status_history WHERE inbound_shipment_id=2 ORDER BY id")).rows)
+      .toEqual([{ to_status: "booked" }, { to_status: "in_transit" }]);
+  });
+
+  it("rejects an edit that would invalidate a booked shipment and preserves its prior costs and quantities", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='booked' WHERE id=1");
+    const before = await state();
+    await expect(execute(await patch({ qtyShipped: 501 }))).rejects.toMatchObject({ details: { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED" } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("rechecks catalog changes at departure without changing the saved shipment or charge", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    await service.book(1, actorId);
+    await pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=200");
+    const before = await state();
+    await expect(service.markInTransit(1, actorId)).rejects.toMatchObject({ details: { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED" } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("includes every PO on a multi-PO shipment in its receiving readiness check", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    await execute({ operation: "add-from-po", resourceId: 1, body: { purchaseOrderId: 19, lineSelections: [{ poLineId: 29, qty: 20,
+      unitSelection: { productVariantId: 300, unitsPerVariant: 10, quantity: 2 } }] } });
+    const setup = await service.getReceivingSetup(1);
+    expect(setup.ready).toBe(true);
+    expect(setup.lines.map((line: { purchaseOrderId: number | null }) => line.purchaseOrderId).sort((left: number | null, right: number | null) => left! - right!)).toEqual([10, 19]);
+    await pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=300");
+    const before = await state();
+    await expect(service.book(1, actorId)).rejects.toMatchObject({ details: { receivingSetup: { issueCount: 1 } } });
+    expect(await state()).toEqual(before);
+  });
+
+  it("previews a configuration-only admin edit, posts it once, and preserves the physical piece and charge totals", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='booked' WHERE id=1");
+    await pool.query("UPDATE procurement.inbound_shipment_lines SET product_variant_id=NULL,units_per_variant_snapshot=NULL WHERE id=11");
+    await pool.query("UPDATE procurement.purchase_order_lines SET product_variant_id=NULL,expected_receive_variant_id=NULL WHERE id=21");
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const context = await editor.context(1, actorId);
+    const request: ShipmentEditorRequest = { sourceVersion: context.sourceVersion, reason: "Verified case configuration against supplier packing list",
+      changes: [{ lineId: 11, fields: {}, unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 } }], removals: [], additions: [] };
+    const before = await state();
+    const preview = await editor.preview(1, request, actorId);
+    expect(await state()).toEqual(before);
+    expect(preview.review.before[0].shipmentUnits?.selectedVariantId).toBeNull();
+    expect(preview.review.after[0].shipmentUnits).toMatchObject({ selectedVariantId: 200, unitsPerVariantSnapshot: 250 });
+    expect(preview.review.before[0].fields.qtyShipped).toBe(preview.review.after[0].fields.qtyShipped);
+    expect(preview.review.charges).toEqual([{ currency: "USD", cents: 500 }]);
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    const descriptor = editorDescriptor(body);
+    const saved = await editor.approve(1, body, actorId, descriptor);
+    expect(saved.httpStatus).toBe(200);
+    expect(await editor.approve(1, body, actorId, descriptor)).toMatchObject({ replayed: true });
+    expect(await service.getReceivingSetup(1)).toMatchObject({ ready: true });
+    expect(await readLine()).toMatchObject({ qtyShipped: 500, cartonCount: 2, unitsPerVariantSnapshot: 250 });
+    expect((await pool.query("SELECT actual_cents FROM procurement.inbound_freight_costs WHERE id=31")).rows).toEqual([{ actual_cents: "500" }]);
+  });
+
+  it("allows an administrator to add an unconfigured line to a draft and makes its remaining setup explicit", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    await pool.query("UPDATE procurement.purchase_order_lines SET product_variant_id=NULL,expected_receive_variant_id=NULL WHERE id=22");
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request: ShipmentEditorRequest = { sourceVersion: (await editor.context(1, actorId)).sourceVersion,
+      reason: "Save the supplier's draft manifest while receiving configuration is completed", changes: [], removals: [],
+      additions: [{ clientKey: "4c26d134-3a6e-4bf1-b2dc-5820013e56ba", purchaseOrderId: 10, purchaseOrderLineId: 22, quantityPieces: 40 }] };
+    const preview = await editor.preview(1, request, actorId);
+    expect(preview.review.after.find(line => line.purchaseOrderLineId === 22)?.shipmentUnits?.selectedVariantId).toBeNull();
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    expect(await editor.approve(1, body, actorId, editorDescriptor(body))).toMatchObject({ httpStatus: 200 });
+    expect(await service.getReceivingSetup(1)).toMatchObject({ ready: false, issueCount: 1 });
+    await expect(service.book(1, actorId)).rejects.toMatchObject({ details: { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED" } });
+  });
+
+  it("repairs inherited booked-shipment setup in approved batches while departure remains blocked", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    await pool.query("UPDATE procurement.purchase_order_lines SET product_variant_id=NULL,expected_receive_variant_id=NULL WHERE id IN (21,22)");
+    await pool.query("UPDATE procurement.inbound_shipment_lines SET product_variant_id=NULL,units_per_variant_snapshot=NULL WHERE id=11");
+    const [added] = await execute(fromPo(1, 40, 22)) as Array<{ id: number }>;
+    await pool.query("UPDATE procurement.inbound_shipments SET status='booked' WHERE id=1");
+    expect(await service.getReceivingSetup(1)).toMatchObject({ ready: false, issueCount: 2 });
+    const editor = createShipmentEditorService(database, service, () => NOW);
+    const request: ShipmentEditorRequest = { sourceVersion: (await editor.context(1, actorId)).sourceVersion,
+      reason: "Confirm the first product configuration from the supplier packing list", removals: [], additions: [],
+      changes: [{ lineId: 11, fields: {}, unitSelection: { productVariantId: 200, unitsPerVariant: 250, quantity: 2 } }] };
+    const preview = await editor.preview(1, request, actorId);
+    const body = { ...request, previewVersion: preview.previewVersion, approvalConfirmed: true };
+    expect(await editor.approve(1, body, actorId, editorDescriptor(body))).toMatchObject({ httpStatus: 200 });
+    expect(await service.getReceivingSetup(1)).toMatchObject({ ready: false, issueCount: 1 });
+    const beforeInvalidEdit = await state();
+    await expect(execute(await patch({ qtyShipped: 501 }, 11))).rejects.toMatchObject({ details: { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED" } });
+    expect(await state()).toEqual(beforeInvalidEdit);
+    const beforeDeparture = await state();
+    await expect(service.markInTransit(1, actorId)).rejects.toMatchObject({ details: { code: "SHIPMENT_RECEIVING_SETUP_REQUIRED" } });
+    expect(await state()).toEqual(beforeDeparture);
+    await execute(await patch({ unitSelection: { productVariantId: 201, unitsPerVariant: 1, quantity: 40 } }, added.id));
+    await service.markInTransit(1, actorId);
+    expect(await service.getReceivingSetup(1)).toMatchObject({ ready: true, issueCount: 0 });
+    expect((await pool.query("SELECT actual_cents FROM procurement.inbound_freight_costs WHERE id=31")).rows).toEqual([{ actual_cents: "500" }]);
+  });
+
+  it("holds catalog evidence stable until booking and its history commit", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    let releaseBooking!: () => void, enteredHistory!: () => void;
+    const held = new Promise<void>(resolve => { releaseBooking = resolve; });
+    const entered = new Promise<void>(resolve => { enteredHistory = resolve; });
+    const gated = createService(database, { ...storage, createInboundShipmentStatusHistory: async (entry: any, executor: any) => {
+      enteredHistory(); await held; return storage.createInboundShipmentStatusHistory(entry, executor);
+    } } as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
+    const booking = gated.book(1, actorId);
+    await entered;
+    const catalogWriter = await pool.connect();
+    try {
+      await catalogWriter.query("BEGIN");
+      // Deliberately fail rather than allowing a racing catalog change to wait
+      // for the test's booking gate. The share lock must be owned already.
+      await catalogWriter.query("SET LOCAL lock_timeout='100ms'");
+      await expect(catalogWriter.query("UPDATE catalog.product_variants SET is_active=false WHERE id=200"))
+        .rejects.toMatchObject({ code: "55P03" });
+    } finally {
+      await catalogWriter.query("ROLLBACK"); catalogWriter.release(); releaseBooking();
+    }
+    await booking;
+    expect((await pool.query("SELECT status FROM procurement.inbound_shipments WHERE id=1")).rows[0].status).toBe("booked");
+    expect((await pool.query("SELECT is_active FROM catalog.product_variants WHERE id=200")).rows[0].is_active).toBe(true);
+  });
+
+  it("serializes duplicate booking attempts into one committed status history entry", async () => {
+    await pool.query("UPDATE procurement.inbound_shipments SET status='draft' WHERE id=1");
+    const outcomes = await Promise.all([outcome(service.book(1, actorId)), outcome(service.book(1, actorId))]);
+    expect(outcomes.filter(result => result.ok)).toHaveLength(1);
+    expect((await pool.query("SELECT to_status FROM procurement.inbound_shipment_status_history WHERE inbound_shipment_id=1")).rows)
+      .toEqual([{ to_status: "booked" }]);
+    expect(await readLine()).toMatchObject({ qtyShipped: 500, cartonCount: 2, allocatedCostCents: 500 });
   });
 
   it("uses the PO SKU as identity evidence when the source has no receive variant", async () => {

@@ -1,7 +1,7 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import express from "express";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import {
   INVENTORY_RUNTIME_AUTHORITY_READOUT_PATH,
   type InventoryRuntimeAuthorityReadout,
@@ -11,7 +11,9 @@ import { InventoryRuntimeAuthorityReadoutService } from "../../application/inven
 import { InventoryRuntimeAuthorityReadoutError } from "../../domain/inventory-runtime-authority-readout";
 import { logger } from "../../../../platform/observability/logger";
 
-const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));
+const { hasPermission } = vi.hoisted(() => ({
+  hasPermission: vi.fn(async (_user: string, _resource: string, _action?: string) => true),
+}));
 // Keep the real requireAnyPermission middleware; isolate only its identity-owner call.
 vi.mock("../../../identity", () => ({ hasPermission }));
 
@@ -32,7 +34,7 @@ function readout(): InventoryRuntimeAuthorityReadout {
 
 describe("inventory runtime authority routes", () => {
   let server: Awaited<ReturnType<typeof startServer>>;
-  let service: { read: ReturnType<typeof vi.fn> };
+  let service: { read: Mock<(...args: any[]) => Promise<any>> };
   let session: { user?: { id?: string } };
   let warnSpy: ReturnType<typeof vi.spyOn>;
   let errorSpy: ReturnType<typeof vi.spyOn>;

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { validateReplenishmentTrigger } from "../../domain/replenishment-trigger";
 import { insertReplenTaskSchema } from "@shared/schema";
 
-vi.mock("../../../notifications/notifications.service", () => ({ notify: vi.fn() }));
+vi.mock("../../../notifications/in-app-notifications.api", () => ({ notify: vi.fn() }));
 vi.mock("../../../warehouse/settings.resolver", () => ({ getSettingsForWarehouse: vi.fn() }));
 import { ReplenishmentUseCases } from "../../application/replenishment.use-cases";
 

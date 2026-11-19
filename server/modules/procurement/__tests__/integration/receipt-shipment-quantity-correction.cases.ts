@@ -17,6 +17,7 @@ import {
   recordReceiptCostOrigin,
 } from "../../../inventory/infrastructure/cost-evidence.repository";
 import { quantityCorrectionContextSchema } from "@shared/procurement/receipt-shipment-quantity-correction";
+import { registerCostLinkRepairCases } from "./cost-link-repair.cases";
 
 export function registerQuantityCorrectionCases(fixture: {
   pool: () => pg.Pool;
@@ -91,6 +92,7 @@ export function registerQuantityCorrectionCases(fixture: {
       evidenceConfirmed: true as const,
     };
   }
+  registerCostLinkRepairCases({ ...fixture, prepare });
   const descriptor = (
     body: unknown,
     key = randomUUID(),

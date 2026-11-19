@@ -218,8 +218,25 @@ non-idempotent financial operations · use `allowNegative: true` · commit secre
 - **Database:** uses the EXTERNAL database (`EXTERNAL_DATABASE_URL`), not Replit's. The
   dev database is empty; production is on Heroku (`cardshellz-echelon`).
 - **Money:** confirm the unit (cents vs decimal) of any financial column before computing.
-- **Migrations:** numbered SQL files in `migrations/`; `server/db.ts` has fallback
-  startup migrations.
+- **Migrations:** numbered SQL files in `migrations/`, applied in the release phase
+  (`scripts/release.sh`). New schema goes there. The web process never changes table
+  structure at boot. The legacy fallback routine in `server/db.ts` has been deleted
+  (REFACTOR-PLAN P4.1); tracked migrations are the only schema authority. Do not add
+  DDL or DML to `server/db.ts`.
+- **Schema baseline:** the legacy migration files cannot build a database from nothing, so
+  an empty database is built from `migrations/baseline/` (a generated, structure-only
+  snapshot of production) plus the migrations it does not cover. CI builds one on every
+  PR (`scripts/ci/build-database-from-repository.ts`, PostgreSQL 17). Never hand-edit the
+  baseline; regenerate it with `scripts/migrations/generate-baseline.mjs`. It never runs
+  in production, which already has migration records.
+- **Schema drift check:** nightly, `.github/workflows/schema-drift.yml` compares a database
+  built from the repository with production's structure and posts to the ops alert webhook
+  if they differ, or if it could not run. GitHub holds no database credential: a Heroku
+  Scheduler job (`scripts/publish-production-structure.ts`) publishes the structure (no
+  rows) to the `production-structure` branch, and the check reads it there. Never edit that
+  branch by hand. A difference in `membership` or another shellz-club table means they
+  shipped a change: regenerate the baseline. A difference in an Echelon table means
+  production changed outside a migration: investigate first.
 - **Shipping engine:** fully engine-agnostic via `shippingEngine.*` interface (C9 complete).
   ShipStation adapter is the only implementation. Legacy `shipstation_order_id` /
   `shipstation_order_key` columns remain on `oms.oms_orders` and `wms.outbound_shipments`

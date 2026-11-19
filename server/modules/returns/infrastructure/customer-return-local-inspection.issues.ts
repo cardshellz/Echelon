@@ -28,7 +28,8 @@ export function deriveLocalInspectionIssues(source: Source): CustomerReturnLocal
     if (!line || (item.channelId !== null && item.channelId !== source.shop.channelId)
       || (item.omsOrderReference !== null && item.omsOrderReference !== String(source.order.omsOrderId))
       || (item.omsOrderReference === null && item.legacyOrderReference !== null
-        && item.legacyOrderReference !== String(source.order.omsOrderId))
+        && item.legacyOrderReference !== String(source.order.omsOrderId)
+        && orderIdentity(item.legacyOrderReference) !== orderIdentity(source.order.externalOrderId))
       || (item.externalOrderId !== null && orderIdentity(item.externalOrderId) !== orderIdentity(source.order.externalOrderId))
       || (item.externalLineItemId !== null && line.externalLineItemId !== null
         && purchasedLineIdentity(item.externalLineItemId) !== purchasedLineIdentity(line.externalLineItemId))) {
@@ -39,14 +40,14 @@ export function deriveLocalInspectionIssues(source: Source): CustomerReturnLocal
   const claimedByItem = new Map<number, number>();
   for (const claim of source.rootClaims) {
     const line = lines.get(claim.omsOrderLineId);
-    const item = items.get(claim.wmsOrderItemId);
-    if (!line || !item || claim.channelId !== source.shop.channelId || claim.omsOrderId !== source.order.omsOrderId
-      || item.omsOrderLineId !== claim.omsOrderLineId || line.externalLineItemId === null
+    const item = claim.wmsOrderItemId === null ? undefined : items.get(claim.wmsOrderItemId);
+    if (!line || (claim.wmsOrderItemId !== null && !item) || claim.channelId !== source.shop.channelId || claim.omsOrderId !== source.order.omsOrderId
+      || (item && item.omsOrderLineId !== claim.omsOrderLineId) || line.externalLineItemId === null
       || purchasedLineIdentity(claim.externalLineItemId) !== purchasedLineIdentity(line.externalLineItemId)) {
       add("local_claim_identity_conflict", claim.omsOrderLineId);
     }
     claimedByLine.set(claim.omsOrderLineId, (claimedByLine.get(claim.omsOrderLineId) ?? 0) + claim.quantity);
-    claimedByItem.set(claim.wmsOrderItemId, (claimedByItem.get(claim.wmsOrderItemId) ?? 0) + claim.quantity);
+    if (claim.wmsOrderItemId !== null) claimedByItem.set(claim.wmsOrderItemId, (claimedByItem.get(claim.wmsOrderItemId) ?? 0) + claim.quantity);
   }
   for (const claim of source.legacyClaims) {
     const item = claim.wmsOrderItemId === null ? undefined : items.get(claim.wmsOrderItemId);

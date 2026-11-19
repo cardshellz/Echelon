@@ -1,5 +1,7 @@
 import { shipmentCostWorkflowIdSchema, shipmentCostUpdateResultSchema, type ShipmentCostUpdateResult } from "@shared/procurement/shipment-cost-workflow";
 import { createFinancialCommandIntentStore, financialCommandFetchJson, FinancialCommandRequestError, type FinancialCommandIntentStore } from "./financial-command";
+import { shipmentMeasurementApprovalSchema, shipmentMeasurementPreviewSchema, type ShipmentMeasurementApproval } from "@shared/procurement/shipment-measurement-correction";
+import { canonicalJson } from "@shared/utils/canonical-json";
 
 /** Opt in to the additive exception fields. Older open browser tabs still use
  * the original strict response shape during a rolling application deployment. */
@@ -11,23 +13,43 @@ export function readShipmentCostWorkflow(url: string, options?: { includePoLineL
 /** Each shipment keeps its own uncertain command so a retry cannot post twice. */
 export function createShipmentCostUpdateClient(generateKey: () => string) {
   const intents = new Map<number, FinancialCommandIntentStore>();
-  return { async update(shipmentId: number): Promise<ShipmentCostUpdateResult> {
+  const uncertainRequests = new Map<number, string>();
+  return { async update(shipmentId: number, measurementCorrection?: ShipmentMeasurementApproval): Promise<ShipmentCostUpdateResult> {
     shipmentCostWorkflowIdSchema.parse(shipmentId);
     let intent = intents.get(shipmentId);
     if (!intent) { intent = createFinancialCommandIntentStore(generateKey); intents.set(shipmentId, intent); }
     const url = `/api/inbound-shipments/${shipmentId}/update-costs`;
-    const key = intent.acquire({ shipmentId });
+    const body = measurementCorrection ? { measurementCorrection: shipmentMeasurementApprovalSchema.parse(measurementCorrection) } : {};
+    const command = { shipmentId, ...body };
+    const fingerprint = canonicalJson(command);
+    if (uncertainRequests.has(shipmentId) && uncertainRequests.get(shipmentId) !== fingerprint)
+      throw new FinancialCommandRequestError("Confirm the saved result or retry the pending approval before changing this request.",
+        { status: 409, code: "SHIPMENT_COST_UPDATE_PENDING_REQUEST", ambiguous: true, retryable: true });
+    const key = intent.acquire(command);
     try {
       const response = await financialCommandFetchJson<unknown>(url, { method: "POST", credentials: "include",
-        headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: "{}" });
+        headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(body) });
       const result = shipmentCostUpdateResultSchema.safeParse(response);
       if (!result.success || result.data.shipmentId !== shipmentId) throw new FinancialCommandRequestError(
         "The cost update response could not be verified. Reload the saved results before retrying.",
         { status: 200, code: "SHIPMENT_COST_UPDATE_RESPONSE_INVALID", retryable: true, ambiguous: true },
       );
+      if (measurementCorrection) {
+        const saved = result.data.measurementCorrection as { preview?: unknown } | undefined;
+        const preview = shipmentMeasurementPreviewSchema.safeParse(saved?.preview);
+        if (!preview.success || preview.data.shipmentId !== shipmentId || preview.data.previewVersion !== measurementCorrection.previewVersion)
+          throw new FinancialCommandRequestError("The measurement approval response could not be verified. Reload saved results before retrying.",
+            { status: 200, code: "SHIPMENT_MEASUREMENTS_RESPONSE_INVALID", retryable: true, ambiguous: true });
+      }
       intent.complete(key);
+      uncertainRequests.delete(shipmentId);
       return result.data;
-    } catch (error) { intent.fail(key, error); throw error; }
+    } catch (error) {
+      intent.fail(key, error);
+      if (error instanceof FinancialCommandRequestError && error.ambiguous) uncertainRequests.set(shipmentId, fingerprint);
+      else uncertainRequests.delete(shipmentId);
+      throw error;
+    }
   } };
 }
 

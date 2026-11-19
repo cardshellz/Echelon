@@ -1,0 +1,1858 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-27T13:58:44.419Z",
+  "validatedCode": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+  "currentMain": "bdf711be2c23ad6e992df947b08202e495779db1",
+  "sourceBoundary": "All formal application/types/unit/guard/build/mock/connected/regression wrappers are clean at the frozen committed code. The prior55-case AP run is separately bound by exact pending-patch/committed-byte equivalence.",
+  "publicationBoundary": "Local verification only; this manifest does not establish hosted CI, publication, deployment, live role assignments or production latency.",
+  "coreFix": {
+    "function": "getApSummary",
+    "file": "server/modules/procurement/ap-ledger.service.ts",
+    "line": 2407,
+    "snapshotReaderLine": 2424,
+    "beforeIndependentReads": 6,
+    "afterReadOnlyRepeatableReadTransactions": 1,
+    "clockEpochCapturedOnce": true,
+    "queryMoneyDtoStatusCalendarBodyPreserved": true,
+    "independentReview": {
+      "file": "ap-summary-independent-review-880758b69.json",
+      "sha256": "c5b62b5cfe55447a55eca7d64c934976119d35bc17fd65456c3e1c97cad3211b"
+    },
+    "commitEquivalence": {
+      "file": "ap-summary-commit-equivalence-b340d5b45.json",
+      "sha256": "79fc10ce2e530dbb669a153b8586fac68044155c2dd1c05b1676289402aee9b8"
+    },
+    "protectedInputs": [
+      {
+        "file": "server/modules/procurement/__tests__/integration/ap-financial-safeguards.integration.test.ts",
+        "currentRawSha256": "9b460f90aaa6a8accea5caa3b70bd834895a28cb0603bc5636b9e24306b323a4",
+        "committedNormalizedSha256": "febff04195fa738d0437059d73a97a2c29bf9b3e273e92ec146753b1c7690ce6",
+        "pendingWorkingBytesMatchIndependentCapture": true
+      },
+      {
+        "file": "server/modules/procurement/__tests__/integration/ap-summary-read-barrier.ts",
+        "currentRawSha256": "99ff719e93712fa1193d68e6d9cade8621dddfdbe6abd2b669066765e3b6c463",
+        "committedNormalizedSha256": "99ff719e93712fa1193d68e6d9cade8621dddfdbe6abd2b669066765e3b6c463",
+        "pendingWorkingBytesMatchIndependentCapture": true
+      },
+      {
+        "file": "server/modules/procurement/__tests__/integration/supplier-credit.integration.test.ts",
+        "currentRawSha256": "1b241ba9fc899c421fb963d814f5fc1f8569ad773a01ee32338abfedcaaa74e1",
+        "committedNormalizedSha256": "d937e0f066110ff4fdd15e458d03c60a2603cc7c342abfd37a1fcfb24c0082d7",
+        "pendingWorkingBytesMatchIndependentCapture": true
+      },
+      {
+        "file": "server/modules/procurement/ap-ledger.service.ts",
+        "currentRawSha256": "29bb2d573bb25cc20315d938c52193d01305f91929c4b8f3cf15d4ac22a7c71d",
+        "committedNormalizedSha256": "46c44e7fe236084361f467c58c47409670c378593715e45da42f19170db08de0",
+        "pendingWorkingBytesMatchIndependentCapture": true
+      }
+    ]
+  },
+  "apSnapshotRegression": {
+    "passed": 55,
+    "files": [
+      {
+        "file": "server/modules/procurement/__tests__/integration/ap-financial-safeguards.integration.test.ts",
+        "database": "procurement_snapshot_256f7f6e62ad471bac772b9d2e4c2bae",
+        "sourceBefore": {
+          "head": "880758b69ac7ae23de9ef03a35338964268da192",
+          "workingTreeSha256": "5db33d4f27ed7e11f22e9d67d532db608e3f58740b1141caeeaa99d0c3da4b4d",
+          "untracked": [
+            "server/modules/procurement/__tests__/integration/ap-summary-read-barrier.ts"
+          ]
+        },
+        "sourceAfter": {
+          "head": "880758b69ac7ae23de9ef03a35338964268da192",
+          "workingTreeSha256": "5db33d4f27ed7e11f22e9d67d532db608e3f58740b1141caeeaa99d0c3da4b4d",
+          "untracked": [
+            "server/modules/procurement/__tests__/integration/ap-summary-read-barrier.ts"
+          ]
+        },
+        "elapsedMs": 10574,
+        "runner": {
+          "file": "db-01-ap-financial-safeguards-1793108106226-result.json",
+          "sha256": "08fb3f61acbfeb54cbb60a38d91ea8ee213d69b18d2bf0e0dcd16855254bc305"
+        },
+        "log": {
+          "file": "db-01-ap-financial-safeguards-1793108106226.log",
+          "sha256": "1ac8ee1dab8f5e32a4aeeaae9f7a154d064f6d1dc20e09345d1088bb57653e43"
+        },
+        "report": {
+          "file": "db-01-ap-financial-safeguards-1793108106226.json",
+          "sha256": "94e2dd5bed667a09e207142b1f3d7c2ce689c0fec587ed4a3a69b283536b603f"
+        },
+        "files": 1,
+        "passed": 21,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0,
+        "caseNames": [
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rejects new returned payment atomically",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rejects new scheduled payment atomically",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rejects new arbitrary_status payment atomically",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rejects new voided payment atomically",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rejects a revoked real permission before changing settlement or audit history",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) keeps completed settlement and dashboard totals consistent",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) keeps AP summary snapshot coherent during a concurrent record payment commit",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) keeps AP summary snapshot coherent during a concurrent void payment commit",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) captures AP summary clock before a caller mutates its Date",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rejects a 'invalid Date' AP summary clock before attempting any database transport",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rejects a 'non-Date' AP summary clock before attempting any database transport",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) accepts a finite zero-epoch AP summary clock without replacing it with system time",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rolls back and releases an AP summary reader after a PostgreSQL read failure",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rejects header reduction after payment and dispute without changing balances or adding mutation audit",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rejects removal of the last valid-mills line after payment and dispute",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) approval evidence survives dispute and blocks every generic financial edit owner",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) voided payment allocations still lock generic editing even without approval markers",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) unrecognized invoices remain editable before and after dispute",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) keeps disputed debt in outstanding, overdue, aging and explicit dispute totals",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) serializes payment, dispute and generic edit without erasing the obligation",
+          "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) actual NOT VALID constraint preserves legacy records while blocking new unsupported states"
+        ]
+      },
+      {
+        "file": "server/modules/procurement/__tests__/integration/supplier-credit.integration.test.ts",
+        "database": "procurement_snapshot_9b88aa3b9f8f4d8a9ad332671a4196fa",
+        "sourceBefore": {
+          "head": "880758b69ac7ae23de9ef03a35338964268da192",
+          "workingTreeSha256": "5db33d4f27ed7e11f22e9d67d532db608e3f58740b1141caeeaa99d0c3da4b4d",
+          "untracked": [
+            "server/modules/procurement/__tests__/integration/ap-summary-read-barrier.ts"
+          ]
+        },
+        "sourceAfter": {
+          "head": "880758b69ac7ae23de9ef03a35338964268da192",
+          "workingTreeSha256": "5db33d4f27ed7e11f22e9d67d532db608e3f58740b1141caeeaa99d0c3da4b4d",
+          "untracked": [
+            "server/modules/procurement/__tests__/integration/ap-summary-read-barrier.ts"
+          ]
+        },
+        "elapsedMs": 45619,
+        "runner": {
+          "file": "db-02-supplier-credit-1793108106226-result.json",
+          "sha256": "33e958847a93464838d0befed55644badcdc98c7a284d0da3e8a52e354b48723"
+        },
+        "log": {
+          "file": "db-02-supplier-credit-1793108106226.log",
+          "sha256": "d0b19caffacf45fd21101081794d5a00bba3014db68515d0ad040cdb2c5a662b"
+        },
+        "report": {
+          "file": "db-02-supplier-credit-1793108106226.json",
+          "sha256": "7e8736533de5854a64c13ae428fbf2e3e2c5228755cdabf36c5e86738e84af73"
+        },
+        "files": 1,
+        "passed": 34,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0,
+        "caseNames": [
+          "supplier credit financial ownership and recovery records a dated supplier document separately from cash and preserves unsupported inventory history",
+          "supplier credit financial ownership and recovery combines credit and cash settlement without relabelling credit as money paid",
+          "supplier credit financial ownership and recovery keeps AP summary snapshot coherent during concurrent supplier credit apply",
+          "supplier credit financial ownership and recovery keeps AP summary snapshot coherent during concurrent supplier credit reverse",
+          "supplier credit financial ownership and recovery can apply a supplier credit to another payable of the same supplier while retaining its original source",
+          "supplier credit financial ownership and recovery reverses an application explicitly, then voids by compensation while retaining original rows",
+          "supplier credit financial ownership and recovery supports product and packaging reductions from one original invoice row in the same supplier document",
+          "supplier credit financial ownership and recovery deduplicates a supplier reference even with a fresh command key",
+          "supplier credit financial ownership and recovery recovers the exact committed response after acknowledgement loss and refuses changed requests or actors under its key",
+          "supplier credit financial ownership and recovery serializes competing applications of the same credit version",
+          "supplier credit financial ownership and recovery serializes cash and credit competing for the last payable cents",
+          "supplier credit financial ownership and recovery rejects overapplication and leaves both cash and credit history unchanged",
+          "supplier credit financial ownership and recovery rejects a different supplier's target invoice without partial applications",
+          "supplier credit financial ownership and recovery rejects invalid credit amount 0 at the boundary",
+          "supplier credit financial ownership and recovery rejects invalid credit amount -1 at the boundary",
+          "supplier credit financial ownership and recovery rejects invalid credit amount 0.1 at the boundary",
+          "supplier credit financial ownership and recovery rejects invalid credit amount 9007199254740992 at the boundary",
+          "supplier credit financial ownership and recovery rejects a stale source version without inventing a revised supplier document",
+          "supplier credit financial ownership and recovery requires current permission after approve waits for the financial lock",
+          "supplier credit financial ownership and recovery requires current permission after reconcile_costs waits for the financial lock",
+          "supplier credit financial ownership and recovery blocks cash overpayment at the PostgreSQL boundary after credit is applied",
+          "supplier credit financial ownership and recovery preserves credit document and application audit history at the database boundary",
+          "supplier credit financial ownership and recovery replaces a voided mistaken document explicitly and retains both source documents",
+          "supplier credit financial ownership and recovery rolls back a late audit failure and safely retries the same financial command",
+          "supplier credit financial ownership and recovery keeps original invoice economics protected after a credit is voided",
+          "supplier credit financial ownership and recovery rejects forged approval history and preserves harmless invoice display metadata",
+          "supplier credit financial ownership and recovery uses database permissions even when a view-only session claims an admin role",
+          "supplier credit financial ownership and recovery rechecks approved cost evidence without changing credit, settlement or physical history",
+          "supplier credit financial ownership and recovery replays a cost recheck exactly and rejects changed payload, actor, action or document under its key",
+          "supplier credit financial ownership and recovery retains a durable rejection when a draft credit is rechecked",
+          "supplier credit financial ownership and recovery retains a durable rejection when a voided credit is rechecked",
+          "supplier credit financial ownership and recovery refuses a stale recheck version and current view-only authority without changing the graph",
+          "supplier credit financial ownership and recovery rolls back a late recheck audit failure and retries the same key without financial mutation",
+          "supplier credit financial ownership and recovery reapplies its migration without rewriting financial or cost history"
+        ]
+      }
+    ],
+    "newRegressionCases": 9,
+    "newCaseNames": [
+      "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) keeps AP summary snapshot coherent during a concurrent record payment commit",
+      "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) keeps AP summary snapshot coherent during a concurrent void payment commit",
+      "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) captures AP summary clock before a caller mutates its Date",
+      "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rejects a 'invalid Date' AP summary clock before attempting any database transport",
+      "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rejects a 'non-Date' AP summary clock before attempting any database transport",
+      "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) accepts a finite zero-epoch AP summary clock without replacing it with system time",
+      "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rolls back and releases an AP summary reader after a PostgreSQL read failure",
+      "supplier credit financial ownership and recovery keeps AP summary snapshot coherent during concurrent supplier credit apply",
+      "supplier credit financial ownership and recovery keeps AP summary snapshot coherent during concurrent supplier credit reverse"
+    ],
+    "sourceBoundary": "Ran on stable pending parent880; all four exact tested runtime/test inputs match the later committed code. This is not a claim that those earlier wrappers ran at b340.",
+    "baselineFailures": {
+      "targetedFailedCases": 6,
+      "reports": [
+        {
+          "file": "db-01-ap-financial-safeguards-1793107527057.json",
+          "sha256": "1bf924b5962405dbf67472bb9255d960227013657a91cab9efd32d439ed6145a"
+        },
+        {
+          "file": "db-02-supplier-credit-1793107527057.json",
+          "sha256": "2673791b367cc16ee326f667c43283c6c4300697afa3528dc64f9d545019b265"
+        }
+      ],
+      "cases": [
+        {
+          "name": "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) keeps AP summary snapshot coherent during a concurrent record payment commit",
+          "failure": "AssertionError: expected { totalOutstandingCents: 10000, …(12) } to deeply equal { totalOutstandingCents: 10000, …(12) }\n    at C:/Users/owner/.codex/worktrees/procurement-cost-completion/Echelon/server/modules/procurement/__tests__/integration/ap-financial-safeguards.integration.test.ts:165:29\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)"
+        },
+        {
+          "name": "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) keeps AP summary snapshot coherent during a concurrent void payment commit",
+          "failure": "AssertionError: expected { totalOutstandingCents: +0, …(12) } to deeply equal { totalOutstandingCents: +0, …(12) }\n    at C:/Users/owner/.codex/worktrees/procurement-cost-completion/Echelon/server/modules/procurement/__tests__/integration/ap-financial-safeguards.integration.test.ts:165:29\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)"
+        },
+        {
+          "name": "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) captures AP summary clock before a caller mutates its Date",
+          "failure": "AssertionError: expected { totalOutstandingCents: 7000, …(12) } to deeply equal { totalOutstandingCents: 7000, …(12) }\n    at C:/Users/owner/.codex/worktrees/procurement-cost-completion/Echelon/server/modules/procurement/__tests__/integration/ap-financial-safeguards.integration.test.ts:185:29\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)"
+        },
+        {
+          "name": "AP financial safeguards with actual0620 and status constraint (real PostgreSQL) rolls back and releases an AP summary reader after a PostgreSQL read failure",
+          "failure": "AssertionError: expected undefined to match object { isolation: 'repeatable read', …(1) }\n    at Proxy.<anonymous> (file:///C:/Users/owner/Echelon/.codex-artifacts/shipment-cost-reconciliation-20261015/worktree/node_modules/@vitest/expect/dist/index.js:1278:10)\n    at Proxy.<anonymous> (file:///C:/Users/owner/Echelon/.codex-artifacts/shipment-cost-reconciliation-20261015/worktree/node_modules/@vitest/expect/dist/index.js:1151:15)"
+        },
+        {
+          "name": "supplier credit financial ownership and recovery keeps AP summary snapshot coherent during concurrent supplier credit apply",
+          "failure": "AssertionError: expected { Object (totalOutstandingCents, disputedOutstandingCents, ...) } to deeply equal { Object (totalOutstandingCents, disputedOutstandingCents, ...) }\n    at C:/Users/owner/.codex/worktrees/procurement-cost-completion/Echelon/server/modules/procurement/__tests__/integration/supplier-credit.integration.test.ts:140:29\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)"
+        },
+        {
+          "name": "supplier credit financial ownership and recovery keeps AP summary snapshot coherent during concurrent supplier credit reverse",
+          "failure": "AssertionError: expected { Object (totalOutstandingCents, disputedOutstandingCents, ...) } to deeply equal { Object (totalOutstandingCents, disputedOutstandingCents, ...) }\n    at C:/Users/owner/.codex/worktrees/procurement-cost-completion/Echelon/server/modules/procurement/__tests__/integration/supplier-credit.integration.test.ts:140:29\n    at processTicksAndRejections (node:internal/process/task_queues:104:5)"
+        }
+      ],
+      "note": "Diagnostic pre-fix reproduction; intentional filtered skips are not final passing coverage."
+    }
+  },
+  "typechecks": [
+    {
+      "runner": {
+        "file": "tsconfig-1793108329534-result.json",
+        "sha256": "6247793f85f5ad2ee58fe43777ced66459ad36192b8daf9b3cd3f339d6d1e1c7"
+      },
+      "name": "tsconfig",
+      "args": [
+        "--max-old-space-size=6144",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "--incremental",
+        "false",
+        "-p",
+        "tsconfig.json"
+      ],
+      "elapsedMs": 206744,
+      "sourceBefore": {
+        "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+        "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "untracked": []
+      },
+      "sourceAfter": {
+        "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+        "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "untracked": []
+      },
+      "exitCode": 0,
+      "resultRecordedAt": "2026-10-27T13:42:17.768Z",
+      "log": {
+        "file": "tsconfig-1793108329534.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "runner": {
+        "file": "tsconfig.tests.server-1793108329534-result.json",
+        "sha256": "af8b0139ca10adff7dcd8263b971b9d6ca6d518b72c27439af3ca30d22c86f25"
+      },
+      "name": "tsconfig.tests.server",
+      "args": [
+        "--max-old-space-size=8192",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "--incremental",
+        "false",
+        "-p",
+        "tsconfig.tests.server.json"
+      ],
+      "elapsedMs": 180554,
+      "sourceBefore": {
+        "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+        "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "untracked": []
+      },
+      "sourceAfter": {
+        "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+        "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "untracked": []
+      },
+      "exitCode": 0,
+      "resultRecordedAt": "2026-10-27T13:41:52.355Z",
+      "log": {
+        "file": "tsconfig.tests.server-1793108329534.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "runner": {
+        "file": "tsconfig.tests.client-1793108329570-result.json",
+        "sha256": "fec5acc3f9b4f0f662d801cd0451024ce5c006ca2c2ad2b4e670502cd279881f"
+      },
+      "name": "tsconfig.tests.client",
+      "args": [
+        "--max-old-space-size=6144",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "--incremental",
+        "false",
+        "-p",
+        "tsconfig.tests.client.json"
+      ],
+      "elapsedMs": 129409,
+      "sourceBefore": {
+        "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+        "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "untracked": []
+      },
+      "sourceAfter": {
+        "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+        "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "untracked": []
+      },
+      "exitCode": 0,
+      "resultRecordedAt": "2026-10-27T13:41:00.565Z",
+      "log": {
+        "file": "tsconfig.tests.client-1793108329570.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "runner": {
+        "file": "tsconfig.tests.connected-1793108328842-result.json",
+        "sha256": "e9a9ca15305ed6d6e7763b6ac0d55aa67608b2b409c3575abcb6be6d9fab96b4"
+      },
+      "name": "tsconfig.tests.connected",
+      "args": [
+        "--max-old-space-size=6144",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "--incremental",
+        "false",
+        "-p",
+        "tsconfig.tests.connected.json"
+      ],
+      "elapsedMs": 122787,
+      "sourceBefore": {
+        "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+        "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "untracked": []
+      },
+      "sourceAfter": {
+        "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+        "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "untracked": []
+      },
+      "exitCode": 0,
+      "resultRecordedAt": "2026-10-27T13:40:52.639Z",
+      "log": {
+        "file": "tsconfig.tests.connected-1793108328842.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    },
+    {
+      "runner": {
+        "file": "browser-types-1793108330387-result.json",
+        "sha256": "bb929f96a30a1e33f92de92f6bf2cda59d3b8608db75a849428e450b7135d08c"
+      },
+      "name": "browser-types",
+      "args": [
+        "--max-old-space-size=6144",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "--incremental",
+        "false",
+        "-p",
+        "C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\tsconfig.browser.json"
+      ],
+      "elapsedMs": 30317,
+      "sourceBefore": {
+        "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+        "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "untracked": []
+      },
+      "sourceAfter": {
+        "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+        "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "untracked": []
+      },
+      "exitCode": 0,
+      "resultRecordedAt": "2026-10-27T13:39:22.270Z",
+      "log": {
+        "file": "browser-types-1793108330387.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      }
+    }
+  ],
+  "unit": {
+    "runner": {
+      "file": "unit-1793108329091-result.json",
+      "sha256": "b1638e9d8bebb88fc0437477b404fa434d8dfa5df951be8009630721dfb77d55"
+    },
+    "name": "unit",
+    "args": [
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "server/modules/procurement/__tests__/unit",
+      "shared/procurement",
+      "client/src/components/layout/__tests__/unit/procurement-sidebar-authority.test.ts",
+      "client/src/pages/__tests__/unit/ap-invoice-navigation.test.ts",
+      "server/modules/catalog/__tests__/unit/inventory-tracking-policy.test.ts",
+      "server/modules/catalog/__tests__/unit/variant-uom.test.ts",
+      "client/src/lib/__tests__/unit/exact-money-input.test.ts",
+      "shared/__tests__/unit/money-read.test.ts",
+      "shared/utils/__tests__/money.test.ts",
+      "server/modules/inventory/__tests__/unit/cost-resolver-money.test.ts",
+      "--maxWorkers=2",
+      "--allowOnly=false",
+      "--passWithNoTests=false",
+      "--reporter=default",
+      "--reporter=json",
+      "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\unit-1793108329091.json"
+    ],
+    "elapsedMs": 173674,
+    "sourceBefore": {
+      "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+      "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "untracked": []
+    },
+    "sourceAfter": {
+      "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+      "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "untracked": []
+    },
+    "exitCode": 0,
+    "resultRecordedAt": "2026-10-27T13:41:43.725Z",
+    "log": {
+      "file": "unit-1793108329091.log",
+      "sha256": "b7ab0c745cd12ea3994217d172ff550b5a7ec96e92616665bc50882882302e57"
+    },
+    "report": {
+      "file": "unit-1793108329091.json",
+      "sha256": "7279a447458f0fac66ace5bd4c7a30f92eee06863fd22e7d6667f7164572e2bc"
+    },
+    "files": 298,
+    "passed": 5157,
+    "failed": 0,
+    "skipped": 0,
+    "todo": 0
+  },
+  "guards": {
+    "runner": {
+      "file": "guards-1793108329092-result.json",
+      "sha256": "967ae1c3f11d28318bb6ba3b847e2385da8de91cd34fe2b055b6e92258de3ccc"
+    },
+    "name": "guards",
+    "args": [
+      "scripts/ci/run-test-lane.mjs",
+      "guards",
+      "--maxWorkers=2"
+    ],
+    "elapsedMs": 204236,
+    "sourceBefore": {
+      "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+      "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "untracked": []
+    },
+    "sourceAfter": {
+      "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+      "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "untracked": []
+    },
+    "exitCode": 0,
+    "resultRecordedAt": "2026-10-27T13:42:14.210Z",
+    "log": {
+      "file": "guards-1793108329092.log",
+      "sha256": "6d34f965783dafda8ce169e2d11307c4ea54f7ef38faaf2adbf7b6c91943ba22"
+    },
+    "passed": 421,
+    "files": 11,
+    "failed": 0,
+    "skipped": 0
+  },
+  "build": {
+    "runner": {
+      "file": "build-1793108638569-result.json",
+      "sha256": "e426723d0a0061c35943a23cb18cffef7df19080771e8ec70da8fcbc4b7a61e6"
+    },
+    "name": "build",
+    "args": [
+      "node_modules/tsx/dist/cli.mjs",
+      "script/build.ts"
+    ],
+    "elapsedMs": 22882,
+    "sourceBefore": {
+      "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+      "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "untracked": []
+    },
+    "sourceAfter": {
+      "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+      "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "untracked": []
+    },
+    "exitCode": 0,
+    "resultRecordedAt": "2026-10-27T13:44:22.388Z",
+    "log": {
+      "file": "build-1793108638569.log",
+      "sha256": "494c34ee4575339d3686f5b07e3603218d65723fd746d0311cb07026cf76431d"
+    }
+  },
+  "postgresql": {
+    "passed": 399,
+    "currentCleanCodeCases": 344,
+    "byteEquivalentApCases": 55,
+    "files": [
+      {
+        "file": "server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts",
+        "database": "procurement_snapshot_80b9959181084e5ab068c1ef250a4611",
+        "group": {
+          "file": "database-results-1793108328863.json",
+          "sha256": "cf232c99d82af38c840127b912255970a2c4b7c91a707d758513b6c69596fd8b"
+        },
+        "identity": {
+          "file": "database-identity-1793108328863.json",
+          "sha256": "fff77698864b267e136c9397af18174a38103666e5a3b080ec2513f6af211602"
+        },
+        "runner": {
+          "file": "db-01-receiving-cost-application-1793108328863-result.json",
+          "sha256": "a139eebd0e36fdeb16ece6d498c7f95366b5525dbf2e199f3a6f26241aa8da15"
+        },
+        "name": "db-01-receiving-cost-application",
+        "args": [
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts",
+          "--no-file-parallelism",
+          "--maxWorkers=1",
+          "--isolate",
+          "--allowOnly=false",
+          "--passWithNoTests=false",
+          "--reporter=default",
+          "--reporter=json",
+          "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\db-01-receiving-cost-application-1793108328863.json"
+        ],
+        "elapsedMs": 320636,
+        "sourceBefore": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "sourceAfter": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "exitCode": 0,
+        "resultRecordedAt": "2026-10-27T13:44:10.844Z",
+        "log": {
+          "file": "db-01-receiving-cost-application-1793108328863.log",
+          "sha256": "5e3db3444896e734c6872b758bd40d2e95bd2984716c2494328854293b3ed817"
+        },
+        "report": {
+          "file": "db-01-receiving-cost-application-1793108328863.json",
+          "sha256": "1fd3e4ef5ad22ed8bb05592c98cc272f9292e42770ea5a2d06cde5cb29110dc4"
+        },
+        "files": 1,
+        "passed": 214,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      {
+        "file": "server/modules/procurement/__tests__/integration/shipment-line-commands.integration.test.ts",
+        "database": "procurement_snapshot_16257ad7c88643cab188b9c22ab492c8",
+        "group": {
+          "file": "database-results-1793108329109.json",
+          "sha256": "a06c49a633c20f461bef746642460abede21c643ad1d6877dc17b3aefe76c482"
+        },
+        "identity": {
+          "file": "database-identity-1793108329109.json",
+          "sha256": "fff77698864b267e136c9397af18174a38103666e5a3b080ec2513f6af211602"
+        },
+        "runner": {
+          "file": "db-01-shipment-line-commands-1793108329109-result.json",
+          "sha256": "fe7c97a0ab4873e6f8f2915c8db0feb906a45de5a88177399e9d00c08d37ca9c"
+        },
+        "name": "db-01-shipment-line-commands",
+        "args": [
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "server/modules/procurement/__tests__/integration/shipment-line-commands.integration.test.ts",
+          "--no-file-parallelism",
+          "--maxWorkers=1",
+          "--isolate",
+          "--allowOnly=false",
+          "--passWithNoTests=false",
+          "--reporter=default",
+          "--reporter=json",
+          "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\db-01-shipment-line-commands-1793108329109.json"
+        ],
+        "elapsedMs": 74047,
+        "sourceBefore": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "sourceAfter": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "exitCode": 0,
+        "resultRecordedAt": "2026-10-27T13:40:05.236Z",
+        "log": {
+          "file": "db-01-shipment-line-commands-1793108329109.log",
+          "sha256": "7a6877136c056815ffa61534290a2808f39bfe58ffa5ce377b973267246474f6"
+        },
+        "report": {
+          "file": "db-01-shipment-line-commands-1793108329109.json",
+          "sha256": "898c305169422f5d6555a883c4700e7f32a95ccce1f26a5085d05b1af91bbb7a"
+        },
+        "files": 1,
+        "passed": 87,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      {
+        "file": "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
+        "database": "procurement_snapshot_c909a1d818504ee9b9f95832d6e3de2c",
+        "group": {
+          "file": "database-results-1793108329109.json",
+          "sha256": "a06c49a633c20f461bef746642460abede21c643ad1d6877dc17b3aefe76c482"
+        },
+        "identity": {
+          "file": "database-identity-1793108329109.json",
+          "sha256": "fff77698864b267e136c9397af18174a38103666e5a3b080ec2513f6af211602"
+        },
+        "runner": {
+          "file": "db-02-procurement-flow-cost-controlled-acceptance-1793108329109-result.json",
+          "sha256": "2c6ad5cbbaab2f21048ed787c6ccdee5186b2b994955a6712d54aadddf514bfd"
+        },
+        "name": "db-02-procurement-flow-cost-controlled-acceptance",
+        "args": [
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
+          "--no-file-parallelism",
+          "--maxWorkers=1",
+          "--isolate",
+          "--allowOnly=false",
+          "--passWithNoTests=false",
+          "--reporter=default",
+          "--reporter=json",
+          "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\db-02-procurement-flow-cost-controlled-acceptance-1793108329109.json"
+        ],
+        "elapsedMs": 34558,
+        "sourceBefore": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "sourceAfter": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "exitCode": 0,
+        "resultRecordedAt": "2026-10-27T13:41:01.775Z",
+        "log": {
+          "file": "db-02-procurement-flow-cost-controlled-acceptance-1793108329109.log",
+          "sha256": "d7c2fe3e073b440d381e4a3d8fc3d0fd9a23b11adae5e010ce4c05bf1deaae8b"
+        },
+        "report": {
+          "file": "db-02-procurement-flow-cost-controlled-acceptance-1793108329109.json",
+          "sha256": "00b8d0f85f6b89d957d043605f474776fca5f1f50038a63182411c3ce243c3f9"
+        },
+        "files": 1,
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      {
+        "file": "server/modules/procurement/__tests__/integration/cost-reporting.integration.test.ts",
+        "database": "procurement_snapshot_e054f2a6d0d144b99dc93de1a0e04556",
+        "group": {
+          "file": "database-results-1793108329109.json",
+          "sha256": "a06c49a633c20f461bef746642460abede21c643ad1d6877dc17b3aefe76c482"
+        },
+        "identity": {
+          "file": "database-identity-1793108329109.json",
+          "sha256": "fff77698864b267e136c9397af18174a38103666e5a3b080ec2513f6af211602"
+        },
+        "runner": {
+          "file": "db-03-cost-reporting-1793108329109-result.json",
+          "sha256": "a0cde33e65b3f73819c215bc5dadd7f5df449057163c086238bd491365cd36b4"
+        },
+        "name": "db-03-cost-reporting",
+        "args": [
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "server/modules/procurement/__tests__/integration/cost-reporting.integration.test.ts",
+          "--no-file-parallelism",
+          "--maxWorkers=1",
+          "--isolate",
+          "--allowOnly=false",
+          "--passWithNoTests=false",
+          "--reporter=default",
+          "--reporter=json",
+          "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\db-03-cost-reporting-1793108329109.json"
+        ],
+        "elapsedMs": 32139,
+        "sourceBefore": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "sourceAfter": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "exitCode": 0,
+        "resultRecordedAt": "2026-10-27T13:41:56.200Z",
+        "log": {
+          "file": "db-03-cost-reporting-1793108329109.log",
+          "sha256": "6ee788ddfbf8bf21ad11ff9f3252829154e415b4bce8c2d248204de88b1152e2"
+        },
+        "report": {
+          "file": "db-03-cost-reporting-1793108329109.json",
+          "sha256": "0423a92011caf4c8aab547bc9d7e3949a126b1567294234336c78cdba41ddd3f"
+        },
+        "files": 1,
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      {
+        "file": "server/modules/procurement/__tests__/integration/shipment-work-list.integration.test.ts",
+        "database": "procurement_snapshot_b2d0307aa1ca4263b7013524bfe4818a",
+        "group": {
+          "file": "database-results-1793108329109.json",
+          "sha256": "a06c49a633c20f461bef746642460abede21c643ad1d6877dc17b3aefe76c482"
+        },
+        "identity": {
+          "file": "database-identity-1793108329109.json",
+          "sha256": "fff77698864b267e136c9397af18174a38103666e5a3b080ec2513f6af211602"
+        },
+        "runner": {
+          "file": "db-04-shipment-work-list-1793108329109-result.json",
+          "sha256": "c9d2c8804b1fdf1e72981f490cdaa9b5302a6e5a44560891a9d5ef8583dd329a"
+        },
+        "name": "db-04-shipment-work-list",
+        "args": [
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "server/modules/procurement/__tests__/integration/shipment-work-list.integration.test.ts",
+          "--no-file-parallelism",
+          "--maxWorkers=1",
+          "--isolate",
+          "--allowOnly=false",
+          "--passWithNoTests=false",
+          "--reporter=default",
+          "--reporter=json",
+          "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\db-04-shipment-work-list-1793108329109.json"
+        ],
+        "elapsedMs": 2522,
+        "sourceBefore": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "sourceAfter": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "exitCode": 0,
+        "resultRecordedAt": "2026-10-27T13:42:08.268Z",
+        "log": {
+          "file": "db-04-shipment-work-list-1793108329109.log",
+          "sha256": "c4faad1835cbbd742ebec05651632fbf999fbf9c3b237f84806d28074474ea22"
+        },
+        "report": {
+          "file": "db-04-shipment-work-list-1793108329109.json",
+          "sha256": "9a20b663d7597d9decf10c4a536a5e328f1c25577e6f8553d814dd8aa44fbd42"
+        },
+        "files": 1,
+        "passed": 7,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0
+      },
+      {
+        "file": "server/modules/procurement/__tests__/integration/supplier-po-document.integration.test.ts",
+        "database": "procurement_snapshot_42f601a7e8cf470d8e236f31af2e8242",
+        "group": {
+          "file": "database-results-1793108329109.json",
+          "sha256": "a06c49a633c20f461bef746642460abede21c643ad1d6877dc17b3aefe76c482"
+        },
+        "identity": {
+          "file": "database-identity-1793108329109.json",
+          "sha256": "fff77698864b267e136c9397af18174a38103666e5a3b080ec2513f6af211602"
+        },
+        "runner": {
+          "file": "db-05-supplier-po-document-1793108329109-result.json",
+          "sha256": "57c06ba5c3b4a87750b1d740b8a42727c3d6849eaa7746b528ba4381b53dec93"
+        },
+        "name": "db-05-supplier-po-document",
+        "args": [
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "server/modules/procurement/__tests__/integration/supplier-po-document.integration.test.ts",
+          "--no-file-parallelism",
+          "--maxWorkers=1",
+          "--isolate",
+          "--allowOnly=false",
+          "--passWithNoTests=false",
+          "--reporter=default",
+          "--reporter=json",
+          "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\db-05-supplier-po-document-1793108329109.json"
+        ],
+        "elapsedMs": 8702,
+        "sourceBefore": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "sourceAfter": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "untracked": []
+        },
+        "exitCode": 0,
+        "resultRecordedAt": "2026-10-27T13:42:27.844Z",
+        "log": {
+          "file": "db-05-supplier-po-document-1793108329109.log",
+          "sha256": "e94234ba3b5c94e0694dd6dcfb6da2d2736805dafe80a94789b99a10bbf5498a"
+        },
+        "report": {
+          "file": "db-05-supplier-po-document-1793108329109.json",
+          "sha256": "a9aa20c4ae8a522e3d87ee72e6fe5fa7b436be76db42e92f5822c4f968632f35"
+        },
+        "files": 1,
+        "passed": 7,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0
+      }
+    ],
+    "failed": 0,
+    "skipped": 0
+  },
+  "mockedBrowser": {
+    "runner": {
+      "file": "browser-1793108705602-result.json",
+      "sha256": "cdbe028d2d00102b2fab5feff27c05939bc8d3302f37a6ab25b0a1f214eb1f62"
+    },
+    "name": "browser",
+    "args": [
+      "node_modules/@playwright/test/cli.js",
+      "test",
+      "-c",
+      "playwright.procurement.config.ts",
+      "test/browser/procurement-workspace.spec.ts",
+      "test/browser/procurement-planning.spec.ts",
+      "test/browser/procurement-pipeline.spec.ts",
+      "test/browser/procurement-cost-cross-screen.spec.ts",
+      "test/browser/procurement-cost-origin-repair.spec.ts",
+      "test/browser/procurement-supplier-document.spec.ts",
+      "test/browser/procurement-ap-work-lists.spec.ts",
+      "test/browser/procurement-ap-safeguards.spec.ts",
+      "test/browser/procurement-payment-completion.spec.ts",
+      "test/browser/procurement-supplier-credits.spec.ts",
+      "test/browser/procurement-receiving-units.spec.ts",
+      "test/browser/procurement-document-relationships.spec.ts",
+      "test/browser/procurement-shipment-receiving-configurations.spec.ts",
+      "test/browser/procurement-shipment-receiving-readiness.spec.ts",
+      "--workers=6",
+      "--reporter=line,json",
+      "--output=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\browser-artifacts-1793108705602"
+    ],
+    "elapsedMs": 583260,
+    "sourceBefore": {
+      "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+      "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "untracked": []
+    },
+    "sourceAfter": {
+      "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+      "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "untracked": []
+    },
+    "exitCode": 0,
+    "resultRecordedAt": "2026-10-27T13:54:49.505Z",
+    "log": {
+      "file": "browser-1793108705602.log",
+      "sha256": "576aabe4833c8a5a29416163a9150a35e3d6ad78f67e7e36f3cc041f8cc59c29"
+    },
+    "report": {
+      "file": "browser-1793108705602.json",
+      "sha256": "664e695da9cc05d1943a604581a4cc70456e347663763cbecfca7cd6d44408fe"
+    },
+    "passed": 424,
+    "failed": 0,
+    "skipped": 0,
+    "flaky": 0,
+    "reporterErrors": 0,
+    "durationMs": 582842.094,
+    "discovery": {
+      "file": "browser-selection-current-main.json",
+      "sha256": "91fa502580a3e950e3117f62bbf898a8ab7e7b8a327dc6c778284b13d51a1c12"
+    },
+    "selectedSpecs": [
+      "test/browser/procurement-workspace.spec.ts",
+      "test/browser/procurement-planning.spec.ts",
+      "test/browser/procurement-pipeline.spec.ts",
+      "test/browser/procurement-cost-cross-screen.spec.ts",
+      "test/browser/procurement-cost-origin-repair.spec.ts",
+      "test/browser/procurement-supplier-document.spec.ts",
+      "test/browser/procurement-ap-work-lists.spec.ts",
+      "test/browser/procurement-ap-safeguards.spec.ts",
+      "test/browser/procurement-payment-completion.spec.ts",
+      "test/browser/procurement-supplier-credits.spec.ts",
+      "test/browser/procurement-receiving-units.spec.ts",
+      "test/browser/procurement-document-relationships.spec.ts",
+      "test/browser/procurement-shipment-receiving-configurations.spec.ts",
+      "test/browser/procurement-shipment-receiving-readiness.spec.ts"
+    ],
+    "exactCaseProjectCoverage": true,
+    "caseProjectIdentitySha256": "16072a78328647e8800e02bb597d3624833d9d99a4e48aff72327413c751ea24",
+    "projects": {
+      "desktop": 212,
+      "mobile": 212
+    },
+    "casesByFile": {
+      "procurement-ap-safeguards.spec.ts": 20,
+      "procurement-ap-work-lists.spec.ts": 22,
+      "procurement-cost-cross-screen.spec.ts": 58,
+      "procurement-cost-origin-repair.spec.ts": 8,
+      "procurement-document-relationships.spec.ts": 20,
+      "procurement-payment-completion.spec.ts": 32,
+      "procurement-pipeline.spec.ts": 44,
+      "procurement-planning.spec.ts": 22,
+      "procurement-receiving-units.spec.ts": 66,
+      "procurement-shipment-receiving-configurations.spec.ts": 16,
+      "procurement-shipment-receiving-readiness.spec.ts": 14,
+      "procurement-supplier-credits.spec.ts": 80,
+      "procurement-supplier-document.spec.ts": 4,
+      "procurement-workspace.spec.ts": 18
+    }
+  },
+  "connected": {
+    "passed": 46,
+    "failed": 0,
+    "skipped": 0,
+    "flaky": 0,
+    "reporterErrors": 0,
+    "discovery": {
+      "file": "connected-discovery-b340d5b45.json",
+      "sha256": "47654badc95a368388760b982315031413dfe1ef7a230638e7ab9ac761f2f60a"
+    },
+    "exactCaseProjectCoverage": true,
+    "balancedFourShards": true,
+    "frontendIndexSha256": "a5b8a23d7e39f189c41f7824aacc0942bf4ada9f492dd142a6bd4d52bcb934ba",
+    "shards": [
+      {
+        "shard": 1,
+        "wrapper": {
+          "file": "connected-wrapper-1793108790904-4848.json",
+          "sha256": "4e99a8d58352c212bd756140b1ff245e725052804d6b6b7161aa239b050d487b"
+        },
+        "args": [
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.procurement-connected.config.ts",
+          "--reporter=line,json",
+          "--global-timeout=720000",
+          "--output=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\connected-artifacts-1793108790904-4848",
+          "--shard=1/4"
+        ],
+        "startedAt": "2026-10-27T13:46:32.160Z",
+        "finishedAt": "2026-10-27T13:56:45.530Z",
+        "sourceBefore": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "a5b8a23d7e39f189c41f7824aacc0942bf4ada9f492dd142a6bd4d52bcb934ba"
+        },
+        "sourceAfter": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "a5b8a23d7e39f189c41f7824aacc0942bf4ada9f492dd142a6bd4d52bcb934ba"
+        },
+        "childCloseConfirmed": true,
+        "sourceStable": true,
+        "log": {
+          "file": "connected-1793108790904-4848.log",
+          "sha256": "08401431354ae5844cd3ed2bd630e8200cb77215b5e4428de3f8905ce91b25f5"
+        },
+        "report": {
+          "file": "connected-1793108790904-4848.json",
+          "sha256": "6b71a90c8e3b43b882b81b9e988279d609eda07abbe1d3b1347dee9083b7293a"
+        },
+        "cases": [
+          {
+            "project": "desktop",
+            "file": "authority.spec.ts",
+            "line": 61,
+            "title": "view-only lead cannot change receiving records through direct authenticated requests",
+            "titlePath": [
+              "authority.spec.ts",
+              "view-only lead cannot change receiving records through direct authenticated requests"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 83722,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "authority.spec.ts",
+            "line": 85,
+            "title": "view-only lead sees disabled receive controls on a fresh receipt without pending recovery",
+            "titlePath": [
+              "authority.spec.ts",
+              "view-only lead sees disabled receive controls on a fresh receipt without pending recovery"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 61532,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "authority.spec.ts",
+            "line": 100,
+            "title": "view-only lead cannot start, discard or import into an independently created draft",
+            "titlePath": [
+              "authority.spec.ts",
+              "view-only lead cannot start, discard or import into an independently created draft"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 84076,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "authority.spec.ts",
+            "line": 127,
+            "title": "a non-lead receiver with identical grants can reach the same receipt as the authorized API",
+            "titlePath": [
+              "authority.spec.ts",
+              "a non-lead receiver with identical grants can reach the same receipt as the authorized API"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 55625,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "authority.spec.ts",
+            "line": 159,
+            "title": "revocation after a committed lost response retains intent and restoration replays exactly once",
+            "titlePath": [
+              "authority.spec.ts",
+              "revocation after a committed lost response retains intent and restoration replays exactly once"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 67899,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "authority.spec.ts",
+            "line": 192,
+            "title": "expired persisted session preserves committed entry intent through real login and replay",
+            "titlePath": [
+              "authority.spec.ts",
+              "expired persisted session preserves committed entry intent through real login and replay"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 66095,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "authority.spec.ts",
+            "line": 221,
+            "title": "another authenticated receiver cannot consume the original operator's pending intent",
+            "titlePath": [
+              "authority.spec.ts",
+              "another authenticated receiver cannot consume the original operator's pending intent"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 74743,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "authority.spec.ts",
+            "line": 255,
+            "title": "receiving adjustment does not grant vendor or catalog creation",
+            "titlePath": [
+              "authority.spec.ts",
+              "receiving adjustment does not grant vendor or catalog creation"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 22304,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "authority.spec.ts",
+            "line": 297,
+            "title": "a catalog creator can create metadata without gaining receipt adjustment authority",
+            "titlePath": [
+              "authority.spec.ts",
+              "a catalog creator can create metadata without gaining receipt adjustment authority"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 22636,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "catalog-validation.spec.ts",
+            "line": 18,
+            "title": "catalog creation rejects invalid case factor before writes: ZERO-C0",
+            "titlePath": [
+              "catalog-validation.spec.ts",
+              "catalog creation rejects invalid case factor before writes: ZERO-C0"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 34024,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "catalog-validation.spec.ts",
+            "line": 18,
+            "title": "catalog creation rejects invalid case factor before writes: TOO-LARGE-C2147483648",
+            "titlePath": [
+              "catalog-validation.spec.ts",
+              "catalog creation rejects invalid case factor before writes: TOO-LARGE-C2147483648"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 22239,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "catalog-validation.spec.ts",
+            "line": 47,
+            "title": "catalog creation rolls back its parent on variant failure and permits a clean retry",
+            "titlePath": [
+              "catalog-validation.spec.ts",
+              "catalog creation rolls back its parent on variant failure and permits a clean retry"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 14034,
+            "retry": 0
+          }
+        ],
+        "passed": 12,
+        "failed": 0,
+        "skipped": 0,
+        "flaky": 0,
+        "reporterErrors": 0,
+        "durationMs": 612130.5199999999
+      },
+      {
+        "shard": 2,
+        "wrapper": {
+          "file": "connected-wrapper-1793108790995-78196.json",
+          "sha256": "2c3580683d6493a6298b8e462b6478080f7624896116f5fd689564e86af8a5e3"
+        },
+        "args": [
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.procurement-connected.config.ts",
+          "--reporter=line,json",
+          "--global-timeout=720000",
+          "--output=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\connected-artifacts-1793108790995-78196",
+          "--shard=2/4"
+        ],
+        "startedAt": "2026-10-27T13:46:32.241Z",
+        "finishedAt": "2026-10-27T13:56:45.587Z",
+        "sourceBefore": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "a5b8a23d7e39f189c41f7824aacc0942bf4ada9f492dd142a6bd4d52bcb934ba"
+        },
+        "sourceAfter": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "a5b8a23d7e39f189c41f7824aacc0942bf4ada9f492dd142a6bd4d52bcb934ba"
+        },
+        "childCloseConfirmed": true,
+        "sourceStable": true,
+        "log": {
+          "file": "connected-1793108790995-78196.log",
+          "sha256": "091c4bffcff48baf9c8c849580fe4286700c4f2911f5b3d02c4a220eaa1421b3"
+        },
+        "report": {
+          "file": "connected-1793108790995-78196.json",
+          "sha256": "acf8c712c62eba641405449835023c81f9e3ebc31187aa98c247b5da0cf5963e"
+        },
+        "cases": [
+          {
+            "project": "desktop",
+            "file": "navigation.spec.ts",
+            "line": 101,
+            "title": "connected-viewer follows purchase, shipment Costs and freight invoice with preserved return context",
+            "titlePath": [
+              "navigation.spec.ts",
+              "connected-viewer follows purchase, shipment Costs and freight invoice with preserved return context"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 84519,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "navigation.spec.ts",
+            "line": 147,
+            "title": "connected-viewer follows a shared goods invoice to its other PO without replacing the original purchase anchor",
+            "titlePath": [
+              "navigation.spec.ts",
+              "connected-viewer follows a shared goods invoice to its other PO without replacing the original purchase anchor"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 74732,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "navigation.spec.ts",
+            "line": 101,
+            "title": "connected-picker follows purchase, shipment Costs and freight invoice with preserved return context",
+            "titlePath": [
+              "navigation.spec.ts",
+              "connected-picker follows purchase, shipment Costs and freight invoice with preserved return context"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 69474,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "navigation.spec.ts",
+            "line": 147,
+            "title": "connected-picker follows a shared goods invoice to its other PO without replacing the original purchase anchor",
+            "titlePath": [
+              "navigation.spec.ts",
+              "connected-picker follows a shared goods invoice to its other PO without replacing the original purchase anchor"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 55583,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "navigation.spec.ts",
+            "line": 188,
+            "title": "a non-lead creator saves a fee-only purchase and keeps existing drafts read-only",
+            "titlePath": [
+              "navigation.spec.ts",
+              "a non-lead creator saves a fee-only purchase and keeps existing drafts read-only"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 68123,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "navigation.spec.ts",
+            "line": 259,
+            "title": "a non-lead purchasing reader can inspect AP work without receiving payment, credit or return authority",
+            "titlePath": [
+              "navigation.spec.ts",
+              "a non-lead purchasing reader can inspect AP work without receiving payment, credit or return authority"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 65993,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "navigation.spec.ts",
+            "line": 286,
+            "title": "a non-lead read-only purchaser keeps draft detail and cannot enter or mutate its editor",
+            "titlePath": [
+              "navigation.spec.ts",
+              "a non-lead read-only purchaser keeps draft detail and cannot enter or mutate its editor"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 74362,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "navigation.spec.ts",
+            "line": 313,
+            "title": "a non-lead purchase editor can open an existing draft without gaining creation permission",
+            "titlePath": [
+              "navigation.spec.ts",
+              "a non-lead purchase editor can open an existing draft without gaining creation permission"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 22587,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "navigation.spec.ts",
+            "line": 338,
+            "title": "a non-admin with both read grants can inspect the purchasing dashboard but cannot start auto-draft",
+            "titlePath": [
+              "navigation.spec.ts",
+              "a non-admin with both read grants can inspect the purchasing dashboard but cannot start auto-draft"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 22622,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "receiving-recovery.spec.ts",
+            "line": 3,
+            "title": "committed case receipt survives lost response, reload, retry and close without duplicate stock",
+            "titlePath": [
+              "receiving-recovery.spec.ts",
+              "committed case receipt survives lost response, reload, retry and close without duplicate stock"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 34648,
+            "retry": 0
+          },
+          {
+            "project": "desktop",
+            "file": "receiving-recovery.spec.ts",
+            "line": 67,
+            "title": "lost finalization response retries against the committed receipt without a second stock posting",
+            "titlePath": [
+              "receiving-recovery.spec.ts",
+              "lost finalization response retries against the committed receipt without a second stock posting"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 21884,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "authority.spec.ts",
+            "line": 61,
+            "title": "view-only lead cannot change receiving records through direct authenticated requests",
+            "titlePath": [
+              "authority.spec.ts",
+              "view-only lead cannot change receiving records through direct authenticated requests"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 12833,
+            "retry": 0
+          }
+        ],
+        "passed": 12,
+        "failed": 0,
+        "skipped": 0,
+        "flaky": 0,
+        "reporterErrors": 0,
+        "durationMs": 611606.9319999999
+      },
+      {
+        "shard": 3,
+        "wrapper": {
+          "file": "connected-wrapper-1793108789898-87736.json",
+          "sha256": "2fdd9342052ca7e492bdea86f81d715d15cc5f144f8e43a655c5897eb2432369"
+        },
+        "args": [
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.procurement-connected.config.ts",
+          "--reporter=line,json",
+          "--global-timeout=720000",
+          "--output=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\connected-artifacts-1793108789898-87736",
+          "--shard=3/4"
+        ],
+        "startedAt": "2026-10-27T13:46:31.664Z",
+        "finishedAt": "2026-10-27T13:56:31.856Z",
+        "sourceBefore": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "a5b8a23d7e39f189c41f7824aacc0942bf4ada9f492dd142a6bd4d52bcb934ba"
+        },
+        "sourceAfter": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "a5b8a23d7e39f189c41f7824aacc0942bf4ada9f492dd142a6bd4d52bcb934ba"
+        },
+        "childCloseConfirmed": true,
+        "sourceStable": true,
+        "log": {
+          "file": "connected-1793108789898-87736.log",
+          "sha256": "4b388a32f0fad97da49f75c8ccda2d1c8e287809ec65f045ed4973ecfa65e19e"
+        },
+        "report": {
+          "file": "connected-1793108789898-87736.json",
+          "sha256": "8559f582bce748683b745cf94d125a10f07a7c63b2b66f9eee0002ff7ac6b4c3"
+        },
+        "cases": [
+          {
+            "project": "mobile",
+            "file": "authority.spec.ts",
+            "line": 85,
+            "title": "view-only lead sees disabled receive controls on a fresh receipt without pending recovery",
+            "titlePath": [
+              "authority.spec.ts",
+              "view-only lead sees disabled receive controls on a fresh receipt without pending recovery"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 86836,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "authority.spec.ts",
+            "line": 100,
+            "title": "view-only lead cannot start, discard or import into an independently created draft",
+            "titlePath": [
+              "authority.spec.ts",
+              "view-only lead cannot start, discard or import into an independently created draft"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 73412,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "authority.spec.ts",
+            "line": 127,
+            "title": "a non-lead receiver with identical grants can reach the same receipt as the authorized API",
+            "titlePath": [
+              "authority.spec.ts",
+              "a non-lead receiver with identical grants can reach the same receipt as the authorized API"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 69950,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "authority.spec.ts",
+            "line": 159,
+            "title": "revocation after a committed lost response retains intent and restoration replays exactly once",
+            "titlePath": [
+              "authority.spec.ts",
+              "revocation after a committed lost response retains intent and restoration replays exactly once"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 55603,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "authority.spec.ts",
+            "line": 192,
+            "title": "expired persisted session preserves committed entry intent through real login and replay",
+            "titlePath": [
+              "authority.spec.ts",
+              "expired persisted session preserves committed entry intent through real login and replay"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 81489,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "authority.spec.ts",
+            "line": 221,
+            "title": "another authenticated receiver cannot consume the original operator's pending intent",
+            "titlePath": [
+              "authority.spec.ts",
+              "another authenticated receiver cannot consume the original operator's pending intent"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 68988,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "authority.spec.ts",
+            "line": 255,
+            "title": "receiving adjustment does not grant vendor or catalog creation",
+            "titlePath": [
+              "authority.spec.ts",
+              "receiving adjustment does not grant vendor or catalog creation"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 58053,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "authority.spec.ts",
+            "line": 297,
+            "title": "a catalog creator can create metadata without gaining receipt adjustment authority",
+            "titlePath": [
+              "authority.spec.ts",
+              "a catalog creator can create metadata without gaining receipt adjustment authority"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 22565,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "catalog-validation.spec.ts",
+            "line": 18,
+            "title": "catalog creation rejects invalid case factor before writes: ZERO-C0",
+            "titlePath": [
+              "catalog-validation.spec.ts",
+              "catalog creation rejects invalid case factor before writes: ZERO-C0"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 22732,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "catalog-validation.spec.ts",
+            "line": 18,
+            "title": "catalog creation rejects invalid case factor before writes: TOO-LARGE-C2147483648",
+            "titlePath": [
+              "catalog-validation.spec.ts",
+              "catalog creation rejects invalid case factor before writes: TOO-LARGE-C2147483648"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 33940,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "catalog-validation.spec.ts",
+            "line": 47,
+            "title": "catalog creation rolls back its parent on variant failure and permits a clean retry",
+            "titlePath": [
+              "catalog-validation.spec.ts",
+              "catalog creation rolls back its parent on variant failure and permits a clean retry"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 22507,
+            "retry": 0
+          }
+        ],
+        "passed": 11,
+        "failed": 0,
+        "skipped": 0,
+        "flaky": 0,
+        "reporterErrors": 0,
+        "durationMs": 598715.96
+      },
+      {
+        "shard": 4,
+        "wrapper": {
+          "file": "connected-wrapper-1793108792490-38620.json",
+          "sha256": "a2cb6aa7e940562205fe0dda9b3ec585edc81c565492effb1fb0d8b7c0fa660e"
+        },
+        "args": [
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.procurement-connected.config.ts",
+          "--reporter=line,json",
+          "--global-timeout=720000",
+          "--output=C:\\Users\\owner\\Echelon\\outputs\\procurement-ap-summary-snapshot-2026-10-27\\connected-artifacts-1793108792490-38620",
+          "--shard=4/4"
+        ],
+        "startedAt": "2026-10-27T13:46:33.331Z",
+        "finishedAt": "2026-10-27T13:56:31.859Z",
+        "sourceBefore": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "a5b8a23d7e39f189c41f7824aacc0942bf4ada9f492dd142a6bd4d52bcb934ba"
+        },
+        "sourceAfter": {
+          "head": "b340d5b45037c0362ab41b5d0065f872f04af38f",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "a5b8a23d7e39f189c41f7824aacc0942bf4ada9f492dd142a6bd4d52bcb934ba"
+        },
+        "childCloseConfirmed": true,
+        "sourceStable": true,
+        "log": {
+          "file": "connected-1793108792490-38620.log",
+          "sha256": "3e828d356e2b1f903a6a2c75aa25a958078782949ca43e49f411ebb4105f5d90"
+        },
+        "report": {
+          "file": "connected-1793108792490-38620.json",
+          "sha256": "cf02efd518e0dbacecce7a8f7a52e6a3ab67d7d541dd5f0c37edcdcf18ba22f0"
+        },
+        "cases": [
+          {
+            "project": "mobile",
+            "file": "navigation.spec.ts",
+            "line": 101,
+            "title": "connected-viewer follows purchase, shipment Costs and freight invoice with preserved return context",
+            "titlePath": [
+              "navigation.spec.ts",
+              "connected-viewer follows purchase, shipment Costs and freight invoice with preserved return context"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 81389,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "navigation.spec.ts",
+            "line": 147,
+            "title": "connected-viewer follows a shared goods invoice to its other PO without replacing the original purchase anchor",
+            "titlePath": [
+              "navigation.spec.ts",
+              "connected-viewer follows a shared goods invoice to its other PO without replacing the original purchase anchor"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 62564,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "navigation.spec.ts",
+            "line": 101,
+            "title": "connected-picker follows purchase, shipment Costs and freight invoice with preserved return context",
+            "titlePath": [
+              "navigation.spec.ts",
+              "connected-picker follows purchase, shipment Costs and freight invoice with preserved return context"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 95907,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "navigation.spec.ts",
+            "line": 147,
+            "title": "connected-picker follows a shared goods invoice to its other PO without replacing the original purchase anchor",
+            "titlePath": [
+              "navigation.spec.ts",
+              "connected-picker follows a shared goods invoice to its other PO without replacing the original purchase anchor"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 43880,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "navigation.spec.ts",
+            "line": 188,
+            "title": "a non-lead creator saves a fee-only purchase and keeps existing drafts read-only",
+            "titlePath": [
+              "navigation.spec.ts",
+              "a non-lead creator saves a fee-only purchase and keeps existing drafts read-only"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 67177,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "navigation.spec.ts",
+            "line": 259,
+            "title": "a non-lead purchasing reader can inspect AP work without receiving payment, credit or return authority",
+            "titlePath": [
+              "navigation.spec.ts",
+              "a non-lead purchasing reader can inspect AP work without receiving payment, credit or return authority"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 66815,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "navigation.spec.ts",
+            "line": 286,
+            "title": "a non-lead read-only purchaser keeps draft detail and cannot enter or mutate its editor",
+            "titlePath": [
+              "navigation.spec.ts",
+              "a non-lead read-only purchaser keeps draft detail and cannot enter or mutate its editor"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 74300,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "navigation.spec.ts",
+            "line": 313,
+            "title": "a non-lead purchase editor can open an existing draft without gaining creation permission",
+            "titlePath": [
+              "navigation.spec.ts",
+              "a non-lead purchase editor can open an existing draft without gaining creation permission"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 22528,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "navigation.spec.ts",
+            "line": 338,
+            "title": "a non-admin with both read grants can inspect the purchasing dashboard but cannot start auto-draft",
+            "titlePath": [
+              "navigation.spec.ts",
+              "a non-admin with both read grants can inspect the purchasing dashboard but cannot start auto-draft"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 22694,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "receiving-recovery.spec.ts",
+            "line": 3,
+            "title": "committed case receipt survives lost response, reload, retry and close without duplicate stock",
+            "titlePath": [
+              "receiving-recovery.spec.ts",
+              "committed case receipt survives lost response, reload, retry and close without duplicate stock"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 34036,
+            "retry": 0
+          },
+          {
+            "project": "mobile",
+            "file": "receiving-recovery.spec.ts",
+            "line": 67,
+            "title": "lost finalization response retries against the committed receipt without a second stock posting",
+            "titlePath": [
+              "receiving-recovery.spec.ts",
+              "lost finalization response retries against the committed receipt without a second stock posting"
+            ],
+            "expectedStatus": "passed",
+            "status": "expected",
+            "durationMs": 22775,
+            "retry": 0
+          }
+        ],
+        "passed": 11,
+        "failed": 0,
+        "skipped": 0,
+        "flaky": 0,
+        "reporterErrors": 0,
+        "durationMs": 597044.3369999999
+      }
+    ]
+  },
+  "migrations": {
+    "count": 558,
+    "base": "bdf711be2c23ad6e992df947b08202e495779db1",
+    "changedMigrationFiles": 0,
+    "proof": {
+      "file": "migration-policy-b340d5b45.json",
+      "sha256": "2a87c51b34c47df449c4adc3df98437c8bcc9a70c3ce4f22841d35725e38d315"
+    }
+  },
+  "performance": {
+    "equivalence": {
+      "file": "main-performance-equivalence-880758b69.json",
+      "sha256": "0fb627405b2fb632a9aff9df5065581273419294f50a6e08d76ed7b3afb89ba8"
+    },
+    "hotFunctionsUnchanged": 7,
+    "furtherChangesOutsideMeasuredOwners": true,
+    "historicalTimingAttribution": "The 2026-10-25 timings/driver counts remain measurements of5dc5f1b4 against719b6098. This artifact does not claim a new timed experiment, current AP concurrency proof, hosted CI or production performance.",
+    "newTimingExperimentClaimed": false
+  },
+  "finalCleanup": {
+    "proof": {
+      "file": "final-cleanup-b340d5b45.json",
+      "sha256": "c816c24274f78618b0c4432b8d63200e04463774cb21569f12d6c123f7b96cee"
+    },
+    "checkedAt": "2026-10-27T13:58:40.776Z",
+    "identity": {
+      "role": "review_procurement_snapshot",
+      "database": "postgres",
+      "directory": "C:/Users/owner/Echelon/outputs/procurement-ap-summary-snapshot-2026-10-27/pgdata",
+      "address": "127.0.0.1",
+      "port": 62874
+    },
+    "remainingDatabases": 0,
+    "remainingClientConnections": 0,
+    "readOnly": true,
+    "recordsChanged": false
+  },
+  "coverageBoundaries": [
+    "The connected46 starts its shipment in_transit; it does not prove a real draft-to-booked receiving-configuration journey. New configuration/readiness mocked screens and actual command DB suites are separate layers of proof.",
+    "Connected AP payment/credit/return work lists are empty. Posted financial mutations are exercised by the real two-connection command integration tests, not a connected operator payment/credit/return detail journey.",
+    "Fixtures install current actual schema columns and selected migrations; they are not a complete production bootstrap/release migration replay or external provider-dispatch proof.",
+    "Posted PO cost freshness still performs per-shipment work, and extreme health child-row capacity remains unverified. Earlier performance timings belong to their recorded5dc measurement, not this new commit.",
+    "Historical PO144/149 and shipments95/97 remain a separate evidence/repair queue. This collection reads files/Git only and makes no live-record claim from disposable fixtures."
+  ]
+}

@@ -3,6 +3,7 @@ import {
   makeDropshipEbayOrderIntakeLogger,
   systemDropshipEbayOrderIntakeClock,
 } from "../application/dropship-ebay-order-intake-poll-service";
+import { PgDropshipEbayMarketplaceOrderEffects } from "./dropship-ebay-marketplace-order-effects.repository";
 import { EbayDropshipOrderIntakeProvider } from "./dropship-ebay-order-intake.provider";
 import { PgDropshipEbayOrderIntakeRepository } from "./dropship-ebay-order-intake.repository";
 import { createDropshipMarketplaceCredentialRepositoryFromEnv } from "./dropship-marketplace-credentials";
@@ -16,6 +17,7 @@ export function createDropshipEbayOrderIntakePollServiceFromEnv(): DropshipEbayO
     provider: new EbayDropshipOrderIntakeProvider(credentials),
     healthService: createDropshipOrderIntakeHealthServiceFromEnv(),
     orderIntakeService: createDropshipOrderIntakeServiceFromEnv(),
+    marketplaceOrders: new PgDropshipEbayMarketplaceOrderEffects(),
     clock: systemDropshipEbayOrderIntakeClock,
     logger: makeDropshipEbayOrderIntakeLogger(),
   });

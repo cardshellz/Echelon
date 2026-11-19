@@ -54,7 +54,8 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
       CREATE TABLE catalog.product_line_products (product_id integer);
       CREATE TABLE catalog.product_categories (id integer PRIMARY KEY, name varchar(100) NOT NULL);
       CREATE TABLE dropship.dropship_catalog_rules (id integer);
-      CREATE TABLE dropship.dropship_vendor_selection_rules (id integer);
+      -- The vendor's picks, which the selection SHARE lock names (PLAN-B v4.1 §9 row 11); reduced.
+      CREATE TABLE dropship.dropship_vendor_selected_variants (vendor_id integer, product_variant_id integer);
       CREATE TABLE dropship.dropship_vendor_variant_overrides (id integer);
       CREATE TABLE dropship.dropship_audit_events (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         vendor_id integer, store_connection_id integer, entity_type text, entity_id text,
@@ -65,6 +66,7 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
       CREATE TABLE dropship.dropship_vendor_listings (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         vendor_id integer, store_connection_id integer, product_variant_id integer, platform text, status text,
         vendor_retail_price_cents integer, pushed_quantity integer, quantity_cap integer, last_preview_hash text,
+        external_listing_id varchar(255),
         metadata jsonb, created_at timestamptz, updated_at timestamptz, UNIQUE(store_connection_id,product_variant_id));
       CREATE TABLE dropship.dropship_listing_push_job_items (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         job_id integer, listing_id integer, product_variant_id integer, action text, status text, preview_hash text,
@@ -478,6 +480,6 @@ function queueInput(revisionId: number): CreateDropshipListingPushJobRepositoryI
       rows: [{ productVariantId: 101, productId: 7, priceSettingRevisionId: revisionId,
         priceCents: 1299, marketplaceQuantity: 2, previewStatus: "ready", blockers: [], warnings: [],
         listingMode: "draft_first", previewHash: "preview-hash", businessPolicySelection: null,
-        listingIntent: { priceCents: 1299 } } as CreateDropshipListingPushJobRepositoryInput["preview"]["rows"][number]],
+        listingIntent: { priceCents: 1299 } } as unknown as CreateDropshipListingPushJobRepositoryInput["preview"]["rows"][number]],
     } };
 }

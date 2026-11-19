@@ -1,6 +1,8 @@
-import { InventoryPublicationTargetHoldService } from "../../inventory-planning/application/inventory-publication-target-hold.service";
-import { InventoryAvailabilityMasterDataError } from "../../inventory-planning/domain/inventory-availability-master-data.contracts";
-import { PostgresInventoryPublicationTargetHoldStore } from "../../inventory-planning/infrastructure/inventory-publication-target-hold.repository";
+import {
+  InventoryAvailabilityMasterDataError,
+  InventoryPublicationTargetHoldService,
+  PostgresInventoryPublicationTargetHoldStore,
+} from "../../inventory-planning/publication-target-hold.api";
 import type {
   DropshipListingHoldGate,
   DropshipListingHoldGateOutcome,

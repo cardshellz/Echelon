@@ -258,6 +258,18 @@ interface PlannedTarget {
   sourceWarehouseIds: number[];
 }
 
+/**
+ * The listing owner's limit on what is published (eBay sync-back owner rule
+ * 1, the selection's `publishLimitUnits`): min(calculated, limit). Applied to
+ * publication plans only; a channel quantity read reports the quantity as it
+ * is computed, and the listing owner applies the same limit to what it sends.
+ */
+function limitPublishedUnits(calculated: bigint, limit: number | undefined): bigint {
+  if (limit === undefined) return calculated;
+  const bound = BigInt(limit);
+  return calculated < bound ? calculated : bound;
+}
+
 function planTarget(
   snapshot: SupplySnapshotDto,
   productId: number,
@@ -338,7 +350,8 @@ function planTarget(
   const variantHolds = new Map(target.variantHolds.map((entry) => [entry.productVariantId, entry.hold] as const));
   const rows = selectedVariants.map((variant): RuntimeRow => {
     // The hold that zeroes this SKU: the destination-wide hold covers every SKU
-    // and wins; otherwise a SKU-level hold covers this one alone.
+    // and wins; otherwise a SKU-level hold covers this one alone. An operator
+    // stops a SKU on a channel with a Max 0 stock rule, which is a rule, not a hold.
     const hold = target.hold ?? variantHolds.get(variant.id) ?? null;
     const selection = target.selection?.variants.find(entry => entry.productVariantId === variant.id);
     const blockers: RuntimeIssue[] = (selection?.blockers ?? []).map(blocker => issue(blocker.code, blocker.message,
@@ -444,7 +457,8 @@ function planTarget(
       cappedUnits: calculation.cappedUnits.toString(),
       // A deselected retained listing still has a removal duty. Keep its exact
       // identity and real ATP lineage; only the outgoing quantity becomes zero.
-      publishedUnits: selection?.action === "zero" ? "0" : calculation.publishedUnits.toString(),
+      publishedUnits: selection?.action === "zero" ? "0"
+        : limitPublishedUnits(calculation.publishedUnits, purpose === "publication" ? selection?.publishLimitUnits : undefined).toString(),
       sourceWarehouseBreakdown,
       policy: resolution.policy,
       mapping: mapping ? {

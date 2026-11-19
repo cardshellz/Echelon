@@ -1,6 +1,11 @@
 import { sql, type SQL } from "drizzle-orm";
 import { wmsOmsOrderLinkSql } from "./oms-wms-order-link.sql";
 import {
+  currentChannelPackageEvidenceSql,
+  currentPushedShipmentItemQuantitySql,
+  shipmentHasRetiredPackageSql,
+} from "./channel-fulfillment-package-coverage.sql";
+import {
   DROPSHIP_LINE_FULFILLMENT_PROVIDER,
   DROPSHIP_ORDER_CHANNEL_PROVIDER,
   DROPSHIP_WRITEBACK_PROVIDER,
@@ -135,6 +140,7 @@ function shippedChannelShipmentsCte(
                   AND e.details->>'coverageVersion' = '2'
                   AND e.details->>'writebackComplete' = 'true'
                   AND e.details->>'packageSignature' = package_signature.shopify_package_signature
+                  AND NOT ${shipmentHasRetiredPackageSql({ shipmentId: sql`os.id`, omsOrderId: sql`oo.id` })}
                 )
                 OR (c.provider = 'ebay' AND e.event_type = 'tracking_pushed')
               )
@@ -172,25 +178,9 @@ function shippedChannelShipmentsCte(
                   c.provider
                 ) = c.provider
                 AND NOT (
-                  EXISTS (
-                    SELECT 1
-                    FROM wms.effective_physical_shipment_items physical_item
-                    LEFT JOIN wms.package_allocation_entries allocation_entry
-                      ON allocation_entry.id = physical_item.package_allocation_entry_id
-                    LEFT JOIN wms.package_allocation_source_lines allocation_source
-                      ON allocation_source.id = allocation_entry.package_allocation_source_line_id
-                    JOIN oms.channel_fulfillment_push_items push_item
-                      ON push_item.physical_shipment_item_id = physical_item.id
-                    JOIN oms.channel_fulfillment_pushes push
-                      ON push.id = push_item.channel_fulfillment_push_id
-                    WHERE COALESCE(physical_item.legacy_wms_shipment_item_id,
-                      physical_item.label_replacement_source_item_id,
-                      allocation_source.source_wms_shipment_item_id) = eligible_item.id
-                      AND push.oms_order_id = oo.id
-                      AND push.channel_provider = c.provider
-                      AND push.push_status IN ('success', 'ignored')
-                      AND push_item.quantity_pushed = eligible_item.qty
-                  )
+                  ${currentPushedShipmentItemQuantitySql({
+                    shipmentItemId: sql`eligible_item.id`, omsOrderId: sql`oo.id`, provider: sql`c.provider`,
+                  })} = eligible_item.qty
                   OR EXISTS (
                     SELECT 1
                     FROM oms.channel_fulfillment_receipt_items receipt_item
@@ -200,6 +190,15 @@ function shippedChannelShipmentsCte(
                       AND receipt.oms_order_id = oo.id
                       AND receipt.source_provider = c.provider
                       AND receipt.processing_status IN ('processed', 'ignored')
+                      AND ${currentChannelPackageEvidenceSql({
+                        physicalShipmentId: sql`receipt.physical_shipment_id`, omsOrderId: sql`oo.id`,
+                      })}
+                      -- Unmapped legacy receipts cannot prove which relabelled
+                      -- package is current. Preserve their normal legacy use.
+                      AND (receipt.physical_shipment_id IS NOT NULL OR NOT ${shipmentHasRetiredPackageSql({
+                        shipmentId: sql`os.id`, omsOrderId: sql`oo.id`,
+                      })})
+                      AND LOWER(COALESCE(receipt.raw_payload->>'status', '')) NOT IN ('cancelled', 'canceled', 'failure', 'error')
                       AND receipt_item.quantity = eligible_item.qty
                   )
                 )

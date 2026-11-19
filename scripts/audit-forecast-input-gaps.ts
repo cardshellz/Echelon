@@ -145,15 +145,11 @@ async function main() {
   const { pool } = await import("../server/db");
   const { procurementStorage } = await import("../server/modules/procurement");
   const { inventoryStorage } = await import("../server/modules/inventory");
-  const { loadPurchasingRecommendationContext } = await import(
-    "../server/modules/procurement/purchasing-recommendation-context.service"
-  );
-  const { generatePurchasingRecommendations } = await import(
-    "../server/modules/procurement/purchasing-recommendation.engine"
-  );
-  const { buildForecastInputGapDiagnostics } = await import(
-    "../server/modules/procurement/forecast-input-gap-diagnostics.service"
-  );
+  const {
+    buildForecastInputGapDiagnostics,
+    generatePurchasingRecommendations,
+    loadPurchasingRecommendationContext,
+  } = await import("../server/modules/procurement/planning-and-pipeline-jobs.api");
 
   const storage = { ...procurementStorage, ...inventoryStorage };
 

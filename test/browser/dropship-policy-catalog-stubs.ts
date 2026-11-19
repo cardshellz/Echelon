@@ -132,11 +132,100 @@ import {
   type OlderGroupRulesKind,
 } from "../../server/modules/dropship/domain/older-group-rules-edit";
 import {
+  listDropshipVendorCatalogIdsInputSchema,
+  parseCatalogNoticeAcknowledgeBody,
   previewDropshipVendorCatalogInputSchema,
-  replaceDropshipVendorSelectionRulesInputSchema,
+  readCatalogNoticeAcknowledgeClientVersion,
+  readDropshipVendorSelectionSummaryInputSchema,
 } from "../../server/modules/dropship/application/dropship-selection-dtos";
-import { hashVendorSelectionRules, normalizeVendorSelectionRule } from "../../server/modules/dropship/application/dropship-selection-atp-service";
+// Step 1's new-items notice (PLAN-B v4.1 §11.4, B3): the server's own grouping and "Got it" rule.
+import { decideAcknowledge, groupNewItems, type CatalogArrivalFact } from "../../server/modules/dropship/domain/catalog-arrivals";
+import { generateVendorListingPreviewInputSchema } from "../../server/modules/dropship/application/dropship-use-case-dtos";
+import { DROPSHIP_CATALOG_CODE_VERSION, isCatalogPageOutdated } from "../../server/modules/dropship/domain/catalog-code-version";
+import {
+  LISTING_PUSH_RUN_CHUNK_SIZE,
+  LISTING_PUSH_RUN_ERROR_CODES,
+  MAX_LISTING_PUSH_RUN_TARGETS,
+  createListingPushRunRequestSchema,
+  createListingPushRunResponseSchema,
+  emptyListingPushRunCounts,
+  listListingPushRunsResponseSchema,
+  listingPushRunDetailResponseSchema,
+  stopListingPushRunResponseSchema,
+  type ListingPushRunCounts,
+  type ListingPushRunProblem,
+  type ListingPushRunStatus,
+  type ListingPushRunStopReason,
+  type ListingPushRunView,
+} from "../../shared/dropship/listing-push-runs";
+import {
+  DROPSHIP_CATALOG_READ_ERROR_CODES,
+  DROPSHIP_CATALOG_SELECTION_CAP,
+  DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON,
+  DROPSHIP_CATALOG_SELECTION_FILTERS,
+  dropshipCatalogCategoriesAnswerSchema,
+  dropshipCatalogIdsAnswerSchema,
+  dropshipCatalogNewItemsAnswerSchema,
+  dropshipCatalogNoticeAcknowledgeAnswerSchema,
+  dropshipCatalogReadSummarySchema,
+  dropshipCatalogSelectionSummarySchema,
+  type DropshipCatalogCategoriesAnswer,
+  type DropshipCatalogNewItemsAnswer,
+  type DropshipCatalogSelectionFilter,
+  type DropshipCatalogSelectionSummary,
+} from "../../shared/dropship/vendor-catalog-reads";
+// Step 1 on one-time picks (PLAN-B v4.1 §12.9, V27): the server's own contract, request parsing, planner and evaluator.
+import {
+  SELECTION_CHANGE_CAP,
+  SELECTION_CHANGE_ERROR_CODES,
+  SELECTION_CHANGE_SKIPPED_SHOWN,
+  selectionChangeAnswerSchema,
+  selectionChangePreviewAnswerSchema,
+  type SelectionChangeAnswer,
+  type SelectionChangeEnds,
+  type SelectionChangePreviewAnswer,
+  type SelectionChangeStoreEffects,
+} from "../../shared/dropship/vendor-selection-changes";
+import {
+  hashSelectionChangeRequest,
+  parseSelectionChangeBody,
+  parseSelectionChangePreviewBody,
+  readSelectionChangeClientVersion,
+  type CanonicalSelectionChange,
+  type CanonicalSelectionChangeSave,
+} from "../../server/modules/dropship/application/dropship-selection-change-dtos";
+import { CATALOG_READ_WORDS } from "../../server/modules/dropship/domain/catalog-read-words";
+import { DropshipError } from "../../server/modules/dropship/domain/errors";
+import { isReservedSelectionIdempotencyKey } from "../../server/modules/dropship/domain/selection-release";
 import { evaluateDropshipVendorCatalogSelection } from "../../server/modules/dropship/domain/vendor-selection";
+import {
+  planSelectionChange,
+  refuseGrowthOverCap,
+  selectedCountAfterChange,
+  type SelectionChangePlan,
+} from "../../server/modules/dropship/domain/vendor-selection-change";
+// PR C (PLAN-C v4.1 §13.4, TST-10): the server's own end decision, effects hash and drift rule. The stock decision
+// behind B's quantity effects cannot be imported here (its imports load the listing lifecycle repositories), so
+// stubSelectionEffects keeps its copy of it, pinned to the server's by catalog-stub-selection-effects-parity.test.ts.
+import {
+  combineSelectionEffectsHash,
+  compareSelectionEffects,
+  selectionEffectsHash,
+  selectionEndsEchoMatches,
+  selectionEndsHash,
+  type SelectionEffect,
+  type SelectionEffectEntry,
+} from "../../server/modules/dropship/domain/vendor-selection-drift";
+import {
+  decideListingEnds,
+  type ListingEndCandidate,
+  type ListingEndDecision,
+  type ListingEndReason,
+  type ListingEndStoreFacts,
+  type PendingListingEnd,
+} from "../../server/modules/dropship/domain/vendor-selection-ends";
+// PR C's push fence (PLAN-C v4.1 §6.2): its codes and words, for the run problems of a target whose end is open.
+import { LISTING_END_FENCE_CODES, LISTING_END_FENCE_WORDS } from "../../server/modules/dropship/domain/listing-end-fence";
 import { publicationSelectionBusyIssue } from "../../server/modules/inventory-planning/publication-selection-work";
 
 /**
@@ -180,9 +269,10 @@ export const ROW = {
 };
 
 /**
- * One size of step 1's catalog as the stub holds it (catalog step 1, stage 1): the candidate's facts, its stock and
- * whether it is turned off for the vendor. Its selection decision is never stored: every read evaluates it with the
- * server's own `evaluateDropshipVendorCatalogSelection` against `StubState.selectionRules`, as the route does.
+ * One size of step 1's catalog as the stub holds it (step 1 on one-time picks, PLAN-B v4.1 §12.9): the candidate's
+ * facts, its Card Shellz category, its stock and whether it is turned off for the vendor. Its selection decision is
+ * never stored: every read evaluates it with the server's evaluator from the vendor's pick (`StubState.picks`), as
+ * B's route does (chooseDecision).
  */
 export interface ChooseRowFact {
   productId: number;
@@ -192,6 +282,8 @@ export interface ChooseRowFact {
   variantSku: string | null;
   variantName: string;
   category: string | null;
+  /** `catalog.products.category_id`: what the categories read counts by and the Category filter sends (V40); null: none. */
+  categoryId: number | null;
   productLineIds: number[];
   productLineNames: string[];
   unitsPerVariant: number;
@@ -202,11 +294,20 @@ export interface ChooseRowFact {
   listingTier: typeof ROW.listingTier;
 }
 
+/**
+ * Card Shellz category ids of the fixtures. Mailers is ROW's (PR 10e, D18): the default state's one category, with no
+ * settings of its own, and ENVELOPE's; Sleeves is LAYERED_SAMPLE's.
+ */
+export const MAILERS_CATEGORY_ID = 30;
+export const SLEEVES_CATEGORY_ID = 40;
+export const TOPLOADERS_CATEGORY_ID = 42;
+
 /** ROW's facts: the default catalog's one size. */
 export const ROW_FACT: ChooseRowFact = {
   productId: ROW.productId, productVariantId: ROW.productVariantId, productSku: ROW.productSku, productName: ROW.productName,
-  variantSku: ROW.variantSku, variantName: ROW.variantName, category: ROW.category, productLineIds: [], productLineNames: [],
-  unitsPerVariant: ROW.unitsPerVariant, stock: ROW.selectionDecision.marketplaceQuantity, listingTier: ROW.listingTier,
+  variantSku: ROW.variantSku, variantName: ROW.variantName, category: ROW.category, categoryId: MAILERS_CATEGORY_ID,
+  productLineIds: [], productLineNames: [], unitsPerVariant: ROW.unitsPerVariant, stock: ROW.selectionDecision.marketplaceQuantity,
+  listingTier: ROW.listingTier,
 };
 
 /** `count` sizes of one product line ("Trading Card Supplies"), two categories, ascending ids from 2001. */
@@ -214,47 +315,56 @@ export function chooseRowsFixture(count: number): ChooseRowFact[] {
   return Array.from({ length: count }, (_, index) => ({
     ...ROW_FACT, productId: 200 + Math.floor(index / 4), productVariantId: 2_001 + index,
     productName: `Penny Sleeves ${String(Math.floor(index / 4) + 1).padStart(3, "0")}`, productSku: `PS-${Math.floor(index / 4) + 1}`,
-    variantName: `Pack of ${25 * ((index % 4) + 1)}`, variantSku: `PS-${index + 1}`, category: index % 2 === 0 ? "Sleeves" : "Toploaders",
+    variantName: `Pack of ${25 * ((index % 4) + 1)}`, variantSku: `PS-${index + 1}`,
+    category: index % 2 === 0 ? "Sleeves" : "Toploaders", categoryId: index % 2 === 0 ? SLEEVES_CATEGORY_ID : TOPLOADERS_CATEGORY_ID,
     productLineIds: [4], productLineNames: ["Trading Card Supplies"], stock: 10 + (index % 7),
   }));
 }
 
-/** A saved selection rule as `GET /api/dropship/catalog/selection-rules` returns it. */
-export interface SelectionRuleRecord {
-  id: number; revisionId: number | null; vendorId: number;
-  scopeType: "catalog" | "product_line" | "category" | "product" | "variant"; action: "include" | "exclude";
-  productLineId: number | null; productId: number | null; productVariantId: number | null; category: string | null;
-  autoConnectNewSkus: boolean; autoListNewSkus: boolean; priority: number; isActive: boolean;
-  metadata: Record<string, unknown> | null; createdAt: string; updatedAt: string;
-}
-
-/** A rule record; the targets left out are null. */
-export function selectionRule(id: number, scopeType: SelectionRuleRecord["scopeType"], action: SelectionRuleRecord["action"],
-  target: Partial<Pick<SelectionRuleRecord, "productLineId" | "productId" | "productVariantId" | "category">> = {},
-  extra: Partial<SelectionRuleRecord> = {}): SelectionRuleRecord {
-  return { id, revisionId: 1, vendorId: 1, scopeType, action, productLineId: target.productLineId ?? null, productId: target.productId ?? null,
-    productVariantId: target.productVariantId ?? null, category: target.category ?? null, autoConnectNewSkus: action === "include",
-    autoListNewSkus: false, priority: action === "include" ? 100 : 200, isActive: true, metadata: { source: "portal_catalog" },
-    createdAt: STAMP, updatedAt: STAMP, ...extra };
+/** The product variant ids of `facts`, ascending: the picks a journey starts from. */
+export function picksOf(facts: readonly ChooseRowFact[]): Set<number> {
+  return new Set(facts.map((fact) => fact.productVariantId).sort((left, right) => left - right));
 }
 
 /**
- * How the next selection save (PUT …/selection-rules) answers: busy (nothing saved), a 500 (nothing saved), a 403 refusal
- * (nothing saved), saved with the answer cut off, or saved after a pause (a save still running while the vendor clicks).
+ * How the next picks preview or save (`POST …/selection/changes[/preview]`) answers before the stub plans it
+ * (PLAN-B v4.1 §12.9, §14), in the order the routes meet them:
+ * - `html`, `too-large-no-code`: an older dyno that does not know the route: the app's HTML with 200, or its 100 KiB
+ *   global parser's 413 with no code (§4 row 3, §12.5); answered before the body is read;
+ * - `server-error` (500) and a scripted refusal (`ScriptedError`, such as a 410 or PR C's 409 page outdated): answered
+ *   after the body is parsed, before the save's replay check;
+ * - `paused` (503 `DROPSHIP_SELECTION_WRITES_PAUSED` with `Retry-After: 5`) and `busy` (409 `PUBLICATION_SELECTION_BUSY`,
+ *   the server's answer after its own retries): after the replay check, as the service checks them (§8.3);
+ * - save only: `drop-after-commit` (saved, the answer cut off) and `slow` (saved after SLOW_SELECTION_SAVE_MS).
+ * Once used up, each request is planned and answered from the stub's picks.
  */
-export type SelectionPutAnswer = "busy" | "server-error" | "forbidden" | "drop-after-commit" | "slow";
+export type SelectionChangeScript = "html" | "too-large-no-code" | "paused" | "busy" | "server-error" | "drop-after-commit" | "slow" | ScriptedError;
 
-/** How long a "slow" selection save takes before it saves and answers. */
-export const SLOW_SELECTION_PUT_MS = 2_500;
+/** How long a "slow" picks save takes before it saves and answers (a save still running while the vendor clicks). */
+export const SLOW_SELECTION_SAVE_MS = 2_500;
 
-/** How the next rules read (GET …/selection-rules) answers: as saved, or a 500. */
-export type RulesReadAnswer = "ok" | "server-error";
+/**
+ * A step 1 catalog read (GET /api/dropship/catalog) that answers 500 once: the first read with this Show filter and
+ * page. Step 1's reads retry a 500 three times (retryPublishRead), so a journey that needs a read to give up scripts it
+ * four times (`catalogReadFailuresFor`).
+ */
+export interface CatalogReadFailure { selection: DropshipCatalogSelectionFilter; page: number }
 
-/** A step 1 catalog read (GET /api/dropship/catalog) that answers 500 once: the first read with this Show filter and page. */
-export interface CatalogReadFailure { selectedOnly: boolean; page: number }
+/** A read that gives up: one failure for the first send and one for each of step 1's three retries of a 500. */
+export const READ_FAILURES_UNTIL_GIVE_UP = 4;
 
-/** One PUT …/selection-rules as the stub received it, with the status it answered (0: the answer was cut off). */
-export interface SelectionPut { key: string; body: { idempotencyKey?: unknown; rules?: unknown }; bytes: number; status: number }
+export function catalogReadFailuresFor(selection: DropshipCatalogSelectionFilter, page: number): CatalogReadFailure[] {
+  return Array.from({ length: READ_FAILURES_UNTIL_GIVE_UP }, () => ({ selection, page }));
+}
+
+/** One size Card Shellz added (an arrival): its ledger id and the category it arrived in. */
+export interface StubCatalogArrival { arrivalId: number; productVariantId: number; categoryId: number }
+
+/** One category's notice watermarks: what step 1 shows from (`seen`) and what the email moved (`notified`). */
+export interface StubNoticeMark { seenThroughArrivalId: number; notifiedThroughArrivalId: number }
+
+/** One picks preview or save as the stub received it, with the status it answered (0: the answer was cut off). */
+export interface SelectionChangeCall { key: string; body: Record<string, unknown>; bytes: number; status: number }
 
 export function previewRow(storeConnectionId: number) {
   return {
@@ -263,6 +373,10 @@ export function previewRow(storeConnectionId: number) {
     priceCents: 699, marketplaceCategoryId: "183435", marketplaceCategoryName: "Card Sleeves", storeCategoryNames: [],
     businessPolicySelection: null, previewHash: `${storeConnectionId}`.padStart(64, "d"), priceSettingRevisionId: null,
     contentEvidenceHash: "c".repeat(64),
+    // The listing's content, as every preview row carries it (step 3's Check drops it and its sheet reads it again).
+    presentation: { source: "resolved_listing", title: "Envelope Single Pocket, Pack of 50",
+      descriptionText: "Holds one card in a rigid sleeve.", productName: "Envelope Single Pocket", variantName: "Pack of 50", unitsPerVariant: 50,
+      brand: "Card Shellz", condition: "New", itemSpecifics: [{ name: "Material", values: ["PET"] }], images: [], issues: [] },
   };
 }
 
@@ -418,9 +532,6 @@ export const LAYERED_SAMPLE: ProductFixture = {
     { productVariantId: 302, sizeName: "Pack of 500", sku: "PSL-500", retailCents: 899, costCents: 610, stockUnits: 9 },
   ],
 };
-
-/** The Card Shellz category id of ROW's "Mailers" (PR 10e, D18): the default state's one category, with no settings of its own. */
-export const MAILERS_CATEGORY_ID = 30;
 
 /** Product 11 and its one chosen size, as ROW: $6.99 retail, $4.10 cost (the price stub's numbers); in Mailers, which sets nothing. */
 export const ENVELOPE: ProductFixture = {
@@ -672,26 +783,91 @@ export interface StubState {
   keyedAnswers: Record<string, { body: string; json: Record<string, unknown> }>;
   /** The next revision a keyed writer saves (W1, W3, W4, W5, W6, W9 share one counter, as ids; W6's request ids too). */
   nextRevision: number;
-  /** Step 1's catalog (catalog step 1 stage 1): each size's facts; its decision is evaluated on every read. */
+  /** Step 1's catalog: each size's facts; its decision is evaluated from the picks on every read. */
   chooseRows: ChooseRowFact[];
-  /** The vendor's active selection rules. Left out of `initial`, they follow `selected`: ROW's pick, or none. */
-  selectionRules: SelectionRuleRecord[];
-  /** The id the next saved rule gets (a save re-inserts every rule with new ids, as the repository does). */
-  nextRuleId: number;
-  /** The rule set's revision; every committed save adds one. */
+  /** The vendor's one-time picks (PLAN-B v4.1 §5, V27). Left out of `initial`, they follow `selected`: ROW's pick, or none. */
+  picks: Set<number>;
+  /** The vendor's head selection revision; every committed picks save adds one (a no-op save too, as the server's). */
   selectionRevision: number;
-  /** Every selection save, in order. */
-  selectionPuts: SelectionPut[];
-  /** How many times the rules were read. */
-  rulesReads: number;
-  /** How the next selection saves answer, in order; once used up, a save is made. */
-  selectionPutAnswers: SelectionPutAnswer[];
-  /** How the next rules reads answer, in order; once used up, every read answers the saved rules. */
-  rulesReadAnswers: RulesReadAnswer[];
+  /** Every picks save (`POST …/selection/changes`), in order. */
+  changeCalls: SelectionChangeCall[];
+  /** Every picks preview (`POST …/selection/changes/preview`), in order. */
+  changePreviews: SelectionChangeCall[];
+  /** How the next picks saves answer, in order (`SelectionChangeScript`); once used up, each save is planned and made. */
+  changeAnswers: SelectionChangeScript[];
+  /** How the next picks previews answer, in order; once used up, each is planned from the picks. */
+  changePreviewAnswers: SelectionChangeScript[];
+  /**
+   * What changes on eBay while the vendor reads the save question: each runs once, right after a preview is answered,
+   * so the save that follows plans from the changed facts (an effects change, C7; a removal-only drift, C10).
+   */
+  afterChangePreview: Array<(state: StubState) => void>;
+  /** The request keys the picks save saw: the request hash and the stored answer, so the same key replays (200). */
+  changeKeys: Record<string, { hash: string; answer: SelectionChangeAnswer }>;
+  /** Each store's listings that ended on eBay (sync-back, #1900): never counted by the save question (V20, C13). */
+  endedVariantIds: Record<number, number[]>;
+  /**
+   * PR C's end requests (`dropship_listing_end_requests`, PLAN-C v4.1 §3), oldest first: a journey seeds some, and
+   * every save adds a `pending` one per end it plans and supersedes the `pending` ones it takes back (§4.7 step 9).
+   * No worker runs in the stub, so an end moves on only when a journey changes it. An `ended` one is Card Shellz's
+   * end: its listing reads `ended` with no eBay end time (§5.5 step 8).
+   */
+  listingEnds: StubListingEnd[];
+  /**
+   * Sizes of the catalog step 1 does not list because Card Shellz isn't offering them now (not sellable to buyers):
+   * a pick of one is a hidden pick, which a wholly removed product takes with it (PLAN-C v4.1 §4.3, §4.4 rule 2).
+   */
+  hiddenRows: ChooseRowFact[];
+  /** How many categories reads still answer 500 before they answer (`READ_FAILURES_UNTIL_GIVE_UP` makes one give up). */
+  categoriesReadFailures: number;
   /** Catalog reads that answer 500, each once, matched in order by Show filter and page (verify V5, V8). */
   catalogReadFailures: CatalogReadFailure[];
-  /** The request keys the selection save saw: the request hash and the revision it made, so the same key replays. */
-  selectionKeys: Record<string, { hash: string; revisionId: number }>;
+  /**
+   * Step 1 catalog reads (not step 3's `selectedOnly` list) answered as an older (A) dyno answers this page's version
+   * (503 page_newer_than_server, `pageNewerThanServer`), each once, matched in order by kind: a page of rows ("list") or
+   * an `idsOnly` read ("ids") (review round 1 CLI-2).
+   */
+  olderServerReads: Array<"list" | "ids">;
+  // Step 1's new-items notice (PLAN-B v4.1 §11.4, §12.9; B3).
+  /** Sizes Card Shellz added after the release baseline (`dropship_catalog_arrivals`, never baseline), oldest first. */
+  catalogArrivals: StubCatalogArrival[];
+  /** The vendor's notice marks by category id (`dropship_vendor_category_notice_marks`); a category left out has none, so nothing in it is new. */
+  noticeMarks: Record<number, StubNoticeMark>;
+  /** Every "Got it" (`POST …/new-items/acknowledge`), with the status it answered. */
+  noticeAcknowledges: Array<{ body: Record<string, unknown>; status: number }>;
+  /** How the next "Got it"s answer before the stub decides them: an older dyno's HTML, or a refusal. */
+  noticeAcknowledgeAnswers: Array<"html" | ScriptedError>;
+  // Step 1 plan S2-5 PR A: step 3 on publish runs.
+  /** The step-up proofs auth/me reports; none by default, so a publish asks for a code first (the server's own rule). */
+  proofs: Record<string, StubProof>;
+  /** The actions a step-up code was sent for, in order. */
+  codesSent: string[];
+  /**
+   * Each store's live listings: the sizes on that eBay store (the summary's `live` counts the selected ones, `not_live`'s
+   * filter). Step 1's save question counts them: a selected one removed goes to quantity 0, an unpicked one added gets
+   * its quantity back (stubSelectionEffects).
+   */
+  liveVariantIds: Record<number, number[]>;
+  /** How the next selection summary reads answer, in order; once used up, the summary is worked out from the stub. */
+  selectionSummaryAnswers: Array<"html" | ScriptedError>;
+  /** Every preview POST body, in order (the Check's chunks). */
+  previewBodies: Array<{ storeConnectionId: number; productVariantIds: number[] }>;
+  /** How the next preview POSTs answer, in order; once used up, each previews its sizes. */
+  previewAnswers: ScriptedError[];
+  /** The publish runs the stub holds, oldest first. */
+  runs: StubRun[];
+  /** Every run create body, in order, with the status it answered (0: the answer was cut off). */
+  runCreates: Array<{ body: Record<string, unknown>; status: number }>;
+  /** How the next run creates answer, in order: an older dyno's HTML, a refusal, or made with the answer cut off. */
+  runCreateAnswers: Array<"html" | "drop" | ScriptedError>;
+  /** The states the next run made walks through, one per detail read (the last one stays); null: queued, then completed. */
+  nextRunFrames: StubRunFrame[] | null;
+  /** Sizes the server's snapshot leaves out of the next run (no longer offered when it was taken). */
+  runSnapshotShort: number;
+  /** Every run detail read, by run id, in order. */
+  runDetailReads: number[];
+  /** Every Stop, by run id, in order. */
+  runStops: number[];
   unexpected: string[];
   errors: string[];
 }
@@ -732,7 +908,8 @@ export function onboardingJson(vendor: StubState["vendor"] = { status: "active",
       subscriptionId: "sub-1", includesDropship: true, reasonCode: "active" },
     storeConnections: { activeCount: 1, connectedCount: 1, launchReadyConnectedCount: 1, credentialAttentionCount: 0,
       needsAttentionCount: 0, totalCount: 1, includedLimit: 3, canConnectStore: true },
-    catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
+    // PR B (V17, row 7): the pick count, and the rule count kept one release with the same value.
+    catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, vendorSelectedItemCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
     wallet: { availableBalanceCents: 10_000, pendingBalanceCents: 0, activeFundingMethodCount: 1, activeStripeFundingMethodCount: 1,
       activeStripeCardFundingMethodCount: 1, activeUsdcBaseFundingMethodCount: 0, autoReloadEnabled: true, autoReloadFundingMethodId: 10,
       autoReloadFundingMethodActive: true, autoReloadFundingMethodReady: true, autoReloadFundingMethodIsCard: true, hasActiveFundingMethod: true,
@@ -2626,8 +2803,12 @@ export const defaultStubState = (): StubState => ({
   conversionPages: {}, conversionApplies: [], conversionApplyAnswers: [], conversionLayers: { categorySettings: {}, productSettings: {} },
   conversionNotices: {}, conversionNoticeAcknowledges: [], conversionNoticeAcknowledgeAnswers: [],
   reviews: {}, keyedAnswers: {}, nextRevision: 40,
-  chooseRows: [ROW_FACT], selectionRules: [], nextRuleId: 100, selectionRevision: 1, selectionPuts: [], rulesReads: 0,
-  selectionPutAnswers: [], rulesReadAnswers: [], catalogReadFailures: [], selectionKeys: {},
+  chooseRows: [ROW_FACT], picks: new Set<number>(), selectionRevision: 1, changeCalls: [], changePreviews: [], changeAnswers: [],
+  changePreviewAnswers: [], afterChangePreview: [], changeKeys: {}, endedVariantIds: {}, listingEnds: [], hiddenRows: [],
+  categoriesReadFailures: 0, catalogReadFailures: [], olderServerReads: [],
+  catalogArrivals: [], noticeMarks: {}, noticeAcknowledges: [], noticeAcknowledgeAnswers: [],
+  proofs: {}, codesSent: [], liveVariantIds: {}, selectionSummaryAnswers: [], previewBodies: [], previewAnswers: [],
+  runs: [], runCreates: [], runCreateAnswers: [], nextRunFrames: null, runSnapshotShort: 0, runDetailReads: [], runStops: [],
   unexpected: [], errors: [],
 });
 
@@ -2638,8 +2819,8 @@ export const defaultStubState = (): StubState => ({
  */
 export async function openCatalog(page: Page, path: string, initial: Partial<StubState> = {}) {
   const state: StubState = { ...defaultStubState(), ...initial };
-  // Step 1's rules follow `selected` unless a journey gives its own: ROW chosen by the vendor's own pick, or nothing.
-  if (initial.selectionRules === undefined) state.selectionRules = state.selected ? [selectionRule(1, "variant", "include", { productVariantId: ROW.productVariantId })] : [];
+  // Step 1's picks follow `selected` unless a journey gives its own: ROW picked by the vendor, or nothing (V27).
+  if (initial.picks === undefined) state.picks = new Set(state.selected ? [ROW.productVariantId] : []);
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async (route) => {
@@ -2675,19 +2856,37 @@ async function answerApi(state: StubState, route: Route) {
   const listings = storeId === null ? null : `/api/dropship/listings/stores/${storeId}`;
   if (path === "/api/dropship/auth/me") {
     return route.fulfill({ json: { principal: { authIdentityId: 1, memberId: MEMBER_ID, cardShellzEmail: "vendor@example.com", hasPasskey: false,
-      authMethod: "password", entitlementStatus: "active", authenticatedAt: STAMP }, sensitiveProofs: {} } });
+      authMethod: "password", entitlementStatus: "active", authenticatedAt: STAMP }, sensitiveProofs: state.proofs } });
   }
+  if (path === "/api/dropship/auth/sensitive-actions/challenge/start" && method === "POST") {
+    state.codesSent.push((route.request().postDataJSON() as { action: string }).action);
+    return route.fulfill({ status: 202, json: { method: "email_mfa", challengeId: "c-1", expiresAt: "2999-01-01T00:10:00.000Z" } });
+  }
+  if (path === "/api/dropship/auth/sensitive-actions/challenge/verify" && method === "POST") {
+    const body = route.request().postDataJSON() as { action: string; verificationCode: string };
+    if (body.verificationCode !== STEP_UP_CODE) {
+      return fulfillError(route, { status: 400, code: "DROPSHIP_AUTH_CHALLENGE_INVALID", message: "That code is not right." });
+    }
+    state.proofs[body.action] = LIVE_PROOF;
+    return route.fulfill({ json: { action: body.action, ...LIVE_PROOF } });
+  }
+  if (path === "/api/dropship/catalog/selection" && method === "GET") return answerSelectionSummary(state, route, url);
+  if (path.startsWith(LISTING_PUSH_RUNS_PATH)) return answerListingPushRuns(state, route, url, method, path);
   if (path === "/api/dropship/onboarding/state" && method === "GET") return route.fulfill({ json: onboardingJson(state.vendor) });
   if (path === "/api/dropship/settings" && method === "GET") return route.fulfill({ json: settingsJson(state) });
   if (path === "/api/dropship/catalog" && method === "GET") return answerCatalogRead(state, route, url);
-  if (path === "/api/dropship/catalog/selection-rules" && method === "GET") {
-    state.rulesReads += 1;
-    if (state.rulesReadAnswers.shift() === "server-error") {
-      return fulfillError(route, { status: 500, code: "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR", message: "Dropship vendor catalog request failed." });
-    }
-    return route.fulfill({ json: { rules: state.selectionRules.filter((rule) => rule.isActive) } });
+  if (path === "/api/dropship/catalog/categories" && method === "GET") return answerCatalogCategories(state, route, url);
+  if (path === CATALOG_NEW_ITEMS_PATH && method === "GET") return answerCatalogNewItems(state, route, url);
+  if (path === `${CATALOG_NEW_ITEMS_PATH}/acknowledge` && method === "POST") return answerNewItemsAcknowledge(state, route);
+  if (path === SELECTION_CHANGES_PREVIEW_PATH && method === "POST") return answerSelectionChange(state, route, "preview");
+  if (path === SELECTION_CHANGES_PATH && method === "POST") return answerSelectionChange(state, route, "save");
+  // The frozen rules (PLAN-B v4.1 §8.4): the GET answers them for one release (none are modelled here; B's page never
+  // reads it, which the choose journeys check), and an older page's save is told to reload, before any database call.
+  if (path === "/api/dropship/catalog/selection-rules" && method === "GET") return route.fulfill({ json: { rules: [] } });
+  if (path === "/api/dropship/catalog/selection-rules" && method === "PUT") {
+    return fulfillError(route, { status: 410, code: DROPSHIP_CATALOG_READ_ERROR_CODES.rulesRetired, message: CATALOG_READ_WORDS.retired,
+      context: { retryable: false, classification: "permanent" } });
   }
-  if (path === "/api/dropship/catalog/selection-rules" && method === "PUT") return answerSelectionSave(state, route);
   if (storeId !== null && method === "GET" && path === `${listings}/listing-intent-changes`
     && state.stores.some((store) => store.storeConnectionId === storeId)) {
     return route.fulfill({ json: listingIntentChangePage(url, []) });
@@ -2702,32 +2901,48 @@ async function answerApi(state: StubState, route: Route) {
   if (storeId !== null && method === "GET" && state.stores.some((store) => store.storeConnectionId === storeId && store.platform === "ebay")) {
     if (await answerStoreRead(state, route, storeId, path, url) !== NOT_MINE) return;
   }
-  if (path === "/api/dropship/listings/preview" && method === "POST") {
-    state.previewCalls += 1;
-    const storeConnectionId = (route.request().postDataJSON() as { storeConnectionId: number }).storeConnectionId;
-    return route.fulfill({ json: { preview: { vendorId: 1, storeConnectionId, platform: "ebay", generatedAt: STAMP,
-      rows: [previewRow(storeConnectionId)], summary: { total: 1, ready: 1, blocked: 0, warning: 0 } } } });
-  }
+  if (path === "/api/dropship/listings/preview" && method === "POST") return answerPreview(state, route);
   state.unexpected.push(`${method} ${path}`);
   return route.fulfill({ status: 500, json: { error: { message: "Unexpected request" } } });
 }
 
 // ---------------------------------------------------------------------------
-// Catalog step 1 (stage 1): the catalog read and the selection save, as dropship-vendor-catalog.routes.ts serves them
+// Catalog step 1 on one-time picks (PLAN-B v4.1 §8, §12.9; V27): the catalog read, the categories, and the picks
+// preview and save, as dropship-vendor-catalog.routes.ts and the change service answer them
 // ---------------------------------------------------------------------------
 
-/** The global JSON parser's limit the selection save goes through (rate-table-admin-body.middleware.ts). */
-const GLOBAL_JSON_LIMIT_BYTES = 100 * 1024;
 /** The catalog read's filters the step may send; anything else (a product line, a product) is off contract for step 1. */
-const CATALOG_READ_PARAMS = new Set(["search", "category", "selectedOnly", "page", "limit"]);
+const CATALOG_READ_PARAMS = new Set(["search", "category", "selectedOnly", "page", "limit",
+  // Step 1 plan S2-5 PR A (§4.8): the new filters and this page's version; step 3 sends them. PR B's step 1 filters
+  // its Category by id (V40).
+  "selection", "includeFacets", "clientVersion", "idsOnly", "purpose", "categoryId"]);
 
-/** One size's decision under the stub's rules, by the server's own evaluator. */
+/** The picks routes (§8.2, §8.3). */
+const SELECTION_CHANGES_PATH = "/api/dropship/catalog/selection/changes";
+const SELECTION_CHANGES_PREVIEW_PATH = `${SELECTION_CHANGES_PATH}/preview`;
+/** The bulk parser's limit for both picks routes (DROPSHIP_BULK_JSON_LIMIT_BYTES, dropship-bulk-json.middleware.ts). */
+const BULK_JSON_LIMIT_BYTES = 1024 * 1024;
+/**
+ * The server's words on the picks routes, copied because their modules load express or the database: the bulk parser's
+ * 413 (SELECTION_CHANGE_TOO_LARGE_MESSAGE) and the change service's refusals (SELECTION_CHANGE_WORDS,
+ * dropship-selection-change-service.ts). The page shows its own words for most of these codes (§13).
+ */
+const SELECTION_CHANGE_SERVER_WORDS = {
+  bodyTooLarge: "This change is too large to send at once. Change fewer items, then save.",
+  paused: "Saving is paused for a few minutes while Card Shellz updates the site. Your changes are kept, and saving will try again by itself.",
+  stale: "Your saved choices changed after this page loaded. Review them and save again.",
+  effectsChanged: "Something on eBay changed while you were deciding. Check the new numbers and save again.",
+  keyConflict: "This save's request key was already used for a different change. Press Save again.",
+  tooLarge: (after: number) => `This would make ${after.toLocaleString("en-US")} selected, over the 10,000 limit. Undo some additions to save.`,
+} as const;
+
+/** One size's decision from the vendor's pick, by the server's evaluator (domain/vendor-selection.ts): every stub row is exposed. */
 function chooseDecision(state: StubState, fact: ChooseRowFact) {
   return evaluateDropshipVendorCatalogSelection({
     candidate: { productId: fact.productId, productVariantId: fact.productVariantId, productLineIds: fact.productLineIds, category: fact.category,
       productIsActive: true, variantIsActive: true, variantUomType: "pack" },
     adminExposureDecision: { exposed: true, reason: "exposed", includeRuleIds: [], excludeRuleIds: [] },
-    rules: state.selectionRules.filter((rule) => rule.isActive),
+    picked: state.picks.has(fact.productVariantId),
     rawAtpUnits: fact.stock,
     override: fact.enabledOverride === false ? { productVariantId: fact.productVariantId, enabledOverride: false } : null,
   });
@@ -2743,21 +2958,129 @@ function routeNumber(value: string | null, fallback: number): number {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+/** A query value the route reads strictly (step 1 plan S2-5 §4.8): absent, or one of `allowed`; anything else is the route's 400. */
+function strictQuery(url: URL, name: string, allowed: readonly string[]): { ok: true; value: string | undefined } | { ok: false } {
+  const value = routeString(url.searchParams.get(name));
+  if (url.searchParams.get(name) === null) return { ok: true, value: undefined };
+  return value !== undefined && allowed.includes(value) ? { ok: true, value } : { ok: false };
+}
+
+/** An id the route reads strictly (`parseOptionalIdQuery`): absent, or a positive whole number; anything else is the route's 400. */
+function strictIdQuery(url: URL, name: string): { ok: true; value: number | undefined } | { ok: false } {
+  const text = url.searchParams.get(name);
+  if (text === null) return { ok: true, value: undefined };
+  const value = Number(text.trim());
+  return /^\d{1,10}$/.test(text.trim()) && Number.isSafeInteger(value) && value > 0 && value <= 2_147_483_647 ? { ok: true, value } : { ok: false };
+}
+
+/** `clientVersion`, as the route reads it first (CHK7): absent is this release's page; digits only; newer than the server is 503. */
+function readClientVersion(url: URL): { ok: true; newer: boolean } | { ok: false } {
+  const text = url.searchParams.get("clientVersion");
+  if (text === null) return { ok: true, newer: false };
+  if (!/^\d{1,10}$/.test(text.trim()) || Number(text) < 1) return { ok: false };
+  return { ok: true, newer: Number(text) > DROPSHIP_CATALOG_CODE_VERSION };
+}
+
+function catalogQueryInvalid(state: StubState, route: Route, url: URL, parameter: string) {
+  state.unexpected.push(`GET ${url.pathname}${url.search} (query refused: ${parameter})`);
+  return fulfillError(route, { status: 400, code: DROPSHIP_CATALOG_READ_ERROR_CODES.queryInvalid,
+    message: "This catalog request was not valid. Reload the page and try again.", context: { parameter } });
+}
+
+function pageNewerThanServer(route: Route) {
+  return route.fulfill({ status: 503, headers: { "Retry-After": "5" }, json: { error: { code: DROPSHIP_CATALOG_READ_ERROR_CODES.writesPaused,
+    message: CATALOG_READ_WORDS.pageNewerThanServer, context: { reason: DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON } } } });
+}
+
+/** The same answer as a scripted refusal (`selectionSummaryAnswers`): an older (A) dyno's 503 for this newer page. */
+export function pageNewerThanServerAnswer(): ScriptedError {
+  return { status: 503, code: DROPSHIP_CATALOG_READ_ERROR_CODES.writesPaused, message: CATALOG_READ_WORDS.pageNewerThanServer,
+    context: { reason: DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON } };
+}
+
+function catalogInternalError(route: Route) {
+  return fulfillError(route, { status: 500, code: "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR", message: "Dropship vendor catalog request failed." });
+}
+
 /**
  * `GET /api/dropship/catalog`: the query is read as the route reads it and checked with the server's own schema (a
- * failure is the route's 400, recorded as unexpected; review CT4); search, category and selectedOnly filter; facets
- * apply search only; page/limit slice.
+ * failure is the route's 400, recorded as unexpected; review CT4); search, the category (by id since PR B, V40; by
+ * name for older tabs) and the selection filter (`selection`, or stage 1's `selectedOnly` alias) filter; facets apply
+ * search only and are left out when `includeFacets=false`; the `summary` counts the filter apart from the selection
+ * (A2 deviation 5); page/limit slice. `idsOnly=true&purpose=` answers the changeable ids instead, refusing the list the
+ * purpose needs past the cap (TESTS22). Rows carry `categoryId` and the decision's `picked` (§9 row 1).
  */
 function answerCatalogRead(state: StubState, route: Route, url: URL) {
   const offContract = [...url.searchParams.keys()].filter((key) => !CATALOG_READ_PARAMS.has(key));
   if (offContract.length > 0) state.unexpected.push(`GET /api/dropship/catalog${url.search} (query off contract: ${offContract.join(",")})`);
+  const version = readClientVersion(url);
+  if (!version.ok) return catalogQueryInvalid(state, route, url, "clientVersion");
+  if (version.newer) return pageNewerThanServer(route);
+  if (url.searchParams.get("selectedOnly") === null) {
+    const older = state.olderServerReads.indexOf(url.searchParams.get("idsOnly") === "true" ? "ids" : "list");
+    if (older >= 0) {
+      state.olderServerReads.splice(older, 1);
+      return pageNewerThanServer(route);
+    }
+  }
+  const categoryId = strictIdQuery(url, "categoryId");
+  if (!categoryId.ok) return catalogQueryInvalid(state, route, url, "categoryId");
+  const selection = strictQuery(url, "selection", DROPSHIP_CATALOG_SELECTION_FILTERS);
+  if (!selection.ok) return catalogQueryInvalid(state, route, url, "selection");
+  const idsOnly = strictQuery(url, "idsOnly", ["true", "false"]);
+  if (!idsOnly.ok) return catalogQueryInvalid(state, route, url, "idsOnly");
+  const includeFacets = strictQuery(url, "includeFacets", ["true", "false"]);
+  if (!includeFacets.ok) return catalogQueryInvalid(state, route, url, "includeFacets");
+  const purpose = strictQuery(url, "purpose", ["add", "remove"]);
+  if (!purpose.ok) return catalogQueryInvalid(state, route, url, "purpose");
   const selectedOnlyText = routeString(url.searchParams.get("selectedOnly"));
-  const parsed = previewDropshipVendorCatalogInputSchema.safeParse({
+  const filterFields = {
     vendorId: 1,
     search: routeString(url.searchParams.get("search")),
     category: routeString(url.searchParams.get("category")),
+    ...(categoryId.value !== undefined ? { categoryId: categoryId.value } : {}),
     // The route reads "true" and "false"; anything else falls back to false.
     selectedOnly: selectedOnlyText === "true",
+    ...(selection.value ? { selection: selection.value as DropshipCatalogSelectionFilter } : {}),
+  };
+  const resolved = filterFields.selection ?? (filterFields.selectedOnly ? "selected" : "all");
+  const search = filterFields.search?.toLowerCase() ?? "";
+  const category = filterFields.category?.toLowerCase() ?? "";
+  const searched = state.chooseRows.filter((fact) => !search
+    || [fact.productSku, fact.variantSku, fact.productName, fact.variantName].some((text) => text?.toLowerCase().includes(search)));
+  const matching = searched
+    .filter((fact) => !category || fact.category?.toLowerCase() === category)
+    .filter((fact) => categoryId.value === undefined || fact.categoryId === categoryId.value)
+    .map((fact) => ({ fact, decision: chooseDecision(state, fact) }));
+  // `new` (B3): the sizes the notice counts, in the category sent or every one the vendor sells from (SVC's rule).
+  const newIds = resolved === "new" ? new Set(stubNewArrivals(state, categoryId.value ?? null).map((arrival) => arrival.productVariantId)) : null;
+  const bySelection = ({ fact, decision }: { fact: ChooseRowFact; decision: ReturnType<typeof chooseDecision> }) =>
+    newIds !== null ? newIds.has(fact.productVariantId) && !decision.selected
+      : resolved === "all" || (resolved === "selected" ? decision.selected : !decision.selected);
+
+  if (idsOnly.value === "true") {
+    const parsedIds = listDropshipVendorCatalogIdsInputSchema.safeParse({ ...filterFields, purpose: purpose.value });
+    if (!parsedIds.success) return catalogQueryInvalid(state, route, url, "purpose");
+    // Changeable: exposed (every stub row is) and not turned off for the vendor.
+    const changeable = matching.filter(bySelection).filter(({ fact }) => fact.enabledOverride !== false);
+    const selectedIds = changeable.filter(({ decision }) => decision.selected).map(({ fact }) => fact.productVariantId).sort((a, b) => a - b);
+    const notSelectedIds = changeable.filter(({ decision }) => !decision.selected).map(({ fact }) => fact.productVariantId).sort((a, b) => a - b);
+    const needed = parsedIds.data.purpose === "add" ? notSelectedIds.length : selectedIds.length;
+    if (needed > DROPSHIP_CATALOG_SELECTION_CAP) {
+      return fulfillError(route, { status: 422, code: DROPSHIP_CATALOG_READ_ERROR_CODES.idsTooMany,
+        message: CATALOG_READ_WORDS.idsTooMany, context: { total: changeable.length, needed } });
+    }
+    return route.fulfill({ json: dropshipCatalogIdsAnswerSchema.parse({
+      selectedIds: selectedIds.length > DROPSHIP_CATALOG_SELECTION_CAP ? null : selectedIds,
+      notSelectedIds: notSelectedIds.length > DROPSHIP_CATALOG_SELECTION_CAP ? null : notSelectedIds,
+      total: changeable.length,
+    }) });
+  }
+  if (purpose.value !== undefined) return catalogQueryInvalid(state, route, url, "idsOnly");
+
+  const parsed = previewDropshipVendorCatalogInputSchema.safeParse({
+    ...filterFields,
+    ...(includeFacets.value ? { includeFacets: includeFacets.value === "true" } : {}),
     page: routeNumber(url.searchParams.get("page"), 1),
     limit: routeNumber(url.searchParams.get("limit"), 50),
   });
@@ -2765,28 +3088,24 @@ function answerCatalogRead(state: StubState, route: Route, url: URL) {
     state.unexpected.push(`GET /api/dropship/catalog${url.search} (query refused: ${parsed.error.issues.map((issue) => issue.path.join(".")).join(",")})`);
     return route.fulfill({ status: 400, json: { error: { code: "DROPSHIP_VENDOR_CATALOG_INVALID_INPUT", message: "Dropship vendor catalog input failed validation." } } });
   }
-  const search = parsed.data.search?.toLowerCase() ?? "";
-  const category = parsed.data.category?.toLowerCase() ?? "";
-  const selectedOnly = parsed.data.selectedOnly;
   const page = parsed.data.page;
   const limit = parsed.data.limit;
-  const failing = state.catalogReadFailures.findIndex((failure) => failure.selectedOnly === selectedOnly && failure.page === page);
+  const failing = state.catalogReadFailures.findIndex((failure) => failure.selection === resolved && failure.page === page);
   if (failing >= 0) {
     state.catalogReadFailures.splice(failing, 1);
-    return fulfillError(route, { status: 500, code: "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR", message: "Dropship vendor catalog request failed." });
+    return catalogInternalError(route);
   }
-  const searched = state.chooseRows.filter((fact) => !search
-    || [fact.productSku, fact.variantSku, fact.productName, fact.variantName].some((text) => text?.toLowerCase().includes(search)));
-  const decided = searched
-    .filter((fact) => !category || fact.category?.toLowerCase() === category)
-    .map((fact) => ({ fact, decision: chooseDecision(state, fact) }))
-    .filter(({ decision }) => !selectedOnly || decision.selected);
+  const decided = matching.filter(bySelection);
   const rows = decided.slice((page - 1) * limit, page * limit).map(({ fact, decision }) => ({
     productId: fact.productId, productVariantId: fact.productVariantId, productSku: fact.productSku, productName: fact.productName,
-    variantSku: fact.variantSku, variantName: fact.variantName, category: fact.category, productLineIds: fact.productLineIds,
-    productLineNames: fact.productLineNames, unitsPerVariant: fact.unitsPerVariant, productIsActive: true, variantIsActive: true,
-    variantUomType: "pack", selectionDecision: decision, listingTier: fact.listingTier,
+    variantSku: fact.variantSku, variantName: fact.variantName, category: fact.category, categoryId: fact.categoryId,
+    productLineIds: fact.productLineIds, productLineNames: fact.productLineNames, unitsPerVariant: fact.unitsPerVariant,
+    productIsActive: true, variantIsActive: true, variantUomType: "pack", selectionDecision: decision, listingTier: fact.listingTier,
   }));
+  const summary = dropshipCatalogReadSummarySchema.parse({
+    matching: matching.length, matchingSelected: matching.filter(({ decision }) => decision.selected).length,
+  });
+  if (!parsed.data.includeFacets) return route.fulfill({ json: { rows, total: decided.length, page, limit, facets: null, summary } });
   const categories = new Map<string, { category: string; label: string; rowCount: number }>();
   const productLines = new Map<string, { productLineIds: number[]; label: string; rowCount: number }>();
   for (const fact of searched) {
@@ -2803,74 +3122,882 @@ function answerCatalogRead(state: StubState, route: Route, url: URL) {
   }
   const byLabel = <T extends { label: string }>(facets: Iterable<T>) => [...facets].sort((left, right) => left.label.localeCompare(right.label));
   return route.fulfill({ json: { rows, total: decided.length, page, limit,
-    facets: { categories: byLabel(categories.values()), productLines: byLabel(productLines.values()), products: [] } } });
+    facets: { categories: byLabel(categories.values()), productLines: byLabel(productLines.values()), products: [] }, summary } });
 }
 
 /**
- * `PUT /api/dropship/catalog/selection-rules`, as the route and repository answer it: 413 over the global JSON limit,
- * 400 off the server's schema (recorded as unexpected), the same key and request hash replayed (200), the same key with
- * another hash refused (409), the scripted answers, else every rule saved again under new ids and a new revision (201).
+ * Every category of step 1's catalog with its counts, as the service counts them (`listCatalogCategories`): every
+ * exposed size by its category id, a size turned off for the vendor included in `rowCount`; `selectedCount` the
+ * selected ones; sizes with no category apart; sorted by name, then id.
  */
-async function answerSelectionSave(state: StubState, route: Route) {
+export function stubCatalogCategories(state: StubState): DropshipCatalogCategoriesAnswer {
+  const byId = new Map<number, { categoryId: number; name: string; rowCount: number; selectedCount: number }>();
+  let uncategorizedCount = 0;
+  for (const fact of state.chooseRows) {
+    if (fact.categoryId === null) {
+      uncategorizedCount += 1;
+      continue;
+    }
+    const entry = byId.get(fact.categoryId) ?? { categoryId: fact.categoryId, name: fact.category?.trim() ?? "", rowCount: 0, selectedCount: 0 };
+    entry.rowCount += 1;
+    if (chooseDecision(state, fact).selected) entry.selectedCount += 1;
+    byId.set(fact.categoryId, entry);
+  }
+  const categories = [...byId.values()].sort((left, right) => left.name.localeCompare(right.name) || left.categoryId - right.categoryId);
+  return contractAnswer(dropshipCatalogCategoriesAnswerSchema, { categories, uncategorizedCount });
+}
+
+/** `GET /api/dropship/catalog/categories?clientVersion=`: the page version first, then the counts (or a scripted 500). */
+function answerCatalogCategories(state: StubState, route: Route, url: URL) {
+  const offContract = [...url.searchParams.keys()].filter((key) => key !== "clientVersion");
+  if (offContract.length > 0) state.unexpected.push(`GET ${url.pathname}${url.search} (query off contract: ${offContract.join(",")})`);
+  const version = readClientVersion(url);
+  if (!version.ok) return catalogQueryInvalid(state, route, url, "clientVersion");
+  if (version.newer) return pageNewerThanServer(route);
+  if (state.categoriesReadFailures > 0) {
+    state.categoriesReadFailures -= 1;
+    return catalogInternalError(route);
+  }
+  return route.fulfill({ json: stubCatalogCategories(state) });
+}
+
+/** Step 1's new-items notice routes (§11.4). */
+const CATALOG_NEW_ITEMS_PATH = "/api/dropship/catalog/new-items";
+
+/**
+ * The arrivals new for the vendor now, as the arrivals service decides them (`decideNewForVendor`, `readNewItems`):
+ * past the category's `seen` watermark (no mark: nothing in it is new, FIDELITY-5), the size still in that category, not
+ * picked and not turned off, in a category the vendor sells from (one of its selected sizes is in it), and in
+ * `categoryId` when given. Every stub size is offered and sellable.
+ */
+export function stubNewArrivals(state: StubState, categoryId: number | null): CatalogArrivalFact[] {
+  const facts = new Map(state.chooseRows.map((fact) => [fact.productVariantId, fact]));
+  const sellsFrom = new Set(state.chooseRows.filter((fact) => fact.categoryId !== null && chooseDecision(state, fact).selected)
+    .map((fact) => fact.categoryId as number));
+  return state.catalogArrivals.flatMap((arrival): CatalogArrivalFact[] => {
+    const mark = state.noticeMarks[arrival.categoryId];
+    const fact = facts.get(arrival.productVariantId);
+    if (mark === undefined || arrival.arrivalId <= mark.seenThroughArrivalId || !fact || fact.categoryId !== arrival.categoryId) return [];
+    if (!sellsFrom.has(arrival.categoryId) || (categoryId !== null && arrival.categoryId !== categoryId)) return [];
+    const picked = state.picks.has(arrival.productVariantId);
+    const turnedOff = fact.enabledOverride === false;
+    if (picked || turnedOff) return [];
+    return [{ arrivalId: arrival.arrivalId, productVariantId: arrival.productVariantId, productId: fact.productId, categoryId: arrival.categoryId,
+      baseline: false, picked, turnedOff }];
+  }).sort((left, right) => left.arrivalId - right.arrivalId);
+}
+
+/** The notice's answer: the server's own grouping (counts, highest arrival, by name then id) over `stubNewArrivals`. */
+export function stubCatalogNewItems(state: StubState): DropshipCatalogNewItemsAnswer {
+  const names = new Map(state.chooseRows.filter((fact) => fact.categoryId !== null)
+    .map((fact) => [fact.categoryId as number, fact.category?.trim() ?? ""]));
+  return contractAnswer(dropshipCatalogNewItemsAnswerSchema, { categories: groupNewItems(stubNewArrivals(state, null), names) });
+}
+
+/** `GET /api/dropship/catalog/new-items?clientVersion=`: the page version first, then the notice. */
+function answerCatalogNewItems(state: StubState, route: Route, url: URL) {
+  const offContract = [...url.searchParams.keys()].filter((key) => key !== "clientVersion");
+  if (offContract.length > 0) state.unexpected.push(`GET ${url.pathname}${url.search} (query off contract: ${offContract.join(",")})`);
+  const version = readClientVersion(url);
+  if (!version.ok) return catalogQueryInvalid(state, route, url, "clientVersion");
+  if (version.newer) return pageNewerThanServer(route);
+  return route.fulfill({ json: stubCatalogNewItems(state) });
+}
+
+/**
+ * `POST /api/dropship/catalog/new-items/acknowledge` ("Got it", §11.4), as the route answers it: the page version
+ * first (before the strict body, SAFETY-13), then the server's strict body parse, then `decideAcknowledge` on the
+ * stub's mark: past the newest arrival 400 `DROPSHIP_CATALOG_NOTICE_ACK_INVALID`; a mark already there `already_seen`
+ * (nothing written); else both watermarks move up (a missing mark is created).
+ */
+async function answerNewItemsAcknowledge(state: StubState, route: Route) {
+  const path = `${CATALOG_NEW_ITEMS_PATH}/acknowledge`;
+  const body = route.request().postDataJSON() as unknown;
+  const call = { body: typeof body === "object" && body !== null ? body as Record<string, unknown> : {}, status: 0 };
+  state.noticeAcknowledges.push(call);
+  const script = state.noticeAcknowledgeAnswers.shift();
+  if (script === "html") {
+    call.status = 200;
+    return fulfillOlderDyno(route);
+  }
+  if (script) {
+    call.status = script.status;
+    return fulfillError(route, script);
+  }
+  const invalid = (error: unknown) => {
+    call.status = 400;
+    const parsed = error instanceof DropshipError ? error : null;
+    state.unexpected.push(`POST ${path} (body off contract: ${JSON.stringify(parsed?.context ?? {})})`);
+    return fulfillError(route, { status: 400, code: parsed?.code ?? DROPSHIP_CATALOG_READ_ERROR_CODES.newItemsInvalidInput,
+      message: "The new-items notice request failed validation." });
+  };
+  let clientVersion: number | null;
+  let parsed: { categoryId: number; throughArrivalId: number };
+  try {
+    clientVersion = readCatalogNoticeAcknowledgeClientVersion(body);
+  } catch (error) {
+    return invalid(error);
+  }
+  if (clientVersion !== null && clientVersion > DROPSHIP_CATALOG_CODE_VERSION) {
+    call.status = 503;
+    return pageNewerThanServer(route);
+  }
+  try {
+    parsed = parseCatalogNoticeAcknowledgeBody(body);
+  } catch (error) {
+    return invalid(error);
+  }
+  const mark = state.noticeMarks[parsed.categoryId] ?? null;
+  const maxArrivalId = state.catalogArrivals.reduce((max, arrival) => Math.max(max, arrival.arrivalId), 0);
+  const decision = decideAcknowledge({ mark, throughArrivalId: parsed.throughArrivalId, maxArrivalId });
+  if (decision.kind === "invalid") {
+    call.status = 400;
+    return fulfillError(route, { status: 400, code: DROPSHIP_CATALOG_READ_ERROR_CODES.noticeAcknowledgeInvalid,
+      message: "The new-items notice was acknowledged past the newest Card Shellz arrival." });
+  }
+  if (decision.kind === "advance") {
+    state.noticeMarks[parsed.categoryId] = { seenThroughArrivalId: decision.seenThroughArrivalId, notifiedThroughArrivalId: decision.notifiedThroughArrivalId };
+  }
+  call.status = 200;
+  return route.fulfill({ json: contractAnswer(dropshipCatalogNoticeAcknowledgeAnswerSchema, {
+    outcome: decision.kind === "advance" ? "acknowledged" : "already_seen",
+    categoryId: parsed.categoryId,
+    seenThroughArrivalId: state.noticeMarks[parsed.categoryId].seenThroughArrivalId,
+  }) });
+}
+
+/** A listing's id in the stub: one per store and size. */
+export function stubListingId(storeConnectionId: number, productVariantId: number): number {
+  return storeConnectionId * 1_000_000 + productVariantId;
+}
+
+/** An end request's states (PLAN-C v4.1 §3): `pending`, `ending` and `failed` are open; the rest are closed. */
+export type StubListingEndState = "pending" | "ending" | "failed" | "ended" | "superseded";
+const OPEN_END_STATES: ReadonlySet<StubListingEndState> = new Set<StubListingEndState>(["pending", "ending", "failed"]);
+
+/** One end request as the stub holds it: its listing (by store and size), its reason and its state. */
+export interface StubListingEnd {
+  id: number;
+  storeConnectionId: number;
+  productVariantId: number;
+  productId: number;
+  reason: ListingEndReason;
+  state: StubListingEndState;
+}
+
+/** The open end of a store's listing of a size, if any (at most one, the table's one-open index). */
+function openListingEnd(state: StubState, storeConnectionId: number, productVariantId: number): StubListingEnd | null {
+  return state.listingEnds.find((end) => end.storeConnectionId === storeConnectionId && end.productVariantId === productVariantId
+    && OPEN_END_STATES.has(end.state)) ?? null;
+}
+
+/** Whether Card Shellz ended a store's listing of a size (an `ended` request, §5.5 step 8). */
+function endedByCardShellz(state: StubState, storeConnectionId: number, productVariantId: number): boolean {
+  return state.listingEnds.some((end) => end.storeConnectionId === storeConnectionId && end.productVariantId === productVariantId
+    && end.state === "ended");
+}
+
+/** Whether a store can be used now (the store connection's `connected`, as the effects reader reads it). */
+function stubStoreConnected(state: StubState, storeConnectionId: number): boolean {
+  return (state.storeStatuses[storeConnectionId] ?? "connected") === "connected";
+}
+
+/**
+ * The stub's facts as the server's end decision reads them (PR C, PLAN-C v4.1 §4.4): every catalog row is an active,
+ * exposed, sellable size of its product (so every one is visible in step 1, and none is archived), and a hidden row
+ * (`hiddenRows`) is one Card Shellz isn't offering now (`internal_only`, so step 1 does not list it). A store's
+ * listings are its live sizes (`liveVariantIds`, with eBay ids) and its sizes ended on eBay (`endedVariantIds`, with
+ * sync-back's end time); a listing whose end Card Shellz finished reads `ended` with no end time; an open end request
+ * (`listingEnds`) is the listing's `openEndId`/`openEndState`.
+ */
+export function stubListingEndFacts(state: StubState): { candidates: ListingEndCandidate[]; stores: ListingEndStoreFacts[] } {
+  const candidate = (fact: ChooseRowFact, hidden: boolean): ListingEndCandidate => ({
+    productId: fact.productId, productVariantId: fact.productVariantId, productLineIds: fact.productLineIds, category: fact.category,
+    productIsActive: true, variantIsActive: true, requiresShipping: true, trackInventory: true, salesEligibility: hidden ? "internal_only" : "sellable",
+  });
+  const candidates = [...state.chooseRows.map((fact) => candidate(fact, false)), ...state.hiddenRows.map((fact) => candidate(fact, true))];
+  const stores = [...state.stores].sort((left, right) => left.storeConnectionId - right.storeConnectionId).map((store): ListingEndStoreFacts => {
+    const ended = new Set(state.endedVariantIds[store.storeConnectionId] ?? []);
+    const sizes = [...new Set([...(state.liveVariantIds[store.storeConnectionId] ?? []), ...ended])].sort((left, right) => left - right);
+    return {
+      storeConnectionId: store.storeConnectionId, platform: store.platform, externalAccountId: `stub-account-${store.storeConnectionId}`,
+      providerEnvironment: "production",
+      listings: sizes.map((productVariantId) => {
+        const id = stubListingId(store.storeConnectionId, productVariantId);
+        const open = openListingEnd(state, store.storeConnectionId, productVariantId);
+        const endedOnEbay = ended.has(productVariantId);
+        return { id, productVariantId, status: endedOnEbay || endedByCardShellz(state, store.storeConnectionId, productVariantId) ? "ended" : "active",
+          externalListingId: `L-${id}`, externalOfferId: `O-${id}`, marketplaceEndedAt: endedOnEbay ? new Date(STAMP) : null,
+          openEndId: open?.id ?? null, openEndState: open === null ? null : open.state as "pending" | "ending" | "failed", pushInFlight: false };
+      }),
+    };
+  });
+  return { candidates, stores };
+}
+
+/** The `pending` ends a save may take back (the service reads those of the added sizes' products, §4.2 item 5). */
+function stubPendingEnds(state: StubState): PendingListingEnd[] {
+  return state.listingEnds.filter((end) => end.state === "pending").map((end) => ({ id: end.id, listingId: stubListingId(end.storeConnectionId,
+    end.productVariantId), productId: end.productId, productVariantId: end.productVariantId, reason: end.reason }));
+}
+
+/** What the stub's effects answer carries: B's per-store counts with PR C's, the vendor-level ends and both hashes. */
+export interface StubSelectionEffects {
+  stores: SelectionChangeStoreEffects[];
+  ends: SelectionChangeEnds;
+  otherEntriesHash: string;
+  effectsHash: string;
+  decision: ListingEndDecision;
+}
+
+/**
+ * What a planned change does on each of the vendor's stores (§7.6, V20; PR C §4.5), as `decideSelectionEffects`
+ * (domain/vendor-selection-effects.ts) counts it over the stub's listing model. The ends are the server's own
+ * decideListingEnds over stubListingEndFacts; a listing with an end planned now is an `ends` entry instead of B's
+ * `goesToZero`. B's quantity rule is a copy (pinned to the domain by catalog-stub-selection-effects-parity.test.ts):
+ * a size has a listing on a store when it is in that store's `liveVariantIds` (live) or `endedVariantIds` (ended on
+ * eBay). No listing: nothing is promised. Ended (on eBay, or by Card Shellz): no change either way, never
+ * `startsSelling`. Otherwise a size sells while it is selected (picked and offered) and no end is open on its listing
+ * (the stock decision's `endOpen`, §7): before the save an end is open as read; after it, one superseded now is closed.
+ * So a picked offered size removed goes to quantity 0, an offered size added gets its quantity back, and a size whose
+ * end is `ending` or `failed` sells neither before nor after; a size Card Shellz does not offer sells neither. (Paused
+ * stores, vendor limits and the stock decision's other branches are not modelled: no journey sets them.) Every store
+ * is listed, ascending, zero counts included; the hashes are the domain's own functions.
+ */
+export function stubSelectionEffects(state: StubState, plan: Pick<SelectionChangePlan, "insertIds" | "deleteIds">,
+  offered: ReadonlySet<number>): StubSelectionEffects {
+  const facts = stubListingEndFacts(state);
+  const decision = decideListingEnds({
+    now: new Date(STAMP), removedNow: plan.deleteIds, added: plan.insertIds, pickedBefore: state.picks, candidates: facts.candidates,
+    archivedIds: [], rules: [{ id: 1, scopeType: "catalog", action: "include" }], stores: facts.stores, pendingEnds: stubPendingEnds(state),
+  });
+  const plannedEnds = new Set(decision.endPlans.map((end) => end.listingId));
+  const superseded = new Set(decision.supersedeIds);
+  const pickedAfter = new Map<number, boolean>();
+  for (const id of plan.insertIds) pickedAfter.set(id, true);
+  for (const id of [...plan.deleteIds, ...decision.hiddenRemovedIds]) pickedAfter.set(id, false);
+  const reported = new Map<number, SelectionEffect>();
+  for (const [effect, rows] of [["stillEnding", decision.stillEnding], ["endReview", decision.endReview],
+    ["endedReAdd", decision.endedReAdd]] as const) for (const row of rows) reported.set(row.listingId, effect);
+  const entries: SelectionEffectEntry[] = [];
+  const stores = facts.stores.map((store) => {
+    const fixture = state.stores.find((entry) => entry.storeConnectionId === store.storeConnectionId)!;
+    const counts: SelectionChangeStoreEffects = { storeConnectionId: store.storeConnectionId, storeName: fixture.name, platform: store.platform,
+      goesToZero: 0, startsSelling: 0, ends: 0, storeConnected: stubStoreConnected(state, store.storeConnectionId) };
+    for (const listing of store.listings) {
+      if (plannedEnds.has(listing.id)) {
+        counts.ends += 1;
+        entries.push([store.storeConnectionId, listing.id, listing.productVariantId, "ends"]);
+        continue;
+      }
+      const picked = pickedAfter.get(listing.productVariantId);
+      if (picked === undefined) continue;
+      if (listing.status !== "ended" && listing.marketplaceEndedAt === null && offered.has(listing.productVariantId)) {
+        const openBefore = listing.openEndState !== null;
+        const openAfter = openBefore && !(listing.openEndId !== null && superseded.has(listing.openEndId));
+        const sellsBefore = !picked && !openBefore;
+        const sellsAfter = picked && !openAfter;
+        const effect = sellsBefore && !sellsAfter ? "goesToZero" : !sellsBefore && sellsAfter ? "startsSelling" : null;
+        if (effect !== null) {
+          counts[effect] += 1;
+          entries.push([store.storeConnectionId, listing.id, listing.productVariantId, effect]);
+        }
+      }
+      const told = reported.get(listing.id);
+      if (told !== undefined) entries.push([store.storeConnectionId, listing.id, listing.productVariantId, told]);
+    }
+    return counts;
+  });
+  for (const productVariantId of decision.hiddenRemovedIds) entries.push([0, 0, productVariantId, "removedWithProduct"]);
+  const ends: SelectionChangeEnds = {
+    listingIds: [...plannedEnds].sort((left, right) => left - right), hiddenRemovedIds: decision.hiddenRemovedIds,
+    otherSizes: decision.endPlans.filter((end) => end.reason === "product_removed").length,
+    // By size, as the domain counts them (a size listed on two stores is one item you're adding).
+    stillEnding: new Set(decision.stillEnding.map((entry) => entry.productVariantId)).size,
+    endReview: new Set(decision.endReview.map((entry) => entry.productVariantId)).size,
+    endedReAdd: new Set(decision.endedReAdd.map((entry) => entry.productVariantId)).size,
+  };
+  const otherEntriesHash = selectionEffectsHash(entries.filter((entry) => entry[3] !== "ends" && entry[3] !== "removedWithProduct"));
+  return { stores, ends, otherEntriesHash, effectsHash: combineSelectionEffectsHash(selectionEndsHash(ends), otherEntriesHash), decision };
+}
+
+/**
+ * The save's end writes (§4.7 step 9), after its picks writes: the `pending` ends it takes back are superseded, then
+ * one `pending` end per planned end, with the next id (the table's identity grows past every row it holds).
+ */
+function stubWriteListingEnds(state: StubState, decision: ListingEndDecision): void {
+  const superseded = new Set(decision.supersedeIds);
+  for (const end of state.listingEnds) if (end.state === "pending" && superseded.has(end.id)) end.state = "superseded";
+  let nextId = Math.max(700, ...state.listingEnds.map((end) => end.id)) + 1;
+  for (const planned of decision.endPlans) {
+    state.listingEnds.push({ id: nextId, storeConnectionId: planned.storeConnectionId, productVariantId: planned.productVariantId,
+      productId: planned.productId, reason: planned.reason, state: "pending" });
+    nextId += 1;
+  }
+}
+
+/** A change planned from the stub's picks, as the service plans it (`planFromFacts`, with the domain's planner and cap). */
+function stubPlanChange(state: StubState, change: CanonicalSelectionChange) {
+  const facts = new Map(state.chooseRows.map((fact) => [fact.productVariantId, fact]));
+  // Offered: in the catalog (every stub row is exposed and sellable) and not turned off for the vendor (SEL offeredVariantIdsAmong).
+  const offered = new Set([...change.addIds, ...change.removeIds].filter((id) => {
+    const fact = facts.get(id);
+    return fact !== undefined && fact.enabledOverride !== false;
+  }));
+  const plan = planSelectionChange({ pickedBefore: state.picks, add: change.addIds, remove: change.removeIds, offered });
+  const selectedBefore = selectedVariantIds(state).length;
+  const selectedAfter = selectedCountAfterChange({ selectedBefore, plan, offeredDeletes: offered });
+  return {
+    plan,
+    selectedBefore,
+    selectedAfter,
+    growsOverCap: refuseGrowthOverCap({ before: selectedBefore, after: selectedAfter, cap: SELECTION_CHANGE_CAP }),
+    effects: stubSelectionEffects(state, plan, offered),
+  };
+}
+
+type StubPlannedChange = ReturnType<typeof stubPlanChange>;
+
+function plannedAnswer(planned: StubPlannedChange): Omit<SelectionChangePreviewAnswer, "headRevisionId" | "refused"> {
+  return {
+    toAdd: planned.plan.insertIds.length,
+    toRemove: planned.plan.deleteIds.length,
+    alreadySelected: planned.plan.alreadySelected.length,
+    alreadyNotSelected: planned.plan.alreadyNotSelected.length,
+    skipped: { count: planned.plan.skipped.length, first: planned.plan.skipped.slice(0, SELECTION_CHANGE_SKIPPED_SHOWN).map((skip) => skip.id) },
+    selectedBefore: planned.selectedBefore,
+    selectedAfter: planned.selectedAfter,
+    cap: SELECTION_CHANGE_CAP,
+    overCapAfter: planned.selectedAfter > SELECTION_CHANGE_CAP,
+    effects: planned.effects.stores,
+    effectsHash: planned.effects.effectsHash,
+    ends: planned.effects.ends,
+    otherEntriesHash: planned.effects.otherEntriesHash,
+  };
+}
+
+function isScriptedRefusal(script: SelectionChangeScript | undefined): script is ScriptedError {
+  return typeof script === "object" && script !== null;
+}
+
+/** The writes gate's answer (§10): transient, `Retry-After: 5`, as the route sends every `writesPaused` code. */
+function writesPausedAnswer(route: Route, reason: "older_version_running" | typeof DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON) {
+  return route.fulfill({ status: 503, headers: { "Retry-After": "5" }, json: { error: { code: SELECTION_CHANGE_ERROR_CODES.writesPaused,
+    message: SELECTION_CHANGE_SERVER_WORDS.paused, context: { reason, vendorId: 1, classification: "transient", retryable: true } } } });
+}
+
+/** The service's busy answer after its own retries (§8.3, SAFETY-3): A's busy words, transient, 409. */
+function selectionBusyAnswer(route: Route) {
+  const busy = publicationSelectionBusyIssue({ code: "55P03", message: "PUBLICATION_SELECTION_BUSY" });
+  return fulfillError(route, { status: 409, code: SELECTION_CHANGE_ERROR_CODES.busy, message: busy?.message ?? "",
+    context: { classification: "transient", retryable: true, attempts: 4, lastErrorCode: "55P03" } });
+}
+
+/**
+ * `POST /api/dropship/catalog/selection/changes/preview` and `POST …/selection/changes`, in the route's and the
+ * service's order (§8.1-§8.3): an older dyno's scripted answer; the bulk parser (413 past 1 MiB, 400 not JSON); the
+ * page version (503 newer); the strict body through the server's own parse (`parseSelectionChange[Preview]Body`; a
+ * refusal is the route's 400 and recorded as unexpected: this page never sends one); then
+ * - preview: a scripted answer, else the plan from the picks with the head revision (a stale base is answered, not
+ *   refused), then `afterChangePreview`'s next change;
+ * - save: the reserved key (400); a scripted 500 or refusal; the replay by key (the stored answer, 200; another
+ *   request under the key, 409); scripted paused / busy; the head revision (409); the plan; the cap (422); the effects
+ *   against the confirmed hash (409 when the change adds, else saved as drifted, §7.5); then the picks are written
+ *   with a new revision (201), or with the answer cut off / after a pause when scripted.
+ * Every answer is parsed with the shared contract before it is sent.
+ */
+async function answerSelectionChange(state: StubState, route: Route, kind: "preview" | "save") {
+  const path = kind === "preview" ? SELECTION_CHANGES_PREVIEW_PATH : SELECTION_CHANGES_PATH;
   const text = route.request().postData() ?? "";
   const bytes = Buffer.byteLength(text);
-  let body: { idempotencyKey?: unknown; rules?: unknown } = {};
+  let body: unknown;
+  let json = true;
   try {
-    body = JSON.parse(text) as typeof body;
+    body = JSON.parse(text);
+  } catch {
+    // Deliberate: a body that is not JSON is the bulk parser's 400 below, recorded as unexpected.
+    json = false;
+  }
+  const loose = typeof body === "object" && body !== null && !Array.isArray(body) ? body as Record<string, unknown> : {};
+  const call: SelectionChangeCall = { key: typeof loose.idempotencyKey === "string" ? loose.idempotencyKey : "", body: loose, bytes, status: 0 };
+  (kind === "preview" ? state.changePreviews : state.changeCalls).push(call);
+  const answered = (status: number) => { call.status = status; };
+  const scripts = kind === "preview" ? state.changePreviewAnswers : state.changeAnswers;
+
+  // An older dyno does not know the route (§4 row 3): its HTML with 200, or its 100 KiB global parser's 413 with no code.
+  if (scripts[0] === "html") {
+    scripts.shift();
+    answered(200);
+    return fulfillOlderDyno(route);
+  }
+  if (scripts[0] === "too-large-no-code") {
+    scripts.shift();
+    answered(413);
+    return route.fulfill({ status: 413, json: { message: "request entity too large" } });
+  }
+  if (bytes > BULK_JSON_LIMIT_BYTES) {
+    answered(413);
+    return fulfillError(route, { status: 413, code: SELECTION_CHANGE_ERROR_CODES.requestTooLarge, message: SELECTION_CHANGE_SERVER_WORDS.bodyTooLarge });
+  }
+  if (!json) {
+    answered(400);
+    state.unexpected.push(`POST ${path} (not JSON)`);
+    return fulfillError(route, { status: 400, code: "DROPSHIP_REQUEST_JSON_INVALID", message: "The request body is not valid JSON." });
+  }
+  let change: CanonicalSelectionChange;
+  let save: CanonicalSelectionChangeSave | null = null;
+  try {
+    const clientVersion = readSelectionChangeClientVersion(body);
+    if (clientVersion !== null && clientVersion > DROPSHIP_CATALOG_CODE_VERSION) {
+      answered(503);
+      return writesPausedAnswer(route, DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON);
+    }
+    // PR C (PLAN-C v4.1 §4.1): an older page's preview is refused in the route, before any read; this page never
+    // sends one, so it is recorded as unexpected.
+    if (kind === "preview" && isCatalogPageOutdated(clientVersion)) {
+      answered(409);
+      state.unexpected.push(`POST ${path} (page outdated: ${clientVersion})`);
+      return fulfillError(route, { status: 409, code: SELECTION_CHANGE_ERROR_CODES.pageOutdated, message: CATALOG_READ_WORDS.retired,
+        context: { clientVersion, serverVersion: DROPSHIP_CATALOG_CODE_VERSION, classification: "permanent", retryable: false } });
+    }
+    if (kind === "preview") {
+      change = parseSelectionChangePreviewBody(body);
+    } else {
+      save = parseSelectionChangeBody(body);
+      change = save;
+    }
   } catch (error) {
-    state.unexpected.push(`PUT selection-rules (not JSON: ${error instanceof Error ? error.message : String(error)})`);
+    if (!(error instanceof DropshipError)) throw error;
+    answered(400);
+    state.unexpected.push(`POST ${path} (body refused: ${error.code})`);
+    return fulfillError(route, { status: 400, code: error.code, message: error.message, ...(error.context ? { context: error.context } : {}) });
   }
-  const key = typeof body.idempotencyKey === "string" ? body.idempotencyKey : "";
-  const record = (status: number) => { state.selectionPuts.push({ key, body, bytes, status }); };
-  if (bytes > GLOBAL_JSON_LIMIT_BYTES) {
-    record(413);
-    return route.fulfill({ status: 413, json: { error: { code: "PAYLOAD_TOO_LARGE", message: "request entity too large" } } });
+
+  if (save === null) {
+    const scripted = scripts.shift();
+    if (scripted === "server-error") {
+      answered(500);
+      return catalogInternalError(route);
+    }
+    if (isScriptedRefusal(scripted)) {
+      answered(scripted.status);
+      return fulfillError(route, scripted);
+    }
+    if (scripted === "paused") {
+      answered(503);
+      return writesPausedAnswer(route, DROPSHIP_PAGE_NEWER_THAN_SERVER_REASON);
+    }
+    if (scripted === "busy") {
+      answered(409);
+      return selectionBusyAnswer(route);
+    }
+    if (scripted !== undefined) throw new Error(`A preview cannot be scripted "${scripted}".`);
+    const planned = stubPlanChange(state, change);
+    const answer = contractAnswer(selectionChangePreviewAnswerSchema, {
+      headRevisionId: state.selectionRevision, ...plannedAnswer(planned), refused: planned.growsOverCap ? "too_large" : null,
+    });
+    answered(200);
+    await route.fulfill({ json: answer });
+    // What changes on eBay while the vendor reads the question: the save that follows plans from it.
+    state.afterChangePreview.shift()?.(state);
+    return;
   }
-  const parsed = replaceDropshipVendorSelectionRulesInputSchema.safeParse({ vendorId: 1, idempotencyKey: key,
-    actor: { actorType: "vendor", actorId: MEMBER_ID }, rules: body.rules });
-  if (!parsed.success) {
-    record(400);
-    state.unexpected.push(`PUT selection-rules (body off contract: ${parsed.error.issues.map((issue) => issue.message).join("; ")})`);
-    return route.fulfill({ status: 400, json: { error: { code: "DROPSHIP_VENDOR_CATALOG_INVALID_INPUT", message: "Dropship vendor catalog input failed validation." } } });
+
+  // B's release and follow-up write their revisions under this prefix (V8); the page's keys never start with it.
+  if (isReservedSelectionIdempotencyKey(save.idempotencyKey)) {
+    answered(400);
+    state.unexpected.push(`POST ${path} (reserved key)`);
+    return fulfillError(route, { status: 400, code: SELECTION_CHANGE_ERROR_CODES.keyReserved, message: CATALOG_READ_WORDS.keyReserved });
   }
-  const normalized = parsed.data.rules.map(normalizeVendorSelectionRule);
-  const hash = hashVendorSelectionRules(normalized);
-  const seen = state.selectionKeys[key];
+  const hash = hashSelectionChangeRequest(save);
+  // A fault or refusal that comes before the replay check: a 500, or a refusal of the page itself (410, C's 409).
+  if (scripts[0] === "server-error") {
+    scripts.shift();
+    answered(500);
+    return catalogInternalError(route);
+  }
+  if (isScriptedRefusal(scripts[0])) {
+    const scripted = scripts.shift() as ScriptedError;
+    answered(scripted.status);
+    return fulfillError(route, scripted);
+  }
+  const seen = state.changeKeys[save.idempotencyKey];
   if (seen) {
     if (seen.hash !== hash) {
+      answered(409);
+      return fulfillError(route, { status: 409, code: SELECTION_CHANGE_ERROR_CODES.keyConflict, message: SELECTION_CHANGE_SERVER_WORDS.keyConflict,
+        context: { vendorId: 1, revisionId: seen.answer.revisionId, classification: "permanent", retryable: false } });
+    }
+    answered(200);
+    return route.fulfill({ status: 200, json: seen.answer });
+  }
+  // PR C's step 2a, after the replay (§4.1, §4.6): an older page is told to reload, and this page's echo of the
+  // confirmed ends must be the preview it confirmed. This page always sends both, so either refusal is unexpected.
+  if (isCatalogPageOutdated(save.clientVersion)) {
+    answered(409);
+    state.unexpected.push(`POST ${path} (page outdated: ${save.clientVersion})`);
+    return fulfillError(route, { status: 409, code: SELECTION_CHANGE_ERROR_CODES.pageOutdated, message: CATALOG_READ_WORDS.retired,
+      context: { vendorId: 1, clientVersion: save.clientVersion, serverVersion: DROPSHIP_CATALOG_CODE_VERSION,
+        classification: "permanent", retryable: false } });
+  }
+  if (save.expectedEnds === null || save.expectedOtherEntriesHash === null || !selectionEndsEchoMatches({
+    expectedEffectsHash: save.expectedEffectsHash, expectedEnds: save.expectedEnds, expectedOtherEntriesHash: save.expectedOtherEntriesHash,
+  })) {
+    answered(400);
+    state.unexpected.push(`POST ${path} (confirmed ends echo refused)`);
+    return fulfillError(route, { status: 400, code: SELECTION_CHANGE_ERROR_CODES.invalidInput,
+      message: "This save doesn't match what you confirmed. Reload the page and try again.",
+      context: { vendorId: 1, classification: "permanent", retryable: false } });
+  }
+  const expectedEnds = save.expectedEnds;
+  // After the replay, as the service checks them: the writes gate, and busy after the server's own retries.
+  if (scripts[0] === "paused") {
+    scripts.shift();
+    answered(503);
+    return writesPausedAnswer(route, "older_version_running");
+  }
+  if (scripts[0] === "busy") {
+    scripts.shift();
+    answered(409);
+    return selectionBusyAnswer(route);
+  }
+  if (save.expectedRevisionId !== state.selectionRevision) {
+    answered(409);
+    return fulfillError(route, { status: 409, code: SELECTION_CHANGE_ERROR_CODES.revisionConflict, message: SELECTION_CHANGE_SERVER_WORDS.stale,
+      context: { vendorId: 1, expectedRevisionId: save.expectedRevisionId, currentRevisionId: state.selectionRevision,
+        classification: "permanent", retryable: false } });
+  }
+  const planned = stubPlanChange(state, save);
+  if (planned.growsOverCap) {
+    answered(422);
+    return fulfillError(route, { status: 422, code: SELECTION_CHANGE_ERROR_CODES.tooLarge, message: SELECTION_CHANGE_SERVER_WORDS.tooLarge(planned.selectedAfter),
+      context: { vendorId: 1, selectedBefore: planned.selectedBefore, selectedAfter: planned.selectedAfter, cap: SELECTION_CHANGE_CAP,
+        classification: "permanent", retryable: false } });
+  }
+  // The drift rule (§7.5; PR C §4.6), the server's own: effects that moved since the question refuse a change that
+  // adds, and a removal that would end a listing or remove a hidden pick the vendor did not confirm; fewer go through.
+  const comparison = compareSelectionEffects({ expectedEffectsHash: save.expectedEffectsHash, actualEffectsHash: planned.effects.effectsHash,
+    addIds: save.addIds, expectedEnds, actualEnds: planned.effects.ends });
+  const drifted = comparison.outcome === "drifted";
+  if (comparison.outcome === "changed") {
+    answered(409);
+    return fulfillError(route, { status: 409, code: SELECTION_CHANGE_ERROR_CODES.effectsChanged, message: SELECTION_CHANGE_SERVER_WORDS.effectsChanged,
+      context: { vendorId: 1, expectedEffectsHash: save.expectedEffectsHash, actualEffectsHash: planned.effects.effectsHash,
+        effects: planned.effects.stores, classification: "permanent", retryable: false } });
+  }
+  const commit = scripts[0] === "drop-after-commit" || scripts[0] === "slow" ? scripts.shift() : undefined;
+  if (commit === "slow") await new Promise<void>((resolve) => { setTimeout(resolve, SLOW_SELECTION_SAVE_MS); });
+  for (const id of [...planned.plan.deleteIds, ...planned.effects.decision.hiddenRemovedIds]) state.picks.delete(id);
+  for (const id of planned.plan.insertIds) state.picks.add(id);
+  stubWriteListingEnds(state, planned.effects.decision);
+  // A no-op save writes its revision too (§8.3).
+  state.selectionRevision += 1;
+  const answer = contractAnswer(selectionChangeAnswerSchema, {
+    revisionId: state.selectionRevision, ...plannedAnswer(planned), confirmedEffectsHash: save.expectedEffectsHash, drifted,
+  });
+  state.changeKeys[save.idempotencyKey] = { hash, answer };
+  if (commit === "drop-after-commit") {
+    // Saved, but its answer never came back (the next send of the key replays it).
+    answered(0);
+    return route.abort("connectionreset");
+  }
+  answered(201);
+  return route.fulfill({ status: 201, json: answer });
+}
+
+// ---------------------------------------------------------------------------
+// Step 3 on publish runs (step 1 plan S2-5 PR A, §4.6, §4.8, §4.10): the selection summary, the Check's previews and
+// the run routes, as dropship-vendor-catalog.routes.ts and dropship-listing.routes.ts answer them
+// ---------------------------------------------------------------------------
+
+/** A step-up proof as auth/me reports it. */
+export interface StubProof { method: string; verifiedAt: string; expiresAt: string }
+/** The code the stub's email step-up takes. */
+export const STEP_UP_CODE = "123456";
+/** A live bulk push proof (it expires far in the future). */
+export const LIVE_PROOF: StubProof = { method: "email_mfa", verifiedAt: STAMP, expiresAt: "2999-01-01T00:00:00.000Z" };
+const LISTING_PUSH_RUNS_PATH = "/api/dropship/listing-push-runs";
+
+/** One state a run reaches, applied on a detail read: counts left out stay as they were. */
+export interface StubRunFrame {
+  status?: ListingPushRunStatus;
+  stopReason?: ListingPushRunStopReason | null;
+  counts: Partial<ListingPushRunCounts>;
+  problems?: ListingPushRunProblem[];
+  /** When a paused run tries again (the detail's `waitingUntil`); null once it goes on. */
+  waitingUntil?: string | null;
+  /** Completed sizes the store saved as unpublished drafts (the detail's `drafts`). */
+  drafts?: number;
+}
+
+/**
+ * An answer the stub sends through a shared contract: typed against the schema's input, so a field the contract adds
+ * or renames fails the stub type check (CI "Dropship catalog browser stub types"), not only the browser run, and
+ * parsed, so the page reads exactly what the server's parse sends (review round 2 CT11).
+ */
+export function contractAnswer<S extends z.ZodTypeAny>(schema: S, value: z.input<S>): z.output<S> {
+  return schema.parse(value);
+}
+
+/** A publish run as the stub holds it: the view the routes answer, its counts, problems, and the frames still to come. */
+export interface StubRun {
+  view: ListingPushRunView;
+  counts: ListingPushRunCounts;
+  problems: ListingPushRunProblem[];
+  waitingUntil: string | null;
+  drafts: number;
+  frames: StubRunFrame[];
+  key: string;
+  body: string;
+}
+
+/** The ids the stub's picks select now (picked and offered), by the server's own evaluator. */
+function selectedVariantIds(state: StubState): number[] {
+  return state.chooseRows.filter((fact) => chooseDecision(state, fact).selected).map((fact) => fact.productVariantId).sort((a, b) => a - b);
+}
+
+/** The selection summary the route answers (dropship-selection-atp-service.ts readSelectionSummary), worked out from the stub. */
+export function stubSelectionSummary(state: StubState, storeConnectionId: number | null): DropshipCatalogSelectionSummary {
+  const selected = selectedVariantIds(state);
+  const live = storeConnectionId === null ? 0 : selected.filter((id) => (state.liveVariantIds[storeConnectionId] ?? []).includes(id)).length;
+  return contractAnswer(dropshipCatalogSelectionSummarySchema, {
+    selectionRevisionId: state.selectionRevision,
+    selectedTotal: selected.length,
+    cap: DROPSHIP_CATALOG_SELECTION_CAP,
+    overCap: selected.length > DROPSHIP_CATALOG_SELECTION_CAP,
+    store: storeConnectionId === null ? null : { storeConnectionId, live, notLive: selected.length - live },
+  });
+}
+
+/** An older dyno's answer to a route it does not know: the app's HTML with 200 (server/static.ts; F25). */
+function fulfillOlderDyno(route: Route) {
+  return route.fulfill({ status: 200, contentType: "text/html", body: "<!doctype html><html><body><div id=\"root\"></div></body></html>" });
+}
+
+/** `GET /api/dropship/catalog/selection?storeConnectionId=&clientVersion=`: the page version first, then a store of the vendor's. */
+function answerSelectionSummary(state: StubState, route: Route, url: URL) {
+  const offContract = [...url.searchParams.keys()].filter((key) => key !== "storeConnectionId" && key !== "clientVersion");
+  if (offContract.length > 0) state.unexpected.push(`GET ${url.pathname}${url.search} (query off contract: ${offContract.join(",")})`);
+  const version = readClientVersion(url);
+  if (!version.ok) return catalogQueryInvalid(state, route, url, "clientVersion");
+  if (version.newer) return pageNewerThanServer(route);
+  const storeText = url.searchParams.get("storeConnectionId");
+  const storeConnectionId = storeText === null ? null : /^\d{1,10}$/.test(storeText) ? Number(storeText) : Number.NaN;
+  const parsed = readDropshipVendorSelectionSummaryInputSchema.safeParse({ vendorId: 1, storeConnectionId });
+  if (!parsed.success) return catalogQueryInvalid(state, route, url, "storeConnectionId");
+  const scripted = state.selectionSummaryAnswers.shift();
+  if (scripted === "html") return fulfillOlderDyno(route);
+  if (scripted) return fulfillError(route, scripted);
+  if (parsed.data.storeConnectionId !== null && !state.stores.some((store) => store.storeConnectionId === parsed.data.storeConnectionId)) {
+    return fulfillError(route, { status: 404, code: DROPSHIP_CATALOG_READ_ERROR_CODES.storeRequired,
+      message: "That store was not found. Reload the page and choose a store." });
+  }
+  return route.fulfill({ json: stubSelectionSummary(state, parsed.data.storeConnectionId) });
+}
+
+/**
+ * `POST /api/dropship/listings/preview`: the body checked with the member schema (at most 500 sizes), then one preview
+ * row per size, in the order sent (the row of ROW's size is `previewRow`'s, as before; another size takes its names
+ * from step 1's catalog). A size the catalog does not hold is previewed as blocked.
+ */
+async function answerPreview(state: StubState, route: Route) {
+  state.previewCalls += 1;
+  const body = route.request().postDataJSON() as Record<string, unknown>;
+  // The member route's schema is this one without vendorId and actor, which the service adds (dropship-listing-dtos.ts).
+  const parsed = generateVendorListingPreviewInputSchema.safeParse({ ...body, vendorId: 1, actor: { actorType: "vendor", actorId: MEMBER_ID } });
+  if (!parsed.success) return refuseBody(state, route, "POST", "/api/dropship/listings/preview", parsed.error.issues.map((issue) => issue.message).join("; "));
+  state.previewBodies.push({ storeConnectionId: parsed.data.storeConnectionId, productVariantIds: [...parsed.data.productVariantIds] });
+  const scripted = state.previewAnswers.shift();
+  if (scripted) return fulfillError(route, scripted);
+  const storeConnectionId = parsed.data.storeConnectionId;
+  const rows = parsed.data.productVariantIds.map((productVariantId) => {
+    const base = previewRow(storeConnectionId);
+    if (productVariantId === base.productVariantId) return base;
+    const fact = state.chooseRows.find((row) => row.productVariantId === productVariantId);
+    if (!fact) return { ...base, productVariantId, productId: 0, sku: null, title: `Size ${productVariantId}`, previewStatus: "blocked",
+      blockers: ["catalog_package_data_required"] };
+    return { ...base, productVariantId, productId: fact.productId, sku: fact.variantSku, title: `${fact.productName}, ${fact.variantName}`,
+      previewHash: `${productVariantId}`.padStart(64, "d") };
+  });
+  const blocked = rows.filter((row) => row.previewStatus === "blocked").length;
+  return route.fulfill({ json: { preview: { vendorId: 1, storeConnectionId, platform: "ebay", generatedAt: STAMP, rows,
+    summary: { total: rows.length, ready: rows.length - blocked, blocked, warning: 0 } } } });
+}
+
+function runCountsOf(run: StubRun): ListingPushRunCounts {
+  return { ...run.counts };
+}
+
+/** The next frame of a run, applied on a detail read; the last frame stays. */
+function advanceRun(run: StubRun): void {
+  const frame = run.frames.length > 1 ? run.frames.shift() : run.frames[0];
+  if (!frame) return;
+  run.counts = { ...run.counts, ...frame.counts };
+  if (frame.status) run.view = { ...run.view, status: frame.status, completedAt: frame.status === "processing" ? null : STAMP };
+  if (frame.stopReason !== undefined) run.view = { ...run.view, stopReason: frame.stopReason };
+  if (frame.problems) run.problems = frame.problems;
+  if (frame.waitingUntil !== undefined) run.waitingUntil = frame.waitingUntil;
+  if (frame.drafts !== undefined) run.drafts = frame.drafts;
+  run.view = { ...run.view, updatedAt: STAMP };
+}
+
+function runRefusal(route: Route, status: number, code: string, message: string, context?: Record<string, unknown>) {
+  return fulfillError(route, { status, code, message, ...(context ? { context } : {}) });
+}
+
+/**
+ * The run routes (§4.2, §4.6), in the server's order: the step-up proof, the body's strict schema, the key replay (200
+ * with the run as it is) or conflict, the selection revision, the snapshot (TOO_LARGE, then EMPTY, as the repository
+ * refuses them), then one run per store. Detail reads walk the run's frames; Stop cancels what has not started.
+ * Every answer is parsed with the shared route contract before it is sent.
+ */
+async function answerListingPushRuns(state: StubState, route: Route, url: URL, method: string, path: string) {
+  if (path === LISTING_PUSH_RUNS_PATH && method === "POST") return answerRunCreate(state, route);
+  if (path === LISTING_PUSH_RUNS_PATH && method === "GET") {
+    const storeConnectionId = Number(url.searchParams.get("storeConnectionId"));
+    const limit = Number(url.searchParams.get("limit") ?? 20);
+    if (!Number.isSafeInteger(storeConnectionId) || storeConnectionId < 1 || !Number.isSafeInteger(limit) || limit < 1 || limit > 20) {
+      state.unexpected.push(`GET ${path}${url.search} (query off contract)`);
+      return runRefusal(route, 400, LISTING_PUSH_RUN_ERROR_CODES.invalidInput, "The publish request was not valid.");
+    }
+    const runs = state.runs.filter((run) => run.view.storeConnectionId === storeConnectionId).reverse().slice(0, limit)
+      .map((run) => ({ run: run.view, counts: runCountsOf(run) }));
+    return route.fulfill({ json: contractAnswer(listListingPushRunsResponseSchema, { runs }) });
+  }
+  const detail = /^\/api\/dropship\/listing-push-runs\/(\d+)(\/stop)?$/.exec(path);
+  const run = detail ? state.runs.find((candidate) => candidate.view.runId === Number(detail[1])) : undefined;
+  if (detail && !run) return runRefusal(route, 404, LISTING_PUSH_RUN_ERROR_CODES.notFound, "That publish was not found.");
+  if (detail && run && !detail[2] && method === "GET") {
+    state.runDetailReads.push(run.view.runId);
+    advanceRun(run);
+    const after = Number(url.searchParams.get("problemsAfter") ?? 0);
+    const items = run.problems.filter((problem) => problem.productVariantId > after).sort((a, b) => a.productVariantId - b.productVariantId);
+    const page = items.slice(0, 50);
+    return route.fulfill({ json: contractAnswer(listingPushRunDetailResponseSchema, { run: run.view, counts: runCountsOf(run),
+      problems: { items: page, nextCursor: items.length > 50 ? page[page.length - 1].productVariantId : null },
+      waitingUntil: run.view.status === "processing" ? run.waitingUntil : null, drafts: run.drafts }) });
+  }
+  if (detail && run && detail[2] && method === "POST") {
+    state.runStops.push(run.view.runId);
+    if (run.view.status === "processing" && run.view.cancelRequestedAt === null) {
+      // Pending targets and queued items are cancelled at once; only the size being sent finishes (§4.6, D28).
+      const cancelled = run.counts.cancelled + run.counts.pending + run.counts.queued;
+      run.view = { ...run.view, cancelRequestedAt: STAMP, stopReason: "vendor_stop", updatedAt: STAMP };
+      run.frames = [{ counts: {} }, { status: "cancelled", stopReason: "vendor_stop", counts: { pending: 0, queued: 0, cancelled } }];
+    }
+    return route.fulfill({ json: contractAnswer(stopListingPushRunResponseSchema, { run: run.view, counts: runCountsOf(run) }) });
+  }
+  state.unexpected.push(`${method} ${path}`);
+  return route.fulfill({ status: 500, json: { error: { message: "Unexpected request" } } });
+}
+
+async function answerRunCreate(state: StubState, route: Route) {
+  const body = (route.request().postDataJSON() ?? {}) as Record<string, unknown>;
+  const record = (status: number) => { state.runCreates.push({ body, status }); };
+  const scripted = state.runCreateAnswers.shift();
+  if (scripted === "html") {
+    record(200);
+    return fulfillOlderDyno(route);
+  }
+  if (scripted && scripted !== "drop") {
+    record(scripted.status);
+    return fulfillError(route, scripted);
+  }
+  // requireDropshipSensitiveActionProof("bulk_listing_push") runs before the service.
+  const proof = state.proofs.bulk_listing_push;
+  if (!proof || new Date(proof.expiresAt).getTime() <= Date.now()) {
+    record(403);
+    return runRefusal(route, 403, "DROPSHIP_STEP_UP_REQUIRED", "Recent dropship sensitive-action verification is required.", { action: "bulk_listing_push" });
+  }
+  const parsed = createListingPushRunRequestSchema.safeParse(body);
+  if (!parsed.success) {
+    record(400);
+    return refuseBody(state, route, "POST", LISTING_PUSH_RUNS_PATH, parsed.error.issues.map((issue) => issue.message).join("; "));
+  }
+  const request = parsed.data;
+  const sent = JSON.stringify({ storeConnectionId: request.storeConnectionId, scope: request.scope, expectedSelectionRevisionId: request.expectedSelectionRevisionId });
+  const earlier = state.runs.find((run) => run.key === request.idempotencyKey);
+  if (earlier) {
+    if (earlier.body !== sent) {
       record(409);
-      return fulfillError(route, { status: 409, code: "DROPSHIP_IDEMPOTENCY_CONFLICT", message: "Dropship vendor selection idempotency key was reused with a different request." });
+      return runRefusal(route, 409, LISTING_PUSH_RUN_ERROR_CODES.idempotencyConflict, "This publish request key was already used for a different publish.");
     }
     record(200);
-    return route.fulfill({ status: 200, json: { revisionId: seen.revisionId, idempotentReplay: true, rules: state.selectionRules } });
+    return route.fulfill({ status: 200, json: contractAnswer(createListingPushRunResponseSchema, { run: earlier.view, idempotentReplay: true }) });
   }
-  const scripted = state.selectionPutAnswers.shift();
-  if (scripted === "busy") {
+  if (request.expectedSelectionRevisionId !== state.selectionRevision) {
     record(409);
-    const busy = publicationSelectionBusyIssue({ code: "55P03", message: "PUBLICATION_SELECTION_BUSY" });
-    return route.fulfill({ status: 409, json: { error: busy } });
+    return runRefusal(route, 409, LISTING_PUSH_RUN_ERROR_CODES.selectionRevisionConflict,
+      "Your choices changed since this page loaded. Check the count and publish again.",
+      { expectedSelectionRevisionId: request.expectedSelectionRevisionId, currentSelectionRevisionId: state.selectionRevision });
   }
-  if (scripted === "server-error") {
-    record(500);
-    return fulfillError(route, { status: 500, code: "DROPSHIP_VENDOR_CATALOG_INTERNAL_ERROR", message: "Dropship vendor catalog request failed." });
+  const selected = selectedVariantIds(state);
+  if (selected.length > MAX_LISTING_PUSH_RUN_TARGETS) {
+    record(422);
+    return runRefusal(route, 422, LISTING_PUSH_RUN_ERROR_CODES.tooLarge, "More than 10,000 sizes are selected. Remove some in step 1, then publish.",
+      { limit: MAX_LISTING_PUSH_RUN_TARGETS });
   }
-  if (scripted === "forbidden") {
-    record(403);
-    return fulfillError(route, { status: 403, code: "DROPSHIP_VENDOR_CATALOG_ACCESS_BLOCKED", message: "Dropship vendor status does not allow catalog access." });
+  const live = state.liveVariantIds[request.storeConnectionId] ?? [];
+  const liveCount = selected.filter((id) => live.includes(id)).length;
+  const targets = (request.scope === "not_live" ? selected.length - liveCount : selected.length) - state.runSnapshotShort;
+  if (targets <= 0) {
+    record(422);
+    return runRefusal(route, 422, LISTING_PUSH_RUN_ERROR_CODES.empty, request.scope === "not_live" && liveCount > 0
+      ? "Everything selected is already on eBay. Use Publish all to re-send it." : "Choose what to sell in step 1 first.",
+    { scope: request.scope, liveCount, selectedCount: selected.length });
   }
-  if (scripted === "slow") await new Promise<void>((resolve) => { setTimeout(resolve, SLOW_SELECTION_PUT_MS); });
-  state.selectionRevision += 1;
-  const revisionId = state.selectionRevision;
-  state.selectionRules = normalized.map((rule) => selectionRule(state.nextRuleId++, rule.scopeType, rule.action,
-    { productLineId: rule.productLineId, productId: rule.productId, productVariantId: rule.productVariantId, category: rule.category },
-    { revisionId, autoConnectNewSkus: rule.autoConnectNewSkus, autoListNewSkus: rule.autoListNewSkus, priority: rule.priority, metadata: rule.metadata }));
-  state.selectionKeys[key] = { hash, revisionId };
-  if (scripted === "drop-after-commit") {
+  // One run per store, after the snapshot, as the repository checks it (dropship-listing-push-run.repository.ts
+  // createRun: replay, revision, snapshot with TOO_LARGE, EMPTY, then ACTIVE; review round 2 CT8).
+  const active = state.runs.find((run) => run.view.storeConnectionId === request.storeConnectionId && run.view.status === "processing");
+  if (active) {
+    record(409);
+    return runRefusal(route, 409, LISTING_PUSH_RUN_ERROR_CODES.runActive, "A publish is already running for this store. It's shown below.",
+      { runId: active.view.runId });
+  }
+  // Ids grow as the server's identity column does: a new run's id is above every run the store already has.
+  const runId = Math.max(40, ...state.runs.map((run) => run.view.runId)) + 1;
+  const view: ListingPushRunView = {
+    runId, storeConnectionId: request.storeConnectionId, scope: request.scope, status: "processing", stopReason: null,
+    selectionRevisionId: request.expectedSelectionRevisionId, targetCount: targets, chunkSize: LISTING_PUSH_RUN_CHUNK_SIZE,
+    chunkCount: Math.ceil(targets / LISTING_PUSH_RUN_CHUNK_SIZE), nextChunkIndex: 0, cancelRequestedAt: null,
+    createdAt: STAMP, updatedAt: STAMP, completedAt: null,
+  };
+  const frames = state.nextRunFrames ?? defaultRunFrames(state, request.storeConnectionId, request.scope === "not_live"
+    ? selected.filter((id) => !live.includes(id)) : selected, targets);
+  state.nextRunFrames = null;
+  state.runs.push({ view, counts: { ...emptyListingPushRunCounts(), pending: targets }, problems: [], waitingUntil: null, drafts: 0,
+    frames: [...frames], key: request.idempotencyKey, body: sent });
+  const json = contractAnswer(createListingPushRunResponseSchema, { run: view, idempotentReplay: false });
+  if (scripted === "drop") {
+    // The run was made, but its answer never came back (P3).
     record(0);
     return route.abort("connectionreset");
   }
-  record(201);
-  return route.fulfill({ status: 201, json: { revisionId, idempotentReplay: false, rules: state.selectionRules } });
+  record(202);
+  return route.fulfill({ status: 202, json });
+}
+
+/**
+ * A run's frames when the journey scripts none: queued, then done. A target whose listing on the run's store has an
+ * open end request is fenced before eBay (PLAN-C v4.1 §6.2): a vendor run item is blocked with the fence's code
+ * (`pending`/`ending` → END_IN_PROGRESS, `failed` → END_REVIEW), so the run finishes partial with that problem; every
+ * other target completes. (`targetIds` may name more sizes than `targets` when the snapshot is scripted short.)
+ */
+function defaultRunFrames(state: StubState, storeConnectionId: number, targetIds: readonly number[], targets: number): StubRunFrame[] {
+  const facts = new Map(state.chooseRows.map((fact) => [fact.productVariantId, fact]));
+  const problems: ListingPushRunProblem[] = targetIds.flatMap((productVariantId) => {
+    const open = openListingEnd(state, storeConnectionId, productVariantId);
+    const fact = facts.get(productVariantId);
+    if (open === null || !fact) return [];
+    const review = open.state === "failed";
+    return [{ productVariantId, productId: fact.productId, productName: fact.productName, variantName: fact.variantName, sku: fact.variantSku,
+      outcome: "blocked" as const, code: review ? LISTING_END_FENCE_CODES.review : LISTING_END_FENCE_CODES.inProgress,
+      // The fence's own server words, as the worker stores them on the item.
+      message: review ? LISTING_END_FENCE_WORDS.review : LISTING_END_FENCE_WORDS.inProgress, retryable: false }];
+  });
+  if (problems.length === 0) return [{ counts: { pending: 0, queued: targets } }, { status: "completed", counts: { queued: 0, completed: targets } }];
+  return [{ counts: { pending: 0, queued: targets } },
+    { status: "partial", counts: { queued: 0, completed: targets - problems.length, blocked: problems.length }, problems }];
 }
 
 /**
@@ -2881,10 +4008,11 @@ export async function serveAppQueryClient(page: Page): Promise<void> {
   await page.addInitScript(() => { (window as Window & { __CATALOG_APP_QUERY_CLIENT__?: boolean }).__CATALOG_APP_QUERY_CLIENT__ = true; });
 }
 
-/** Another tab's save: `rules` become the vendor's rules under new ids and a new revision (as any committed save does). */
-export function saveFromAnotherTab(state: StubState, rules: ReadonlyArray<Omit<SelectionRuleRecord, "id">>): void {
+/** Another tab's picks save (or the release follow-up's tidy, FIDELITY-6): its adds and removes, and a new head revision. */
+export function saveFromAnotherTab(state: StubState, change: { add?: readonly number[]; remove?: readonly number[] }): void {
+  for (const id of change.remove ?? []) state.picks.delete(id);
+  for (const id of change.add ?? []) state.picks.add(id);
   state.selectionRevision += 1;
-  state.selectionRules = rules.map((rule) => ({ ...rule, id: state.nextRuleId++, revisionId: state.selectionRevision }));
 }
 
 /**

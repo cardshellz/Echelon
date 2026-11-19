@@ -6,8 +6,8 @@ import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase }
 import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, cutoverCompositionLegacyChannelSeedSql,
   installCutoverCompositionMigrations } from "../fixtures/inventory-cutover-composition-database.fixture";
 import { PostgresQuantityPublicationAdmission, quantityPublicationScopeLockKey } from "../../infrastructure/quantity-publication-admission.repository";
-import { PostgresEbayPublicationRecoveryRepository } from "../../infrastructure/ebay-publication-recovery.repository";
-import { EbayPublicationRecoveryService } from "../../application/ebay-publication-recovery.service";
+import { PostgresPublicationRecoveryRepository as PostgresEbayPublicationRecoveryRepository } from "../../infrastructure/publication-recovery.repository";
+import { PublicationRecoveryService as EbayPublicationRecoveryService } from "../../application/publication-recovery.service";
 import { observeEbayQuantityRequest, recordQuantityProviderResponse } from "../../application/quantity-provider-request-evidence";
 import type { QuantityPublicationScope } from "../../domain/quantity-publication-admission";
 
@@ -20,8 +20,8 @@ dbDescribe.sequential("explicit eBay republication recovery on disposable Postgr
     database=await createInventoryCutoverTestDatabase(process.env.ECHELON_TEST_DATABASE_URL,true,cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(database.pool);
     for(const file of ["0709_walmart_quantity_admission.sql","0716_inventory_publication_reconciliation.sql",
-      "0729_ebay_listing_sync_recovery.sql","0733_ebay_provider_response_finality.sql","0734_ebay_operator_republication_recovery.sql",
-      "0749_quantity_outbox_preflight_completion.sql", "900000008000018120001_ebay_automatic_sync_recovery.sql"]){
+      "0729_ebay_listing_sync_recovery.sql","0733_ebay_provider_response_finality.sql","0734_ebay_operator_republication_recovery.sql", "900000020000018840001_shared_publication_recovery.sql",
+      "0746_listing_recreation_stock_continuation.sql", "0749_quantity_outbox_preflight_completion.sql", "900000008000018120001_ebay_automatic_sync_recovery.sql"]){
       await database.pool.query(readFileSync(resolve(process.cwd(),"migrations",file),"utf8"));
     }
     await database.pool.query(cutoverCompositionSeedSql);
@@ -141,9 +141,61 @@ dbDescribe.sequential("explicit eBay republication recovery on disposable Postgr
     expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_publication_operator_resumes WHERE idempotency_key=$1",[current.idempotencyKey])).rows[0].count).toBe(0);
     expect((await owner().resume(current)).attemptIds).toEqual(ids);
   });
+
+  it.each(["ebay", "shopify", "walmart"] as const)("recovers an unreceipted legacy %s request through the same owner, preserving uncertainty", async providerKey => {
+    const target = { ...scope(), providerKey, providerScopeType: providerKey === "ebay" ? "account" as const : "location" as const };
+    const admission = new PostgresQuantityPublicationAdmission(database.pool, clock);
+    await expect(admission.run(target, async () => { throw new Error("legacy process loss"); })).rejects.toThrow("legacy process loss");
+    const before = (await database.pool.query("SELECT id::text,to_jsonb(a) AS record FROM inventory.quantity_publication_attempts a WHERE scope_key=$1 ORDER BY id DESC LIMIT 1",
+      [quantityPublicationScopeLockKey(target)])).rows[0];
+    expect((await database.pool.query("SELECT count(*)::int AS n FROM inventory.quantity_provider_requests WHERE attempt_id=$1", [before.id])).rows[0].n).toBe(0);
+    const command = await confirmation([target]);
+    expect(await owner().resume(command)).toEqual({ attemptIds: [before.id], replayed: false, providerWriteAttempted: false });
+    expect(await owner().resume(command)).toMatchObject({ attemptIds: [before.id], replayed: true });
+    const after = (await database.pool.query("SELECT to_jsonb(a) AS record FROM inventory.quantity_publication_attempts a WHERE id=$1", [before.id])).rows[0].record;
+    expect(after).toEqual({ ...before.record, state: "superseded_unknown" });
+    expect((await database.pool.query("SELECT before_record,request_evidence FROM inventory.quantity_publication_operator_resume_attempts WHERE attempt_id=$1", [before.id])).rows)
+      .toEqual([{ before_record: before.record, request_evidence: [] }]);
+    expect((await database.pool.query("SELECT scope,reason FROM inventory.quantity_publication_catchup WHERE scope_key=$1",
+      [quantityPublicationScopeLockKey(target)])).rows).toEqual([{ scope: target, reason: "operator_resume_unknown_outcome" }]);
+    await expect(admission.run(target, async () => "current work")).resolves.toBe("current work");
+  });
+  it("retains current catch-up duty across archival and reactivation without rewriting the old outcome", async () => {
+    const target = scope(); const attemptId = await uncertain(target);
+    await database.pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=101");
+    try {
+      await owner().resume(await confirmation([target]));
+      const retained = (await database.pool.query("SELECT scope FROM inventory.quantity_publication_catchup WHERE scope_key=$1",
+        [quantityPublicationScopeLockKey(target)])).rows;
+      expect(retained).toEqual([{ scope: target }]);
+      await database.pool.query("UPDATE catalog.product_variants SET is_active=true WHERE id=101");
+      expect((await database.pool.query("SELECT scope FROM inventory.quantity_publication_catchup WHERE scope_key=$1",
+        [quantityPublicationScopeLockKey(target)])).rows).toEqual(retained);
+      expect((await database.pool.query("SELECT state,resolution_basis FROM inventory.quantity_publication_attempts WHERE id=$1", [attemptId])).rows[0])
+        .toEqual({ state: "superseded_unknown", resolution_basis: null });
+    } finally { await database.pool.query("UPDATE catalog.product_variants SET is_active=true WHERE id=101"); }
+  });
+  it.each(["connectionId", "externalScopeId", "providerKey", "productId"] as const)("rejects a mixed %s recovery before retaining a decision", async field => {
+    const first = scope(); const second = { ...scope(), [field]: field === "providerKey" ? "shopify" : field === "externalScopeId" ? "another-account" : 2 };
+    await expect(owner().preview([first, second])).rejects.toMatchObject({ code: "EBAY_RECOVERY_SCOPE_INVALID" });
+  });
+
   it("does not permit SQL bypass of receipts or modification of immutable recovery history",async()=>{
     const target=scope();const id=await uncertain(target);
     await expect(database.pool.query("UPDATE inventory.quantity_publication_attempts SET state='superseded_unknown' WHERE id=$1",[id])).rejects.toThrow();
+    const client = await database.pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query("SELECT pg_advisory_xact_lock_shared(918419,0)");
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1,918420))", [quantityPublicationScopeLockKey(target)]);
+      await expect(client.query(`INSERT INTO inventory.quantity_publication_operator_resumes
+        (idempotency_key,actor,command_hash,preview_hash,scope_keys,review_payload,result_payload,created_at)
+        VALUES($1,'forged-empty-review',$2,$2,$3,$4::jsonb,$5::jsonb,$6)`, [
+        `forged-${++sequence}`, "a".repeat(64), [quantityPublicationScopeLockKey(target)],
+        JSON.stringify({ previewHash: "a".repeat(64), canResume: false, blockReason: "no_pending_attempts", attempts: [] }),
+        JSON.stringify({ attemptIds: [], replayed: false, providerWriteAttempted: false }), clock(),
+      ])).rejects.toThrow("Empty recovery must preserve the exact no-pending-attempt review");
+    } finally { await client.query("ROLLBACK"); client.release(); }
     await owner().resume(await confirmation([target]));
     await expect(database.pool.query("DELETE FROM inventory.quantity_publication_operator_resume_attempts WHERE attempt_id=$1",[id])).rejects.toThrow();
     await expect(database.pool.query("UPDATE inventory.quantity_provider_request_results SET request_terminated=true WHERE request_id IN(SELECT id FROM inventory.quantity_provider_requests WHERE attempt_id=$1)",[id])).rejects.toThrow();

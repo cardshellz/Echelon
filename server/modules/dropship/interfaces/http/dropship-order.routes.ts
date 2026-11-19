@@ -289,6 +289,8 @@ function statusForDropshipOrderError(code: string): number {
     case "DROPSHIP_ORDER_SHIPPING_QUOTE_ITEMS_MISMATCH":
     case "DROPSHIP_ORDER_LINE_LISTING_REQUIRED":
     case "DROPSHIP_ORDER_LISTING_NOT_ACCEPTABLE":
+    // PR C (DC14): the line's listing had ended before the order; refused like any unacceptable listing.
+    case "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER":
     case "DROPSHIP_ORDER_CATALOG_VARIANT_NOT_ELIGIBLE":
     case "DROPSHIP_ORDER_PRICING_POLICY_BLOCKED":
     case "DROPSHIP_ORDER_INVENTORY_SHORTFALL":

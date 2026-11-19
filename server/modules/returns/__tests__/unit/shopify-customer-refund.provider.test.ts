@@ -153,7 +153,7 @@ describe("ShopifyCustomerRefundProvider", () => {
       idempotencyKey: "return-refund-command-2",
       notifyCustomer: false,
       notes: null,
-    })).rejects.toMatchObject<CustomerRefundProviderError>({
+    })).rejects.toMatchObject({
       code: "RETURN_CUSTOMER_REFUND_TOTAL_MISMATCH",
       retryable: true,
       context: {
@@ -180,8 +180,122 @@ describe("ShopifyCustomerRefundProvider", () => {
       idempotencyKey: "return-refund-command-3",
       notifyCustomer: false,
       notes: null,
-    })).rejects.toMatchObject<CustomerRefundProviderError>({
+    })).rejects.toMatchObject({
       code: "RETURN_CUSTOMER_REFUND_REJECTED",
+      retryable: false,
+    });
+  });
+
+  it("classifies HTTP 200 truncated or non-JSON mutation responses as retryable reconciliation-required (CUST-01)", async () => {
+    const provider = providerWith(vi.fn(async () => new Response('{"data":{"refundCreate":{"refund":{"id":"gid://shopify/Refund/4001"', {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(provider.execute({
+      source: source(),
+      quote: quote(),
+      idempotencyKey: "return-refund-command-truncated",
+      notifyCustomer: false,
+      notes: null,
+    })).rejects.toMatchObject({
+      code: "RETURN_CUSTOMER_REFUND_PROVIDER_RESPONSE_INVALID",
+      retryable: true,
+      context: {
+        status: 200,
+        reconciliationRequired: true,
+      },
+    });
+  });
+
+  it("keeps the abort timeout active while reading a stalled HTTP 200 response stream (CUST-01)", async () => {
+    const credentials: ShopifyReturnCredentialStore = {
+      load: vi.fn(async () => ({ shopDomain: "cardshellz.myshopify.com", accessToken: "secret-token" })),
+    };
+    const fetchMock = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      const signal = init?.signal;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"data":'));
+          signal?.addEventListener("abort", () => {
+            controller.error(signal.reason ?? new DOMException("Aborted", "AbortError"));
+          }, { once: true });
+        },
+      });
+      return new Response(stream, {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    const provider = new ShopifyCustomerRefundProvider(credentials, fetchMock as typeof fetch, 25);
+
+    await expect(provider.execute({
+      source: source(),
+      quote: quote(),
+      idempotencyKey: "return-refund-command-stalled",
+      notifyCustomer: false,
+      notes: null,
+    })).rejects.toMatchObject({
+      code: "RETURN_CUSTOMER_REFUND_PROVIDER_UNAVAILABLE",
+      retryable: true,
+      context: {
+        reconciliationRequired: true,
+      },
+    });
+  });
+
+  it("treats ambiguous top-level GraphQL errors on mutations as retryable while keeping pre-execution validation terminal (CUST-01)", async () => {
+    const busyProvider = providerWith(vi.fn(async () => jsonResponse({
+      errors: [{ message: "Internal error. Looks like something went wrong on our end." }],
+    })));
+
+    await expect(busyProvider.execute({
+      source: source(),
+      quote: quote(),
+      idempotencyKey: "return-refund-command-graphql-busy",
+      notifyCustomer: false,
+      notes: null,
+    })).rejects.toMatchObject({
+      code: "RETURN_CUSTOMER_REFUND_PROVIDER_BUSY",
+      retryable: true,
+      context: {
+        reconciliationRequired: true,
+      },
+    });
+
+    const ambiguousProvider = providerWith(vi.fn(async () => jsonResponse({
+      errors: [{ message: "Field 'refund' encountered an unexpected failure during mutation execution." }],
+    })));
+
+    await expect(ambiguousProvider.execute({
+      source: source(),
+      quote: quote(),
+      idempotencyKey: "return-refund-command-graphql-ambiguous",
+      notifyCustomer: false,
+      notes: null,
+    })).rejects.toMatchObject({
+      code: "RETURN_CUSTOMER_REFUND_PROVIDER_GRAPHQL_ERROR",
+      retryable: true,
+      context: {
+        reconciliationRequired: true,
+      },
+    });
+
+    const validationProvider = providerWith(vi.fn(async () => jsonResponse({
+      errors: [{
+        message: "Variable $input of type RefundInput! was provided invalid value",
+        extensions: { code: "GRAPHQL_VALIDATION_FAILED" },
+      }],
+    })));
+
+    await expect(validationProvider.execute({
+      source: source(),
+      quote: quote(),
+      idempotencyKey: "return-refund-command-graphql-validation",
+      notifyCustomer: false,
+      notes: null,
+    })).rejects.toMatchObject({
+      code: "RETURN_CUSTOMER_REFUND_PROVIDER_GRAPHQL_ERROR",
       retryable: false,
     });
   });
@@ -202,15 +316,22 @@ function source(): ReturnFinancialCaseSource {
     channelId: 36,
     channelProvider: "shopify",
     vendorId: null,
+    storeConnectionId: null,
     omsOrderId: 653408,
     externalOrderId: "1001",
     externalOrderNumber: "#61694",
     currency: "USD",
-    customerRefundStatus: "pending",
-    vendorSettlementStatus: "not_applicable",
     policyVersion: 2,
     updatedAt: new Date("2026-08-23T12:00:00.000Z"),
-    items: [{ returnCaseItemId: 41, externalLineItemId: "2001", quantity: 1 }],
+    items: [{
+      returnCaseItemId: 41,
+      omsOrderLineId: 201,
+      externalLineItemId: "2001",
+      productVariantId: 301,
+      quantity: 1,
+      sku: "SKU-41",
+      title: "Item 41",
+    }],
     actionContext: {} as ReturnFinancialCaseSource["actionContext"],
   };
 }

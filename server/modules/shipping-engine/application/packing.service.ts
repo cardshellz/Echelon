@@ -32,6 +32,10 @@ import {
   type ShippingPackPlanParcel,
 } from "@shared/schema";
 import { db } from "../../../db";
+import {
+  confirmPackPlanParcelInTx,
+  markPackPlanPackedInTx,
+} from "../../cartonization/pack-plan-confirmation.api";
 
 /**
  * Warehouse statuses whose orders belong on the packing queue. Picking hands
@@ -533,21 +537,14 @@ export async function confirmParcel(
 
     const now = clock();
 
-    const [parcel] = await tx
-      .update(shippingPackPlanParcels)
-      .set({
-        actualBoxId: input.actualBoxId ?? null,
-        actualWeightGrams: input.actualWeightGrams ?? null,
-        packedAt: now,
-        packedBy,
-      })
-      .where(
-        and(
-          eq(shippingPackPlanParcels.id, input.parcelId),
-          eq(shippingPackPlanParcels.packPlanId, input.planId),
-        ),
-      )
-      .returning();
+    const parcel = await confirmPackPlanParcelInTx(tx, {
+      planId: input.planId,
+      parcelId: input.parcelId,
+      actualBoxId: input.actualBoxId ?? null,
+      actualWeightGrams: input.actualWeightGrams ?? null,
+      packedAt: now,
+      packedBy,
+    });
     if (!parcel)
       return { ok: false as const, code: "PARCEL_NOT_FOUND" as const };
     await tx.execute(sql`INSERT INTO shipping.packaging_confirmation_events(plan_id,parcel_id,actor_id,created_at,before_state,after_state)
@@ -561,15 +558,7 @@ export async function confirmParcel(
     const allConfirmed = allParcelsConfirmed(siblings);
     let planStatus = plan.status;
     if (allConfirmed && plan.status === "active") {
-      await tx
-        .update(shippingPackPlans)
-        .set({ status: "packed", updatedAt: now })
-        .where(
-          and(
-            eq(shippingPackPlans.id, input.planId),
-            eq(shippingPackPlans.status, "active"),
-          ),
-        );
+      await markPackPlanPackedInTx(tx, input.planId, now);
       planStatus = "packed";
     }
 

@@ -105,6 +105,15 @@ export async function isBehindSchedule(
  *
  * Returns whether the pass actually ran, which is what the tests assert on.
  */
+function isCompletedRunResult(result: unknown): boolean {
+  if (!result || typeof result !== "object") return true;
+  const candidate = result as { allOk?: unknown; skipped?: unknown; status?: unknown };
+  if (candidate.skipped === true) return false;
+  if (candidate.allOk === false) return false;
+  if (typeof candidate.status === "string" && candidate.status !== "success") return false;
+  return true;
+}
+
 export async function runBootCatchUpIfBehind(input: {
   db: Db;
   jobKey: string;
@@ -117,7 +126,57 @@ export async function runBootCatchUpIfBehind(input: {
     console.log(`${logPrefix} Boot catch-up skipped - ${jobKey} is on schedule.`);
     return false;
   }
-  await run();
+  const result = await run();
+  if (!isCompletedRunResult(result)) {
+    return false;
+  }
   await recordRunCompleted(db, jobKey);
   return true;
+}
+
+/**
+ * Return all recorded `job_key -> last_completed_at (ISO)` entries in
+ * `public.scheduler_runs` for `/api/sync/status` observability (`P1.5`).
+ */
+export async function listRecordedSchedulerRuns(
+  db: Db,
+): Promise<Record<string, string>> {
+  const res = await db.execute(sql`
+    SELECT job_key, last_completed_at
+    FROM public.scheduler_runs
+  `);
+  const rows: Array<{ job_key?: unknown; last_completed_at?: unknown }> =
+    Array.isArray(res?.rows) ? res.rows : [];
+  const out: Record<string, string> = {};
+  for (const row of rows) {
+    if (typeof row.job_key !== "string" || !row.last_completed_at) continue;
+    const parsed = new Date(row.last_completed_at as string | Date);
+    if (!Number.isNaN(parsed.getTime())) {
+      out[row.job_key] = parsed.toISOString();
+    }
+  }
+  return out;
+}
+
+/**
+ * Execute a one-shot maintenance/repair job at most once across the lifetime
+ * of the database (`P1.5` run-once ledger gate).
+ */
+export async function runOneShotIfNeverCompleted(input: {
+  db: Db;
+  oneShotKey: string;
+  logPrefix: string;
+  run: () => Promise<void>;
+}): Promise<{ executed: boolean; alreadyCompletedAt: string | null }> {
+  const prior = await getLastRunAt(input.db, input.oneShotKey);
+  if (prior) {
+    console.log(
+      `${input.logPrefix} Skipping one-shot '${input.oneShotKey}' (already completed at ${prior.toISOString()}).`,
+    );
+    return { executed: false, alreadyCompletedAt: prior.toISOString() };
+  }
+  await input.run();
+  const completedAt = new Date();
+  await recordRunCompleted(input.db, input.oneShotKey, completedAt);
+  return { executed: true, alreadyCompletedAt: null };
 }

@@ -1,9 +1,9 @@
 import { preparePickingCommand, pickingCommandKey, pickingCommandBeforeItem, readPickingCommand,
   freezeCanonicalPickingRequest, commitPickingReceipt, deliverPickingFollowup, pendingPickingCommandKeys,
-  type PickingCommandRecord, pickingReceiptItemSchema, executePickingCommand } from "../wms/picking-command.repository";
-import { createPickingCommandLog } from "../wms/picking-command-log.repository";
+  type PickingCommandRecord, pickingReceiptItemSchema, executePickingCommand } from "../wms/picking-execution.api";
+import { createPickingCommandLog } from "../wms/picking-execution.api";
 import { selectPickingSource, PickingSourcePlanError, type PickingSourcePlan } from "@shared/picking-source-plan";
-import { reconcileWmsPickingProgress, UNMAPPED_LINE_MISSING_VARIANT } from "../wms/picking-progress.repository";
+import { reconcileWmsPickingProgress, UNMAPPED_LINE_MISSING_VARIANT } from "../wms/picking-execution.api";
 import { isUnmappedOrderLine } from "@shared/unmapped-order-line";
 import { validatePickerOrder } from "@shared/types/picker-order";
 import { pickingInventoryContextSchema, type PickingInventoryContext } from "@shared/types/picking-inventory-context";
@@ -14,6 +14,18 @@ import { canonicalAvailabilityClaimPickCommandSchema, canonicalAvailabilityClaim
 import { eq, and, sql } from "drizzle-orm";
 import { IntegrityError, NotFoundError, ValidationError } from "../../../shared/errors";
 import { AuditLogger, persistAuditEvent } from "../../infrastructure/auditLogger";
+import { cancelShipmentBlockingReplenTasksForOrderInInventory } from "../inventory/cross-module-inventory-mutations.api";
+import {
+  updateAutoFixedPickProductLocationInTx,
+  insertAutoFixedPickProductLocationInTx,
+} from "../warehouse/cross-module-warehouse-mutations.api";
+import { backfillPlannedShipmentItemPickLocationInWms } from "../wms/outbound-shipment-mutations.api";
+import {
+  closeOrderShipmentBlockingAllocationExceptionsInWms,
+  insertWmsAllocationExceptionReturningInWms,
+  supersedePriorBlockingAllocationExceptionsInWms,
+  updateDuplicateBlockingAllocationExceptionInWms,
+} from "../wms/wms-order-mutations.api";
 import {
   inventoryLevels,
   warehouseLocations,
@@ -41,7 +53,7 @@ import {
 import {
   persistWmsOrderItemPickProgress,
   setWmsOrderItemLocation,
-} from "../wms/order-item-commands";
+} from "../wms/order-intake-and-items.api";
 import type {
   CanonicalClaimCursor,
   InventoryAvailabilityRuntimeClaimContext,
@@ -54,7 +66,7 @@ import {
   refreshCanonicalClaimSupply,
 } from "../inventory-planning/application/inventory-availability-runtime-claim.service";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { requireCorrectivePick, PickCorrectionError, recordCorrectionEvent, correctionHash } from "../wms/pick-correction.repository";
+import { requireCorrectivePick, PickCorrectionError, recordCorrectionEvent, correctionHash } from "../wms/pick-corrections-and-holds.api";
 import { planConfirmedPickShipment, type ConfirmedPickShipmentPlan } from "./confirmed-pick-shipment";
 import type { PickingAssignmentSnapshot } from "@shared/types/picking-assignment-release";
 import { releasePickingAssignment } from "./picking-assignment-release.service";
@@ -73,16 +85,16 @@ type DrizzleDb = {
 type InventoryCore = {
   getLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel | null>;
   getLevelsByVariant: (productVariantId: number) => Promise<InventoryLevel[]>;
-  upsertLevel: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel>;
-  adjustLevel: (levelId: number, deltas: Record<string, number | undefined>) => Promise<InventoryLevel>;
+  upsertLevel?: (productVariantId: number, warehouseLocationId: number) => Promise<InventoryLevel>;
+  adjustLevel?: (levelId: number, deltas: Record<string, number | undefined>) => Promise<InventoryLevel>;
   adjustInventory: (params: {
     productVariantId: number;
     warehouseLocationId: number;
     qtyDelta: number;
     reason: string;
     userId?: string;
-  }) => Promise<void>;
-  logTransaction: (txn: any) => Promise<void>;
+  }) => Promise<unknown>;
+  logTransaction: (txn: any) => Promise<unknown>;
   pickItem: (params: {
     productVariantId: number;
     warehouseLocationId: number;
@@ -675,39 +687,22 @@ export class PickingUseCases {
             ...metadata,
             duplicateObservedAt: now.toISOString(),
           };
-          const updated = await tx.execute(sql`
-            UPDATE wms.allocation_exceptions
-            SET
-              requested_qty = ${params.requestedQty},
-              metadata = ${JSON.stringify(mergedMetadata)}::jsonb,
-              updated_at = ${now}
-            WHERE id = ${Number(exact.id)}
-            RETURNING *
-          `);
+          const updated = await updateDuplicateBlockingAllocationExceptionInWms(tx, {
+            exceptionId: Number(exact.id),
+            requestedQty: params.requestedQty,
+            mergedMetadataJson: JSON.stringify(mergedMetadata),
+            now,
+          });
           return { exception: updated.rows?.[0] ?? exact, created: false };
         }
 
-        await tx.execute(sql`
-          UPDATE wms.allocation_exceptions
-          SET
-            status = 'cancelled',
-            resolution = 'superseded_by_new_blocker',
-            resolved_at = ${now},
-            updated_at = ${now},
-            metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-              'supersededBy', 'newer_blocking_exception',
-              'supersededAt', ${now}::timestamptz,
-              'supersededExceptionType', ${params.exceptionType}::text
-            )
-          WHERE order_item_id = ${params.item.id}
-            AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
-            AND (
-              status = 'blocked'
-              OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
-            )
-        `);
+        await supersedePriorBlockingAllocationExceptionsInWms(tx, {
+          orderItemId: params.item.id,
+          exceptionType: params.exceptionType,
+          now,
+        });
 
-        const [exception] = await tx.insert(allocationExceptions).values({
+        const [exception] = await insertWmsAllocationExceptionReturningInWms(tx, {
           orderId: params.item.orderId,
           orderItemId: params.item.id,
           orderNumber: params.order?.orderNumber ?? null,
@@ -724,7 +719,7 @@ export class PickingUseCases {
           resolvedBy: null,
           resolvedAt: null,
           metadata,
-        }).returning();
+        });
 
         return { exception, created: true };
       });
@@ -797,10 +792,28 @@ export class PickingUseCases {
     if (item.requiresShipping !== 1) {
       throw new ValidationError(`Order item ${orderItemId} does not require picking`);
     }
+    if (order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled") {
+      throw new ValidationError(`Cannot assign bin on ${order.warehouseStatus} order ${order.orderNumber}`);
+    }
+    if (order.onHold === 1 || order.orderEditOperationId != null || item.onHold) {
+      throw new ValidationError(`Cannot assign bin while order or line ${item.id} is on hold`);
+    }
 
     const typedCode = (params.locationCode || "").trim().toUpperCase();
     if (!typedCode && !params.warehouseLocationId) {
       throw new ValidationError("locationCode or warehouseLocationId is required");
+    }
+    const existingLocationCode = (item.location || "").trim().toUpperCase();
+    if (
+      Number(item.pickedQuantity ?? 0) > 0 &&
+      existingLocationCode &&
+      !["U", "UNASSIGNED"].includes(existingLocationCode) &&
+      typedCode &&
+      typedCode !== existingLocationCode
+    ) {
+      throw new ValidationError(
+        `Cannot reassign bin for item ${item.id} after partial pick (${item.pickedQuantity}/${item.quantity} picked from ${item.location}); unpick first before changing bins`,
+      );
     }
 
     const variant = await this.storage.getProductVariantBySku(item.sku);
@@ -825,7 +838,7 @@ export class PickingUseCases {
 
       if (result.created) {
         try {
-          const { notify } = await import("../notifications/notifications.service");
+          const { notify } = await import("../notifications/in-app-notifications.api");
           await notify("allocation_blocked", {
             title: `Allocation blocked: ${item.sku}`,
             message,
@@ -872,6 +885,17 @@ export class PickingUseCases {
         : `Warehouse location ${typedCode} was not found`;
       const exception = await createBlockedException("unknown_location", message);
       return { success: false, error: "unknown_location", message, exception };
+    }
+
+    if (
+      Number(item.pickedQuantity ?? 0) > 0 &&
+      existingLocationCode &&
+      !["U", "UNASSIGNED"].includes(existingLocationCode) &&
+      location.code.trim().toUpperCase() !== existingLocationCode
+    ) {
+      throw new ValidationError(
+        `Cannot reassign bin for item ${item.id} after partial pick (${item.pickedQuantity}/${item.quantity} picked from ${item.location}); unpick first before changing bins`,
+      );
     }
 
     if (order.warehouseId && location.warehouseId && Number(location.warehouseId) !== Number(order.warehouseId)) {
@@ -934,6 +958,31 @@ export class PickingUseCases {
     const zone = location.zone || location.code.split("-")[0] || "U";
 
     const result = await this.db.transaction(async (tx) => {
+      if (typeof (tx as any).execute === "function") {
+        const lockedItemRes = await (tx as any).execute(sql`
+          SELECT picked_quantity, location, COALESCE(on_hold, false) AS on_hold
+          FROM wms.order_items
+          WHERE id = ${item.id}
+          FOR UPDATE
+        `);
+        const lockedItem = lockedItemRes?.rows?.[0];
+        if (lockedItem) {
+          if (Boolean(lockedItem.on_hold)) {
+            throw new ValidationError(`Cannot assign bin while line ${item.id} is on hold`);
+          }
+          const lockedLoc = String(lockedItem.location ?? "").trim().toUpperCase();
+          if (
+            Number(lockedItem.picked_quantity ?? 0) > 0 &&
+            lockedLoc &&
+            !["U", "UNASSIGNED"].includes(lockedLoc) &&
+            lockedLoc !== location.code.trim().toUpperCase()
+          ) {
+            throw new ValidationError(
+              `Cannot reassign bin for item ${item.id} after partial pick (${lockedItem.picked_quantity}/${item.quantity} picked from ${lockedItem.location}); unpick first before changing bins`,
+            );
+          }
+        }
+      }
       if (autoFixedSetup) {
         const [existingAtBin] = await tx
           .select()
@@ -945,22 +994,16 @@ export class PickingUseCases {
           .limit(1);
 
         if (existingAtBin) {
-          await tx
-            .update(productLocations)
-            .set({
-              productVariantId: variant.id,
-              productId: variant.productId,
-              sku: item.sku,
-              name: variant.name || item.name,
-              location: location.code,
-              zone,
-              isPrimary: 1,
-              status: "active",
-              updatedAt: new Date(),
-            })
-            .where(eq(productLocations.id, existingAtBin.id));
+          await updateAutoFixedPickProductLocationInTx(tx, existingAtBin.id, {
+            productVariantId: variant.id,
+            productId: variant.productId,
+            sku: item.sku,
+            name: variant.name || item.name,
+            location: location.code,
+            zone,
+          });
         } else {
-          await tx.insert(productLocations).values({
+          await insertAutoFixedPickProductLocationInTx(tx, {
             productId: variant.productId,
             productVariantId: variant.id,
             sku: item.sku,
@@ -968,8 +1011,6 @@ export class PickingUseCases {
             location: location.code,
             zone,
             warehouseLocationId: location.id,
-            isPrimary: 1,
-            status: "active",
             imageUrl: item.imageUrl || null,
             barcode: item.barcode || variant.barcode || null,
           });
@@ -982,7 +1023,7 @@ export class PickingUseCases {
         zone,
       });
 
-      const [exception] = await tx.insert(allocationExceptions).values({
+      const [exception] = await insertWmsAllocationExceptionReturningInWms(tx, {
         orderId: item.orderId,
         orderItemId: item.id,
         orderNumber: order.orderNumber,
@@ -1009,7 +1050,7 @@ export class PickingUseCases {
           })),
           enteredLocationCode: typedCode || null,
         },
-      }).returning();
+      });
 
       return { updatedItem, exception };
     });
@@ -1043,7 +1084,7 @@ export class PickingUseCases {
     });
 
     try {
-      const { notify } = await import("../notifications/notifications.service");
+      const { notify } = await import("../notifications/in-app-notifications.api");
       const notificationType = autoFixedSetup
         ? "allocation_auto_fixed"
         : reviewNeeded
@@ -1097,16 +1138,24 @@ export class PickingUseCases {
       throw new ValidationError(`No variant found for SKU ${item.sku}`);
     }
 
+    const order = await this.storage.getOrderById(item.orderId);
+    const normalizedItemLocation = item.location.trim().toUpperCase();
+    const pickLocationWhere = order?.warehouseId
+      ? and(
+          sql`upper(${warehouseLocations.code}) = ${normalizedItemLocation}`,
+          eq(warehouseLocations.warehouseId, order.warehouseId),
+        )
+      : sql`upper(${warehouseLocations.code}) = ${normalizedItemLocation}`;
+
     const [pickLocation] = await this.db
       .select()
       .from(warehouseLocations)
-      .where(eq(warehouseLocations.code, item.location))
+      .where(pickLocationWhere)
       .limit(1);
     if (!pickLocation) {
       throw new ValidationError(`Pick bin ${item.location} was not found`);
     }
 
-    const order = await this.storage.getOrderById(item.orderId);
     const pickerId = order?.assignedPickerId || params.userId;
     const picker = pickerId ? await this.storage.getUser(pickerId) : null;
 
@@ -1251,7 +1300,8 @@ export class PickingUseCases {
     }
 
     const locked = await tx.execute(sql`
-      SELECT status, picked_quantity, fulfilled_quantity, quantity, short_reason, picked_at
+      SELECT status, picked_quantity, fulfilled_quantity, quantity, short_reason, picked_at,
+             COALESCE(on_hold, false) AS on_hold
       FROM wms.order_items
       WHERE id = ${input.itemId}
       FOR UPDATE
@@ -1259,6 +1309,12 @@ export class PickingUseCases {
     if (!locked.rows?.length) throw new IntegrityError(`Item ${input.itemId} not found`);
     const lockedStatus = locked.rows[0].status as ItemStatus;
     const lockedPickedQuantity = Number(locked.rows[0].picked_quantity ?? 0);
+    if (Boolean(locked.rows[0].on_hold) && input.status !== "pending" && !recordsConfirmedShipment(input)) {
+      throw new IntegrityError(
+        `Cannot pick item ${input.itemId}: line is on hold for an order edit`,
+        { reason: "order_item_on_hold", orderId: input.beforeItem.orderId, orderItemId: input.itemId },
+      );
+    }
     let shipmentPlan: ConfirmedPickShipmentPlan = { kind: "ordinary_pick" };
     let correctionActor: string | undefined;
     if (!input.pickCorrectionId && Number(locked.rows[0].fulfilled_quantity ?? 0) > lockedPickedQuantity)
@@ -1415,7 +1471,8 @@ export class PickingUseCases {
       }
 
       const locked = await tx.execute(sql`
-        SELECT status, picked_quantity, fulfilled_quantity, quantity, short_reason, picked_at
+        SELECT status, picked_quantity, fulfilled_quantity, quantity, short_reason, picked_at,
+               COALESCE(on_hold, false) AS on_hold
         FROM wms.order_items
         WHERE id = ${input.itemId}
         FOR UPDATE
@@ -1423,6 +1480,12 @@ export class PickingUseCases {
       if (!locked.rows?.length) throw new IntegrityError(`Item ${input.itemId} not found`);
       const lockedStatus = locked.rows[0].status as ItemStatus;
       const lockedPickedQuantity = Number(locked.rows[0].picked_quantity ?? 0);
+      if (Boolean(locked.rows[0].on_hold) && input.status !== "pending" && !recordsConfirmedShipment(input)) {
+        throw new IntegrityError(
+          `Cannot pick item ${input.itemId}: line is on hold for an order edit`,
+          { reason: "order_item_on_hold", orderId: input.beforeItem.orderId, orderItemId: input.itemId },
+        );
+      }
       if (!input.pickCorrectionId && Number(locked.rows[0].fulfilled_quantity ?? 0) > lockedPickedQuantity)
         throw new PickCorrectionError("PICK_CORRECTION_REQUIRED", "Answer the missing-pick confirmation before recording this pick.");
       if (input.pickCorrectionId) {
@@ -2676,16 +2739,7 @@ export class PickingUseCases {
     db: Pick<DrizzleDb, "execute">,
     params: { orderItemId: number; productVariantId: number; locationId: number },
   ): Promise<void> {
-    await db.execute(sql`
-      UPDATE wms.outbound_shipment_items osi
-      SET from_location_id = ${params.locationId}
-      FROM wms.outbound_shipments os
-      WHERE osi.shipment_id = os.id
-        AND osi.order_item_id = ${params.orderItemId}
-        AND osi.product_variant_id = ${params.productVariantId}
-        AND osi.from_location_id IS NULL
-        AND os.status IN ('planned', 'queued')
-    `);
+    await backfillPlannedShipmentItemPickLocationInWms(db, params);
   }
 
   private async queueShortPickReplen(params: {
@@ -2762,38 +2816,42 @@ export class PickingUseCases {
   }): Promise<void> {
     const existing = async () => params.commandKey ? (await this.db.select().from(allocationExceptions).where(and(
       eq(allocationExceptions.orderItemId,params.item.id),sql`${allocationExceptions.metadata}->>'pickingCommandKey'=${params.commandKey}`)).limit(1))[0] : undefined;
-    const [inserted] = await this.db.insert(allocationExceptions).values({
-      orderId: params.item.orderId,
-      orderItemId: params.item.id,
-      orderNumber: params.order?.orderNumber ?? null,
-      sku: params.item.sku,
-      productVariantId: params.productVariantId,
-      exceptionType: "inventory_auto_resolved",
-      status: "needs_review",
-      requestedQty: params.resolution.pickedQty,
-      selectedLocationId: params.locationId,
-      selectedLocationCode: params.locationCode,
-      resolution: params.resolution.code === "picker_scan_bin_shortage"
-        ? "picker_scan_count_correction"
-        : "picker_confirmed_count_correction",
-      autoFixedSetup: false,
-      reviewReason: params.resolution.message,
-      resolvedBy: params.userId || null,
-      resolvedAt: this.clock(),
-      metadata: {
-        pickingCommandKey: params.commandKey,
-        pickerNonBlocking: true,
-        shipmentBlocking: false,
-        observation: params.resolution.code === "picker_scan_bin_shortage"
-          ? "validated_item_scan"
-          : "picker_confirmed_physical_stock",
-        adjustment: params.resolution.adjustment,
-        systemQtyBefore: params.resolution.systemQtyBefore,
-        pickedQty: params.resolution.pickedQty,
-        deviceType: params.deviceType || null,
-        sessionId: params.sessionId || null,
+    const [inserted] = await insertWmsAllocationExceptionReturningInWms(
+      this.db,
+      {
+        orderId: params.item.orderId,
+        orderItemId: params.item.id,
+        orderNumber: params.order?.orderNumber ?? null,
+        sku: params.item.sku,
+        productVariantId: params.productVariantId,
+        exceptionType: "inventory_auto_resolved",
+        status: "needs_review",
+        requestedQty: params.resolution.pickedQty,
+        selectedLocationId: params.locationId,
+        selectedLocationCode: params.locationCode,
+        resolution: params.resolution.code === "picker_scan_bin_shortage"
+          ? "picker_scan_count_correction"
+          : "picker_confirmed_count_correction",
+        autoFixedSetup: false,
+        reviewReason: params.resolution.message,
+        resolvedBy: params.userId || null,
+        resolvedAt: this.clock(),
+        metadata: {
+          pickingCommandKey: params.commandKey,
+          pickerNonBlocking: true,
+          shipmentBlocking: false,
+          observation: params.resolution.code === "picker_scan_bin_shortage"
+            ? "validated_item_scan"
+            : "picker_confirmed_physical_stock",
+          adjustment: params.resolution.adjustment,
+          systemQtyBefore: params.resolution.systemQtyBefore,
+          pickedQty: params.resolution.pickedQty,
+          deviceType: params.deviceType || null,
+          sessionId: params.sessionId || null,
+        },
       },
-    }).onConflictDoNothing().returning();
+      { onConflictDoNothing: true },
+    );
     const exception = inserted ?? await existing();
     if (!exception) throw new IntegrityError("Inline inventory review was not recorded", {commandKey:params.commandKey,orderItemId:params.item.id});
 
@@ -2828,7 +2886,7 @@ export class PickingUseCases {
     else await this.storage.createPickingLog(log);
 
     try {
-      const { notify } = await import("../notifications/notifications.service");
+      const { notify } = await import("../notifications/in-app-notifications.api");
       await notify("allocation_review_needed", {
         title: `Inventory review needed: ${params.item.sku}`,
         message: params.resolution.message,
@@ -3060,7 +3118,7 @@ export class PickingUseCases {
     const loc = allLocations.find(l => l.id === pickLocationId);
 
     console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickLocationId}`);
-    
+
     return {
       success: true,
       productVariantId: productVariant.id,
@@ -3904,34 +3962,18 @@ export class PickingUseCases {
     const resolutionLabel = `order_exception_${params.resolution}`;
     const blockerNote = `Closed by order exception resolution '${params.resolution}'${params.userId ? ` by ${params.userId}` : ""}${params.notes ? `: ${params.notes}` : ""}`;
 
-    const allocationResult = await this.db.execute(sql`
-      UPDATE wms.allocation_exceptions
-      SET
-        status = ${closedStatus},
-        resolution = ${resolutionLabel},
-        resolved_by = ${params.userId ?? null},
-        resolved_at = NOW(),
-        updated_at = NOW()
-      WHERE order_id = ${orderId}
-        AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
-        AND (
-          status = 'blocked'
-          OR COALESCE(metadata->>'shipmentBlocking', 'false') = 'true'
-        )
-      RETURNING id
-    `);
+    const allocationResult = await closeOrderShipmentBlockingAllocationExceptionsInWms(this.db, {
+      orderId,
+      closedStatus,
+      resolutionLabel,
+      resolvedBy: params.userId ?? null,
+    });
 
-    const replenResult = await this.db.execute(sql`
-      UPDATE inventory.replen_tasks
-      SET
-        status = 'cancelled',
-        blocks_shipment = FALSE,
-        notes = CONCAT(COALESCE(notes, ''), CASE WHEN COALESCE(notes, '') = '' THEN '' ELSE E'\n' END, ${blockerNote})
-      WHERE order_id = ${orderId}
-        AND blocks_shipment = TRUE
-        AND status NOT IN ('completed', 'cancelled')
-      RETURNING id
-    `);
+    const replenResult = await cancelShipmentBlockingReplenTasksForOrderInInventory(
+      this.db,
+      orderId,
+      blockerNote,
+    );
 
     return {
       allocationExceptionsClosed: allocationResult.rows?.length ?? 0,
@@ -4028,7 +4070,7 @@ export class PickingUseCases {
       // break may have occurred. Notify leads to verify source bins.
       if (adjustment > 0) {
         try {
-          const { notify } = await import("../notifications/notifications.service");
+          const { notify } = await import("../notifications/in-app-notifications.api");
           await notify("cycle_count_needed", {
             title: `Bin variance: ${variant.sku}`,
             message: `Bin has +${adjustment} more than expected ` +

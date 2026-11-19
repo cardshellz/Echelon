@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000047000019770001_catalog_publication_renditions.sql",
+  "generation": 47,
+  "pr": 1977,
+  "ordinal": 1,
+  "after": [
+    "900000046000019710001_purchase_tax_treatments.sql"
+  ]
+}

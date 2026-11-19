@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 /**
  * Shipment-level state mutations + order-level roll-up.
  *
@@ -36,10 +37,18 @@ import {
   type ShipmentStatus,
   type WmsWarehouseStatus,
 } from "@shared/enums/order-status";
-import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
-import type { EngineRef } from "../shipping/types";
+import { engineRefFromRow } from "../shipping/engine-and-reconcile.api";
+import type { EngineCancelResult, EngineRef } from "../shipping/engine-and-reconcile.api";
 import { deriveWmsShippingProgress } from "@shared/wms-shipping-progress";
-import { shippingProgressLine, wmsShippingProgressQuery, type WmsShippingProgressRow } from "../wms/shipping-progress.query";
+import { shippingProgressLine, wmsShippingProgressQuery, type WmsShippingProgressRow } from "../wms/shipment-execution-and-projection.api";
+import { applyWmsOrderShippingRollupStatusInWms } from "../wms/wms-order-mutations.api";
+import {
+  cancelStaleFullyCoveredOutboundShipmentsInWms,
+  flagOutboundShipmentAddressChangedAfterLabelInWms,
+  markOutboundShipmentCancelledRowInWms,
+  markOutboundShipmentShippedRowInWms,
+  markOutboundShipmentVoidedRowInWms,
+} from "../wms/outbound-shipment-mutations.api";
 
 // ─── Public types ────────────────────────────────────────────────────
 
@@ -50,6 +59,30 @@ export interface MarkShipmentResult {
   wmsOrderId: number;
   /** True when the helper issued an UPDATE; false on idempotent replay. */
   changed: boolean;
+}
+
+export type ShipmentCancelLocalOutcome =
+  | "cancelled"
+  | "already_cancelled"
+  | "refused_already_shipped"
+  | "refused_terminal";
+
+export type ShipmentCancelProviderOutcome =
+  | "not_needed"
+  | "cancelled"
+  | "already_cancelled"
+  | "already_shipped"
+  | "not_found"
+  | "unverified";
+
+export type ShipmentCancelCallbackResult =
+  | EngineCancelResult
+  | { state: EngineCancelResult["state"]; alreadyInState?: boolean }
+  | void;
+
+export interface MarkShipmentCancelledResult extends MarkShipmentResult {
+  localOutcome: ShipmentCancelLocalOutcome;
+  providerOutcome: ShipmentCancelProviderOutcome;
 }
 
 export interface RecomputeResult {
@@ -250,7 +283,7 @@ export async function markShipmentShipped(
   const current = await loadShipment(db, shipmentId);
   const now = opts.now ?? new Date();
 
-  const currentCarrierCostCents = Number(current.carrier_cost_cents ?? 0);
+  const currentCarrierCostCents = readIntegerCents(current.carrier_cost_cents ?? 0, "current carrier cost", true);
   const serviceMatches = serviceCode === null || current.service_code === serviceCode;
   const carrierCostMatches = !hasCarrierCost || (
     currentCarrierCostCents === meta.carrierCostCents
@@ -296,29 +329,18 @@ export async function markShipmentShipped(
   }
 
   const trackingUrl = meta.trackingUrl ?? null;
-  await db.execute(sql`
-    UPDATE wms.outbound_shipments SET
-      status = 'shipped',
-      carrier = ${meta.carrier},
-      service_code = COALESCE(${serviceCode}, service_code),
-      tracking_number = ${meta.trackingNumber},
-      tracking_url = ${trackingUrl},
-      shipped_at = ${meta.shipDate},
-      carrier_cost_cents = CASE
-        WHEN ${hasCarrierCost} THEN ${meta.carrierCostCents ?? null}
-        ELSE carrier_cost_cents
-      END,
-      carrier_cost_source = CASE
-        WHEN ${hasCarrierCost} THEN ${carrierCostSource || null}
-        ELSE carrier_cost_source
-      END,
-      carrier_cost_recorded_at = CASE
-        WHEN ${hasCarrierCost} THEN ${now}
-        ELSE carrier_cost_recorded_at
-      END,
-      updated_at = ${now}
-    WHERE id = ${shipmentId}
-  `);
+  await markOutboundShipmentShippedRowInWms(db, {
+    shipmentId,
+    carrier: meta.carrier,
+    serviceCode,
+    trackingNumber: meta.trackingNumber,
+    trackingUrl,
+    shipDate: meta.shipDate,
+    hasCarrierCost,
+    carrierCostCents: meta.carrierCostCents ?? null,
+    carrierCostSource: carrierCostSource || null,
+    now,
+  });
 
   // Shopify fulfillment convergence (void→re-ship heal; supersedes the
   // §6 Commit 24 re-label-only hook). Fires whenever incoming tracking
@@ -392,42 +414,55 @@ export async function markShipmentCancelled(
   reason: string = "operator_cancel",
   opts: {
     now?: Date;
-    engineCancel?: (ref: EngineRef) => Promise<void>;
+    engineCancel?: (ref: EngineRef) => Promise<ShipmentCancelCallbackResult>;
     /**
      * Only for a locally stale aggregate row whose provider order is proven
      * to have already shipped through a terminal sibling row.
      */
     skipEngineCancel?: boolean;
     shipstation?: {
-      removeFromList?: (shipstationOrderId: number) => Promise<void>;
+      removeFromList?: (shipstationOrderId: number) => Promise<ShipmentCancelCallbackResult>;
     };
   } = {},
-): Promise<MarkShipmentResult> {
+): Promise<MarkShipmentCancelledResult> {
   assertPositiveInt(shipmentId, "shipmentId");
 
   const current = await loadShipment(db, shipmentId);
   const now = opts.now ?? new Date();
 
   if (current.status === "cancelled") {
-    return { wmsOrderId: current.order_id, changed: false };
+    return {
+      wmsOrderId: current.order_id,
+      changed: false,
+      localOutcome: "already_cancelled",
+      providerOutcome: "not_needed",
+    };
   }
 
   // A shipped shipment is TERMINAL. Once it physically left the building
-  // (status 'shipped', or 'returned'/'lost' which both presuppose a ship), it
-  // must NEVER be cancelled — the only valid post-ship transitions are
-  // returned/lost (recorded as their own events). Refuse here rather than
-  // throw so reconcile/cleanup callers log and move on instead of crashing.
-  // This is the single-writer enforcement of the invariant whose absence let a
-  // boot-time dedup cancel 600+ already-shipped split shipments (2026-06-15).
+  // (status 'shipped', or 'returned'/'lost' which both presuppose a ship, or
+  // any row carrying shipped_at evidence), it must NEVER be cancelled — the
+  // only valid post-ship transitions are returned/lost (recorded as their own
+  // events). Refuse here rather than throw so reconcile/cleanup callers log and
+  // move on instead of crashing.
   if (
     current.status === "shipped" ||
     current.status === "returned" ||
-    current.status === "lost"
+    current.status === "lost" ||
+    current.shipped_at != null
   ) {
     console.warn(
-      `[markShipmentCancelled] refused: shipment ${shipmentId} is '${current.status}' (terminal-shipped); not cancelling`,
+      `[markShipmentCancelled] refused: shipment ${shipmentId} is '${current.status}' (shipped_at=${String(current.shipped_at ?? null)}); not cancelling`,
     );
-    return { wmsOrderId: current.order_id, changed: false };
+    return {
+      wmsOrderId: current.order_id,
+      changed: false,
+      localOutcome:
+        current.status === "shipped" || current.shipped_at != null
+          ? "refused_already_shipped"
+          : "refused_terminal",
+      providerOutcome: "not_needed",
+    };
   }
 
   const safeReason = typeof reason === "string" && reason.trim().length > 0
@@ -436,40 +471,95 @@ export async function markShipmentCancelled(
 
   // Engine-side removal: cancel the order in the shipping engine when the
   // shipment was already pushed (queued/labeled) and has an engine ref.
-  // Pre-push states (planned) never touched the engine. Idempotent when SS
-  // is already cancelled. Failure is non-blocking — reconcile catches drift.
+  // Pre-push states (planned) never touched the engine.
   const ref = engineRefFromRow(current as any);
-  if (
+  const needsProviderStop =
     !opts.skipEngineCancel &&
-    (current.status === "queued" ||
-      current.status === "labeled") &&
-    ref
-  ) {
+    (current.status === "queued" || current.status === "labeled") &&
+    Boolean(ref);
+
+  let providerOutcome: ShipmentCancelProviderOutcome = needsProviderStop
+    ? "unverified"
+    : "not_needed";
+
+  if (needsProviderStop && ref) {
     const cancelFn = opts.engineCancel
       ?? (opts.shipstation?.removeFromList
-        ? async (r: EngineRef) => { await opts.shipstation!.removeFromList!(Number(r.engineOrderRef)); }
+        ? async (r: EngineRef) => opts.shipstation!.removeFromList!(Number(r.engineOrderRef))
         : null);
     if (cancelFn) {
       try {
-        await cancelFn(ref);
+        const cancelResult = await cancelFn(ref);
+        if (
+          cancelResult &&
+          typeof cancelResult === "object" &&
+          (cancelResult.state === "cancelled" ||
+            cancelResult.state === "already_cancelled" ||
+            cancelResult.state === "already_shipped" ||
+            cancelResult.state === "not_found")
+        ) {
+          providerOutcome = cancelResult.state;
+        }
       } catch (err: any) {
         console.error(
           `[markShipmentCancelled] engine cancel failed for shipment ${shipmentId} (ref=${ref.engineOrderRef}): ${err?.message ?? err}`,
         );
+        providerOutcome = "unverified";
       }
     }
   }
 
-  await db.execute(sql`
-    UPDATE wms.outbound_shipments SET
-      status = 'cancelled',
-      cancelled_at = ${now},
-      voided_reason = ${safeReason},
-      updated_at = ${now}
-    WHERE id = ${shipmentId}
-  `);
+  if (providerOutcome === "already_shipped") {
+    console.warn(
+      `[markShipmentCancelled] refused: provider reported shipment ${shipmentId} (ref=${ref?.engineOrderRef ?? "unknown"}) is already_shipped; not cancelling`,
+    );
+    return {
+      wmsOrderId: current.order_id,
+      changed: false,
+      localOutcome: "refused_already_shipped",
+      providerOutcome: "already_shipped",
+    };
+  }
 
-  return { wmsOrderId: current.order_id, changed: true };
+  const updateResult: any = await markOutboundShipmentCancelledRowInWms(db, {
+    shipmentId,
+    now,
+    safeReason,
+  });
+
+  const updatedRows = Array.isArray(updateResult?.rows) ? updateResult.rows : [];
+  if (updatedRows.length > 0) {
+    return {
+      wmsOrderId: current.order_id,
+      changed: true,
+      localOutcome: "cancelled",
+      providerOutcome,
+    };
+  }
+
+  const latest = await loadShipment(db, shipmentId);
+  if (latest.status === "cancelled") {
+    return {
+      wmsOrderId: latest.order_id,
+      changed: false,
+      localOutcome: "already_cancelled",
+      providerOutcome,
+    };
+  }
+
+  const localOutcome: ShipmentCancelLocalOutcome =
+    latest.status === "shipped" || latest.shipped_at != null
+      ? "refused_already_shipped"
+      : "refused_terminal";
+  console.warn(
+    `[markShipmentCancelled] refused at final write: shipment ${shipmentId} became '${latest.status}' (shipped_at=${String(latest.shipped_at ?? null)}) during cancellation`,
+  );
+  return {
+    wmsOrderId: latest.order_id,
+    changed: false,
+    localOutcome,
+    providerOutcome,
+  };
 }
 
 // ─── handleAddressChangeOnShipment ──────────────────────────────────
@@ -528,14 +618,7 @@ export async function handleAddressChangeOnShipment(
 
     case "labeled":
     case "shipped": {
-      await db.execute(sql`
-        UPDATE wms.outbound_shipments SET
-          requires_review = true,
-          review_reason = 'address_changed_after_label',
-          address_changed_after_label = true,
-          updated_at = ${now}
-        WHERE id = ${shipmentId}
-      `);
+      await flagOutboundShipmentAddressChangedAfterLabelInWms(db, { shipmentId, now });
       return { mode: "requires_review", shipmentId };
     }
 
@@ -580,8 +663,9 @@ export async function handleCustomerCancelOnShipment(
   shipmentId: number,
   opts: {
     now?: Date;
+    engineCancel?: (ref: EngineRef) => Promise<ShipmentCancelCallbackResult>;
     shipstation?: {
-      removeFromList?: (shipstationOrderId: number) => Promise<void>;
+      removeFromList?: (shipstationOrderId: number) => Promise<ShipmentCancelCallbackResult>;
     };
   } = {},
 ): Promise<
@@ -614,8 +698,21 @@ export async function handleCustomerCancelOnShipment(
         db,
         shipmentId,
         "customer_cancel",
-        { now, shipstation: opts.shipstation },
+        {
+          now,
+          engineCancel: opts.engineCancel,
+          shipstation: opts.shipstation,
+        },
       );
+      if (!result.changed) {
+        if (result.localOutcome === "already_cancelled") {
+          return { mode: "noop", reason: "cancelled" };
+        }
+        if (result.localOutcome === "refused_already_shipped") {
+          return { mode: "noop", reason: "already_shipped" };
+        }
+        return { mode: "noop", reason: "terminal_conflict" };
+      }
       return { mode: "cancelled", wmsOrderId: result.wmsOrderId };
     }
 
@@ -735,16 +832,11 @@ export async function markShipmentVoided(
     }
   }
 
-  await db.execute(sql`
-    UPDATE wms.outbound_shipments SET
-      status = 'voided',
-      voided_at = ${now},
-      voided_reason = ${safeReason},
-      tracking_number = NULL,
-      tracking_url = NULL,
-      updated_at = ${now}
-    WHERE id = ${shipmentId}
-  `);
+  await markOutboundShipmentVoidedRowInWms(db, {
+    shipmentId,
+    now,
+    safeReason,
+  });
 
   // Shopify fulfillment cancel hook (§6 Commit 17). Guarded so callers
   // that do not wire `fulfillmentPush` (tests, pre-Group-E paths) skip
@@ -832,72 +924,12 @@ async function recomputeLockedOrderShippingStatus(
   const now = opts.now ?? new Date();
   const stampCompletedAt = derived === "shipped" && !orderRow.completed_at;
 
-  if (stampCompletedAt) {
-    await db.execute(sql`
-      WITH updated_order AS (
-        UPDATE wms.orders SET
-          warehouse_status = ${derived},
-          completed_at = ${now},
-          updated_at = ${now}
-        WHERE id = ${wmsOrderId}
-        RETURNING id
-      ),
-      closed_blockers AS (
-        UPDATE wms.allocation_exceptions
-        SET
-          status = CASE WHEN ${derived}::text = 'cancelled' THEN 'cancelled' ELSE 'resolved' END,
-          resolution = CONCAT('order_', ${derived}::text, '_shipment_rollup'),
-          resolved_at = ${now},
-          updated_at = ${now},
-          metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-            'closedBy', 'shipment_rollup',
-            'closedByOrderStatus', ${derived}::text,
-            'closedAt', ${now}::timestamptz
-          )
-        WHERE order_id = ${wmsOrderId}
-          AND ${derived}::text IN ('shipped', 'cancelled')
-          AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
-          AND (
-            status = 'blocked'
-            OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
-          )
-        RETURNING id
-      )
-      SELECT id FROM updated_order
-    `);
-  } else {
-    await db.execute(sql`
-      WITH updated_order AS (
-        UPDATE wms.orders SET
-          warehouse_status = ${derived},
-          updated_at = ${now}
-        WHERE id = ${wmsOrderId}
-        RETURNING id
-      ),
-      closed_blockers AS (
-        UPDATE wms.allocation_exceptions
-        SET
-          status = CASE WHEN ${derived}::text = 'cancelled' THEN 'cancelled' ELSE 'resolved' END,
-          resolution = CONCAT('order_', ${derived}::text, '_shipment_rollup'),
-          resolved_at = ${now},
-          updated_at = ${now},
-          metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-            'closedBy', 'shipment_rollup',
-            'closedByOrderStatus', ${derived}::text,
-            'closedAt', ${now}::timestamptz
-          )
-        WHERE order_id = ${wmsOrderId}
-          AND ${derived}::text IN ('shipped', 'cancelled')
-          AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
-          AND (
-            status = 'blocked'
-            OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
-          )
-        RETURNING id
-      )
-      SELECT id FROM updated_order
-    `);
-  }
+  await applyWmsOrderShippingRollupStatusInWms(db, {
+    wmsOrderId,
+    derived,
+    now,
+    stampCompletedAt,
+  });
 
   return { warehouseStatus: derived, changed: true };
 }
@@ -1002,16 +1034,7 @@ export async function cancelStaleShipmentsIfFullyCovered(
   );
   if (!allCovered) return false;
 
-  const cancelResult: any = await db.execute(sql`
-    UPDATE wms.outbound_shipments
-    SET status = 'cancelled',
-        cancelled_at = NOW(),
-        updated_at = NOW()
-    WHERE order_id = ${wmsOrderId}
-      AND status IN ('planned', 'queued')
-      AND shipped_at IS NULL
-    RETURNING id
-  `);
+  const cancelResult: any = await cancelStaleFullyCoveredOutboundShipmentsInWms(db, wmsOrderId);
 
   const cancelledCount = cancelResult?.rows?.length ?? 0;
   if (cancelledCount > 0) {

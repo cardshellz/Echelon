@@ -2,7 +2,7 @@ import type { PoolClient } from "pg";
 import { sql, type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { OrderEditError } from "../order-edits/domain/order-edit-error";
+import { OrderEditError } from "../order-edits/oms-coordination.api";
 
 type HoldTransaction =
   | Pick<PoolClient, "query">

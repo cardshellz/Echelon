@@ -293,6 +293,33 @@ describe("channel-owned stock selection", () => {
       rows: [{ productVariantId: 102, canonicalAtpUnits: "7", publishedUnits: "7", mapping: null, blockers: [] }] });
     expect(plan(selected).targets).toEqual([]);
   });
+  // eBay sync-back FF-13 (owner rule 1, plan v4 SB29): the listing owner's limit bounds what is published, nothing else.
+  describe("the listing owner's publish limit (publishLimitUnits)", () => {
+    const limited = (limits: Array<number | undefined>, actions: Array<"publish" | "zero"> = ["publish", "publish"]) => {
+      const selected = selectedTarget(actions);
+      selected.selection!.variants = selected.selection!.variants.map((variant, index) =>
+        limits[index] === undefined ? variant : { ...variant, publishLimitUnits: limits[index] });
+      return selected;
+    };
+    it("publishes min(calculated, limit) and keeps the real ATP lineage", () => {
+      expect(plan(limited([5, 0])).targets[0]).toMatchObject({ publishable: true, rows: [
+        { productVariantId: 101, canonicalAtpUnits: "25", publishedUnits: "5" },
+        { productVariantId: 102, canonicalAtpUnits: "7", publishedUnits: "0" },
+      ] });
+    });
+    it("changes nothing when the limit is above what is calculated, or absent", () => {
+      expect(plan(limited([40, undefined])).targets[0].rows).toMatchObject([{ publishedUnits: "25" }, { publishedUnits: "7" }]);
+    });
+    it("still publishes 0 for a zero duty", () => {
+      const selected = limited([undefined, undefined], ["zero", "publish"]);
+      expect(plan(selected).targets[0].rows[0]).toMatchObject({ canonicalAtpUnits: "25", publishedUnits: "0" });
+    });
+    it("leaves a channel quantity read at the quantity as computed (the sweep's ATP as today)", () => {
+      const selected = limited([5, undefined]);
+      selected.mappings = [];
+      expect(plan(selected, "channel_quantity_read").targets[0].rows).toMatchObject([{ publishedUnits: "25" }, { publishedUnits: "7" }]);
+    });
+  });
 });
 
 describe("historical cutover publication scope", () => {

@@ -155,7 +155,8 @@ describe("ReceivingService - mutation integrity", () => {
       }),
     };
     const db = { transaction: vi.fn(async (fn) => fn(tx)) };
-    const service = new ReceivingService(db as any, {} as any, {} as any, storage as any);
+    const now = new Date("2026-07-20T12:00:00Z");
+    const service = new ReceivingService(db as any, {} as any, {} as any, storage as any, null, null, null, null, null, null, () => now);
 
     const result = await service.createOrder({
       sourceType: "blind",
@@ -167,7 +168,7 @@ describe("ReceivingService - mutation integrity", () => {
     }, "user-1");
 
     expect(db.transaction).toHaveBeenCalledOnce();
-    expect(storage.generateReceiptNumber).toHaveBeenCalledWith(tx);
+    expect(storage.generateReceiptNumber).toHaveBeenCalledWith(tx, now);
     expect(storage.createReceivingOrder).toHaveBeenCalledWith({
       receiptNumber: "RCV-20260720-001",
       sourceType: "blind",
@@ -179,6 +180,7 @@ describe("ReceivingService - mutation integrity", () => {
       notes: "Dock 2",
       status: "draft",
       createdBy: "user-1",
+      createdAt: now, updatedAt: now,
     }, tx);
     expect(result).toMatchObject({ id: 50, receiptNumber: "RCV-20260720-001" });
   });
@@ -547,6 +549,7 @@ describe("ReceivingService - close reconciliation semantics", () => {
           return { rows: [{ id: order.id }] };
         }
         if (text.includes("procurement.receiving_custody_fence")) return { rows: [{ singleton: true }] };
+        if (text.includes("with purchase_lines as materialized")) return { rows: [{ observations: [], acceptances: [], unidentifiedAcceptances: [] }] };
         if (text.includes("procurement.receiving_quarantine_")) return { rows: [] };
         if (text.includes("units_per_variant")) {
           return { rows: [{ id: 5, product_id: 1, units_per_variant: 1, is_active: true }] };
@@ -624,6 +627,9 @@ describe("ReceivingService - close reconciliation semantics", () => {
     const tx = {
       execute: vi.fn(async (query: any) => {
         const text = sqlToStr(query);
+        if (text.includes("with receipt_rows as materialized")) return { rows: [{
+          receivingLines: [], postedReceipts: [], reversals: [], custodyObservations: [], custodyAcceptances: [],
+        }] };
         if (text.includes("from procurement.receiving_orders") && text.includes("for update")) {
           return { rows: [{ id: order.id }] };
         }
@@ -636,6 +642,8 @@ describe("ReceivingService - close reconciliation semantics", () => {
         if (text.includes("from procurement.purchase_orders")) return { rows: [{ status: "sent" }] };
         if (text.includes("from procurement.inbound_shipments")) return { rows: [{ status: "delivered" }] };
         if (text.includes("from procurement.inbound_shipment_lines")) {
+          if (text.includes('as "qtyshipped"')) return { rows: lines.map(line => ({ id: line.id,
+            purchaseOrderId: 1, purchaseOrderLineId: line.id, qtyShipped: line.expectedQty })) };
           if (text.includes('as "inboundshipmentid"')) return { rows: lines.map((line) => ({ id: line.id, inboundShipmentId: 84,
             purchaseOrderId: 1, purchaseOrderLineId: line.id })) };
           const sourceId = new PgDialect().sqlToQuery(query).params[0];

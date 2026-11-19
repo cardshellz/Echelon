@@ -9,6 +9,7 @@ import {
   SESSION_ADVISORY_LOCK_TIMEOUT,
   SessionAdvisoryLockError,
   type SessionAdvisoryLockKey,
+  type SessionAdvisoryLockPool,
 } from "../session-advisory-lock";
 
 const LOCK: SessionAdvisoryLockKey = { namespace: 918407, key: 16610, label: "test.push" };
@@ -78,7 +79,11 @@ function makePool(options: {
     clients.push(client);
     return client;
   });
-  return { connect, clients, lockManager };
+  return {
+    connect: connect as typeof connect & SessionAdvisoryLockPool["connect"],
+    clients,
+    lockManager,
+  };
 }
 
 function statementsOf(client: FakeClient): string[] {

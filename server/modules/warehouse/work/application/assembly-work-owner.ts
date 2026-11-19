@@ -1,6 +1,6 @@
 import type { PoolClient } from "pg";
 import type { AssemblyOutputPickFence } from "@shared/warehouse-assembly-execution";
-import { requireAssemblyOrderAuthority } from "../../../orders/assembly-handoff-authority";
+import { requireAssemblyOrderAuthority } from "../../../orders/assembly-order-authority.api";
 import {
   type AssemblyTask, type AssemblyWorkRoute, type AssemblyWorkFence,
 } from "@shared/warehouse-assembly-work";

@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
 
-const authorityRows = [{ authority: "legacy", authority_revision: "1", activation_run_id: null }];
-function emptyLegacyQuery(query: Parameters<PgDialect["sqlToQuery"]>[0]) {
+const authorityRows: Record<string, unknown>[] = [{ authority: "legacy", authority_revision: "1", activation_run_id: null }];
+function emptyLegacyQuery(query: Parameters<PgDialect["sqlToQuery"]>[0]): { rows: Record<string, unknown>[] } {
   return { rows: new PgDialect().sqlToQuery(query).sql.includes("availability_runtime_authority") ? authorityRows : [] };
 }
 

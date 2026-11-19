@@ -6,6 +6,7 @@ import {
   FinancialCommandRequestError,
   createFinancialCommandIntentStore,
   financialCommandFetchJson,
+  financialCommandNeedsRecovery,
   financialCommandRetryDelay,
   parseRetryAfterMs,
   shouldRetryFinancialCommand,
@@ -16,6 +17,52 @@ afterEach(() => {
 });
 
 describe("financial command HTTP handling", () => {
+  it.each(["true", "false"])("recognizes a recorded permission rejection with replay header %s", async (replayed) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ code: "ADMIN_REQUIRED", error: "Current administrator approval is required" }), {
+      status: 403, headers: { "Idempotency-Replayed": replayed },
+    })));
+    const failure = await financialCommandFetchJson("/commands", { method: "POST" }).catch(error => error);
+    expect(failure).toMatchObject({ idempotencyReplayed: replayed === "true", ambiguous: false, retryable: false });
+    expect(financialCommandNeedsRecovery(failure)).toBe(false);
+  });
+
+  it.each([undefined, "TRUE", "invalid"])("retains a permission-gated intent without a valid receipt: %s", async (replayed) => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: "Permission required" }), {
+      status: 403, headers: replayed === undefined ? {} : { "Idempotency-Replayed": replayed },
+    })));
+    const failure = await financialCommandFetchJson("/commands", { method: "POST" }).catch(error => error);
+    expect(failure).toMatchObject({ idempotencyReplayed: null });
+    expect(financialCommandNeedsRecovery(failure)).toBe(true);
+  });
+
+  it("does not treat a malformed error body as a verified rejection", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response("unreadable rejection", {
+      status: 403, headers: { "Idempotency-Replayed": "false" },
+    })));
+    const failure = await financialCommandFetchJson("/commands", { method: "POST" }).catch(error => error);
+    expect(failure).toMatchObject({ idempotencyReplayed: null });
+    expect(financialCommandNeedsRecovery(failure)).toBe(true);
+  });
+
+  it.each(["FINANCIAL_COMMAND_CONTRACT_CHANGED", "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED"])("retains an unresolved original command for %s", (code) => {
+    expect(financialCommandNeedsRecovery(new FinancialCommandRequestError("Review original command", {
+      status: 409, code, idempotencyReplayed: false, ambiguous: false, retryable: false,
+    }))).toBe(true);
+  });
+
+  it.each([null, 500, 503])("retains unknown or server-failed outcomes despite a receipt marker: %s", (status) => {
+    expect(financialCommandNeedsRecovery(new FinancialCommandRequestError("Outcome unknown", {
+      status, idempotencyReplayed: false, ambiguous: false, retryable: false,
+    }))).toBe(true);
+  });
+
+  it("retains unclassified failures and allows fresh review after a definite validation rejection", () => {
+    expect(financialCommandNeedsRecovery(new Error("Unexpected failure"))).toBe(true);
+    expect(financialCommandNeedsRecovery(new FinancialCommandRequestError("Check the source", {
+      status: 422, ambiguous: false, retryable: false,
+    }))).toBe(false);
+  });
+
   it("preserves structured errors and honors Retry-After seconds", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
       error: "An identical financial command is already being processed",

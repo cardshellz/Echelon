@@ -144,14 +144,14 @@ function migrationColumns(schemaName: string, tableName: string): string[] {
 
 function configuredObjectNames(table: PgTable): Set<string> {
   const config = getTableConfig(table);
-  return new Set([
-    ...config.checks.map((constraint) => constraint.name),
-    ...config.foreignKeys.map((foreignKey) => foreignKey.getName()),
-    ...config.indexes
-      .map((index) => index.config.name)
-      .filter((name): name is string => name !== undefined),
-    ...config.uniqueConstraints.map((constraint) => constraint.name),
-  ]);
+  return new Set(
+    [
+      ...config.checks.map((constraint) => constraint.name),
+      ...config.foreignKeys.map((foreignKey) => foreignKey.getName()),
+      ...config.indexes.map((index) => index.config.name),
+      ...config.uniqueConstraints.map((constraint) => constraint.name),
+    ].filter((name): name is string => name !== undefined),
+  );
 }
 
 function migrationNamedObjects(schemaName: string, tableName: string): string[] {

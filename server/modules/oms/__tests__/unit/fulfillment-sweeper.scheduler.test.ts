@@ -64,7 +64,7 @@ describe("fulfillment-sweeper.scheduler", () => {
       cancellationFailures: 0,
       partialOverlapShipmentIds: [],
     }));
-    const execute = vi.fn(async () => ({
+    const execute = vi.fn(async (_query?: unknown) => ({
       rows: [
         {
           id: 501,
@@ -148,7 +148,7 @@ describe("fulfillment-sweeper.scheduler", () => {
   });
 
   it("isolates a malformed stale receipt and continues recovering later candidates", async () => {
-    const process = vi.fn(async () => ({
+    const process = vi.fn(async (_input?: any) => ({
       receiptId: 602,
       processingStatus: "processed",
       physicalShipmentId: 90002,

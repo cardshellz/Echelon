@@ -48,7 +48,7 @@ class FakeRepository implements EbayCategoryRulesRepository {
         loadStoreContext: async () => this.context,
         listCatalogCandidates: async (ids) => this.candidates.filter((candidate) => ids.includes(candidate.productVariantId)),
         listCatalogExposureRules: async () => [{ id: 1, scopeType: "catalog", action: "include" }],
-        listSelectionRules: async () => [{ id: 2, scopeType: "catalog", action: "include", autoConnectNewSkus: true, autoListNewSkus: true, isActive: true }],
+        listPickedVariantIds: async (_vendorId: number, ids: readonly number[]) => new Set(ids),
         listVariantOverrides: async () => [],
         listExistingListings: async () => [],
       },

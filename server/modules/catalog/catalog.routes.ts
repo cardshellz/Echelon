@@ -3,6 +3,7 @@ import type { Express, Response } from "express";
 import { sendInventoryQuantityError, validateInventoryCommandKey } from "../inventory/interfaces/quantity-command.middleware";
 import { CatalogInventoryCommandError } from "./application/catalog-inventory-command.service";
 import { createCatalogInventoryCommandService } from "./infrastructure/catalog-inventory-command.repository";
+import { renameDerivedVariantSkus } from "./application/product-sku-rename";
 import { db, pool } from "../../db";
 import { and, asc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import {
@@ -32,6 +33,8 @@ import {
 import {
   registerShopifyProductMappingReconciliationRoutes,
 } from "./shopify-product-mapping-reconciliation.routes";
+import { registerShopifyProductConnectionRoutes } from "./shopify-product-connection.routes";
+import { normalizeCategorySlug, registerProductCategoryUpdateRoute } from "./product-category-update.routes";
 import {
   coercePackageAttributesOnVariantPayload,
   parsePackageAttributeBulkRows,
@@ -46,7 +49,9 @@ import {
 } from "./inventory-strategy-policy";
 import { updateProductInventoryTracking, InventoryTrackingPolicyError } from "./inventory-tracking-policy.repository";
 import { registerBulkInventoryTrackingRoutes } from "./bulk-inventory-tracking.routes";
+import { registerProductMergeRoutes } from "./product-merge.routes";
 import { registerInventoryTrackingHistoryRoutes } from "./inventory-tracking-history.routes";
+import { ProductAssetError } from "./product-asset-errors";
 import { registerProductAssetRoutes } from "./product-asset.routes";
 import { registerCatalogPublicImageRoutes } from "./catalog-public-image.routes";
 import { readPublicCatalogImage } from "./catalog-publication-images.reader";
@@ -60,12 +65,27 @@ import {
   VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE,
   VariantSalesEligibilityError,
 } from "./variant-sales-eligibility-policy";
-import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
-import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
-import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+import {
+  createInventoryLegacyAdminControlService,
+  INVENTORY_LEGACY_ADMIN_CONTROLS,
+  sendInventoryLegacyAdminControlError,
+} from "../inventory-planning/legacy-admin-control.api";
 import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work";
+import {
+  assignProductsShippingGroupInTx,
+  clearPrimaryProductAssetsForProduct,
+  deactivateVariantChannelFeedsInTx,
+  insertProductCategoryRecord,
+  insertShippingGroupRecord,
+  linkVariantShopifyFeedAndListingInTx,
+  updateScopedVariantPackageAttributesInTx,
+  updateShippingGroupRecordById,
+  updateVariantPackageAttributesByIdInTx,
+} from "./infrastructure/catalog-route-mutations.repository";
 
 type CatalogRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
+
+export const MAX_CATALOG_BATCH_SIZE = 500;
 
 function sendSelectionBusy(res: Response, error: unknown): boolean {
   const busy = publicationSelectionBusyIssue(error);
@@ -173,12 +193,10 @@ import {
 } from "../procurement";
 import {
   BinAssignmentFilterError,
-  parseBinAssignmentVariantIdsQuery,
-} from "../warehouse/bin-assignment-filter";
-import {
   BinAssignmentValidationError,
+  parseBinAssignmentVariantIdsQuery,
   parseBinAssignmentWriteRequest,
-} from "../warehouse/bin-assignment-contracts";
+} from "../warehouse/bin-assignment.api";
 const storage = { ...catalogStorage, ...inventoryStorage, ...ordersStorage, ...channelsStorage, ...warehouseStorage, ...procurementStorage };
 import { requirePermission, requireAuth } from "../../routes/middleware";
 
@@ -362,14 +380,6 @@ async function resolveShopifyVariant(input: {
   return matches[0];
 }
 
-function normalizeCategorySlug(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "");
-}
-
 async function resolveProductCategory(input: { categoryId?: number | string | null; category?: string | null }) {
   const rawCategoryId = input.categoryId;
   if (rawCategoryId !== undefined && rawCategoryId !== null && String(rawCategoryId).trim() !== "") {
@@ -407,7 +417,9 @@ export async function registerProductRoutes(app: Express) {
   const shopifyProductMapping = createShopifyProductMappingService();
   const inventoryLegacyAdminControl = createInventoryLegacyAdminControlService();
   registerShopifyProductMappingReconciliationRoutes(app);
+  registerShopifyProductConnectionRoutes(app);
   registerBulkInventoryTrackingRoutes(app);
+  registerProductMergeRoutes(app);
   registerInventoryTrackingHistoryRoutes(app);
   registerProductAssetRoutes(app);
   registerCatalogPublicImageRoutes(app, (assetId, hash) => readPublicCatalogImage(pool, assetId, hash));
@@ -662,6 +674,13 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (!Array.isArray(requestedProductIds) || requestedProductIds.length === 0) {
         return res.status(400).json({ error: "productIds must be a non-empty array of positive integers" });
       }
+      if (requestedProductIds.length > MAX_CATALOG_BATCH_SIZE) {
+        return res.status(400).json({
+          error: `Cannot assign more than ${MAX_CATALOG_BATCH_SIZE} products in a single request`,
+          code: "BATCH_LIMIT_EXCEEDED",
+          maxBatchSize: MAX_CATALOG_BATCH_SIZE,
+        });
+      }
       if (requestedProductIds.some((value) => !Number.isInteger(value) || Number(value) <= 0)) {
         return res.status(400).json({ error: "Every productId must be a positive integer" });
       }
@@ -727,11 +746,12 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           );
         }
 
-        const updated = await tx
-          .update(products)
-          .set({ shippingGroupId, updatedAt: changedAt })
-          .where(inArray(products.id, productIds))
-          .returning({ id: products.id });
+        const updated = await assignProductsShippingGroupInTx(
+          tx,
+          productIds,
+          shippingGroupId,
+          changedAt,
+        );
         if (updated.length !== productIds.length) {
           throw new Error("Shipping-group assignment did not update every locked product");
         }
@@ -796,15 +816,12 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const code = String(req.body.code ?? name).trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
       if (!code) return res.status(400).json({ error: "Shipping group code must contain at least one letter or number" });
 
-      const [group] = await db
-        .insert(shippingGroups)
-        .values({
-          code,
-          name,
-          description: req.body.description || null,
-          sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
-        })
-        .returning();
+      const group = await insertShippingGroupRecord({
+        code,
+        name,
+        description: req.body.description || null,
+        sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
+      });
       res.status(201).json(group);
     } catch (error: any) {
       if (error?.code === "23505") return res.status(409).json({ error: "Shipping group code already exists" });
@@ -824,17 +841,13 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (!name) return res.status(400).json({ error: "Shipping group name is required" });
 
       // code is intentionally immutable on update (stable storefront/sync key).
-      const [group] = await db
-        .update(shippingGroups)
-        .set({
-          name,
-          description: req.body.description !== undefined ? req.body.description || null : existing[0].description,
-          sortOrder: req.body.sortOrder !== undefined ? Number(req.body.sortOrder) : existing[0].sortOrder,
-          isActive: req.body.isActive !== undefined ? Boolean(req.body.isActive) : existing[0].isActive,
-          updatedAt: new Date(),
-        })
-        .where(eq(shippingGroups.id, id))
-        .returning();
+      const group = await updateShippingGroupRecordById(id, {
+        name,
+        description: req.body.description !== undefined ? req.body.description || null : existing[0].description,
+        sortOrder: req.body.sortOrder !== undefined ? Number(req.body.sortOrder) : existing[0].sortOrder,
+        isActive: req.body.isActive !== undefined ? Boolean(req.body.isActive) : existing[0].isActive,
+        updatedAt: new Date(),
+      });
       res.json(group);
     } catch (error) {
       console.error("Error updating shipping group:", error);
@@ -852,15 +865,12 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (!slug) {
         return res.status(400).json({ error: "Category slug is required" });
       }
-      const [category] = await db
-        .insert(productCategories)
-        .values({
-          name,
-          slug,
-          description: req.body.description || null,
-          sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
-        })
-        .returning();
+      const category = await insertProductCategoryRecord({
+        name,
+        slug,
+        description: req.body.description || null,
+        sortOrder: req.body.sortOrder != null ? Number(req.body.sortOrder) : 0,
+      });
       res.status(201).json(category);
     } catch (error: any) {
       if (error?.code === "23505") {
@@ -871,51 +881,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     }
   });
 
-  app.patch("/api/product-categories/:id", requirePermission("inventory", "edit"), async (req, res) => {
-    try {
-      const id = Number(req.params.id);
-      if (!Number.isInteger(id) || id <= 0) {
-        return res.status(400).json({ error: "Invalid product category id" });
-      }
-      const existing = await db.select().from(productCategories).where(eq(productCategories.id, id));
-      if (!existing[0]) return res.status(404).json({ error: "Product category not found" });
-
-      const name = req.body.name !== undefined ? String(req.body.name).trim() : existing[0].name;
-      if (!name) return res.status(400).json({ error: "Category name is required" });
-      const slug = req.body.slug !== undefined
-        ? normalizeCategorySlug(String(req.body.slug))
-        : req.body.name !== undefined
-          ? normalizeCategorySlug(name)
-          : existing[0].slug;
-      if (!slug) return res.status(400).json({ error: "Category slug is required" });
-
-      const [category] = await db
-        .update(productCategories)
-        .set({
-          name,
-          slug,
-          description: req.body.description !== undefined ? req.body.description || null : existing[0].description,
-          sortOrder: req.body.sortOrder !== undefined ? Number(req.body.sortOrder) : existing[0].sortOrder,
-          isActive: req.body.isActive !== undefined ? Boolean(req.body.isActive) : existing[0].isActive,
-          updatedAt: new Date(),
-        })
-        .where(eq(productCategories.id, id))
-        .returning();
-
-      await db
-        .update(products)
-        .set({ category: category.name, updatedAt: new Date() })
-        .where(eq(products.categoryId, category.id));
-
-      res.json(category);
-    } catch (error: any) {
-      if (error?.code === "23505") {
-        return res.status(409).json({ error: "Category already exists" });
-      }
-      console.error("Error updating product category:", error);
-      res.status(500).json({ error: "Failed to update product category" });
-    }
-  });
+  registerProductCategoryUpdateRoute(app, db);
 
   app.get("/api/products/:id", requirePermission("inventory", "view"), async (req, res) => {
     try {
@@ -1026,7 +992,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
             INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
             createProduct,
           )
-        : await createProduct();
+        : await db.transaction((tx) => createProduct(tx));
       res.json(created);
     } catch (error: any) {
       if (sendSelectionBusy(res, error)) return;
@@ -1233,44 +1199,10 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           return { product: null, renamedVariants: 0, renamedFrom: null as string | null };
         }
 
-        let renamedVariants = 0;
         const lockedOldSku = currentProduct.sku ?? null;
-        if (newProductSku && lockedOldSku && newProductSku !== lockedOldSku) {
-          const productVariantsList = await storage.getProductVariantsByProductId(id, tx);
-          for (const variant of productVariantsList) {
-            if (!variant.sku) continue;
-
-            let newVariantSku: string;
-            if (variant.sku === lockedOldSku) {
-              newVariantSku = newProductSku;
-            } else if (variant.sku.startsWith(lockedOldSku + "-")) {
-              newVariantSku = newProductSku + variant.sku.slice(lockedOldSku.length);
-            } else {
-              continue;
-            }
-
-            const oldVariantSku = variant.sku;
-            if (newVariantSku === oldVariantSku) continue;
-            if (newVariantSku.length > 100) {
-              throw Object.assign(new Error(`Derived variant SKU exceeds 100 characters: ${newVariantSku}`), {
-                statusCode: 400,
-              });
-            }
-
-            const updatedVariant = await storage.updateProductVariant(variant.id, { sku: newVariantSku }, tx);
-            if (!updatedVariant) {
-              throw new Error(`Variant ${variant.id} disappeared during SKU rename`);
-            }
-            await storage.cascadeOperationalSkuRename(variant.id, oldVariantSku, newVariantSku, tx);
-            await synchronizeProcurementSkuReferences({
-              productVariantId: variant.id,
-              oldSku: oldVariantSku,
-              newSku: newVariantSku,
-              actor,
-            }, { executor: tx });
-            renamedVariants++;
-          }
-        }
+        const renamedVariants = await renameDerivedVariantSkus(tx, storage, {
+          productId: id, oldProductSku: lockedOldSku, newProductSku: newProductSku ?? null, actor,
+        });
 
         if ("shippingGroupId" in normalizedUpdates) {
           const syncResult = await enqueueShippingGroupMetafields(tx, [id]);
@@ -1454,13 +1386,18 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
   app.delete("/api/products/:id", requirePermission("inventory", "delete"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      // First delete all variants
-      const variants = await storage.getProductVariantsByProductId(id);
-      for (const variant of variants) {
-        await storage.deleteProductVariant(variant.id);
+      const id = parseInt(req.params.id, 10);
+      if (!Number.isInteger(id) || id <= 0) {
+        return res.status(400).json({ error: "Invalid product id" });
       }
-      const success = await storage.deleteProduct(id);
+      // Delete all variants and the product atomically so a mid-loop FK failure rolls back.
+      const success = await db.transaction(async (tx) => {
+        const variants = await storage.getProductVariantsByProductId(id, tx);
+        for (const variant of variants) {
+          await storage.deleteProductVariant(variant.id, tx);
+        }
+        return storage.deleteProduct(id, tx);
+      });
       if (!success) {
         return res.status(404).json({ error: "Product not found" });
       }
@@ -1504,6 +1441,8 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
   });
 
   app.post("/api/products/:id/assets", requirePermission("inventory", "create"), async (req, res) => {
+    if (!["video", "document"].includes(req.body.assetType))
+      return res.status(400).json({ code: "ASSET_SOURCE_ENDPOINT_REQUIRED", error: "Create photos through the Catalog image source owner." });
     try {
       const productId = parseInt(req.params.id);
 
@@ -1518,10 +1457,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       // If setting as primary, unset existing primary
       if (isPrimary && existingAssets.length > 0) {
-        await db
-          .update(productAssets)
-          .set({ isPrimary: 0 })
-          .where(eq(productAssets.productId, productId));
+        await clearPrimaryProductAssetsForProduct(productId);
       }
 
       const asset = await storage.createProductAsset({
@@ -1544,7 +1480,10 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (Object.hasOwn(req.body, "productVariantId") || Object.hasOwn(req.body, "productId")) {
         return res.status(400).json({ code: "ASSET_SCOPE_ENDPOINT_REQUIRED", error: "Change photo assignments using the product image scope endpoint." });
       }
-      const asset = await storage.updateProductAsset(id, req.body);
+      const metadata = z.object({ altText: z.string().max(500).nullable().optional() }).strict().safeParse(req.body);
+      if (!metadata.success) return res.status(400).json({ code: "ASSET_METADATA_ENDPOINT_REQUIRED",
+        error: "This endpoint edits photo captions only. Use Images to upload a replacement, change the primary photo, reorder photos or change their assignment." });
+      const asset = await storage.updateProductAsset(id, metadata.data);
       if (!asset) {
         return res.status(404).json({ error: "Asset not found" });
       }
@@ -1571,14 +1510,24 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
   app.put("/api/product-assets/:id/primary", requirePermission("inventory", "edit"), async (req, res) => {
     try {
-      const assetId = parseInt(req.params.id);
-      const { productId } = req.body;
-      if (!productId) {
-        return res.status(400).json({ error: "productId required" });
+      const assetId = parseInt(req.params.id, 10);
+      if (!Number.isInteger(assetId) || assetId <= 0) {
+        return res.status(400).json({ error: "Invalid asset id", code: "ASSET_PRIMARY_INVALID" });
+      }
+      const rawProductId = req.body?.productId;
+      if (rawProductId === undefined || rawProductId === null || rawProductId === "") {
+        return res.status(400).json({ error: "productId required", code: "ASSET_PRIMARY_INVALID" });
+      }
+      const productId = Number(rawProductId);
+      if (!Number.isInteger(productId) || productId <= 0) {
+        return res.status(400).json({ error: "productId must be a positive integer", code: "ASSET_PRIMARY_INVALID" });
       }
       await storage.setPrimaryProductAsset(productId, assetId);
       res.json({ success: true });
     } catch (error) {
+      if (error instanceof ProductAssetError) {
+        return res.status(error.status).json({ error: error.message, code: error.code });
+      }
       console.error("Error setting primary asset:", error);
       res.status(500).json({ error: "Failed to set primary asset" });
     }
@@ -1764,10 +1713,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         const updatedVariant = await storage.updateProductVariant(id, payload, tx);
         if (!updatedVariant) return { variant: null, renamed: false };
         if (!isInventoryManagedVariant(updatedVariant)) {
-          await tx
-            .update(channelFeeds)
-            .set({ isActive: 0, updatedAt: new Date() })
-            .where(eq(channelFeeds.productVariantId, id));
+          await deactivateVariantChannelFeedsInTx(tx, id);
         }
         if (
           existing.requiresShipping !== updatedVariant.requiresShipping
@@ -1894,11 +1840,12 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const updatedVariants = await db.transaction(async (tx) => {
         const updated = [];
         for (const row of rows) {
-          const [variant] = await tx
-            .update(productVariants)
-            .set({ ...serializePackageAttributeUpdates(row.updates), updatedAt: new Date() })
-            .where(and(eq(productVariants.productId, productId), eq(productVariants.id, row.variantId)))
-            .returning();
+          const variant = await updateScopedVariantPackageAttributesInTx(
+            tx,
+            productId,
+            row.variantId,
+            serializePackageAttributeUpdates(row.updates),
+          );
           if (!variant) {
             throw Object.assign(new Error(`Variant ${row.variantId} was not updated`), { statusCode: 409 });
           }
@@ -1938,11 +1885,11 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const updatedVariants = await db.transaction(async (tx) => {
         const updated = [];
         for (const row of rows) {
-          const [variant] = await tx
-            .update(productVariants)
-            .set({ ...serializePackageAttributeUpdates(row.updates), updatedAt: new Date() })
-            .where(eq(productVariants.id, row.variantId))
-            .returning();
+          const variant = await updateVariantPackageAttributesByIdInTx(
+            tx,
+            row.variantId,
+            serializePackageAttributeUpdates(row.updates),
+          );
           if (!variant) {
             throw Object.assign(new Error(`Variant ${row.variantId} was not updated`), { statusCode: 409 });
           }
@@ -2316,6 +2263,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
             variantId: id,
             remoteVariantId: shopifyVariantId,
           },
+          operatorVariantBindings: [{ variantId: id, remoteVariantId: shopifyVariantId }],
         });
 
         const [repairedVariant] = await db
@@ -2456,80 +2404,15 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           variantUpdates.barcode = String(shopifyVariant.barcode).trim();
         }
 
-        const [updatedVariant] = await tx
-          .update(productVariants)
-          .set(variantUpdates)
-          .where(eq(productVariants.id, id))
-          .returning();
-
-        const updatedFeeds = await tx
-          .update(channelFeeds)
-          .set({
-            channelVariantId: shopifyVariantId,
-            channelProductId: shopifyProductId,
-            channelSku: shopifySku || echelonSku,
-            channelInventoryItemId: shopifyInventoryItemId,
-            isActive: 1,
-            updatedAt: new Date(),
-          })
-          .where(and(
-            eq(channelFeeds.channelId, channel.id),
-            eq(channelFeeds.productVariantId, id),
-            eq(channelFeeds.channelType, "shopify"),
-          ))
-          .returning({ id: channelFeeds.id });
-
-        let feedIds = updatedFeeds.map((row) => row.id);
-        if (feedIds.length === 0) {
-          const insertedFeeds = await tx
-            .insert(channelFeeds)
-            .values({
-              channelId: channel.id,
-              productVariantId: id,
-              channelType: "shopify",
-              channelVariantId: shopifyVariantId,
-              channelProductId: shopifyProductId,
-              channelSku: shopifySku || echelonSku,
-              channelInventoryItemId: shopifyInventoryItemId,
-              isActive: 1,
-            })
-            .returning({ id: channelFeeds.id });
-          feedIds = insertedFeeds.map((row) => row.id);
-        }
-
-        const updatedListings = await tx
-          .update(channelListings)
-          .set({
-            externalProductId: shopifyProductId,
-            externalVariantId: shopifyVariantId,
-            externalSku: shopifySku || echelonSku,
-            syncStatus: "synced",
-            syncError: null,
-            lastSyncedAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(and(
-            eq(channelListings.channelId, channel.id),
-            eq(channelListings.productVariantId, id),
-          ))
-          .returning({ id: channelListings.id });
-
-        let listingIds = updatedListings.map((row) => row.id);
-        if (listingIds.length === 0) {
-          const insertedListings = await tx
-            .insert(channelListings)
-            .values({
-              channelId: channel.id,
-              productVariantId: id,
-              externalProductId: shopifyProductId,
-              externalVariantId: shopifyVariantId,
-              externalSku: shopifySku || echelonSku,
-              syncStatus: "synced",
-              lastSyncedAt: new Date(),
-            })
-            .returning({ id: channelListings.id });
-          listingIds = insertedListings.map((row) => row.id);
-        }
+        const { updatedVariant, feedIds, listingIds } = await linkVariantShopifyFeedAndListingInTx(tx, {
+          variantId: id,
+          channelId: channel.id,
+          shopifyProductId,
+          shopifyVariantId,
+          shopifyInventoryItemId,
+          effectiveSku: shopifySku || echelonSku,
+          variantUpdates,
+        });
 
         await persistAuditEvent(tx, {
           actor,
@@ -2698,52 +2581,63 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       if (!Array.isArray(rows)) {
         return res.status(400).json({ error: "rows array required" });
       }
-
-      // Build SKU → variant lookup
-      const allVariants = await storage.getAllProductVariants();
-      const skuMap = new Map<string, typeof allVariants[0]>();
-      for (const v of allVariants) {
-        if (v.sku) skuMap.set(v.sku.toUpperCase(), v);
+      if (rows.length > MAX_CATALOG_BATCH_SIZE) {
+        return res.status(400).json({
+          error: `Cannot update more than ${MAX_CATALOG_BATCH_SIZE} variant rows in a single request`,
+          code: "BATCH_LIMIT_EXCEEDED",
+          maxBatchSize: MAX_CATALOG_BATCH_SIZE,
+        });
       }
 
-      let updated = 0;
-      let skipped = 0;
-      const errors: string[] = [];
-
-      for (const row of rows) {
-        const sku = row.sku?.trim().toUpperCase();
-        if (!sku) { skipped++; continue; }
-
-        const variant = skuMap.get(sku);
-        if (!variant) {
-          errors.push(`SKU not found: ${row.sku}`);
-          continue;
+      const outcome = await db.transaction(async (tx) => {
+        // Build SKU → variant lookup inside the transaction
+        const allVariants = await storage.getAllProductVariants(false, tx);
+        const skuMap = new Map<string, typeof allVariants[0]>();
+        for (const v of allVariants) {
+          if (v.sku) skuMap.set(v.sku.toUpperCase(), v);
         }
 
-        const parentSku = row.parent_sku?.trim().toUpperCase();
-        if (!parentSku) {
-          // Clear parent (set to base variant)
-          await storage.updateProductVariant(variant.id, { parentVariantId: null } as any);
+        let updated = 0;
+        let skipped = 0;
+        const errors: string[] = [];
+
+        for (const row of rows) {
+          const sku = row.sku?.trim().toUpperCase();
+          if (!sku) { skipped++; continue; }
+
+          const variant = skuMap.get(sku);
+          if (!variant) {
+            errors.push(`SKU not found: ${row.sku}`);
+            continue;
+          }
+
+          const parentSku = row.parent_sku?.trim().toUpperCase();
+          if (!parentSku) {
+            // Clear parent (set to base variant)
+            await storage.updateProductVariant(variant.id, { parentVariantId: null } as any, tx);
+            updated++;
+            continue;
+          }
+
+          const parentVariant = skuMap.get(parentSku);
+          if (!parentVariant) {
+            errors.push(`Parent SKU not found: ${row.parent_sku} (for ${row.sku})`);
+            continue;
+          }
+
+          if (parentVariant.productId !== variant.productId) {
+            errors.push(`Parent ${row.parent_sku} belongs to different product than ${row.sku}`);
+            continue;
+          }
+
+          await storage.updateProductVariant(variant.id, { parentVariantId: parentVariant.id }, tx);
           updated++;
-          continue;
         }
 
-        const parentVariant = skuMap.get(parentSku);
-        if (!parentVariant) {
-          errors.push(`Parent SKU not found: ${row.parent_sku} (for ${row.sku})`);
-          continue;
-        }
+        return { updated, skipped, errors, total: rows.length };
+      });
 
-        if (parentVariant.productId !== variant.productId) {
-          errors.push(`Parent ${row.parent_sku} belongs to different product than ${row.sku}`);
-          continue;
-        }
-
-        await storage.updateProductVariant(variant.id, { parentVariantId: parentVariant.id });
-        updated++;
-      }
-
-      res.json({ updated, skipped, errors, total: rows.length });
+      res.json(outcome);
     } catch (error) {
       console.error("Error bulk updating parent variants:", error);
       res.status(500).json({ error: "Failed to bulk update parent variants" });
@@ -2874,74 +2768,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
   // PRODUCT ASSET UPLOAD (file storage)
   // ============================================================================
 
-  const multer = (await import("multer")).default;
-  const assetUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB limit
-
-  /**
-   * POST /api/product-assets/upload
-   * Upload an image file and store it in the database.
-   * Accepts multipart form: file, productId, productVariantId (optional), altText, isPrimary, position
-   */
-  app.post("/api/product-assets/upload", requirePermission("inventory", "edit"), assetUpload.single("file"), async (req, res) => {
-    try {
-      if (!req.file) {
-        return res.status(400).json({ error: "No file provided" });
-      }
-
-      const { productId, productVariantId, altText, isPrimary, position } = req.body;
-
-      if (!productId) {
-        return res.status(400).json({ error: "productId is required" });
-      }
-
-      // Validate file type
-      const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
-      if (!allowedTypes.includes(req.file.mimetype)) {
-        return res.status(400).json({ error: `Invalid file type: ${req.file.mimetype}. Allowed: ${allowedTypes.join(", ")}` });
-      }
-
-      // If setting as primary, unset existing primary
-      if (isPrimary === "true" || isPrimary === "1") {
-        await db.execute(sql`
-          UPDATE catalog.product_assets SET is_primary = 0
-          WHERE product_id = ${parseInt(productId)}
-            ${productVariantId ? sql`AND product_variant_id = ${parseInt(productVariantId)}` : sql`AND product_variant_id IS NULL`}
-        `);
-      }
-
-      const [asset] = await db
-        .insert(productAssets)
-        .values({
-          productId: parseInt(productId),
-          productVariantId: productVariantId ? parseInt(productVariantId) : null,
-          assetType: "image",
-          url: null,
-          altText: altText || null,
-          position: position ? parseInt(position) : 0,
-          isPrimary: (isPrimary === "true" || isPrimary === "1") ? 1 : 0,
-          fileSize: req.file.size,
-          mimeType: req.file.mimetype,
-          storageType: "file",
-        })
-        .returning();
-
-      // Store the actual file data
-      await db.execute(sql`
-        UPDATE catalog.product_assets SET file_data = ${req.file.buffer} WHERE id = ${asset.id}
-      `);
-
-      console.log(`[Assets] Uploaded file for product ${productId}: ${req.file.originalname} (${req.file.size} bytes)`);
-
-      res.json({
-        ...asset,
-        // Don't return file_data in the response — too large
-        fileUrl: `/api/product-assets/${asset.id}/file`,
-      });
-    } catch (error: any) {
-      console.error("Error uploading asset:", error);
-      res.status(500).json({ error: "Failed to upload asset" });
-    }
-  });
+  // Photo source mutations are registered by registerProductAssetRoutes.
 
   /**
    * GET /api/product-assets/:id/file
@@ -3000,111 +2827,6 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     }
   });
 
-  /**
-   * DELETE /api/product-assets/:id
-   * Delete an asset (both URL reference and stored file).
-   */
-  app.delete("/api/product-assets/:id", requirePermission("inventory", "edit"), async (req, res) => {
-    try {
-      const id = parseInt(req.params.id);
-      const [deleted] = await db
-        .delete(productAssets)
-        .where(eq(productAssets.id, id))
-        .returning();
-
-      if (!deleted) {
-        return res.status(404).json({ error: "Asset not found" });
-      }
-
-      console.log(`[Assets] Deleted asset ${id} for product ${deleted.productId}`);
-      res.json({ success: true });
-    } catch (error: any) {
-      console.error("Error deleting asset:", error);
-      res.status(500).json({ error: "Failed to delete asset" });
-    }
-  });
-
-  /**
-   * POST /api/product-assets/store-url
-   * Store an external URL as an asset (e.g., from eBay image pull).
-   * Body: { productId, productVariantId, url, altText, isPrimary, position }
-   * Optionally downloads and caches the file locally.
-   */
-  app.post("/api/product-assets/store-url", requirePermission("inventory", "edit"), async (req, res) => {
-    try {
-      const { productId, productVariantId, url, altText, isPrimary, position, cacheLocally } = req.body;
-
-      if (!productId || !url) {
-        return res.status(400).json({ error: "productId and url are required" });
-      }
-
-      // If setting as primary, unset existing primary
-      if (isPrimary) {
-        await db.execute(sql`
-          UPDATE catalog.product_assets SET is_primary = 0
-          WHERE product_id = ${productId}
-            ${productVariantId ? sql`AND product_variant_id = ${productVariantId}` : sql`AND product_variant_id IS NULL`}
-        `);
-      }
-
-      let fileBuffer: Buffer | null = null;
-      let mimeType: string | null = null;
-      let fileSize: number | null = null;
-
-      // Optionally download and cache the file
-      if (cacheLocally) {
-        try {
-          const response = await fetch(url);
-          if (response.ok) {
-            const arrayBuf = await response.arrayBuffer();
-            fileBuffer = Buffer.from(arrayBuf);
-            mimeType = response.headers.get("content-type") || "image/jpeg";
-            fileSize = fileBuffer.length;
-          }
-        } catch (fetchErr: any) {
-          console.warn(`[Assets] Failed to cache file from ${url}: ${fetchErr.message}`);
-          // Continue with URL-only storage
-        }
-      }
-
-      const storageType: string = fileBuffer ? "both" : "url";
-
-      const [asset] = await db
-        .insert(productAssets)
-        .values({
-          productId,
-          productVariantId: productVariantId || null,
-          assetType: "image",
-          url,
-          altText: altText || null,
-          position: position || 0,
-          isPrimary: isPrimary ? 1 : 0,
-          fileSize,
-          mimeType,
-          storageType,
-        })
-        .returning();
-
-      if (fileBuffer) {
-        await db.execute(sql`
-          UPDATE catalog.product_assets SET file_data = ${fileBuffer} WHERE id = ${asset.id}
-        `);
-      }
-
-      console.log(`[Assets] Stored URL for product ${productId}: ${url} (storage: ${storageType})`);
-
-      res.json({
-        ...asset,
-        fileUrl: storageType === "both" || storageType === "file"
-          ? `/api/product-assets/${asset.id}/file`
-          : asset.url,
-      });
-    } catch (error: any) {
-      console.error("Error storing URL asset:", error);
-      res.status(500).json({ error: "Failed to store URL asset" });
-    }
-  });
-
   // ============================================================================
   // IMAGE SYNC — Pull/Push between Echelon and channels
   // ============================================================================
@@ -3121,23 +2843,25 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const { productIds } = req.body;
       console.log(`[ImageSync] Pulling images from eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
 
-      // Get eBay access token to use Browse API (much more reliable than scraping)
-      let ebayAccessToken: string | undefined;
+      // A failed authenticated read cannot become an unscoped page scrape.
+      let ebayAccessToken: string;
+      let ebayEnvironment: "production" | "sandbox";
       try {
-        const { EbayAuthService, createEbayAuthConfig } = await import("../channels/adapters/ebay/ebay-auth.service");
+        const { EbayAuthService, createEbayAuthConfig } = await import("../channels/ebay-connector.api");
         const config = createEbayAuthConfig();
         const authService = new EbayAuthService(db as any, config);
         ebayAccessToken = await authService.getAccessToken(67);
-        console.log(`[ImageSync] Got eBay access token (${ebayAccessToken?.substring(0, 10)}...)`);
+        ebayEnvironment = authService.getEnvironment();
       } catch (authErr: any) {
-        console.warn(`[ImageSync] Could not get eBay token, falling back to scraping: ${authErr.message}`);
+        console.warn(JSON.stringify({ event: "catalog_photo_import_auth_failed", provider: "ebay" }));
+        return res.status(503).json({ code: "EBAY_AUTH_REQUIRED", error: "Reconnect eBay before importing its listing photos." });
       }
 
       // Respond immediately — processing 90+ products takes too long for a single request
       res.json({ status: "started", message: "eBay image pull started in background. Check Heroku logs for progress." });
 
       // Run in background
-      imageSync.pullFromEbay(productIds, ebayAccessToken).then((results) => {
+      imageSync.pullFromEbay(productIds, ebayAccessToken, ebayEnvironment).then((results) => {
         const totalAdded = results.reduce((sum, r) => sum + r.imagesAdded, 0);
         const totalErrors = results.reduce((sum, r) => sum + r.errors.length, 0);
         console.log(`[ImageSync] pullFromEbay complete: ${results.length} products, ${totalAdded} images added, ${totalErrors} errors`);
@@ -3201,7 +2925,6 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       console.log(`[ImageSync] === PUSH STARTED ===`);
       console.log(`[ImageSync] Domain: ${shopDomain}`);
-      console.log(`[ImageSync] Token prefix: ${accessToken.substring(0, 10)}...`);
       console.log(`[ImageSync] Product IDs: ${productIds?.join(", ") || "ALL"}`);
 
       const results = await imageSync.pushToShopify(shopDomain, accessToken, productIds);
@@ -3225,15 +2948,9 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
    * Push Echelon catalog images to eBay listings.
    * Body: { productIds?: number[] }
    */
-  app.post("/api/images/push/ebay", requirePermission("inventory", "edit"), async (req, res) => {
-    try {
-      const { productIds } = req.body;
-      console.log(`[ImageSync] Pushing images to eBay${productIds?.length ? ` for ${productIds.length} products` : ' (all)'}`);
-      const results = await imageSync.pushToEbay("", productIds);
-      res.json({ results });
-    } catch (error: any) {
-      console.error("Error pushing images to eBay:", error);
-      res.status(500).json({ error: error.message || "Failed to push images to eBay" });
-    }
+  app.post("/api/images/push/ebay", requirePermission("inventory", "edit"), (_req, res) => {
+    return res.status(410).json({ code: "CATALOG_IMAGE_PUSH_USE_CHANNEL_SYNC",
+      error: "Open the eBay channel and use Sync to publish the product's current Catalog originals.",
+      action: { label: "Open eBay channel", href: "/channels/ebay" } });
   });
 }

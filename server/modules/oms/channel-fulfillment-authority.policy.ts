@@ -19,6 +19,9 @@ export interface ChannelFulfillmentWritebackPolicyInput {
   readonly cumulativePhysicalQuantity: number;
   /** Exact channel quantity for package allocations whose physical quantity is larger. */
   readonly cumulativeCommercialQuantity?: number;
+  /** Native quantities already validated against payment history. Only used
+   * to report an existing physical package; never creates warehouse work. */
+  readonly verifiedShopifyQuantity?: Readonly<{ currentQuantity: number; paidQuantity: number; sourceUpdatedAt: string }>;
 }
 
 export interface ChannelFulfillmentWritebackPolicyDecision {
@@ -97,7 +100,17 @@ export function evaluateChannelFulfillmentWritebackPolicy(
   if (TERMINAL_COMMERCIAL_ORDER_STATUSES.has(orderStatus)) {
     reasons.push("terminal_commercial_order");
   }
-  if (TERMINAL_FINANCIAL_STATUSES.has(financialStatus)) {
+  const merchandise = input.verifiedShopifyQuantity;
+  const confirmedShopifyMerchandise = channelProvider === "shopify" && merchandise !== undefined
+    && Number.isSafeInteger(merchandise.currentQuantity) && merchandise.currentQuantity > 0
+    && Number.isSafeInteger(merchandise.paidQuantity) && merchandise.paidQuantity >= merchandise.currentQuantity
+    && merchandise.currentQuantity === input.commercialAuthorizedQuantity
+    && Number.isFinite(Date.parse(merchandise.sourceUpdatedAt));
+  // A financial refund cannot erase proof of an existing package of still-owed
+  // merchandise. Commercial cancelled/refunded states remain blocked above;
+  // voided payment and every unverified financial stop remain blocked here.
+  if (TERMINAL_FINANCIAL_STATUSES.has(financialStatus)
+    && !(financialStatus === "refunded" && confirmedShopifyMerchandise)) {
     reasons.push("terminal_financial_order");
   }
   // A previous computed quantity review is reevaluated below using fresh facts.

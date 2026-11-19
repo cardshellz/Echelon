@@ -9,6 +9,7 @@ type FinancialCommandErrorOptions = {
   details?: Record<string, unknown>;
   responseBody?: unknown;
   retryAfterMs?: number | null;
+  idempotencyReplayed?: boolean | null;
   retryable: boolean;
   ambiguous: boolean;
   cause?: unknown;
@@ -24,6 +25,7 @@ export class FinancialCommandRequestError extends Error {
   readonly details?: Record<string, unknown>;
   readonly responseBody?: unknown;
   readonly retryAfterMs: number | null;
+  readonly idempotencyReplayed: boolean | null;
   readonly retryable: boolean;
   readonly ambiguous: boolean;
 
@@ -35,6 +37,7 @@ export class FinancialCommandRequestError extends Error {
     this.details = options.details;
     this.responseBody = options.responseBody;
     this.retryAfterMs = options.retryAfterMs ?? null;
+    this.idempotencyReplayed = options.idempotencyReplayed ?? null;
     this.retryable = options.retryable;
     this.ambiguous = options.ambiguous;
   }
@@ -155,6 +158,8 @@ export async function financialCommandFetchJson<T>(
 
   if (!response.ok) {
     const structured = structuredError(body);
+    const replayHeader = response.headers.get("Idempotency-Replayed");
+    const hasReplayReceipt = parsedJson && (replayHeader === "true" || replayHeader === "false");
     const retryable = retryableHttpFailure(response.status, structured.code);
     // A dead command must not loop automatically, but its outcome is still
     // unresolved. Retain the exact intent key so an operator can re-arm the
@@ -168,6 +173,7 @@ export async function financialCommandFetchJson<T>(
         details: structured.details,
         responseBody: body,
         retryAfterMs: parseRetryAfterMs(response.headers.get("retry-after")),
+        idempotencyReplayed: hasReplayReceipt ? replayHeader === "true" : null,
         retryable,
         ambiguous: retryable || operatorRecoverable,
       },
@@ -188,6 +194,16 @@ export async function financialCommandFetchJson<T>(
   }
 
   return body as T;
+}
+
+/** For canonical command endpoints, Idempotency-Replayed is emitted only with
+ * a stored terminal result. A permission gate without that receipt may conceal
+ * an earlier success; keep its original intent until the outcome is recovered. */
+export function financialCommandNeedsRecovery(error: unknown): boolean {
+  if (!(error instanceof FinancialCommandRequestError)) return true;
+  return error.ambiguous || error.retryable || error.status === null || error.status >= 500
+    || ([401, 403].includes(error.status) && error.idempotencyReplayed === null)
+    || ["FINANCIAL_COMMAND_CONTRACT_CHANGED", "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED"].includes(error.code ?? "");
 }
 
 export function shouldRetryFinancialCommand(

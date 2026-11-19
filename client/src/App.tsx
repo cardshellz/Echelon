@@ -6,116 +6,186 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { SettingsProvider } from "@/lib/settings";
 import { AuthProvider, useAuth } from "@/lib/auth";
+import type { StaffSystemRole } from "@/lib/staff-authority";
+import { StaffAccessNotice } from "@/components/staff-access-notice";
+import { PURCHASING_DASHBOARD_READ_PERMISSIONS, PURCHASING_READ_PERMISSION, RECEIVING_READ_PERMISSIONS } from "@/lib/procurement-access";
 import { VendorAuthProvider, useVendorAuth } from "@/lib/vendor-auth";
 import { DropshipAuthProvider, dropshipPortalPath, isDropshipPortalHost, useDropshipAuth } from "@/lib/dropship-auth";
 import { PWAUpdatePrompt } from "@/components/PWAUpdatePrompt";
-import Layout from "@/components/layout/AppShell";
-import VendorLayout from "@/components/vendor/VendorLayout";
-import VendorLogin from "@/pages/vendor/VendorLogin";
-import VendorRegister from "@/pages/vendor/VendorRegister";
-import VendorDashboard from "@/pages/vendor/VendorDashboard";
-import VendorProducts from "@/pages/vendor/VendorProducts";
-import VendorOrders from "@/pages/vendor/VendorOrders";
-import VendorWallet from "@/pages/vendor/VendorWallet";
-import VendorSettings from "@/pages/vendor/VendorSettings";
-import DropshipPortalAuth from "@/pages/dropship/DropshipPortalAuth";
-import DropshipPortalPrivacy from "@/pages/dropship/DropshipPortalPrivacy";
-import DropshipPortalDashboard from "@/pages/dropship/DropshipPortalDashboard";
-import DropshipPortalHome from "@/pages/dropship/DropshipPortalHome";
-import DropshipPortalCatalog from "@/pages/dropship/DropshipPortalCatalog";
-import DropshipPortalNotifications from "@/pages/dropship/DropshipPortalNotifications";
-import DropshipPortalCostChanges from "@/pages/dropship/DropshipPortalCostChanges";
-import DropshipPortalOnboarding from "@/pages/dropship/DropshipPortalOnboarding";
-import DropshipPortalOrders from "@/pages/dropship/DropshipPortalOrders";
-import DropshipPortalReturns from "@/pages/dropship/DropshipPortalReturns";
-import DropshipPortalSettings from "@/pages/dropship/DropshipPortalSettings";
-import DropshipPortalWallet from "@/pages/dropship/DropshipPortalWallet";
-import Dashboard from "@/pages/Dashboard";
-import Inventory from "@/pages/Inventory";
-import Builds from "@/pages/Builds";
-import SupplyTransformations from "@/pages/SupplyTransformations";
-import InventoryCutover from "@/pages/InventoryCutover";
-import ProcurementPromiseSafetySettings from "@/pages/ProcurementPromiseSafetySettings";
-import ChannelInventory from "@/pages/ChannelInventory";
-import BuildRecipeCreate from "@/pages/BuildRecipeCreate";
-import Orders from "@/pages/Orders";
-import Dropship from "@/pages/Dropship";
-import Subscriptions from "@/pages/Subscriptions";
-import PickingPage from "@/pages/PickingPage";
-import PickPriority from "@/pages/PickPriority";
-import Packing from "@/pages/Packing";
-import OrderHistory from "@/pages/OrderHistory";
-import WarehousePage from "@/pages/WarehousePage";
-import PickZones from "@/pages/PickZones";
-import WarehouseSettingsPage from "@/pages/WarehouseSettingsPage";
-import WorkConfigurationPage from "@/pages/warehouse-work/WorkConfigurationPage";
-import AssemblyWorkPage from "@/pages/warehouse-work/AssemblyWorkPage";
-import Integrations from "@/pages/Integrations";
-import Users from "@/pages/Users";
-import Roles from "@/pages/Roles";
-import ChannelsPage from "@/pages/ChannelsPage";
-import CatalogPage from "@/pages/CatalogPage";
-import ProductDetail from "@/pages/ProductDetail";
-import CycleCounts from "@/pages/CycleCounts";
-import Transfers from "@/pages/Transfers";
-import Suppliers from "@/pages/Suppliers";
-import PurchasingView from "@/pages/PurchasingView";
-import ReorderEngine from "@/pages/ReorderEngine";
-import ProcurementAutomation from "@/pages/ProcurementAutomation";
-import ProcurementRuns from "@/pages/ProcurementRuns";
-import ProcurementRfqs from "@/pages/ProcurementRfqs";
-import Receiving from "@/pages/Receiving";
-import InventoryHistory from "@/pages/InventoryHistory";
-import Replenishment from "@/pages/Replenishment";
-import SlottingSetup from "@/pages/SlottingSetup";
-import ChannelAllocation from "@/pages/ChannelAllocation";
-import ProductLines from "@/pages/ProductLines";
-import ShippingGroups from "@/pages/ShippingGroups";
-import PurchaseOrders from "@/pages/PurchaseOrders";
-import PurchaseOrderDetail from "@/pages/PurchaseOrderDetail";
-import PurchaseOrderEdit from "@/pages/PurchaseOrderEdit";
-import PurchasingDashboard from "@/pages/PurchasingDashboard";
-import Returns from "@/pages/Returns";
-import ReturnLabelSettings from "@/pages/ReturnLabelSettings";
-import ReturnCases from "@/pages/ReturnCases";
-import ReturnPolicies from "@/pages/ReturnPolicies";
-import CustomerReturnPortalPreview from "@/pages/CustomerReturnPortalPreview";
-import CustomerReturnCustomerPortal from "@/pages/CustomerReturnCustomerPortal";
-import CustomerReturnPortalAccess from "@/pages/CustomerReturnPortalAccess";
+import { loadChunkWithRetry } from "@/lib/chunk-loading";
+import NotFound from "@/pages/not-found";
 import {
   CUSTOMER_RETURN_PORTAL_PATH,
   CUSTOMER_RETURN_PORTAL_ACCESS_PATH,
   CUSTOMER_RETURN_PORTAL_LEGACY_PATH,
   isCustomerReturnPortalPath,
 } from "@shared/returns/customer-return-portal-paths";
-import InboundShipments from "@/pages/InboundShipments";
-import OutboundShipments from "@/pages/OutboundShipments";
-import InboundShipmentDetail from "@/pages/InboundShipmentDetail";
-import CostDashboard from "@/pages/CostDashboard";
-import APDashboard from "@/pages/APDashboard";
-import APInvoices from "@/pages/APInvoices";
-import APInvoiceDetail from "@/pages/APInvoiceDetail";
-import APPayments from "@/pages/APPayments";
-import SupplierCredits from "@/pages/SupplierCredits";
-import SupplierReturns from "@/pages/SupplierReturns";
-import Login from "@/pages/Login";
-import Settings from "@/pages/Settings";
-import ProcurementSettings from "@/pages/ProcurementSettings";
-import ShippingSettings from "@/pages/ShippingSettings";
-import ShippingServiceLevels from "@/pages/ShippingServiceLevels";
-import ShippingServiceLevelDetail from "@/pages/ShippingServiceLevelDetail";
-import NotificationPreferences from "@/pages/NotificationPreferences";
-import EbayChannelPage from "@/pages/EbayChannelPage";
-import { WalmartChannelRouteHost } from "@/pages/WalmartChannelPage";
-import ShopifyChannelPage from "@/pages/ShopifyChannelPage";
-import SyncLogPage from "@/pages/SyncLogPage";
-import OmsOrders from "@/pages/OmsOrders";
-import OrderEdits from "@/pages/OrderEdits";
-import FlowMonitor from "@/pages/FlowMonitor";
-import VendorList from "@/pages/VendorList";
-import VendorDetail from "@/pages/VendorDetail";
-import DemandPlanner from "@/pages/DemandPlanner";
-import NotFound from "@/pages/not-found";
+
+// Every lazy page carries its own Suspense boundary. With only one boundary
+// around the whole <Switch>, a route change whose chunk is still loading does
+// not commit: React keeps the previous page mounted (hidden behind the
+// fallback). Going back before the chunk arrives then re-shows that page
+// without remounting it, so its on-mount reads never run again and it shows
+// stale data (a paid purchase order still reading as unpaid, for example).
+// A per-page boundary lets the route change commit at once: the old page
+// unmounts and the new page shows the fallback while its chunk loads.
+// React.lazy keeps a failed import for good, so every chunk loads through
+// loadChunkWithRetry: a page opened while offline loads once the connection
+// is back instead of staying broken until a full reload.
+function lazyWithRetry<T extends React.ComponentType<any>>(
+  load: () => Promise<{ default: T }>,
+): React.LazyExoticComponent<T> {
+  return React.lazy(() => loadChunkWithRetry(load));
+}
+
+function lazyPage<T extends React.ComponentType<any>>(
+  load: () => Promise<{ default: T }>,
+): T {
+  const LazyComponent = lazyWithRetry(load);
+  function LazyPage(props: React.ComponentProps<T>) {
+    return (
+      <React.Suspense fallback={<RouteSuspenseFallback />}>
+        <LazyComponent {...props} />
+      </React.Suspense>
+    );
+  }
+  // Typed as the page itself, so every call site type-checks exactly as it
+  // did when the page was imported directly.
+  return LazyPage as unknown as T;
+}
+
+const Layout = lazyWithRetry(() => import("@/components/layout/AppShell"));
+const Login = lazyPage(() => import("@/pages/Login"));
+
+const VendorLayout = lazyWithRetry(() => import("@/components/vendor/VendorLayout"));
+const VendorLogin = lazyPage(() => import("@/pages/vendor/VendorLogin"));
+const VendorRegister = lazyPage(() => import("@/pages/vendor/VendorRegister"));
+const VendorDashboard = lazyPage(() => import("@/pages/vendor/VendorDashboard"));
+const VendorProducts = lazyPage(() => import("@/pages/vendor/VendorProducts"));
+const VendorOrders = lazyPage(() => import("@/pages/vendor/VendorOrders"));
+const VendorWallet = lazyPage(() => import("@/pages/vendor/VendorWallet"));
+const VendorSettings = lazyPage(() => import("@/pages/vendor/VendorSettings"));
+const DropshipPortalAuth = lazyPage(() => import("@/pages/dropship/DropshipPortalAuth"));
+const DropshipPortalPrivacy = lazyPage(() => import("@/pages/dropship/DropshipPortalPrivacy"));
+const DropshipPortalDashboard = lazyPage(() => import("@/pages/dropship/DropshipPortalDashboard"));
+const DropshipPortalHome = lazyPage(() => import("@/pages/dropship/DropshipPortalHome"));
+const DropshipPortalCatalog = lazyPage(() => import("@/pages/dropship/DropshipPortalCatalog"));
+const DropshipPortalNotifications = lazyPage(() => import("@/pages/dropship/DropshipPortalNotifications"));
+const DropshipPortalCostChanges = lazyPage(() => import("@/pages/dropship/DropshipPortalCostChanges"));
+const DropshipPortalOnboarding = lazyPage(() => import("@/pages/dropship/DropshipPortalOnboarding"));
+const DropshipPortalOrders = lazyPage(() => import("@/pages/dropship/DropshipPortalOrders"));
+const DropshipPortalReturns = lazyPage(() => import("@/pages/dropship/DropshipPortalReturns"));
+const DropshipPortalSettings = lazyPage(() => import("@/pages/dropship/DropshipPortalSettings"));
+const DropshipPortalWallet = lazyPage(() => import("@/pages/dropship/DropshipPortalWallet"));
+const Dashboard = lazyPage(() => import("@/pages/Dashboard"));
+const Inventory = lazyPage(() => import("@/pages/Inventory"));
+const Builds = lazyPage(() => import("@/pages/Builds"));
+const SupplyTransformations = lazyPage(() => import("@/pages/SupplyTransformations"));
+const InventoryCutover = lazyPage(() => import("@/pages/InventoryCutover"));
+const ProcurementPromiseSafetySettings = lazyPage(() => import("@/pages/ProcurementPromiseSafetySettings"));
+const ChannelInventory = lazyPage(() => import("@/pages/ChannelInventory"));
+const BuildRecipeCreate = lazyPage(() => import("@/pages/BuildRecipeCreate"));
+const Orders = lazyPage(() => import("@/pages/Orders"));
+const Dropship = lazyPage(() => import("@/pages/Dropship"));
+const Subscriptions = lazyPage(() => import("@/pages/Subscriptions"));
+const PickingPage = lazyPage(() => import("@/pages/PickingPage"));
+const PickPriority = lazyPage(() => import("@/pages/PickPriority"));
+const OrderHistory = lazyPage(() => import("@/pages/OrderHistory"));
+const WarehousePage = lazyPage(() => import("@/pages/WarehousePage"));
+const PickZones = lazyPage(() => import("@/pages/PickZones"));
+const WarehouseSettingsPage = lazyPage(() => import("@/pages/WarehouseSettingsPage"));
+const WorkConfigurationPage = lazyPage(() => import("@/pages/warehouse-work/WorkConfigurationPage"));
+const AssemblyWorkPage = lazyPage(() => import("@/pages/warehouse-work/AssemblyWorkPage"));
+const Integrations = lazyPage(() => import("@/pages/Integrations"));
+const Users = lazyPage(() => import("@/pages/Users"));
+const Roles = lazyPage(() => import("@/pages/Roles"));
+const ChannelsPage = lazyPage(() => import("@/pages/ChannelsPage"));
+const CatalogPage = lazyPage(() => import("@/pages/CatalogPage"));
+const ProductDetail = lazyPage(() => import("@/pages/ProductDetail"));
+const CycleCounts = lazyPage(() => import("@/pages/CycleCounts"));
+const Transfers = lazyPage(() => import("@/pages/Transfers"));
+const Suppliers = lazyPage(() => import("@/pages/Suppliers"));
+const PurchasingView = lazyPage(() => import("@/pages/PurchasingView"));
+const ReorderEngine = lazyPage(() => import("@/pages/ReorderEngine"));
+const ProcurementAutomation = lazyPage(() => import("@/pages/ProcurementAutomation"));
+const ProcurementRuns = lazyPage(() => import("@/pages/ProcurementRuns"));
+const ProcurementRfqs = lazyPage(() => import("@/pages/ProcurementRfqs"));
+const Receiving = lazyPage(() => import("@/pages/Receiving"));
+const InventoryHistory = lazyPage(() => import("@/pages/InventoryHistory"));
+const Replenishment = lazyPage(() => import("@/pages/Replenishment"));
+const SlottingSetup = lazyPage(() => import("@/pages/SlottingSetup"));
+const ChannelAllocation = lazyPage(() => import("@/pages/ChannelAllocation"));
+const ProductLines = lazyPage(() => import("@/pages/ProductLines"));
+const ShippingGroups = lazyPage(() => import("@/pages/ShippingGroups"));
+const PurchaseOrders = lazyPage(() => import("@/pages/PurchaseOrders"));
+const PurchaseOrderDetail = lazyPage(() => import("@/pages/PurchaseOrderDetail"));
+const PurchaseOrderEdit = lazyPage(() => import("@/pages/PurchaseOrderEdit"));
+const PurchasingDashboard = lazyPage(() => import("@/pages/PurchasingDashboard"));
+const Returns = lazyPage(() => import("@/pages/Returns"));
+const ReturnLabelSettings = lazyPage(() => import("@/pages/ReturnLabelSettings"));
+const ReturnCases = lazyPage(() => import("@/pages/ReturnCases"));
+const ReturnPolicies = lazyPage(() => import("@/pages/ReturnPolicies"));
+const CustomerReturnPortalPreview = lazyPage(() => import("@/pages/CustomerReturnPortalPreview"));
+const CustomerReturnCustomerPortal = lazyPage(() => import("@/pages/CustomerReturnCustomerPortal"));
+const CustomerReturnPortalAccess = lazyPage(() => import("@/pages/CustomerReturnPortalAccess"));
+const InboundShipments = lazyPage(() => import("@/pages/InboundShipments"));
+const OutboundShipments = lazyPage(() => import("@/pages/OutboundShipments"));
+const ShipmentOrderContext = lazyPage(() => import("@/pages/ShipmentOrderContext"));
+const InboundShipmentDetail = lazyPage(() => import("@/pages/InboundShipmentDetail"));
+const CostDashboard = lazyPage(() => import("@/pages/CostDashboard"));
+const APDashboard = lazyPage(() => import("@/pages/APDashboard"));
+const APInvoices = lazyPage(() => import("@/pages/APInvoices"));
+const APInvoiceDetail = lazyPage(() => import("@/pages/APInvoiceDetail"));
+const APPayments = lazyPage(() => import("@/pages/APPayments"));
+const SupplierCredits = lazyPage(() => import("@/pages/SupplierCredits"));
+const SupplierReturns = lazyPage(() => import("@/pages/SupplierReturns"));
+const StaffPasswordChange = lazyWithRetry(() =>
+  import("@/components/identity/StaffPasswordChange").then((m) => ({ default: m.StaffPasswordChange })),
+);
+const Settings = lazyPage(() => import("@/pages/Settings"));
+const ProcurementSettings = lazyPage(() => import("@/pages/ProcurementSettings"));
+const ShippingSettings = lazyPage(() => import("@/pages/ShippingSettings"));
+const ShippingServiceLevels = lazyPage(() => import("@/pages/ShippingServiceLevels"));
+const ShippingServiceLevelDetail = lazyPage(() => import("@/pages/ShippingServiceLevelDetail"));
+const NotificationPreferences = lazyPage(() => import("@/pages/NotificationPreferences"));
+const EbayChannelPage = lazyPage(() => import("@/pages/EbayChannelPage"));
+const WalmartChannelRouteHost = lazyWithRetry(() =>
+  import("@/pages/WalmartChannelPage").then((m) => ({ default: m.WalmartChannelRouteHost })),
+);
+const ShopifyChannelPage = lazyPage(() => import("@/pages/ShopifyChannelPage"));
+const SyncLogPage = lazyPage(() => import("@/pages/SyncLogPage"));
+const OmsOrders = lazyPage(() => import("@/pages/OmsOrders"));
+const OrderEdits = lazyPage(() => import("@/pages/OrderEdits"));
+const FlowMonitor = lazyPage(() => import("@/pages/FlowMonitor"));
+const VendorList = lazyPage(() => import("@/pages/VendorList"));
+const VendorDetail = lazyPage(() => import("@/pages/VendorDetail"));
+const DemandPlanner = lazyPage(() => import("@/pages/DemandPlanner"));
+
+function RouteSuspenseFallback({ fullScreen = false }: { fullScreen?: boolean }) {
+  return (
+    <div className={`flex items-center justify-center ${fullScreen ? "min-h-screen" : "min-h-[50vh]"}`}>
+      <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+    </div>
+  );
+}
+
+function DeferredWalmartChannelRouteHost() {
+  const [location] = useLocation();
+  const isWalmartRoute = /^\/channels\/walmart\/[1-9]\d*(?:\/listings\/bulk)?$/.test(location);
+  const [activated, setActivated] = React.useState(isWalmartRoute);
+
+  React.useEffect(() => {
+    if (isWalmartRoute) setActivated(true);
+  }, [isWalmartRoute]);
+
+  if (!activated && !isWalmartRoute) return null;
+
+  return (
+    <React.Suspense fallback={null}>
+      <WalmartChannelRouteHost />
+    </React.Suspense>
+  );
+}
 
 // Reorder Engine feature-flag switch (design spec §4.6, PR 2). Reads the
 // procurement settings and renders the new cockpit when `useNewReorderCockpit`
@@ -145,16 +215,18 @@ function ReorderAnalysisRoute() {
 
 function ProtectedRoute({
   component: Component,
-  allowedRoles,
+  allowedSystemRoles,
   requiredPermission,
   anyOfPermissions,
+  allOfPermissions,
 }: { 
   component: React.ComponentType;
-  allowedRoles?: string[];
+  allowedSystemRoles?: StaffSystemRole[];
   requiredPermission?: { resource: string; action: string };
   anyOfPermissions?: { resource: string; action: string }[];
+  allOfPermissions?: { resource: string; action: string }[];
 }) {
-  const { user, isLoading, hasPermission } = useAuth();
+  const { user, isLoading, hasPermission, hasSystemRole, assignedRoles, accessStatus } = useAuth();
   
   if (isLoading) {
     return (
@@ -164,21 +236,26 @@ function ProtectedRoute({
     );
   }
   
+  if (accessStatus === "unverified") return <StaffAccessNotice />;
   if (!user) {
     return <Redirect to="/login" />;
   }
   
-  if (allowedRoles && !allowedRoles.includes(user.role)) {
-    return <Redirect to="/picking" />;
+  if (assignedRoles.length === 0) return <StaffAccessNotice />;
+  if (allowedSystemRoles && !allowedSystemRoles.some(hasSystemRole)) {
+    return <StaffAccessNotice denied />;
   }
   if (
     requiredPermission
     && !hasPermission(requiredPermission.resource, requiredPermission.action)
   ) {
-    return <Redirect to="/picking" />;
+    return <StaffAccessNotice denied />;
   }
   if (anyOfPermissions && !anyOfPermissions.some(permission => hasPermission(permission.resource, permission.action))) {
-    return <Redirect to="/picking" />;
+    return <StaffAccessNotice denied />;
+  }
+  if (allOfPermissions && !allOfPermissions.every(permission => hasPermission(permission.resource, permission.action))) {
+    return <StaffAccessNotice denied />;
   }
   
   return <Component />;
@@ -306,7 +383,7 @@ function DropshipPortalRouter() {
 
 function Router() {
   const [location] = useLocation();
-  const { user, isLoading } = useAuth();
+  const { user, isLoading, accessStatus, assignedRoles, hasPermission, hasSystemRole,credentialActionRequired } = useAuth();
 
   // The prelaunch customer experience has its own access screen and never
   // renders the warehouse application shell, including during sign-in.
@@ -343,30 +420,54 @@ function Router() {
     );
   }
   
+  if (accessStatus === "unverified") return <StaffAccessNotice />;
   if (!user) {
     return <Redirect to="/login" />;
   }
 
-  const isPickerOnly = user.role === "picker";
+  if(credentialActionRequired || location === "/staff/password") return <StaffPasswordChange/>;
+
+  if (assignedRoles.length === 0) return <StaffAccessNotice />;
+
+  const landingPath = [
+    { path: "/picking", allowed: hasPermission("picking", "view") },
+    { path: "/picking/logs", allowed: hasPermission("picking", "view_logs") },
+    { path: "/picking/metrics", allowed: hasPermission("picking", "view_metrics") },
+    { path: "/picking/settings", allowed: hasPermission("picking", "manage_settings") },
+    { path: "/users", allowed: hasPermission("users", "view") },
+    { path: "/roles", allowed: hasPermission("roles", "view") },
+    { path: "/channels", allowed: hasPermission("channels", "view") },
+    { path: "/inventory/supply-transformations", allowed: hasPermission("inventory_planning", "view") },
+    { path: "/assembly", allowed: hasPermission("warehouse_work", "assembly") },
+    { path: "/order-edits", allowed: hasPermission("orders", "edit") },
+    { path: "/outbound-shipments", allowed: hasPermission("shipments", "view") },
+    { path: "/purchase-orders", allowed: hasPermission("purchasing", "view") },
+    { path: "/receiving", allowed: RECEIVING_READ_PERMISSIONS.some(permission => hasPermission(permission.resource, permission.action)) },
+    { path: "/dropship", allowed: hasPermission("dropship", "view") },
+    { path: "/subscriptions", allowed: hasPermission("shellz", "admin") },
+    { path: "/settings", allowed: hasPermission("settings", "view") },
+    { path: "/orders", allowed: hasPermission("orders", "view") },
+  ].find(candidate => candidate.allowed)?.path;
 
   return (
     <Layout>
-      <WalmartChannelRouteHost key={user.id} />
+      <DeferredWalmartChannelRouteHost key={user.id} />
+      <React.Suspense fallback={<RouteSuspenseFallback />}>
       <Switch>
         <Route path="/">
-          {isPickerOnly ? <Redirect to="/picking" /> : <Dashboard />}
+          {hasPermission("inventory", "view") ? <Dashboard /> : landingPath ? <Redirect to={landingPath} /> : <StaffAccessNotice />}
         </Route>
         <Route path="/inventory">
-          <ProtectedRoute component={Inventory} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Inventory} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/inventory/builds/recipes/new">
-          <ProtectedRoute component={BuildRecipeCreate} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={BuildRecipeCreate} allOfPermissions={[{ resource: "inventory", action: "view" }, { resource: "inventory", action: "adjust" }]} />
         </Route>
         <Route path="/inventory/builds/recipes/:recipeId/edit">
-          <ProtectedRoute component={BuildRecipeCreate} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={BuildRecipeCreate} allOfPermissions={[{ resource: "inventory", action: "view" }, { resource: "inventory", action: "adjust" }]} />
         </Route>
         <Route path="/inventory/builds">
-          <ProtectedRoute component={Builds} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Builds} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/inventory/cutover">
           <ProtectedRoute
@@ -381,57 +482,67 @@ function Router() {
           />
         </Route>
         <Route path="/cycle-counts">
-          <ProtectedRoute component={CycleCounts} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={CycleCounts} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/slotting-setup">
-          <ProtectedRoute component={SlottingSetup} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={SlottingSetup} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/bin-assignments">
-          <ProtectedRoute component={SlottingSetup} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={SlottingSetup} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/transfers">
-          <ProtectedRoute component={Transfers} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Transfers} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/orders">
-          <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Orders} requiredPermission={{ resource: "orders", action: "view" }} />
         </Route>
         <Route path="/dropship">
-          <ProtectedRoute component={Dropship} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Dropship} requiredPermission={{ resource: "dropship", action: "view" }} />
         </Route>
         <Route path="/subscriptions">
-          <ProtectedRoute component={Subscriptions} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Subscriptions} requiredPermission={{ resource: "shellz", action: "admin" }} />
         </Route>
         <Route path="/vendors/:id">
-          <ProtectedRoute component={VendorDetail} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={VendorDetail} requiredPermission={{ resource: "dropship", action: "view" }} />
         </Route>
         <Route path="/vendors">
-          <ProtectedRoute component={VendorList} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={VendorList} requiredPermission={{ resource: "dropship", action: "view" }} />
         </Route>
-        <Route path="/picking" component={PickingPage} />
-        <Route path="/picking/logs" component={PickingPage} />
-        <Route path="/picking/metrics" component={PickingPage} />
-        <Route path="/picking/settings" component={PickingPage} />
+        <Route path="/picking">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "view" }} />
+        </Route>
+        <Route path="/picking/logs">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "view_logs" }} />
+        </Route>
+        <Route path="/picking/metrics">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "view_metrics" }} />
+        </Route>
+        <Route path="/picking/settings">
+          <ProtectedRoute component={PickingPage} requiredPermission={{ resource: "picking", action: "manage_settings" }} />
+        </Route>
         <Route path="/pick-priority">
-          <ProtectedRoute component={PickPriority} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PickPriority} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
-        <Route path="/packing" component={Packing} />
+        <Route path="/packing">
+          <StaffAccessNotice denied />
+        </Route>
         <Route path="/order-history">
-          <ProtectedRoute component={OrderHistory} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={OrderHistory} requiredPermission={{ resource: "orders", action: "view" }} />
         </Route>
         <Route path="/warehouse/locations">
-          <ProtectedRoute component={WarehousePage} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={WarehousePage} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/warehouse/packaging">
           <ProtectedRoute component={WarehousePage} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
         <Route path="/warehouse">
-          <ProtectedRoute component={WarehousePage} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={WarehousePage} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/pick-zones">
-          <ProtectedRoute component={PickZones} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PickZones} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/warehouse/settings/:id">
-          <ProtectedRoute component={WarehouseSettingsPage} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={WarehouseSettingsPage} requiredPermission={{ resource: "warehouse", action: "read" }} />
         </Route>
         <Route path="/warehouse/workflows/:id">
           <ProtectedRoute component={WorkConfigurationPage} requiredPermission={{ resource: "warehouse_work", action: "view" }} />
@@ -440,34 +551,34 @@ function Router() {
           <ProtectedRoute component={AssemblyWorkPage} requiredPermission={{ resource: "warehouse_work", action: "assembly" }} />
         </Route>
         <Route path="/integrations">
-          <ProtectedRoute component={Integrations} allowedRoles={["admin"]} />
+          <ProtectedRoute component={Integrations} requiredPermission={{ resource: "settings", action: "edit" }} />
         </Route>
         <Route path="/users">
-          <ProtectedRoute component={Users} allowedRoles={["admin"]} />
+          <ProtectedRoute component={Users} requiredPermission={{ resource: "users", action: "view" }} />
         </Route>
         <Route path="/roles">
-          <ProtectedRoute component={Roles} allowedRoles={["admin"]} />
+          <ProtectedRoute component={Roles} requiredPermission={{ resource: "roles", action: "view" }} />
         </Route>
         <Route path="/sync-log">
-          <ProtectedRoute component={SyncLogPage} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={SyncLogPage} requiredPermission={{ resource: "channels", action: "view" }} />
         </Route>
         <Route path="/oms/orders">
-          <ProtectedRoute component={OmsOrders} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={OmsOrders} requiredPermission={{ resource: "orders", action: "view" }} />
         </Route>
         <Route path="/order-edits">
           <ProtectedRoute component={OrderEdits} requiredPermission={{ resource: "orders", action: "edit" }} />
         </Route>
         <Route path="/oms/flow-monitor">
-          <ProtectedRoute component={FlowMonitor} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={FlowMonitor} requiredPermission={{ resource: "operations", action: "view" }} />
         </Route>
         <Route path="/channels/shopify">
-          <ProtectedRoute component={ShopifyChannelPage} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ShopifyChannelPage} anyOfPermissions={[{ resource: "channels", action: "view" }, { resource: "shopify", action: "view" }]} />
         </Route>
         <Route path="/channels/ebay">
-          <ProtectedRoute component={EbayChannelPage} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={EbayChannelPage} requiredPermission={{ resource: "channels", action: "view" }} />
         </Route>
         <Route path={/^\/channels\/walmart\/[1-9]\d*(?:\/listings\/bulk)?$/}>
-          {["admin", "lead"].includes(user.role) ? null : <Redirect to="/picking" />}
+          {hasPermission("channels", "view") ? null : <StaffAccessNotice denied />}
         </Route>
         <Route path="/channels/inventory">
           <ProtectedRoute
@@ -480,142 +591,145 @@ function Router() {
           <Redirect to="/channels/inventory" replace />
         </Route>
         <Route path="/channels">
-          <ProtectedRoute component={ChannelsPage} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ChannelsPage} requiredPermission={{ resource: "channels", action: "view" }} />
         </Route>
         <Route path="/channels/reserves">
-          <ProtectedRoute component={ChannelsPage} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ChannelsPage} requiredPermission={{ resource: "channels", action: "view" }} />
         </Route>
         <Route path="/product-lines">
-          <ProtectedRoute component={ProductLines} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ProductLines} requiredPermission={{ resource: "channels", action: "view" }} />
         </Route>
         <Route path="/shipping-groups">
-          <ProtectedRoute component={ShippingGroups} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ShippingGroups} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/channel-allocation">
-          <ProtectedRoute component={ChannelAllocation} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ChannelAllocation} requiredPermission={{ resource: "channels", action: "view" }} />
         </Route>
         <Route path="/catalog">
-          <ProtectedRoute component={CatalogPage} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={CatalogPage} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/catalog/variants">
-          <ProtectedRoute component={CatalogPage} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={CatalogPage} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/products/:id">
-          <ProtectedRoute component={ProductDetail} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ProductDetail} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/shipping">
-          <ProtectedRoute component={Orders} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Orders} requiredPermission={{ resource: "orders", action: "view" }} />
+        </Route>
+        <Route path="/outbound-shipments/:id/order">
+          <ProtectedRoute component={ShipmentOrderContext} allOfPermissions={[{ resource: "shipments", action: "view" }, { resource: "shipments", action: "view_order_context" }]} />
         </Route>
         <Route path="/outbound-shipments">
-          <ProtectedRoute component={OutboundShipments} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={OutboundShipments} requiredPermission={{ resource: "shipments", action: "view" }} />
         </Route>
         <Route path="/enterprise"><Redirect to="/" /></Route>
         <Route path="/demand-planner">
-          <ProtectedRoute component={DemandPlanner} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={DemandPlanner} requiredPermission={{ resource: "purchasing", action: "view" }} />
         </Route>
         {/* New-PO editor routes (Spec A). MUST be registered before
             /purchase-orders/:id so wouter does not match 'new' as an :id. */}
         <Route path="/purchase-orders/new">
-          <ProtectedRoute component={PurchaseOrderEdit} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PurchaseOrderEdit} requiredPermission={PURCHASING_READ_PERMISSION} allOfPermissions={[{ resource: "purchasing", action: "create" }]} />
         </Route>
         <Route path="/purchase-orders/:id/edit">
-          <ProtectedRoute component={PurchaseOrderEdit} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PurchaseOrderEdit} requiredPermission={PURCHASING_READ_PERMISSION} allOfPermissions={[{ resource: "purchasing", action: "edit" }]} />
         </Route>
         <Route path="/purchase-orders/:id">
-          {(params) => <ProtectedRoute key={params.id} component={PurchaseOrderDetail} allowedRoles={["admin", "lead"]} />}
+          {(params) => <ProtectedRoute key={params.id} component={PurchaseOrderDetail} requiredPermission={PURCHASING_READ_PERMISSION} />}
         </Route>
         <Route path="/purchase-orders">
-          <ProtectedRoute component={PurchaseOrders} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PurchaseOrders} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/receiving">
-          <ProtectedRoute component={Receiving} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Receiving} anyOfPermissions={RECEIVING_READ_PERMISSIONS} />
         </Route>
         <Route path="/suppliers">
-          <ProtectedRoute component={Suppliers} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Suppliers} requiredPermission={{ resource: "purchasing", action: "view" }} />
         </Route>
         {/* Legacy escape hatch: always the old page, flag-independent. MUST be
             registered before /reorder-analysis (wouter matches in order). */}
         <Route path="/reorder-analysis/legacy">
-          <ProtectedRoute component={PurchasingView} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PurchasingView} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/reorder-analysis">
-          <ProtectedRoute component={ReorderAnalysisRoute} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ReorderAnalysisRoute} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         {/* Automation page (design surface 03): mode/policy settings +
             recommendation review queue + auto-draft runs. */}
         <Route path="/procurement/automation">
-          <ProtectedRoute component={ProcurementAutomation} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ProcurementAutomation} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         {/* Run report page (design surface 04): read-only auto-draft run
             reports, decision history, and forecast accuracy. */}
         <Route path="/procurement/runs">
-          <ProtectedRoute component={ProcurementRuns} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ProcurementRuns} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         {/* RFQ workbench (design surface 05): read-only tracking of quote
             requests created from the Order Builder + the sourcing
             requirement queue. */}
         <Route path="/procurement/rfqs">
-          <ProtectedRoute component={ProcurementRfqs} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ProcurementRfqs} anyOfPermissions={[{ resource: "purchasing", action: "view" }, { resource: "inventory", action: "view" }]} />
         </Route>
         <Route path="/replenishment">
-          <ProtectedRoute component={Replenishment} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Replenishment} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/returns/cases">
-          <ProtectedRoute component={ReturnCases} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={ReturnCases} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/returns/receiving">
-          <ProtectedRoute component={Returns} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={Returns} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/returns/label-settings">
-          <ProtectedRoute component={ReturnLabelSettings} allowedRoles={["admin"]} />
+          <ProtectedRoute component={ReturnLabelSettings} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
         <Route path="/returns">
           <Redirect to="/returns/cases" />
         </Route>
         <Route path="/return-policies">
-          <ProtectedRoute component={ReturnPolicies} allowedRoles={["admin"]} />
+          <ProtectedRoute component={ReturnPolicies} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
         <Route path="/shipments/:id">
-          {(params) => <ProtectedRoute key={params.id} component={InboundShipmentDetail} allowedRoles={["admin", "lead"]} />}
+          {(params) => <ProtectedRoute key={params.id} component={InboundShipmentDetail} requiredPermission={PURCHASING_READ_PERMISSION} />}
         </Route>
         <Route path="/shipments">
-          <ProtectedRoute component={InboundShipments} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={InboundShipments} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/inventory/costs">
-          <ProtectedRoute component={CostDashboard} allowedRoles={["admin"]} />
+          <ProtectedRoute component={CostDashboard} requiredPermission={{ resource: "inventory", action: "view" }} />
         </Route>
         <Route path="/inventory/history">
-          <ProtectedRoute component={InventoryHistory} allowedRoles={["admin"]} />
+          <ProtectedRoute component={InventoryHistory} requiredPermission={{ resource: "inventory", action: "audit" }} />
         </Route>
         <Route path="/ap">
-          <ProtectedRoute component={APDashboard} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={APDashboard} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/ap-invoices/:id">
-          {(params) => <ProtectedRoute key={params.id} component={APInvoiceDetail} allowedRoles={["admin", "lead"]} />}
+          {(params) => <ProtectedRoute key={params.id} component={APInvoiceDetail} requiredPermission={PURCHASING_READ_PERMISSION} />}
         </Route>
         <Route path="/ap-invoices">
-          <ProtectedRoute component={APInvoices} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={APInvoices} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/supplier-returns/:id">
-          {(params) => <ProtectedRoute key={params.id} component={SupplierReturns} allowedRoles={["admin", "lead"]} />}
+          {(params) => <ProtectedRoute key={params.id} component={SupplierReturns} requiredPermission={PURCHASING_READ_PERMISSION} />}
         </Route>
         <Route path="/supplier-returns">
-          <ProtectedRoute component={SupplierReturns} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={SupplierReturns} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/supplier-credits/:id">
-          {(params) => <ProtectedRoute key={params.id} component={SupplierCredits} allowedRoles={["admin", "lead"]} />}
+          {(params) => <ProtectedRoute key={params.id} component={SupplierCredits} requiredPermission={PURCHASING_READ_PERMISSION} />}
         </Route>
         <Route path="/supplier-credits">
-          <ProtectedRoute component={SupplierCredits} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={SupplierCredits} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         <Route path="/ap-payments">
-          <ProtectedRoute component={APPayments} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={APPayments} requiredPermission={PURCHASING_READ_PERMISSION} />
         </Route>
         {/* Redirects for old procurement URLs */}
         <Route path="/purchasing/catalog"><Redirect to="/reorder-analysis" /></Route>
         <Route path="/purchasing/:id"><Redirect to="/purchase-orders/:id" /></Route>
         <Route path="/purchasing">
-          <ProtectedRoute component={PurchasingDashboard} allowedRoles={["admin", "lead"]} />
+          <ProtectedRoute component={PurchasingDashboard} allOfPermissions={PURCHASING_DASHBOARD_READ_PERMISSIONS} />
         </Route>
         {/* Spec A: procurement settings page. MUST be registered before
             /settings so wouter does not fall through to the general page. */}
@@ -629,24 +743,27 @@ function Router() {
           <ProtectedRoute component={ProcurementSettings} anyOfPermissions={[{ resource: "purchasing", action: "view" }, { resource: "settings", action: "edit" }]} />
         </Route>
         <Route path="/shipping-settings">
-          <ProtectedRoute component={ShippingSettings} allowedRoles={["admin"]} />
+          <ProtectedRoute component={ShippingSettings} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
         <Route path="/shipping-service-levels/:id">
-          <ProtectedRoute component={ShippingServiceLevelDetail} allowedRoles={["admin"]} />
+          <ProtectedRoute component={ShippingServiceLevelDetail} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
         <Route path="/shipping-service-levels">
-          <ProtectedRoute component={ShippingServiceLevels} allowedRoles={["admin"]} />
+          <ProtectedRoute component={ShippingServiceLevels} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
         <Route path="/settings">
-          <ProtectedRoute component={Settings} allowedRoles={["admin"]} />
+          <ProtectedRoute component={Settings} requiredPermission={{ resource: "settings", action: "view" }} />
         </Route>
-        <Route path="/notification-preferences" component={NotificationPreferences} />
+        <Route path="/notification-preferences">
+          <ProtectedRoute component={NotificationPreferences} requiredPermission={{ resource: "settings", action: "view" }} />
+        </Route>
         {/* Redirects for old URLs */}
         <Route path="/products"><Redirect to="/catalog" /></Route>
         <Route path="/variants"><Redirect to="/catalog/variants" /></Route>
         <Route path="/warehouses"><Redirect to="/warehouse" /></Route>
         <Route component={NotFound} />
       </Switch>
+      </React.Suspense>
     </Layout>
   );
 }
@@ -666,7 +783,9 @@ function App() {
           <TooltipProvider>
             <Toaster />
             <StaffPWAUpdatePrompt />
-            <Router />
+            <React.Suspense fallback={<RouteSuspenseFallback fullScreen />}>
+              <Router />
+            </React.Suspense>
           </TooltipProvider>
         </SettingsProvider>
       </AuthProvider>

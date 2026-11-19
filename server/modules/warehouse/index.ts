@@ -12,6 +12,14 @@ export { WarehouseInventorySourceService } from "./application/warehouse-invento
 export { PostgresWarehouseInventorySourceStore } from "./infrastructure/warehouse-inventory-source.repository";
 export { WarehouseInventorySourceError } from "./domain/warehouse-inventory-source";
 
-// Services (Pending use-case port)
-export { createBinAssignmentService } from "./bin-assignment.service";
-export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "./bin-assignment.service";
+// Internal API Boundaries (CI-03)
+export * from "./bin-assignment.api";
+export * from "./inventory-governance.api";
+export * from "./cutover-work.api";
+export {
+  getReplenishmentSettingsForWarehouse,
+  getSettingsForWarehouse,
+  getSlaCutoffConfig,
+  type SlaCutoffConfig,
+} from "./settings.resolver";
+export { selectPickBinCandidate } from "./pick-bin-candidate";

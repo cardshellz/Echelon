@@ -29,20 +29,59 @@ describe("writer-ratchet (P2.1)", () => {
   const baseline: Record<string, string[]> = JSON.parse(
     readFileSync(join(repoRoot, "scripts/writer-ratchet/baseline.json"), "utf8"),
   );
-  const { writers: current } = scanWriterTopology(repoRoot);
-  const { writers: currentIncludingScripts } = scanWriterTopology(repoRoot, {
-    roots: ["server", "scripts"],
+  const routeAndScriptBaseline: {
+    routeWriters: Record<string, string[]>;
+    scriptWriters: Record<string, string[]>;
+  } = JSON.parse(
+    readFileSync(join(repoRoot, "scripts/writer-ratchet/route-and-script-baseline.json"), "utf8"),
+  );
+  const { writers: current, routeWriters: currentRouteWriters } = scanWriterTopology(repoRoot);
+  const { writers: currentIncludingScripts, scriptWriters: currentScriptWriters } = scanWriterTopology(repoRoot, {
+    roots: ["server", "scripts", "script"],
+  });
+  it("staff credential state has only the Identity owning writer", () => {
+    expect(current["identity.staff_credentials"]).toEqual(["modules/identity"]);
+    expect(currentIncludingScripts["identity.staff_credentials"]).toEqual(["modules/identity"]);
+    expect(baseline["identity.staff_credentials"]).toEqual(["modules/identity"]);
+  });
+
+  it("Catalog owns runtime image writes and the legacy direct import cannot write photos", () => {
+    expect(current["catalog.product_assets"]).toEqual(["modules/catalog"]);
+    expect(baseline["catalog.product_assets"]).toEqual(["modules/catalog"]);
+    expect(currentIncludingScripts["catalog.product_assets"]).not.toContain("scripts/import_ebay_to_echelon.ts");
   });
 
   it.each([
+    ["oms.customer_order_actions", "modules/customer-account"],
+    ["oms.customer_order_action_invalidations", "modules/customer-account"],
+    ["wms.shipping_package_history_jobs", "modules/shipping"],
+    ["wms.shipping_package_history_events", "modules/shipping"],
+    ["wms.shipping_package_history_invalidations", "modules/shipping"],
+    ["wms.shipping_package_history_backfills", "modules/shipping"],
+    ["returns.customer_return_box_measurements", "modules/returns"],
+    ["returns.customer_return_parcel_receipts", "modules/returns"],
+    ["returns.customer_return_workflows", "modules/returns"],
+    ["returns.customer_return_guest_challenges", "modules/returns"],
+    ["returns.customer_return_guest_events", "modules/returns"],
+    ["returns.customer_return_workflow_events", "modules/returns"],
+    ["returns.customer_return_parcel_receipt_allocations", "modules/returns"],
     ["wms.picking_commands", "modules/wms"],
     ["procurement.receiving_custody_fence", "modules/procurement"],
+    ["procurement.purchase_tax_types", "modules/procurement"],
+    ["procurement.vendor_invoice_line_taxes", "modules/procurement"],
+    ["procurement.receipt_invoice_cost_allocations", "modules/procurement"],
+    ["procurement.ap_invoice_transition_reviews", "modules/procurement"],
+    ["procurement.supplier_header_cost_reviews", "modules/procurement"],
     ["procurement.receiving_quarantine_observations", "modules/procurement"],
     ["procurement.receiving_quarantine_acceptances", "modules/procurement"],
     ["procurement.receiving_quarantine_dispositions", "modules/procurement"],
+    ["inventory.replen_rules", "modules/inventory"],
     ["inventory.replen_followups", "modules/inventory"],
     ["inventory.replen_transfer_credits", "modules/inventory"],
     ["inventory.replen_trigger_receipts", "modules/inventory"],
+    ["inventory.interwarehouse_transfer_events", "modules/inventory"],
+    ["inventory.interwarehouse_transfer_lines", "modules/inventory"],
+    ["inventory.interwarehouse_transfers", "modules/inventory"],
     ["inventory.transfer_followups", "modules/inventory"],
   ])("%s has only its warehouse operation owner, including scripts", (table, owner) => {
     expect(current[table]).toEqual([owner]);
@@ -51,6 +90,8 @@ describe("writer-ratchet (P2.1)", () => {
   });
 
   it.each([
+    ["catalog.product_asset_versions", "modules/catalog"],
+    ["catalog.product_asset_renditions", "modules/catalog"],
     [
         "catalog.publication_media_references",
         "modules/catalog"
@@ -58,6 +99,14 @@ describe("writer-ratchet (P2.1)", () => {
     [
         "catalog.publication_media_version_pins",
         "modules/catalog"
+    ],
+    [
+        "marketplace.channel_sync_batches",
+        "modules/marketplace-listings"
+    ],
+    [
+        "marketplace.channel_sync_batch_members",
+        "modules/marketplace-listings"
     ],
     [
         "marketplace.listing_intent_changes",
@@ -80,6 +129,14 @@ describe("writer-ratchet (P2.1)", () => {
       expect(current[table]).toEqual([owner]);
       expect(currentIncludingScripts[table]).toEqual([owner]);
       expect(baseline[table]).toEqual([owner]);
+    });
+
+  it.each(["inventory.stock_link_checks", "inventory.stock_link_destinations", "inventory.product_inventory_sync_requests"])(
+    "%s has only the inventory-planning engine as writer, including scripts (PLAN-CH2 §3)", (table) => {
+      // The check rows gained their writer with the command (P4), the destination rows with the tick (P7).
+      expect(current[table]).toEqual(["modules/inventory-planning"]);
+      expect(currentIncludingScripts[table]).toEqual(["modules/inventory-planning"]);
+      expect(baseline[table]).toEqual(["modules/inventory-planning"]);
     });
 
   it("wms.order_items has exactly one owning writer across runtime and operational scripts", () => {
@@ -135,6 +192,16 @@ describe("writer-ratchet (P2.1)", () => {
     expect(current["channels.channel_product_identities"]).toEqual(["modules/channels"]);
     expect(currentIncludingScripts["channels.channel_product_identities"]).toEqual(["modules/channels"]);
     expect(baseline["channels.channel_product_identities"]).toEqual(["modules/channels"]);
+  });
+
+  it("staff Shopify OAuth authorizations have only the Channels owning writer, including scripts", () => {
+    const table = "channels.shopify_oauth_authorizations";
+    expect(current[table]).toEqual(["modules/channels"]);
+    expect(currentIncludingScripts[table]).toEqual(["modules/channels"]);
+    expect(baseline[table]).toEqual(["modules/channels"]);
+    expect(current["channels.channel_connections"]).not.toContain("server/routes/shopify.routes.ts");
+    expect(currentIncludingScripts["channels.channel_connections"]).not.toContain("server/routes/shopify.routes.ts");
+    expect(baseline["channels.channel_connections"]).not.toContain("server/routes/shopify.routes.ts");
   });
   it.each(["marketplace.channel_listing_presence", "marketplace.channel_listing_presence_events"])(
     "%s has only the Marketplace Listings owning writer", table => {
@@ -223,7 +290,12 @@ describe("writer-ratchet (P2.1)", () => {
     for (const table of ["oms.oms_orders", "oms.oms_order_lines", "oms.oms_order_events"]) {
       expect(current[table]).toContain("modules/oms");
       expect(current[table]).not.toContain("modules/channels");
+      expect(current[table]).not.toContain("modules/dropship");
+      expect(currentIncludingScripts[table]).not.toContain("modules/dropship");
+      expect(baseline[table]).not.toContain("modules/dropship");
     }
+    expect(current["oms.oms_order_lines"]).toEqual(["modules/oms"]);
+    expect(baseline["oms.oms_order_lines"]).toEqual(["modules/oms"]);
   });
 
   it("keeps selective listing publication and inventory membership with their owning modules", () => {
@@ -287,5 +359,161 @@ describe("writer-ratchet (P2.1)", () => {
     // Existing QA fixture writer is unchanged; the production cleanup does not
     // add a second runtime owner or a new script writer.
     expect(currentIncludingScripts["inventory.cycle_count_items"]).toEqual(["modules/inventory","scripts/create-daily-replen-qa-counts.ts"]);
+  });
+
+  it("blocks any direct database writes in *.routes.ts files or server/routes/* across the entire repository (P2-1C)", () => {
+    expect(
+      routeAndScriptBaseline.routeWriters,
+      "routeWriters in route-and-script-baseline.json must remain permanently empty ({}) — zero route DB writes allowed.",
+    ).toEqual({});
+    expect(
+      currentRouteWriters,
+      `Direct DB write(s) detected in *.routes.ts. Route files must be pure HTTP transport and delegate all writes to owning module .api.ts contracts:\n` +
+        Object.entries(currentRouteWriters)
+          .flatMap(([table, files]) => files.map((file) => `${table}  ←  ${file}`))
+          .join("\n"),
+    ).toEqual({});
+
+    const serverRouteBuckets: string[] = [];
+    for (const [table, buckets] of Object.entries(current)) {
+      for (const bucket of buckets) {
+        if (bucket.startsWith("server/routes/")) {
+          serverRouteBuckets.push(`${table}  ←  ${bucket}`);
+        }
+      }
+    }
+    expect(
+      serverRouteBuckets,
+      `Direct DB write(s) detected inside server/routes/* (including route state/helper files). Delegate to owning module .api.ts contracts:\n` +
+        serverRouteBuckets.join("\n"),
+    ).toEqual([]);
+  });
+
+  it.each([
+    "channels.channel_variant_overrides",
+    "ebay.ebay_category_aspects",
+    "ebay.ebay_category_mappings",
+    "ebay.ebay_listing_rules",
+    "ebay.ebay_product_aspect_overrides",
+    "ebay.ebay_type_aspect_defaults",
+  ])("%s has only the Channels owning writer, including operational scripts (P2-1C)", (table) => {
+    expect(current[table]).toEqual(["modules/channels"]);
+    expect(currentIncludingScripts[table]).toEqual(["modules/channels"]);
+    expect(baseline[table]).toEqual(["modules/channels"]);
+  });
+
+  it.each([
+    ["catalog.product_line_products", "modules/catalog"],
+    ["catalog.product_variants", "modules/catalog"],
+    ["catalog.products", "modules/catalog"],
+    ["channels.channel_connections", "modules/channels"],
+    ["channels.channel_feeds", "modules/channels"],
+    ["channels.channel_listings", "modules/channels"],
+    ["channels.channels", "modules/channels"],
+    ["channels.sync_settings", "modules/channels"],
+  ])("%s has only its sole runtime owning writer in Catalog or Channels (P2-2A)", (table, owner) => {
+    expect(current[table]).toEqual([owner]);
+    expect(baseline[table]).toEqual([owner]);
+  });
+
+  it.each([
+    "channels.channel_connections",
+    "channels.channels",
+    "channels.sync_settings",
+  ])("%s has only the Channels owning writer, including operational scripts (P2-2A)", (table) => {
+    expect(currentIncludingScripts[table]).toEqual(["modules/channels"]);
+  });
+
+  it.each([
+    ["inventory.adjustment_reasons", "modules/inventory"],
+    ["inventory.inventory_levels", "modules/inventory"],
+    ["inventory.inventory_transactions", "modules/inventory"],
+    ["inventory.replen_tasks", "modules/inventory"],
+    ["inventory.warehouse_settings", "modules/inventory"],
+    ["warehouse.echelon_settings", "modules/warehouse"],
+    ["warehouse.product_locations", "modules/warehouse"],
+    ["warehouse.warehouse_locations", "modules/warehouse"],
+    ["warehouse.warehouses", "modules/warehouse"],
+  ])("%s has only its sole runtime owning writer in Inventory or Warehouse (P2-2B)", (table, owner) => {
+    expect(current[table]).toEqual([owner]);
+    expect(baseline[table]).toEqual([owner]);
+  });
+
+  it.each([
+    ["inventory.adjustment_reasons", "modules/inventory"],
+    ["inventory.warehouse_settings", "modules/inventory"],
+    ["warehouse.echelon_settings", "modules/warehouse"],
+    ["warehouse.warehouses", "modules/warehouse"],
+  ])("%s has only its Inventory or Warehouse owning writer, including operational scripts (P2-2B)", (table, owner) => {
+    expect(currentIncludingScripts[table]).toEqual([owner]);
+  });
+
+  it.each([
+    ["public.audit_events", "server/infrastructure/transactional-audit.ts"],
+    ["public.financial_command_results", "server/platform/commands/command-results.repository.ts"],
+    ["public.idempotency_keys", "server/infrastructure/idempotency-keys.repository.ts"],
+    ["shipping.pack_plan_parcels", "modules/cartonization"],
+    ["shipping.pack_plans", "modules/cartonization"],
+    ["wms.picking_logs", "modules/wms"],
+    ["wms.reconciliation_exceptions", "modules/oms"],
+  ])("%s has only its sole runtime owning writer (P2-2C)", (table, owner) => {
+    expect(current[table]).toEqual([owner]);
+    expect(baseline[table]).toEqual([owner]);
+  });
+
+  it.each([
+    ["public.audit_events", "server/infrastructure/transactional-audit.ts"],
+    ["public.financial_command_results", "server/platform/commands/command-results.repository.ts"],
+    ["public.idempotency_keys", "server/infrastructure/idempotency-keys.repository.ts"],
+    ["shipping.pack_plan_parcels", "modules/cartonization"],
+    ["shipping.pack_plans", "modules/cartonization"],
+    ["wms.reconciliation_exceptions", "modules/oms"],
+  ])("%s has only its sole owning writer, including operational scripts (P2-2C)", (table, owner) => {
+    expect(currentIncludingScripts[table]).toEqual([owner]);
+  });
+
+  it.each([
+    "wms.allocation_exceptions",
+    "wms.orders",
+    "wms.outbound_shipment_items",
+    "wms.outbound_shipments",
+  ])("%s has only the WMS runtime owning writer (P2-2D)", (table) => {
+    expect(current[table]).toEqual(["modules/wms"]);
+    expect(baseline[table]).toEqual(["modules/wms"]);
+  });
+
+  it("enforces zero multi-writer tables across the entire runtime codebase and baseline (P2-2D)", () => {
+    const baselineMultiWriters = Object.entries(baseline)
+      .filter(([, buckets]) => buckets.length > 1)
+      .map(([table, buckets]) => `${table}  ←  [${buckets.join(", ")}]`);
+    const currentMultiWriters = Object.entries(current)
+      .filter(([, buckets]) => buckets.length > 1)
+      .map(([table, buckets]) => `${table}  ←  [${buckets.join(", ")}]`);
+
+    expect(
+      baselineMultiWriters,
+      `baseline.json must permanently contain 0 multi-writer tables:\n` +
+        baselineMultiWriters.join("\n"),
+    ).toEqual([]);
+    expect(
+      currentMultiWriters,
+      `Multi-writer table(s) detected! Every table in server/ must have at most ONE owning module/repository writer. Delegate cross-module writes through the owning module's .api.ts contract:\n` +
+        currentMultiWriters.join("\n"),
+    ).toEqual([]);
+  });
+
+  it("blocks any new direct database writes in scripts/ or script/ outside the frozen baseline", () => {
+    const addedScriptWrites: string[] = [];
+    for (const [table, files] of Object.entries(currentScriptWriters)) {
+      const allowed = new Set(routeAndScriptBaseline.scriptWriters[table] ?? []);
+      for (const file of files) {
+        if (!allowed.has(file)) addedScriptWrites.push(`${table}  ←  ${file}`);
+      }
+    }
+    expect(
+      addedScriptWrites,
+      `NEW direct DB write(s) detected in scripts/ or script/. Operational scripts must delegate writes to owning module use-cases:\n` +
+        addedScriptWrites.join("\n"),
+    ).toEqual([]);
   });
 });

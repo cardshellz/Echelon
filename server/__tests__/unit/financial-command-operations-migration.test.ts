@@ -14,6 +14,12 @@ const service = readNormalizedSource(
   "commands",
   "financial-command-operations.service.ts",
 );
+const repository = readNormalizedSource(
+  "server",
+  "platform",
+  "commands",
+  "command-results.repository.ts",
+);
 
 describe("financial command operations migration", () => {
   it("adds a bounded one-attempt recovery budget and immutable recovery evidence", () => {
@@ -45,17 +51,18 @@ describe("financial command operations migration", () => {
   });
 
   it("purges only expired replayable terminal rows with a bounded skip-locked batch", () => {
-    expect(service).toContain("status IN ('succeeded', 'rejected')");
-    expect(service).toContain("expires_at <= transaction_timestamp()");
-    expect(service).toContain("FOR UPDATE SKIP LOCKED");
-    expect(service).toContain("LIMIT $1");
-    expect(service).not.toMatch(/status IN \('succeeded', 'rejected', 'dead'\)/);
+    expect(service).toContain("purgeExpiredFinancialCommandResultsInRepository(dbPool, batchSize)");
+    expect(repository).toContain("status IN ('succeeded', 'rejected')");
+    expect(repository).toContain("expires_at <= transaction_timestamp()");
+    expect(repository).toContain("FOR UPDATE SKIP LOCKED");
+    expect(repository).toContain("LIMIT $1");
+    expect(repository).not.toMatch(/status IN \('succeeded', 'rejected', 'dead'\)/);
   });
 
   it("copies recovery evidence inside PostgreSQL without timestamp round-tripping", () => {
     const recoveryWriter = service.slice(
       service.indexOf("INSERT INTO public.financial_command_recoveries"),
-      service.indexOf("const updated = await client.query"),
+      service.indexOf("const { rearmDeadFinancialCommandResultInRepository }"),
     );
     expect(recoveryWriter).toContain("SELECT");
     expect(recoveryWriter).toContain("command.completed_at");

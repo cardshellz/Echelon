@@ -1,6 +1,9 @@
+import { rfqWorkListQuerySchema, rfqWorkListResponseSchema, type RfqWorkListLine, type RfqWorkListItem, type RfqWorkListResponse } from "@shared/procurement/rfq-work-list";
+import { readRfqWorkListEvidence, type RfqWorkListDatabase } from "./rfq-work-list.repository";
+import { summarizeRfqHandoff } from "./domain/rfq-work-list";
 import { PendingPurchaseSourcingReviewError, sourcingScopesOverlap, assertRfqSupplySnapshotCurrent, isActiveRfqReservation, rfqPendingSourcingPieces } from "./domain/rfq-sourcing-reservation";
 import { loadPendingPurchaseSourcingReservations, type PendingPurchaseSourcingReservation, loadLinkedRfqPurchases, loadRecommendationRunDates } from "./rfq-sourcing-reservation.repository";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import {
   products as productsTable,
@@ -8,7 +11,6 @@ import {
   requestForQuoteLines as requestForQuoteLinesTable,
   requestForQuotes as requestForQuotesTable,
   vendorProducts as vendorProductsTable,
-  vendors as vendorsTable,
 } from "@shared/schema";
 import type { PurchasingRecommendationItem } from "./purchasing-recommendation.engine";
 import type { PurchaseReceiveSelection } from "@shared/procurement/purchase-receive-selection";
@@ -204,206 +206,28 @@ export function buildPurchasingRfqQueue(
     });
 }
 
-// ---------------------------------------------------------------------------
-// Read-only RFQ tracking list (workbench, design surface 05).
-//
-// Lists created procurement.request_for_quotes rows newest-first with their
-// lines joined to the immutable recommendation evidence (SKU / product name /
-// recommended pieces), the vendor-product mapping (vendor SKU), and the vendor
-// name. Creation is owned by the Order Builder; quote revision capture and
-// draft-PO conversion are owned by rfq-workflow.service.ts. This list remains
-// a bounded read, preserving the legacy quote fields and every stored status.
-// ---------------------------------------------------------------------------
-
-export const RFQ_LIST_DEFAULT_LIMIT = 25;
-export const RFQ_LIST_MAX_LIMIT = 100;
-
-/**
- * Bound an untrusted `limit` query param: non-numeric, zero, or negative
- * values fall back to RFQ_LIST_DEFAULT_LIMIT; anything above
- * RFQ_LIST_MAX_LIMIT is capped to it.
- */
+// The list owns a validated read projection; creation and commands remain with
+// their existing RFQ/PO owners.
+export { RFQ_LIST_DEFAULT_LIMIT, RFQ_LIST_MAX_LIMIT } from "@shared/procurement/rfq-work-list";
+export type RequestForQuoteListLine = RfqWorkListLine;
+export type RequestForQuoteListItem = RfqWorkListItem;
+export type RequestForQuoteListResult = RfqWorkListResponse;
 export function parseRfqListLimit(value: unknown): number {
-  const parsed = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return RFQ_LIST_DEFAULT_LIMIT;
-  return Math.min(parsed, RFQ_LIST_MAX_LIMIT);
+  return rfqWorkListQuerySchema.parse(value === undefined ? {} : { limit: value }).limit;
 }
-
-export type RequestForQuoteListLine = {
-  id: number;
-  rfqId: number;
-  recommendationLineId: number;
-  recommendationRunId: number | null;
-  vendorProductId: number;
-  vendorSku: string | null;
-  sku: string;
-  productName: string;
-  status: string;
-  requestedPieces: number;
-  recommendedPieces: number | null;
-  purchaseUom: string | null;
-  piecesPerPurchaseUom: number | null;
-  quantityOverrideReason: string | null;
-  allocationOverrideReason: string | null;
-  allocationOverrideApprovedBy: string | null;
-  allocationOverrideApprovedAt: Date | string | null;
-  allocationOverrideBaselinePieces: number | null;
-  allocationOverrideExcessPieces: number | null;
-  // Quote compatibility mirrors. Immutable revisions are available through
-  // the workflow detail and history endpoints; amounts remain integer mills.
-  quotedPieces: number | null;
-  quotedUnitCostMills: number | null;
-  quoteReference: string | null;
-  quoteValidUntil: string | null;
-  quotedAt: Date | string | null;
-};
-
-export type RequestForQuoteListItem = {
-  id: number;
-  rfqNumber: string;
-  status: string;
-  vendorId: number;
-  vendorName: string | null;
-  requestNote: string | null;
-  currency: string;
-  responseDueDate: string | null;
-  createdBy: string | null;
-  createdAt: Date | string;
-  updatedAt: Date | string;
-  sentAt: Date | string | null;
-  respondedAt: Date | string | null;
-  cancelledAt: Date | string | null;
-  lineCount: number;
-  requestedPiecesTotal: number;
-  lines: RequestForQuoteListLine[];
-};
-
-export type RequestForQuoteListResult = {
-  limit: number;
-  count: number;
-  /** Status → row count over the returned page (not the whole table). */
-  statusCounts: Record<string, number>;
-  rfqs: RequestForQuoteListItem[];
-};
-
-export async function listRequestForQuotes(
-  dbClient: any,
-  options: { limit?: unknown } = {},
-): Promise<RequestForQuoteListResult> {
-  const limit = parseRfqListLimit(options.limit);
-
-  const rfqRows = await dbClient.select().from(requestForQuotesTable)
-    .orderBy(desc(requestForQuotesTable.createdAt), desc(requestForQuotesTable.id))
-    .limit(limit);
-
-  if (rfqRows.length === 0) {
-    return { limit, count: 0, statusCounts: {}, rfqs: [] };
-  }
-
-  const rfqIds = rfqRows.map((rfq: any) => Number(rfq.id));
-  const lineRows = await dbClient.select({
-    id: requestForQuoteLinesTable.id,
-    rfqId: requestForQuoteLinesTable.rfqId,
-    recommendationLineId: requestForQuoteLinesTable.recommendationLineId,
-    recommendationRunId: purchaseRecommendationLinesTable.runId,
-    vendorProductId: requestForQuoteLinesTable.vendorProductId,
-    vendorSku: vendorProductsTable.vendorSku,
-    sku: purchaseRecommendationLinesTable.sku,
-    productName: purchaseRecommendationLinesTable.productName,
-    status: requestForQuoteLinesTable.status,
-    requestedPieces: requestForQuoteLinesTable.requestedPieces,
-    recommendedPieces: purchaseRecommendationLinesTable.recommendedPieces,
-    purchaseUom: requestForQuoteLinesTable.purchaseUom,
-    piecesPerPurchaseUom: requestForQuoteLinesTable.piecesPerPurchaseUom,
-    quantityOverrideReason: requestForQuoteLinesTable.quantityOverrideReason,
-    allocationOverrideReason: requestForQuoteLinesTable.allocationOverrideReason,
-    allocationOverrideApprovedBy: requestForQuoteLinesTable.allocationOverrideApprovedBy,
-    allocationOverrideApprovedAt: requestForQuoteLinesTable.allocationOverrideApprovedAt,
-    allocationOverrideBaselinePieces: requestForQuoteLinesTable.allocationOverrideBaselinePieces,
-    allocationOverrideExcessPieces: requestForQuoteLinesTable.allocationOverrideExcessPieces,
-    quotedPieces: requestForQuoteLinesTable.quotedPieces,
-    quotedUnitCostMills: requestForQuoteLinesTable.quotedUnitCostMills,
-    quoteReference: requestForQuoteLinesTable.quoteReference,
-    quoteValidUntil: requestForQuoteLinesTable.quoteValidUntil,
-    quotedAt: requestForQuoteLinesTable.quotedAt,
-  }).from(requestForQuoteLinesTable)
-    .innerJoin(
-      purchaseRecommendationLinesTable,
-      eq(requestForQuoteLinesTable.recommendationLineId, purchaseRecommendationLinesTable.id),
-    )
-    .leftJoin(vendorProductsTable, eq(requestForQuoteLinesTable.vendorProductId, vendorProductsTable.id))
-    .where(inArray(requestForQuoteLinesTable.rfqId, rfqIds))
-    .orderBy(requestForQuoteLinesTable.rfqId, requestForQuoteLinesTable.id);
-
-  const vendorIds = Array.from(new Set<number>(rfqRows.map((rfq: any) => Number(rfq.vendorId))));
-  const vendorRows = vendorIds.length === 0 ? [] : await dbClient.select({
-    id: vendorsTable.id,
-    name: vendorsTable.name,
-  }).from(vendorsTable).where(inArray(vendorsTable.id, vendorIds));
-  const vendorNameById = new Map<number, string>(
-    vendorRows.map((vendor: any) => [Number(vendor.id), String(vendor.name)]),
-  );
-
-  const linesByRfqId = new Map<number, RequestForQuoteListLine[]>();
-  for (const line of lineRows) {
-    const rfqId = Number(line.rfqId);
-    const group = linesByRfqId.get(rfqId) ?? [];
-    group.push({
-      id: Number(line.id),
-      rfqId,
-      recommendationLineId: Number(line.recommendationLineId),
-      recommendationRunId: line.recommendationRunId == null ? null : Number(line.recommendationRunId),
-      vendorProductId: Number(line.vendorProductId),
-      vendorSku: line.vendorSku ?? null,
-      sku: String(line.sku),
-      productName: String(line.productName),
-      status: String(line.status),
-      requestedPieces: Number(line.requestedPieces),
-      recommendedPieces: line.recommendedPieces == null ? null : Number(line.recommendedPieces),
-      purchaseUom: line.purchaseUom ?? null,
-      piecesPerPurchaseUom: line.piecesPerPurchaseUom == null ? null : Number(line.piecesPerPurchaseUom),
-      quantityOverrideReason: line.quantityOverrideReason ?? null,
-      allocationOverrideReason: line.allocationOverrideReason ?? null,
-      allocationOverrideApprovedBy: line.allocationOverrideApprovedBy ?? null,
-      allocationOverrideApprovedAt: line.allocationOverrideApprovedAt ?? null,
-      allocationOverrideBaselinePieces:
-        line.allocationOverrideBaselinePieces == null ? null : Number(line.allocationOverrideBaselinePieces),
-      allocationOverrideExcessPieces:
-        line.allocationOverrideExcessPieces == null ? null : Number(line.allocationOverrideExcessPieces),
-      quotedPieces: line.quotedPieces == null ? null : Number(line.quotedPieces),
-      quotedUnitCostMills: line.quotedUnitCostMills == null ? null : Number(line.quotedUnitCostMills),
-      quoteReference: line.quoteReference ?? null,
-      quoteValidUntil: line.quoteValidUntil ?? null,
-      quotedAt: line.quotedAt ?? null,
-    });
-    linesByRfqId.set(rfqId, group);
-  }
-
+export async function listRequestForQuotes(database: RfqWorkListDatabase, options: unknown = {}): Promise<RfqWorkListResponse> {
+  const query = rfqWorkListQuerySchema.parse(options);
+  const evidence = await readRfqWorkListEvidence(database, query);
   const statusCounts: Record<string, number> = {};
-  const rfqs: RequestForQuoteListItem[] = rfqRows.map((rfq: any) => {
-    const status = String(rfq.status);
-    statusCounts[status] = (statusCounts[status] ?? 0) + 1;
-    const lines = linesByRfqId.get(Number(rfq.id)) ?? [];
-    return {
-      id: Number(rfq.id),
-      rfqNumber: String(rfq.rfqNumber),
-      status,
-      vendorId: Number(rfq.vendorId),
-      vendorName: vendorNameById.get(Number(rfq.vendorId)) ?? null,
-      requestNote: rfq.requestNote ?? null,
-      currency: String(rfq.currency ?? "USD"),
-      responseDueDate: rfq.responseDueDate ?? null,
-      createdBy: rfq.createdBy ?? null,
-      createdAt: rfq.createdAt,
-      updatedAt: rfq.updatedAt,
-      sentAt: rfq.sentAt ?? null,
-      respondedAt: rfq.respondedAt ?? null,
-      cancelledAt: rfq.cancelledAt ?? null,
-      lineCount: lines.length,
-      requestedPiecesTotal: lines.reduce((sum, line) => sum + line.requestedPieces, 0),
-      lines,
-    };
+  const rfqs = evidence.headers.map(header => {
+    const lines = evidence.lines.filter(line => line.rfqId === header.id);
+    const totalPieces = lines.reduce((total, line) => total + BigInt(line.requestedPieces), BigInt(0));
+    if (totalPieces > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("RFQ requested piece total exceeds the supported exact range");
+    statusCounts[header.status] = (statusCounts[header.status] ?? 0) + 1;
+    return { ...header, lines, lineCount: lines.length, requestedPiecesTotal: Number(totalPieces),
+      handoff: summarizeRfqHandoff(header, lines, evidence.links.filter(link => link.rfqId === header.id || link.actualRfqId === header.id)) };
   });
-
-  return { limit, count: rfqs.length, statusCounts, rfqs };
+  return rfqWorkListResponseSchema.parse({ limit: query.limit, count: rfqs.length, statusCounts, rfqs,
+    page: { total: evidence.total, limit: query.limit, offset: query.offset,
+      nextOffset: query.offset + rfqs.length < evidence.total ? query.offset + rfqs.length : null } });
 }

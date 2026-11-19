@@ -538,6 +538,7 @@ class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
         retryable: true,
         lastErrorCode: null,
         lastErrorMessage: null,
+        lineItems: [],
         createdAt: now,
         updatedAt: now,
         completedAt: now,
@@ -603,7 +604,7 @@ class FakeOrderOpsProcessor implements DropshipOrderOpsProcessor {
 
   async processIntake(
     input: Parameters<DropshipOrderOpsProcessor["processIntake"]>[0],
-  ): ReturnType<DropshipOrderOpsProcessor["processIntake"]> {
+  ): Promise<Awaited<ReturnType<DropshipOrderOpsProcessor["processIntake"]>>> {
     this.lastInput = input;
     return {
       outcome: "accepted",

@@ -87,6 +87,7 @@ export const customerReturnFlowReviewInputSchema = z
         z
           .object({
             dimensions: customerReturnDimensionsSchema,
+            packedWeightGrams: customerReturnParcelWeightSchema.optional(),
             originalBoxId: z.string().min(1).max(255).nullable(),
             items: z
               .array(z.object({ lineId, quantity: positiveQuantity }).strict())

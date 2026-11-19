@@ -1,3 +1,4 @@
+import { readIntegerMills } from "@shared/money-read";
 /**
  * Auto-Draft Job
  *
@@ -9,41 +10,31 @@
 import { db } from "../db";
 import { normalizePoLinePricing } from "@shared/utils/po-line-pricing";
 import { inventoryStorage } from "../modules/inventory";
-import { runStaleAutoDraftPoEscalationCheck } from "../modules/procurement/auto-draft-po-escalation.service";
-import { procurementMethods } from "../modules/procurement/procurement.storage";
+import { procurementMethods } from "../modules/procurement/runtime-services.api";
 import {
-  generatePurchasingRecommendations,
-  passesAutoDraftApprovalPolicy,
-  type AutoDraftRecommendationSettings,
-  type PurchasingRecommendationItem,
-} from "../modules/procurement/purchasing-recommendation.engine";
-import { loadPurchaseRecommendationSnapshotAnalysis } from "../modules/procurement/purchase-recommendation-analysis.service";
-import { createDrizzleAutoDraftRunLifecycleRepository } from "../modules/procurement/auto-draft-run-lifecycle.repository";
-import {
+  buildPurchaseRecommendationRunInput,
+  buildPurchasingRecommendationRunDetail,
   createAutoDraftRunLifecycleService,
+  createAutomaticRfqDraftService,
+  createDrizzleAutoDraftRunLifecycleRepository,
+  createDrizzleRecommendationPoHandoffRepository,
+  createPurchaseRecommendationSnapshotService,
+  createRecommendationPoHandoffService,
+  generatePurchasingRecommendations,
+  loadPurchaseRecommendationSnapshotAnalysis,
+  normalizeAutomaticRfqDraftPolicy,
+  passesAutoDraftApprovalPolicy,
+  runStaleAutoDraftPoEscalationCheck,
+  summarizeAutomaticRfqDraftResult,
+  type AutoDraftRecommendationSettings,
   type AutoDraftRunLifecycleService,
   type AutoDraftRunRecord,
-} from "../modules/procurement/auto-draft-run-lifecycle.service";
-import {
-  buildPurchasingRecommendationRunDetail,
-  type PurchasingRecommendationRunPoMutation,
-} from "../modules/procurement/purchasing-recommendation.run-detail";
-import { createDrizzleRecommendationPoHandoffRepository } from "../modules/procurement/recommendation-po-handoff.repository";
-import {
-  createRecommendationPoHandoffService,
   type AutomaticRecommendationPoHandoffItem,
   type AutomaticRecommendationPoHandoffResult,
   type CreatedRecommendationPurchaseOrder,
-} from "../modules/procurement/recommendation-po-handoff.service";
-import {
-  buildPurchaseRecommendationRunInput,
-  createPurchaseRecommendationSnapshotService,
-} from "../modules/procurement/purchase-recommendation-snapshot.service";
-import {
-  createAutomaticRfqDraftService,
-  normalizeAutomaticRfqDraftPolicy,
-  summarizeAutomaticRfqDraftResult,
-} from "../modules/procurement/automatic-rfq-draft.service";
+  type PurchasingRecommendationItem,
+  type PurchasingRecommendationRunPoMutation,
+} from "../modules/procurement/planning-and-pipeline-jobs.api";
 
 export interface AutoDraftOptions {
   triggeredBy: "scheduler" | "manual";
@@ -250,7 +241,7 @@ function toAutomaticHandoffItem(
     throw new RangeError(`Recommendation ${item.recommendationId} requires supplier quote-basis review`);
   }
   const quotedUnitCostMills = item.supplierBasis.quotedUnitCostMills;
-  if (!Number.isSafeInteger(quotedUnitCostMills) || Number(quotedUnitCostMills) < 0) {
+  if (!Number.isSafeInteger(quotedUnitCostMills) || readIntegerMills(quotedUnitCostMills, "quotedUnitCostMills", true) < 0) {
     throw new RangeError(`Recommendation ${item.recommendationId} has no valid original supplier quote`);
   }
   const quotedAt = item.supplierBasis.quotedAt
@@ -287,7 +278,7 @@ function toAutomaticHandoffItem(
     estimatedCostCents: item.estimatedCostCents,
     pricingBasis: item.supplierBasis.pricingBasis,
     purchaseUom: item.supplierBasis.purchaseUom,
-    quotedUnitCostMills: Number(quotedUnitCostMills),
+    quotedUnitCostMills: readIntegerMills(quotedUnitCostMills, "quotedUnitCostMills", true),
     piecesPerPurchaseUom: item.supplierBasis.piecesPerPurchaseUom,
     quoteReference: item.supplierBasis.quoteReference,
     quotedAt,

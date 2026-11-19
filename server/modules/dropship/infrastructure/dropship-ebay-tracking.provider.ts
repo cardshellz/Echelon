@@ -11,13 +11,13 @@ import type {
 import {
   EbayApiClient,
   EbayFulfillmentIdempotencyConflictError,
-} from "../../channels/adapters/ebay/ebay-api.client";
-import { buildEbayShippingFulfillmentPath, normalizeEbayTrackingNumber } from "../../channels/adapters/ebay/ebay-fulfillment.util";
-import { mapCarrierToEbay } from "../../channels/adapters/ebay/ebay-category-map";
+} from "../../channels/ebay-connector.api";
+import { buildEbayShippingFulfillmentPath, normalizeEbayTrackingNumber } from "../../channels/ebay-connector.api";
+import { mapCarrierToEbay } from "../../channels/ebay-connector.api";
 import type {
   EbayShippingFulfillmentRequest,
   EbayShippingFulfillmentResponse,
-} from "../../channels/adapters/ebay/ebay-types";
+} from "../../channels/ebay-connector.api";
 import { ChannelFulfillmentProviderError } from "../../channels/channel-fulfillment-provider.error";
 import {
   isEbayResourceAuthFailureStatus,

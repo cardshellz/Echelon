@@ -1,3 +1,4 @@
+import { registerReceivingEntryRoutes } from "./receiving-entry.routes";
 import { ReceivingError } from "./receiving.service";
 import { registerReceiptReversalRoutes } from "./receipt-reversal.routes";
 import { registerReceivingQuarantineRoutes } from "./receiving-quarantine.routes";
@@ -9,9 +10,18 @@ import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
 import { ordersStorage } from "../orders";
 const storage = { ...procurementStorage, ...catalogStorage, ...warehouseStorage, ...inventoryStorage, ...ordersStorage };
-import { requirePermission, requireAuth } from "../../routes/middleware";
+import { requirePermission, requireAnyPermission, type PermissionGrant } from "../../routes/middleware";
+
+export const RECEIVING_READ_GRANTS: readonly PermissionGrant[] = [
+  ["inventory", "view"],
+  ["inventory", "adjust"],
+  ["purchasing", "view"],
+] as const;
+
+export const DEFAULT_RECEIVING_LIST_LIMIT = 500;
+export const MAX_RECEIVING_LIST_LIMIT = 500;
 import { requireIdempotency } from "../../middleware/idempotency";
-import * as notificationService from "../notifications/notifications.service";
+import * as notificationService from "../notifications/in-app-notifications.api";
 import { millsToCents, centsToMills } from "@shared/utils/money";
 
 /**
@@ -64,20 +74,43 @@ function resolveUnitCostPair(
 }
 
 export function registerReceivingRoutes(app: Express) {
+  const requireReceivingRead = requireAnyPermission(...RECEIVING_READ_GRANTS);
+  registerReceivingEntryRoutes(app);
   registerReceivingQuarantineRoutes(app);
   registerReceiptReversalRoutes(app);
   // ===== RECEIVING ORDERS API =====
   
-  app.get("/api/receiving", requireAuth, async (req, res) => {
+  app.get("/api/receiving", requireReceivingRead, async (req, res) => {
     try {
       const status = req.query.status as string | undefined;
-      const orders = status 
-        ? await storage.getReceivingOrdersByStatus(status)
-        : await storage.getAllReceivingOrders();
+      const hasPagination = req.query.limit !== undefined || req.query.offset !== undefined;
+      const parsedLimit = req.query.limit !== undefined ? parseInt(String(req.query.limit), 10) : DEFAULT_RECEIVING_LIST_LIMIT;
+      const parsedOffset = req.query.offset !== undefined ? parseInt(String(req.query.offset), 10) : 0;
+      const limit = Number.isFinite(parsedLimit) && parsedLimit > 0
+        ? Math.min(parsedLimit, MAX_RECEIVING_LIST_LIMIT)
+        : DEFAULT_RECEIVING_LIST_LIMIT;
+      const offset = Number.isFinite(parsedOffset) && parsedOffset > 0 ? parsedOffset : 0;
+
+      const rawOrders = status
+        ? hasPagination
+          ? await storage.getReceivingOrdersByStatus(status, { limit, offset })
+          : await storage.getReceivingOrdersByStatus(status)
+        : hasPagination
+          ? await storage.getAllReceivingOrders({ limit, offset })
+          : await storage.getAllReceivingOrders();
+      const orders = rawOrders.slice(0, limit);
       
-      // Enrich with vendor info
-      const vendors = await storage.getAllVendors();
-      const vendorMap = new Map(vendors.map(v => [v.id, v]));
+      // Enrich with vendor info (batch-fetch distinct vendorIds when supported)
+      const vendorIds = Array.from(
+        new Set(orders.map(o => o.vendorId).filter((id): id is number => typeof id === "number" && id > 0)),
+      );
+      const vendors =
+        typeof (storage as any).getVendorsByIds === "function"
+          ? vendorIds.length > 0
+            ? await (storage as any).getVendorsByIds(vendorIds)
+            : []
+          : await storage.getAllVendors();
+      const vendorMap = new Map(vendors.map((v: any) => [v.id, v]));
       
       const enriched = orders.map(order => ({
         ...order,
@@ -91,7 +124,7 @@ export function registerReceivingRoutes(app: Express) {
     }
   });
   
-  app.get("/api/receiving/:id", requireAuth, async (req, res) => {
+  app.get("/api/receiving/:id", requireReceivingRead, async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       console.log("[RECEIVING] Fetching order id:", id);
@@ -120,29 +153,6 @@ export function registerReceivingRoutes(app: Express) {
       console.error("[RECEIVING] Error fetching receiving order:", error?.message || error);
       console.error("[RECEIVING] Stack:", error?.stack);
       res.status(500).json({ error: "Failed to fetch receiving order", details: error?.message });
-    }
-  });
-  
-  app.post("/api/receiving", requirePermission("inventory", "adjust"), async (req, res) => {
-    try {
-      const { sourceType, vendorId, warehouseId, poNumber, asnNumber, expectedDate, notes } = req.body;
-      const { receiving: rcvService } = req.app.locals.services;
-      const order = await rcvService.createOrder({
-        sourceType,
-        vendorId,
-        warehouseId,
-        poNumber,
-        asnNumber,
-        expectedDate,
-        notes,
-      }, req.session.user?.id || null);
-      
-      res.status(201).json(order);
-    } catch (error: any) {
-      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error creating receiving order:", error?.message || error);
-      if (error?.stack) console.error(error.stack);
-      res.status(500).json({ error: "Failed to create receiving order", details: error?.message });
     }
   });
   
@@ -232,7 +242,7 @@ export function registerReceivingRoutes(app: Express) {
   
   // ===== RECEIVING LINES API =====
   
-  app.get("/api/receiving/:orderId/lines", requireAuth, async (req, res) => {
+  app.get("/api/receiving/:orderId/lines", requireReceivingRead, async (req, res) => {
     try {
       const orderId = parseInt(req.params.orderId);
       const lines = await storage.getReceivingLines(orderId);
@@ -240,59 +250,6 @@ export function registerReceivingRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching receiving lines:", error);
       res.status(500).json({ error: "Failed to fetch receiving lines" });
-    }
-  });
-  
-  app.post("/api/receiving/:orderId/lines", requirePermission("inventory", "adjust"), async (req, res) => {
-    try {
-      const orderId = parseInt(req.params.orderId);
-      const {
-        sku,
-        productName,
-        expectedQty,
-        receivedQty,
-        productVariantId,
-        expectedUnitsPerVariant,
-        productId,
-        barcode,
-        unitCost,
-        unit_cost_mills,
-        unitCostMills,
-        putawayLocationId,
-      } = req.body;
-
-      // Accept both snake_case (API idiom) and camelCase (internal idiom).
-      // Mills is authoritative when provided; cents is either independently
-      // provided or derived. Disagreeing pairs are rejected to match the PO
-      // contract (purchasing.service.validateCreateWithLinesInput).
-      const resolved = resolveUnitCostPair(
-        unit_cost_mills ?? unitCostMills,
-        unitCost,
-      );
-      if (resolved.error) {
-        return res.status(400).json({ error: resolved.error });
-      }
-
-      const { receiving: rcvService } = req.app.locals.services;
-      const updatedOrder = await rcvService.addLine(orderId, {
-        sku: sku || null,
-        productName: productName || null,
-        expectedQty: expectedQty ?? 0,
-        receivedQty: receivedQty ?? 0,
-        damagedQty: 0,
-        productVariantId: productVariantId || null,
-        expectedUnitsPerVariant,
-        productId: productId || null,
-        barcode: barcode || null,
-        unitCost: resolved.cents,
-        unitCostMills: resolved.mills,
-        putawayLocationId: putawayLocationId || null,
-      });
-      res.status(201).json(updatedOrder);
-    } catch (error: any) {
-      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
-      console.error("Error creating receiving line:", error);
-      res.status(500).json({ error: "Failed to create receiving line" });
     }
   });
   
@@ -431,7 +388,7 @@ export function registerReceivingRoutes(app: Express) {
   // Immutable reversal history; writes use the durable reversal command routes.
   app.get(
     "/api/procurement/receiving-orders/:id/reversals",
-    requireAuth,
+    requireReceivingRead,
     async (req, res) => {
       try {
         const { receiptReversal } = req.app.locals.services;
@@ -448,7 +405,7 @@ export function registerReceivingRoutes(app: Express) {
   // receive UI; the close path persists the same warnings as PO exceptions.
   app.get(
     "/api/procurement/receiving-orders/:id/validation-warnings",
-    requireAuth,
+    requireReceivingRead,
     async (req, res) => {
       try {
         const { receiveValidation } = req.app.locals.services;

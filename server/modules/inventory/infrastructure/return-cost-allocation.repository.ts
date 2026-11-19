@@ -8,7 +8,7 @@ import { remainingCostAllocationIntervals, referenceLotQuantityCost } from "./co
 import { sliceCostQuantityIntervals } from "../domain/cost-quantity-intervals";
 
 export interface ReturnCostAllocationInput {
-  wmsOrderId: number;
+  wmsOrderId: number | null;
   wmsOrderItemId: number | null;
   productVariantId: number;
   quantity: number;
@@ -32,6 +32,7 @@ type ReturnCostExecutor = CostEvidenceTransaction & { select: (...args: any[]) =
  * enter the WMS COGS lookup; repeated SKU lines remain distinct.
  */
 export async function allocateReturnCosts(tx: ReturnCostExecutor, input: ReturnCostAllocationInput): Promise<ReturnCostLayer[]> {
+  if (input.wmsOrderId === null && input.wmsOrderItemId !== null) throw new CostEvidenceError("RETURN_COST_ALLOCATION_CONFLICT", "An original item cannot exist without its original order.");
   for (const [field,value] of Object.entries({wmsOrderId:input.wmsOrderId,wmsOrderItemId:input.wmsOrderItemId,
     productVariantId:input.productVariantId,quantity:input.quantity})) if (value !== null) costInteger(value,field,1);
   const result = input.wmsOrderItemId === null ? { rows: [] } : await tx.execute(sql`

@@ -1,5 +1,6 @@
 import { DropshipError } from "../domain/errors";
 import { EbayListingSyncError } from "../../channels/ebay-listing-sync.domain";
+import { providerReadDiagnosticFromError, providerReadShouldRetry } from "@shared/channel-provider-read";
 
 /**
  * Shared eBay connector refusals that a retry cannot clear: a second attempt reads
@@ -10,7 +11,8 @@ import { EbayListingSyncError } from "../../channels/ebay-listing-sync.domain";
  * This is an allow-list of PERMANENT codes on purpose. Any other code, including
  * the transient identity-read failures (EBAY_REGISTRATION_READ_TIMEOUT,
  * EBAY_REGISTRATION_READ_FAILED, EBAY_PROVIDER_RATE_LIMITED) and any code the
- * connector adds later, stays retryable as it was before this translation.
+ * connector adds later, stays retryable as it was before this translation unless
+ * its validated provider-read diagnostic classifies the refusal more precisely.
  *
  * EBAY_AUTH_REQUIRED is deliberately NOT here: see
  * EBAY_CONNECTOR_ACCESS_TOKEN_REJECTED_CODE below.
@@ -46,9 +48,14 @@ export const EBAY_CONNECTOR_ACCESS_TOKEN_REJECTED_STATUS = 401;
  * The shared code is kept verbatim: it is already namespaced and names the check.
  */
 export function dropshipErrorFromEbayConnector(error: EbayListingSyncError): DropshipError {
+  const providerRead = providerReadDiagnosticFromError(error);
   return new DropshipError(error.code, error.message, {
-    retryable: !PERMANENT_EBAY_CONNECTOR_CODES.has(error.code),
+    // The worker owns its attempt budget. Keep the shared read classification
+    // and diagnostics through translation; a rejected token uses its refresh owner.
+    retryable: error.code === EBAY_CONNECTOR_ACCESS_TOKEN_REJECTED_CODE
+      || (providerRead ? providerReadShouldRetry(providerRead, 0) : !PERMANENT_EBAY_CONNECTOR_CODES.has(error.code)),
     source: "ebay_listing_connector",
+    ...(providerRead ? { providerRead } : {}),
   });
 }
 

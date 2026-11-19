@@ -1,8 +1,9 @@
-import { and, asc, eq, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import {
   channelConnections,
   channelProductIdentities,
   channelFeeds,
+  channelVariantOverrides,
   channelListings,
   channels,
   products,
@@ -18,13 +19,23 @@ import {
   type ImportedShopifyVariantBinding,
   type ShopifyProductMappingSource,
   type ShopifyProductMappingSummary,
+  type ShopifyVariantDelistResolution,
   type ShopifyVariantMappingResolution,
   type VerifiedShopifyVariantIdentity,
 } from "./shopify-product-mapping.domain";
 import { enqueueShippingGroupMetafieldWrite } from "./shipping-group-sync";
-import { upsertChannelProductIdentity } from "../channels/channel-product-identity.repository";
+import { upsertChannelProductIdentity } from "../channels/product-identity.api";
+import { markChannelVariantNotListed } from "../channels/channel-variant-listing.api";
+import {
+  disableDelistedShopifyVariantFeedAndListingInTx,
+  upsertRepairedShopifyVariantFeedAndListingInTx,
+} from "../channels/channel-feed-listing-mutations.api";
+import { retryPublicationSelectionWrite } from "../inventory-planning/publication-selection-retry";
 
 const DEFAULT_SHOPIFY_API_VERSION = "2024-01";
+/** Recorded on a store listing whose Shopify variant was deleted in Shopify. */
+const DELETED_SHOPIFY_VARIANT_SYNC_ERROR =
+  "The linked Shopify variant was deleted; this SKU is not listed on this store";
 const SHOPIFY_REQUEST_TIMEOUT_MS = 10_000;
 const SHOPIFY_VARIANT_PAGE_LIMIT = 250;
 const SHOPIFY_VARIANT_MAX_PAGES = 20;
@@ -36,6 +47,7 @@ type QueryClient = typeof db | TransactionClient;
 interface LoadedMapping {
   summary: ShopifyProductMappingSummary;
   shippingGroupCode: string | null;
+  skuEvidence: Array<{ variantId: number; feedSku: string | null; listingSku: string | null }>;
 }
 
 export interface VerifiedShopifyProduct {
@@ -52,6 +64,8 @@ export interface ShopifyProductMappingRepairResult {
     title: string | null;
   };
   mappedVariantCount: number;
+  /** SKUs recorded as not listed on this store because Shopify deleted their variant. */
+  delistedVariants: ShopifyVariantDelistResolution[];
   updatedFeedCount: number;
   createdFeedCount: number;
   updatedListingCount: number;
@@ -87,15 +101,12 @@ async function resolveShopifyChannel(
       name: channels.name,
     })
     .from(channels)
-    .where(
-      requestedChannelId
-        ? and(eq(channels.id, requestedChannelId), eq(channels.provider, "shopify"))
-        : eq(channels.provider, "shopify"),
-    )
+    .where(eq(channels.provider, "shopify"))
     .orderBy(sql`CASE WHEN ${channels.isDefault} = 1 THEN 0 ELSE 1 END`, asc(channels.id))
-    .limit(1);
+    ;
 
-  if (!rows[0]) {
+  const selected = requestedChannelId ? rows.find(row => row.id === requestedChannelId) : rows[0];
+  if (!selected) {
     throw new ShopifyProductMappingError(
       "SHOPIFY_CHANNEL_NOT_CONFIGURED",
       requestedChannelId
@@ -104,7 +115,7 @@ async function resolveShopifyChannel(
       400,
     );
   }
-  return rows[0];
+  return { ...selected, isPrimary: selected.id === rows[0].id };
 }
 
 async function loadMapping(
@@ -147,9 +158,11 @@ async function loadMapping(
       feedProductId: channelFeeds.channelProductId,
       feedVariantId: channelFeeds.channelVariantId,
       feedInventoryItemId: channelFeeds.channelInventoryItemId,
+      feedSku: channelFeeds.channelSku,
       listingId: channelListings.id,
       listingProductId: channelListings.externalProductId,
       listingVariantId: channelListings.externalVariantId,
+      listingSku: channelListings.externalSku,
     })
     .from(productVariants)
     .leftJoin(
@@ -167,9 +180,19 @@ async function loadMapping(
         eq(channelListings.channelId, channel.id),
       ),
     )
+    .leftJoin(
+      channelVariantOverrides,
+      and(
+        eq(channelVariantOverrides.productVariantId, productVariants.id),
+        eq(channelVariantOverrides.channelId, channel.id),
+      ),
+    )
     .where(and(
       eq(productVariants.productId, product.id),
       eq(productVariants.salesEligibility, "sellable"),
+      // A SKU marked not listed on this store has no Shopify mapping to keep
+      // consistent, exactly like an internal-only SKU.
+      sql`COALESCE(${channelVariantOverrides.isListed}, 1) <> 0`,
     ))
     .orderBy(asc(productVariants.id));
 
@@ -179,7 +202,7 @@ async function loadMapping(
     productId: product.id,
     productName: product.name,
     productSku: product.sku,
-    catalogProductId: product.shopifyProductId,
+    catalogProductId: channel.isPrimary ? product.shopifyProductId : productIdentity?.externalProductId ?? null,
     channelProductId: productIdentity?.externalProductId ?? null,
     channel,
     variants: rows.map((row) => ({
@@ -187,8 +210,8 @@ async function loadMapping(
       sku: row.sku,
       isActive: row.isActive,
       catalogBarcode: row.catalogBarcode,
-      catalogVariantId: row.catalogVariantId,
-      catalogInventoryItemId: row.catalogInventoryItemId,
+      catalogVariantId: channel.isPrimary ? row.catalogVariantId : row.feedVariantId,
+      catalogInventoryItemId: channel.isPrimary ? row.catalogInventoryItemId : row.feedInventoryItemId,
       feedId: row.feedId,
       feedIsActive: row.feedIsActive === null ? null : row.feedIsActive === 1,
       feedProductId: row.feedProductId,
@@ -203,6 +226,7 @@ async function loadMapping(
   return {
     summary: buildShopifyProductMappingSummary(source),
     shippingGroupCode: product.shippingGroupCode,
+    skuEvidence: rows.map(row => ({ variantId: row.variantId, feedSku: row.feedSku, listingSku: row.listingSku })),
   };
 }
 
@@ -458,12 +482,19 @@ function mappingRequiresWrite(
   summary: ShopifyProductMappingSummary,
   targetProductId: string,
   variantMappings: ShopifyVariantMappingResolution[],
+  skuEvidence: LoadedMapping["skuEvidence"],
 ): boolean {
   if (summary.catalogProductId !== targetProductId || summary.status !== "consistent") return true;
   const variantsById = new Map(summary.variants.map((variant) => [variant.variantId, variant]));
+  const skusById = new Map(skuEvidence.map(item => [item.variantId, item]));
   return variantMappings.some((mapping) => {
     const variant = variantsById.get(mapping.variantId);
+    const skus = skusById.get(mapping.variantId);
+    const remoteSku = mapping.remoteSku || mapping.sku || null;
+    // A blank SKU can be filled after identity ownership was claimed. Refresh
+    // observed channel metadata even when product/variant/item IDs are unchanged.
     return !variant
+      || skus?.feedSku !== remoteSku || skus?.listingSku !== remoteSku
       || variant.catalogVariantId !== mapping.remoteVariantId
       || variant.catalogInventoryItemId !== mapping.remoteInventoryItemId
       || (!variant.catalogBarcode && Boolean(mapping.remoteBarcode))
@@ -476,6 +507,51 @@ function mappingRequiresWrite(
       || variant.listingProductId !== targetProductId
       || variant.listingVariantId !== mapping.remoteVariantId;
   });
+}
+
+/**
+ * Record SKUs whose Shopify variant was deleted as not listed on this store,
+ * and detach their stale store links. Runs inside the repair transaction after
+ * its locks and fingerprint recheck. Inventory, other channels, and the SKU
+ * itself are untouched: only this store's override, feed, listing, and (for
+ * the primary store) the catalog's Shopify IDs for the deleted variant change.
+ */
+async function delistDeletedShopifyVariants(
+  tx: TransactionClient,
+  input: {
+    channelId: number;
+    isPrimary: boolean;
+    productId: number;
+    delistedVariants: readonly ShopifyVariantDelistResolution[];
+    writtenAt: Date;
+  },
+): Promise<number> {
+  for (const delisted of input.delistedVariants) {
+    await markChannelVariantNotListed(tx, {
+      channelId: input.channelId,
+      productVariantId: delisted.variantId,
+      at: input.writtenAt,
+    });
+
+    await disableDelistedShopifyVariantFeedAndListingInTx(tx, {
+      channelId: input.channelId,
+      variantId: delisted.variantId,
+      syncError: DELETED_SHOPIFY_VARIANT_SYNC_ERROR,
+      writtenAt: input.writtenAt,
+    });
+
+    if (input.isPrimary && delisted.deletedVariantIds.length > 0) {
+      // Clear only IDs that point at the deleted variant; never a live one.
+      await tx.update(productVariants)
+        .set({ shopifyVariantId: null, shopifyInventoryItemId: null, updatedAt: input.writtenAt })
+        .where(and(
+          eq(productVariants.id, delisted.variantId),
+          eq(productVariants.productId, input.productId),
+          inArray(sql`substring(${productVariants.shopifyVariantId} from '([0-9]+)$')`, delisted.deletedVariantIds),
+        ));
+    }
+  }
+  return input.delistedVariants.length;
 }
 
 function activeVariantAuditSnapshot(summary: ShopifyProductMappingSummary) {
@@ -496,14 +572,18 @@ function activeVariantAuditSnapshot(summary: ShopifyProductMappingSummary) {
 export function createShopifyProductMappingService(dependencies: {
   database?: typeof db;
   verifyShopifyProduct?: typeof fetchVerifiedShopifyProduct;
+  now?: () => Date;
+  sleep?: (milliseconds: number) => Promise<void>;
 } = {}) {
   const database = dependencies.database ?? db;
   const verifyShopifyProduct = dependencies.verifyShopifyProduct ?? fetchVerifiedShopifyProduct;
+  const now = dependencies.now ?? (() => new Date());
   async function getSummary(
     productId: number,
     channelId?: number | null,
+    client: QueryClient = database,
   ): Promise<ShopifyProductMappingSummary> {
-    return (await loadMapping(database, productId, channelId)).summary;
+    return (await loadMapping(client, productId, channelId)).summary;
   }
 
   async function repair(input: {
@@ -516,6 +596,11 @@ export function createShopifyProductMappingService(dependencies: {
     verifiedShopifyProduct?: VerifiedShopifyProduct;
     /** Exact local/remote rows produced by that same internal catalog import. */
     importedVariantBindings?: readonly ImportedShopifyVariantBinding[];
+    /** Internal operator connection owner; HTTP repair never accepts these fields. */
+    operatorVariantBindings?: readonly ImportedShopifyVariantBinding[];
+    expectedMappingFingerprint?: string;
+    /** Optional sibling owner, committed with the mapping rather than afterwards. */
+    afterMapping?: (transaction: TransactionClient, at: Date) => Promise<void>;
     expectedVariant?: {
       variantId: number;
       remoteVariantId: string | number;
@@ -539,6 +624,9 @@ export function createShopifyProductMappingService(dependencies: {
     }
     const loaded = await loadMapping(database, input.productId, input.channelId);
     const before = loaded.summary;
+    if (input.expectedMappingFingerprint && before.fingerprint !== input.expectedMappingFingerprint) {
+      throw new ShopifyProductMappingError("SHOPIFY_MAPPING_CHANGED", "The catalog mapping changed after review. Refresh the connection review.", 409);
+    }
     const verifiedShopifyProduct = input.verifiedShopifyProduct
       ? validateVerifiedShopifyProduct(input.verifiedShopifyProduct, targetProductId)
       : await verifyShopifyProduct(before.channel.id, targetProductId);
@@ -548,9 +636,11 @@ export function createShopifyProductMappingService(dependencies: {
       verifiedRemoteVariants: verifiedShopifyProduct.variants,
       allowUnmappedAdoption: Boolean(
         (input.verifiedShopifyProduct && input.importedVariantBindings?.length)
+        || input.operatorVariantBindings !== undefined
         || (input.allowProductOnlyAdoption === true && before.variants.length === 0),
       ),
       importedVariantBindings: input.importedVariantBindings,
+      operatorVariantBindings: input.operatorVariantBindings,
       expectedVariant: input.expectedVariant,
     });
     if (!repairEvaluation.ok) {
@@ -565,9 +655,26 @@ export function createShopifyProductMappingService(dependencies: {
     }
     const mappedVariantIds = repairEvaluation.mappedVariantIds;
     const variantMappings = repairEvaluation.variantMappings;
-    const requiresWrite = before.channelProductId !== targetProductId || mappingRequiresWrite(before, targetProductId, variantMappings);
+    const delistedVariants = repairEvaluation.delistedVariants;
+    const requiresWrite = before.channelProductId !== targetProductId
+      || delistedVariants.length > 0
+      || mappingRequiresWrite(before, targetProductId, variantMappings, loaded.skuEvidence);
 
     if (!requiresWrite) {
+      if (input.afterMapping) {
+        // A verified identity replay may still need to finish its sibling price
+        // obligation. Lock and recheck it without rewriting mapping history.
+        await retryPublicationSelectionWrite(() => database.transaction(async tx => {
+          await tx.execute(sql`SELECT id FROM channels.channels WHERE id=${before.channel.id} FOR UPDATE`);
+          await tx.execute(sql`SELECT id FROM catalog.products WHERE id=${input.productId} FOR UPDATE`);
+          await tx.execute(sql`SELECT id FROM catalog.product_variants WHERE product_id=${input.productId} ORDER BY id FOR UPDATE`);
+          const current = await loadMapping(tx, input.productId, before.channel.id);
+          if (current.summary.fingerprint !== before.fingerprint) {
+            throw new ShopifyProductMappingError("SHOPIFY_MAPPING_CHANGED", "The mapping changed while completing its saved price obligation. Refresh and try again.", 409);
+          }
+          await input.afterMapping!(tx, now());
+        }), { sleep: dependencies.sleep });
+      }
       return {
         before,
         after: before,
@@ -576,6 +683,7 @@ export function createShopifyProductMappingService(dependencies: {
           title: verifiedShopifyProduct.title,
         },
         mappedVariantCount: variantMappings.length,
+        delistedVariants: [] as ShopifyVariantDelistResolution[],
         updatedFeedCount: 0,
         createdFeedCount: 0,
         updatedListingCount: 0,
@@ -585,13 +693,17 @@ export function createShopifyProductMappingService(dependencies: {
       };
     }
 
-    const writeResult = await database.transaction(async (tx) => {
+    const writeResult = await retryPublicationSelectionWrite(() => database.transaction(async (tx) => {
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(
           hashtextextended(${`shopify-product-mapping:${before.channel.id}:${targetProductId}`}, 0::bigint)
         )
       `);
+      // Pricing writers lock the channel before variant rows. Preserve that
+      // order when initial creation prices join this mapping transaction.
+      await tx.execute(sql`SELECT id FROM channels.channels WHERE id=${before.channel.id} FOR UPDATE`);
       await tx.execute(sql`SELECT id FROM catalog.products WHERE id = ${input.productId} FOR UPDATE`);
+      await tx.execute(sql`SELECT id FROM catalog.product_variants WHERE product_id=${input.productId} ORDER BY id FOR UPDATE`);
       const current = await loadMapping(tx, input.productId, before.channel.id);
       if (current.summary.fingerprint !== before.fingerprint) {
         throw new ShopifyProductMappingError(
@@ -601,14 +713,14 @@ export function createShopifyProductMappingService(dependencies: {
         );
       }
 
-      const [duplicateProduct] = await tx
+      const [duplicateProduct] = before.channel.isPrimary ? await tx
         .select({ id: products.id, sku: products.sku, name: products.name })
         .from(products)
         .where(and(
           sql`${products.id} <> ${input.productId}`,
           normalizedIdSql(products.shopifyProductId, targetProductId),
         ))
-        .limit(1);
+        .limit(1) : [];
       if (duplicateProduct) {
         throw new ShopifyProductMappingError(
           "SHOPIFY_PRODUCT_ALREADY_MAPPED",
@@ -616,6 +728,13 @@ export function createShopifyProductMappingService(dependencies: {
           409,
           { targetProductId, duplicateProduct },
         );
+      }
+
+      const [duplicateIdentity] = await tx.select({ productId: channelProductIdentities.productId })
+        .from(channelProductIdentities).where(and(eq(channelProductIdentities.channelId, before.channel.id),
+          eq(channelProductIdentities.externalProductId, targetProductId), sql`${channelProductIdentities.productId} <> ${input.productId}`)).limit(1);
+      if (duplicateIdentity) {
+        throw new ShopifyProductMappingError("SHOPIFY_PRODUCT_ALREADY_MAPPED", "The target Shopify product already belongs to another catalog product in this store.", 409, { duplicateIdentity });
       }
 
       const [crossProductMapping] = await tx
@@ -656,7 +775,7 @@ export function createShopifyProductMappingService(dependencies: {
       const expectedOwnerByRemoteId = new Map(
         variantMappings.map((mapping) => [mapping.remoteVariantId, mapping.variantId]),
       );
-      const catalogVariantOwners = await tx
+      const catalogVariantOwners = before.channel.isPrimary ? await tx
         .select({
           variantId: productVariants.id,
           productId: productVariants.productId,
@@ -664,7 +783,7 @@ export function createShopifyProductMappingService(dependencies: {
           remoteVariantId: productVariants.shopifyVariantId,
         })
         .from(productVariants)
-        .where(normalizedIdsSql(productVariants.shopifyVariantId, mappedVariantIds));
+        .where(normalizedIdsSql(productVariants.shopifyVariantId, mappedVariantIds)) : [];
       const conflictingCatalogOwner = catalogVariantOwners.find((owner) => {
         const remoteVariantId = normalizeShopifyId(owner.remoteVariantId);
         return remoteVariantId !== null && expectedOwnerByRemoteId.get(remoteVariantId) !== owner.variantId;
@@ -726,12 +845,12 @@ export function createShopifyProductMappingService(dependencies: {
         );
       }
 
-      const now = new Date();
-      const [updatedProduct] = await tx
+      const writtenAt = now();
+      const [updatedProduct] = before.channel.isPrimary ? await tx
         .update(products)
-        .set({ shopifyProductId: targetProductId, updatedAt: now })
+        .set({ shopifyProductId: targetProductId, updatedAt: writtenAt })
         .where(eq(products.id, input.productId))
-        .returning({ id: products.id });
+        .returning({ id: products.id }) : [{ id: input.productId }];
       if (!updatedProduct) {
         throw new ShopifyProductMappingError(
           "PRODUCT_NOT_FOUND",
@@ -755,20 +874,21 @@ export function createShopifyProductMappingService(dependencies: {
         const catalogVariantUpdates: Partial<typeof productVariants.$inferInsert> = {
           shopifyVariantId: mapping.remoteVariantId,
           shopifyInventoryItemId: mapping.remoteInventoryItemId,
-          updatedAt: now,
+          updatedAt: writtenAt,
         };
         if (!currentVariant?.catalogBarcode && mapping.remoteBarcode) {
           catalogVariantUpdates.barcode = mapping.remoteBarcode;
         }
-        const [updatedVariant] = await tx
+        const [updatedVariant] = before.channel.isPrimary ? await tx
           .update(productVariants)
           .set(catalogVariantUpdates)
           .where(and(
             eq(productVariants.id, mapping.variantId),
             eq(productVariants.productId, input.productId),
             eq(productVariants.isActive, true),
+            eq(productVariants.salesEligibility, "sellable"),
           ))
-          .returning({ id: productVariants.id });
+          .returning({ id: productVariants.id }) : [{ id: mapping.variantId }];
         if (!updatedVariant) {
           throw new ShopifyProductMappingError(
             "ACTIVE_VARIANT_CHANGED",
@@ -778,73 +898,28 @@ export function createShopifyProductMappingService(dependencies: {
           );
         }
 
-        const updatedFeeds = await tx
-          .update(channelFeeds)
-          .set({
-            channelType: "shopify",
-            channelProductId: targetProductId,
-            channelVariantId: mapping.remoteVariantId,
-            channelInventoryItemId: mapping.remoteInventoryItemId,
-            channelSku: mapping.remoteSku || mapping.sku || null,
-            isActive: 1,
-            consecutivePushFailures: 0,
-            quarantinedAt: null,
-            quarantineReason: null,
-            updatedAt: now,
-          })
-          .where(and(
-            eq(channelFeeds.channelId, before.channel.id),
-            eq(channelFeeds.channelType, "shopify"),
-            eq(channelFeeds.productVariantId, mapping.variantId),
-          ))
-          .returning({ id: channelFeeds.id });
-        if (updatedFeeds.length > 0) {
-          updatedFeedCount += updatedFeeds.length;
-        } else {
-          await tx.insert(channelFeeds).values({
-            channelId: before.channel.id,
-            productVariantId: mapping.variantId,
-            channelType: "shopify",
-            channelProductId: targetProductId,
-            channelVariantId: mapping.remoteVariantId,
-            channelInventoryItemId: mapping.remoteInventoryItemId,
-            channelSku: mapping.remoteSku || mapping.sku || null,
-            isActive: 1,
-          });
-          createdFeedCount += 1;
-        }
-
-        const updatedListings = await tx
-          .update(channelListings)
-          .set({
-            externalProductId: targetProductId,
-            externalVariantId: mapping.remoteVariantId,
-            externalSku: mapping.remoteSku || mapping.sku || null,
-            syncStatus: "synced",
-            syncError: null,
-            lastSyncedAt: now,
-            updatedAt: now,
-          })
-          .where(and(
-            eq(channelListings.channelId, before.channel.id),
-            eq(channelListings.productVariantId, mapping.variantId),
-          ))
-          .returning({ id: channelListings.id });
-        if (updatedListings.length > 0) {
-          updatedListingCount += updatedListings.length;
-        } else {
-          await tx.insert(channelListings).values({
-            channelId: before.channel.id,
-            productVariantId: mapping.variantId,
-            externalProductId: targetProductId,
-            externalVariantId: mapping.remoteVariantId,
-            externalSku: mapping.remoteSku || mapping.sku || null,
-            syncStatus: "synced",
-            lastSyncedAt: now,
-          });
-          createdListingCount += 1;
-        }
+        const repairedCounts = await upsertRepairedShopifyVariantFeedAndListingInTx(tx, {
+          channelId: before.channel.id,
+          variantId: mapping.variantId,
+          targetProductId,
+          remoteVariantId: mapping.remoteVariantId,
+          remoteInventoryItemId: mapping.remoteInventoryItemId,
+          channelSku: mapping.remoteSku || mapping.sku || null,
+          writtenAt,
+        });
+        updatedFeedCount += repairedCounts.updatedFeedCount;
+        createdFeedCount += repairedCounts.createdFeedCount;
+        updatedListingCount += repairedCounts.updatedListingCount;
+        createdListingCount += repairedCounts.createdListingCount;
       }
+
+      const delistedCount = await delistDeletedShopifyVariants(tx, {
+        channelId: before.channel.id,
+        isPrimary: before.channel.isPrimary === true,
+        productId: input.productId,
+        delistedVariants,
+        writtenAt,
+      });
 
       const repaired = await loadMapping(tx, input.productId, before.channel.id);
       if (
@@ -889,6 +964,8 @@ export function createShopifyProductMappingService(dependencies: {
           mappedVariantIds,
           variantMappings,
           mappedVariantCount: variantMappings.length,
+          delistedVariants,
+          delistedCount,
           updatedFeedCount,
           createdFeedCount,
           updatedListingCount,
@@ -896,19 +973,26 @@ export function createShopifyProductMappingService(dependencies: {
         },
       });
 
-      await enqueueShippingGroupMetafieldWrite(tx, {
-        shopifyProductId: targetProductId,
-        shippingGroupCode: current.shippingGroupCode,
-      });
+      await input.afterMapping?.(tx, writtenAt);
+
+      // The membership outbox serves the primary store. A secondary store's
+      // external IDs must never be sent through that store's credentials.
+      if (before.channel.isPrimary) {
+        await enqueueShippingGroupMetafieldWrite(tx, {
+          shopifyProductId: targetProductId,
+          shippingGroupCode: current.shippingGroupCode,
+        });
+      }
 
       return {
         mappedVariantCount: variantMappings.length,
+        delistedVariants,
         updatedFeedCount,
         createdFeedCount,
         updatedListingCount,
         createdListingCount,
       };
-    });
+    }), { sleep: dependencies.sleep });
 
     const after = await getSummary(input.productId, before.channel.id);
     return {
@@ -919,7 +1003,7 @@ export function createShopifyProductMappingService(dependencies: {
         title: verifiedShopifyProduct.title,
       },
       ...writeResult,
-      shippingGroupMetafieldQueued: true,
+      shippingGroupMetafieldQueued: before.channel.isPrimary === true,
       alreadyConsistent: false,
     };
   }

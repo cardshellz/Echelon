@@ -13,7 +13,7 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { requireAuth } from "../../../../routes/middleware";
-import { ensurePackPlan } from "../../../cartonization/application/wms-pack-plan.service";
+import { ensurePackPlan } from "../../../cartonization/pack-plan.api";
 import {
   confirmParcel,
   getPackingQueue,

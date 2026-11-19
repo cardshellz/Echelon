@@ -1,3 +1,4 @@
+import { DocumentRelationships } from "./DocumentRelationships";
 import { PurchaseReceiptCostLines } from "./PurchaseCostTrace";
 import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
 import React, { useEffect, useRef, useState } from "react";
@@ -93,12 +94,10 @@ function PurchaseReadView({ purchase }: { purchase: PurchaseWorkspace["purchase"
   );
 }
 
-function ShipmentReadView({ shipment, purchaseOrderId, navigation }: { shipment: PurchaseWorkspace["shipments"][number]; purchaseOrderId: number; navigation: ProcurementNavigation }) {
+function ShipmentReadView({ shipment, purchaseOrderId }: { shipment: PurchaseWorkspace["shipments"][number]; purchaseOrderId: number }) {
   const [showTracking, setShowTracking] = useState(false);
   return (
     <div className="space-y-4">
-      <p className="rounded-md border bg-muted/40 p-3 text-xs">The currency basis of shipment cost totals is unavailable here. Review the recorded charges and allocations in the full shipment cost view.</p>
-      <Button asChild variant="outline" size="sm"><Link href={navigation.childHref(`/shipments/${shipment.id}?tab=costs`)}><ExternalLink className="h-4 w-4" aria-hidden="true" />View shipment costs</Link></Button>
       <dl className="grid grid-cols-2 gap-4">
         <Field label="Transport mode">{formatWorkspaceStatus(shipment.mode)}</Field>
         <Field label="Container">{shipment.containerNumber ?? "Not recorded"}</Field>
@@ -109,30 +108,7 @@ function ShipmentReadView({ shipment, purchaseOrderId, navigation }: { shipment:
         <Button variant="outline" size="sm" onClick={() => setShowTracking(!showTracking)}>{showTracking ? "Hide carrier tracking" : "View carrier tracking"}</Button>
         {showTracking && <InboundShipmentTracking key={shipment.id} shipmentId={shipment.id} shipmentStatus={shipment.status} containerNumber={shipment.containerNumber} />}
       </section>
-      <section className="space-y-2 border-t pt-4" aria-label="Shipment line links">
-        <h4 className="text-sm font-semibold">Shipment lines</h4>
-        <p className="text-xs text-muted-foreground">Each line shows its recorded shipment quantity and purchase order links.</p>
-        {shipment.lines.length === 0 ? <p className="text-sm text-muted-foreground">No lines recorded.</p> : (
-          <div className="max-h-80 overflow-auto rounded-md border">
-            <Table>
-              <TableHeader><TableRow><TableHead>SKU / line</TableHead><TableHead>PO link</TableHead><TableHead className="text-right">Recorded qty</TableHead></TableRow></TableHeader>
-              <TableBody>{shipment.lines.map((line) => {
-                const conflicting = line.purchaseOrderId !== null && line.purchaseOrderLinePurchaseOrderId !== null && line.purchaseOrderId !== line.purchaseOrderLinePurchaseOrderId;
-                const linkedId = line.purchaseOrderId ?? line.purchaseOrderLinePurchaseOrderId;
-                return (
-                  <TableRow key={line.id}>
-                    <TableCell className="font-mono text-xs">{line.sku ?? `Line #${line.id}`}</TableCell>
-                    <TableCell className="text-xs">
-                      {conflicting ? <span className="text-amber-700 dark:text-amber-400">Conflicting links: #{line.purchaseOrderId} / #{line.purchaseOrderLinePurchaseOrderId}</span> : linkedId === null ? "Not linked" : `${linkedId === purchaseOrderId ? "This PO" : `PO #${linkedId}`}`}
-                    </TableCell>
-                    <TableCell className="text-right font-mono text-xs">{line.qtyShipped.toLocaleString()}</TableCell>
-                  </TableRow>
-                );
-              })}</TableBody>
-            </Table>
-          </div>
-        )}
-      </section>
+      <DocumentRelationships root={{ kind: "shipment", id: shipment.id }} purchaseId={purchaseOrderId} />
     </div>
   );
 }
@@ -235,8 +211,8 @@ export function PurchaseRecordInspector({ data, navigation }: { data: PurchaseWo
         {missing ? <p role="alert" className="text-sm text-muted-foreground">This selection is invalid or is not among the records returned for this purchase. Close the inspector or select a connected record.</p> : selected ? (
           <>
             {selected.kind === "purchase" && <PurchaseReadView purchase={selected.record} />}
-            {selected.kind === "shipment" && <ShipmentReadView key={selected.record.id} shipment={selected.record} purchaseOrderId={data.purchase.id} navigation={navigation} />}
-            {selected.kind === "receipt" && <><ReceiptReadView receipt={selected.record} />{data.costTrace && <section className="space-y-2 border-t pt-4" aria-label="Receipt cost evidence"><h4 className="text-sm font-semibold">Original receipt lots and current costs</h4><PurchaseReceiptCostLines trace={data.costTrace} receiptId={selected.record.id} data={data} navigation={navigation} /></section>}</>}
+            {selected.kind === "shipment" && <ShipmentReadView key={selected.record.id} shipment={selected.record} purchaseOrderId={data.purchase.id} />}
+            {selected.kind === "receipt" && <><ReceiptReadView receipt={selected.record} /><DocumentRelationships root={{ kind: "receipt", id: selected.record.id }} purchaseId={data.purchase.id} />{data.costTrace && <section className="space-y-2 border-t pt-4" aria-label="Receipt cost evidence"><h4 className="text-sm font-semibold">Original receipt lots and current costs</h4><PurchaseReceiptCostLines trace={data.costTrace} receiptId={selected.record.id} data={data} navigation={navigation} /></section>}</>}
             {selected.kind === "invoice" && <InvoiceReadView invoice={selected.record} purchaseOrderId={data.purchase.id} navigation={navigation} />}
             {related.size > 0 && <section className="space-y-2 border-t pt-4" aria-label="Connected records"><h4 className="text-sm font-semibold">Connected records</h4><ul className="space-y-2">{[...related.values()].map((record) => <li key={`${record.kind}:${record.record.id}`}><Link href={navigation.inspectHref({ kind: record.kind, id: record.record.id })} className="rounded-sm text-sm text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{recordTitle(record)}</Link></li>)}</ul></section>}
           </>

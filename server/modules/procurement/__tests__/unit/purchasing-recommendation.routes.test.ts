@@ -1,3 +1,5 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
+import { rfqListHeader, rfqListLine } from "../fixtures/rfq-work-list.fixture";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -10,9 +12,13 @@ import type { AutoDraftRecommendationSettings, PurchasingRecommendationRawRow } 
 import type { CreatePurchaseRecommendationRunInput } from "../../purchase-recommendation-snapshot.service";
 import { normalizePurchasingForecastPolicy } from "../../purchasing-forecast-policy";
 import type { ServiceRegistry } from "../../../../services";
+import { logger } from "../../../../platform/observability/logger";
 import { forwardDemandBuyingRow, PURCHASE_BUYING_AS_OF } from "../fixtures/purchase-buying-review.fixture";
 
 const mocks = vi.hoisted(() => ({
+  hasPermission: vi.fn(),
+  readCurrentStaffAccess: vi.fn(),
+  sessionUser: { id: "admin-user", role: "admin" } as { id: string; role?: string },
   procurement: {
     getReorderAnalysisData: vi.fn(),
     getOpenPoSummaryReport: vi.fn(),
@@ -56,14 +62,24 @@ const mocks = vi.hoisted(() => ({
   },
 }));
 
-vi.mock("../../../../routes/middleware", () => {
+vi.mock("../../../../modules/identity", async () => ({
+  hasPermission: mocks.hasPermission,
+  readCurrentStaffAccess: mocks.readCurrentStaffAccess,
+  hasAssignedSystemRole: (await import("../../../../modules/identity/staff-authority")).hasAssignedSystemRole,
+}));
+vi.mock("../../../../routes/middleware", async importOriginal => {
+  const actual = await importOriginal<typeof import("../../../../routes/middleware")>();
   const pass = (req: Request, _res: Response, next: NextFunction) => {
     (req as any).user = { id: "admin-user", role: "admin" };
-    (req as any).session = { user: { id: "admin-user", role: "admin" } };
+    (req as any).session = { user: { ...mocks.sessionUser } };
     next();
   };
   return {
     requirePermission: () => pass,
+    requireAnyPermission: (...grants: Parameters<typeof actual.requireAnyPermission>) => {
+      const authorize = actual.requireAnyPermission(...grants);
+      return (req: Request, res: Response, next: NextFunction) => pass(req, res, () => { void authorize(req, res, next); });
+    },
   };
 });
 
@@ -117,7 +133,7 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
 }
 
 async function requestJson(baseUrl: string, method: string, path: string, body?: any) {
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await requestLocalHttp(`${baseUrl}${path}`, {
     method,
     headers: { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -145,6 +161,10 @@ describe("purchasing recommendation routes", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.sessionUser = { id: "admin-user", role: "admin" };
+    mocks.readCurrentStaffAccess.mockResolvedValue({ user: { id: "admin-user", active: 1 },
+      roles: [{ id: 1, name: "Administrator", isSystem: true }], permissions: ["inventory:adjust", "inventory:view", "purchasing:view"] });
+    mocks.hasPermission.mockResolvedValue(true);
     mocks.db.transaction.mockImplementation(async work => work(mocks.db));
     mocks.db.execute.mockResolvedValue({ rows: [] });
     mocks.db.select.mockImplementation(() => {
@@ -1189,50 +1209,9 @@ describe("purchasing recommendation routes", () => {
   });
 
   it("lists created RFQs newest-first with joined lines and vendor names", async () => {
-    const createdAt = new Date("2026-07-21T10:00:00.000Z");
-    mocks.db.select
-      .mockReturnValueOnce(selectChain([{
-        id: 42,
-        rfqNumber: "RFQ-2026-0042",
-        vendorId: 77,
-        status: "draft",
-        requestNote: "Quote delivered pricing",
-        currency: "USD",
-        responseDueDate: "2026-07-30",
-        createdBy: "buyer-17",
-        createdAt,
-        updatedAt: createdAt,
-        sentAt: null,
-        respondedAt: null,
-        cancelledAt: null,
-      }]))
-      .mockReturnValueOnce(selectChain([{
-        id: 501,
-        rfqId: 42,
-        recommendationLineId: 11,
-        recommendationRunId: 3,
-        vendorProductId: 44,
-        vendorSku: "SUP-302",
-        sku: "SKU-RED",
-        productName: "Red Card Shell",
-        status: "draft",
-        requestedPieces: 96,
-        recommendedPieces: 96,
-        purchaseUom: null,
-        piecesPerPurchaseUom: null,
-        quantityOverrideReason: null,
-        allocationOverrideReason: null,
-        allocationOverrideApprovedBy: null,
-        allocationOverrideApprovedAt: null,
-        allocationOverrideBaselinePieces: null,
-        allocationOverrideExcessPieces: null,
-        quotedPieces: null,
-        quotedUnitCostMills: null,
-        quoteReference: null,
-        quoteValidUntil: null,
-        quotedAt: null,
-      }]))
-      .mockReturnValueOnce(selectChain([{ id: 77, name: "Supplier 77" }]));
+    mocks.db.execute.mockResolvedValueOnce({ rows: [{ total: "1" }] })
+      .mockResolvedValueOnce({ rows: [rfqListHeader({ vendorId: 77, vendorName: "Supplier 77", requestNote: "Quote delivered pricing" })] })
+      .mockResolvedValueOnce({ rows: [rfqListLine()] }).mockResolvedValueOnce({ rows: [] });
     server = await startServer(buildApp());
 
     const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/rfqs?limit=10");
@@ -1256,17 +1235,35 @@ describe("purchasing recommendation routes", () => {
     });
   });
 
-  it("caps the RFQ list limit and returns an empty page without extra queries", async () => {
-    const headerChain = selectChain([]);
-    mocks.db.select.mockReturnValueOnce(headerChain);
+  it("rejects oversized or malformed RFQ list parameters before querying", async () => {
     server = await startServer(buildApp());
-
-    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/rfqs?limit=99999");
-
-    expect(status).toBe(200);
-    expect(headerChain.limit).toHaveBeenCalledWith(100);
-    expect(body).toMatchObject({ limit: 100, count: 0, statusCounts: {}, rfqs: [] });
-    expect(mocks.db.select).toHaveBeenCalledTimes(1);
+    for (const query of ["limit=99999", "limit=10abc", "offset=-1", "status=unknown", "search=a&search=b"]) {
+      const result = await requestJson(server.url, "GET", `/api/purchasing/rfqs?${query}`);
+      expect(result).toMatchObject({ status: 400, body: { code: "RFQ_LIST_QUERY_INVALID" } });
+    }
+    expect(mocks.db.execute).not.toHaveBeenCalled();
+    expect(mocks.db.transaction).not.toHaveBeenCalled();
+  });
+  it("returns an empty requested page without losing matching total", async () => {
+    mocks.db.execute.mockResolvedValueOnce({ rows: [{ total: "105" }] }).mockResolvedValueOnce({ rows: [] });
+    server = await startServer(buildApp());
+    const result = await requestJson(server.url, "GET", "/api/purchasing/rfqs?limit=100&offset=200");
+    expect(result).toMatchObject({ status: 200, body: { limit: 100, count: 0, statusCounts: {}, rfqs: [], page: { total: 105, limit: 100, offset: 200, nextOffset: null } } });
+    expect(mocks.db.execute).toHaveBeenCalledTimes(2);
+  });
+  it.each(["purchasing", "inventory"])("permits %s-only read access to RFQ list and sourcing queue", async resource => {
+    mocks.hasPermission.mockImplementation(async (_userId: string, requestedResource: string, action: string) => requestedResource === resource && action === "view");
+    mocks.db.execute.mockResolvedValueOnce({ rows: [{ total: "0" }] }).mockResolvedValueOnce({ rows: [] });
+    server = await startServer(buildApp());
+    expect((await requestJson(server.url, "GET", "/api/purchasing/rfqs")).status).toBe(200);
+    expect((await requestJson(server.url, "GET", "/api/purchasing/rfq-queue")).status).toBe(200);
+  });
+  it("denies RFQ list and queue reads when neither read grant is current", async () => {
+    mocks.hasPermission.mockResolvedValue(false);
+    server = await startServer(buildApp());
+    expect((await requestJson(server.url, "GET", "/api/purchasing/rfqs")).status).toBe(403);
+    expect((await requestJson(server.url, "GET", "/api/purchasing/rfq-queue")).status).toBe(403);
+    expect(mocks.db.execute).not.toHaveBeenCalled(); expect(mocks.db.select).not.toHaveBeenCalled();
   });
 
   it("returns live forecast input gap diagnostics with actionable samples", async () => {
@@ -3062,6 +3059,92 @@ describe("purchasing recommendation routes", () => {
         },
       ],
     });
+  });
+
+  it.each(["picker", "lead", "admin", undefined])(
+    "denies both manual auto-draft aliases with zero assignments despite session label %s",
+    async role => {
+      // The request-local user deliberately remains an admin. Authority must use
+      // the same session identity as the inventory:adjust permission owner.
+      mocks.sessionUser = { id: "non-admin-user", role };
+      mocks.readCurrentStaffAccess.mockResolvedValue({ user: { id: "non-admin-user", active: 1 }, roles: [], permissions: ["inventory:adjust"] });
+      server = await startServer(buildApp());
+
+      for (const path of ["/api/purchasing/auto-draft-run", "/api/purchasing/auto-draft/run"]) {
+        const response = await requestJson(server.url, "POST", path);
+        expect(response).toEqual({
+          status: 403,
+          body: { error: "Admin role required", code: "AUTO_DRAFT_ADMIN_REQUIRED" },
+        });
+      }
+
+      expect(mocks.runAutoDraftJob).not.toHaveBeenCalled();
+      expect(mocks.startAutoDraftJob).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { path: "/api/purchasing/auto-draft-run", status: 200, job: "runAutoDraftJob" as const },
+    { path: "/api/purchasing/auto-draft/run", status: 202, job: "startAutoDraftJob" as const },
+  ])("attributes an authorized manual run at $path to the session actor", async ({ path, status, job }) => {
+    mocks.sessionUser = { id: "session-admin-user", role: "picker" };
+    server = await startServer(buildApp());
+
+    const response = await requestJson(server.url, "POST", path);
+
+    expect(response.status).toBe(status);
+    expect(mocks[job]).toHaveBeenCalledOnce();
+    expect(mocks[job]).toHaveBeenCalledWith({
+      triggeredBy: "manual",
+      triggeredByUser: "session-admin-user",
+    });
+  });
+
+  it.each([
+    { name: "Administrator", isSystem: false },
+    { name: "Team Lead", isSystem: true },
+  ])("keeps the manual administrator requirement for assigned $name (system=$isSystem)", async role => {
+    mocks.readCurrentStaffAccess.mockResolvedValue({ user: { id: "admin-user", active: 1 },
+      roles: [{ id: 19, ...role }], permissions: ["inventory:adjust"] });
+    server = await startServer(buildApp());
+    for (const path of ["/api/purchasing/auto-draft-run", "/api/purchasing/auto-draft/run"]) {
+      expect((await requestJson(server.url, "POST", path)).status).toBe(403);
+    }
+    expect(mocks.runAutoDraftJob).not.toHaveBeenCalled();
+    expect(mocks.startAutoDraftJob).not.toHaveBeenCalled();
+  });
+
+  it("rereads assignments on each manual invocation and fails closed when the reader fails", async () => {
+    mocks.readCurrentStaffAccess.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("secret-connection-string authority unavailable"));
+    server = await startServer(buildApp());
+    expect((await requestJson(server.url, "POST", "/api/purchasing/auto-draft-run")).status).toBe(403);
+    const report = vi.spyOn(logger, "error");
+    try {
+      expect(await requestJson(server.url, "POST", "/api/purchasing/auto-draft/run")).toEqual({
+        status: 503, body: { error: "Current authorization could not be verified", code: "AUTO_DRAFT_AUTHORITY_UNAVAILABLE" },
+      });
+      expect(report).toHaveBeenCalledExactlyOnceWith("procurement.auto_draft.authorize", {
+        module: "procurement", outcome: "failed", error_code: "AUTO_DRAFT_AUTHORITY_UNAVAILABLE", dependency: "identity", actor_id: "admin-user",
+      });
+    } finally { report.mockRestore(); }
+    expect(mocks.readCurrentStaffAccess.mock.calls).toEqual([["admin-user"], ["admin-user"]]);
+    expect(mocks.runAutoDraftJob).not.toHaveBeenCalled();
+    expect(mocks.startAutoDraftJob).not.toHaveBeenCalled();
+  });
+
+  it("fails closed with a safe response even when authority failure diagnostics are unavailable", async () => {
+    mocks.readCurrentStaffAccess.mockRejectedValue(new Error("secret authority connection"));
+    const report = vi.spyOn(logger, "error").mockImplementation(() => { throw new Error("diagnostic unavailable"); });
+    try {
+      server = await startServer(buildApp());
+      for (const path of ["/api/purchasing/auto-draft-run", "/api/purchasing/auto-draft/run"]) {
+        expect(await requestJson(server.url, "POST", path)).toEqual({
+          status: 503, body: { error: "Current authorization could not be verified", code: "AUTO_DRAFT_AUTHORITY_UNAVAILABLE" },
+        });
+      }
+      expect(mocks.runAutoDraftJob).not.toHaveBeenCalled();
+      expect(mocks.startAutoDraftJob).not.toHaveBeenCalled();
+    } finally { report.mockRestore(); }
   });
 
   it("starts the auto-draft job for an admin user without awaiting completion", async () => {

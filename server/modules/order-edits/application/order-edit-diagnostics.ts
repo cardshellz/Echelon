@@ -75,7 +75,8 @@ export function orderEditDiagnosticError(
 }
 
 export interface OrderEditDiagnosticEvent {
-  operationId: string;
+  /** Absent when a read fails before any operation exists. */
+  operationId?: string;
   code: string;
   phase?: string;
   connectionId?: number;

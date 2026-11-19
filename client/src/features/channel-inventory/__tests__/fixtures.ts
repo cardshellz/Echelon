@@ -3,6 +3,7 @@ import type {
   ChannelExposurePolicyScope,
   ChannelExposurePolicyValue,
 } from "@shared/types/inventory-channel-exposure";
+import type { StockLinkSupportedStatus } from "@shared/types/stock-link";
 
 import type { PreviewRow, Target, View } from "../model";
 
@@ -165,5 +166,14 @@ export function previewRow(overrides: Partial<PreviewRow> = {}): PreviewRow {
     },
     mapping: null,
     ...overrides,
+  };
+}
+
+/** A supported stock-link status (PLAN-CH2 v4.1 §7.3) for Shopify destination 5: switch on, nothing paused or held. */
+export function stockLinkStatus(overrides: Partial<StockLinkSupportedStatus> = {}): StockLinkSupportedStatus {
+  return {
+    supported: true, publicationTargetId: 5, autoLinkEnabled: true, revision: "4",
+    counts: { linked: 12, waiting: 3, flagged: 1, error: 0 },
+    paused: null, halted: null, retiresHeld: null, ...overrides,
   };
 }

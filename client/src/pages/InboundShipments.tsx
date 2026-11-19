@@ -1,13 +1,16 @@
+import { useAuth } from "@/lib/auth";
+import { shipmentListState } from "@/lib/shipment-list-navigation";
 import { shipmentWarehouseOptionsSchema } from "@shared/procurement/shipment-create-source";
 import { useShipmentCreation } from "@/hooks/use-shipment-creation";
 import { ShipmentCreateRecovery } from "@/features/purchasing/ShipmentCreateRecovery";
 import { shipmentCreateSchema, type ShipmentCreateInput } from "@shared/procurement/shipment-create-command";
 import type { ShipmentCreateRecovery as ShipmentRecovery } from "@/lib/shipment-create-command";
 import { shipmentWorkListPageSchema, SHIPMENT_LIST_PAGE_SIZE, type ShipmentWorkListItem, type ShipmentCostFilter } from "@shared/procurement/shipment-work-list";
-import { landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
+import { costHealthTitle, landedCostHealthSchema, landedCostHealthHref, type LandedCostHealth } from "@shared/procurement/landed-cost-health";
+import { CostReviewTaskSummary } from "@/features/purchasing/CostReviewTaskSummary";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useLocation } from "wouter";
+import { Link, useLocation, useSearch } from "wouter";
 import { ShipmentPurchaseOrderLinks } from "@/features/purchasing/ShipmentPurchaseOrderLinks";
 import { procurementChildHref } from "@/lib/procurement-navigation";
 import { Card, CardContent } from "@/components/ui/card";
@@ -80,22 +83,29 @@ type LandedCostFollowupFilter = ShipmentCostFilter;
 type InboundShipment = ShipmentWorkListItem;
 
 export default function InboundShipments() {
+  const { hasPermission } = useAuth();
+  const canCreateShipment = hasPermission("purchasing", "create");
   const shipmentCreation = useShipmentCreation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
 
-  // Filters
-  const [statusFilter, setStatusFilterValue] = useState("active");
-  const [modeFilter, setModeFilterValue] = useState("all");
-  const [landedCostFilter, setLandedCostFilterValue] = useState<LandedCostFollowupFilter>("all");
-  const [searchQuery, setSearchQueryValue] = useState("");
-
-  const [offset, setOffset] = useState(0);
-  const setStatusFilter = (value: string) => { setOffset(0); setStatusFilterValue(value); };
-  const setModeFilter = (value: string) => { setOffset(0); setModeFilterValue(value); };
-  const setLandedCostFilter = (value: LandedCostFollowupFilter) => { setOffset(0); setLandedCostFilterValue(value); };
-  const setSearchQuery = (value: string) => { setOffset(0); setSearchQueryValue(value); };
+  const listSearch = useSearch();
+  const listState = shipmentListState(listSearch);
+  const { status: statusFilter, mode: modeFilter, costFilter: landedCostFilter, search: searchQuery, offset } = listState;
+  function updateFilters(changes: Record<string, string | number>) {
+    const params = new URLSearchParams(listSearch);
+    for (const [key, value] of Object.entries(changes)) params.set(key, String(value));
+    if (params.get("mode") === "all") params.delete("mode");
+    navigate(`/shipments?${params}`, { replace: true });
+  }
+  const setOffset = (value: number) => updateFilters({ offset: value });
+  const setStatusFilter = (value: string) => updateFilters({ status: value, offset: 0 });
+  const setModeFilter = (value: string) => updateFilters({ mode: value, offset: 0 });
+  const setLandedCostFilter = (value: LandedCostFollowupFilter) => updateFilters({ costFilter: value, offset: 0 });
+  const setSearchQuery = (value: string) => updateFilters({ search: value, offset: 0 });
+  const shipmentHref = (shipment: InboundShipment) => procurementChildHref("/shipments", listSearch,
+    `/shipments/${shipment.id}?document=${encodeURIComponent(shipment.shipmentNumber)}`);
 
   // Create dialog
   const [showCreateDialog, setShowCreateDialog] = useState(false);
@@ -177,6 +187,7 @@ export default function InboundShipments() {
     retry: false,
     networkMode: "always",
     mutationFn: (submission: ShipmentCreateSubmission) => {
+      if (!canCreateShipment) throw new Error("Purchasing creation permission is required to create a shipment.");
       if (!submission.visit.isCurrent()) throw new Error("The shipment creation view changed. Review the saved request before sending.");
       return shipmentCreation.execute(submission.body, submission.recovery);
     },
@@ -263,7 +274,7 @@ export default function InboundShipments() {
   }
 
   function renderHealthType(type: string) {
-    return type.replace(/_/g, " ");
+    return costHealthTitle(type);
   }
 
   // Status filter buttons
@@ -318,7 +329,7 @@ export default function InboundShipments() {
             Track and manage inbound freight shipments
           </p>
         </div>
-        <Button onClick={() => setShowCreateDialog(true)} className="min-h-[44px] w-full sm:w-auto">
+        <Button disabled={!canCreateShipment} onClick={() => setShowCreateDialog(true)} className="min-h-[44px] w-full sm:w-auto">
           <Plus className="h-4 w-4 mr-2" />
           New Shipment
         </Button>
@@ -467,7 +478,7 @@ export default function InboundShipments() {
                     <Badge variant={item.severity === "critical" ? "destructive" : "outline"}>{item.severity}</Badge>
                     <span className="font-mono">{item.shipmentNumber || `#${item.shipmentId}`}</span>
                     <span>{renderHealthType(item.type)}</span>
-                    <span className="text-muted-foreground flex-1 min-w-[220px]">{item.detail}</span>
+                    <div className="text-muted-foreground flex-1 min-w-0"><CostReviewTaskSummary item={item} /></div>
                     <div className="ml-auto flex gap-2">
                       {item.action === "push_costs_to_lots" && (
                         <Button
@@ -483,7 +494,7 @@ export default function InboundShipments() {
                         size="sm"
                         onClick={() => navigate(landedCostHealthHref(item))}
                       >
-                        Review
+                        Review costs
                       </Button>
                     </div>
                   </div>
@@ -500,7 +511,7 @@ export default function InboundShipments() {
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Search shipment #, carrier, container #..."
+              placeholder="Search shipment, PO, SKU, carrier or container..."
               value={searchQuery}
               onChange={e => setSearchQuery(e.target.value)}
               className="pl-9 h-10"
@@ -579,13 +590,13 @@ export default function InboundShipments() {
             <Card
               key={shipment.id}
               className="cursor-pointer active:bg-accent/50"
-              onClick={() => navigate(`/shipments/${shipment.id}`)}
+              onClick={() => navigate(shipmentHref(shipment))}
             >
               <CardContent className="p-3">
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-mono font-medium text-sm">{shipment.shipmentNumber}</span>
+                      <Link href={shipmentHref(shipment)} onClick={event => event.stopPropagation()} className="font-mono font-medium text-sm text-primary hover:underline">{shipment.shipmentNumber}</Link>
                       <Badge
                         variant={STATUS_BADGES[shipment.status]?.variant || "secondary"}
                         className={`text-xs ${STATUS_BADGES[shipment.status]?.color || ""}`}
@@ -599,7 +610,7 @@ export default function InboundShipments() {
                     <div className="mt-1 text-sm" data-testid={`shipment-purchases-${shipment.id}`}>
                       <ShipmentPurchaseOrderLinks
                         purchaseOrders={shipment.purchaseOrders}
-                        hrefFor={(id) => procurementChildHref(`/shipments/${shipment.id}`, "", `/purchase-orders/${id}?tab=shipments`)}
+                        hrefFor={(id, poNumber) => procurementChildHref("/shipments", listSearch, `/purchase-orders/${id}?tab=shipments&poScope=${id}&document=${encodeURIComponent(poNumber)}`)}
                       />
                     </div>
                     <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
@@ -649,16 +660,16 @@ export default function InboundShipments() {
                 <TableRow
                   key={shipment.id}
                   className="cursor-pointer"
-                  onClick={() => navigate(`/shipments/${shipment.id}`)}
+                  onClick={() => navigate(shipmentHref(shipment))}
                 >
-                  <TableCell className="font-mono font-medium">{shipment.shipmentNumber}</TableCell>
+                  <TableCell className="font-mono font-medium"><Link href={shipmentHref(shipment)} onClick={event => event.stopPropagation()} className="text-primary hover:underline">{shipment.shipmentNumber}</Link></TableCell>
                   <TableCell>{renderModeBadge(shipment.mode)}</TableCell>
                   <TableCell>{shipment.carrierName || "—"}</TableCell>
                   <TableCell className="font-mono text-sm">{shipment.containerNumber || "—"}</TableCell>
                   <TableCell className="min-w-[10rem]" data-testid={`shipment-purchases-${shipment.id}`}>
                     <ShipmentPurchaseOrderLinks
                       purchaseOrders={shipment.purchaseOrders}
-                      hrefFor={(id) => procurementChildHref(`/shipments/${shipment.id}`, "", `/purchase-orders/${id}?tab=shipments`)}
+                      hrefFor={(id, poNumber) => procurementChildHref("/shipments", listSearch, `/purchase-orders/${id}?tab=shipments&poScope=${id}&document=${encodeURIComponent(poNumber)}`)}
                     />
                   </TableCell>
                   <TableCell className="text-sm">{renderRoute(shipment)}</TableCell>
@@ -693,7 +704,7 @@ export default function InboundShipments() {
             <DialogDescription>Create a draft shipment. You can add PO lines after creation.</DialogDescription>
           </DialogHeader>
           <ShipmentCreateRecovery recovery={shipmentCreation.recovery} error={shipmentCreation.error} pending={createMutation.isPending} onRetry={recoverShipmentCreation} onRefresh={shipmentCreation.refresh} />
-          <fieldset disabled={createMutation.isPending || !shipmentCreation.ready || !!shipmentCreation.recovery || !!shipmentCreation.error} className="space-y-4 min-w-0">
+          <fieldset disabled={!canCreateShipment || createMutation.isPending || !shipmentCreation.ready || !!shipmentCreation.recovery || !!shipmentCreation.error} className="space-y-4 min-w-0">
             {warehousesQuery.isPending && <p role="status">Loading available warehouses...</p>}
             {warehousesQuery.isError && <div role="alert">Warehouse options could not be loaded or verified. <Button type="button" variant="outline" onClick={() => void warehousesQuery.refetch()}>Retry warehouses</Button></div>}
             <div className="space-y-2">

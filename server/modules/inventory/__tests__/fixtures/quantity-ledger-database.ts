@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Pool, PoolClient } from "pg";
 import type { OpeningVerification } from "@shared/types/inventory-cutover-opening";
-import { createInventoryCutoverTestDatabase } from "./inventory-cutover-database";
+import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "./inventory-cutover-database";
 import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, installCutoverCompositionMigrations,
   seedCompositionReviewedDryRun } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-composition-database.fixture";
 import { installCutoverAdmissionFixturePrerequisites } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-admission.fixture";
@@ -22,10 +22,18 @@ export const QUANTITY_TEST_TIME = "2026-09-10T16:00:00.000Z";
  * Opening isolates the quantity owner; it is not whole-application cutover proof.
  */
 export async function createQuantityLedgerTestContext(connectionString: string | undefined, disposable: boolean) {
-  const database = await createInventoryCutoverTestDatabase(connectionString, disposable, cutoverCompositionBaseSql);
+  const database = await createInventoryCutoverTestDatabase(connectionString, disposable, "");
+  return createQuantityLedgerTestContextInDatabase(database);
+}
+
+/** Connected HTTP acceptance must bind the real application connection before
+ * importing owners that use it. Accept its already-owned empty database without
+ * repointing an initialized connection singleton or using the admin database. */
+export async function createQuantityLedgerTestContextInDatabase(database: InventoryCutoverTestDatabase) {
   const pool = database.pool;
   const ledger = new PostgresInventoryQuantityLedger();
   try {
+    await pool.query(cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(pool);
     await pool.query(cutoverCompositionSeedSql);
     await installCutoverAdmissionFixturePrerequisites(pool);

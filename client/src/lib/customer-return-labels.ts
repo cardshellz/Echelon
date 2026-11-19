@@ -1,3 +1,4 @@
+import { customerReturnRejectionMessage } from "@shared/returns/customer-return-errors";
 import { z } from "zod";
 import {
   CUSTOMER_RETURN_LABEL_API,
@@ -46,25 +47,33 @@ async function readLabelResponse<T extends z.ZodTypeAny>(
     const code = error.success
       ? (error.data.error.code ?? "RETURN_LABEL_REQUEST_FAILED")
       : "RETURN_LABEL_REQUEST_FAILED";
+    const reason = z
+      .object({
+        error: z.object({ reasonCode: z.string().max(100).optional() }),
+      })
+      .safeParse(body);
     const message =
       code === "RETURN_RATE_COST_LIMIT"
         ? "Your return is saved, but prepaid shipping for this box needs our team's help. No new label was purchased."
         : code === "RETURN_RATE_COST_UNVERIFIED"
           ? "The prepaid shipping price could not be verified. No label was purchased. Try again or contact us for help."
-        : code === "RETURN_RATE_NONE_ELIGIBLE" || code === "RETURN_LABEL_PARCEL_NOT_ELIGIBLE"
-          ? "Your return is saved, but no allowed prepaid service is available for this box. Contact us for help."
-        : code === "RETURN_LABEL_SUBMISSION_REJECTED"
-        ? "This return was not created. Find the order again to review its current availability."
-        : code === "RETURN_LABEL_SUBMISSION_PROCESSING"
-          ? "Your return is still being checked. Check its status again shortly."
-          : code === "RETURN_LABEL_SUBMISSION_NOT_FOUND"
-            ? "We have not confirmed the outcome yet. Check status before starting another return."
-            : code === "RETURN_LABEL_SETTINGS_CHANGED" ||
-                code === "RETURN_LABEL_SETTINGS_DISABLED"
-              ? "Label settings changed or are paused. Refresh label settings in Testing controls, then check label status."
-              : response.status === 409
-                ? "The saved configuration or return changed. Refresh its status before trying again."
-                : "The label service is unavailable. Your saved request will be kept so you can check its status.";
+          : code === "RETURN_RATE_NONE_ELIGIBLE" ||
+              code === "RETURN_LABEL_PARCEL_NOT_ELIGIBLE"
+            ? "Your return is saved, but no allowed prepaid service is available for this box. Contact us for help."
+            : code === "RETURN_LABEL_SUBMISSION_REJECTED"
+              ? customerReturnRejectionMessage(
+                  reason.success ? reason.data.error.reasonCode : undefined,
+                )
+              : code === "RETURN_LABEL_SUBMISSION_PROCESSING"
+                ? "Your return is still being checked. Check its status again shortly."
+                : code === "RETURN_LABEL_SUBMISSION_NOT_FOUND"
+                  ? "We have not confirmed the outcome yet. Check status before starting another return."
+                  : code === "RETURN_LABEL_SETTINGS_CHANGED" ||
+                      code === "RETURN_LABEL_SETTINGS_DISABLED"
+                    ? "Label settings changed or are paused. Refresh label settings in Testing controls, then check label status."
+                    : response.status === 409
+                      ? "The saved configuration or return changed. Refresh its status before trying again."
+                      : "The label service is unavailable. Your saved request will be kept so you can check its status.";
     throw new ReturnLabelRequestError(code, message);
   }
   const parsed = schema.safeParse(body);

@@ -1,3 +1,5 @@
+import { customerReturnWorkflowStatusSchema, customerReturnWorkflowResumeSchema, customerReturnWorkflowMessage, type CustomerReturnWorkflowStatus } from "@shared/returns/customer-return-workflow.contract";
+import { customerReturnRejectionMessage } from "@shared/returns/customer-return-errors";
 import { z } from "zod";
 import {
   CUSTOMER_RETURNS_API,
@@ -5,6 +7,7 @@ import {
   customerReturnSessionStateSchema,
   customerReturnCustomerOrderSchema,
   customerReturnCustomerOrderPageSchema,
+  customerReturnOrderChoicesSchema,
 } from "@shared/returns/customer-return-access.contract";
 import {
   customerReturnCustomerSubmitInputSchema,
@@ -41,6 +44,22 @@ export class CustomerReturnRequestError extends Error {
   }
 }
 
+export const CUSTOMER_RETURN_REQUEST_TIMEOUT_MS = 25_000;
+async function withReturnRequestDeadline<T>(parent: AbortSignal, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  const cancel = () => controller.abort(parent.reason);
+  if (parent.aborted) cancel(); else parent.addEventListener("abort", cancel, { once: true });
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, CUSTOMER_RETURN_REQUEST_TIMEOUT_MS);
+  try {
+    if (controller.signal.aborted) throw controller.signal.reason;
+    return await work(controller.signal);
+  } catch (error) {
+    if (timedOut) throw new CustomerReturnRequestError("CUSTOMER_RETURN_REQUEST_TIMEOUT", "We couldn't load the result. Your saved request is kept. Please try again.");
+    throw error;
+  } finally { clearTimeout(timer); parent.removeEventListener("abort", cancel); }
+}
+
 async function responseBody<T extends z.ZodTypeAny>(
   response: Response,
   schema: T,
@@ -53,14 +72,24 @@ async function responseBody<T extends z.ZodTypeAny>(
   const body: unknown = await response.json().catch(() => null);
   if (!response.ok) {
     const parsed = z
-      .object({ error: z.object({ code: z.string().max(100) }) })
+      .object({
+        error: z.object({
+          code: z.string().max(100),
+          reasonCode: z.string().max(100).optional(),
+        }),
+      })
       .safeParse(body);
     const code = parsed.success
       ? parsed.data.error.code
       : "CUSTOMER_RETURN_REQUEST_FAILED";
     if (
       code === "RETURN_LIVE_REVIEW_CHANGED" ||
-      code === "RETURN_LABEL_SETTINGS_CHANGED"
+      code === "RETURN_LABEL_SETTINGS_CHANGED" ||
+      code === "RETURN_LIVE_QUANTITY_INVALID" ||
+      code === "RETURN_LABEL_ALLOCATION_UNVERIFIED" ||
+      code === "RETURN_ITEM_WEIGHT_UNVERIFIED" ||
+      code === "RETURN_LABEL_ORIGIN_UNVERIFIED" ||
+      code === "RETURN_LABEL_SETTINGS_DISABLED"
     ) {
       throw new ReturnSourceChangedError(
         "This order changed. Choose it again to review the available items.",
@@ -74,17 +103,22 @@ async function responseBody<T extends z.ZodTypeAny>(
           : "Your return is saved, but prepaid shipping for this box needs our team's help. No new label was purchased."
         : code === "RETURN_RATE_COST_UNVERIFIED"
           ? "The prepaid shipping price could not be verified. No label was purchased. Try again or contact us for help."
-        : code === "RETURN_RATE_NONE_ELIGIBLE" || code === "RETURN_LABEL_PARCEL_NOT_ELIGIBLE"
-          ? canRepack
-            ? "Review your box sizes and separate heavy items into more boxes, or contact us for help. No label was purchased."
-            : "Your return is saved, but no allowed prepaid service is available for this box. Contact us for help."
-        : code === "RETURN_LABEL_SUBMISSION_REJECTED"
-        ? "This request was not accepted. Choose the order again to review its availability."
-        : code === "RETURN_LABEL_SUBMISSION_PROCESSING"
-          ? "Your request is still being checked. Check its status again shortly."
-          : code === "RETURN_LABEL_SUBMISSION_NOT_FOUND"
-            ? "We have not confirmed your request yet. Retry this saved request to continue."
-            : "We could not confirm the result. Your saved request will be kept. Please try again.",
+          : code === "RETURN_RATE_NONE_ELIGIBLE" ||
+              code === "RETURN_LABEL_PARCEL_NOT_ELIGIBLE"
+            ? canRepack
+              ? "Review your box sizes and separate heavy items into more boxes, or contact us for help. No label was purchased."
+              : "Your return is saved, but no allowed prepaid service is available for this box. Contact us for help."
+            : code === "RETURN_LABEL_SUBMISSION_REJECTED"
+              ? parsed.success && ["RETURN_LABEL_SETTINGS_CHANGED", "RETURN_LIVE_REVIEW_CHANGED"].includes(parsed.data.error.reasonCode ?? "")
+                ? "Your return details need to be refreshed. Try again to review your items."
+                : customerReturnRejectionMessage(
+                  parsed.success ? parsed.data.error.reasonCode : undefined,
+                )
+              : code === "RETURN_LABEL_SUBMISSION_PROCESSING"
+                ? "We couldn’t finish preparing your return. Your selections are saved. Please try again."
+                : code === "RETURN_LABEL_SUBMISSION_NOT_FOUND"
+                  ? "We couldn’t finish preparing your return. Your selections are saved. Please try again."
+                  : "We could not confirm the result. Your saved request will be kept. Please try again.",
       response.status,
     );
   }
@@ -92,7 +126,7 @@ async function responseBody<T extends z.ZodTypeAny>(
   if (!parsed.success)
     throw new CustomerReturnRequestError(
       "CUSTOMER_RETURN_RESPONSE_INVALID",
-      "The response could not be verified. Please check its status again.",
+      "We couldn’t load your return details. Please try again.",
     );
   return parsed.data;
 }
@@ -147,24 +181,34 @@ export function createCustomerReturnTransport(
       headers["Content-Type"] = "application/json";
       headers["X-Return-Command"] = "1";
     }
-    return responseBody(
+    return withReturnRequestDeadline(signal, async boundedSignal => responseBody(
       await request(`${CUSTOMER_RETURNS_API}${path}`, {
         method: body === undefined ? "GET" : "POST",
         credentials: "include",
         cache: "no-store",
-        signal,
+        signal: boundedSignal,
         headers,
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }),
       schema,
       path.endsWith("/review"),
-    );
+    ));
   }
   return {
     session: (signal: AbortSignal) =>
       call("/session", signal, customerReturnSessionStateSchema),
     logout: (signal: AbortSignal) =>
       call("/logout", signal, z.object({ ok: z.literal(true) }).strict(), {}),
+    async orderChoices(before: number | null, signal: AbortSignal) {
+      const result = await call(
+        `/order-options${before === null ? "" : `?before=${id.parse(before)}`}`,
+        signal, customerReturnOrderChoicesSchema,
+      );
+      if ((before !== null && result.orders.some(order => order.omsOrderId >= before)) ||
+          (before !== null && result.nextBeforeOmsOrderId !== null && result.nextBeforeOmsOrderId >= before))
+        throw new Error("The order page changed. Refresh your orders.");
+      return result;
+    },
     async orders(before: number | null, signal: AbortSignal) {
       const result = await call(
         `/orders${before === null ? "" : `?before=${id.parse(before)}`}`,
@@ -200,6 +244,18 @@ export function createCustomerReturnTransport(
         customerReturnFlowReviewSchema,
         reviewInput.parse(raw),
       ),
+    orderWorkflow: (orderId: number, signal: AbortSignal) =>
+      call(`/orders/${id.parse(orderId)}/label-requests`, signal, customerReturnWorkflowResumeSchema),
+    enqueue: (orderId: number, raw: unknown, signal: AbortSignal) =>
+      call(`/orders/${id.parse(orderId)}/label-requests`, signal, customerReturnWorkflowStatusSchema, customerReturnCustomerSubmitInputSchema.parse(raw)),
+    workflow: (commandKey: string, signal: AbortSignal) =>
+      call(`/label-requests/${key.parse(commandKey)}`, signal, customerReturnWorkflowStatusSchema),
+    retryWorkflow: (commandKey: string, signal: AbortSignal) =>
+      call(`/label-requests/${key.parse(commandKey)}/retry`, signal, customerReturnWorkflowStatusSchema, {}),
+    authorizationWorkflow: (authorizationId: number, signal: AbortSignal) =>
+      call(`/returns/${id.parse(authorizationId)}/label-requests`, signal, customerReturnWorkflowStatusSchema),
+    queueExistingLabels: (authorizationId: number, signal: AbortSignal) =>
+      call(`/returns/${id.parse(authorizationId)}/label-requests`, signal, customerReturnWorkflowStatusSchema, {}),
     async submit(orderId: number, raw: unknown, signal: AbortSignal) {
       const input = customerReturnCustomerSubmitInputSchema.parse(raw);
       return assertCustomerReturnStatus(
@@ -253,12 +309,20 @@ export function createCustomerReturnTransport(
         authorizationId,
       );
     },
-    history: (before: number | null, signal: AbortSignal) =>
-      call(
-        `/returns${before === null ? "" : `?before=${id.parse(before)}`}`,
-        signal,
-        customerReturnCustomerHistorySchema,
-      ),
+    async history(before: number | null, signal: AbortSignal, includeProgress = false) {
+      const query = new URLSearchParams();
+      if (before !== null) query.set("before", String(id.parse(before)));
+      const path = () => `/returns${query.size ? `?${query}` : ""}`;
+      if (includeProgress) query.set("progress", "1");
+      try { return await call(path(), signal, customerReturnCustomerHistorySchema); }
+      catch (cause) {
+        // Older strict servers do not recognize this read-only extension. Never
+        // downgrade an authentication failure, outage, timeout or label command.
+        if (!includeProgress || signal.aborted || !(cause instanceof CustomerReturnRequestError) || ![400, 404].includes(cause.status ?? 0)) throw cause;
+        query.delete("progress");
+        return call(path(), signal, customerReturnCustomerHistorySchema);
+      }
+    },
   };
 }
 export type CustomerReturnTransport = ReturnType<
@@ -284,6 +348,7 @@ export interface CustomerReturnCommandState {
   error: string | null;
   storageBlocked: boolean;
   rejected: boolean;
+  workflow: CustomerReturnWorkflowStatus | null;
 }
 type RecoveryStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
@@ -297,6 +362,7 @@ export class CustomerReturnCommandSession {
     error: null,
     storageBlocked: false,
     rejected: false,
+    workflow: null,
   };
   private listeners = new Set<() => void>();
   private active = true;
@@ -363,8 +429,9 @@ export class CustomerReturnCommandSession {
             ),
         ))
     ) {
-      throw new Error(
-        "The saved box identities changed. Contact support before continuing.",
+      throw new CustomerReturnRequestError(
+        "CUSTOMER_RETURN_IDENTITY_CHANGED",
+        "Your return details could not be verified. Contact us for help.",
       );
     }
     const saved = { ...record, authorizationId: status.authorizationId };
@@ -376,26 +443,43 @@ export class CustomerReturnCommandSession {
         "Keep this page open. The latest status could not be saved; your original recovery key is retained.";
     }
     this.update({ record: saved, status, error });
+    return error;
+  }
+  private acceptWorkflow(raw: CustomerReturnWorkflowStatus) {
+    const workflow = customerReturnWorkflowStatusSchema.parse(raw);
+    const record = this.state.record;
+    if (!record || workflow.requestKey !== record.input.idempotencyKey || workflow.omsOrderId !== record.omsOrderId)
+      throw new CustomerReturnRequestError("CUSTOMER_RETURN_IDENTITY_CHANGED", "Your label request could not be verified. Contact us for help.");
+    const storageError = workflow.labels ? this.accept(workflow.labels) : null;
+    if (record.authorizationId !== null && workflow.labels === null)
+      throw new CustomerReturnRequestError("CUSTOMER_RETURN_IDENTITY_CHANGED", "Your saved return could not be verified. Contact us for help.");
+    this.update({ workflow, rejected: workflow.phase === "needs_input" && this.state.record?.authorizationId === null,
+      error: workflow.reason ? customerReturnWorkflowMessage(workflow.reason) : storageError });
   }
   private async run(
-    work: (signal: AbortSignal) => Promise<CustomerReturnCustomerLabelStatus>,
+    work: (signal: AbortSignal) => Promise<CustomerReturnCustomerLabelStatus | CustomerReturnWorkflowStatus>,
   ) {
-    if (!this.active || this.state.busy) return;
+    if (!this.active || this.state.busy) return false;
     const controller = new AbortController();
     this.controller = controller;
     this.update({ busy: true, error: null });
     try {
       const status = await work(controller.signal);
-      if (!controller.signal.aborted && this.active) this.accept(status);
+      if (!controller.signal.aborted && this.active) {
+        if ("phase" in status) this.acceptWorkflow(status);
+        else this.accept(status);
+        return true;
+      }
+      return false;
     } catch (cause) {
       if (!controller.signal.aborted && this.active) {
         if (cause instanceof PreviewAccessError) this.denied(cause.message);
         else
           this.update({
             error:
-              cause instanceof Error
+              cause instanceof CustomerReturnRequestError
                 ? cause.message
-                : "The outcome is unknown. Check this saved request again.",
+                : "We couldn’t finish preparing your return. Your selections are saved. Please try again.",
             rejected:
               this.state.rejected ||
               (cause instanceof CustomerReturnRequestError &&
@@ -403,11 +487,29 @@ export class CustomerReturnCommandSession {
                 this.state.record?.authorizationId === null),
           });
       }
+      return false;
     } finally {
       if (this.controller === controller) this.controller = null;
       if (!controller.signal.aborted && this.active)
         this.update({ busy: false });
     }
+  }
+  async restore(orderId: number, signal: AbortSignal): Promise<boolean> {
+    if (this.state.record) return true;
+    let restored: z.infer<typeof customerReturnWorkflowResumeSchema>;
+    try { restored = customerReturnWorkflowResumeSchema.parse(await this.api.orderWorkflow(id.parse(orderId), signal)); }
+    catch (error) {
+      if (error instanceof CustomerReturnRequestError && error.code === "RETURN_WORKFLOW_NOT_FOUND") return false;
+      throw error;
+    }
+    if (signal.aborted || !this.active) return true;
+    if (restored.workflow.omsOrderId !== orderId) throw new CustomerReturnRequestError("CUSTOMER_RETURN_IDENTITY_CHANGED", "Your saved return could not be verified.");
+    const record = customerReturnSavedRequestSchema.parse({ version: 1, sessionKey: this.identity, omsOrderId: orderId,
+      authorizationId: restored.workflow.labels?.authorizationId ?? null, input: restored.input });
+    this.save(record);
+    this.update({ record });
+    this.acceptWorkflow(restored.workflow);
+    return true;
   }
   async begin(
     orderId: number,
@@ -432,69 +534,36 @@ export class CustomerReturnCommandSession {
       return;
     }
     this.update({ record, rejected: false });
-    await this.run(async (signal) => {
-      let status = await this.api.submit(
-        record.omsOrderId,
-        record.input,
-        signal,
-      );
-      const attempted = new Set<number>();
-      // The explicit Get labels action authorizes each reviewed box. Stop at
-      // uncertainty; reloads/checks never enter this purchase loop.
-      while (
-        !signal.aborted &&
-        this.active &&
-        status.canProgress &&
-        !status.parcels.some(
-          (parcel) =>
-            parcel.status === "processing" || parcel.status === "needs_review",
-        )
-      ) {
-        this.accept(status);
-        const next = [...status.parcels]
-          .sort((left, right) => left.number - right.number)
-          .find((parcel) => parcel.status === "pending");
-        if (!next || attempted.has(next.parcelId)) break;
-        attempted.add(next.parcelId);
-        status = await this.api.progress(status.authorizationId, signal);
-      }
-      return status;
-    });
+    await this.run(signal => this.api.enqueue(record.omsOrderId, record.input, signal));
   }
+  /** Polling is observation only. The durable backend worker owns every next
+   * purchase/reconciliation step, including after this page is closed. */
   async check() {
     const record = this.state.record;
-    if (record)
-      await this.run((signal) =>
-        record.authorizationId === null
-          ? this.api.byCommand(record.input.idempotencyKey, signal)
-          : this.api.status(record.authorizationId, signal),
-      );
+    if (!record) return false;
+    return this.run(async signal => {
+      try { return await this.api.workflow(record.input.idempotencyKey, signal); }
+      catch (error) {
+        if (!(error instanceof CustomerReturnRequestError) || error.code !== "RETURN_WORKFLOW_NOT_FOUND") throw error;
+        // Old receipts remain readable. Only an explicit retry enrolls them.
+        return record.authorizationId === null ? this.api.byCommand(record.input.idempotencyKey, signal)
+          : this.api.status(record.authorizationId, signal);
+      }
+    });
   }
   async retry() {
     const record = this.state.record;
-    if (!record || record.authorizationId !== null || this.state.rejected)
-      return;
-    await this.run(async (signal) => {
-      try {
-        return await this.api.resume(record.input.idempotencyKey, signal);
-      } catch (cause) {
-        if (
-          cause instanceof CustomerReturnRequestError &&
-          (cause.status === 404 ||
-            cause.code === "RETURN_LABEL_SUBMISSION_NOT_FOUND")
-        )
-          return this.api.submit(record.omsOrderId, record.input, signal);
-        throw cause;
+    if (!record || this.state.rejected) return;
+    await this.run(async signal => {
+      try { return await this.api.retryWorkflow(record.input.idempotencyKey, signal); }
+      catch (error) {
+        if (!(error instanceof CustomerReturnRequestError) || error.code !== "RETURN_WORKFLOW_NOT_FOUND") throw error;
+        return record.authorizationId === null ? this.api.enqueue(record.omsOrderId, record.input, signal)
+          : this.api.queueExistingLabels(record.authorizationId, signal);
       }
     });
   }
-  async progress() {
-    const record = this.state.record;
-    if (record?.authorizationId && this.state.status?.canProgress)
-      await this.run((signal) =>
-        this.api.progress(record.authorizationId!, signal),
-      );
-  }
+  async progress() { return this.retry(); }
   finish() {
     if (
       this.state.busy ||
@@ -503,7 +572,7 @@ export class CustomerReturnCommandSession {
       return;
     try {
       this.storage?.removeItem(this.storageKey);
-      this.update({ record: null, status: null, error: null, rejected: false });
+      this.update({ record: null, status: null, workflow: null, error: null, rejected: false });
     } catch {
       this.update({
         error:
@@ -545,10 +614,12 @@ export async function downloadCustomerReturnLabel(
   );
   if (!parcel?.downloadPath || parcel.status !== "ready")
     throw new Error("This label is not ready to download.");
-  const response = await request(parcel.downloadPath, {
+  const downloadPath = parcel.downloadPath;
+  return withReturnRequestDeadline(signal, async boundedSignal => {
+  const response = await request(downloadPath, {
     credentials: "include",
     cache: "no-store",
-    signal,
+    signal: boundedSignal,
     headers: {
       [RETURN_CUSTOMER_SESSION_HEADER]: sessionKey.parse(expectedSessionKey),
     },
@@ -569,4 +640,5 @@ export async function downloadCustomerReturnLabel(
   )
     throw new Error("The label file could not be verified.");
   return blob;
+  });
 }

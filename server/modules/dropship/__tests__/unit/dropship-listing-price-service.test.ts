@@ -3,7 +3,9 @@ import { DropshipListingPriceService, type ListingPriceTransaction } from "../..
 import { listingPriceTargetSchema, saveListingPriceInputSchema, resolveListingPrice, MAX_LISTING_PRICE_CENTS,
   type ListingPricingMode } from "../../../../../shared/dropship/listing-price";
 import { DropshipError } from "../../domain/errors";
+import { contentCandidate } from "../fixtures/listing-content.fixture";
 import type { DropshipListingCatalogCandidate, DropshipListingStoreContext, DropshipPricingPolicyRecord } from "../../application/dropship-listing-preview-service";
+import type { DropshipLogger } from "../../application/dropship-ports";
 import type { DropshipProductCost } from "../../application/dropship-product-cost";
 import type { ListingRulePrice } from "../../application/dropship-rule-price";
 
@@ -18,15 +20,14 @@ describe("listing price local draft authority", () => {
   beforeEach(() => {
     context = { vendorId: 10, vendorStatus: "onboarding", entitlementStatus: "active",
       storeConnectionId: 22, storeStatus: "connected", setupStatus: "incomplete", platform: "ebay", storeLaunchReady: false };
-    const candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers", categoryId: null,
-      productIsActive: true, variantIsActive: true, variantUomType: "pack", defaultRetailPriceCents: 899 } as DropshipListingCatalogCandidate;
+    const candidate: DropshipListingCatalogCandidate = { ...contentCandidate(), productLineIds: [] };
     tx = {
       vendorId: 10,
       catalog: {
         loadStoreContext: vi.fn(async () => context),
         listCatalogCandidates: vi.fn(async () => [candidate]),
-        listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
-        listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
+        listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog" as const, action: "include" as const }]),
+        listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)),
         listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
         listPricingPolicies: vi.fn(async () => []),
       },
@@ -72,10 +73,12 @@ describe("listing price local draft authority", () => {
   it.each(["missing", "unexposed", "unselected", "disabled"])("rejects %s variant", async (mode) => {
     if (mode === "missing") vi.mocked(tx.catalog.listCatalogCandidates).mockResolvedValue([]);
     if (mode === "unexposed") vi.mocked(tx.catalog.listCatalogExposureRules).mockResolvedValue([]);
-    if (mode === "unselected") vi.mocked(tx.catalog.listSelectionRules).mockResolvedValue([]);
+    if (mode === "unselected") vi.mocked(tx.catalog.listPickedVariantIds).mockResolvedValue(new Set());
     if (mode === "disabled") vi.mocked(tx.catalog.listVariantOverrides).mockResolvedValue([{ productVariantId: 101, enabledOverride: false }]);
     await expect(service.saveForMember("member-1", target, input)).rejects.toMatchObject({ code: "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE" });
     expect(tx.save).not.toHaveBeenCalled();
+    // The vendor's picks are read for this one size only (PLAN-B v4.1 §9 row 2).
+    if (mode !== "missing") expect(tx.catalog.listPickedVariantIds).toHaveBeenCalledWith(tx.vendorId, [target.productVariantId]);
   });
   it("reset ignores an old applied listing price and remains revisioned", async () => {
     vi.mocked(tx.catalog.listExistingListings).mockResolvedValue([{ productVariantId: 101, listingId: 1,
@@ -146,15 +149,14 @@ describe("a price save never leaves a size without a price it can be listed at",
   beforeEach(() => {
     const context: DropshipListingStoreContext = { vendorId: 10, vendorStatus: "active", entitlementStatus: "active",
       storeConnectionId: 22, storeStatus: "connected", setupStatus: "complete", platform: "ebay", storeLaunchReady: true };
-    candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers", categoryId: null,
-      productIsActive: true, variantIsActive: true, variantUomType: "pack", defaultRetailPriceCents: 899 } as DropshipListingCatalogCandidate;
+    candidate = { ...contentCandidate(), productLineIds: [] };
     tx = {
       vendorId: 10,
       catalog: {
         loadStoreContext: vi.fn(async () => context),
         listCatalogCandidates: vi.fn(async () => [candidate]),
-        listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
-        listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
+        listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog" as const, action: "include" as const }]),
+        listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)),
         listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
         listPricingPolicies: vi.fn(async () => []),
       },
@@ -272,13 +274,12 @@ describe("inherit: a size with no price of its own (A3, L1)", () => {
   let tx: ListingPriceTransaction;
   let service: DropshipListingPriceService;
   let candidate: DropshipListingCatalogCandidate;
-  let logger: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> };
+  let logger: { info: ReturnType<typeof vi.fn<DropshipLogger["info"]>>; warn: ReturnType<typeof vi.fn<DropshipLogger["warn"]>>; error: ReturnType<typeof vi.fn<DropshipLogger["error"]>> };
   const inherit = { priceCents: null, pricingMode: "inherit" as const, expectedRevisionId: 4, idempotencyKey: "inherit-1" };
   beforeEach(() => {
     const context: DropshipListingStoreContext = { vendorId: 10, vendorStatus: "active", entitlementStatus: "active",
       storeConnectionId: 22, storeStatus: "connected", setupStatus: "complete", platform: "ebay", storeLaunchReady: true };
-    candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers", categoryId: null,
-      productIsActive: true, variantIsActive: true, variantUomType: "pack", defaultRetailPriceCents: 899 } as DropshipListingCatalogCandidate;
+    candidate = { ...contentCandidate(), productLineIds: [] };
     // The repository keeps one request hash per key and refuses a key reused for another change, as the PostgreSQL one does.
     const hashes = new Map<string, string>();
     tx = {
@@ -286,8 +287,8 @@ describe("inherit: a size with no price of its own (A3, L1)", () => {
       catalog: {
         loadStoreContext: vi.fn(async () => context),
         listCatalogCandidates: vi.fn(async () => [candidate]),
-        listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
-        listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
+        listCatalogExposureRules: vi.fn(async () => [{ id: 1, scopeType: "catalog" as const, action: "include" as const }]),
+        listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)),
         listVariantOverrides: vi.fn(async () => []),
         // An earlier push saved $9.99 on the listing; inherit never falls back to it.
         listExistingListings: vi.fn(async () => [{ productVariantId: 101, listingId: 1,
@@ -310,7 +311,7 @@ describe("inherit: a size with no price of its own (A3, L1)", () => {
           idempotentReplay: false };
       }),
     };
-    logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    logger = { info: vi.fn<DropshipLogger["info"]>(), warn: vi.fn<DropshipLogger["warn"]>(), error: vi.fn<DropshipLogger["error"]>() };
     service = new DropshipListingPriceService({ repository: { execute: async (_request, operation) => operation(tx) },
       clock: { now: () => now }, logger });
   });

@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures } from "./procurement-fixtures";
 
@@ -6,10 +7,10 @@ async function closedShipment(page: Page, options: { loseFirstResponse?: boolean
   const state = { updated: false, keys: [] as string[] };
   await page.route("**/api/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: {
-      user: { id: "test-user", username: "test", role: options.viewer ? "lead" : "admin" }, roles: options.viewer ? ["lead"] : ["admin"],
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({
+      user: { id: "test-user", username: "test", role: options.viewer ? "lead" : "admin" }, systemRoles: options.viewer ? ["lead"] : ["admin"],
       permissions: options.viewer ? ["purchasing:view"] : ["purchasing:view", "purchasing:approve"],
-    } });
+    }) });
     if (request.method() === "GET" && path === "/api/inbound-shipments/42") return route.fulfill({ json: {
       id: 42, shipmentNumber: "TEST-CLOSED-42", status: "closed", mode: "sea_fcl", purchaseOrderId: 17,
       allocationMethodDefault: "by_value", statusHistory: [],
@@ -58,12 +59,12 @@ test("a closed shipment has one working cost update and saved results survive re
   await review.getByRole("button", { name: "Update shipment costs", exact: true }).click();
   await expect(review.getByText("Charge split current", { exact: true })).toBeVisible();
   const results = page.getByRole("region", { name: "Inventory cost results" });
-  await expect(results).toContainText("Costs posted on 1 of 1 shipment lines.");
+  await expect(results).toContainText("Shipping costs applied");
   await expect(review.getByRole("button", { name: "Update shipment costs", exact: true })).not.toBeVisible();
   expect(state.keys).toHaveLength(1);
   expect(state.keys[0]).toMatch(/^[\da-f-]{36}$/);
   await page.reload();
-  await expect(results).toContainText("Costs posted on 1 of 1 shipment lines.");
+  await expect(results).toContainText("Shipping costs applied");
   await expect(page.getByText("Closed", { exact: true }).first()).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.screenshot({ path: info.outputPath("closed-shipment-cost-review-after.png"), fullPage: true });
@@ -79,7 +80,7 @@ test("a lost response gives a plain explanation and retry sends the same command
   await expect(error).toBeVisible();
   await expect(error).not.toContainText("409:");
   await button.click();
-  await expect(page.getByRole("region", { name: "Inventory cost results" })).toContainText("Costs posted on 1 of 1 shipment lines.");
+  await expect(page.getByRole("region", { name: "Inventory cost results" })).toContainText("Shipping costs applied");
   expect(state.keys).toHaveLength(2);
   expect(state.keys[0]).toBe(state.keys[1]);
   expect(failures).toEqual([]);
@@ -89,7 +90,7 @@ test("viewers can read costs but cannot start the approval-controlled update", a
   const { state, failures } = await closedShipment(page, { viewer: true });
   await expect(page.getByText("A purchasing approver can update these costs. You can review the saved details below.", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Update shipment costs", exact: true })).toHaveCount(0);
-  await expect(page.getByRole("region", { name: "Inventory cost results" })).toContainText("Not updated yet");
+  await expect(page.getByRole("region", { name: "Inventory cost results" })).toContainText("Update the shipping costs");
   expect(state.keys).toEqual([]);
   expect(failures).toEqual([]);
 });

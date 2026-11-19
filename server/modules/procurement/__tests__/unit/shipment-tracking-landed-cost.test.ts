@@ -1,10 +1,19 @@
-import { readShipmentCostReviewInTransaction } from "../../shipment-cost-review.repository";
+// Packing/transaction tests isolate the source reader; real header/tax effects are covered by PostgreSQL flow tests.
+vi.mock("../../shipment-cost-exclusions.repository", () => ({ readShipmentCostExclusions: vi.fn(async () => ({ taxByLine: new Map(), otherByLine: new Map() })) }));
+import type { ShipmentExceptionReader } from "../../shipment-cost-exception.repository";
+import type { PurchaseCostStatusSnapshotReader } from "../../purchase-cost-status-snapshot.repository";
+import { readShipmentCostReviewInTransaction, readShipmentCostReviewProjectionsInTransaction } from "../../shipment-cost-review.repository";
+import { readShipmentHealthEvidence, readShipmentProvisionalLotCounts, type ShipmentHealthReadEvidence } from "../../shipment-health-evidence.repository";
+vi.mock("../../shipment-health-evidence.repository", () => ({ readShipmentHealthEvidence: vi.fn(), readShipmentProvisionalLotCounts: vi.fn() }));
 import { shipmentCostReviewSchema, type ShipmentCostReview } from "@shared/procurement/shipment-cost-workflow";
 import { landedCostHealthSchema } from "@shared/procurement/landed-cost-health";
-vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn() }));
+vi.mock("../../shipment-cost-review.repository", () => ({ readShipmentCostReview: vi.fn(), readShipmentCostReviewInTransaction: vi.fn(), readShipmentCostReviewProjectionsInTransaction: vi.fn() }));
 import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../shipment-cost-application.service";
 vi.mock("../../shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
 import { shipmentLineVersion } from "../../shipment-line-version";
+// These tests isolate packing/allocation and malformed input behavior. The tax
+// source reader has real receipt/AP/landed PostgreSQL acceptance separately.
+vi.mock("../../purchase-tax-costs.repository", () => ({ readTaxedShipmentSupplierCosts: vi.fn(async () => new Map()) }));
 import { buildShipmentAllocationBasis, buildShipmentAllocationEvidence } from "../../domain/shipment-allocation-basis";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDialect } from "drizzle-orm/pg-core";
@@ -14,17 +23,28 @@ import {
   createShipmentTrackingService,
 } from "../../shipment-tracking.service";
 
+const oneCbmAcrossFivePieces = { dimensionBasis: "piece", lengthCm: "2000", widthCm: "10", heightCm: "10" };
+
 beforeEach(() => {
+  vi.mocked(readShipmentCostReviewProjectionsInTransaction).mockReset().mockImplementation(async <T>(tx: ShipmentExceptionReader, ids: readonly number[],
+    project: (review: ShipmentCostReview) => T, reader?: PurchaseCostStatusSnapshotReader): Promise<Map<number, T>> => {
+    const result = new Map<number, T>();
+    for (const id of ids) {
+      const review = await readShipmentCostReviewInTransaction(tx, id, reader);
+      if (review) result.set(id, project(review));
+    }
+    return result;
+  });
   vi.mocked(readShipmentCostReviewInTransaction).mockReset().mockResolvedValue({ shipmentId: 1,
     lines: [{ lineId: 11, sku: "SKU-1", sourceIssue: null, exceptionReview: null, application: null }] });
   vi.mocked(recordShipmentCostRevisions).mockReset().mockResolvedValue({ revisions: [], issues: [] } as any);
-  vi.mocked(applyShipmentCostRevisions).mockReset().mockResolvedValue({ updated: 0, total: 0, skipped: [], costApplications: [] });
+  vi.mocked(applyShipmentCostRevisions).mockReset().mockResolvedValue({ updated: 0, total: 0, status: "applied", skipped: [], costApplications: [] });
 });
 
 function buildTransactionalDb() {
   const tx = {
     insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
-    execute: vi.fn().mockResolvedValue({ rows: [{ id: 1 }] }),
+    execute: vi.fn(async query => ({ rows: new PgDialect().sqlToQuery(query).sql.includes("FROM procurement.purchase_order_lines") ? [] : [{ id: 1 }] })),
   };
   const db = {
     execute: vi.fn().mockResolvedValue({ rows: [] }),
@@ -43,7 +63,7 @@ function buildTransactionalCogs() {
 }
 
 function buildStorage(overrides: Record<string, any> = {}) {
-  return {
+  const storage = {
     db: { execute: vi.fn().mockResolvedValue({}) },
     getInboundShipments: vi.fn().mockResolvedValue([]),
     getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing" }),
@@ -72,6 +92,32 @@ function buildStorage(overrides: Record<string, any> = {}) {
     getProductVariantById: vi.fn().mockResolvedValue({ id: 10, unitsPerVariant: 1 }),
     ...overrides,
   } as any;
+  // Preserve the existing scenarios at the raw evidence boundary. The real
+  // batched SQL/grouping is covered by repository and PostgreSQL tests.
+  vi.mocked(readShipmentHealthEvidence).mockImplementation(async (tx, ids) => {
+    const result = new Map<number, ShipmentHealthReadEvidence>();
+    for (const id of ids) {
+      const lines = await storage.getInboundShipmentLines(id, tx);
+      const costs = await storage.getInboundFreightCosts(id, tx);
+      result.set(id, { lines, costs,
+        allocationsByCostId: new Map(await Promise.all(costs.map(async (cost: any) => [cost.id, await storage.getInboundFreightCostAllocations(cost.id, tx)]))),
+        snapshotsByLineId: new Map((await Promise.all(lines.map((line: any) => storage.getLandedCostSnapshots(line.id, tx)))).flat().map((snapshot: any) => [snapshot.inboundShipmentLineId, snapshot])),
+        purchaseLinesById: new Map((await Promise.all(lines.filter((line: any) => line.purchaseOrderLineId != null).map((line: any) => storage.getPurchaseOrderLineById(line.purchaseOrderLineId, tx)))).filter(Boolean).map((line: any) => [line.id, line])),
+        purchaseOrdersById: new Map((await Promise.all(lines.filter((line: any) => line.purchaseOrderId != null).map((line: any) => storage.getPurchaseOrderById(line.purchaseOrderId, tx)))).filter(Boolean).map((order: any) => [order.id, order])),
+      });
+    }
+    return result;
+  });
+  vi.mocked(readShipmentProvisionalLotCounts).mockImplementation(async (tx, scopes) => {
+    const result = new Map<number, { provisionalLotCount: number; untracedProvisionalLotCount: number }>();
+    for (const scope of scopes) {
+      const lots = await storage.getProvisionalLotsByShipment(scope.shipmentId, tx);
+      const traced = new Set(scope.tracedLotIds);
+      result.set(scope.shipmentId, { provisionalLotCount: lots.length, untracedProvisionalLotCount: lots.filter((lot: { id: number }) => !traced.has(lot.id)).length });
+    }
+    return result;
+  });
+  return storage;
 }
 
 function productValueEvidence(totalProductCostCents: number, orderQty = 5, qtyShipped = 5) {
@@ -100,7 +146,7 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
     const storage = buildStorage({
       getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_volume" }),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
-        { id: 11, sku: "SKU-1", qtyShipped: 5, totalVolumeCbm: "1.2" },
+        { id: 11, sku: "SKU-1", qtyShipped: 5, dimensionBasis: "piece", lengthCm: "2400", widthCm: "10", heightCm: "10", totalVolumeCbm: "1.2" },
       ]),
       getInboundFreightCosts: vi.fn().mockResolvedValue([
         { id: 31, costType: "freight", actualCents: 1200, allocationMethod: null },
@@ -188,8 +234,8 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
     const storage = buildStorage({
       getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_chargeable_weight" }),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
-        { id: 11, sku: "SKU-1", qtyShipped: 5, chargeableWeightKg: "29" },
-        { id: 12, sku: "SKU-2", qtyShipped: 5, chargeableWeightKg: "26" },
+        { id: 11, sku: "SKU-1", qtyShipped: 5, dimensionBasis: "piece", weightKg: "5.800", lengthCm: "1", widthCm: "1", heightCm: "1", chargeableWeightKg: "29" },
+        { id: 12, sku: "SKU-2", qtyShipped: 5, dimensionBasis: "piece", weightKg: "5.200", lengthCm: "1", widthCm: "1", heightCm: "1", chargeableWeightKg: "26" },
       ]),
       getInboundFreightCosts: vi.fn().mockResolvedValue([
         { id: 31, costType: "freight", actualCents: 44660, allocationMethod: null },
@@ -259,7 +305,7 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
     const { db } = buildTransactionalDb();
     const storage = buildStorage({
       getInboundShipmentLines: vi.fn().mockResolvedValue([{ id: 11, sku: "SKU-1", qtyShipped: 5,
-        purchaseOrderId: 1, purchaseOrderLineId: 21, totalWeightKg: "1", totalVolumeCbm: "1" }]),
+        purchaseOrderId: 1, purchaseOrderLineId: 21, ...oneCbmAcrossFivePieces, weightKg: "0.200", totalWeightKg: "1", totalVolumeCbm: "1" }]),
       getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, purchaseOrderId: 1, lineType: "product",
         orderQty: 5, totalProductCostCents: null }),
       getInboundFreightCosts: vi.fn().mockResolvedValue([{ id: 31, costType: "freight", actualCents: 1200, allocationMethod: method }]),
@@ -316,6 +362,57 @@ describe("ShipmentTrackingService.getAllocationStatus", () => {
 });
 
 describe("ShipmentTrackingService.getEnrichedLines", () => {
+  function unallocatedProductStorage(allocatedCostCents: unknown) {
+    return buildStorage({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([{
+        id: 11, purchaseOrderId: 1, purchaseOrderLineId: 21, productVariantId: null,
+        qtyShipped: 5, allocatedCostCents,
+      }]),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({
+        id: 21, purchaseOrderId: 1, lineType: "product", orderQty: 5,
+        totalProductCostCents: 500, unitCostCents: 100, unitCostMills: 10000,
+      }),
+    });
+  }
+
+  it.each([null, undefined])("keeps an unallocated product line readable without inventing zero costs (%s)", async amount => {
+    const storage = unallocatedProductStorage(amount);
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const result = await service.getEnrichedLines(1);
+
+    expect(result[0]).toMatchObject({
+      allocatedCostCents: null,
+      freightAllocatedCents: null, dutyAllocatedCents: null,
+      insuranceAllocatedCents: null, otherAllocatedCents: null,
+      freightAllocatedMillsPerUnit: null, dutyAllocatedMillsPerUnit: null,
+      insuranceAllocatedMillsPerUnit: null, otherAllocatedMillsPerUnit: null,
+      totalAllocatedMillsPerUnit: null, landedUnitCostMills: null,
+      poUnitCostMills: 10000, productValueIssue: null,
+    });
+    expect(storage.updateInboundShipmentLine).not.toHaveBeenCalled();
+    expect(storage.bulkCreateInboundFreightCostAllocations).not.toHaveBeenCalled();
+  });
+
+  it("keeps an explicitly recorded zero allocation distinct from missing allocation evidence", async () => {
+    const service = createShipmentTrackingService({} as any, unallocatedProductStorage(0));
+
+    const result = await service.getEnrichedLines(1);
+
+    expect(result[0]).toMatchObject({ allocatedCostCents: 0, totalAllocatedMillsPerUnit: 0,
+      landedUnitCostMills: 10000, freightAllocatedCents: null, freightAllocatedMillsPerUnit: null });
+  });
+
+  it.each(["invalid", "", "1.2", Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects a present malformed or unsafe allocation instead of returning an unknown or zero amount (%s)", async amount => {
+      const service = createShipmentTrackingService({} as any, unallocatedProductStorage(amount));
+
+      await expect(service.getEnrichedLines(1)).rejects.toMatchObject({
+        name: "MoneyInputError", context: { field: "allocatedCents", unit: "cents" },
+      });
+    },
+  );
+
   it("returns PO SKU, mills unit costs, and allocation category breakdowns for the allocation tab", async () => {
     const storage = buildStorage({
       getInboundShipmentLines: vi.fn().mockResolvedValue([
@@ -327,6 +424,7 @@ describe("ShipmentTrackingService.getEnrichedLines", () => {
           productVariantId: null,
           qtyShipped: 5,
           allocatedCostCents: 1275,
+          ...oneCbmAcrossFivePieces,
           landedUnitCostCents: 355,
         },
       ]),
@@ -376,6 +474,40 @@ describe("ShipmentTrackingService.getEnrichedLines", () => {
       totalAllocatedMillsPerUnit: 25500,
       landedUnitCostMills: 35500,
     }));
+  });
+
+  // 2026-10-26, S260821004377: a line with no cost allocation yet (null
+  // allocated_cost_cents, no allocation rows) made the strict cents reader
+  // throw and 500ed the whole shipment page.
+  it("loads a line with no cost allocation as nothing allocated instead of failing the page", async () => {
+    const storage = buildStorage({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([{ id: 11, sku: null, purchaseOrderId: 1, purchaseOrderLineId: 21,
+        productVariantId: null, qtyShipped: 5, allocatedCostCents: null, landedUnitCostCents: null }]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([]),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, purchaseOrderId: 1, lineType: "product", sku: "PO-SKU",
+        productName: "PO Product", orderQty: 5, totalProductCostCents: 500, unitCostCents: 100, unitCostMills: 10000 }),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    const [line] = await service.getEnrichedLines(1);
+
+    expect(line).toEqual(expect.objectContaining({ allocatedCostCents: null, freightAllocatedCents: null,
+      freightAllocatedMillsPerUnit: null, totalAllocatedMillsPerUnit: null, poUnitCostMills: 10000, landedUnitCostMills: null }));
+  });
+
+  it("still rejects a present allocation that is not exact integer cents", async () => {
+    const storage = buildStorage({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([{ id: 11, sku: null, purchaseOrderId: 1, purchaseOrderLineId: 21,
+        productVariantId: null, qtyShipped: 5, allocatedCostCents: "12.5", landedUnitCostCents: null }]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([]),
+      getInboundFreightCostAllocations: vi.fn().mockResolvedValue([]),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, purchaseOrderId: 1, lineType: "product", sku: "PO-SKU",
+        productName: "PO Product", orderQty: 5, totalProductCostCents: 500, unitCostCents: 100, unitCostMills: 10000 }),
+    });
+    const service = createShipmentTrackingService({} as any, storage);
+
+    await expect(service.getEnrichedLines(1)).rejects.toThrow("allocatedCents: invalid cents amount");
   });
 });
 
@@ -438,7 +570,7 @@ describe("ShipmentTrackingService direct command lock order", () => {
     const { db, tx } = buildTransactionalDb();
     let releaseGraph!: () => void;
     const graphLock = new Promise<void>((resolve) => { releaseGraph = resolve; });
-    tx.execute.mockImplementationOnce(() => graphLock);
+    tx.execute.mockImplementationOnce(() => graphLock.then(() => ({ rows: [] })));
     const sourceFailure = new Error("Stop after the first protected source read");
     const storage = buildStorage({
       getInboundFreightCostById: vi.fn().mockRejectedValue(sourceFailure),
@@ -576,7 +708,7 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
       ]),
       getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "closed", allocationMethodDefault: "by_volume" }),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
-        { id: 11, productVariantId: 10, purchaseOrderLineId: 21, qtyShipped: 5, totalVolumeCbm: "1" },
+        { id: 11, productVariantId: 10, purchaseOrderLineId: 21, qtyShipped: 5, ...oneCbmAcrossFivePieces, totalVolumeCbm: "1" },
       ]),
       getInboundFreightCosts: vi.fn().mockResolvedValue([
         { id: 31, costType: "freight", actualCents: 500 },
@@ -615,7 +747,7 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
       ]),
       getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "costing", allocationMethodDefault: "by_volume" }),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
-        { id: 11, productVariantId: 10, purchaseOrderLineId: 21, qtyShipped: 5, totalVolumeCbm: "1" },
+        { id: 11, productVariantId: 10, purchaseOrderLineId: 21, qtyShipped: 5, ...oneCbmAcrossFivePieces, totalVolumeCbm: "1" },
       ]),
       getInboundFreightCosts: vi.fn().mockResolvedValue([
         { id: 31, costType: "freight", actualCents: 500 },
@@ -650,7 +782,7 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
       getInboundShipments: vi.fn().mockResolvedValue([{ id: 1, shipmentNumber: "INB-1", status: "closed" }]),
       getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "closed", allocationMethodDefault: "by_volume" }),
       getInboundShipmentLines: vi.fn().mockResolvedValue([{ id: 11, productVariantId: 10, purchaseOrderLineId: 21,
-        qtyShipped: 5, totalVolumeCbm: "1" }]),
+        qtyShipped: 5, ...oneCbmAcrossFivePieces, totalVolumeCbm: "1" }]),
       getInboundFreightCosts: vi.fn().mockResolvedValue([{ id: 31, costType: "freight", estimatedCents: 500, actualCents: null }]),
       getInboundFreightCostAllocations: vi.fn().mockResolvedValue([{ shipmentCostId: 31, inboundShipmentLineId: 11,
         allocationBasisValue: "1", allocationBasisTotal: "1", allocatedCents: 500 }]),
@@ -690,7 +822,7 @@ describe("ShipmentTrackingService.getLandedCostHealth", () => {
     expect(result.items[0].detail).toContain("1 lot retains a provisional flag");
     expect(result.items[0].detail).toContain("this flag alone does not mean freight is unposted");
     expect(db.transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "repeatable read", accessMode: "read only" });
-    expect(readShipmentCostReviewInTransaction).toHaveBeenCalledWith(tx, 1);
+    expect(readShipmentCostReviewInTransaction).toHaveBeenCalledWith(tx, 1, expect.objectContaining({ read: expect.any(Function) }));
     expect(storage.getProvisionalLotsByShipment).toHaveBeenCalledWith(1, tx);
     expect(storage.getLandedCostSnapshots).toHaveBeenCalledWith(11, tx);
   });
@@ -843,7 +975,7 @@ describe("ShipmentTrackingService.finalizeAllocations", () => {
     const storage = buildStorage({
       getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "closed" }),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
-        { id: 11, productVariantId: 10, purchaseOrderId: 1, purchaseOrderLineId: 21, qtyShipped: 5, totalVolumeCbm: "1" },
+        { id: 11, productVariantId: 10, purchaseOrderId: 1, purchaseOrderLineId: 21, qtyShipped: 5, ...oneCbmAcrossFivePieces, totalVolumeCbm: "1" },
       ]),
       getInboundFreightCosts: vi.fn().mockResolvedValue([
         { id: 31, costType: "freight", actualCents: 50 },
@@ -884,7 +1016,7 @@ describe("ShipmentTrackingService.finalizeAllocations", () => {
     const storage = buildStorage({
       getInboundShipmentById: vi.fn().mockResolvedValue({ id: 1, status: "closed" }),
       getInboundShipmentLines: vi.fn().mockResolvedValue([{ id: 11, productVariantId: 10, purchaseOrderId: 1,
-        purchaseOrderLineId: 21, qtyShipped: 1000, totalVolumeCbm: "1" }]),
+        purchaseOrderLineId: 21, qtyShipped: 1000, dimensionBasis: "piece", lengthCm: "10", widthCm: "10", heightCm: "10", totalVolumeCbm: "1" }]),
       getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, purchaseOrderId: 1, lineType: "product",
         orderQty: 1000, totalProductCostCents: 490, unitCostCents: 0, unitCostMills: 49 }),
       getInboundFreightCosts: vi.fn().mockResolvedValue([{ id: 31, costType: "freight", actualCents: 100 + freightChange }]),
@@ -947,7 +1079,7 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
 
   it("delegates exact shipment identity to the component owner with a transaction-bound COGS writer", async () => {
     const { db, tx } = buildTransactionalDb();
-    const result = { updated: 1, total: 1, skipped: [], costApplications: [] };
+    const result = { updated: 1, total: 1, status: "applied" as const, skipped: [], costApplications: [] };
     vi.mocked(applyShipmentCostRevisions).mockResolvedValueOnce(result);
     const storage = buildStorage();
     const clock = () => new Date("2026-09-07T12:00:00Z");
@@ -961,7 +1093,7 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
 
   it.each(["source_cost_missing", "receipt_lineage_missing"])("returns the owner's %s review result unchanged", async (reason) => {
     const { db } = buildTransactionalDb();
-    const result = { updated: 0, total: 0, skipped: [{ applicationId: 11, reason, message: "Review source evidence" }], costApplications: [] };
+    const result = { updated: 0, total: 0, status: "review_required" as const, skipped: [{ applicationId: 11, reason, message: "Review source evidence" }], costApplications: [] };
     vi.mocked(applyShipmentCostRevisions).mockResolvedValueOnce(result);
     const service = createShipmentTrackingService(db as any, buildStorage());
     expect(await service.pushLandedCostsToLots(1)).toEqual(result);
@@ -970,7 +1102,7 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
   it("keeps incomplete component graphs under owner review without calling the legacy lot updater", async () => {
     const { db } = buildTransactionalDb();
     const cogs = buildTransactionalCogs();
-    const result = { updated: 0, total: 0, skipped: [{ applicationId: 11, reason: "incomplete_graph", message: "Review lineage" }], costApplications: [] };
+    const result = { updated: 0, total: 0, status: "review_required" as const, skipped: [{ applicationId: 11, reason: "incomplete_graph", message: "Review lineage" }], costApplications: [] };
     vi.mocked(applyShipmentCostRevisions).mockResolvedValueOnce(result);
     const service = createShipmentTrackingService(db as any, buildStorage(), cogs as any);
     expect(await service.pushLandedCostsToLots(1)).toEqual(result);
@@ -996,7 +1128,7 @@ describe("ShipmentTrackingService.pushLandedCostsToLots", () => {
       createInboundShipmentStatusHistory: vi.fn().mockResolvedValue({}),
       getInboundShipmentLines: vi.fn().mockResolvedValue([
         // has volume so the by_volume dimension gate passes and close proceeds to push
-        { id: 11, productVariantId: null, purchaseOrderLineId: 21, qtyShipped: 20, totalVolumeCbm: "2.0" },
+        { id: 11, productVariantId: null, purchaseOrderLineId: 21, qtyShipped: 20, dimensionBasis: "piece", lengthCm: "1000", widthCm: "10", heightCm: "10", totalVolumeCbm: "2.0" },
       ]),
       getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 21, unitCostCents: 70 }),
       getInboundFreightCosts: vi.fn().mockResolvedValue([{ id: 31, costType: "freight", actualCents: 1000 }]),
@@ -1063,7 +1195,7 @@ describe("ShipmentTrackingService cost mutation integrity", () => {
       expect.objectContaining({ inboundShipmentId: 1, costType: "freight", actualCents: 100 }),
       tx, new Date("2026-09-06T12:00:00.000Z"),
     );
-    expect(storage.updateInboundShipment).toHaveBeenCalledWith(1, expect.any(Object), tx, undefined);
+    expect(storage.updateInboundShipment).not.toHaveBeenCalled();
     expect(storage.deleteAllocationsForShipment).not.toHaveBeenCalled();
     expect(db.transaction).toHaveBeenCalledTimes(1);
   });

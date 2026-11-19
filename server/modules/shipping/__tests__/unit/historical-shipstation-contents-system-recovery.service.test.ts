@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { HistoricalShipStationContentsClient } from "../../historical-shipstation-contents-audit.client";
 import {
   historicalShipStationRecoverableCaseEvidenceHash,
-  type HistoricalShipStationContentsRecoveryEvidence,
+  type HistoricalShipStationContentsAutomaticRecoveryEvidence,
   type HistoricalShipStationContentsSystemRecoveryEvent,
 } from "../../historical-shipstation-contents-recovery.domain";
 import type {
@@ -30,7 +30,7 @@ const candidate: HistoricalShipStationContentsSystemRecoveryCandidate = Object.f
   }),
 });
 
-const recoveryEvidence: HistoricalShipStationContentsRecoveryEvidence = Object.freeze({
+const recoveryEvidence: HistoricalShipStationContentsAutomaticRecoveryEvidence = Object.freeze({
   contractVersion: 1,
   recoveryStatus: "provider_line_keys_authoritative",
   evidenceHash: "e".repeat(64),
@@ -64,6 +64,12 @@ function providerClient(): HistoricalShipStationContentsClient {
         }),
       }),
       recoveryEvidenceDetails: recoveryEvidence,
+      providerObservation: Object.freeze({
+        evidenceHash: recoveryEvidence.evidenceHash,
+        lines: Object.freeze([
+          Object.freeze({ sku: "SKU-A", quantity: 2 }),
+        ]),
+      }),
     })),
   };
 }
@@ -201,6 +207,10 @@ describe("HistoricalShipStationContentsSystemRecoveryService", () => {
           recoveryEvidence: null,
         }),
         recoveryEvidenceDetails: null,
+        providerObservation: Object.freeze({
+          evidenceHash: "0".repeat(64),
+          lines: Object.freeze([]),
+        }),
       })),
     };
     const service = new HistoricalShipStationContentsSystemRecoveryService(repository, client);

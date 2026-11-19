@@ -35,7 +35,7 @@ vi.mock("../../../orders", () => ({ ordersStorage: {} }));
 vi.mock("../../../channels", () => ({ channelsStorage: {} }));
 vi.mock("../../../../routes/middleware", () => {
   const pass: RequestHandler = (_req, _res, next) => next();
-  return { requirePermission: () => pass, requireAuth: pass, upload: { single: () => pass } };
+  return { requirePermission: () => pass, requireAuth: pass, requireAssignedSystemRole: () => pass, upload: { single: () => pass } };
 });
 import { registerInventoryRoutes } from "../../inventory.routes";
 

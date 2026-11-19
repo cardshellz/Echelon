@@ -1,3 +1,4 @@
+import { purchaseEntryFixture, purchasingAuthFixture } from "./procurement-purchase-order-entry-fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 
@@ -17,6 +18,7 @@ async function setup(page: Page, mode: Mode) {
   const gate = new Promise<void>((done) => { release = done; });
   await page.route("**/api/**", async (route) => {
     const request = route.request(), path = new URL(request.url()).pathname;
+    if (path === "/api/auth/me") return route.fulfill({ json: purchasingAuthFixture });
     if (mode.startsWith("prepare") && path === "/api/settings/procurement") return route.fulfill({ json: { useNewPoEditor: false } });
     const match = /^\/api\/purchase-orders\/(17|99)(\/send|\/send-to-vendor|\/workspace)?$/.exec(path);
     if (path === "/api/purchase-orders/17/document") return route.fulfill({ json: { html: "<html><body>Reviewed supplier PO TEST-PO-17</body></html>" } });
@@ -32,7 +34,7 @@ async function setup(page: Page, mode: Mode) {
     if (mode === "delayed" || mode === "prepare_delayed") await gate;
     if (mode.startsWith("prepare")) {
       Object.assign(purchase, { status: "approved", physicalStatus: "draft", updatedAt: SAVED_AT });
-      return route.fulfill({ json: purchase });
+      return route.fulfill({ json: purchaseEntryFixture(request, "prepare", id, purchase) });
     }
     if (mode === "malformed") return route.fulfill({ json: { ...purchase, status: "sent", physicalStatus: "sent", sentToVendorAt: null } });
     if (mode === "stale") return route.fulfill({ status: 409, json: {
@@ -126,7 +128,7 @@ test("preparing supplier review opens the document without claiming or recording
   await expect(page.getByText("PO ready for supplier review", { exact: true })).toBeVisible();
   await expect(page.getByRole("dialog", { name: "Purchase Order — TEST-PO-17" })).toBeVisible();
   await expect(page.getByText("External send recorded", { exact: true })).toHaveCount(0);
-  expect(commands).toEqual([{ id: 17, body: null }]);
+  expect(commands).toEqual([{ id: 17, body: {} }]);
   expect(failures).toEqual([]);
 });
 
@@ -164,11 +166,12 @@ test("editor Save and Review prepares the saved PO without an automatic send cla
       orderQty: 1, unitCostMills: 100000, unitCostCents: 1000, totalProductCostCents: 1000, packagingCostCents: 0, parentLineId: null }] };
   await page.route("**/api/**", async (route) => {
     const request = route.request(), path = new URL(request.url()).pathname;
+    if (path === "/api/auth/me") return route.fulfill({ json: purchasingAuthFixture });
     if (request.method() === "GET" && path === "/api/vendors") return route.fulfill({ json: [vendor] });
     if (request.method() === "GET" && path === "/api/purchase-orders/17") return route.fulfill({ json: saved ? { ...draft, status: "approved", updatedAt: SAVED_AT } : draft });
     if (request.method() === "PUT" && path === "/api/purchase-orders/17/draft") {
       const body = request.postDataJSON(); requests.push(body); saved = true;
-      return route.fulfill({ json: { po: { ...draft, status: "approved", updatedAt: SAVED_AT }, status: "approved", pdf: null, pending_approval: false, dispatch_recorded: false } });
+      return route.fulfill({ json: purchaseEntryFixture(request, "save-draft", 17, { po: { ...draft, status: "approved", updatedAt: SAVED_AT }, status: "approved", pdf: null, pending_approval: false, dispatch_recorded: false }) });
     }
     return route.fallback();
   });

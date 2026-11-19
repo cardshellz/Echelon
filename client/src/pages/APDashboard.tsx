@@ -1,6 +1,7 @@
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contract";
+import { apSummarySchema, type ApSummary } from "@shared/procurement/ap-summary";
 import React from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
@@ -18,8 +19,7 @@ import { AlertTriangle, Clock, DollarSign, CheckCircle, Plus, FileText, CreditCa
 import { format, parseISO } from "date-fns";
 
 function formatCents(cents: number | null | undefined): string {
-  if (!cents && cents !== 0) return "$0.00";
-  return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  return formatPaymentAmount(cents);
 }
 
 function formatDate(d: string | null | undefined) {
@@ -36,8 +36,13 @@ const PAYMENT_METHOD_LABELS: Record<string, string> = {
 };
 
 export default function APDashboard() {
-  const { data: summary, isLoading } = useQuery<any>({
+  const { data: summary, isLoading, isFetching, isError, refetch } = useQuery<ApSummary>({
     queryKey: ["/api/ap/summary"],
+    queryFn: async ({ signal }) => {
+      const response = await fetch("/api/ap/summary", { credentials: "include", signal });
+      if (!response.ok) throw new Error("Accounts payable summary could not be loaded.");
+      return apSummarySchema.parse(await response.json());
+    },
   });
 
   if (isLoading) {
@@ -48,11 +53,19 @@ export default function APDashboard() {
     );
   }
 
-  const agingBuckets = summary?.agingBuckets ?? {};
-  const vendorAging: any[] = summary?.vendorAging ?? [];
-  const recentPayments: any[] = summary?.recentPayments ?? [];
-  const recentlyPaid: any[] = summary?.recentlyPaid ?? [];
-  const hasOutstanding = summary?.totalOutstandingCents > 0;
+  if (isError || !summary) {
+    return <section className="p-6 max-w-7xl mx-auto space-y-4">
+      <h1 className="text-2xl font-bold">Accounts Payable</h1>
+      <p role="alert">Accounts payable overview is unavailable. Balances and activity could not be verified.</p>
+      <Button variant="outline" disabled={isFetching} onClick={() => void refetch()}>Retry AP overview</Button>
+    </section>;
+  }
+
+  const agingBuckets = summary.agingBuckets;
+  const vendorAging = summary.vendorAging;
+  const recentPayments = summary.recentPayments;
+  const recentlyPaid = summary.recentlyPaid;
+  const hasOutstanding = summary.totalOutstandingCents > 0;
 
   return (
     <div className="p-6 max-w-7xl mx-auto space-y-6">
@@ -151,13 +164,13 @@ export default function APDashboard() {
           </CardHeader>
           <CardContent>
             <div className="grid grid-cols-5 gap-4 text-center">
-              {[
+              {([
                 { label: "Current", key: "current", color: "text-green-600" },
                 { label: "1-30 Days", key: "days1_30", color: "text-amber-500" },
                 { label: "31-60 Days", key: "days31_60", color: "text-orange-500" },
                 { label: "61-90 Days", key: "days61_90", color: "text-red-500" },
                 { label: "90+ Days", key: "days90plus", color: "text-red-700" },
-              ].map(({ label, key, color }) => (
+              ] as const).map(({ label, key, color }) => (
                 <div key={key} className="space-y-1">
                   <p className="text-xs text-muted-foreground">{label}</p>
                   <p className={`text-lg font-bold ${agingBuckets[key] > 0 ? color : "text-muted-foreground"}`}>
@@ -190,9 +203,9 @@ export default function APDashboard() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {vendorAging
-                  .sort((a: any, b: any) => b.total - a.total)
-                  .map((v: any) => (
+                {[...vendorAging]
+                  .sort((a, b) => b.total - a.total)
+                  .map((v) => (
                     <TableRow key={v.vendorId}>
                       <TableCell className="font-medium">{v.vendorName}</TableCell>
                       <TableCell className="text-right font-mono text-sm">{v.current > 0 ? formatCents(v.current) : "—"}</TableCell>
@@ -228,12 +241,12 @@ export default function APDashboard() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {recentPayments.map((p: any) => (
+                {recentPayments.map((p) => (
                   <TableRow key={p.id}>
                     <TableCell className="font-mono text-sm">{p.paymentNumber}</TableCell>
                     <TableCell>{p.vendorName ?? "—"}</TableCell>
                     <TableCell className="text-sm">{formatPaymentCalendarDate(p)}</TableCell>
-                    <TableCell className="text-sm">{PAYMENT_METHOD_LABELS[p.paymentMethod] ?? p.paymentMethod}</TableCell>
+                    <TableCell className="text-sm">{PAYMENT_METHOD_LABELS[p.paymentMethod ?? ""] ?? p.paymentMethod ?? "—"}</TableCell>
                     <TableCell className="text-right font-mono font-medium">{formatCents(p.totalAmountCents)}</TableCell>
                     <TableCell>
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${
@@ -269,7 +282,7 @@ export default function APDashboard() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {recentlyPaid.map((inv: any) => (
+                {recentlyPaid.map((inv) => (
                   <TableRow key={inv.id} className="cursor-pointer hover:bg-muted/50">
                     <TableCell>
                       <Link href={`/ap-invoices/${inv.id}`}>

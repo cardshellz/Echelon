@@ -30,6 +30,37 @@ Production relationship completeness and query performance are not established b
 
 ## Verification
 
+### Shipment progress on PO lines
+
+The PO Lines tab reads the same `document-relationships` snapshot used by shipment,
+receiving and lifecycle views. `projectPurchaseLineShipping` owns the display
+projection. It groups by saved PO-line IDs, never SKU, and keeps receipt rows out
+of shipment totals. The repository includes the PO's posted received and cancelled
+piece counters in the same repeatable-read snapshot as its linked shipments.
+
+- Draft and booked manifests are **planned**. In transit, at port, customs clearance,
+  delivered, costing and closed shipments count as **shipped**. This follows
+  `shipment-tracking.service.ts::markInTransit`, which records departure.
+- **Still to ship** is ordered minus cancelled minus shipped, floored at zero.
+  Planned pieces remain within this quantity; they are displayed separately.
+  Overshipments and plans exceeding the remainder are reported explicitly.
+- Actual **received** quantities stay under the receipt/PO posting owner. A receipt
+  cannot create a shipment or multiply its quantity. When received exceeds linked
+  shipped quantities, the remainder is unverified rather than an instruction to
+  ship those goods again.
+- Unknown statuses, contradictory/missing PO-line links, unsafe totals and failed
+  reads are not treated as complete zero quantities. Verified counts remain
+  labelled; unresolved links have a direct path to the existing relationship view.
+- Each shipment link carries its PO scope and shipment-line ID. The existing URL
+  journey remembers the PO Lines tab and selected line. Back from shipment or receipt
+  restores that row and focus after reload or opening a copied link. Cancelled
+  shipments remain navigable but do not count toward progress.
+
+This is a read-only display projection, not shipment allocation capacity or a new
+quantity/cost writer. Existing shipment and receipt correction commands retain
+approval, actual quantities, cost calculations and audit ownership. Their existing
+query invalidation includes the relationship keys; navigation also refreshes them.
+
 Run the focused unit and rendered component tests:
 
 ```sh

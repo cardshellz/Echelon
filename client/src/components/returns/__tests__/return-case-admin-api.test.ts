@@ -1,3 +1,4 @@
+import type { z } from "zod";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -11,7 +12,9 @@ import {
   getVendorSettlementPreview,
   issueReturnCustomerRefund,
   recordReturnDisposition,
+  recordReturnDispositionResultSchema,
   recordReturnReceipt,
+  returnCaseInspectionSummarySchema,
   settleReturnVendorAccount,
   startReturnInspection,
   type ReturnCaseAdminTransport,
@@ -482,7 +485,7 @@ describe("return case admin API client", () => {
         fullyReceived: true,
         partiallyReceived: false,
       },
-      inspectionSummary: null,
+      inspectionSummary: null as z.infer<typeof returnCaseInspectionSummarySchema> | null,
       actions: [{
         kind: "complete_inspection",
         label: "Complete inspection",
@@ -1093,7 +1096,7 @@ function detailFixture() {
         fullyReceived: false,
         partiallyReceived: true,
       },
-      inspectionSummary: null,
+      inspectionSummary: null as z.infer<typeof returnCaseInspectionSummarySchema> | null,
       dispositionSummary: {
         receivedUnits: 1,
         recordedUnits: 0,
@@ -1187,8 +1190,8 @@ function dispositionResultFixture() {
     caseId: 42,
     caseNumber: "RET-0000000042",
     dispositionId: 77,
-    inspectionId: null,
-    inspectionResolution: "not_required" as const,
+    inspectionId: null as number | null,
+    inspectionResolution: "not_required" as z.infer<typeof recordReturnDispositionResultSchema>["inspectionResolution"],
     lines: [
       {
         returnCaseItemId: 12,

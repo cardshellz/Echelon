@@ -1,3 +1,4 @@
+import type { CustomerReturnWorkflowStore, ReturnWorkflowRecord } from "../../application/customer-return-workflow.ports";
 import { describe, expect, it, vi } from "vitest";
 import {
   CustomerReturnCustomerOperationsService,
@@ -40,6 +41,57 @@ async function publicInput() {
   return publicRequest;
 }
 describe("customer-bound return operations", () => {
+  it("reads progress once for the owned page without checking eligibility or buying labels", async () => {
+    const s = setup(), now = new Date("2026-11-02T12:00:00Z");
+    const row = { authorizationId: 10, authorizationNumber: "RMA-10", omsOrderId: 100, orderReference: "#TEST-1", createdAt: now.toISOString() };
+    s.listReturns.mockResolvedValue([row, { ...row, authorizationId: 9 }]);
+    const progress = { key: "authorization:10", reference: "RMA-10", status: { code: "label_ready" as const, label: "Return label ready" },
+      refund: { code: "not_started" as const, label: "Refund not started" }, quantity: 2, receivedQuantity: 0, parcels: [] };
+    const readHistory = vi.fn(async () => new Map([[10, progress]]));
+    const service = new CustomerReturnCustomerOperationsService({ ...s.dependencies, historyProgress: { readHistory }, now: () => now });
+    expect(await service.listReturns({ pageSize: 1, includeProgress: true })).toMatchObject({ returns: [{ ...row, progress }], nextBeforeAuthorizationId: 10 });
+    expect(readHistory).toHaveBeenCalledExactlyOnceWith(principal, [row], now);
+    expect(s.resolveOwned).not.toHaveBeenCalled(); expect(s.status).not.toHaveBeenCalled(); expect(s.submitForOrder).not.toHaveBeenCalled();
+  });
+  it.each(["failure", "wrong_identity"])("keeps owned history available when progress has %s", async kind => {
+    const s = setup(), now = new Date("2026-11-02T12:00:00Z"), report = vi.fn();
+    s.listReturns.mockResolvedValue([{ authorizationId: 10, authorizationNumber: "RMA-10", omsOrderId: 100, orderReference: "#TEST-1", createdAt: now.toISOString() }]);
+    const readHistory = vi.fn(async () => {
+      if (kind === "failure") throw new Error("synthetic private failure");
+      return new Map([[10, { key: "authorization:999", reference: "RMA-999", status: { code: "label_ready" as const, label: "Ready" },
+        refund: { code: "not_started" as const, label: "Not started" }, quantity: 2, receivedQuantity: 0, parcels: [] }]]);
+    });
+    const service = new CustomerReturnCustomerOperationsService({ ...s.dependencies, historyProgress: { readHistory }, reportHistoryUnavailable: report, now: () => now });
+    expect((await service.listReturns({ includeProgress: true })).returns).toMatchObject([{ authorizationId: 10, progress: null }]);
+    expect(report).toHaveBeenCalledOnce();
+  });
+  it("does not read supplementary progress for an empty history page", async () => {
+    const s = setup(), readHistory = vi.fn();
+    await new CustomerReturnCustomerOperationsService({ ...s.dependencies, historyProgress: { readHistory } }).listReturns();
+    expect(readHistory).not.toHaveBeenCalled();
+  });
+  it("preserves the strict legacy history response unless summaries are explicitly requested", async () => {
+    const s = setup(), readHistory = vi.fn(), row = { authorizationId: 10, authorizationNumber: "RMA-10", omsOrderId: 100,
+      orderReference: "#TEST-1", createdAt: "2026-11-02T12:00:00Z" };
+    s.listReturns.mockResolvedValue([row]);
+    const result = await new CustomerReturnCustomerOperationsService({ ...s.dependencies, historyProgress: { readHistory } }).listReturns();
+    expect(result.returns).toEqual([row]); expect(result.returns[0]).not.toHaveProperty("progress");
+    expect(readHistory).not.toHaveBeenCalled();
+  });
+  it("keeps verified guests bound to their order even if a read adapter returns another order", async () => {
+    const s = setup();
+    const service = new CustomerReturnCustomerOperationsService({ ...s.dependencies,
+      principal: { channelId: 36, externalCustomerId: null, orderScope: { omsOrderId: 100, externalOrderId: order.externalOrderId },
+        verifiedPurchase: { email: "guest@example.test", customerId: null } } });
+    await service.submit(100, await publicInput());
+    expect(s.submitForOrder).toHaveBeenCalledWith(expect.anything(), "guest-order:36:100", expect.objectContaining({ externalCustomerId: null, omsOrderId: 100,
+      verifiedPurchase: { email: "guest@example.test", customerId: null } }));
+    s.resolveOwned.mockResolvedValue({ ...order, omsOrderId: 101 });
+    await expect(service.submit(101, await publicInput())).rejects.toMatchObject({ status: 404 });
+    s.readOwnedAuthorization.mockResolvedValue({ authorizationId: 10, omsOrderId: 101 });
+    await expect(service.labelStatus(10)).rejects.toMatchObject({ status: 404 });
+    await expect(service.artifact(10, 11)).rejects.toMatchObject({ status: 404 });
+  });
   it("verifies the canonical order before submit and sends trusted identity with no private URLs", async () => {
     const s = setup();
     const input = await publicInput();
@@ -137,5 +189,65 @@ describe("customer-bound return operations", () => {
     const s = setup();
     await expect(s.service.labelStatus(invalid)).rejects.toMatchObject({ status: 400 });
     expect(s.readOwnedAuthorization).not.toHaveBeenCalled();
+  });
+});
+
+async function workflowSetup() {
+  const legacy = setup(), fixture = await labelPreparationFixture();
+  const record: ReturnWorkflowRecord = { request: { ...fixture.input, orderReference: "#63210" },
+    scope: { channelId: 36, omsOrderId: 100, externalOrderId: order.externalOrderId, externalCustomerId: principal.externalCustomerId },
+    actor: "customer:36:customer-1", phase: "queued", reason: null, authorizationId: null, failures: 0,
+    explicitRetry: false, leaseToken: null, updatedAt: new Date("2026-10-30T12:00:00.000Z") };
+  const workflows = { enqueue: vi.fn<CustomerReturnWorkflowStore["enqueue"]>(async () => structuredClone(record)),
+    readOwned: vi.fn<CustomerReturnWorkflowStore["readOwned"]>(async () => structuredClone(record)),
+    readOwnedOrder: vi.fn<CustomerReturnWorkflowStore["readOwnedOrder"]>(async () => structuredClone(record)),
+    readOwnedAuthorization: vi.fn<CustomerReturnWorkflowStore["readOwnedAuthorization"]>(async () => structuredClone(record)),
+    retryOwned: vi.fn<CustomerReturnWorkflowStore["retryOwned"]>(async () => structuredClone(record)),
+    acceptedRequest: vi.fn<CustomerReturnWorkflowStore["acceptedRequest"]>(async () => ({ request: record.request, scope: record.scope })),
+    claim: vi.fn<CustomerReturnWorkflowStore["claim"]>(), settle: vi.fn<CustomerReturnWorkflowStore["settle"]>() };
+  return { ...legacy, record, workflows, service: new CustomerReturnCustomerOperationsService({ ...legacy.dependencies, workflows, now: () => new Date(record.updatedAt) }) };
+}
+describe("customer-owned durable label workflow boundary", () => {
+  it("queues one immutable request under verified identity without synchronously buying or preparing a label", async () => {
+    const s = await workflowSetup(), input = await publicInput();
+    const result = await s.service.queueLabels(100, input);
+    expect(result.phase).toBe("queued");
+    expect(s.workflows.enqueue).toHaveBeenCalledWith(expect.objectContaining({ request: { ...input, channelId: 36, orderReference: "#63210" },
+      actor: "customer:36:customer-1", scope: s.record.scope }));
+    expect(s.submitForOrder).not.toHaveBeenCalled(); expect(s.progress).not.toHaveBeenCalled();
+  });
+  it("restores an owned unfinished request by order with only read ports", async () => {
+    const s = await workflowSetup(), result = await s.service.orderWorkflow(100);
+    expect(result.input.idempotencyKey).toBe(s.record.request.idempotencyKey);
+    expect(result.input).not.toHaveProperty("channelId"); expect(result.input).not.toHaveProperty("orderReference");
+    expect(s.workflows.readOwnedOrder).toHaveBeenCalledExactlyOnceWith(principal, 100);
+    expect(s.workflows.enqueue).not.toHaveBeenCalled(); expect(s.progress).not.toHaveBeenCalled();
+  });
+  it.each(["workflowStatus", "retryWorkflow"] as const)("does not disclose another customer's request through %s", async method => {
+    const s = await workflowSetup(); s.workflows.readOwned.mockResolvedValue(null); s.workflows.retryOwned.mockResolvedValue(null);
+    await expect(s.service[method](LABEL_KEY)).rejects.toMatchObject({ code: "RETURN_WORKFLOW_NOT_FOUND", status: 404 });
+    expect(s.status).not.toHaveBeenCalled(); expect(s.progress).not.toHaveBeenCalled();
+  });
+  it.each(["customer", "channel", "order", "key"])("rejects changed %s identity returned by a read port", async field => {
+    const s = await workflowSetup();
+    if (field === "customer") s.record.scope.externalCustomerId = "other-customer";
+    if (field === "channel") s.record.scope.channelId = 37;
+    if (field === "order") s.record.scope.omsOrderId = 101;
+    if (field === "key") s.record.request.idempotencyKey = "00000000-0000-4000-8000-000000000077";
+    await expect(s.service.queueLabels(100, await publicInput())).rejects.toMatchObject({ status: 404 });
+    expect(s.status).not.toHaveBeenCalled();
+  });
+  it("enrolls an accepted historical return only through verified ownership and its saved manifest", async () => {
+    const s = await workflowSetup(); s.record.authorizationId = 10; s.record.phase = "labels";
+    const result = await s.service.queueExistingLabels(10);
+    expect(s.workflows.acceptedRequest).toHaveBeenCalledExactlyOnceWith(principal, 10);
+    expect(s.workflows.enqueue).toHaveBeenCalledWith(expect.objectContaining({ authorizationId: 10, request: s.record.request }));
+    expect(result.labels?.parcels[0].downloadPath).toBe("/api/returns/customer/returns/10/parcels/11/download");
+    expect(s.progress).not.toHaveBeenCalled();
+  });
+  it("rejects a forged authorization before reading or enrolling its manifest", async () => {
+    const s = await workflowSetup(); s.readOwnedAuthorization.mockResolvedValue(null);
+    await expect(s.service.queueExistingLabels(10)).rejects.toMatchObject({ status: 404 });
+    expect(s.workflows.acceptedRequest).not.toHaveBeenCalled(); expect(s.workflows.enqueue).not.toHaveBeenCalled();
   });
 });

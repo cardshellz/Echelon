@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -19,9 +20,7 @@ async function setup(page: Page, failure: "lost-response" | "invalid-success" | 
       }
       return route.fulfill({ json: result });
     }
-    if (request.method()==="GET" && path==="/api/auth/me") return route.fulfill({ json: {
-      user: { id: "return-operator",username: "operator",role: "admin" },permissions: ["inventory:view","inventory:adjust"],roles: ["admin"],
-    } });
+    if (request.method()==="GET" && path==="/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "return-operator",username: "operator",role: "admin" }, permissions: ["inventory:view","inventory:adjust"], systemRoles: ["admin"] }) });
     if (request.method()==="GET" && path==="/api/warehouse/locations") return route.fulfill({ json: [
       { id: 30,code: "RETURNS",warehouseId: 1,isActive: 1,locationType: "pick",zone: "R",name: "" },
     ] });

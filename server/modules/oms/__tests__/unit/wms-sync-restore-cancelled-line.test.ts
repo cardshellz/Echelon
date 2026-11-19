@@ -22,7 +22,7 @@ const h = vi.hoisted(() => {
   }
   const db = {
     transaction: vi.fn(async (work: (t: typeof tx) => Promise<unknown>) => work(tx)),
-    execute: vi.fn(async () => ({ rows: [] })),
+    execute: vi.fn(async (): Promise<{ rows: unknown[] }> => ({ rows: [] })),
     select: vi.fn(() => ({ from: (table: unknown) => chain(table) })),
   };
   return { txExecute, tx, tableRows, db };
@@ -107,7 +107,11 @@ function harness(options: {
 }) {
   const reconcileOrderDemand = options.reconcileOrderDemand
     ?? vi.fn(async () => ({ reconciled: true, reservation: { reserved: 1, failed: [] } }));
-  const service = new WmsSyncService({ reservation: { reconcileOrderDemand } } as any) as unknown as Harness;
+  const reserveOrder = vi.fn(async () => ({
+    orderId: WMS_ORDER_ID, reserved: 1, promised: 0, failed: [],
+    totalBaseUnits: 1, totalPromisedBaseUnits: 0,
+  }));
+  const service = new WmsSyncService({ reservation: { reserveOrder, reconcileOrderDemand } } as any) as unknown as Harness;
   service.refreshOmsLineMaterializedQuantities = vi.fn(async () => undefined);
   service.lockOmsLinesForMaterialization = vi.fn(async () => [options.lockedLine]);
   service.incrementOmsLineMaterializedQuantities = vi.fn(async () => undefined);
@@ -315,7 +319,7 @@ describe("WMS sync restores lines cancelled by a transient authority drop", () =
 // Drives the real reconcileExistingWmsOrderLines loop over a fake database: the
 // line-level decision it makes for each Global-e webhook in turn.
 describe("WMS line reconciliation across a Global-e hold", () => {
-  const PAID_ORDER = { id: OMS_ORDER_ID, status: "confirmed", financialStatus: "paid" };
+  const PAID_ORDER = { id: OMS_ORDER_ID, channelId: 36, status: "confirmed", financialStatus: "paid" };
   const READY_ORDER = { warehouseStatus: "ready", channelId: 36, warehouseId: 1 };
 
   function seed(input: {
@@ -333,6 +337,7 @@ describe("WMS line reconciliation across a Global-e hold", () => {
       sku: SKU,
     };
     h.tableRows.set(omsOrders, () => [PAID_ORDER]);
+    h.db.execute.mockResolvedValue({ rows: [{ provider: "shopify" }] });
     h.tableRows.set(omsOrderLines, () => [line]);
     h.tableRows.set(wmsOrders, () => [READY_ORDER]);
     h.tableRows.set(wmsOrderItems, () => [{

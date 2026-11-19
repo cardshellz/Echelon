@@ -88,8 +88,9 @@ const OWNER_PLATFORM_SQL = `SELECT v.id AS vendor_id, sc.platform
  * profiles, the price and description settings, and the product and category
  * settings, whose triggers keep each row equal to its revision (migrations
  * 0657, 0659, 0660, 0717, 0738, 0739; the last two refuse a delete, so a reset
- * is a new revision too). So every committed save, reset or delete changes the
- * fingerprint. The store's category marks (0739) are a part too, as their own
+ * is a new revision too), and the vendor's selection, whose every picks change
+ * writes a selection revision (PLAN-B v4.1 §9 row 5). So every committed save,
+ * reset or delete changes the fingerprint. The store's category marks (0739) are a part too, as their own
  * values (product, category, seen_at; plan P29): a first mark, or a "Got it"
  * that acknowledges at least one product, changes it, so "Card Shellz updated
  * products" shows either at once instead of after the cache's time limit. A
@@ -138,9 +139,9 @@ SELECT o.vendor_id, json_build_array(
      WHERE s.vendor_id = o.vendor_id AND s.store_connection_id = o.store_connection_id`, "s.product_variant_id")},
   ${rowsDigest("s.product_variant_id, s.store_category_names", `dropship.dropship_ebay_store_category_assignments s
      WHERE s.vendor_id = o.vendor_id AND s.store_connection_id = o.store_connection_id`, "s.product_variant_id")},
-  ${rowsDigest(`r.id, r.scope_type, r.action, r.product_line_id, r.product_id, r.product_variant_id, r.category,
-     r.auto_connect_new_skus, r.auto_list_new_skus, r.priority`, `dropship.dropship_vendor_selection_rules r
-     WHERE r.vendor_id = o.vendor_id AND r.is_active = true`, "r.id")},
+  -- The vendor's selection (its picks) by its head selection revision (PLAN-B v4.1 §9 row 5): every picks save,
+  -- conversion and follow-up writes a revision, and the rules it replaced are frozen.
+  (SELECT max(r.id) FROM dropship.dropship_vendor_selection_rule_set_revisions r WHERE r.vendor_id = o.vendor_id),
   ${rowsDigest("x.product_variant_id, x.enabled_override, x.marketplace_quantity_cap", `dropship.dropship_vendor_variant_overrides x
      WHERE x.vendor_id = o.vendor_id`, "x.id")},
   ${rowsDigest(`r.id, r.scope_type, r.action, r.product_line_id, r.product_id, r.product_variant_id, r.category,
@@ -333,7 +334,7 @@ export async function loadListingSettingsInputsWithClient(client: Reader,
 
   let candidates: ListingSettingsInputs["candidates"];
   try {
-    candidates = await loadSelectedCandidates({ vendorId, ...selectedCatalogReaderForTransaction(client) }, input.now, "listing_settings");
+    candidates = await loadSelectedCandidates(selectedCatalogReaderForTransaction(client, vendorId), input.now, "listing_settings");
   } catch (error) {
     if (error instanceof DropshipError && error.code === "DROPSHIP_LISTING_SETTINGS_TOO_LARGE") {
       return { state: "too_large", store, storeLevel };

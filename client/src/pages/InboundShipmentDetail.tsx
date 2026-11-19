@@ -1,9 +1,16 @@
+import { DocumentRelationships } from "@/features/purchasing/DocumentRelationships";
+import { PurchaseTaxReview } from "@/features/purchasing/PurchaseTaxReview";
+import { usePurchaseTaxTypes } from "@/features/purchasing/PurchaseTaxTypes";
+import { ShipmentHistoryCorrection } from "@/features/purchasing/ShipmentHistoryCorrection";
 import { formatPaymentAmount } from "@/lib/ap-payment-command";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { shipmentRecordedUnitSummary, shipmentDimensionBasisLabel } from "@/lib/shipment-unit-entry";
 import { ShipmentQuantityEditor } from "@/features/purchasing/ReceiptShipmentQuantityCorrection";
 import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
-import { parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
+import { clearReceiptUnitDraft, fetchShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
+import type { ShipmentReceiptUnitSelection } from "@shared/procurement/shipment-receipt-plan";
+import { shipmentReceivingSetupSchema } from "@shared/procurement/shipment-receiving-setup";
+import { ShipmentCustodyReceiptLinks } from "@/components/purchasing/ShipmentCustodyReceiptLinks";
 import { formatMills } from "@shared/utils/money";
 import { useEffect, useMemo, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -13,6 +20,7 @@ import { ShipmentPurchaseOrderLinks } from "@/features/purchasing/ShipmentPurcha
 import { ShipmentCostUpdateAction } from "@/features/purchasing/ShipmentCostUpdateAction";
 import { ShipmentCostApplicationReview } from "@/features/purchasing/ShipmentCostApplicationReview";
 import { useShipmentCostReview } from "@/features/purchasing/use-shipment-cost-review";
+import { ShipmentMeasurementCorrection } from "@/features/purchasing/ShipmentMeasurementCorrection";
 import { isShipmentCostLinePosted } from "@shared/procurement/shipment-cost-workflow";
 import { shipmentCostWorkflowError } from "@/lib/shipment-cost-workflow";
 import { Decimal } from "decimal.js";
@@ -108,6 +116,7 @@ const COST_TYPE_OPTIONS = [
   { value: "freight", label: "Freight" },
   { value: "dimensions_adjustment", label: "Dimensions Adjustment" },
   { value: "duty", label: "Duty" },
+  { value: "tax", label: "Tax" },
   { value: "insurance", label: "Insurance" },
   { value: "brokerage", label: "Brokerage" },
   { value: "platform_fee", label: "Platform Fee" },
@@ -140,6 +149,7 @@ const ALLOCATION_METHOD_LABELS: Record<string, string> = {
 // Cost types that force a specific allocation method
 const COST_TYPE_ALLOCATION_OVERRIDES: Record<string, string> = {
   duty: "by_value",
+  tax: "by_value",
   brokerage: "by_line_count",
   inspection: "by_line_count",
   platform_fee: "by_line_count",
@@ -219,6 +229,7 @@ const ALLOCATION_COST_STATUS_LABELS: Record<string, string> = {
   stale_allocation_basis: "Update needed",
   invalid_value_basis: "Data needs review",
   invalid_allocation_basis: "Data needs review",
+  missing_dimensions: "Measurements needed",
   allocation_mismatch: "Totals differ",
   allocated_with_fallback: "Even Split",
   allocated: "Split recorded",
@@ -300,12 +311,14 @@ function AllocationAmountCell({
   cents,
   millsPerUnit,
   strong = false,
+  pending = false,
 }: {
   cents: number | string | null | undefined;
   millsPerUnit?: number | null;
   strong?: boolean;
+  pending?: boolean;
 }) {
-  if (cents === null || cents === undefined) return <>—</>;
+  if (cents === null || cents === undefined) return pending ? <span className="text-xs text-muted-foreground">Awaiting measurements</span> : <>—</>;
   return (
     <div className={`font-mono ${strong ? "font-medium" : ""}`}>
       <div>{formatCents(Number(cents))}</div>
@@ -367,6 +380,7 @@ export default function InboundShipmentDetail() {
   // Dialog states
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [showCancelDialog, setShowCancelDialog] = useState(false);
+  const [showMeasurementCorrection, setShowMeasurementCorrection] = useState(false);
 
 
   const [showAddCostDialog, setShowAddCostDialog] = useState(false);
@@ -375,6 +389,7 @@ export default function InboundShipmentDetail() {
   const [cancelError, setCancelError] = useState<string | null>(null);
   useEffect(() => {
     setShowCancelDialog(false);
+    setShowMeasurementCorrection(false);
     setCancelReason("");
     setCancelError(null);
   }, [shipmentId]);
@@ -406,6 +421,7 @@ export default function InboundShipmentDetail() {
     performedByName: "",
     costDate: "",
   });
+  const purchaseTaxTypes = usePurchaseTaxTypes(["duty", "tax"].includes(newCost.costType));
 
   // Edit cost form
   const [editingCost, setEditingCost] = useState<ShipmentCostEditor | null>(null);
@@ -492,6 +508,13 @@ export default function InboundShipmentDetail() {
   });
 
   const costReview = useShipmentCostReview(shipmentId, !!shipment && ["costing", "closed"].includes(shipment.status));
+  const receivingSetup = useQuery({ queryKey: [`/api/inbound-shipments/${shipmentId}/receiving-setup`],
+    enabled: !!shipmentId && ["draft", "booked"].includes(shipment?.status), staleTime: 0, retry: false,
+    queryFn: async () => {
+      const result = shipmentReceivingSetupSchema.parse(await financialCommandFetchJson(`/api/inbound-shipments/${shipmentId}/receiving-setup`, { credentials: "include" }));
+      if (result.shipmentId !== shipmentId) throw new Error("Receiving setup belongs to a different shipment. Reload before continuing.");
+      return result;
+    } });
   const costsPosted = costReview.isSuccess && costReview.data.lines.length > 0
     && costReview.data.lines.every(isShipmentCostLinePosted) && allocationStatus?.blockerCount === 0;
 
@@ -564,7 +587,7 @@ export default function InboundShipmentDetail() {
   const allocationChecksumDeltaCents = allocatableCostTotalCents - lineAllocatedTotalCents;
 
   const isEditable = !["closed", "cancelled"].includes(shipment?.status || "");
-  const lineActions = useShipmentLineActions({ shipmentId, navigationIdentity, lines, editable: isEditable });
+  const lineActions = useShipmentLineActions({ shipmentId, navigationIdentity, lines, editable: isEditable, draftAllowed: shipment?.status === "draft" });
   const isPreClosed = !["closed", "cancelled"].includes(shipment?.status || "");
 
   // Container utilization
@@ -601,17 +624,14 @@ export default function InboundShipmentDetail() {
     }
   };
 
-  async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }) {
-    const query = new URLSearchParams({ purchaseOrderId: String(params.purchaseOrderId) });
-    const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/receipt-pack-resolution?${query.toString()}`);
-    const body = await res.json().catch(() => null);
-    if (!res.ok) throw new Error(body?.error || "Failed to check shipment receipt packs");
-    return parseShipmentReceiptResolution(body, params);
+  async function fetchShipmentReceiptPackResolution(params: { shipmentId: number; purchaseOrderId: number }, selections?: ShipmentReceiptUnitSelection[]) {
+    return fetchShipmentReceiptResolution(params, selections);
   }
 
   async function createReceiptForShipment(
     params: { shipmentId: number; purchaseOrderId: number },
     navigation: NavigationSnapshot = captureNavigation(),
+    receiptUnitSelections: ShipmentReceiptUnitSelection[] = [],
   ) {
     if (navigation.isCurrent()) setCreatingShipmentReceipt(true);
     try {
@@ -626,10 +646,11 @@ export default function InboundShipmentDetail() {
           "Content-Type": "application/json",
           "Idempotency-Key": idempotencyKey,
         },
-        body: JSON.stringify({ purchaseOrderId: params.purchaseOrderId }),
+        body: JSON.stringify({ purchaseOrderId: params.purchaseOrderId, ...(receiptUnitSelections.length ? { receiptUnitSelections } : {}) }),
       });
       const body = await res.json().catch(() => null);
       if (!res.ok) throw new Error(body?.error || "Failed to create receipt");
+      clearReceiptUnitDraft(params);
       toast({ title: "Receipt created", description: `${body.receiptNumber} created from shipment` });
       invalidatePoViews();
       if (!navigation.isCurrent()) return;
@@ -688,24 +709,24 @@ export default function InboundShipmentDetail() {
     }
   }
 
-  async function refreshShipmentReceiptPackResolution() {
+  async function refreshShipmentReceiptPackResolution(selections?: ShipmentReceiptUnitSelection[]) {
     if (!pendingShipmentReceipt) return;
     const navigation = captureNavigation();
     setCheckingShipmentReceiptPacks(true);
     try {
-      const resolution = await fetchShipmentReceiptPackResolution(pendingShipmentReceipt);
+      const resolution = await fetchShipmentReceiptPackResolution(pendingShipmentReceipt, selections);
       if (!navigation.isCurrent()) return;
       setShipmentReceiptPackResolution(resolution);
     } catch (err: any) {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      throw err;
     } finally {
       if (navigation.isCurrent()) setCheckingShipmentReceiptPacks(false);
     }
   }
 
-  function createPendingShipmentReceipt() {
+  function createPendingShipmentReceipt(selections: ShipmentReceiptUnitSelection[] = []) {
     if (!pendingShipmentReceipt) return;
-    createReceiptForShipment(pendingShipmentReceipt);
+    createReceiptForShipment(pendingShipmentReceipt, captureNavigation(), selections);
   }
 
   function openReceiptVariantSetup(line?: ShipmentReceiptPackResolutionLine) {
@@ -766,14 +787,18 @@ export default function InboundShipmentDetail() {
 
   function createTransitionMutation(endpoint: string) {
     return useMutation({
+      onMutate: () => captureNavigation(),
       mutationFn: async (body: any = {}) => {
+        if (endpoint === "book" || endpoint === "in-transit" || endpoint === "close") return financialCommandFetchJson(`/api/inbound-shipments/${shipmentId}/${endpoint}`,
+          { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/${endpoint}`, body || undefined);
         return res.json();
       },
-      onSuccess: (result: { costApplication?: LandedCostPushResult | { status: "retry_required"; code: string } }) => {
+      onSuccess: (result: { costApplication?: LandedCostPushResult | { status: "retry_required"; code: string } }, _body, context) => {
         queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}`] });
         queryClient.invalidateQueries({ queryKey: ["/api/inbound-shipments"] });
         invalidatePoViews();
+        if (!context?.isCurrent()) return;
         const costResult = result.costApplication;
         if (costResult) {
           void queryClient.invalidateQueries({ queryKey: [`/api/inbound-shipments/${shipmentId}/cost-review`] });
@@ -789,7 +814,13 @@ export default function InboundShipmentDetail() {
         }
         toast({ title: "Success", description: `Shipment ${endpoint.replace(/-/g, " ")} completed` });
       },
-      onError: (err: Error) => {
+      onError: (err: Error, _body, context) => {
+        if (!context?.isCurrent()) return;
+        if (endpoint === "book" || endpoint === "in-transit") void receivingSetup.refetch();
+        if (endpoint === "close" && err instanceof FinancialCommandRequestError && err.code === "MISSING_ALLOCATION_DIMENSIONS") {
+          setActiveTab("allocation"); setShowMeasurementCorrection(true);
+          return;
+        }
         toast({ title: "Error", description: err.message, variant: "destructive" });
       },
     });
@@ -1127,7 +1158,7 @@ export default function InboundShipmentDetail() {
               <ShipmentPurchaseOrderLinks
                 purchaseOrders={shipment.purchaseOrders}
                 legacyPurchaseOrderIds={linkedPurchaseOrderIds}
-                hrefFor={(id) => procurementNavigation.childHref(`/purchase-orders/${id}?tab=shipments`)}
+                hrefFor={(id, poNumber) => procurementNavigation.childHref(`/purchase-orders/${id}?tab=shipments&poScope=${id}&document=${encodeURIComponent(poNumber)}`, { currentLabel: shipment.shipmentNumber })}
               />
             </div>
           )}
@@ -1192,8 +1223,9 @@ export default function InboundShipmentDetail() {
 
         {/* Action buttons */}
         <div className="flex gap-2 flex-wrap w-full sm:w-auto">
-          {shipment.status !== "cancelled" && lines.length > 0 && (
-            <ShipmentQuantityEditor key={shipment.id} shipmentLines={lines} />
+          <ShipmentHistoryCorrection key={`history-${shipment.id}`} shipmentId={shipment.id} />
+          {shipment.status !== "cancelled" && (
+            <ShipmentQuantityEditor key={shipment.id} shipmentId={shipment.id} shipmentStatus={shipment.status} shipmentLines={lines} />
           )}
           {isEditable && (
             <Button
@@ -1235,14 +1267,14 @@ export default function InboundShipmentDetail() {
           )}
 
           {shipment.status === "draft" && (
-            <Button onClick={() => bookMutation.mutate({})} disabled={bookMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+            <Button onClick={() => bookMutation.mutate({})} disabled={bookMutation.isPending || receivingSetup.isFetching || !receivingSetup.data?.ready || receivingSetup.isError} className="flex-1 sm:flex-none min-h-[44px]">
               <CheckCircle className="h-4 w-4 mr-2" />
               Confirm
             </Button>
           )}
 
           {shipment.status === "booked" && (
-            <Button onClick={() => inTransitMutation.mutate({})} disabled={inTransitMutation.isPending} className="flex-1 sm:flex-none min-h-[44px]">
+            <Button onClick={() => inTransitMutation.mutate({})} disabled={inTransitMutation.isPending || receivingSetup.isFetching || !receivingSetup.data?.ready || receivingSetup.isError} className="flex-1 sm:flex-none min-h-[44px]">
               <Ship className="h-4 w-4 mr-2" />
               Mark In Transit
             </Button>
@@ -1321,7 +1353,7 @@ export default function InboundShipmentDetail() {
 
           {shipment.status === "costing" && (
             <Button
-              onClick={() => closeMutation.mutate({}, { onError: (e: any) => { if (/dimension/i.test(e?.message || "")) lineActions.openDimensions(); } })}
+              onClick={() => closeMutation.mutate({})}
               disabled={closeMutation.isPending}
               className="flex-1 sm:flex-none min-h-[44px]"
             >
@@ -1342,6 +1374,21 @@ export default function InboundShipmentDetail() {
           )}
         </div>
       </div>
+
+      {["draft", "booked"].includes(shipment.status) && <section aria-label="Shipment receiving setup" className="rounded-lg border p-4 space-y-2">
+        <h2 className="font-semibold">Receiving setup</h2>
+        {receivingSetup.isFetching && <p className="text-sm">Checking configurations before booking or shipping…</p>}
+        {receivingSetup.isError && <p role="alert" className="text-sm">Receiving setup could not be verified. Booking and shipping are unavailable until it is checked. <Button size="sm" variant="outline" onClick={() => void receivingSetup.refetch()}>Retry receiving setup</Button></p>}
+        {!receivingSetup.isError && receivingSetup.data?.ready && <p className="text-sm text-green-700">Every item has a valid receiving configuration.</p>}
+        {!receivingSetup.isError && receivingSetup.data && !receivingSetup.data.ready && <>
+          <p className="text-sm">{receivingSetup.data.lines.length ? "Choose or add the configurations below before booking or shipping. Your draft is saved." : "Add shipment items and their receiving configurations before booking or shipping."}</p>
+          {receivingSetup.data.lines.filter(line => line.issue).map(line => <div key={line.lineId} className="rounded border p-3 text-sm">
+            <p className="font-medium">{line.sku ?? line.name}</p><p>{line.issue?.message}</p>
+          </div>)}
+        </>}
+        {receivingSetup.data && receivingSetup.data.lines.length > 0 && <ShipmentQuantityEditor shipmentId={shipment.id} shipmentStatus={shipment.status}
+          shipmentLines={lines} buttonLabel={receivingSetup.data.ready ? "Edit receiving setup" : "Set up receiving"} onSaved={() => void receivingSetup.refetch()} />}
+      </section>}
 
       {/* ═══════ Summary Cards ═══════ */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-2 md:gap-4">
@@ -1404,17 +1451,18 @@ export default function InboundShipmentDetail() {
                 <div className="flex items-start gap-2">
                   <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0 text-red-600" />
                   <div className="flex-1 min-w-0">
-                    <div className="font-medium text-red-800">Missing dimensions — this shipment can't be closed</div>
+                    <div className="font-medium text-red-800">{shipment.status === "closed" ? "Saved measurements need a cost update" : "Measurements are needed before shipment costs can be finalized"}</div>
                     <ul className="mt-1 list-disc pl-4 text-red-700 space-y-0.5">
                       {dimIssues.map((issue, i) => (
                         <li key={i}>{issue.message}</li>
                       ))}
                     </ul>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <Button size="sm" className="bg-red-600 hover:bg-red-700" onClick={lineActions.openDimensions} disabled={!isEditable || lineActions.busy}>
-                        Enter dimensions
+                      <Button size="sm" className="bg-red-600 hover:bg-red-700" onClick={() => ["costing", "closed"].includes(shipment.status) ? setShowMeasurementCorrection(true) : lineActions.openDimensions()}
+                        disabled={["costing", "closed"].includes(shipment.status) ? false : !isEditable || lineActions.busy}>
+                        {["costing", "closed"].includes(shipment.status) ? "Correct measurements and costs" : "Enter dimensions"}
                       </Button>
-                      <Button
+                      {!["costing", "closed"].includes(shipment.status) && <Button
                         size="sm"
                         variant="outline"
                         className="border-red-300"
@@ -1423,7 +1471,7 @@ export default function InboundShipmentDetail() {
                       >
                         <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${lineActions.busy ? "animate-spin" : ""}`} />
                         Resolve from product data
-                      </Button>
+                      </Button>}
                     </div>
                   </div>
                 </div>
@@ -1453,6 +1501,15 @@ export default function InboundShipmentDetail() {
             </div>
           )}
 
+          <DocumentRelationships root={{ kind: "shipment", id: shipment.id }} lineActions={isEditable ? (relationshipLine) => {
+            const source = lines.find((line: { id: number }) => line.id === relationshipLine.id);
+            return source ? <div className="flex gap-1">
+              <Button variant="outline" size="sm" aria-label="Edit shipment line" onClick={() => lineActions.openEditor(source)}>Edit line</Button>
+              <Button variant="ghost" size="sm" aria-label="Remove shipment line" disabled={lineActions.busy} onClick={() => lineActions.remove(source)}><Trash2 className="h-4 w-4 text-destructive" /></Button>
+            </div> : null;
+          } : undefined} />
+          <details className="rounded-lg border p-3">
+            <summary className="cursor-pointer text-sm font-medium">Packing and measurements</summary>
           {/* Mobile cards */}
           <div className="md:hidden space-y-3">
             {lines.length === 0 ? (
@@ -1539,7 +1596,7 @@ export default function InboundShipmentDetail() {
                         <TableCell className="text-right">{formatNumber(line.totalWeightKg, 1)}</TableCell>
                         <TableCell className="text-right">{formatNumber(line.totalVolumeCbm, 4)}</TableCell>
                         <TableCell className="text-right">
-                          <AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} />
+                          <AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} pending={line.allocationPending} />
                         </TableCell>
                         <TableCell className="text-right font-mono">{formatMillsOrDash(line.landedUnitCostMills)}</TableCell>
                         {isEditable && (
@@ -1590,6 +1647,7 @@ export default function InboundShipmentDetail() {
               </div>
             </div>
           )}
+          </details>
         </TabsContent>
 
         {/* ══ Tab 2: Costs ══ */}
@@ -1677,6 +1735,7 @@ export default function InboundShipmentDetail() {
                             </Link>
                           )}
                           {invoiceRecoveryLink(cost)}
+                          {["tax", "duty"].includes(cost.costType) && <div className="mt-2"><PurchaseTaxReview target={{ kind: "shipment_charge", id: cost.id }} label="Tax treatment" /></div>}
                         </div>
                         {isEditable && (
                           <div className="flex gap-1">
@@ -1750,6 +1809,7 @@ export default function InboundShipmentDetail() {
                         </TableCell>
                         <TableCell>
                           <Badge variant="outline" className="text-xs capitalize">{cost.costType.replace(/_/g, " ")}</Badge>
+                          {["tax", "duty"].includes(cost.costType) && <div className="mt-2"><PurchaseTaxReview target={{ kind: "shipment_charge", id: cost.id }} label="Tax treatment" /></div>}
                         </TableCell>
                         <TableCell className="max-w-[200px] truncate">{cost.description || "—"}</TableCell>
                         <TableCell className="text-right font-mono">{formatCents(effectiveShipmentCostCents(cost))}</TableCell>
@@ -1879,16 +1939,20 @@ export default function InboundShipmentDetail() {
                     ))}
                   </div>
                 )}
+                {["costing", "closed"].includes(shipment.status) && <div className="space-y-2">
+                  <Button variant="outline" className="min-h-[44px]" onClick={() => setShowMeasurementCorrection(true)}>Measurements and approvals</Button>
+                  <p className="text-xs text-muted-foreground">Correct saved box dimensions or weights here, then approve their cost impact. Existing receiving history stays unchanged.</p>
+                </div>}
                 {["costing", "closed"].includes(shipment.status) ? costsPosted ? <div className="space-y-2 rounded-md bg-green-50 p-3 dark:bg-green-950/30">
                   <p className="text-sm font-medium text-green-800 dark:text-green-300">Costs posted. No update or approval is needed for the saved charges.</p>
                   <details className="text-sm">
                     <summary className="cursor-pointer">Reapply costs (optional)</summary>
                     <p className="my-2 text-muted-foreground">Use this only to refresh costs after a change. The recorded postings remain in the audit.</p>
-                    <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} />
+                    <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} onMeasurementsNeeded={() => setShowMeasurementCorrection(true)} />
                   </details>
                 </div> : <div className="space-y-2 rounded-md bg-muted/40 p-3">
                   <p className="text-sm">Update shipment costs recalculates this split and updates stock and sold-order costs. {shipment.status === "closed" && "This shipment stays closed; cost adjustments are recorded automatically."}</p>
-                  <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} disabled={allocationStatusError || lines.length === 0} />
+                  <ShipmentCostUpdateAction key={shipment.id} shipmentId={shipment.id} disabled={allocationStatusError || lines.length === 0} onMeasurementsNeeded={() => setShowMeasurementCorrection(true)} />
                 </div> : shipment.status !== "cancelled" && <div className="space-y-2">
                   <p className="text-sm text-muted-foreground">The charge split updates when charges change. Stock and sold-order costs are updated when the shipment closes.</p>
                   {hasPermission("purchasing", "edit") && <Button variant="outline" className="min-h-[44px]" disabled={runAllocationMutation.isPending || lines.length === 0 || allocationStatusError} onClick={() => runAllocationMutation.mutate()}>
@@ -1926,7 +1990,7 @@ export default function InboundShipmentDetail() {
                           </TableCell>
                           <TableCell>
                             <Badge
-                              variant={["needs_allocation", "stale_allocation", "stale_allocation_basis", "invalid_value_basis", "invalid_allocation_basis", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
+                              variant={["needs_allocation", "missing_dimensions", "stale_allocation", "stale_allocation_basis", "invalid_value_basis", "invalid_allocation_basis", "allocation_mismatch"].includes(cost.status) ? "destructive" : cost.status === "allocated_with_fallback" ? "outline" : "secondary"}
                               className={cost.status === "allocated_with_fallback" ? "border-amber-500 text-amber-700" : undefined}
                             >
                               {ALLOCATION_COST_STATUS_LABELS[cost.status] || cost.status.replace(/_/g, " ")}
@@ -1969,11 +2033,11 @@ export default function InboundShipmentDetail() {
                     <TableRow key={line.id}>
                       <TableCell className="font-mono">{line.sku || "—"}</TableCell>
                       <TableCell className="text-right font-mono">{formatMillsOrDash(line.poUnitCostMills)}</TableCell>
-                      <TableCell className="text-right"><AllocationAmountCell cents={line.freightAllocatedCents} millsPerUnit={line.freightAllocatedMillsPerUnit} /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.freightAllocatedCents} millsPerUnit={line.freightAllocatedMillsPerUnit} pending={line.freightAllocationPending} /></TableCell>
                       <TableCell className="text-right"><AllocationAmountCell cents={line.dutyAllocatedCents} millsPerUnit={line.dutyAllocatedMillsPerUnit} /></TableCell>
                       <TableCell className="text-right"><AllocationAmountCell cents={line.insuranceAllocatedCents} millsPerUnit={line.insuranceAllocatedMillsPerUnit} /></TableCell>
                       <TableCell className="text-right"><AllocationAmountCell cents={line.otherAllocatedCents} millsPerUnit={line.otherAllocatedMillsPerUnit} /></TableCell>
-                      <TableCell className="text-right"><AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} strong /></TableCell>
+                      <TableCell className="text-right"><AllocationAmountCell cents={line.allocatedCostCents} millsPerUnit={line.totalAllocatedMillsPerUnit} pending={line.allocationPending} strong /></TableCell>
                       <TableCell className="text-right font-mono font-medium">{formatMillsOrDash(line.landedUnitCostMills)}</TableCell>
                     </TableRow>
                   ))
@@ -2066,6 +2130,8 @@ export default function InboundShipmentDetail() {
 
         {/* ══ Tab 5: Timeline ══ */}
         <TabsContent value="timeline" className="space-y-4">
+          <ShipmentHistoryCorrection shipmentId={shipment.id} buttonLabel="View history corrections and approvals" />
+          {["costing", "closed"].includes(shipment.status) && <Button variant="outline" onClick={() => setShowMeasurementCorrection(true)}>View measurement changes and approvals</Button>}
           {statusHistory.length === 0 ? (
             <Card>
               <CardContent className="p-4 text-center text-muted-foreground">
@@ -2458,6 +2524,12 @@ export default function InboundShipmentDetail() {
               </Select>
             </div>
 
+            {["tax", "duty"].includes(newCost.costType) && <div className="space-y-2"><Label htmlFor="new-cost-tax-type">Tax type</Label>
+              <select id="new-cost-tax-type" className="w-full rounded border bg-background p-2" value={newCost.taxTypeId ?? ""} onChange={event => setNewCost(previous => ({ ...previous, taxTypeId: event.target.value }))}>
+                <option value="">Choose a tax type</option>{purchaseTaxTypes.data?.map(type => <option value={type.id} key={type.id}>{type.code} · {type.name}</option>)}</select>
+              {purchaseTaxTypes.error && <p role="alert">{purchaseTaxTypes.error.message}</p>}
+              <p className="text-xs text-muted-foreground">Uses the treatment saved in Settings → Procurement. Receiving inherits it automatically.</p>
+            </div>}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div className="space-y-2">
                 <Label>Date</Label>
@@ -2759,6 +2831,8 @@ export default function InboundShipmentDetail() {
       </Dialog>
 
       {lineActions.dialogs}
+      {["costing", "closed"].includes(shipment.status) && <ShipmentMeasurementCorrection key={`measurements-${shipment.id}`} shipmentId={shipment.id}
+        hideTrigger open={showMeasurementCorrection} onOpenChange={setShowMeasurementCorrection} />}
       <ShipmentReceiptPackResolutionDialog
         open={!!shipmentReceiptPackResolution}
         onOpenChange={(open) => {
@@ -2790,7 +2864,7 @@ export default function InboundShipmentDetail() {
               {(shipmentPoReceiveOptions?.purchaseOrders ?? []).map((option: any) => {
                 const { fullyReceived, text: coverageLabel } = shipmentReceiveCoverageLabel(option);
                 return (
-                  <div key={option.purchaseOrderId} className="flex items-center justify-between gap-3 rounded-md border p-3">
+                  <div key={option.purchaseOrderId} data-testid={`shipment-receive-option-${option.purchaseOrderId}`} className="flex flex-col items-start justify-between gap-3 rounded-md border p-3 sm:flex-row sm:items-center">
                     <div className="min-w-0">
                       <div className="font-medium truncate">{option.poNumber ?? `PO #${option.purchaseOrderId}`}</div>
                       <div className="text-sm text-muted-foreground">
@@ -2800,6 +2874,7 @@ export default function InboundShipmentDetail() {
                       {!fullyReceived && option.reason && (
                         <div className="text-xs text-muted-foreground mt-1">{option.reason}</div>
                       )}
+                      <ShipmentCustodyReceiptLinks coverage={option} />
                     </div>
                     {fullyReceived ? (
                       <Badge variant="outline" className="text-green-600 border-green-300 shrink-0">

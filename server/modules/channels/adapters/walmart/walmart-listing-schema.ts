@@ -1,6 +1,7 @@
 import Ajv, { type ErrorObject, type ValidateFunction } from "ajv";
 import addFormats from "ajv-formats";
 import Decimal from "decimal.js";
+import { prepareChannelPublicationWeight } from "../../../marketplace-listings/domain/channel-package-weight";
 import type { ListingIssue } from "@shared/types/channel-listing-publication";
 import { WalmartApiError } from "./walmart-client";
 import type {
@@ -37,6 +38,22 @@ export const MAINTENANCE_PROTECTED_ORDERABLE_FIELDS = new Set([
   "country_of_origin_substantial_transformation",
 ]);
 type JsonObject = Record<string, unknown>;
+const WALMART_SHIPPING_WEIGHT_DECIMAL_PLACES = 3;
+
+/** Walmart's schema expresses shipping weight in pounds, in 0.001 lb steps.
+ * Normalize the source once through the shared ounce rule, then encode upward
+ * to the supported precision. Never feed the encoded payload back as source. */
+export function walmartShippingWeightAttributes(attributes: JsonObject): JsonObject {
+  const result = { ...attributes };
+  const weight = result.ShippingWeight;
+  // The native schema owns missing/invalid attributes and permits zero.
+  if (typeof weight !== "number" || !Number.isFinite(weight) || weight <= 0) return result;
+  const normalized = prepareChannelPublicationWeight({ value: weight, unit: "POUND" });
+  result.ShippingWeight = new Decimal(normalized.pounds)
+    .toDecimalPlaces(WALMART_SHIPPING_WEIGHT_DECIMAL_PLACES, Decimal.ROUND_CEIL).toNumber();
+  return result;
+}
+
 export function jsonObject(value: unknown): JsonObject {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new WalmartApiError(

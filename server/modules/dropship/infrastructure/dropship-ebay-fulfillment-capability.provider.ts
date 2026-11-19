@@ -3,13 +3,13 @@ import { pool as defaultPool } from "../../../db";
 import {
   FulfillmentRoutingError,
   FulfillmentRoutingResolver,
-} from "../../shipping-engine/application/fulfillment-routing.service";
+} from "../../shipping-engine/fulfillment-routing-and-connections.api";
 import type {
   FulfillmentRouteResolution,
-} from "../../shipping-engine/domain/fulfillment-routing";
+} from "../../shipping-engine/fulfillment-routing-and-connections.api";
 import {
   PostgresFulfillmentRoutingStore,
-} from "../../shipping-engine/infrastructure/fulfillment-routing.repository";
+} from "../../shipping-engine/fulfillment-routing-and-connections.api";
 import {
   DropshipEbayFulfillmentCapabilityService,
   type DropshipCarrierServiceCapability,
@@ -18,7 +18,7 @@ import {
   type DropshipEbayInternalFulfillmentEvidence,
   type DropshipEbayInternalFulfillmentEvidenceRepository,
 } from "../application/dropship-ebay-fulfillment-capability-service";
-import { selectRateBookAssignment } from "../../shipping-engine/domain/rate-book";
+import { selectRateBookAssignment } from "../../shipping-engine/rate-quoting-and-policy.api";
 import { DropshipError } from "../domain/errors";
 import { resolveDropshipOmsChannelIdWithClient } from "./dropship-order-intake.repository";
 

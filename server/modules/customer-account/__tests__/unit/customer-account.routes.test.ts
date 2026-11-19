@@ -26,13 +26,14 @@ describe("customer account signed storefront HTTP boundary", () => {
   const services = vi.fn((_principal: CustomerReturnCustomerSession) => ({ edits: { connection }, returns: vi.fn() }));
   const report = vi.fn();
   let enabled = true;
+  let additionalThemeIds: string[] | undefined;
   beforeEach(async () => {
-    vi.clearAllMocks(); enabled = true;
+    vi.clearAllMocks(); enabled = true; additionalThemeIds = undefined;
     services.mockImplementation(() => ({ edits: { connection }, returns: vi.fn() }));
     const auth = new CustomerReturnCustomerAuthService({ config, challenges: { create: vi.fn(), consume: vi.fn() },
       shops: async () => [{ channelId: 2, connectionId: 4, shopDomain: "fixture.myshopify.com", displayName: "Shopify" }], now: () => now, randomState: () => "a".repeat(43) });
     const app = express(); app.use(express.json());
-    registerCustomerAccountRoutes(app, { services, context: async () => ({ config, auth }), staging: () => enabled ? staging : null, report } as unknown as CustomerAccountRouteDependencies);
+    registerCustomerAccountRoutes(app, { services, context: async () => ({ config, auth }), staging: () => enabled ? { ...staging, ...(additionalThemeIds ? { additionalThemeIds } : {}) } : null, report } as unknown as CustomerAccountRouteDependencies);
     server = await new Promise<Server>(resolve => { const value = app.listen(0, "127.0.0.1", () => resolve(value)); });
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}${CUSTOMER_ACCOUNT_PROXY_API}`;
   });
@@ -41,6 +42,46 @@ describe("customer account signed storefront HTTP boundary", () => {
     return fetch(`${base}?${signed}`, { method: "POST", headers: { Origin: "https://shop.test", "Content-Type": "application/json", [CUSTOMER_ACCOUNT_COMMAND_HEADER]: "1", ...headers },
       body: JSON.stringify({ themeId: staging.themeId, expectedCustomerId: "100", method: "GET", path: "/account/bootstrap", query: {}, ...body }) });
   }
+  it("initializes one signed overview read without a bootstrap round trip, preserving the command session gate", async () => {
+    const identity = { externalOrderId: "99", orderReference: "#HISTORY" };
+    const summaries = vi.fn(async () => ({ orders: [{ ...identity, omsOrderId: null, currency: "USD", totalCents: 741, cancelled: false, financialStatus: "Paid" }], unavailableExternalOrderIds: [], statusUnavailable: false }));
+    const actions = vi.fn(async () => ({ orders: [{ ...identity, omsOrderId: null, state: "refreshing", snapshot: null, verifiedAt: null, validUntil: null }] }));
+    services.mockImplementation(() => ({ edits: { connection }, orders: { summaries, actions }, returns: vi.fn() }) as never);
+    const input = { method: "POST", path: "/account/overview", body: { orders: [identity] } };
+    const response = await request(input); expect(response.status).toBe(200);
+    const overview = await response.json(); expect(overview.summaries.orders[0].totalCents).toBe(741);
+    expect(summaries).toHaveBeenCalledWith(input.body, { saved: true, progress: true });
+    expect((await request({ ...input, expectedCustomerId: "101" })).status).toBe(401);
+    expect((await request(input, proof({ logged_in_customer_id: "" }))).status).toBe(401);
+    expect((await request({ ...input, sessionKey: "b".repeat(43) })).status).toBe(401);
+    expect((await request({ method: "POST", path: "/account/saved-summaries", body: input.body })).status).toBe(401);
+    expect((await request({ method: "POST", path: "/account/saved-summaries", body: input.body, sessionKey: overview.bootstrap.session.sessionKey })).status).toBe(200);
+    expect(summaries).toHaveBeenCalledTimes(2);
+  });
+  it("serves the native returns chooser through the existing signed customer scope and cached reader", async () => {
+    const page = { orders: [{ omsOrderId: 10, orderReference: "#TEST-1001", purchasedAt: null, eligibleItemCount: 1 }], nextBeforeOmsOrderId: null, unavailableOrderCount: 0 };
+    const choices = vi.fn(async () => page);
+    const returns = vi.fn(async () => ({ orders: { choices } }));
+    services.mockImplementation(() => ({ edits: { connection }, returns }) as never);
+    const sessionKey = (await (await request()).json()).session.sessionKey;
+    const input = { path: "/returns/order-options", sessionKey };
+    const response = await request(input);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual(page);
+    expect(choices).toHaveBeenCalledExactlyOnceWith({});
+    expect(services.mock.calls.at(-1)?.[0]).toMatchObject({ channelId: 2, externalCustomerId: "100" });
+    expect((await request({ ...input, query: { before: "20" } })).status).toBe(200);
+    expect(choices).toHaveBeenLastCalledWith({ beforeOmsOrderId: 20 });
+    const count = choices.mock.calls.length;
+    for (const change of [{ query: { before: "0" } }, { query: { before: "1.5" } }, { query: { customerId: "101" } }, { body: { customerId: "101" } }])
+      expect((await request({ ...input, ...change })).status).toBe(400);
+    expect((await request({ ...input, method: "POST", body: {} })).status).toBe(404);
+    expect((await request(input, proof({ logged_in_customer_id: "" }))).status).toBe(401);
+    expect((await request({ ...input, expectedCustomerId: "101" })).status).toBe(401);
+    expect((await request({ ...input, sessionKey: "b".repeat(43) })).status).toBe(401);
+    expect((await request(input, proof(), { Origin: "https://evil.test" })).status).toBe(403);
+    expect(choices).toHaveBeenCalledTimes(count);
+  });
   it("verifies Shopify per request without accepting staff cookies or a theme ID as identity", async () => {
     const response = await request(); expect(response.status).toBe(200);
     expect((await response.json()).session).toMatchObject({ authenticated: true, privateTesting: true });
@@ -51,12 +92,69 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect(report).toHaveBeenLastCalledWith({ code: "CUSTOMER_ACCOUNT_SIGN_IN_REQUIRED", path: "/account/bootstrap" });
     expect(services).toHaveBeenCalledTimes(1);
   });
+  it("admits a configured live theme through the same signed boundary while keeping staging usable", async () => {
+    const live = { themeId: "174464958623" };
+    expect((await request(live)).status).toBe(403);
+    expect(services).not.toHaveBeenCalled();
+    additionalThemeIds = [live.themeId];
+    expect((await request(live)).status).toBe(200);
+    expect(services).toHaveBeenCalledTimes(1);
+    expect((await request(live, proof({ logged_in_customer_id: "" }), { Cookie: "staff-session=fake" })).status).toBe(401);
+    expect((await request({ ...live, expectedCustomerId: "101" })).status).toBe(401);
+    expect((await request(live, proof(), { Origin: "https://evil.test" })).status).toBe(403);
+    expect((await request({ themeId: "999" })).status).toBe(403);
+    expect(services).toHaveBeenCalledTimes(1);
+    expect((await request()).status).toBe(200);
+    expect(services).toHaveBeenCalledTimes(2);
+    enabled = false;
+    expect((await request(live)).status).toBe(403);
+    expect(services).toHaveBeenCalledTimes(2);
+  });
   it("records a database failure code without exposing SQL or connection details", async () => {
     connection.mockRejectedValueOnce(Object.assign(new Error("private database query and credentials"), { code: "55P03" }));
     const response = await request();
     expect(response.status).toBe(503);
     expect(report).toHaveBeenLastCalledWith({ code: "CUSTOMER_ACCOUNT_REQUEST_FAILED", path: "/account/bootstrap", causeCode: "55P03" });
     expect(JSON.stringify(await response.json())).not.toContain("private database");
+  });
+  it("keeps batched history and inline details behind the same signed, staging-only boundary without a financial command", async () => {
+    const summary = { externalOrderId: "99", orderReference: "#49180", omsOrderId: null, currency: "USD", totalCents: 0, cancelled: true, financialStatus: "Refunded" };
+    const orders = { summaries: vi.fn(async () => ({ orders: [summary], unavailableExternalOrderIds: [], statusUnavailable: false })),
+      details: vi.fn(async () => ({ externalOrderId: "99", orderReference: "#49180", currency: "USD", totalCents: 0, lines: [] })) };
+    services.mockImplementation(() => ({ edits: { connection }, orders, returns: vi.fn() }));
+    const input = { externalOrderId: "99", orderReference: "#49180" };
+    const sessionKey = (await (await request()).json()).session.sessionKey;
+    const history = await request({ method: "POST", path: "/account/order-summaries", sessionKey, body: { orders: [input] } });
+    expect(history.status).toBe(200); expect((await history.json()).orders).toEqual([summary]);
+    const details = await request({ method: "POST", path: "/account/order-details", sessionKey, body: input });
+    expect(details.status).toBe(200); expect((await details.json()).totalCents).toBe(0);
+    expect(orders.summaries).toHaveBeenCalledExactlyOnceWith({ orders: [input] });
+    expect(orders.details).toHaveBeenCalledExactlyOnceWith(input);
+    enabled = false;
+    expect((await request({ method: "POST", path: "/account/order-details", sessionKey, body: input })).status).toBe(403);
+    expect(orders.details).toHaveBeenCalledTimes(1);
+  });
+  it("authenticates explicit presentation refreshes without submitting a business command",async()=>{
+    const input={externalOrderId:"99",orderReference:"#49180"};
+    const refreshActions=vi.fn(async()=>({orders:[{...input,omsOrderId:10,state:"refreshing",snapshot:null,verifiedAt:null,validUntil:null}]}));
+    services.mockImplementation(()=>({edits:{connection},orders:{refreshActions},returns:vi.fn()}) as never);
+    const sessionKey=(await(await request()).json()).session.sessionKey;
+    expect((await request({method:"POST",path:"/account/order-actions/refresh",sessionKey,body:{orders:[input]}})).status).toBe(200);
+    expect(refreshActions).toHaveBeenCalledExactlyOnceWith({orders:[input]});
+    expect((await request({method:"POST",path:"/account/order-actions/refresh",sessionKey,body:{orders:[input]}},proof({logged_in_customer_id:""}))).status).toBe(401);
+    expect(refreshActions).toHaveBeenCalledOnce();
+  });
+  it("opts into the new progress response only for the supported explicit version", async()=>{
+    const input={externalOrderId:"99",orderReference:"#49180"};
+    const summaries=vi.fn(async()=>({orders:[{...input,omsOrderId:null,currency:"USD",totalCents:0,cancelled:true,financialStatus:"Refunded",progress:{delivery:null,packages:[],returns:[],refunds:[]}}],unavailableExternalOrderIds:[],statusUnavailable:false}));
+    services.mockImplementation(()=>({edits:{connection},orders:{summaries},returns:vi.fn()}) as never);
+    const sessionKey=(await(await request()).json()).session.sessionKey;
+    const result=await request({method:"POST",path:"/account/order-summaries",query:{statusDisplayVersion:"v2"},sessionKey,body:{orders:[input]}});
+    expect(result.status).toBe(200);expect(summaries).toHaveBeenCalledExactlyOnceWith({orders:[input]},{progress:true});
+    for(const query of [{statusDisplayVersion:"v3"},{statusDisplayVersion:"v2",unrecognized:"true"}]){
+      expect((await request({method:"POST",path:"/account/order-summaries",query,sessionKey,body:{orders:[input]}})).status).toBe(400);
+    }
+    expect(summaries).toHaveBeenCalledTimes(1);
   });
   it.each([
     { signed: () => `${proof()}&signature=duplicate` },
@@ -83,6 +181,21 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect((await request({ expectedCustomerId: "101" })).status).toBe(401);
     expect((await request({}, proof(), { Origin: "https://other.test" })).status).toBe(403);
     expect(services).not.toHaveBeenCalled();
+  });
+  it("serves stored action lookups through the owned signed boundary without constructing return services", async () => {
+    const input = { externalOrderId: "99", orderReference: "#TEST-1" };
+    const actions = vi.fn(async () => ({ orders: [{ ...input, omsOrderId: null, state: "not_managed", snapshot: null, verifiedAt: null, validUntil: null }] }));
+    const returns = vi.fn();
+    services.mockImplementation(() => ({ edits: { connection }, orders: { actions }, returns }) as never);
+    const sessionKey = (await (await request()).json()).session.sessionKey;
+    const response = await request({ method: "POST", path: "/account/order-actions", sessionKey, body: { orders: [input] } });
+    expect(response.status).toBe(200);
+    expect(actions).toHaveBeenCalledExactlyOnceWith({ orders: [input] });
+    expect(returns).not.toHaveBeenCalled();
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    enabled = false;
+    expect((await request({ method: "POST", path: "/account/order-actions", sessionKey, body: { orders: [input] } })).status).toBe(403);
+    expect(actions).toHaveBeenCalledOnce();
   });
   it("admits any signed customer for the enabled shop without a tester allowlist", async () => {
     const response = await request({ expectedCustomerId: "101" }, proof({ logged_in_customer_id: "101" }));
@@ -123,6 +236,47 @@ describe("customer account signed storefront HTTP boundary", () => {
     expect(progress).not.toHaveBeenCalled();
     expect((await request(body)).status).toBe(200);
     expect(progress).toHaveBeenCalledWith(operationId, "resume", operationId);
+  });
+  it("negotiates busy observation only on a signed read and never dispatches a command", async () => {
+    const operationId = "22222222-2222-4222-8222-222222222222";
+    const operation = vi.fn(async (_id: string, _code?: "v1", version?: "v1") => ({
+      operationId, orderNumber: "#TEST", currency: "USD", status: "ready", canAbandon: true,
+      previousTotalCents: 1005, updatedTotalCents: 1481, balanceDueCents: 476, refundDueCents: 0,
+      lines: [], warnings: [], expiresAt: null, paymentDeadline: null, paymentUrl: null, error: null,
+      ...(version ? { commandInProgress: true } : {}),
+    }));
+    const progress = vi.fn();
+    services.mockImplementation(() => ({ edits: { connection, operation, progress }, returns: vi.fn() }) as never);
+    const sessionKey = (await (await request()).json()).session.sessionKey;
+    const scope = { path: `/order-edits/operations/${operationId}`, sessionKey };
+    const observed = await request({ ...scope, query: { codeEntryVersion: "v1", observationVersion: "v1" } });
+    expect(observed.status).toBe(200);
+    expect(await observed.json()).toMatchObject({ commandInProgress: true, status: "ready" });
+    expect(operation).toHaveBeenLastCalledWith(operationId, "v1", "v1");
+    const legacy = await request({ ...scope, query: { codeEntryVersion: "v1" } });
+    expect(await legacy.json()).not.toHaveProperty("commandInProgress");
+    expect((await request({ ...scope, query: { observationVersion: "v2" } })).status).toBe(400);
+    expect((await request({ ...scope, sessionKey: undefined, query: { observationVersion: "v1" } })).status).toBe(401);
+    expect(progress).not.toHaveBeenCalled();
+  });
+  it("keeps cancellation review/status inside signed ownership and requires approval identity for submission", async () => {
+    const bootstrap = await (await request()).json(), requestKey = "22222222-2222-4222-8222-222222222222";
+    const rewards = { fingerprint: "a".repeat(64), returnedPoints: "100.00", deductedEarnedPoints: "5.00", settled: false };
+    const cancellationReview = vi.fn(async () => ({ connectionId: 4, omsOrderId: 9, orderNumber: "#1", currency: "USD", revision: "a".repeat(64), orderRevision: "b".repeat(64), refundCents: 829, rewards, eligibility: { allowed: true, reasons: [] } }));
+    const value = { operationId: requestKey, requestKey, omsOrderId: 9, orderNumber: "#1", currency: "USD", status: "pending", refundCents: 829, refundStatus: "pending", rewards, error: null };
+    const submitCancellation = vi.fn(async () => value), cancellationStatus = vi.fn(async () => value);
+    services.mockImplementation(() => ({ edits: { connection, cancellationReview, submitCancellation, cancellationStatus }, returns: vi.fn() }));
+    const scope = { path: "/account/orders/9/cancellation/review", query: { connectionId: "4" }, sessionKey: bootstrap.session.sessionKey };
+    expect((await request(scope)).status).toBe(200); expect(cancellationReview).toHaveBeenCalledWith(4, 9);
+    expect((await request({ ...scope, path: "/account/orders/9/cancellation/status", query: { connectionId: "4", requestKey } })).status).toBe(200);
+    expect(cancellationStatus).toHaveBeenCalledWith(4, 9, requestKey);
+    const command = { ...scope, path: "/account/orders/9/cancellation", method: "POST", body: { requestKey, expectedRevision: "a".repeat(64) } };
+    expect((await request(command)).status).toBe(400);
+    expect((await request({ ...command, commandKey: requestKey, sessionKey: undefined })).status).toBe(401);
+    expect(submitCancellation).not.toHaveBeenCalled();
+    expect((await request({ ...command, commandKey: requestKey })).status).toBe(200);
+    expect(submitCancellation).toHaveBeenCalledWith(4, 9, command.body, requestKey);
+    expect((await request({ ...scope, path: "/account/orders/9/cancellation/reconcile", method: "POST", commandKey: requestKey, body: {} })).status).toBe(404);
   });
   it("dispatches rewards only inside the signed account boundary with a command key", async () => {
     const bootstrap = await (await request()).json();

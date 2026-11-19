@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import http from "node:http";
@@ -27,7 +28,7 @@ describe("supplier sourcing HTTP authority", () => {
   });
   afterEach(async () => { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); vi.restoreAllMocks(); });
   function request(path: string, body?: unknown, actor: string | null = "reviewer") {
-    return fetch(origin + path, { method: body === undefined ? "GET" : "PUT", headers: { "Content-Type": "application/json", ...(actor ? { "X-Test-Actor": actor } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+    return requestLocalHttp(origin + path, { method: body === undefined ? "GET" : "PUT", headers: { "Content-Type": "application/json", ...(actor ? { "X-Test-Actor": actor } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
   }
   it("requires edit permission and an authenticated actor before a mutation", async () => {
     mocks.permission.mockResolvedValue(false);

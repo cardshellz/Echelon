@@ -1,4 +1,4 @@
-import type { Pool, PoolClient, QueryResult } from "pg";
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { describe, expect, it } from "vitest";
 import { PgDropshipCarrierClaimRepository } from "../../infrastructure/dropship-carrier-claim.repository";
 
@@ -92,19 +92,19 @@ class HappyClaimClient {
     private readonly auditRowCount = 1,
   ) {}
 
-  async query<T>(sql: string, values?: unknown[]): Promise<QueryResult<T>> {
+  async query<T extends QueryResultRow = QueryResultRow>(sql: string, values?: unknown[]): Promise<QueryResult<T>> {
     const normalized = sql.trim();
     this.queries.push(normalized);
 
-    if (normalized.includes("INSERT INTO dropship.dropship_admin_config_commands")) return result([{ id: 50 } as T]);
-    if (normalized.includes("WHERE os.id = $1")) return result([shipmentRow() as T]);
-    if (normalized.includes("FROM dropship.dropship_order_intake i")) return result([economicsRow() as T]);
+    if (normalized.includes("INSERT INTO dropship.dropship_admin_config_commands")) return result([{ id: 50 } as unknown as T]);
+    if (normalized.includes("WHERE os.id = $1")) return result([shipmentRow() as unknown as T]);
+    if (normalized.includes("FROM dropship.dropship_order_intake i")) return result([economicsRow() as unknown as T]);
     if (normalized.includes("FROM wms.outbound_shipment_items osi") && normalized.includes("GROUP BY osi.product_variant_id")) {
-      return result([{ product_variant_id: 101, quantity: 1 } as T]);
+      return result([{ product_variant_id: 101, quantity: 1 } as unknown as T]);
     }
-    if (normalized.includes("WHERE a.is_active = true")) return result([assignmentRow() as T]);
-    if (normalized.includes("FROM dropship.dropship_carrier_protection_policies WHERE id")) return result([policyRow() as T]);
-    if (normalized.includes("WHERE os.order_id = $1")) return result([shipmentRow() as T]);
+    if (normalized.includes("WHERE a.is_active = true")) return result([assignmentRow() as unknown as T]);
+    if (normalized.includes("FROM dropship.dropship_carrier_protection_policies WHERE id")) return result([policyRow() as unknown as T]);
+    if (normalized.includes("WHERE os.order_id = $1")) return result([shipmentRow() as unknown as T]);
     if (normalized.includes("INSERT INTO dropship.dropship_shipment_shipping_allocations")) {
       this.allocationGroupHash = String(values?.[11] ?? "");
       return writeResult(1);
@@ -113,9 +113,9 @@ class HappyClaimClient {
       this.allocationReads += 1;
       return this.allocationReads === 1
         ? result([])
-        : result([allocationRow(this.allocationGroupHash, this.allocationOverrides) as T]);
+        : result([allocationRow(this.allocationGroupHash, this.allocationOverrides) as unknown as T]);
     }
-    if (normalized.includes("INSERT INTO dropship.dropship_carrier_claims")) return result([claimRow() as T]);
+    if (normalized.includes("INSERT INTO dropship.dropship_carrier_claims")) return result([claimRow() as unknown as T]);
     if (normalized.includes("UPDATE dropship.dropship_admin_config_commands")) return writeResult(1);
     if (normalized.includes("INSERT INTO dropship.dropship_audit_events")) return writeResult(this.auditRowCount);
     return result([]);
@@ -266,10 +266,10 @@ function poolFor(client: HappyClaimClient): Pool {
   return { connect: async () => client as unknown as PoolClient } as unknown as Pool;
 }
 
-function result<T>(rows: T[]): QueryResult<T> {
+function result<T extends QueryResultRow = QueryResultRow>(rows: T[]): QueryResult<T> {
   return { command: "SELECT", rowCount: rows.length, oid: 0, fields: [], rows };
 }
 
-function writeResult<T>(rowCount: number): QueryResult<T> {
+function writeResult<T extends QueryResultRow = QueryResultRow>(rowCount: number): QueryResult<T> {
   return { command: "INSERT", rowCount, oid: 0, fields: [], rows: [] };
 }

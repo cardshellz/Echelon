@@ -1,3 +1,4 @@
+import { readIntegerMills } from "@shared/money-read";
 /**
  * Receipt Reversal service (Spec D, 2026-08-07).
  *
@@ -231,7 +232,7 @@ export class ReceiptReversalService {
         || row.allow_negative === null || Number(row.allow_negative) !== (params.allowNegative === true ? 1 : 0) || row.order_reversal_id !== null) throw reversalEvidenceReviewRequired();
       const parsed = receiptReversalLineResultSchema.safeParse({
         reversalId: Number(row.id), receivingOrderId: Number(row.receiving_order_id), receivingLineId: Number(row.receiving_line_id),
-        qty: Number(row.qty), baseUnitsReversed: Number(row.base_units_reversed), lotUnitCostMills: row.lot_unit_cost_mills === null ? null : Number(row.lot_unit_cost_mills),
+        qty: Number(row.qty), baseUnitsReversed: Number(row.base_units_reversed), lotUnitCostMills: row.lot_unit_cost_mills === null ? null : readIntegerMills(row.lot_unit_cost_mills, "lot unit cost", true),
         apReconciliationReopened: Number(row.ap_reconciliation_reopened) === 1, idempotentReplay: true,
       });
       if (!parsed.success || row.ap_reconciliation_reopened === null || ![0, 1].includes(Number(row.ap_reconciliation_reopened))) throw reversalEvidenceReviewRequired();
@@ -370,7 +371,7 @@ export class ReceiptReversalService {
       reversalScope: row.reversal_scope,
       orderReversalId: row.order_reversal_id === null ? null : Number(row.order_reversal_id),
       baseUnitsReversed: row.base_units_reversed === null ? null : Number(row.base_units_reversed),
-      lotUnitCostMills: row.lot_unit_cost_mills === null ? null : Number(row.lot_unit_cost_mills),
+      lotUnitCostMills: row.lot_unit_cost_mills === null ? null : readIntegerMills(row.lot_unit_cost_mills, "lot unit cost", true),
       allowNegative: Number(row.allow_negative) === 1,
       apReconciliationReopened: Number(row.ap_reconciliation_reopened) === 1,
       idempotencyKey: row.idempotency_key,

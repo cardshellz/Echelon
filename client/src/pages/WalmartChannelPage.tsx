@@ -26,10 +26,10 @@ export function WalmartChannelRouteHost({ navigationDocumentId }: { navigationDo
   // the navigation guard itself derives deterministic generations from it.
   const [documentId] = useState(() => navigationDocumentId ?? crypto.randomUUID());
   const [location] = useLocation();
-  const { user } = useAuth();
+  const { user, hasPermission } = useAuth();
   const activeId = Number(/^\/channels\/walmart\/([1-9]\d*)(?:\/listings\/bulk)?$/.exec(location)?.[1]);
   const [retained, setRetained] = useState<ReadonlySet<number>>(new Set());
-  if (!user || !["admin", "lead"].includes(user.role)) return null;
+  if (!user || !hasPermission("channels", "view")) return null;
   const ids = new Set(retained);
   if (Number.isSafeInteger(activeId) && activeId > 0) ids.add(activeId);
   return <>{[...ids].map(channelId => <div key={channelId} hidden={channelId !== activeId} className={location.endsWith("/listings/bulk") && channelId === activeId ? "h-full min-h-0" : undefined}>

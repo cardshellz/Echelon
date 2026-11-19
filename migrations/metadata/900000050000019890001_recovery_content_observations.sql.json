@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000050000019890001_recovery_content_observations.sql",
+  "generation": 50,
+  "pr": 1989,
+  "ordinal": 1,
+  "after": [
+    "900000049000019830001_freight_invoice_approval_history_lookup.sql"
+  ]
+}

@@ -12,3 +12,4 @@ vite.config.ts.*
 # Local browser test output
 test-results/
 playwright-report/
+.codex-artifacts/

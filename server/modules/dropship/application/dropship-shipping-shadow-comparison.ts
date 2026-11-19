@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type {
   ShippingQuoteEvidenceWriter,
-} from "../../shipping-engine/application/shipping-quote-evidence-writer";
+} from "../../shipping-engine/rate-quoting-and-policy.api";
 import {
   calculateBasisPointsFeeCents,
 } from "../domain/shipping-quote";

@@ -1,11 +1,12 @@
 /**
  * The eBay offer's price strings come from integer cents (S4): the same
- * strings as before for whole, non-negative cents, and a build error naming
- * the SKU for an amount that is not whole, non-negative cents.
+ * strings as before for whole, non-negative cents, and a typed source error
+ * identifying the variant for an amount that is not whole, non-negative cents.
  */
 
 import { describe, expect, it } from "vitest";
 import { EbayListingBuilder } from "../../adapters/ebay/ebay-listing-builder";
+import { ChannelListingValidationError } from "@shared/channel-listing-validation";
 import type { ChannelListingPayload, ChannelVariantPayload } from "../../channel-adapter.interface";
 
 const CONFIG = {
@@ -79,17 +80,24 @@ describe("eBay offer price strings", () => {
     ["a NaN", Number.NaN],
     ["an infinite", Number.POSITIVE_INFINITY],
     ["an unsafe (above 2^53)", Number.MAX_SAFE_INTEGER + 1],
-  ])("refuses %s price and names the SKU", (_label, priceCents) => {
+  ])("refuses %s price and identifies the source variant", (_label, priceCents) => {
     expect(() => offerFor({ priceCents, compareAtPriceCents: null }))
-      .toThrow(/eBay offer priceCents must be whole, non-negative cents for SKU CS-TL35-P25/);
+      .toThrow(new ChannelListingValidationError({ field: "price", reason: "invalid", productId: 42, variantId: 101, variantSku: "CS-TL35-P25" }));
   });
 
   it.each([
     ["a negative", -999],
     ["a fractional", 999.5],
     ["an infinite", Number.POSITIVE_INFINITY],
-  ])("refuses %s compare-at price and names the SKU", (_label, compareAtPriceCents) => {
+  ])("refuses %s compare-at price and identifies the source variant", (_label, compareAtPriceCents) => {
     expect(() => offerFor({ priceCents: 799, compareAtPriceCents }))
-      .toThrow(/eBay offer compareAtPriceCents must be whole, non-negative cents for SKU CS-TL35-P25/);
+      .toThrow(new ChannelListingValidationError({ field: "price", reason: "invalid", productId: 42, variantId: 101, variantSku: "CS-TL35-P25" }));
+  });
+
+  it.each([null, 0, -1, Number.NaN, Number.POSITIVE_INFINITY])("refuses invalid package weight %s with actionable source identity", weightGrams => {
+    const listing = listingWith({ priceCents: 500, compareAtPriceCents: null });
+    listing.variants[0].weightGrams = weightGrams;
+    expect(() => new EbayListingBuilder().buildInventoryItems(listing, CONFIG, { requirePackageWeight: true }))
+      .toThrow(new ChannelListingValidationError({ field: "package_weight", reason: weightGrams === null ? "required" : "invalid", productId: 42, variantId: 101, variantSku: "CS-TL35-P25" }));
   });
 });

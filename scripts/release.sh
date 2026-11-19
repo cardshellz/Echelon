@@ -20,4 +20,9 @@ else
   echo "Skipping drizzle-kit push during release (set RUN_DRIZZLE_PUSH_ON_RELEASE=true to enable)."
 fi
 
+# Read-only check that the customer order editor's inspection SQL still runs
+# against this database. A failure stops the release (set -e).
+echo "Running order editor read smoke check..."
+npx tsx scripts/release-smoke-order-edit.ts
+
 echo "Release phase complete"

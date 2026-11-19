@@ -7,8 +7,8 @@ const RETURN_CASES_SOURCE = readFileSync(
   resolve(process.cwd(), "client/src/pages/ReturnCases.tsx"),
   "utf8",
 );
-const DROPSHIP_SOURCE = readFileSync(
-  resolve(process.cwd(), "client/src/pages/Dropship.tsx"),
+const RETURN_OPS_TAB_SOURCE = readFileSync(
+  resolve(process.cwd(), "client/src/features/returns/ReturnOpsTab.tsx"),
   "utf8",
 );
 const OPEN_RETURN_CASE_SOURCE = readFileSync(
@@ -17,7 +17,11 @@ const OPEN_RETURN_CASE_SOURCE = readFileSync(
 );
 
 describe("first-class returns create entry", () => {
-  it("uses the canonical case creator and limits legacy dropship UI to inspection", () => {
+  it("uses the canonical case creator, limits legacy dropship UI to inspection, and decouples ReturnCases from Dropship.tsx", () => {
+    expect(RETURN_CASES_SOURCE).toContain(
+      'import { ReturnOpsTab } from "@/features/returns/ReturnOpsTab";',
+    );
+    expect(RETURN_CASES_SOURCE).not.toContain("@/pages/Dropship");
     expect(RETURN_CASES_SOURCE).toContain("<ReturnCaseAdminPanel");
     expect(RETURN_CASES_SOURCE).toContain("onOpenLegacyRma=");
     expect(RETURN_CASES_SOURCE).toContain("showCreatePanel={false}");
@@ -28,9 +32,9 @@ describe("first-class returns create entry", () => {
   });
 
   it("does not run legacy creator setup queries when its panel is disabled", () => {
-    expect(DROPSHIP_SOURCE).toContain("{showCreatePanel && (");
-    expect(DROPSHIP_SOURCE.match(/enabled: showCreatePanel,/g)).toHaveLength(4);
-    expect(DROPSHIP_SOURCE).toMatch(
+    expect(RETURN_OPS_TAB_SOURCE).toContain("{showCreatePanel && (");
+    expect(RETURN_OPS_TAB_SOURCE.match(/enabled: showCreatePanel,/g)).toHaveLength(4);
+    expect(RETURN_OPS_TAB_SOURCE).toMatch(
       /showCreatePanel\s*&&\s*selectedReturnVendorId !== null/,
     );
   });

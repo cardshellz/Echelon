@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type Request, type Response, type NextFunction } from "express";
 import { createServer, type Server } from "node:http";
@@ -23,7 +24,7 @@ vi.mock("../../../../platform/commands/command-results.repository", () => ({
   createDrizzleFinancialCommandRepository: () => mocks.repository,
 }));
 vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../../notifications/notifications.service", () => ({}));
+vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
 import { registerInboundShipmentRoutes } from "../../inbound-shipment.routes";
 import { FinancialCommandError } from "../../../../platform/commands/transactional-command.service";
@@ -34,7 +35,7 @@ const service = { executeCostCommandInTransaction: vi.fn() };
 const KEY = "shipment-cost-http-fixture";
 
 async function send(method: string, path: string, body: unknown, headers: Record<string, string> = {}) {
-  const response = await fetch(`${url}${path}`, { method, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const response = await requestLocalHttp(`${url}${path}`, { method, headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   return { status: response.status, headers: response.headers, body: await response.json() };
 }
 
@@ -46,7 +47,7 @@ beforeEach(async () => {
   service.executeCostCommandInTransaction.mockResolvedValue({ id: 31, inboundShipmentId: 7, version: "a".repeat(64) });
   const app = express();
   app.use(express.json());
-  app.locals.services = { shipmentTracking: service };
+  app.locals.services = { shipmentTracking: service } as unknown as typeof app.locals.services;
   registerInboundShipmentRoutes(app);
   server = createServer(app);
   await new Promise<void>((resolve) => { server!.listen(0, "127.0.0.1", resolve); });

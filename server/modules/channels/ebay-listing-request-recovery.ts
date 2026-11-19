@@ -36,6 +36,9 @@ export async function recoverPriorEbayListingRequests(input: {
       syncJobId: input.context.jobId, syncRevision: input.context.claimedRevision });
     if (resumed.busy) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY",
       "Another stock update is still running. This saved listing update will continue automatically.");
+    if (resumed.reviewRequired && resumed.unresolved.length)
+      throw new EbayListingSyncError("PUBLICATION_RECOVERY_REVIEW_REQUIRED",
+        "An earlier request has no reliable final receipt. Review recovery to authorize a fresh update while retaining its unknown outcome.");
     hasRecurringRecovery = resumed.watchId !== null;
     recovered = { busy: false, resolved: [...recovered.resolved, ...resumed.superseded], unresolved: resumed.unresolved };
   }

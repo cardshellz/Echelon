@@ -5,7 +5,7 @@ import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
 import { identityStorage } from "../identity";
 const storage = { ...ordersStorage, ...channelsStorage, ...identityStorage };
-import { requirePermission, requireAuth } from "../../routes/middleware";
+import { requirePermission, requireAnyPermission, requireAuth } from "../../routes/middleware";
 import { orders, orderItems, pickingLogs, outboundShipments } from "@shared/schema";
 import { broadcastOrdersUpdated } from "../../websocket";
 import { db } from "../../db";
@@ -13,8 +13,9 @@ import {
   enqueueShipStationHoldSyncRetry,
   enqueueShipStationSortRankSyncRetry,
   enqueueShipStationShipmentPushRetry,
-} from "../oms/webhook-retry.worker";
-import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
+  enqueueShipStationShipmentCancelRetry,
+} from "../oms/webhook-retry.api";
+import { engineRefFromRow } from "../shipping/engine-and-reconcile.api";
 import { reserveAndPushAfterHoldRelease } from "./release-hold-push";
 import { sql } from "drizzle-orm";
 import Papa from "papaparse";
@@ -115,7 +116,7 @@ export function registerPickingRoutes(app: Express) {
   // ===== PICKING QUEUE API =====
   
   // DEBUG: Raw SQL test to pinpoint column issues
-  app.get("/api/picking/debug", requireAuth, async (req, res) => {
+  app.get("/api/picking/debug", requireAuth, requirePermission("picking", "manage_settings"), async (req, res) => {
     try {
       // Raw SQL to bypass Drizzle type mapping
       const rows = await storage.debugPickingQueue();
@@ -127,7 +128,7 @@ export function registerPickingRoutes(app: Express) {
   
   // Active orders use the queue; all-date history has its own bounded reader.
   // Diagnostic endpoint to inspect a specific order's items
-  app.get("/api/picking/diagnose/:orderNumber", requireAuth, async (req, res) => {
+  app.get("/api/picking/diagnose/:orderNumber", requireAuth, requirePermission("picking", "manage_settings"), async (req, res) => {
     try {
       const orderNumber = '#' + req.params.orderNumber;
       const diagnosis = await storage.diagnoseOrder(orderNumber);
@@ -138,7 +139,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Diagnostic: find orders where picked_count > unit_count (double counting)
-  app.get("/api/picking/diagnose-overcounted", requireAuth, async (req, res) => {
+  app.get("/api/picking/diagnose-overcounted", requireAuth, requirePermission("picking", "manage_settings"), async (req, res) => {
     try {
       const rows = await storage.diagnoseOvercountedOrders();
       res.json(rows);
@@ -156,7 +157,7 @@ export function registerPickingRoutes(app: Express) {
     catch (error: any) { res.status(500).json({ error: error.message }); }
   });
 
-  app.get("/api/picking/queue", requireAuth, limitPageRead(async (req, res) => {
+  app.get("/api/picking/queue", requireAuth, requirePermission("picking", "view"), limitPageRead(async (req, res) => {
     try {
       // Disable caching - pick queue changes frequently
       res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -172,7 +173,7 @@ export function registerPickingRoutes(app: Express) {
     }
   }));
 
-  app.get("/api/picking/orders/:id", requireAuth, async (req, res) => {
+  app.get("/api/picking/orders/:id", requireAuth, requirePermission("picking", "view"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
       res.json(await req.app.locals.services.picking.getPickerOrder(id));
@@ -188,7 +189,7 @@ export function registerPickingRoutes(app: Express) {
   // of whether replen is currently needed. Pallet-pick items and items with
   // no assigned/resolvable source are simply absent from the map. This
   // endpoint must NEVER block picking: on any failure it degrades to {}.
-  app.get("/api/picking/replen-bins", requireAuth, async (req, res) => {
+  app.get("/api/picking/replen-bins", requireAuth, requirePermission("picking", "view"), async (req, res) => {
     const empty = { replenBins: {} as Record<string, { locationCode: string }> };
     try {
       const itemIds = String(req.query.itemIds ?? "")
@@ -205,7 +206,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/picking/orders/:id/claim", requireAuth, async (req, res) => {
+  app.post("/api/picking/orders/:id/claim", requireAuth, requirePermission("orders", "claim"), async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
       const id = parseInt(req.params.id);
@@ -238,7 +239,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.patch("/api/picking/items/:id", requireAuth, async (req, res) => {
+  app.patch("/api/picking/items/:id", requireAuth, requirePermission("picking", "perform"), async (req, res) => {
     try {
       const command = pickingCommandSchema.safeParse(req.body);
       if (!command.success) return res.status(400).json({ code: "PICK_COMMAND_INVALID", error: "Invalid picking command", details: command.error.flatten() });
@@ -260,11 +261,25 @@ export function registerPickingRoutes(app: Express) {
       const status = error?.isOperational && typeof error.statusCode === "number"
         ? error.statusCode
         : error?.name === "ValidationError" ? 400 : 500;
-      res.status(status).json({ error: error.message || "Failed to update item", code: error.code });
+      const reason = error?.context?.reason ?? error?.details?.reason ?? error?.reason ?? null;
+      const commandRejected = status === 409 && [
+        "pick_progress_conflict",
+        "pick_quantity_conflict",
+        "order_on_hold",
+        "order_item_on_hold",
+        "line_on_hold",
+        "pick_progress_delta_invalid",
+      ].includes(String(reason));
+      res.status(status).json({
+        error: error.message || "Failed to update item",
+        code: error.code,
+        ...(reason ? { reason } : {}),
+        ...(commandRejected ? { commandRejected: true } : {}),
+      });
     }
   });
 
-  app.post("/api/picking/items/:id/unpick", requireAuth, async (req, res) => {
+  app.post("/api/picking/items/:id/unpick", requireAuth, requirePermission("picking", "perform"), async (req, res) => {
     try {
       const command = unpickingCommandSchema.safeParse(req.body);
       if (!command.success) return res.status(400).json({ code: "UNPICK_COMMAND_INVALID", error: "Invalid unpick command", details: command.error.flatten() });
@@ -277,7 +292,11 @@ export function registerPickingRoutes(app: Express) {
       });
 
       if (!result.success) {
-        return res.status(409).json(result);
+        return res.status(409).json({
+          ...result,
+          reason: result.error,
+          commandRejected: true,
+        });
       }
 
       res.json(result);
@@ -286,11 +305,23 @@ export function registerPickingRoutes(app: Express) {
       const status = error?.isOperational && typeof error.statusCode === "number"
         ? error.statusCode
         : error?.name === "ValidationError" ? 400 : 500;
-      res.status(status).json({ error: error.message || "Failed to unpick item", code: error.code });
+      const reason = error?.context?.reason ?? error?.details?.reason ?? error?.reason ?? null;
+      const commandRejected = status === 409 && [
+        "unpick_progress_conflict",
+        "unpick_identity_changed",
+        "order_on_hold",
+        "order_not_unpickable",
+      ].includes(String(reason));
+      res.status(status).json({
+        error: error.message || "Failed to unpick item",
+        code: error.code,
+        ...(reason ? { reason } : {}),
+        ...(commandRejected ? { commandRejected: true } : {}),
+      });
     }
   });
 
-  app.post("/api/picking/items/:id/resolve-allocation", requireAuth, async (req, res) => {
+  app.post("/api/picking/items/:id/resolve-allocation", requireAuth, requirePermission("picking", "perform"), async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
       const locationCode = req.body.locationCode ?? req.body.binCode ?? req.body.scanCode;
@@ -319,7 +350,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/picking/items/:id/replen-source-empty", requireAuth, async (req, res) => {
+  app.post("/api/picking/items/:id/replen-source-empty", requireAuth, requirePermission("picking", "perform"), async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
       const result = await picking.reportReplenSourceEmpty(parseInt(req.params.id), {
@@ -339,7 +370,7 @@ export function registerPickingRoutes(app: Express) {
   app.post("/api/picking/case-break", requireAuth, async (_req, res) => pickerReplenAuthorityRemoved(res));
 
   // Consolidated picker bin count. Replen execution remains system-owned.
-  app.post("/api/picking/bin-count", requireAuth, async (req, res) => {
+  app.post("/api/picking/bin-count", requireAuth, requirePermission("picking", "perform"), async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
       const { sku, locationId, binCount, didReplen } = req.body;
@@ -366,7 +397,7 @@ export function registerPickingRoutes(app: Express) {
   app.post("/api/picking/replen/cancel", requireAuth, async (_req, res) => pickerReplenAuthorityRemoved(res));
   app.post("/api/picking/replen-confirm", requireAuth, async (_req, res) => pickerReplenAuthorityRemoved(res));
 
-  app.post("/api/picking/replen-guidance", requireAuth, async (req, res) => {
+  app.post("/api/picking/replen-guidance", requireAuth, requirePermission("picking", "view"), async (req, res) => {
     try {
       const guidance = await req.app.locals.services.picking.getReplenGuidance(req.body?.orderItemId);
       res.json(guidance);
@@ -376,7 +407,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/picking/orders/:id/ready-to-ship", requireAuth, async (req, res) => {
+  app.post("/api/picking/orders/:id/ready-to-ship", requireAuth, requirePermission("picking", "complete"), async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
       const order = await picking.markReadyToShip(
@@ -541,18 +572,55 @@ export function registerPickingRoutes(app: Express) {
         }
 
         // P2a (LINE-ITEM-HOLD-DESIGN.md): mark held + split the line into its own
-        // held shipment in one transaction, then re-push the main shipment WITHOUT
-        // the held line if it was already in ShipStation.
-        const { holdLineItemWithSplit } = await import("../wms/line-item-hold");
-        const split = await holdLineItemWithSplit(db, {
-          wmsOrderId: orderId,
-          orderItemId: itemId,
-          reason,
-          now: new Date(),
-        });
+        // held shipment in one transaction, then re-push or cancel the main shipment
+        // in ShipStation via durable retry rows committed atomically with the split.
+        const {
+          holdLineItemWithSplit,
+          LineItemHoldEligibilityError,
+          LineItemHoldNotFoundError,
+        } = await import("../wms/pick-corrections-and-holds.api");
+        let split;
+        try {
+          split = await holdLineItemWithSplit(db, {
+            wmsOrderId: orderId,
+            orderItemId: itemId,
+            reason,
+            now: new Date(),
+            afterSplitInTransaction: async (tx, splitResult) => {
+              if (!splitResult.mainShipmentId) return;
+              if (splitResult.providerSyncStatus === "queued_repush") {
+                await enqueueShipStationShipmentPushRetry(
+                  tx,
+                  splitResult.mainShipmentId,
+                  "LineItemHeldRepushMain",
+                );
+              } else if (splitResult.providerSyncStatus === "queued_cancel") {
+                await enqueueShipStationShipmentCancelRetry(
+                  tx,
+                  splitResult.mainShipmentId,
+                  "LineItemHeldCancelEmptyMain",
+                );
+              }
+            },
+          });
+        } catch (holdErr) {
+          if (holdErr instanceof LineItemHoldNotFoundError) {
+            return res.status(404).json({ error: "Line item not found on this order" });
+          }
+          if (holdErr instanceof LineItemHoldEligibilityError) {
+            return res.status(409).json({
+              error: "Line has already started picking or fulfillment and cannot be held",
+              status: holdErr.status,
+            });
+          }
+          throw holdErr;
+        }
         if (split.mainShipmentPushed && split.mainStillHasItems && split.mainShipmentId) {
           await enqueueShipStationShipmentPushRetry(db, split.mainShipmentId, "LineItemHeldRepushMain")
             .catch((e: any) => console.warn("[line-item-hold] main re-push enqueue failed:", e?.message));
+        } else if (split.providerSyncStatus === "queued_cancel" && split.mainShipmentId) {
+          await enqueueShipStationShipmentCancelRetry(db, split.mainShipmentId, "LineItemHeldCancelEmptyMain")
+            .catch((e: any) => console.warn("[line-item-hold] main cancel enqueue failed:", e?.message));
         }
 
         const order = await storage.getOrderById(orderId);
@@ -565,14 +633,22 @@ export function registerPickingRoutes(app: Express) {
             orderId,
             orderNumber: order?.orderNumber,
             reason,
-            notes: `SKU ${item.sku} -> held shipment ${split.heldShipmentId ?? "?"}`,
+            notes: `SKU ${item.sku} -> held shipment ${split.heldShipmentId ?? "?"} (sync=${split.providerSyncStatus})`,
             deviceType: (req.headers["x-device-type"] as string) || "desktop",
             sessionId: req.sessionID,
           })
           .catch((err) => console.warn("[PickingLog] Failed to log line_item_held:", err.message));
 
         broadcastOrdersUpdated();
-        res.json({ ok: true, heldShipmentId: split.heldShipmentId });
+        res.json({
+          ok: true,
+          heldShipmentId: split.heldShipmentId,
+          providerSyncStatus: split.providerSyncStatus,
+          providerStopPending:
+            split.providerSyncStatus === "queued_repush" ||
+            split.providerSyncStatus === "queued_cancel",
+          requiresReview: split.providerSyncStatus === "review_required_labeled",
+        });
       } catch (error: any) {
         console.error("Error holding line item:", error);
         res.status(500).json({ error: "Failed to hold line item" });
@@ -602,7 +678,7 @@ export function registerPickingRoutes(app: Express) {
         // push that shipment so the released line ships on its own. A line that
         // already shipped gets heldShipmentId = null: its held shipment is closed
         // (or sent to review) so ShipStation never receives a second order for it.
-        const { releaseLineItemFromHold } = await import("../wms/line-item-hold");
+        const { releaseLineItemFromHold } = await import("../wms/pick-corrections-and-holds.api");
         const released = await releaseLineItemFromHold(db, {
           wmsOrderId: orderId,
           orderItemId: itemId,
@@ -639,9 +715,9 @@ export function registerPickingRoutes(app: Express) {
 
   // Set order priority (admin/lead only)
   // Accepts a numeric priority value: 9999 = Bump to Top, -1 = Hold, 100 = Normal (SLA reset)
-  app.post("/api/orders/:id/priority", requireAuth, async (req, res) => {
+  app.post("/api/orders/:id/priority", requireAuth, requirePermission("orders", "priority"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
 
@@ -688,7 +764,7 @@ export function registerPickingRoutes(app: Express) {
 
   // ===== ORDER COMBINING =====
 
-  app.get("/api/settings/order-combining", requireAuth, async (req, res) => {
+  app.get("/api/settings/order-combining", requireAuth, requireAnyPermission(["picking", "view"], ["picking", "manage_settings"], ["orders", "view"]), async (req, res) => {
     try {
       // Optional ?warehouseId=X — if omitted, returns the DEFAULT template value
       const raw = req.query.warehouseId;
@@ -704,9 +780,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/settings/order-combining", requireAuth, async (req, res) => {
+  app.post("/api/settings/order-combining", requireAuth, requirePermission("picking", "manage_settings"), async (req, res) => {
     try {
-      if (!req.session.user || req.session.user.role !== "admin") {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin access required" });
       }
       // Body: { warehouseId: number | null, enabled: boolean }
@@ -724,7 +800,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/orders/combinable", requireAuth, async (req, res) => {
+  app.get("/api/orders/combinable", requireAuth, requireAnyPermission(["picking", "view"], ["picking", "manage_settings"], ["orders", "view"]), async (req, res) => {
     try {
       // Optional ?warehouseId=X — scopes the search to one warehouse
       const raw = req.query.warehouseId;
@@ -740,9 +816,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/orders/combine", requireAuth, async (req, res) => {
+  app.post("/api/orders/combine", requireAuth, requirePermission("picking", "manage_settings"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       res.json(await orderCombining.combineOrders(req.body.orderIds, req.session.user.id));
@@ -755,9 +831,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/orders/combine-all", requireAuth, async (req, res) => {
+  app.post("/api/orders/combine-all", requireAuth, requirePermission("picking", "manage_settings"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       // Optional body.warehouseId — scopes the sweep to a single warehouse
@@ -773,9 +849,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.post("/api/orders/:id/uncombine", requireAuth, async (req, res) => {
+  app.post("/api/orders/:id/uncombine", requireAuth, requirePermission("picking", "manage_settings"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       const result = await orderCombining.uncombineOrder(parseInt(req.params.id));
@@ -789,7 +865,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/orders/combined-groups", requireAuth, async (req, res) => {
+  app.get("/api/orders/combined-groups", requireAuth, requireAnyPermission(["picking", "view"], ["picking", "manage_settings"], ["orders", "view"]), async (req, res) => {
     try {
       res.json(await orderCombining.getActiveGroups());
     } catch (error: any) {
@@ -801,9 +877,9 @@ export function registerPickingRoutes(app: Express) {
   // ===== EXCEPTION HANDLING =====
   
   // Get all orders in exception status (admin/lead only)
-  app.get("/api/orders/exceptions", requireAuth, async (req, res) => {
+  app.get("/api/orders/exceptions", requireAuth, requirePermission("orders", "resolve_exception"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       
@@ -837,9 +913,9 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Resolve an exception (admin/lead only)
-  app.post("/api/orders/:id/resolve-exception", requireAuth, async (req, res) => {
+  app.post("/api/orders/:id/resolve-exception", requireAuth, requirePermission("orders", "resolve_exception"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       const { picking } = req.app.locals.services;
@@ -889,6 +965,12 @@ export function registerPickingRoutes(app: Express) {
       res.json({ ...order, closedBlockers });
     } catch (error: any) {
       console.error("Error resolving exception:", error);
+      if (error?.isOperational && typeof error.statusCode === "number") {
+        return res.status(error.statusCode).json({
+          error: error.message,
+          reason: error.context?.reason,
+        });
+      }
       res.status(500).json({ error: "Failed to resolve exception" });
     }
   });
@@ -896,9 +978,9 @@ export function registerPickingRoutes(app: Express) {
   // ===== PICKING LOGS API =====
 
   // Get picking logs with filters (admin/lead only)
-  app.get("/api/picking/logs", requireAuth, async (req, res) => {
+  app.get("/api/picking/logs", requireAuth, requirePermission("picking", "view_logs"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       
@@ -947,9 +1029,9 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Get order timeline (logs for a specific order)
-  app.get("/api/picking/orders/:id/timeline", requireAuth, async (req, res) => {
+  app.get("/api/picking/orders/:id/timeline", requireAuth, requirePermission("picking", "view_logs"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       
@@ -988,7 +1070,7 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Get action types for filtering
-  app.get("/api/picking/logs/action-types", requireAuth, async (req, res) => {
+  app.get("/api/picking/logs/action-types", requireAuth, requirePermission("picking", "view_logs"), async (req, res) => {
     res.json([
       { value: "order_claimed", label: "Order Claimed" },
       { value: "order_released", label: "Order Released" },
@@ -1003,10 +1085,10 @@ export function registerPickingRoutes(app: Express) {
     ]);
   });
 
-  app.post("/api/picking/logs/backfill", requireAuth, async (req, res) => {
+  app.post("/api/picking/logs/backfill", requireAuth, requirePermission("picking", "manage_settings"), async (req, res) => {
     try {
       const user = req.session?.user;
-      if (!user || user.role !== "admin") {
+      if (!user) {
         return res.status(403).json({ error: "Admin access required" });
       }
 
@@ -1123,10 +1205,10 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/picking/metrics", requireAuth, async (req, res) => {
+  app.get("/api/picking/metrics", requireAuth, requirePermission("picking", "view_metrics"), async (req, res) => {
     try {
       const user = req.session?.user;
-      if (!user || !["admin", "lead"].includes(user.role)) {
+      if (!user) {
         return res.status(403).json({ error: "Access denied" });
       }
 
@@ -1196,9 +1278,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/orders/history", requireAuth, limitPageRead(async (req, res) => {
+  app.get("/api/orders/history", requirePermission("orders", "view"), limitPageRead(async (req, res) => {
     try {
-      if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       
@@ -1232,9 +1314,9 @@ export function registerPickingRoutes(app: Express) {
     }
   }));
   
-  app.get("/api/orders/:id/detail", requireAuth, async (req, res) => {
+  app.get("/api/orders/:id/detail", requirePermission("orders", "view"), async (req, res) => {
     try {
-      if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       
@@ -1255,9 +1337,9 @@ export function registerPickingRoutes(app: Express) {
     }
   });
   
-  app.get("/api/orders/history/export", requireAuth, async (req, res) => {
+  app.get("/api/orders/history/export", requirePermission("orders", "view"), async (req, res) => {
     try {
-      if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       

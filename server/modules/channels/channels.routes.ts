@@ -32,10 +32,10 @@ import { ChannelIdentityError } from "./channel-identity.domain";
 import { runShopifyWeightBackfill, createShopifyWeightBackfillDeps } from "./shopify-weight-backfill.service";
 import { rowToListingDto } from "./channel-listings.transform";
 import { toPublicChannelConnection } from "./channel-connection.transform";
-import { createOmsService } from "../oms/oms.service";
-import { enqueueShipStationHoldSyncRetry } from "../oms/webhook-retry.worker";
-import { reserveAndPushAfterHoldRelease } from "../orders/release-hold-push";
-import { WmsOrderInvariantError } from "../wms/insert-order";
+import { createOmsService } from "../oms/channel-order-intake.api";
+import { enqueueShipStationHoldSyncRetry } from "../oms/webhook-retry.api";
+import { reserveAndPushAfterHoldRelease } from "../orders/hold-release-push.api";
+import { WmsOrderInvariantError } from "../wms/order-intake-and-items.api";
 import { randomBytes } from "crypto";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
@@ -46,10 +46,20 @@ import {
   parsePositiveInteger,
   parseWmsOrderBucket,
 } from "./wms-order-listing";
-import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
-import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
-import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+import {
+  createInventoryLegacyAdminControlService,
+  INVENTORY_LEGACY_ADMIN_CONTROLS,
+  sendInventoryLegacyAdminControlError,
+} from "../inventory-planning/legacy-admin-control.api";
 import { publicationSelectionBusyIssue } from "../inventory-planning/publication-selection-work";
+import {
+  deleteChannelAllocationRuleInTx,
+  deleteChannelWarehouseAssignmentInTx,
+  insertChannelAllocationRuleInTx,
+  insertChannelWarehouseAssignmentInTx,
+  updateChannelAllocationRuleInTx,
+  updateChannelWarehouseAssignmentInTx,
+} from "./infrastructure/channel-legacy-admin.repository";
 
 type ChannelRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -585,6 +595,12 @@ export function registerChannelRoutes(app: Express) {
       const order = await storage.getOrderById(id);
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
+      }
+      if (order.warehouseStatus === "shipped" || order.warehouseStatus === "cancelled") {
+        return res.status(409).json({
+          error: `Cannot modify order in terminal '${order.warehouseStatus}' status`,
+          reason: "order_terminal_status",
+        });
       }
 
       const { priority, notes, status, onHold } = req.body;
@@ -2371,7 +2387,7 @@ export function registerChannelRoutes(app: Express) {
 
       const [created] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
-        (transaction) => transaction.insert(channelWarehouseAssignments).values(parsed.data).returning(),
+        (transaction) => insertChannelWarehouseAssignmentInTx(transaction, parsed.data),
       );
       res.status(201).json(created);
     } catch (error: any) {
@@ -2403,11 +2419,7 @@ export function registerChannelRoutes(app: Express) {
       const updates: any = { ...parsed.data, updatedAt: new Date() };
       const [updated] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
-        (transaction) => transaction
-          .update(channelWarehouseAssignments)
-          .set(updates)
-          .where(eq(channelWarehouseAssignments.id, id))
-          .returning(),
+        (transaction) => updateChannelWarehouseAssignmentInTx(transaction, id, updates),
       );
 
       if (!updated) return res.status(404).json({ error: "Assignment not found" });
@@ -2427,10 +2439,7 @@ export function registerChannelRoutes(app: Express) {
 
       const [deleted] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
-        (transaction) => transaction
-          .delete(channelWarehouseAssignments)
-          .where(eq(channelWarehouseAssignments.id, id))
-          .returning(),
+        (transaction) => deleteChannelWarehouseAssignmentInTx(transaction, id),
       );
 
       if (!deleted) return res.status(404).json({ error: "Assignment not found" });
@@ -2590,7 +2599,7 @@ export function registerChannelRoutes(app: Express) {
 
       const [created] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
-        (transaction) => transaction.insert(channelAllocationRules).values(data).returning(),
+        (transaction) => insertChannelAllocationRuleInTx(transaction, data),
       );
 
       // Trigger immediate sync for the affected product
@@ -2645,11 +2654,7 @@ export function registerChannelRoutes(app: Express) {
 
       const [updated] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
-        (transaction) => transaction
-          .update(channelAllocationRules)
-          .set(updates)
-          .where(eq(channelAllocationRules.id, id))
-          .returning(),
+        (transaction) => updateChannelAllocationRuleInTx(transaction, id, updates),
       );
 
       if (!updated) return res.status(404).json({ error: "Rule not found" });
@@ -2679,10 +2684,7 @@ export function registerChannelRoutes(app: Express) {
 
       const [deleted] = await inventoryLegacyAdminControl.executeLegacyWrite(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
-        (transaction) => transaction
-          .delete(channelAllocationRules)
-          .where(eq(channelAllocationRules.id, id))
-          .returning(),
+        (transaction) => deleteChannelAllocationRuleInTx(transaction, id),
       );
 
       if (!deleted) return res.status(404).json({ error: "Rule not found" });

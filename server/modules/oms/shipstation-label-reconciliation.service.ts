@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ShipStationLabelCommercialFulfillmentShipment } from "../shipping/package-allocation-label-commercial-fulfillment.service";
+import type { ShipStationLabelCommercialFulfillmentShipment } from "../shipping/package-allocation-authority.api";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 const PROVIDER_SETTLE_MS = 2 * 60 * 1_000;
@@ -18,6 +18,7 @@ export interface LabelRecoveryCompletion {
 /** Label observation is not an order-import DTO. Opaque contents are validated
  * by the existing shipping owner, not by requirements for SKU, cost or address. */
 export interface ShipStationLabelSnapshot extends ShipStationLabelCommercialFulfillmentShipment {
+  dimensions?: unknown;
   trackingNumber: string;
   carrierCode?: string | null;
   serviceCode?: string | null;

@@ -33,6 +33,14 @@ export interface InventoryLevelProjection {
   atpUnits: number;
   /** @deprecated Compatibility alias for atpUnits. */
   available: number;
+  /**
+   * True when this product's ATP or conversion read failed. atpUnits is then
+   * 0 (never sell what could not be computed) and the row must be shown as
+   * unavailable rather than as a real zero. Other products are unaffected.
+   */
+  atpUnavailable: boolean;
+  /** Structured code of the failure that made ATP unavailable, if any. */
+  atpErrorCode: string | null;
   locationCount: number;
   pickableQty: number;
   binCount: number;
@@ -57,11 +65,23 @@ function nullablePositiveInteger(value: unknown): number | null {
   return parsed > 0 ? parsed : null;
 }
 
+export interface InventoryLevelLogger {
+  error(event: Record<string, unknown>): void;
+}
+
+const defaultLogger: InventoryLevelLogger = { error: event => console.error(JSON.stringify(event)) };
+
+function errorCode(error: unknown): string {
+  const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code.length > 0 ? code : "INVENTORY_LEVEL_PRODUCT_READ_FAILED";
+}
+
 export async function projectInventoryLevels(input: {
   rows: Array<Record<string, unknown>>;
   atp: InventoryLevelAtpReader;
   conversions: InventoryConversionReader;
   warehouseId?: number;
+  logger?: InventoryLevelLogger;
 }): Promise<InventoryLevelProjection[]> {
   const levels = input.rows.map((row) => {
     const variantQty = integer(row.total_variant_qty);
@@ -92,6 +112,8 @@ export async function projectInventoryLevels(input: {
       unreservedQty: variantQty - reservedQty,
       atpUnits: 0,
       available: 0,
+      atpUnavailable: false,
+      atpErrorCode: null as string | null,
       locationCount: integer(row.location_count),
       pickableQty: integer(row.pickable_variant_qty),
       binCount,
@@ -109,18 +131,38 @@ export async function projectInventoryLevels(input: {
   const productIds = [...new Set(levels
     .filter((level) => level.productId != null)
     .map((level) => level.productId as number))];
-  const atpRows = await Promise.all(productIds.map((productId) => (
+  // Each product is read independently. One product with an inconsistent
+  // conversion rule (e.g. a package size changed after its rule was approved)
+  // must not hide every other product's stock: its rows are marked
+  // unavailable, logged, and shown with ATP 0 (fail closed for that product).
+  const failedProducts = new Map<number, string>();
+  const readOrRecord = async <T>(productId: number, step: "atp" | "conversions", read: () => Promise<readonly T[]>): Promise<readonly T[]> => {
+    try {
+      return await read();
+    } catch (error) {
+      const code = errorCode(error);
+      if (!failedProducts.has(productId)) failedProducts.set(productId, code);
+      (input.logger ?? defaultLogger).error({
+        level: "error", action: "inventory.levels.product_read_failed", outcome: "failed", error_code: code,
+        product_id: productId, step, warehouse_id: input.warehouseId ?? null,
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return [];
+    }
+  };
+  const atpRows = await Promise.all(productIds.map((productId) => readOrRecord(productId, "atp", () => (
     input.warehouseId == null
       ? input.atp.getAtpPerVariant(productId)
       : input.atp.getAtpPerVariantByWarehouse(productId, input.warehouseId)
-  )));
+  ))));
   const atpByVariant = new Map<number, number>();
   for (const row of atpRows.flat()) {
     atpByVariant.set(row.productVariantId, row.atpUnits);
   }
-  // Missing/retired models return no directions. Read failure fails this view;
-  // never reconstruct a path from parent links, units or another SKU's stock.
-  const conversionRows = await Promise.all(productIds.map(productId => input.conversions.getAllowedConversions(productId)));
+  // Missing/retired models return no directions. A read failure marks only
+  // that product; never reconstruct a path from parent links, units or another SKU's stock.
+  const conversionRows = await Promise.all(productIds.map(productId =>
+    readOrRecord(productId, "conversions", () => input.conversions.getAllowedConversions(productId))));
   const conversionsByTarget = new Map<number, AllowedInventoryConversion[]>();
   for (const conversion of conversionRows.flat()) {
     const entries = conversionsByTarget.get(conversion.destinationVariantId) ?? [];
@@ -130,9 +172,12 @@ export async function projectInventoryLevels(input: {
 
   const skuCounts = new Map<string, number>();
   for (const level of levels) {
-    level.atpUnits = atpByVariant.get(level.variantId) ?? 0;
+    const failure = level.productId == null ? undefined : failedProducts.get(level.productId);
+    level.atpUnavailable = failure !== undefined;
+    level.atpErrorCode = failure ?? null;
+    level.atpUnits = failure !== undefined ? 0 : atpByVariant.get(level.variantId) ?? 0;
     level.available = level.atpUnits;
-    level.allowedConversions = conversionsByTarget.get(level.variantId) ?? [];
+    level.allowedConversions = failure !== undefined ? [] : conversionsByTarget.get(level.variantId) ?? [];
     if (level.sku) {
       const normalizedSku = level.sku.toUpperCase();
       skuCounts.set(normalizedSku, (skuCounts.get(normalizedSku) ?? 0) + 1);

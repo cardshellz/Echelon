@@ -6,17 +6,31 @@ import type {
   DropshipSelectionAtpRepository,
   DropshipVendorCatalogCandidate,
   DropshipVendorProfile,
+  DropshipVendorSelectionCountRecord,
   DropshipVendorSelectionRuleRecord,
   DropshipVendorVariantOverrideRecord,
-  NormalizedDropshipVendorSelectionRule,
-  ReplaceDropshipVendorSelectionRulesRepositoryInput,
-  ReplaceDropshipVendorSelectionRulesRepositoryResult,
 } from "../application/dropship-selection-atp-service";
 import type {
+  DropshipVendorCatalogCandidateFilter,
   ListDropshipVendorSelectionRulesInput,
-  PreviewDropshipVendorCatalogInput,
 } from "../application/dropship-selection-dtos";
+import { countSelectedVariants } from "../application/dropship-selected-catalog";
 import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";
+import { CATALOG_READ_WORDS } from "../domain/catalog-read-words";
+import { DROPSHIP_CATALOG_READ_ERROR_CODES } from "../../../../shared/dropship/vendor-catalog-reads";
+import { listLiveVariantIds, readHeadSelectionRevisionId } from "./dropship-listing-push-run.repository";
+import { selectedCatalogReaderForTransaction } from "./dropship-selected-catalog.reader";
+
+/**
+ * PR B's freeze trigger on the rules table raises exactly this message with
+ * SQLSTATE P0001 (the picks migration, PLAN-B v4.1 §6 step 8). PR A's rules
+ * save answers it with 410 "this page was updated, reload" (§4.9 item 2, D39),
+ * so an A dyno still serving during B's release refuses instead of a 500. B
+ * deleted the rules save (V10): B's own PUT answers 410 before any database
+ * call; this constant stays as the freeze's contract, pinned by the migration's
+ * text test.
+ */
+export const SELECTION_RULES_RETIRED_DB_MESSAGE = "DROPSHIP_SELECTION_RULES_RETIRED";
 
 interface VendorRow {
   id: number;
@@ -61,6 +75,8 @@ interface VendorCatalogCandidateRow {
   product_sku: string | null;
   product_name: string;
   product_category: string | null;
+  product_category_id: number | null;
+  product_category_name: string | null;
   product_is_active: boolean;
   product_variant_id: number;
   variant_sku: string | null;
@@ -70,6 +86,7 @@ interface VendorCatalogCandidateRow {
   variant_is_active: boolean;
   product_line_ids: number[] | null;
   product_line_names: string[] | null;
+  picked: boolean;
 }
 
 interface VariantOverrideRow {
@@ -127,6 +144,7 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
     }
   }
 
+  /** The frozen rules, for the rules GET only (one release; PLAN-B v4.1 §8.4). Nothing writes them any more. */
   async listSelectionRules(
     input: ListDropshipVendorSelectionRulesInput,
   ): Promise<DropshipVendorSelectionRuleRecord[]> {
@@ -138,102 +156,44 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
     }
   }
 
-  async replaceSelectionRules(
-    input: ReplaceDropshipVendorSelectionRulesRepositoryInput,
-  ): Promise<ReplaceDropshipVendorSelectionRulesRepositoryResult> {
+  async readSelectionCounts(input: {
+    vendorId: number;
+    storeConnectionId: number | null;
+    now: Date;
+  }): Promise<DropshipVendorSelectionCountRecord> {
     const client = await this.dbPool.connect();
     try {
-      await client.query("BEGIN");
-      await client.query("SELECT pg_advisory_xact_lock(hashtext('dropship_vendor_selection_rules'), $1::integer)", [
-        input.vendorId,
-      ]);
-
-      const existingRevision = await client.query<{
-        id: number;
-        request_hash: string;
-      }>(
-        `SELECT id, request_hash
-         FROM dropship.dropship_vendor_selection_rule_set_revisions
-         WHERE vendor_id = $1 AND idempotency_key = $2
-         FOR UPDATE`,
-        [input.vendorId, input.idempotencyKey],
-      );
-
-      if (existingRevision.rows[0]) {
-        if (existingRevision.rows[0].request_hash !== input.requestHash) {
-          throw new DropshipError(
-            "DROPSHIP_IDEMPOTENCY_CONFLICT",
-            "Dropship vendor selection idempotency key was reused with a different request.",
-            { vendorId: input.vendorId },
-          );
+      // One snapshot for the revision and the counts, so the page's expected
+      // revision always belongs to the count it shows. Read only: nothing here writes.
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const selectionRevisionId = await readHeadSelectionRevisionId(client, input.vendorId);
+      let liveIds: ReadonlySet<number> = new Set();
+      if (input.storeConnectionId !== null) {
+        const store = await client.query<{ id: number }>(
+          `SELECT id FROM dropship.dropship_store_connections WHERE id = $1 AND vendor_id = $2`,
+          [input.storeConnectionId, input.vendorId],
+        );
+        if (!store.rows[0]) {
+          throw new DropshipError(DROPSHIP_CATALOG_READ_ERROR_CODES.storeRequired, CATALOG_READ_WORDS.storeRequired, {
+            storeConnectionId: input.storeConnectionId,
+            retryable: false,
+          });
         }
-
-        const rules = await listSelectionRulesWithClient(client, {
+        liveIds = await listLiveVariantIds(client, {
           vendorId: input.vendorId,
-          includeInactive: false,
+          storeConnectionId: input.storeConnectionId,
         });
-        await client.query("COMMIT");
-        return {
-          revisionId: existingRevision.rows[0].id,
-          idempotentReplay: true,
-          rules,
-        };
       }
-
-      const beforeRules = await listSelectionRulesWithClient(client, {
-        vendorId: input.vendorId,
-        includeInactive: false,
-      });
-      const revision = await client.query<{ id: number }>(
-        `INSERT INTO dropship.dropship_vendor_selection_rule_set_revisions
-          (vendor_id, idempotency_key, request_hash, actor_type, actor_id, rule_count, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id`,
-        [
-          input.vendorId,
-          input.idempotencyKey,
-          input.requestHash,
-          input.actor.actorType,
-          input.actor.actorId ?? null,
-          input.rules.length,
-          input.now,
-        ],
+      const counts = await countSelectedVariants(
+        selectedCatalogReaderForTransaction(client, input.vendorId),
+        input.now,
+        liveIds,
       );
-      const revisionId = revision.rows[0]?.id;
-      if (!revisionId) {
-        throw new Error("Dropship vendor selection revision insert did not return an id.");
-      }
-
-      await client.query(
-        `UPDATE dropship.dropship_vendor_selection_rules
-         SET is_active = false, updated_at = $2
-         WHERE vendor_id = $1 AND is_active = true`,
-        [input.vendorId, input.now],
-      );
-
-      for (const rule of input.rules) {
-        await insertSelectionRule(client, input.vendorId, revisionId, rule, input.now);
-      }
-
-      const afterRules = await listSelectionRulesWithClient(client, {
-        vendorId: input.vendorId,
-        includeInactive: false,
-      });
-      await recordSelectionAuditEvent(client, {
-        vendorId: input.vendorId,
-        revisionId,
-        actorType: input.actor.actorType,
-        actorId: input.actor.actorId,
-        beforeRules,
-        afterRules,
-        now: input.now,
-      });
       await client.query("COMMIT");
-
       return {
-        revisionId,
-        idempotentReplay: false,
-        rules: afterRules,
+        selectionRevisionId,
+        selectedTotal: counts.selected,
+        storeLive: input.storeConnectionId === null ? null : counts.selectedAmong,
       };
     } catch (error) {
       await rollbackQuietly(client);
@@ -244,11 +204,12 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
   }
 
   async listVendorCatalogCandidates(
-    input: PreviewDropshipVendorCatalogInput,
+    input: DropshipVendorCatalogCandidateFilter,
   ): Promise<DropshipVendorCatalogCandidate[]> {
     const client = await this.dbPool.connect();
     try {
-      const params: unknown[] = [];
+      // $1 is the vendor whose picks decide `picked` (PLAN-B v4.1 §9 row 1); the filters follow it.
+      const params: unknown[] = [input.vendorId];
       const where = [
         "p.is_active = true",
         "pv.is_active = true",
@@ -270,6 +231,11 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
       if (input.category) {
         params.push(input.category);
         where.push(`LOWER(p.category) = LOWER($${params.length})`);
+      }
+
+      if (input.categoryId) {
+        params.push(input.categoryId);
+        where.push(`p.category_id = $${params.length}`);
       }
 
       const productLineIds = input.productLineIds?.length
@@ -298,6 +264,8 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
            p.sku AS product_sku,
            p.name AS product_name,
            p.category AS product_category,
+           p.category_id AS product_category_id,
+           pc.name AS product_category_name,
            p.is_active AS product_is_active,
            pv.id AS product_variant_id,
            pv.sku AS variant_sku,
@@ -306,9 +274,17 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
            pv.uom_type,
            pv.is_active AS variant_is_active,
            COALESCE(line_data.product_line_ids, ARRAY[]::int[]) AS product_line_ids,
-           COALESCE(line_data.product_line_names, ARRAY[]::text[]) AS product_line_names
+           COALESCE(line_data.product_line_names, ARRAY[]::text[]) AS product_line_names,
+           -- One primary-key probe per size: whether this vendor picked it (one-time picks; no rules read).
+           EXISTS (
+             SELECT 1
+             FROM dropship.dropship_vendor_selected_variants s
+             WHERE s.vendor_id = $1
+               AND s.product_variant_id = pv.id
+           ) AS picked
          FROM catalog.product_variants pv
          INNER JOIN catalog.products p ON p.id = pv.product_id
+         LEFT JOIN catalog.product_categories pc ON pc.id = p.category_id
          LEFT JOIN LATERAL (
            SELECT
              ARRAY_AGG(line_rows.product_line_id ORDER BY line_rows.product_line_name, line_rows.product_line_id) AS product_line_ids,
@@ -321,7 +297,8 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
            ) line_rows
          ) line_data ON true
          WHERE ${where.join(" AND ")}
-         ORDER BY p.name ASC, pv.position ASC, pv.name ASC`,
+         -- Stable: two products or sizes with one name keep their order across pages (CRIT C12).
+         ORDER BY p.name ASC, pv.position ASC, pv.name ASC, p.id ASC, pv.id ASC`,
         params,
       );
 
@@ -373,68 +350,6 @@ async function listSelectionRulesWithClient(
   return result.rows.map(mapSelectionRuleRow);
 }
 
-async function insertSelectionRule(
-  client: PoolClient,
-  vendorId: number,
-  revisionId: number,
-  rule: NormalizedDropshipVendorSelectionRule,
-  now: Date,
-): Promise<void> {
-  await client.query(
-    `INSERT INTO dropship.dropship_vendor_selection_rules
-      (revision_id, vendor_id, scope_type, action, product_line_id, product_id,
-       product_variant_id, category, auto_connect_new_skus, auto_list_new_skus,
-       priority, is_active, metadata, created_at, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true, $12::jsonb, $13, $13)`,
-    [
-      revisionId,
-      vendorId,
-      rule.scopeType,
-      rule.action,
-      rule.productLineId,
-      rule.productId,
-      rule.productVariantId,
-      rule.category,
-      rule.autoConnectNewSkus,
-      rule.autoListNewSkus,
-      rule.priority,
-      JSON.stringify(rule.metadata),
-      now,
-    ],
-  );
-}
-
-async function recordSelectionAuditEvent(
-  client: PoolClient,
-  input: {
-    vendorId: number;
-    revisionId: number;
-    actorType: "vendor" | "admin" | "system";
-    actorId?: string;
-    beforeRules: DropshipVendorSelectionRuleRecord[];
-    afterRules: DropshipVendorSelectionRuleRecord[];
-    now: Date;
-  },
-): Promise<void> {
-  await client.query(
-    `INSERT INTO dropship.dropship_audit_events
-      (vendor_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
-     VALUES ($1, 'dropship_vendor_selection_ruleset', $2, 'vendor_selection_rules_replaced',
-             $3, $4, 'info', $5::jsonb, $6)`,
-    [
-      input.vendorId,
-      String(input.revisionId),
-      input.actorType,
-      input.actorId ?? null,
-      JSON.stringify({
-        beforeRules: input.beforeRules.map(serializeSelectionRuleForAudit),
-        afterRules: input.afterRules.map(serializeSelectionRuleForAudit),
-      }),
-      input.now,
-    ],
-  );
-}
-
 function mapCatalogExposureRuleRow(row: CatalogRuleRow): DropshipCatalogExposureRule {
   return {
     id: row.id,
@@ -480,11 +395,14 @@ function mapVendorCatalogCandidateRow(row: VendorCatalogCandidateRow): DropshipV
     variantName: row.variant_name,
     unitsPerVariant: Math.max(1, Number(row.units_per_variant)),
     category: row.product_category,
+    categoryId: row.product_category_id,
+    categoryName: row.product_category_name,
     productLineIds: row.product_line_ids ?? [],
     productLineNames: row.product_line_names ?? [],
     productIsActive: row.product_is_active,
     variantIsActive: row.variant_is_active,
     variantUomType: parseCatalogVariantUomType(row.uom_type, { productVariantId: row.product_variant_id }),
+    picked: row.picked === true,
   };
 }
 
@@ -498,24 +416,6 @@ function mapVariantOverrideRow(row: VariantOverrideRow): DropshipVendorVariantOv
     notes: row.notes,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-  };
-}
-
-function serializeSelectionRuleForAudit(rule: DropshipVendorSelectionRuleRecord): Record<string, unknown> {
-  return {
-    id: rule.id,
-    revisionId: rule.revisionId,
-    vendorId: rule.vendorId,
-    scopeType: rule.scopeType,
-    action: rule.action,
-    productLineId: rule.productLineId,
-    productId: rule.productId,
-    productVariantId: rule.productVariantId,
-    category: rule.category,
-    autoConnectNewSkus: rule.autoConnectNewSkus,
-    autoListNewSkus: rule.autoListNewSkus,
-    priority: rule.priority,
-    metadata: rule.metadata,
   };
 }
 

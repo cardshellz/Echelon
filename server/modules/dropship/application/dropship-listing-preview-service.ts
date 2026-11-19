@@ -26,7 +26,12 @@ import {
   type DropshipCatalogVariantCandidate,
 } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
+import { LISTING_PUSH_RUN_CODES, isReservedListingPushJobKey } from "../domain/listing-push-run";
+import { LISTING_PUSH_RUN_WORDS } from "../domain/listing-push-run-words";
 import { evaluateListingPriceAgainstCost } from "../domain/listing-price-cost";
+import { hasMarketplaceListing } from "../domain/listing-live-status";
+import { isLivePolicyIncompatibilityTolerated } from "../domain/marketplace-sync-decision";
+import { publishableQuantity } from "../domain/marketplace-sync-sweep";
 import { listingPhotoLeftOutReason } from "../domain/listing-photo-reasons";
 import {
   listingTierForVariantUomType,
@@ -36,7 +41,6 @@ import {
 import {
   evaluateDropshipVendorCatalogSelection,
   type DropshipVendorCatalogSelectionDecision,
-  type DropshipVendorSelectionRule,
   type DropshipVendorVariantOverride,
 } from "../domain/vendor-selection";
 import type {
@@ -133,6 +137,13 @@ export interface DropshipExistingVendorListing {
   vendorRetailPriceCents: number | null;
   quantityCap: number | null;
   externalListingId: string | null;
+  /**
+   * eBay sync-back (owner rule 1): the vendor's limit on this listing; a push
+   * publishes min(ATP, limit). Absent or null: no limit.
+   */
+  vendorQuantityLimit?: number | null;
+  /** The shipping policy last seen live on this listing on eBay (the live-policy rule, SB10); absent or null when unknown. */
+  observedFulfillmentPolicyId?: string | null;
 }
 
 export interface DropshipPricingPolicyRecord {
@@ -247,6 +258,8 @@ export interface ManagedListingIntentScope {
 
 export interface CreateDropshipListingPushJobRepositoryInput {
   managedIntentScope?: ManagedListingIntentScope;
+  /** The publish run chunk this job carries out (step 1 plan S2-5, §4.3); only the push sweep passes it. */
+  run?: { runId: number; chunkIndex: number };
   vendorId: number;
   storeConnectionId: number;
   platform: DropshipSourcePlatform;
@@ -340,7 +353,8 @@ export interface DropshipListingPreviewRepository {
   }): Promise<DropshipListingStoreContext | null>;
   getStoreListingConfig(storeConnectionId: number): Promise<DropshipStoreListingConfig | null>;
   listCatalogExposureRules(): Promise<DropshipCatalogExposureRule[]>;
-  listSelectionRules(vendorId: number): Promise<DropshipVendorSelectionRule[]>;
+  /** Which of these sizes the vendor picked (PLAN-B v4.1 §9 row 2); bounded by the ids, never the whole selection. */
+  listPickedVariantIds(vendorId: number, productVariantIds: readonly number[]): Promise<Set<number>>;
   listCatalogCandidates(productVariantIds: readonly number[]): Promise<DropshipListingCatalogCandidate[]>;
   listVariantOverrides(input: {
     vendorId: number;
@@ -410,17 +424,17 @@ export class DropshipListingPreviewService {
       throw new DropshipError("DROPSHIP_LISTING_IMAGE_NOT_FOUND", "Listing image is unavailable.");
     }
     await this.loadStoreContextForAction(vendorId, parsed.storeConnectionId, "preview");
-    const [candidates, adminRules, selectionRules, overrides] = await Promise.all([
+    const [candidates, adminRules, pickedIds, overrides] = await Promise.all([
       this.deps.repository.listCatalogCandidates([parsed.productVariantId]),
       this.deps.repository.listCatalogExposureRules(),
-      this.deps.repository.listSelectionRules(vendorId),
+      this.deps.repository.listPickedVariantIds(vendorId, [parsed.productVariantId]),
       this.deps.repository.listVariantOverrides({ vendorId, productVariantIds: [parsed.productVariantId] }),
     ]);
     const candidate = candidates.find((row) => row.productVariantId === parsed.productVariantId);
     if (!candidate) throw new DropshipError("DROPSHIP_LISTING_IMAGE_NOT_FOUND", "Listing image is unavailable.");
     const exposure = evaluateDropshipCatalogExposure(candidate, adminRules, this.deps.clock.now());
     const selection = evaluateDropshipVendorCatalogSelection({
-      candidate, adminExposureDecision: exposure, rules: selectionRules, rawAtpUnits: 0,
+      candidate, adminExposureDecision: exposure, picked: pickedIds.has(candidate.productVariantId), rawAtpUnits: 0,
       override: overrides.find((row) => row.productVariantId === parsed.productVariantId) ?? null,
     });
     if (!exposure.exposed || !selection.selected) {
@@ -469,7 +483,7 @@ export class DropshipListingPreviewService {
 
     const [
       adminRules,
-      selectionRules,
+      pickedIds,
       candidates,
       overrides,
       existingListings,
@@ -480,7 +494,7 @@ export class DropshipListingPreviewService {
       savedListingPrices,
     ] = await Promise.all([
       this.deps.repository.listCatalogExposureRules(),
-      this.deps.repository.listSelectionRules(parsed.vendorId),
+      this.deps.repository.listPickedVariantIds(parsed.vendorId, uniqueVariantIds),
       this.deps.repository.listCatalogCandidates(uniqueVariantIds),
       this.deps.repository.listVariantOverrides({
         vendorId: parsed.vendorId,
@@ -515,7 +529,7 @@ export class DropshipListingPreviewService {
     const ruleEligibleCandidates = candidates.filter((candidate) => {
       const exposure = evaluateDropshipCatalogExposure(candidate, adminRules, generatedAt);
       return exposure.exposed && evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
-        rules: selectionRules, rawAtpUnits: 0, override: overrides.find((row) => row.productVariantId === candidate.productVariantId) ?? null }).selected;
+        picked: pickedIds.has(candidate.productVariantId), rawAtpUnits: 0, override: overrides.find((row) => row.productVariantId === candidate.productVariantId) ?? null }).selected;
     });
     // One read of the product and category listing settings per preview (plan
     // PR 8b, D26), for every platform: price and description apply to every
@@ -612,7 +626,7 @@ export class DropshipListingPreviewService {
       const selectionDecision = evaluateDropshipVendorCatalogSelection({
         candidate,
         adminExposureDecision,
-        rules: selectionRules,
+        picked: pickedIds.has(productVariantId),
         rawAtpUnits,
         override: overridesByVariantId.get(productVariantId) ?? null,
         applyMarketplaceQuantityCap: atp.authority === "legacy",
@@ -933,6 +947,12 @@ export class DropshipListingPreviewService {
     idempotentReplay: boolean;
   }> {
     const parsed = createListingPushJobForMemberInputSchema.parse(input);
+    if (isReservedListingPushJobKey(parsed.idempotencyKey)) {
+      // Publish runs' chunk jobs own this prefix (SAFETY14); a vendor key that
+      // looked like one could otherwise collide with a chunk's job.
+      throw new DropshipError(LISTING_PUSH_RUN_CODES.keyReserved, LISTING_PUSH_RUN_WORDS.keyReserved,
+        { classification: "permanent" });
+    }
     const vendor = (await this.deps.vendorProvisioning.provisionForMember(memberId)).vendor;
     return this.createListingPushJob({
       ...parsed,
@@ -1005,6 +1025,7 @@ export class DropshipListingPreviewService {
     });
     const result = await this.deps.repository.createListingPushJob({
       ...(managedIntentScope ? { managedIntentScope } : {}),
+      ...(parsed.run ? { run: parsed.run } : {}),
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       platform: preview.platform,
@@ -1037,6 +1058,15 @@ export class DropshipListingPreviewService {
       ...result,
       preview,
     };
+  }
+
+  /**
+   * The store and account checks a push makes, for a caller that queues
+   * pushes later (a publish run, step 1 plan S2-5, §4.2): the same refusals,
+   * codes and words as a push job, before anything is written.
+   */
+  async assertListingPushAccess(vendorId: number, storeConnectionId: number): Promise<DropshipListingStoreContext> {
+    return this.loadStoreContextForAction(vendorId, storeConnectionId, "push");
   }
 
   private async loadStoreContextForAction(
@@ -1294,6 +1324,10 @@ function buildListingPreviewRow(input: {
     blockers.push(`listing_tier:${input.tierStatus.reason}`);
   }
   const marketplaceQuantity = tierOffSale ? 0 : input.selectionDecision.marketplaceQuantity;
+  // eBay sync-back, owner rule 1: the row keeps ATP exactly as today (what the sweep decides against); the push
+  // publishes min(ATP, the vendor's limit on this listing). Without a limit the intent is today's.
+  const vendorQuantityLimit = input.existingListing?.vendorQuantityLimit ?? null;
+  const intentQuantity = vendorQuantityLimit === null ? marketplaceQuantity : publishableQuantity(marketplaceQuantity, vendorQuantityLimit);
   if (!input.config) {
     blockers.push("listing_config_required");
   } else if (input.config.platform !== input.context.platform) {
@@ -1340,7 +1374,7 @@ function buildListingPreviewRow(input: {
         config: input.config,
         content: listingIntentContent(input.candidate, input.resolvedContent, publishedCategory, input.listingPhotos),
         priceCents,
-        quantity: marketplaceQuantity,
+        quantity: intentQuantity,
         storeCategoryNames: input.storeCategoryNames,
       })
     : { intent: null, blockers: [], warnings: [] };
@@ -1348,8 +1382,19 @@ function buildListingPreviewRow(input: {
   warnings.push(...marketplaceValidation.warnings);
   warnings.push(...unpublishablePhotoWarnings(input.listingPhotos));
   if (input.ebayFulfillmentPreflight?.compatible === false) {
-    blockers.push(...input.ebayFulfillmentPreflight.issues.map(
-      (issue) => `ebay_fulfillment_policy:${issue.code}`,
+    const issues = input.ebayFulfillmentPreflight.issues;
+    // The live-policy rule (SB10, owner rule 4): the vendor's shipping policy already live on this very listing is kept
+    // (a warning; staff and the vendor hear of it from the sweep's policy check). A policy Card Shellz would introduce,
+    // or one whose check could not be verified, stays a blocker.
+    const tolerated = isLivePolicyIncompatibilityTolerated({
+      effectivePolicyId: input.ebayFulfillmentPreflight.fulfillmentPolicyId,
+      observedPolicyId: input.existingListing?.observedFulfillmentPolicyId ?? null,
+      listingLive: input.existingListing !== null && input.existingListing.status !== "ended"
+        && hasMarketplaceListing(input.existingListing.externalListingId),
+      issueCodes: issues.map((issue) => issue.code),
+    });
+    (tolerated ? warnings : blockers).push(...issues.map(
+      (issue) => `${tolerated ? "ebay_fulfillment_policy_live" : "ebay_fulfillment_policy"}:${issue.code}`,
     ));
   }
   blockers.push(...input.ebayReturnPaymentPolicyBlockers);
@@ -1504,6 +1549,7 @@ function missingCatalogPreviewRow(input: {
       selected: false,
       reason: "not_exposed_by_admin",
       adminExposureReason: "inactive_product_or_variant",
+      picked: false,
       includeRuleIds: [],
       excludeRuleIds: [],
       autoConnectNewSkus: false,

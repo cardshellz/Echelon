@@ -1,10 +1,11 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { beforeEach, afterEach, describe, it, expect, vi } from "vitest";
 import express, { type Request, type Response, type NextFunction } from "express";
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 import type { ServiceRegistry } from "../../../../services";
 
-const mocks = vi.hoisted(() => ({ execute: vi.fn(), getCostReview: vi.fn(), cancel: vi.fn() }));
+const mocks = vi.hoisted(() => ({ execute: vi.fn(), getCostReview: vi.fn(), cancel: vi.fn(), close: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: {} }));
 vi.mock("../../../../routes/middleware", () => ({
   requireAuth: (_req: Request, _res: Response, next: NextFunction) => next(),
@@ -15,7 +16,7 @@ vi.mock("../../../../routes/middleware", () => ({
 }));
 vi.mock("../../../../middleware/idempotency", () => ({ requireIdempotency: () => (_req: Request, _res: Response, next: NextFunction) => next() }));
 vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../../notifications/notifications.service", () => ({}));
+vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 vi.mock("../../shipment-cost-update.commands", async importOriginal => ({
   ...await importOriginal<typeof import("../../shipment-cost-update.commands")>(),
   createShipmentCostUpdateCommands: () => ({ execute: mocks.execute }),
@@ -37,7 +38,7 @@ describe("shipment cost workflow HTTP boundaries", () => {
       next();
     });
     // Only the workflow read is invoked here; the command owner is mocked above.
-    app.locals.services = { shipmentTracking: { getCostReview: mocks.getCostReview, cancel: mocks.cancel } } as unknown as ServiceRegistry;
+    app.locals.services = { shipmentTracking: { getCostReview: mocks.getCostReview, cancel: mocks.cancel, close: mocks.close } } as unknown as ServiceRegistry;
     registerInboundShipmentRoutes(app);
     server = http.createServer(app);
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -47,14 +48,22 @@ describe("shipment cost workflow HTTP boundaries", () => {
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     vi.restoreAllMocks();
   });
-  const read = (id = "42", permission = "purchasing:view") => fetch(`${base}/api/inbound-shipments/${id}/cost-review`, { headers: { "x-test-permission": permission } });
-  const update = (options: { id?: string; permission?: string; actor?: string; key?: string } = {}) => fetch(`${base}/api/inbound-shipments/${options.id ?? "42"}/update-costs`, {
+  const read = (id = "42", permission = "purchasing:view") => requestLocalHttp(`${base}/api/inbound-shipments/${id}/cost-review`, { headers: { "x-test-permission": permission } });
+  const update = (options: { id?: string; permission?: string; actor?: string; key?: string } = {}) => requestLocalHttp(`${base}/api/inbound-shipments/${options.id ?? "42"}/update-costs`, {
     method: "POST", body: "{}", headers: { "content-type": "application/json", "x-test-permission": options.permission ?? "purchasing:approve",
       "x-test-actor": options.actor ?? "approver", "idempotency-key": options.key ?? "workflow-test-42" },
   });
-  const cancel = (permission = "purchasing:edit", id = "42") => fetch(`${base}/api/inbound-shipments/${id}/cancel`, {
+  const cancel = (permission = "purchasing:edit", id = "42") => requestLocalHttp(`${base}/api/inbound-shipments/${id}/cancel`, {
     method: "POST", body: JSON.stringify({ reason: "Supplier withdrew shipment" }),
     headers: { "content-type": "application/json", "x-test-permission": permission, "x-cancel-actor": "cancelling-operator" },
+  });
+  it("retains the structured measurement blocker when closing so the UI can open the approved correction", async () => {
+    mocks.close.mockRejectedValueOnce(new ShipmentTrackingError("Box dimensions are missing.", 400, { code: "MISSING_ALLOCATION_DIMENSIONS", issues: [] }));
+    const response = await requestLocalHttp(`${base}/api/inbound-shipments/42/close`, { method: "POST", body: "{}",
+      headers: { "content-type": "application/json", "x-test-permission": "purchasing:approve", "x-test-actor": "approver" } });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ code: "MISSING_ALLOCATION_DIMENSIONS", error: "Box dimensions are missing.", details: { code: "MISSING_ALLOCATION_DIMENSIONS", issues: [] } });
+    expect(mocks.close).toHaveBeenCalledWith(42, "approver", undefined);
   });
   it("requires edit permission for shipment cancellation", async () => {
     expect((await cancel("purchasing:view")).status).toBe(403);
@@ -105,7 +114,7 @@ describe("shipment cost workflow HTTP boundaries", () => {
   it("preserves the original strict response for older tabs and opts new clients into exceptions", async () => {
     mocks.getCostReview.mockResolvedValue({ shipmentId: 42, lines: [{ lineId: 1, exceptionReview: null }] });
     expect(await (await read()).json()).toEqual({ shipmentId: 42, lines: [{ lineId: 1 }] });
-    const response = await fetch(`${base}/api/inbound-shipments/42/cost-review`, { headers: {
+    const response = await requestLocalHttp(`${base}/api/inbound-shipments/42/cost-review`, { headers: {
       "x-test-permission": "purchasing:view", "X-Shipment-Cost-Review-Version": "2",
     } });
     expect(response.headers.get("vary")).toContain("X-Shipment-Cost-Review-Version");

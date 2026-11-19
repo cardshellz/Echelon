@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { receivingQuarantineAcceptanceOptionsSchema } from "@shared/procurement/receiving-quarantine";
-import { readCommandAuthorityActor } from "../identity/infrastructure/command-authority.repository";
+import { readCommandAuthorityActor } from "../identity/command-authority.api";
 import { canResolveCustody, readCustodyReceipt, type CustodyTransaction } from "./receiving-quarantine.repository";
 import { ReceivingQuarantineError } from "./domain/receiving-quarantine";
 import { receivingQuarantineSourceVersion } from "./receiving-quarantine-receiving.port";

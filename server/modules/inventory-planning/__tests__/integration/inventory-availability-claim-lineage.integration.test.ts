@@ -39,10 +39,14 @@ const claimReplacementMigration = readFileSync(
   "utf8",
 );
 
-function sslConfig(connectionString: string) {
-  return /localhost|127\.0\.0\.1/.test(connectionString)
-    ? false
-    : { rejectUnauthorized: false };
+export function assertLocalDisposableDatabaseUrl(connectionString: string): void {
+  const parsed = new URL(connectionString);
+  const host = parsed.hostname.toLowerCase();
+  if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1" && host !== "[::1]") {
+    throw new Error(
+      `Refusing to run claim lineage integration tests against non-local database host "${parsed.hostname}".`,
+    );
+  }
 }
 
 describeWithDisposableDb.sequential("canonical availability claim lineage PostgreSQL guarantees", () => {
@@ -95,10 +99,11 @@ describeWithDisposableDb.sequential("canonical availability claim lineage Postgr
     if (!TEST_DB_URL || !DISPOSABLE_DB || protectedUrls.includes(TEST_DB_URL)) {
       throw new Error("Canonical claim integration tests require a distinct disposable database");
     }
+    assertLocalDisposableDatabaseUrl(TEST_DB_URL);
     pool = new pg.Pool({
       connectionString: TEST_DB_URL,
       max: 2,
-      ssl: sslConfig(TEST_DB_URL),
+      ssl: false,
     });
     await pool.query(`
       CREATE SCHEMA "${schemas.catalog}";

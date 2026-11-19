@@ -1,4 +1,6 @@
 import { ebayAvailablePolicyValuesSchema, type EbayAvailablePolicyValues } from "@shared/ebay-business-policies";
+import { ChannelListingValidationError } from "@shared/channel-listing-validation";
+import type { ChannelPackageRequirements } from "@shared/catalog/shipping-package";
 import {
   EbayListingBuilder,
   type BuiltEbayListingDraft,
@@ -28,10 +30,14 @@ interface EbayRouteVariantInput {
   price_cents?: unknown;
   compare_at_price_cents?: unknown;
   barcode?: string | null;
+  mpn?: string | null;
   ebay_weight_grams?: unknown;
   weight_override?: unknown;
   weight_grams?: unknown;
   weightGrams?: unknown;
+  length_mm?: number | string | null;
+  width_mm?: number | string | null;
+  height_mm?: number | string | null;
   isListed?: boolean;
 }
 
@@ -49,6 +55,7 @@ interface EbayRouteListingDraftInput {
   ebayBrowseCategoryId: string;
   /** Resolved and catalog-validated by the channel policy owner before transport. */
   resolvedPoliciesByVariantId: ReadonlyMap<number, EbayAvailablePolicyValues>;
+  packageRequirementsByVariantId?: ReadonlyMap<number, ChannelPackageRequirements>;
   storeCategoryNames: string[];
   merchantLocationKey: string;
   retainUnlistedVariantsInGroup?: boolean;
@@ -62,12 +69,12 @@ export function buildEbayRouteListingDraft(
   input: EbayRouteListingDraftInput,
 ): BuiltEbayListingDraft {
   const firstPolicies = input.resolvedPoliciesByVariantId?.values().next().value;
-  if (!firstPolicies) throw new Error("A validated eBay policy selection is required before building a listing draft.");
+  if (!firstPolicies) throw new ChannelListingValidationError({ field: "policies", reason: "required", productId: input.productId });
   const listingPolicies = ebayAvailablePolicyValuesSchema.parse(firstPolicies);
   const groupKey = input.existingGroupKey === undefined
     ? input.product.sku || `PROD-${input.productId}` : input.existingGroupKey;
   if (input.existingGroupKey !== undefined && input.isMultiVariant && groupKey === null) {
-    throw new Error("An existing multi-variant eBay listing requires its verified group key.");
+    throw new ChannelListingValidationError({ field: "listing_identity", reason: "required", productId: input.productId });
   }
   const descriptionHtml = input.product.description || `<p>${escapeHtml(input.product.name)}</p>`;
   const variants: ChannelVariantPayload[] = [];
@@ -79,13 +86,12 @@ export function buildEbayRouteListingDraft(
     const sku = String(routeVariant.sku ?? "").trim();
     if (!sku) continue;
 
-    const variantId = normalizeRequiredPositiveInteger(routeVariant.id, `Invalid eBay variant id for SKU ${sku}.`);
+    const variantId = normalizeRequiredPositiveInteger(routeVariant.id, input.productId);
     const isListed = routeVariant.isListed !== false;
     const priceCents = normalizeCents(input.variantPrices.get(variantId) ?? routeVariant.price_cents);
     if (isListed && (priceCents === null || !isValidEbayFixedPriceCents(priceCents))) {
-      throw new Error(
-        `eBay listing price is required and must be at least ${formatEbayMinimumPrice()} for SKU ${sku}.`,
-      );
+      throw new ChannelListingValidationError({ field: "price", reason: priceCents === null ? "required" : "invalid",
+        productId: input.productId, variantId, variantSku: sku });
     }
 
     const availableQty = isListed
@@ -96,7 +102,7 @@ export function buildEbayRouteListingDraft(
     variationValueByVariantId.set(variantId, variationValue);
 
     const resolvedPolicies = input.resolvedPoliciesByVariantId.get(variantId);
-    if (isListed && !resolvedPolicies) throw new Error(`The resolved eBay policy scope is missing variant ${variantId}.`);
+    if (isListed && !resolvedPolicies) throw new ChannelListingValidationError({ field: "policies", reason: "required", productId: input.productId, variantId });
     if (resolvedPolicies) {
       variantListingPoliciesByVariantId.set(variantId, ebayAvailablePolicyValuesSchema.parse(resolvedPolicies));
     }
@@ -107,8 +113,10 @@ export function buildEbayRouteListingDraft(
       name: routeVariant.name || variationValue,
       barcode: routeVariant.barcode ?? null,
       gtin: null,
-      mpn: null,
+      mpn: routeVariant.mpn ?? null,
       weightGrams: normalizePackageWeightGrams(routeVariant),
+      package: { weightGrams: (routeVariant.ebay_weight_grams ?? routeVariant.weight_override ?? routeVariant.weight_grams ?? routeVariant.weightGrams ?? null) as number | string | null,
+        lengthMm: routeVariant.length_mm, widthMm: routeVariant.width_mm, heightMm: routeVariant.height_mm },
       priceCents,
       compareAtPriceCents: normalizeCents(routeVariant.compare_at_price_cents),
       isListed,
@@ -147,6 +155,7 @@ export function buildEbayRouteListingDraft(
     photoPlan: input.photoPlan,
     availableQuantityByVariantId,
     requirePackageWeight: true,
+    packageRequirementsByVariantId: input.packageRequirementsByVariantId,
     titleMaxLength: EBAY_MAX_TITLE_LENGTH,
     descriptionHtmlOverride: descriptionHtml,
     categoryIdOverride: input.ebayBrowseCategoryId,
@@ -160,15 +169,18 @@ export function buildEbayRouteListingDraft(
     includeVariantSkusInGroup: true,
     retainUnlistedVariantsInGroup: input.retainUnlistedVariantsInGroup === true,
     includeEmptyAspectsImageVariesBy: true,
-    includeOfferListingDescription: false,
+    // updateOffer replaces the offer. Its description must come from the same
+    // prepared catalog revision as the inventory item and group, including when
+    // repairing a legacy listing whose provider description is missing.
+    includeOfferListingDescription: true,
     includeOfferTax: false,
   });
 }
 
-function normalizeRequiredPositiveInteger(value: unknown, errorMessage: string): number {
+function normalizeRequiredPositiveInteger(value: unknown, productId: number): number {
   const numeric = typeof value === "string" ? Number(value) : value;
   if (typeof numeric !== "number" || !Number.isInteger(numeric) || numeric <= 0) {
-    throw new Error(errorMessage);
+    throw new ChannelListingValidationError({ field: "variant_identity", reason: "invalid", productId });
   }
   return numeric;
 }
@@ -184,9 +196,7 @@ function normalizePackageWeightGrams(variant: EbayRouteVariantInput): number | n
   if (typeof numeric !== "number" || !Number.isFinite(numeric) || numeric <= 0) {
     return null;
   }
-  // catalog.product_variants.weight_grams is numeric(10,2) (migration 185);
-  // eBay package weights are sent in whole grams.
-  return Math.max(1, Math.round(numeric));
+  return numeric;
 }
 
 function escapeHtml(text: string): string {

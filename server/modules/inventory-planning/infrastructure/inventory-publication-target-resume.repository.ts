@@ -10,6 +10,11 @@ import {
 } from "@shared/types/inventory-publication-target-resume";
 import type { InventoryChannelExposureRuntimePlan } from "@shared/types/inventory-channel-exposure";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
+import {
+  completeIdempotencyKeyPgQuery,
+  insertIdempotencyKeyPgQuery,
+} from "../../../infrastructure/idempotency-keys.repository";
 
 import { pool as defaultPool } from "../../../db";
 import type {
@@ -240,12 +245,11 @@ implements InventoryPublicationTargetResumeStore {
           scopeKeys.push(scopeKey);
         }
 
-        await client.query(
-          `INSERT INTO public.idempotency_keys(
-             key, request_hash, response_body, created_at, expires_at
-           ) VALUES ($1,$2,NULL,$3,NULL)`,
-          [receiptKey, command.requestHash, command.occurredAt],
-        );
+        await insertIdempotencyKeyPgQuery(client, {
+          key: receiptKey,
+          requestHash: command.requestHash,
+          createdAt: command.occurredAt,
+        });
         const updated = (await client.query<{ revision: string }>(
           `UPDATE inventory.inventory_publication_targets
            SET state='live', activated_by=$3, activated_at=$4,
@@ -333,32 +337,28 @@ implements InventoryPublicationTargetResumeStore {
           providerWriteAttempted: false,
           outboxEnqueued: true,
         });
-        await client.query(
-          `INSERT INTO public.audit_events(
-             timestamp, level, actor, action, target, changes, context
-           ) VALUES ($1,'AUDIT',$2,$3,$4,$5::jsonb,$6::jsonb)`,
-          [
-            command.occurredAt,
-            command.actorId,
-            "inventory_availability.publication_target.resumed",
-            `inventory.inventory_publication_target:${target.id}`,
-            JSON.stringify({
-              before: { state: "preview", revision: command.expectedRevision },
-              after: { state: "live", revision: result.revision },
-            }),
-            JSON.stringify({
-              reason: command.reason,
-              idempotencyKey: command.idempotencyKey,
-              requestHash: command.requestHash,
-              resumeReviewId: review.resumeReviewId,
-              evidenceHash: review.evidenceHash,
-              publicationRows,
-            }),
-          ],
-        );
-        await client.query(
-          `UPDATE public.idempotency_keys SET response_body=$2::jsonb WHERE key=$1`,
-          [receiptKey, JSON.stringify({ commandType: "inventory_publication_target_resume", result })],
+        await insertAuditEventPgQuery(client, {
+          timestamp: command.occurredAt,
+          actor: command.actorId,
+          action: "inventory_availability.publication_target.resumed",
+          target: `inventory.inventory_publication_target:${target.id}`,
+          changesJson: JSON.stringify({
+            before: { state: "preview", revision: command.expectedRevision },
+            after: { state: "live", revision: result.revision },
+          }),
+          contextJson: JSON.stringify({
+            reason: command.reason,
+            idempotencyKey: command.idempotencyKey,
+            requestHash: command.requestHash,
+            resumeReviewId: review.resumeReviewId,
+            evidenceHash: review.evidenceHash,
+            publicationRows,
+          }),
+        });
+        await completeIdempotencyKeyPgQuery(
+          client,
+          receiptKey,
+          JSON.stringify({ commandType: "inventory_publication_target_resume", result }),
         );
         await client.query("COMMIT");
         began = false;

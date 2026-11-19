@@ -1,3 +1,6 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
+import { SYSTEM_ROLES } from "../../server/modules/identity/domain/identity.domain";
+import { relationshipFixture } from "../fixtures/document-relationships";
 import { invoiceSourceFixture, unbilledOwnershipFixture } from "../fixtures/invoice-source";
 import type { Page } from "@playwright/test";
 
@@ -8,7 +11,10 @@ const shipment = { id: 42, shipmentNumber: "TEST-SHIP-42", status: "booked", mod
 const invoice = { sourceCapabilities: invoiceSourceFixture("shipment"), currency: "USD", invoiceDate: "2026-10-19T00:00:00.000Z", id: 71, invoiceNumber: "TEST-INV-71", vendorId: 2, vendorName: "Test vendor", inboundShipmentId: 42, shipmentNumber: "TEST-SHIP-42", status: "paid", invoicedAmountCents: 10000, balanceCents: 0, hasSupplierCreditHistory: false, paidAmountCents: 10000, creditedAmountCents: 0, settledAmountCents: 10000, lines: [], poLinks: [{ id: 1, purchaseOrderId: 99, poNumber: "TEST-PO-99" }], attachments: [], payments: [] };
 export const receipt = (id: number) => ({ reversalCapability: { allowed: true, code: null, reason: null }, id, receiptNumber: `TEST-RECEIPT-${id}`, createdAt: "2026-09-01T12:00:00Z", status: "closed", purchaseOrderId: 99, inboundShipmentId: 42, lines: [], vendorId: 2, vendorName: "Test vendor" });
 
-export async function installFixtures(page: Page) {
+export async function installFixtures(page: Page, options: { permissions?: readonly string[] } = {}) {
+  // Match the actual seeded administrator grant catalog. Restricted/negative
+  // scenarios explicitly override this actor instead of relying on a role label.
+  const permissions = options.permissions ?? SYSTEM_ROLES.admin.permissions;
   const failures: string[] = [];
   page.on("pageerror", (error) => failures.push(error.message));
   await page.route("**/api/**", async (route) => {
@@ -19,7 +25,11 @@ export async function installFixtures(page: Page) {
     }
     const path = new URL(request.url()).pathname;
     let json: unknown = [];
-    if (path === "/api/auth/me") json = { user: { id: "test-user", username: "test", role: "admin" }, permissions: [], roles: ["admin"] };
+    if (/^\/api\/procurement\/relationships\/(purchase|shipment|receipt)\/\d+$/.test(path)) {
+      const parts = path.split("/");
+      json = relationshipFixture({ kind: parts[4] as "purchase" | "shipment" | "receipt", id: Number(parts[5]) });
+    }
+    else if (path === "/api/auth/me") json = staffAuthorityFixture({ user: { id: "test-user", username: "test", role: "admin" }, permissions, systemRoles: ["admin"] });
     else if (path === "/api/settings/procurement") json = { useNewPoEditor: true };
     else if (/^\/api\/purchase-orders\/\d+\/financial-evidence$/.test(path)) json = {
       purchaseOrderId: Number(path.split("/")[3]), currency: "USD", state: "complete",
@@ -28,6 +38,9 @@ export async function installFixtures(page: Page) {
     };
     else if (/^\/api\/purchase-orders\/\d+\/cost-reporting$/.test(path)) json = {
       purchaseOrderId: Number(path.split("/")[3]), configuration: "not_configured", deliveries: [], unqueuedEventCount: 0, truncated: false,
+    };
+    else if (/^\/api\/inbound-shipments\/\d+\/receiving-setup$/.test(path)) json = {
+      shipmentId: Number(path.split("/")[3]), ready: false, issueCount: 0, lines: [],
     };
     else if (/^\/api\/inbound-shipments\/\d+\/tracking$/.test(path)) json = {
       pollingEnabled: false, providers: [
@@ -65,6 +78,7 @@ export async function installFixtures(page: Page) {
     else if (path === "/api/inbound-shipments/42/allocation-status") json = { issues: [], costs: [], status: "allocated", blockerCount: 0, warningCount: 0, lineCount: 1, allocatableCostCount: 1, effectiveCostCents: 10000, unallocatedCents: 0 };
     else if (path === "/api/inbound-shipments/42/invoices") json = { invoices: [invoice], summary: { invoiceCount: 1, activeInvoiceCount: 1, totalInvoicedCents: 10000, totalPaidCents: 10000, outstandingCents: 0 } };
     else if (path === "/api/vendor-invoices/71") json = invoice;
+    else if (/^\/api\/vendor-invoices\/\d+\/transition-history$/.test(path)) json = [];
     else if (/^\/api\/receiving\/\d+\/quarantine$/.test(path)) json = {
       receivingOrderId: Number(path.split("/")[3]), warehouseId: 1,
       canRecord: { allowed: true, reason: null }, canAcceptAll: { allowed: true, reason: null }, observations: [],

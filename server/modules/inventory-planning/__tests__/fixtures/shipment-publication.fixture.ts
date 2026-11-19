@@ -63,6 +63,17 @@ export const shipmentPublicationFixtureSql = `
     request_hash text NOT NULL, response_hash text, error_class text, error_message text,
     started_at timestamptz NOT NULL, completed_at timestamptz NOT NULL
   );
+  -- The outbox worker's identity check (channels PR2, PLAN-CH2 v4.1 §4.8 N5) reads the pair's mapping head before
+  -- every full-phase provider write. This reduced destination keeps no head, so the worker behaves as before.
+  CREATE TABLE inventory.publication_variant_mapping_versions (
+    id integer PRIMARY KEY, publication_target_id integer NOT NULL, product_variant_id integer NOT NULL,
+    lifecycle_status text NOT NULL, external_inventory_item_id text NOT NULL
+  );
+  CREATE TABLE inventory.publication_variant_mapping_heads (
+    publication_target_id integer NOT NULL, product_variant_id integer NOT NULL,
+    active_mapping_id integer REFERENCES inventory.publication_variant_mapping_versions(id),
+    PRIMARY KEY (publication_target_id, product_variant_id)
+  );
   CREATE TABLE inventory.inventory_publication_readbacks (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, publication_target_id integer NOT NULL,
     product_variant_id integer NOT NULL, outbox_id bigint NOT NULL, observed_quantity bigint NOT NULL,

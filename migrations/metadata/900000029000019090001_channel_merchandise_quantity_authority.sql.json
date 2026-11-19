@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "migration": "900000029000019090001_channel_merchandise_quantity_authority.sql",
+  "generation": 29,
+  "pr": 1909,
+  "ordinal": 1,
+  "after": ["900000028000019050001_shipment_history_corrections.sql"]
+}

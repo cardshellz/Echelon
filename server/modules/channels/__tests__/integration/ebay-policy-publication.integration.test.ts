@@ -1,5 +1,6 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
+import { ChannelListingValidationError } from "@shared/channel-listing-validation";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { Pool } from "pg";
@@ -8,7 +9,8 @@ import { cutoverCompositionBaseSql } from "../../../inventory-planning/__tests__
 import { installEbayPublicationInventoryFixture } from "../../../inventory-planning/__tests__/fixtures/ebay-publication-inventory.fixture";
 import { installPublicationSelectionWorkFixture } from "../../../inventory-planning/__tests__/fixtures/publication-selection-work.fixture";
 import { AutomaticSyncEbayProvider, automaticSyncPhotos } from "../fixtures/ebay-automatic-sync-provider.fixture";
-import { EbayPolicyCatalogHttp } from "../fixtures/ebay-business-policies.fixture";
+import { EbayPolicyCatalogHttp, providerPolicyCatalog } from "../fixtures/ebay-business-policies.fixture";
+import { EBAY_US_STANDARD_PACKAGE_TYPE } from "../../adapters/ebay/ebay-package-classification";
 
 const runtime = vi.hoisted(() => ({ pool: null as Pool | null, provider: null as AutomaticSyncEbayProvider | null }));
 vi.mock("../../../../db", () => ({ pool: new Proxy({} as Pool, { get(_target, key) {
@@ -35,6 +37,11 @@ vi.mock("../../infrastructure/ebay-listing-helpers", async importOriginal => ({
 vi.mock("../../ebay-listing-sync", () => ({ readExistingEbayListingIdentityForProduct: vi.fn(() => {
   throw new Error("Unpublished policy test must use the publication owner");
 }) }));
+// This policy suite uses a stateful fake provider rather than eBay's Trading
+// HTTP service. Its published readback must reflect that provider's actual writes.
+vi.mock("../../adapters/ebay/ebay-published-content.reader", () => ({
+  readEbayPublishedContent: async ({ listingId }: { listingId: string }) => runtime.provider!.publishedContent(listingId),
+}));
 vi.mock("../../adapters/ebay/ebay-marketplace-registration.factory", async () => {
   const { EbayMarketplaceRegistrationObserver } = await import("../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer");
   return { createEbayMarketplaceRegistrationAdapters: () => {
@@ -53,18 +60,19 @@ import { EbayPublicationCompletionExecution } from "../../ebay-publication-compl
 import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
 import { PgMarketplaceListingRegistrationRepository } from "../../../marketplace-listings/infrastructure/pg-listing-registration.repository";
 import { PostgresQuantityProviderResponseRecovery } from "../../../inventory-planning/infrastructure/quantity-provider-response-recovery.repository";
+import { PostgresEbayPublicationRejectionReader } from "../../../inventory-planning/infrastructure/ebay-publication-rejection.reader";
 import { ensureEbayPublicationReady } from "../../../inventory-planning/infrastructure/ebay-publication-readiness.repository";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 (databaseUrl && disposable ? describe : describe.skip).sequential("current policy correction through a real saved eBay publication", () => {
   let database: InventoryCutoverTestDatabase;
-  beforeAll(async () => {
+  beforeEach(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, cutoverCompositionBaseSql);
     runtime.pool = database.pool;
     await installEbayPublicationInventoryFixture(database.pool, { includePreflightRecoveryMigrations: true, seedPublicationJob: false });
     for (const file of ["0731_ebay_listing_sync_verification_checkpoint.sql", "0732_ebay_listing_sync_identity_admission.sql",
-      "0736_ebay_listing_mapping_repairs.sql", "0737_ebay_publication_completion.sql", "0741_ebay_durable_withdrawal.sql",
+      "0736_ebay_listing_mapping_repairs.sql", "0737_ebay_publication_completion.sql", "0741_ebay_durable_withdrawal.sql", "900000021000018880001_channel_lifecycle_recovery.sql", "900000023000018880003_listing_work_settlement.sql",
       "900000010000018170001_ebay_saved_publication_continuation.sql"])
       await database.pool.query(readFileSync(resolve("migrations", file), "utf8"));
     await installPublicationSelectionWorkFixture(database.pool);
@@ -115,7 +123,26 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       productId: 20, purpose: "publish", variants: [{ productVariantId: 101, sku: "P5" }] },
     { commandKey: randomUUID(), actor: "test-stock-setup", now: new Date() });
   }, 60_000);
-  afterAll(async () => { await database?.close(); runtime.pool = null; runtime.provider = null; vi.unstubAllGlobals(); });
+  afterEach(async () => { await database?.close(); runtime.pool = null; runtime.provider = null; vi.unstubAllGlobals(); vi.useRealTimers(); });
+
+  async function publicationOwner(clock: () => Date, prepare = prepareEbayPublicationCompletion) {
+    const source = await readEbayPublicationSource(20);
+    const store = new PostgresEbayListingSyncRepository(database.pool, new PostgresEbayPublicationRejectionReader(database.pool));
+    const registration = new PgMarketplaceListingRegistrationRepository(database.pool);
+    const owner = { kind: "channel" as const, channelId: 67, productId: 20, provider: "ebay" as const, marketplaceId: "EBAY_US" };
+    const execution = new EbayPublicationCompletionExecution(prepare,
+      new PostgresQuantityProviderResponseRecovery(database.pool, clock),
+      new EbayMarketplaceListingConnector({ delay: async () => {}, inventoryDelayMs: 0, offerDelayMs: 0 }),
+      async (_source, inspection, target) => {
+        if (inspection.publication) await registration.assertCompatiblePublication({ owner, observation: inspection.publication,
+          memberCandidates: [{ productVariantId: 101, sku: "P5", isActive: true, availableQuantity: 17 }] });
+        else await registration.assertCompatibleUnpublishedPublication({ owner,
+          providerAccount: { provider: "ebay", accountNamespace: "production", externalAccountId: "seller-36" }, groupKey: target.groupKey,
+          members: target.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku, offerId: member.offerId })) });
+      });
+    const service = new EbayListingSyncService(store, execution, clock, randomUUID);
+    return { source, store, service, execution };
+  }
 
   it.each(["price_cents", "compare_at_price_cents"] as const)("rejects unsafe bigint %s before policy or provider requests", async column => {
     const catalog = new EbayPolicyCatalogHttp(); vi.stubGlobal("fetch", catalog.fetch);
@@ -127,26 +154,19 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     expect(runtime.provider.writes).toEqual([]);
   });
 
-  it("blocks before all mutations, corrects via the policy owner, and completes the same saved publication with current policies", async () => {
+  it.each([
+    { costType: "CALCULATED", grouped: false }, { costType: "CALCULATED", grouped: true },
+    { costType: "FLAT_RATE", grouped: false }, { costType: "FLAT_RATE", grouped: true },
+  ])("corrects policies and classifies $costType dimensions through real publication (grouped=$grouped)", async ({ costType, grouped }) => {
     const catalog = new EbayPolicyCatalogHttp(); vi.stubGlobal("fetch", catalog.fetch);
+    catalog.catalog.set("fulfillment", { fulfillmentPolicies: providerPolicyCatalog("fulfillment").fulfillmentPolicies.map(policy => ({
+      ...policy, shippingOptions: [{ costType }],
+    })) });
     let timestamp = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0].now.getTime() + 1_000;
     const clock = () => new Date(timestamp++);
-    runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"]);
-    const source = await readEbayPublicationSource(20);
-    const store = new PostgresEbayListingSyncRepository(database.pool);
-    const registration = new PgMarketplaceListingRegistrationRepository(database.pool);
-    const owner = { kind: "channel" as const, channelId: 67, productId: 20, provider: "ebay" as const, marketplaceId: "EBAY_US" };
-    const execution = new EbayPublicationCompletionExecution(prepareEbayPublicationCompletion,
-      new PostgresQuantityProviderResponseRecovery(database.pool, clock),
-      new EbayMarketplaceListingConnector({ delay: async () => {}, inventoryDelayMs: 0, offerDelayMs: 0 }),
-      async (_source, inspection, target) => {
-        if (inspection.publication) await registration.assertCompatiblePublication({ owner, observation: inspection.publication,
-          memberCandidates: [{ productVariantId: 101, sku: "P5", isActive: true, availableQuantity: 17 }] });
-        else await registration.assertCompatibleUnpublishedPublication({ owner,
-          providerAccount: { provider: "ebay", accountNamespace: "production", externalAccountId: "seller-36" }, groupKey: target.groupKey,
-          members: target.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku, offerId: member.offerId })) });
-      });
-    const service = new EbayListingSyncService(store, execution, clock, randomUUID);
+    runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"], grouped ? "group" : "single");
+    const originalMeasurements = (await database.pool.query("SELECT weight_grams,length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0];
+    const { source, store, service, execution } = await publicationOwner(clock);
     const job = await service.enqueue(source, "user:policy-reviewer", randomUUID(), "publish");
     await service.processDue(1, job.id);
     const blocked = await store.get(job.id);
@@ -158,18 +178,121 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
     await ebayBusinessPolicies.patchPolicies({ target: { kind: "product", productId: 20 }, patch: { fulfillmentPolicyId: null }, actor: "user:policy-reviewer" });
     timestamp += 60_000;
     // The existing Sync command resumes the saved publication after correction.
-    const retried = await service.enqueue(source, "user:policy-reviewer", randomUUID(), "sync");
-    expect(retried.id).toBe(job.id);
-    await service.processDue(1, job.id);
+    const command = randomUUID();
+    const retried = await Promise.all([service.enqueue(source, "user:policy-reviewer", command, "sync"),
+      service.enqueue(source, "user:policy-reviewer", command, "sync")]);
+    expect(retried.map(row => row.id)).toEqual([job.id, job.id]);
+    const restarted = new EbayListingSyncService(store, execution, clock, randomUUID);
+    await Promise.all([service.processDue(1, job.id), restarted.processDue(1, job.id)]);
     const completed = await store.get(job.id);
     expect(completed, `${completed.code}: ${completed.message}`).toMatchObject({ state: "completed", code: null, operation: "publish" });
     expect(runtime.provider.snapshot().offer).toMatchObject({ status: "PUBLISHED", listingId: "listing-20", availableQuantity: 17,
       listingPolicies: { fulfillmentPolicyId: "store-shipping", returnPolicyId: "product-returns", paymentPolicyId: "product-payment" } });
-    expect(runtime.provider.writes.filter(write => write.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group")).toHaveLength(1);
+    // Unpublished offers establish absence without a native listing read. The
+    // approved US classification adds no package measurements to that evidence.
+    const expectedPackage = { weight: { value: 4, unit: "OUNCE" }, packageType: EBAY_US_STANDARD_PACKAGE_TYPE };
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual(expectedPackage);
+    expect(completed.warnings).toEqual([{ code: "CHANNEL_PACKAGE_DIMENSIONS_MISSING", field: "package_dimensions",
+      productId: 20, variantId: 101, variantSku: "P5" }]);
+    expect((await database.pool.query("SELECT weight_grams,length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
+      .toEqual(originalMeasurements);
+    const publishPath = grouped ? "/sell/inventory/v1/offer/publish_by_inventory_item_group"
+      : `/sell/inventory/v1/offer/${runtime.provider.snapshot().offer.offerId}/publish`;
+    expect(runtime.provider.writes.filter(write => write.path === publishPath)).toHaveLength(1);
     expect((await database.pool.query("SELECT count(*)::int AS count FROM channels.ebay_listing_sync_jobs")).rows[0].count).toBe(1);
     expect((await database.pool.query("SELECT actor,changes FROM public.audit_events WHERE action='ebay.business_policies.changed'")).rows)
       .toMatchObject([{ actor: "user:policy-reviewer", changes: { before: { fulfillmentPolicyId: "deleted-shipping" }, after: { fulfillmentPolicyId: null } } }]);
+    const completedWrites = structuredClone(runtime.provider.writes);
     await service.processDue(1, job.id);
-    expect(runtime.provider.writes.filter(write => write.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group")).toHaveLength(1);
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual(expectedPackage);
+    expect(runtime.provider.writes).toEqual(completedWrites);
+    expect(runtime.provider.writes.filter(write => write.path === publishPath)).toHaveLength(1);
   }, 30_000);
+  it("normal Sync retries a legacy required-dimensions failure without changing measurements or rewriting its receipt", async () => {
+    const catalog = new EbayPolicyCatalogHttp(); vi.stubGlobal("fetch", catalog.fetch);
+    catalog.catalog.set("fulfillment", { fulfillmentPolicies: providerPolicyCatalog("fulfillment").fulfillmentPolicies.map(policy => ({
+      ...policy, shippingOptions: [{ costType: "CALCULATED" }],
+    })) });
+    await ebayBusinessPolicies.patchPolicies({ target: { kind: "product", productId: 20 }, patch: { fulfillmentPolicyId: null }, actor: "operator" });
+    let timestamp = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0].now.getTime() + 1_000;
+    const clock = () => new Date(timestamp++);
+    runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"], "group");
+    const originalMeasurements = (await database.pool.query("SELECT weight_grams,length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0];
+    let historicalFailure = true;
+    const { source, store, service } = await publicationOwner(clock, async (...args) => {
+      // Reproduce the retired preparation refusal as a real saved failed job.
+      // The retry delegates to the current policy reader and publication owner.
+      if (historicalFailure) throw new ChannelListingValidationError({ field: "package_dimensions", reason: "required",
+        productId: 20, variantId: 101, variantSku: "P5" });
+      return prepareEbayPublicationCompletion(...args);
+    });
+    const saved = await service.enqueue(source, "operator", randomUUID(), "publish");
+    await service.processDue(1, saved.id);
+    expect(await store.get(saved.id)).toMatchObject({ state: "needs_attention", code: "CHANNEL_LISTING_VALIDATION_FAILED" });
+    expect(runtime.provider.writes).toEqual([]);
+    const receipt = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows;
+    expect(receipt).toHaveLength(1);
+    historicalFailure = false; timestamp += 60_000;
+    const resumed = await service.enqueue(source, "operator", randomUUID(), "sync");
+    expect(resumed.id).toBe(saved.id);
+    await service.processDue(1, resumed.id);
+    expect(await store.get(resumed.id)).toMatchObject({ state: "completed", warnings: [{ variantSku: "P5" }] });
+    expect(runtime.provider.snapshot().offer.status).toBe("PUBLISHED");
+    expect(runtime.provider.snapshot().item.packageWeightAndSize).toEqual({ weight: { value: 4, unit: "OUNCE" }, packageType: EBAY_US_STANDARD_PACKAGE_TYPE });
+    expect((await database.pool.query("SELECT weight_grams,length_mm,width_mm,height_mm FROM catalog.product_variants WHERE id=101")).rows[0])
+      .toEqual(originalMeasurements);
+    expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event='needs_attention'", [saved.id])).rows).toEqual(receipt);
+  }, 30_000);
+
+  it.each([
+    { grouped: false, boundary: "item" }, { grouped: true, boundary: "item" },
+    { grouped: false, boundary: "publish" }, { grouped: true, boundary: "publish" },
+  ] as const)("preserves a real dimension refusal at $boundary (grouped=$grouped) and recovers through normal Sync", async ({ grouped, boundary }) => {
+    const catalog = new EbayPolicyCatalogHttp(); vi.stubGlobal("fetch", catalog.fetch);
+    catalog.catalog.set("fulfillment", { fulfillmentPolicies: providerPolicyCatalog("fulfillment").fulfillmentPolicies.map(policy => ({
+      ...policy, shippingOptions: [{ costType: "CALCULATED" }],
+    })) });
+    await ebayBusinessPolicies.patchPolicies({ target: { kind: "product", productId: 20 }, patch: { fulfillmentPolicyId: null }, actor: "operator" });
+    let timestamp = (await database.pool.query<{ now: Date }>("SELECT transaction_timestamp() AS now")).rows[0].now.getTime() + 1_000;
+    const clock = () => new Date(timestamp++);
+    runtime.provider = new AutomaticSyncEbayProvider(clock, true, ["P5"], grouped ? "group" : "single");
+    const publishPath = grouped ? "/sell/inventory/v1/offer/publish_by_inventory_item_group" : "/sell/inventory/v1/offer/offer-P5/publish";
+    const refusedPath = boundary === "item" ? "/sell/inventory/v1/inventory_item/P5" : publishPath;
+    const message = "Package dimensions are required by the selected shipping service.";
+    runtime.provider.rejectNextWrite(refusedPath, message);
+    // The route's production admission factory uses Date; keep it on the same
+    // injected clock as the saved job and HTTP receipt when testing cooldowns.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(timestamp);
+    const { source, store, service } = await publicationOwner(clock);
+    const saved = await service.enqueue(source, "operator", randomUUID(), "publish");
+    await service.processDue(1, saved.id);
+    const refused = await store.get(saved.id);
+    const stoppedState = "needs_attention";
+    expect(refused).toMatchObject({ state: stoppedState, code: "EBAY_QUANTITY_REJECTED" });
+    expect(refused.message).toContain(message);
+    expect(refused.publicationAccepted).toBeNull();
+    expect(runtime.provider.snapshot().offer.status).toBe("UNPUBLISHED");
+    const receipt = (await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event=$2", [saved.id, stoppedState])).rows;
+    expect(receipt).toHaveLength(1);
+    expect(receipt[0].evidence.diagnostic.context.providerWrite).toEqual({ provider: "ebay", kind: "validation", httpStatus: 400, errorCodes: ["25002"] });
+    expect(runtime.provider.writes.filter(write => write.path === refusedPath)).toHaveLength(1);
+    // Only explicitly measured fixture data changes; no per-listing defaults.
+    await database.pool.query("UPDATE catalog.product_variants SET length_mm=152.4,width_mm=101.6,height_mm=25.4 WHERE id=101");
+    // Respect the publication owner's provider-refusal cooldown; do not bypass
+    // its fence just because the optional local dimension warning permits work.
+    timestamp += 20 * 60_000;
+    vi.setSystemTime(timestamp);
+    const resumed = await service.enqueue(source, "operator", randomUUID(), "sync");
+    expect(resumed.id).toBe(saved.id);
+    await service.processDue(1, resumed.id);
+    expect(await store.get(resumed.id)).toMatchObject({ state: "completed", code: null });
+    expect(runtime.provider.snapshot().offer.status).toBe("PUBLISHED");
+    expect(runtime.provider.snapshot().item.packageWeightAndSize?.dimensions).toEqual({ length: 15.24, width: 10.16, height: 2.54, unit: "CENTIMETER" });
+    expect((await database.pool.query("SELECT evidence FROM channels.ebay_listing_sync_events WHERE job_id=$1 AND event=$2", [saved.id, stoppedState])).rows).toEqual(receipt);
+    const count = runtime.provider.writes.length;
+    await service.processDue(1, resumed.id);
+    expect(runtime.provider.writes).toHaveLength(count);
+  }, 30_000);
+
 });

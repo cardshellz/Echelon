@@ -40,6 +40,7 @@ export interface EbayAvailability {
 }
 
 export interface EbayPackageWeightAndSize {
+  shippingIrregular?: boolean;
   weight?: {
     value: number;
     unit: "POUND" | "KILOGRAM" | "GRAM" | "OUNCE";

@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { custodyTestResult } from "@shared/procurement/__tests__/receiving-quarantine.fixture";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -11,7 +12,11 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("../../../../db", () => ({ db: { transaction: mocks.transaction } }));
 // Keep the real requireAuth middleware, but do not initialize identity storage.
-vi.mock("../../../identity", () => ({ hasPermission: vi.fn() }));
+vi.mock("../../../identity", () => ({ hasPermission: vi.fn(), readCurrentStaffAccess: vi.fn(async (userId: string) => ({
+  user: { id: userId, username: "fixture", role: "picker", active: 1, displayName: null,
+    createdAt: new Date(0), lastLoginAt: null },
+  roles: [{ id: 101, name: "Fixture operator", isSystem: false }], permissions: [],
+})) }));
 vi.mock("../../../../platform/observability", () => ({ logger: { error: mocks.log } }));
 vi.mock("../../receiving-quarantine-command-evidence.repository", () => ({ assertNoLegacyCustodyCommand: vi.fn() }));
 vi.mock("../../../../platform/commands/command-results.repository", () => ({ financialCommandRepository: {} }));
@@ -81,7 +86,7 @@ describe("receiving quarantine HTTP boundary", () => {
   });
 
   function request(path: string, options: { method?: string; body?: unknown; authenticated?: boolean; headers?: Record<string, string> } = {}) {
-    return fetch(`${base}${path}`, { method: options.method ?? "GET",
+    return requestLocalHttp(`${base}${path}`, { method: options.method ?? "GET",
       headers: { "content-type": "application/json", ...(options.authenticated === false ? {} : { "x-test-user": "custody-operator" }), ...options.headers },
       body: options.body === undefined ? undefined : JSON.stringify(options.body) });
   }

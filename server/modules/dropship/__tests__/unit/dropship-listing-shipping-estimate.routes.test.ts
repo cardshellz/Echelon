@@ -63,7 +63,7 @@ describe("listing shipping estimate endpoint", () => {
     expect(estimateForMember).toHaveBeenCalledWith("member-1", input, { includeCalculation: false });
   });
   it("asks the service for calculation detail only when the staff gate allows it, and serializes it", async () => {
-    estimateForMember.mockResolvedValueOnce({ ...estimated, calculation } as ListingShippingEstimateResult);
+    estimateForMember.mockResolvedValueOnce({ ...estimated, calculation } as unknown as ListingShippingEstimateResult);
     const response = await request("member-1", input, true);
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ estimate: { ...estimated, calculation } });
@@ -101,7 +101,7 @@ describe("listing shipping estimate endpoint", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
   });
   it("does not expose raw unavailable diagnostics", async () => {
-    estimateForMember.mockResolvedValueOnce({ ...unavailable, message: "PRIVATE_PRICING_LOGIC" } as ListingShippingEstimateResult);
+    estimateForMember.mockResolvedValueOnce({ ...unavailable, message: "PRIVATE_PRICING_LOGIC" } as unknown as ListingShippingEstimateResult);
     const response = await request();
     expect(response.status).toBe(500);
     expect(await response.text()).not.toContain("PRIVATE_PRICING_LOGIC");
@@ -122,7 +122,7 @@ describe("listing shipping estimate endpoint", () => {
     expect((await request()).status).toBe(status);
   });
   it("still rejects unknown private fields even for a staff response", async () => {
-    estimateForMember.mockResolvedValueOnce({ ...estimated, calculation, breakdown: { markupCents: 8 } } as ListingShippingEstimateResult);
+    estimateForMember.mockResolvedValueOnce({ ...estimated, calculation, breakdown: { markupCents: 8 } } as unknown as ListingShippingEstimateResult);
     expect((await request("member-1", input, true)).status).toBe(500);
   });
   it("bounds estimate requests per member while allowing a different member", async () => {

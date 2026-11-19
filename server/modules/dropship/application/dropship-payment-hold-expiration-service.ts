@@ -108,8 +108,8 @@ export class DropshipPaymentHoldExpirationService {
         eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_PAYMENT_HOLD_EXPIRED,
         critical: true,
         channels: ["email", "in_app"],
-        title: "Dropship order payment hold expired",
-        message: `Order ${hold.externalOrderId} payment hold expired and marketplace cancellation is being processed.`,
+        title: "Order cancelled: not paid in time",
+        message: `Order ${hold.externalOrderId} wasn't paid in time, so we're cancelling it on the marketplace.`,
         payload: {
           intakeId: hold.intakeId,
           vendorId: hold.vendorId,
@@ -157,8 +157,8 @@ export class DropshipPaymentHoldExpirationService {
         eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_PAYMENT_HOLD_EXPIRING,
         critical: true,
         channels: ["email", "in_app"],
-        title: "Dropship order payment hold expiring",
-        message: `Order ${hold.externalOrderId} payment hold expires in ${minutesUntilExpiration} minute${minutesUntilExpiration === 1 ? "" : "s"}.`,
+        title: "Order payment due soon",
+        message: `Add money to your wallet within ${minutesUntilExpiration} minute${minutesUntilExpiration === 1 ? "" : "s"}, or order ${hold.externalOrderId} will be cancelled.`,
         payload: {
           intakeId: hold.intakeId,
           vendorId: hold.vendorId,

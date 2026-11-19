@@ -1,4 +1,4 @@
-import { EbayListingBuilder } from "../../channels/adapters/ebay/ebay-listing-builder";
+import { EbayListingBuilder } from "../../channels/ebay-connector.api";
 import type { DropshipMarketplaceListingIntent } from "../application/dropship-marketplace-listing-provider";
 import type { DropshipPublicationPreview } from "../application/dropship-listing-presentation";
 import { DropshipError } from "../domain/errors";

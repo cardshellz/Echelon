@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 import { runMigrationCheck, runMigrationCheckCli } from "../../../scripts/migrations/check-migrations.mjs";
 import { allocateMigration } from "../../../scripts/migrations/create-migration.mjs";
 import { MigrationPolicyError, type MigrationMetadata } from "../../../scripts/migrations/migration-policy.mjs";
@@ -13,6 +13,28 @@ const SOURCE_PR = 1801;
 const TOKEN = "fixture-token-never-sent-to-a-network";
 const temporaryDirectories: string[] = [];
 type Change = "sql" | "metadata" | "delete" | "rename" | "reallocate" | "replace_history";
+type FixtureOptions = {
+  inherited?: boolean;
+  alreadyMain?: boolean;
+  own?: boolean;
+  change?: Change;
+  siblings?: boolean;
+  premergeReallocation?: boolean;
+  writable?: boolean;
+};
+type TemplateSnapshot = {
+  templateRoot: string;
+  eventFile: string;
+  eventBase: string;
+  effectiveBase: string;
+  sourceMerge: string;
+  sourceHead: string;
+  head: string;
+  merge: string;
+  inherited: MigrationMetadata[];
+  own: MigrationMetadata | undefined;
+};
+const templateCache = new Map<string, TemplateSnapshot>();
 
 function git(root: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
@@ -29,42 +51,44 @@ function removeAllocation(migrationsDir: string, record: MigrationMetadata): voi
   rmSync(path.join(migrationsDir, "metadata", `${record.migration}.json`));
 }
 
-/** Real Git commits and merges; only the GitHub HTTP evidence is mocked. */
-function fixture(options: { inherited?: boolean; alreadyMain?: boolean; own?: boolean; change?: Change; siblings?: boolean; premergeReallocation?: boolean } = {}) {
-  const root = mkdtempSync(path.join(os.tmpdir(), "echelon-inherited-migration-test-"));
-  temporaryDirectories.push(root);
-  const migrationsDir = path.join(root, "migrations");
+function buildTemplate(options: FixtureOptions): TemplateSnapshot {
+  const { writable: _writable, ...cacheOptions } = options;
+  const key = JSON.stringify(cacheOptions);
+  const existing = templateCache.get(key);
+  if (existing) return existing;
+  const templateRoot = mkdtempSync(path.join(os.tmpdir(), "echelon-inherited-migration-tpl-"));
+  const migrationsDir = path.join(templateRoot, "migrations");
   mkdirSync(migrationsDir);
   writeFileSync(path.join(migrationsDir, "0001_base.sql"), "SELECT 1;\n");
   writeFileSync(path.join(migrationsDir, "legacy-migrations.json"), JSON.stringify({ version: 1, filenames: ["0001_base.sql"] }));
-  git(root, "init");
-  git(root, "config", "user.name", "Migration provenance test");
-  git(root, "config", "user.email", "migration-provenance@example.invalid");
-  git(root, "config", "core.autocrlf", "false");
-  git(root, "config", "commit.gpgsign", "false");
-  const eventBase = commit(root, "Initial main migration");
-  git(root, "branch", "-M", "fixture-main");
+  git(templateRoot, "init");
+  git(templateRoot, "config", "user.name", "Migration provenance test");
+  git(templateRoot, "config", "user.email", "migration-provenance@example.invalid");
+  git(templateRoot, "config", "core.autocrlf", "false");
+  git(templateRoot, "config", "commit.gpgsign", "false");
+  const eventBase = commit(templateRoot, "Initial main migration");
+  git(templateRoot, "branch", "-M", "fixture-main");
   const inherited: MigrationMetadata[] = [];
   let sourceMerge = eventBase;
   let sourceHead = eventBase;
   if (options.inherited !== false) {
-    git(root, "checkout", "-b", "source-pr", eventBase);
+    git(templateRoot, "checkout", "-b", "source-pr", eventBase);
     inherited.push(allocateMigration({ migrationsDir, pr: SOURCE_PR, name: "inherited" }));
     if (options.siblings) inherited.push(allocateMigration({ migrationsDir, pr: SOURCE_PR, name: "inherited_sibling" }));
-    sourceHead = commit(root, "Source PR migration allocation");
+    sourceHead = commit(templateRoot, "Source PR migration allocation");
     if (options.premergeReallocation) {
       removeAllocation(migrationsDir, inherited[0]);
       inherited[0] = allocateMigration({ migrationsDir, pr: SOURCE_PR, name: "final_source_allocation" });
-      sourceHead = commit(root, "Reallocate pending source migration before its PR merges");
+      sourceHead = commit(templateRoot, "Reallocate pending source migration before its PR merges");
     }
-    git(root, "checkout", "-b", "source-base", eventBase);
-    writeFileSync(path.join(root, "source-base.txt"), "Dependency target branch\n");
-    commit(root, "Advance dependency target branch");
-    git(root, "merge", "--no-ff", "--no-edit", "source-pr");
-    sourceMerge = git(root, "rev-parse", "HEAD");
-    if (options.alreadyMain) git(root, "branch", "-f", "fixture-main", sourceMerge);
+    git(templateRoot, "checkout", "-b", "source-base", eventBase);
+    writeFileSync(path.join(templateRoot, "source-base.txt"), "Dependency target branch\n");
+    commit(templateRoot, "Advance dependency target branch");
+    git(templateRoot, "merge", "--no-ff", "--no-edit", "source-pr");
+    sourceMerge = git(templateRoot, "rev-parse", "HEAD");
+    if (options.alreadyMain) git(templateRoot, "branch", "-f", "fixture-main", sourceMerge);
   }
-  git(root, "checkout", "-b", "current-pr", sourceMerge);
+  git(templateRoot, "checkout", "-b", "current-pr", sourceMerge);
   const first = inherited[0];
   if (options.change === "sql") writeFileSync(path.join(migrationsDir, first.migration), "SELECT 'substituted SQL';\n");
   if (options.change === "metadata") {
@@ -80,22 +104,42 @@ function fixture(options: { inherited?: boolean; alreadyMain?: boolean; own?: bo
     }
   }
   const own = options.own ? allocateMigration({ migrationsDir, pr: CURRENT_PR, name: "current_change" }) : undefined;
-  writeFileSync(path.join(root, "current-change.txt"), "Current PR change\n");
-  const head = commit(root, "Current PR changes");
-  git(root, "checkout", "fixture-main");
-  writeFileSync(path.join(root, "main-change.txt"), "Main advanced independently\n");
-  const effectiveBase = commit(root, "Main advance before CI merge");
-  git(root, "merge", "--no-ff", "--no-edit", "current-pr");
-  const merge = git(root, "rev-parse", "HEAD");
+  writeFileSync(path.join(templateRoot, "current-change.txt"), "Current PR change\n");
+  const head = commit(templateRoot, "Current PR changes");
+  git(templateRoot, "checkout", "fixture-main");
+  writeFileSync(path.join(templateRoot, "main-change.txt"), "Main advanced independently\n");
+  const effectiveBase = commit(templateRoot, "Main advance before CI merge");
+  git(templateRoot, "merge", "--no-ff", "--no-edit", "current-pr");
+  const merge = git(templateRoot, "rev-parse", "HEAD");
   const event = { number: CURRENT_PR, repository: { full_name: REPOSITORY },
     pull_request: { base: { sha: eventBase }, head: { sha: head } } };
-  const eventFile = path.join(root, "event.json");
+  const eventFile = path.join(templateRoot, ".git", "event.json");
   writeFileSync(eventFile, JSON.stringify(event));
+  const snapshot: TemplateSnapshot = { templateRoot, eventFile, eventBase, effectiveBase, sourceMerge, sourceHead, head, merge, inherited, own };
+  templateCache.set(key, snapshot);
+  return snapshot;
+}
+
+/** Real Git commits and merges; only the GitHub HTTP evidence is mocked. */
+function fixture(options: FixtureOptions = {}) {
+  const tpl = buildTemplate(options);
+  let root = tpl.templateRoot;
+  let eventFile = tpl.eventFile;
+  if (options.writable) {
+    root = mkdtempSync(path.join(os.tmpdir(), "echelon-inherited-migration-test-"));
+    temporaryDirectories.push(root);
+    cpSync(tpl.templateRoot, root, { recursive: true });
+    eventFile = path.join(root, ".git", "event.json");
+  }
+  const migrationsDir = path.join(root, "migrations");
+  const { eventBase, effectiveBase, sourceMerge, sourceHead, head, merge, inherited, own } = tpl;
+  const event = { number: CURRENT_PR, repository: { full_name: REPOSITORY },
+    pull_request: { base: { sha: eventBase }, head: { sha: head } } };
   const environment: NodeJS.ProcessEnv = { GITHUB_EVENT_NAME: "pull_request", GITHUB_EVENT_PATH: eventFile,
     GITHUB_REF: `refs/pull/${CURRENT_PR}/merge`, GITHUB_SHA: merge, GITHUB_REPOSITORY: REPOSITORY, GITHUB_TOKEN: TOKEN };
   const sourceEvidence = { number: SOURCE_PR, merged: true, state: "closed", merge_commit_sha: sourceMerge,
     base: { repo: { full_name: REPOSITORY } } };
-  return { root, migrationsDir, eventBase, effectiveBase, sourceMerge, sourceHead, head, merge, inherited, own,
+  return { root, migrationsDir, eventBase, effectiveBase, sourceMerge, sourceHead, head, merge, inherited: [...inherited], own,
     event, eventFile, environment, sourceEvidence };
 }
 
@@ -118,6 +162,14 @@ afterEach(() => {
     if (!path.resolve(root).startsWith(path.resolve(os.tmpdir()) + path.sep)) throw new Error("Unsafe fixture cleanup path");
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+afterAll(() => {
+  for (const { templateRoot } of templateCache.values()) {
+    if (!path.resolve(templateRoot).startsWith(path.resolve(os.tmpdir()) + path.sep)) throw new Error("Unsafe template cleanup path");
+    rmSync(templateRoot, { recursive: true, force: true });
+  }
+  templateCache.clear();
 });
 
 describe("trusted merged-PR migration provenance", () => {
@@ -192,7 +244,7 @@ describe("trusted merged-PR migration provenance", () => {
   });
 
   it("rejects shallow history even when missing history would let the current catalog pass", async () => {
-    const context = fixture({ change: "delete" });
+    const context = fixture({ change: "delete", writable: true });
     // A real Git shallow boundary at the event head hides prior introductions.
     // The synthetic merge and its independent first-parent base remain available.
     writeFileSync(path.join(context.root, ".git", "shallow"), `${context.head}\n`);
@@ -211,7 +263,7 @@ describe("trusted merged-PR migration provenance", () => {
   });
 
   it.each(["sql", "metadata"] as const)("rejects an uncommitted %s substitution even when both recorded Git trees are unchanged", async (part) => {
-    const context = fixture();
+    const context = fixture({ writable: true });
     const first = context.inherited[0];
     const filename = part === "sql" ? path.join(context.migrationsDir, first.migration)
       : path.join(context.migrationsDir, "metadata", `${first.migration}.json`);
@@ -227,7 +279,7 @@ describe("trusted merged-PR migration provenance", () => {
   });
 
   it("checks deleted siblings owned by the merged PR, not only the still-present file that caused lookup", async () => {
-    const context = fixture({ siblings: true });
+    const context = fixture({ siblings: true, writable: true });
     const sibling = context.inherited[1];
     removeAllocation(context.migrationsDir, sibling);
     await rejectsCode(() => runMigrationCheckCli(["--ci"], context.root, context.environment,
@@ -246,7 +298,7 @@ describe("trusted merged-PR migration provenance", () => {
   });
 
   it("rejects a real merge-shaped commit with matching file contents when it is not an ancestor of the event head", async () => {
-    const context = fixture();
+    const context = fixture({ writable: true });
     const tree = git(context.root, "rev-parse", `${context.sourceMerge}^{tree}`);
     const unrelated = git(context.root, "commit-tree", tree, "-p", context.eventBase, "-p", context.sourceHead,
       "-m", "Different merge with identical allocation bytes");

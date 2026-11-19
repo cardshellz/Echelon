@@ -11,6 +11,8 @@ import type { ShipmentCostCommand } from "../../shipment-cost-commands";
 import type { ShipmentLineCommand } from "../../shipment-line-commands";
 import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import { createFlowCostHarness, seedFlowMasterData, FLOW_ACTOR, FLOW_AT, FLOW_IDS, type FlowCostHarness } from "./procurement-flow-cost.fixture";
+import { assertFlowReadAgreement } from "./procurement-flow-read-agreement";
+import { verifyFlowSettlementAndReturn } from "./procurement-flow-settlement.cases";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const enabled = !!url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -267,7 +269,7 @@ controlled.sequential("FLOW persisted RFQ, partial receipts, sale and late freig
         { product_id: FLOW_IDS.productB, expected_receive_units_per_variant: 100 }]);
   }, 90_000);
 
-  it("conserves $4,610 across $4,370 inventory and $240 sold COGS, preserving source history and exact-once retries", async () => {
+  it("conserves $4,610 through inventory, sale, supplier return, payment and replacement credit with exact-once retries", async () => {
     const created = await createPurchases();
     const poA = created.purchases.get(FLOW_IDS.productA)!;
     const poB = created.purchases.get(FLOW_IDS.productB)!;
@@ -402,6 +404,22 @@ controlled.sequential("FLOW persisted RFQ, partial receipts, sale and late freig
     expect(adjustedCogs?.totalCogsCents).toBe(24_000);
     expect(adjustedCogs).toMatchObject({ totalRevenueCents: 30_000, grossMarginCents: 6_000,
       lineItems: [expect.objectContaining({ revenueCents: 30_000, marginCents: 6_000 })] });
+    const readScope = {
+      rfqId: created.proposal.rfqId,
+      purchases: [
+        { id: poA.purchaseOrderId, lineId: poLineA, receivedPieces: 1_000,
+          receiptIds: [receipts[0].receiptId, receipts[2].receiptId, receipts[4].receiptId] },
+        { id: poB.purchaseOrderId, lineId: poLineB, receivedPieces: 500,
+          receiptIds: [receipts[1].receiptId, receipts[3].receiptId] },
+      ],
+      shipmentLines: [
+        { id: xA, shipmentId: x.id, purchaseOrderId: poA.purchaseOrderId, purchaseOrderLineId: poLineA, allocatedCents: 18_000 },
+        { id: xB, shipmentId: x.id, purchaseOrderId: poB.purchaseOrderId, purchaseOrderLineId: poLineB, allocatedCents: 15_000 },
+        { id: yA, shipmentId: y.id, purchaseOrderId: poA.purchaseOrderId, purchaseOrderLineId: poLineA, allocatedCents: 8_000 },
+      ],
+    };
+    await assertFlowReadAgreement(harness, { ...readScope, freightEvidence: "confirmed",
+      expectedInvoiceCount: 2, expectedInvoiceTotalCents: 420_000 });
     const currentSources = (await harness.pool.query("SELECT * FROM procurement.cost_source_revisions ORDER BY id")).rows;
     for (const original of initialSources) expect(currentSources.find((source) => source.id === original.id)).toEqual(original);
     expect((await harness.pool.query("SELECT * FROM procurement.rfq_quote_revisions ORDER BY id")).rows).toEqual(originalQuoteEvidence);
@@ -466,9 +484,13 @@ controlled.sequential("FLOW persisted RFQ, partial receipts, sale and late freig
       { inbound_shipment_line_id: yA, evidence: "confirmed" },
     ]);
     expect(harness.suppressedChannelSyncs.length).toBeGreaterThan(0);
+    await assertFlowReadAgreement(harness, { ...readScope, freightEvidence: "confirmed",
+      expectedInvoiceCount: 4, expectedInvoiceTotalCents: 461_000 });
+    await verifyFlowSettlementAndReturn(harness, { purchaseOrderId: poA.purchaseOrderId,
+      purchaseOrderLineId: poLineA, shipmentId: x.id });
     console.info(JSON.stringify({ event: "procurement.controlled_flow.proven", authority: "pre_opening_legacy",
       rfqId: created.proposal.rfqId, poIds: [poA.purchaseOrderId, poB.purchaseOrderId], shipmentIds: [x.id, y.id],
-      receiptIds: receipts.map((receipt) => receipt.receiptId), final: afterLateCost,
+      receiptIds: receipts.map((receipt) => receipt.receiptId), costCheckpoint: afterLateCost,
       providerSync: "suppressed", retry: "unchanged_command_and_concurrent_cost_pushes" }));
   }, 90_000);
 

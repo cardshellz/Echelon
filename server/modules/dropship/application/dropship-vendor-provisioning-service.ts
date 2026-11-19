@@ -64,6 +64,9 @@ export interface DropshipStoreConnectionSummary {
 
 export interface DropshipCatalogSetupSummary {
   adminExposureRuleCount: number;
+  /** How many sizes the vendor picked (one-time picks, PLAN-B v4.1 §9 row 7, V17). */
+  vendorSelectedItemCount: number;
+  /** @deprecated One release only: the same value as `vendorSelectedItemCount`, for a page that still reads it. */
   vendorSelectionRuleCount: number;
 }
 
@@ -266,9 +269,9 @@ export class DropshipVendorProvisioningService {
       critical: true,
       channels: ["email", "in_app"],
       title: entitlement.status === "suspended"
-        ? "Dropship entitlement suspended"
-        : "Dropship entitlement lapsed",
-      message: "Your .ops dropship entitlement needs attention. New order acceptance and restricted dropship actions may be blocked until the membership is restored.",
+        ? "Your .ops membership is suspended"
+        : "Your .ops membership has lapsed",
+      message: "Your .ops membership needs attention. Until it's renewed, you may not be able to accept new orders or change your store.",
       payload: {
         vendorId: result.vendor.vendorId,
         memberId: entitlement.memberId,
@@ -305,7 +308,7 @@ export function buildOnboardingState(input: {
   const activeStoreCount = input.storeConnections.activeCount;
   const launchReadyConnectedStoreCount = input.storeConnections.launchReadyConnectedCount;
   const adminCatalogAvailable = input.catalog.adminExposureRuleCount > 0;
-  const hasVendorSelection = input.catalog.vendorSelectionRuleCount > 0;
+  const hasVendorSelection = input.catalog.vendorSelectedItemCount > 0;
   const entitlementBlocked = input.vendor.status === "lapsed" || input.vendor.status === "suspended";
   const hasActiveFundingMethod = input.wallet.activeFundingMethodCount > 0;
   const hasStripeReadyFundingMethod = input.wallet.activeStripeFundingMethodCount > 0;

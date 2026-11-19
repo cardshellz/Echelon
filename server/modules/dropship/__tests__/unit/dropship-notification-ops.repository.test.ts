@@ -11,7 +11,7 @@ const now = new Date("2026-05-07T19:15:00.000Z");
 describe("PgDropshipNotificationOpsRepository", () => {
   it("moves failed email events to pending and records an ops audit event before retry delivery", async () => {
     let selectCount = 0;
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, _params?: unknown[]) => {
       const sqlText = String(sql);
       if (sqlText === "BEGIN" || sqlText === "COMMIT") {
         return { rows: [] };
@@ -103,7 +103,7 @@ describe("PgDropshipNotificationOpsRepository", () => {
   });
 
   it("records retry delivery outcome with failure context", async () => {
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, _params?: unknown[]) => {
       const sqlText = String(sql);
       if (sqlText === "BEGIN" || sqlText === "COMMIT") {
         return { rows: [] };

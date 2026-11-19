@@ -1,4 +1,4 @@
-import { reconcileWmsPickingProgress } from "../wms/picking-progress.repository";
+import { reconcileWmsPickingProgress } from "../wms/picking-execution.api";
 import {
   type WmsOrder as Order,
   type InsertWmsOrder as InsertOrder,
@@ -12,14 +12,21 @@ import {
 } from "@shared/schema";
 import { db } from "../../db";
 import { OrderListRepository, type OrderPage, type OrderPageQuery, type OrderScanQuery, type OrderWithItems } from "./order-list.repository";
-import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
+import { eq, ne, inArray, notInArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { IntegrityError, ValidationError } from "../../../shared/errors";
 import { parseCountryCode } from "@shared/country-code";
-import { wmsOmsOrderLinkSql } from "../oms/oms-wms-order-link.sql";
+import {
+  omsWarehouseFinancialStopSql,
+  wmsOmsOrderLinkSql,
+} from "../oms/order-linkage-sql.api";
+import {
+  countOmsOrdersMissingCustomerName,
+  repairShopifyOmsOrderCustomer,
+} from "../oms/shopify-intake.api";
 import { normalizeShopifyRepairOrderId, normalizeShopifyRepairShopDomain, type ShopifyCustomerRepairScope } from "./shopify-customer-repair";
 import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
 import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.resolver";
-import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
+import { insertWmsOrder, type WmsOrderInsert } from "../wms/order-intake-and-items.api";
 import { recomputeOrderStatusFromShipments } from "./shipment-rollup";
 import { transitionOrderStatus, completeOrder } from "./order-status-core";
 import { completeWmsOrderAndRelease } from "./cancel-wms-order";
@@ -29,10 +36,21 @@ import {
   incrementWmsOrderItemFulfilledQuantityByShopifyLineId,
   insertWmsOrderItems,
   persistWmsOrderItemPickProgress,
+  reopenShortWmsOrderItemsForRepick,
   setWmsOrderItemHoldState,
   setWmsOrderItemLocation,
   syncWmsOrderItemsFulfilledFromOms,
-} from "../wms/order-item-commands";
+} from "../wms/order-intake-and-items.api";
+import {
+  backfillWmsOrdersAddressBatchFromOmsInWms,
+  cancelOrderBlockingAllocationExceptionsOnStatusCancelInWms,
+  claimWmsOrderForPickerInWms,
+  syncWmsOrdersCompletedFromFulfilledOmsInWms,
+  transitionWmsOrderStatusByMatrixReturningInWms,
+  updateActiveWmsOrderFieldsReturningInWms,
+  updateWmsOrderByIdInWms,
+  updateWmsOrderByIdReturningInWms,
+} from "../wms/wms-order-mutations.api";
 
 /**
  * Order statuses that are DERIVED from the underlying shipments via
@@ -194,7 +212,7 @@ async function recomputeSortRank(orderId: number): Promise<string | null> {
     slaDueAt,
     orderPlacedAt: row.orderPlacedAt as any,
   });
-  await db.update(orders).set({ sortRank: rank, slaDueAt }).where(eq(orders.id, orderId));
+  await updateWmsOrderByIdInWms(db, orderId, { sortRank: rank, slaDueAt });
   return rank;
 }
 
@@ -256,7 +274,7 @@ export async function recomputeAllActiveSortRanksDetailed(): Promise<SortRankRec
       orderPlacedAt: row.orderPlacedAt as any,
     });
     if (row.sortRank === rank && sameDateTime(row.slaDueAt as any, slaDueAt)) continue;
-    await db.update(orders).set({ sortRank: rank, slaDueAt }).where(eq(orders.id, row.id));
+    await updateWmsOrderByIdInWms(db, row.id, { sortRank: rank, slaDueAt });
     if (row.sortRank !== rank) orderIds.push(row.id);
   }
   return { updated: orderIds.length, orderIds };
@@ -286,7 +304,7 @@ export interface IOrderStorage {
   getOrderItems(orderId: number): Promise<OrderItem[]>;
   getOrderItemById(itemId: number): Promise<OrderItem | undefined>;
   updateOrderItemStatus(itemId: number, status: ItemStatus, pickedQty?: number, shortReason?: string, expectedCurrentStatus?: ItemStatus): Promise<OrderItem | null>;
-  updateOrderItemLocation(itemId: number, location: string, zone: string, barcode: string | null, imageUrl: string | null): Promise<OrderItem | null>;
+  updateOrderItemLocation(itemId: number, location: string, zone: string, barcode: string | null, imageUrl: string | null, options?: { onlyIfPendingUnpicked?: boolean }): Promise<OrderItem | null>;
   updateOrderProgress(orderId: number, postPickStatus?: string): Promise<Order | null>;
 
   updateItemFulfilledQuantity(shopifyLineItemId: number, additionalQty: number): Promise<OrderItem | null>;
@@ -384,7 +402,7 @@ export const orderMethods: IOrderStorage = {
   },
 
   async getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]> {
-    
+
     const orderList = await db.execute(sql`
       SELECT
         o.id,
@@ -433,7 +451,7 @@ export const orderMethods: IOrderStorage = {
         o.combined_role
       FROM wms.orders o
       -- BELT & SUSPENDERS: Reject any order whose OMS parent is
-      -- cancelled/refunded/shipped even if WMS status didn't get updated.
+      -- commercially cancelled/shipped even if WMS status didn't get updated.
       -- Protects against webhook delivery failures.
       LEFT JOIN oms.oms_orders oms_direct
         ON o.source = 'oms'
@@ -461,10 +479,10 @@ export const orderMethods: IOrderStorage = {
             )
           )
         )
-        AND (
-          COALESCE(oms_direct.financial_status, oms_source.financial_status) IS NULL
-          OR COALESCE(oms_direct.financial_status, oms_source.financial_status) NOT IN ('refunded', 'voided')
-        )
+        AND NOT ${omsWarehouseFinancialStopSql(
+          sql`COALESCE(oms_direct.channel_id, oms_source.channel_id)`,
+          sql`COALESCE(oms_direct.financial_status, oms_source.financial_status)`,
+        )}
         AND (
           -- Ready/in_progress/ready_to_ship orders: show in pick queue
           -- Exclude orders with zero shippable items (nothing to pick).
@@ -508,7 +526,7 @@ export const orderMethods: IOrderStorage = {
         -- Fallback only if sort_rank somehow unset (shouldn't happen):
         COALESCE(o.order_placed_at, o.shopify_created_at, o.created_at) ASC
     `);
-    
+
     const orderRows = (orderList.rows as any[]).map((row: any) => ({
       id: row.id,
       channelId: row.channel_id,
@@ -558,11 +576,11 @@ export const orderMethods: IOrderStorage = {
       combinedGroupId: row.combined_group_id,
       combinedRole: row.combined_role,
     }));
-    
+
     if (orderRows.length === 0) {
       return [];
     }
-    
+
     const orderIds = orderRows.map((o: any) => o.id);
     const idList = sql.join(orderIds.map((id: number) => sql`${id}`), sql`, `);
     const allItemsResult = await db.execute(sql`
@@ -630,7 +648,7 @@ export const orderMethods: IOrderStorage = {
       sourceTableId: null,
       externalOrderItemId: null,
     }));
-    
+
     const skusMissingImages = Array.from(new Set(
       allItems.filter(item => !item.imageUrl && item.sku).map(item => item.sku!.toUpperCase())
     ));
@@ -644,7 +662,7 @@ export const orderMethods: IOrderStorage = {
             SELECT pl.sku, pl.image_url FROM warehouse.product_locations pl
             WHERE UPPER(pl.sku) IN (${imageSkuList}) AND pl.image_url IS NOT NULL
             UNION ALL
-            SELECT pv.sku, 
+            SELECT pv.sku,
               COALESCE(
                 CASE WHEN pva.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pva.id || '/file' ELSE pva.url END,
                 CASE WHEN pa.storage_type IN ('file', 'both') THEN '/api/product-assets/' || pa.id || '/file' ELSE pa.url END
@@ -665,7 +683,7 @@ export const orderMethods: IOrderStorage = {
         console.warn("[PickQueue] Failed to enrich images:", (err as Error).message);
       }
     }
-    
+
     const skusMissingBarcodes = Array.from(new Set(
       allItems.filter(item => !item.barcode && item.sku).map(item => item.sku!.toUpperCase())
     ));
@@ -702,14 +720,14 @@ export const orderMethods: IOrderStorage = {
       }
       return enriched;
     });
-    
+
     const itemsByOrderId = new Map<number, OrderItem[]>();
     for (const item of enrichedItems) {
       const existing = itemsByOrderId.get(item.orderId) || [];
       existing.push(item);
       itemsByOrderId.set(item.orderId, existing);
     }
-    
+
 
     return orderRows.map((order: any) => ({
       ...order,
@@ -808,33 +826,7 @@ export const orderMethods: IOrderStorage = {
     // picker. This makes the claim correct regardless of how a stale picker id
     // got left behind (completion, shipment rollup, order edit, reconcile),
     // so we don't have to chase every status writer to null the field.
-    const result = await db
-      .update(orders)
-      .set({
-        warehouseStatus: "in_progress" as OrderStatus,
-        assignedPickerId: pickerId,
-        startedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(orders.id, orderId),
-          eq(orders.onHold, 0),
-          isNull(orders.orderEditOperationId),
-          inArray(orders.warehouseStatus, [
-            "ready",
-            "partially_shipped",
-            "ready_to_ship",
-            "in_progress",
-          ]),
-          // NOT (in_progress AND held by someone else)
-          or(
-            ne(orders.warehouseStatus, "in_progress"),
-            isNull(orders.assignedPickerId),
-            eq(orders.assignedPickerId, pickerId),
-          ),
-        )
-      )
-      .returning();
+    const result = await claimWmsOrderForPickerInWms(db, orderId, pickerId, new Date());
 
     if (result.length === 0) {
       console.log(`[CLAIM] Order ${orderId} claim failed - not available for picker ${pickerId}`);
@@ -870,17 +862,26 @@ export const orderMethods: IOrderStorage = {
     }
 
     // Ops-owned statuses (ready, picking, picked, packing, packed,
-    // ready_to_ship, completed, exception, cancelled) — direct write.
-    const updates: any = { warehouseStatus: status };
+    // ready_to_ship, completed, exception, cancelled) — routed through
+    // the canonical WMS transition matrix (P1.3).
+    const extraUpdates: Record<string, unknown> = {};
     if (status === "completed" || status === "ready_to_ship") {
-      updates.completedAt = new Date();
+      extraUpdates.completedAt = new Date();
+    }
+    if (status === "cancelled") {
+      extraUpdates.cancelledAt = new Date();
     }
 
-    const result = await db
-      .update(orders)
-      .set(updates)
-      .where(eq(orders.id, orderId))
-      .returning();
+    const result = await transitionWmsOrderStatusByMatrixReturningInWms(
+      db,
+      orderId,
+      status as WmsWarehouseStatus,
+      extraUpdates,
+    );
+
+    if (!result[0]) {
+      return null;
+    }
 
     if (status === "completed" || status === "cancelled") {
       await finalizePhysicallyCompleteWmsOrderItems(db, {
@@ -890,47 +891,29 @@ export const orderMethods: IOrderStorage = {
     }
 
     if (status === "cancelled") {
-      await db.execute(sql`
-        UPDATE wms.allocation_exceptions
-        SET
-          status = 'cancelled',
-          resolution = 'order_cancelled_status_update',
-          resolved_at = NOW(),
-          updated_at = NOW(),
-          metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object(
-            'closedBy', 'orders_storage',
-            'closedByOrderStatus', 'cancelled',
-            'closedAt', NOW()
-          )
-        WHERE order_id = ${orderId}
-          AND status NOT IN ('resolved', 'resolved_inline', 'cancelled')
-          AND (
-            status = 'blocked'
-            OR LOWER(COALESCE(metadata->>'shipmentBlocking', 'false')) = 'true'
-          )
-      `);
+      await cancelOrderBlockingAllocationExceptionsOnStatusCancelInWms(db, orderId);
     }
 
     return result[0] || null;
   },
 
   async updateOrderFields(orderId: number, updates: Partial<Order>): Promise<Order | null> {
-    const { id, createdAt, ...safeUpdates } = updates as any;
+    const { id, createdAt, warehouseStatus, ...safeUpdates } = updates as any;
     if (safeUpdates.shippingCountry !== undefined) {
       safeUpdates.shippingCountry = parseCountryCode(safeUpdates.shippingCountry);
     }
-    
+
+    if (warehouseStatus !== undefined) {
+      await this.updateOrderStatus(orderId, warehouseStatus as OrderStatus);
+    }
+
     if (Object.keys(safeUpdates).length === 0) {
       const existing = await this.getOrderById(orderId);
       return existing || null;
     }
-    
-    const result = await db
-      .update(orders)
-      .set(safeUpdates)
-      .where(eq(orders.id, orderId))
-      .returning();
-    
+
+    const result = await updateWmsOrderByIdReturningInWms(db, orderId, safeUpdates);
+
     return result[0] || null;
   },
 
@@ -974,7 +957,8 @@ export const orderMethods: IOrderStorage = {
     location: string,
     zone: string,
     barcode: string | null,
-    imageUrl: string | null
+    imageUrl: string | null,
+    options?: { onlyIfPendingUnpicked?: boolean },
   ): Promise<OrderItem | null> {
     return setWmsOrderItemLocation(db, {
       itemId,
@@ -982,6 +966,7 @@ export const orderMethods: IOrderStorage = {
       zone,
       barcode,
       imageUrl,
+      onlyIfPendingUnpicked: options?.onlyIfPendingUnpicked,
     });
   },
 
@@ -991,21 +976,13 @@ export const orderMethods: IOrderStorage = {
   },
 
   async holdOrder(orderId: number): Promise<Order | null> {
-    const result = await db
-      .update(orders)
-      .set({ onHold: 1, heldAt: new Date() })
-      .where(eq(orders.id, orderId))
-      .returning();
+    const result = await updateWmsOrderByIdReturningInWms(db, orderId, { onHold: 1, heldAt: new Date() });
     if (result[0]) await recomputeSortRank(orderId);
     return result[0] || null;
   },
 
   async releaseHoldOrder(orderId: number): Promise<Order | null> {
-    const result = await db
-      .update(orders)
-      .set({ onHold: 0, heldAt: null })
-      .where(eq(orders.id, orderId))
-      .returning();
+    const result = await updateWmsOrderByIdReturningInWms(db, orderId, { onHold: 0, heldAt: null });
     if (result[0]) await recomputeSortRank(orderId);
     return result[0] || null;
   },
@@ -1030,11 +1007,7 @@ export const orderMethods: IOrderStorage = {
 
   async setOrderPriority(orderId: number, priority: number | "reset"): Promise<Order | null> {
     const finalPriority = priority === "reset" ? 100 : priority;
-    const result = await db
-      .update(orders)
-      .set({ priority: finalPriority })
-      .where(eq(orders.id, orderId))
-      .returning();
+    const result = await updateWmsOrderByIdReturningInWms(db, orderId, { priority: finalPriority });
     if (result[0]) await recomputeSortRank(orderId);
     return result[0] || null;
   },
@@ -1058,7 +1031,7 @@ export const orderMethods: IOrderStorage = {
   async areAllItemsFulfilled(orderId: number): Promise<boolean> {
     const items = await this.getOrderItems(orderId);
     if (items.length === 0) return false;
-    
+
     return items.every(item => (item.fulfilledQuantity || 0) >= item.quantity);
   },
 
@@ -1068,58 +1041,102 @@ export const orderMethods: IOrderStorage = {
       .from(orders)
       .where(eq(orders.warehouseStatus, "exception"))
       .orderBy(desc(orders.heldAt));
-    
+
     const result: (Order & { items: OrderItem[] })[] = [];
     for (const order of exceptionOrders) {
       const items = await db.select().from(orderItems).where(eq(orderItems.orderId, order.id));
       result.push({ ...order, items });
     }
-    
+
     return result;
   },
 
   async resolveException(
-    orderId: number, 
-    resolution: string, 
-    resolvedBy: string, 
+    orderId: number,
+    resolution: string,
+    resolvedBy: string,
     notes?: string
   ): Promise<Order | null> {
-    let newStatus: OrderStatus;
-    switch (resolution) {
-      case "ship_partial":
-        newStatus = "completed";
-        break;
-      case "hold":
-        newStatus = "exception";
-        break;
-      case "resolved":
-        newStatus = "completed";
-        break;
-      case "cancelled":
-        newStatus = "cancelled";
-        break;
-      default:
-        newStatus = "completed";
-    }
-    
-    const updates: any = {
-      exceptionResolution: resolution,
-      exceptionResolvedAt: new Date(),
-      exceptionResolvedBy: resolvedBy,
-      exceptionNotes: notes || null,
-    };
-    
-    if (resolution !== "hold") {
-      updates.warehouseStatus = newStatus;
-    }
-    
-    const result = await db
-      .update(orders)
-      .set(updates)
-      .where(eq(orders.id, orderId))
-      .returning();
-    
-    return result[0] || null;
+    const runInTx = typeof (db as any).transaction === "function"
+      ? (fn: (tx: any) => Promise<Order | null>) => db.transaction(fn)
+      : (fn: (tx: any) => Promise<Order | null>) => fn(db);
+
+    return runInTx(async (tx: any) => {
+      const currentRows = await tx
+        .select()
+        .from(orders)
+        .where(eq(orders.id, orderId))
+        .limit(1);
+      const currentOrder = currentRows[0] as Order | undefined;
+      if (currentOrder && (currentOrder.warehouseStatus === "shipped" || currentOrder.warehouseStatus === "cancelled")) {
+        throw new IntegrityError(
+          `Cannot resolve exception on order ${orderId}: order is already ${currentOrder.warehouseStatus}`,
+          { reason: "order_terminal_status", orderId, warehouseStatus: currentOrder.warehouseStatus },
+        );
+      }
+
+      let newStatus: OrderStatus;
+      switch (resolution) {
+        case "ship_partial":
+          newStatus = "completed";
+          break;
+        case "hold":
+          newStatus = "exception";
+          break;
+        case "resolved": {
+          await reopenShortWmsOrderItemsForRepick(tx as any, { orderId });
+          const itemsAfterReopen: OrderItem[] = typeof tx.select === "function"
+            ? await tx.select().from(orderItems).where(eq(orderItems.orderId, orderId))
+            : [];
+          const activeShippable = itemsAfterReopen.filter(
+            (it) => it.requiresShipping === 1 && !it.onHold && it.status !== "cancelled",
+          );
+          const allCompleted = activeShippable.length > 0 && activeShippable.every(
+            (it) => it.status === "completed" && (it.pickedQuantity ?? 0) >= (it.quantity ?? 0),
+          );
+          const hasProgress = Boolean(currentOrder?.assignedPickerId) || activeShippable.some(
+            (it) => (it.pickedQuantity ?? 0) > 0 || it.status === "in_progress",
+          );
+          newStatus = allCompleted ? "ready_to_ship" : hasProgress ? "in_progress" : "ready";
+          break;
+        }
+        case "cancelled":
+          newStatus = "cancelled";
+          break;
+        default:
+          newStatus = "completed";
+      }
+
+      const updates: any = {
+        exceptionResolution: resolution,
+        exceptionResolvedAt: new Date(),
+        exceptionResolvedBy: resolvedBy,
+        exceptionNotes: notes || null,
+      };
+
+      if (resolution !== "hold") {
+        updates.warehouseStatus = newStatus;
+      }
+      if (resolution === "resolved") {
+        updates.onHold = 0;
+        updates.heldAt = null;
+      }
+
+      if (updates.warehouseStatus) {
+        const { warehouseStatus: targetStatus, ...extraUpdates } = updates;
+        const result = await transitionWmsOrderStatusByMatrixReturningInWms(
+          tx,
+          orderId,
+          targetStatus as WmsWarehouseStatus,
+          extraUpdates,
+        );
+        return result[0] || null;
+      }
+
+      const result = await updateActiveWmsOrderFieldsReturningInWms(tx, orderId, updates);
+
+      return result[0] || null;
+    });
   },
 
   // Shopify raw-table queries (used by sync routes)
@@ -1210,15 +1227,7 @@ export const orderMethods: IOrderStorage = {
 
   async syncFulfilledStatusesFromShopify() {
     // 1. Update wms.orders status to 'completed' where OMS shows fulfilled/shipped
-    await db.execute(sql`
-      UPDATE wms.orders o SET
-        status = 'completed',
-        completed_at = COALESCE(o.completed_at, NOW())
-      FROM oms.oms_orders oms
-      WHERE o.order_number = oms.external_order_number
-        AND (oms.fulfillment_status = 'fulfilled' OR oms.status = 'shipped')
-        AND o.warehouse_status != 'completed'
-    `);
+    await syncWmsOrdersCompletedFromFulfilledOmsInWms(db);
 
     await syncWmsOrderItemsFulfilledFromOms(db);
   },
@@ -1256,21 +1265,7 @@ export const orderMethods: IOrderStorage = {
       let updated = 0;
       for (let offset = 0; offset < normalized.length; offset += ORDER_ADDRESS_BACKFILL_BATCH_SIZE) {
         const batch = normalized.slice(offset, offset + ORDER_ADDRESS_BACKFILL_BATCH_SIZE);
-        const result = await tx.execute(sql`
-          UPDATE wms.orders o SET
-            customer_name = COALESCE(oms.customer_name, oms.ship_to_name, o.customer_name),
-            customer_email = COALESCE(oms.customer_email, o.customer_email),
-            shipping_address = COALESCE(oms.ship_to_address1, o.shipping_address),
-            shipping_city = COALESCE(oms.ship_to_city, o.shipping_city),
-            shipping_state = COALESCE(oms.ship_to_state, o.shipping_state),
-            shipping_postal_code = COALESCE(oms.ship_to_zip, o.shipping_postal_code),
-            shipping_country = normalized.country
-          FROM oms.oms_orders oms,
-            (VALUES ${sql.join(batch.map(row => sql`(${row.id}::integer, ${row.oms_order_id}::integer, ${row.country}::text)`), sql`, `)})
-            AS normalized(order_id, oms_order_id, country)
-          WHERE o.id = normalized.order_id AND oms.id = normalized.oms_order_id
-            AND o.channel_id = oms.channel_id
-        `);
+        const result = await backfillWmsOrdersAddressBatchFromOmsInWms(tx, batch);
         updated += result.rowCount || 0;
       }
       return { updated };
@@ -1302,56 +1297,15 @@ export const orderMethods: IOrderStorage = {
     const shopDomain = normalizeShopifyRepairShopDomain(scope?.shopDomain);
     const externalOrderId = normalizeShopifyRepairOrderId(scope?.externalOrderId);
     const numericOrderId = externalOrderId.slice("gid://shopify/Order/".length);
-    return db.transaction(async tx => {
-      // Hold the resolved channel and connection through the write. A default
-      // channel or display number can never establish provider ownership.
-      const connections = await tx.execute<{ channel_id: number }>(sql`
-        SELECT c.id AS channel_id
-        FROM channels.channels c
-        JOIN channels.channel_connections cc ON cc.channel_id = c.id
-        WHERE c.provider = 'shopify' AND c.status = 'active'
-          AND LOWER(BTRIM(cc.shop_domain)) = ${shopDomain}
-        ORDER BY c.id, cc.id
-        LIMIT 2
-        FOR SHARE OF c, cc
-      `);
-      if (connections.rows.length !== 1) {
-        throw new IntegrityError("Customer repair requires one active Shopify channel connection for the configured shop.");
-      }
-      const channelId = connections.rows[0].channel_id;
-      const matches = await tx.execute<{ id: number }>(sql`
-        SELECT id FROM oms.oms_orders
-        WHERE channel_id = ${channelId}
-          AND external_order_id IN (${numericOrderId}, ${externalOrderId})
-        ORDER BY id LIMIT 2 FOR UPDATE
-      `);
-      if (matches.rows.length === 0) return 0;
-      if (matches.rows.length !== 1) {
-        throw new IntegrityError("Customer repair requires one OMS order for the exact Shopify order and channel.");
-      }
-      const result = await tx.execute(sql`
-      UPDATE oms.oms_orders SET
-        customer_name = ${data.customerName},
-        customer_email = ${data.customerEmail},
-        ship_to_name = ${data.shippingName},
-        ship_to_address1 = ${data.shippingAddress1},
-        ship_to_address2 = ${data.shippingAddress2},
-        ship_to_city = ${data.shippingCity},
-        ship_to_state = ${data.shippingState},
-        ship_to_zip = ${data.shippingPostalCode},
-        ship_to_country = ${shippingCountry}
-      WHERE id = ${matches.rows[0].id} AND channel_id = ${channelId}
-        AND external_order_id IN (${numericOrderId}, ${externalOrderId})
-    `);
-      return result.rowCount || 0;
-    });
+    return repairShopifyOmsOrderCustomer(
+      db,
+      { shopDomain, externalOrderId, numericOrderId },
+      { ...data, shippingCountry },
+    );
   },
 
   async countOmsRawOrdersMissingCustomerName(): Promise<number> {
-    const result = await db.execute<{ count: string }>(sql`
-      SELECT COUNT(*) as count FROM oms.oms_orders WHERE customer_name IS NULL
-    `);
-    return parseInt(result.rows[0]?.count || '0', 10);
+    return countOmsOrdersMissingCustomerName(db);
   },
 
   // Diagnostic/admin queries

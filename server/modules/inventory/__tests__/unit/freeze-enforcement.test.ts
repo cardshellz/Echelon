@@ -133,4 +133,4 @@ vi.mock("../../infrastructure/operational-quantity-posting", async importOrigina
   openOperationalQuantityPosting: vi.fn(async () => null),
 }));
 // The freeze fixture has no held receipt custody; custody conflicts are tested separately.
-vi.mock("../../../procurement/receiving-custody-public", () => ({ readUnresolvedReceivingCustody: vi.fn(async () => []) }));
+vi.mock("../../../procurement/receiving-custody.api", () => ({ readUnresolvedReceivingCustody: vi.fn(async () => []) }));

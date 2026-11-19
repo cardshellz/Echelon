@@ -1,7 +1,8 @@
 import { useCallback, useRef } from "react";
-import { keepPreviousData, useQuery, type QueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import type { StockLinkStatus } from "@shared/types/stock-link";
 
-import { ENDPOINTS, fetchPreview, fetchPublicationStatus, fetchPublishingStatus, fetchShopifyLocations, fetchView } from "./api";
+import { ENDPOINTS, fetchPreview, fetchPublicationStatus, fetchPublishingStatus, fetchShopifyLocations, fetchStockLinkStatus, fetchView } from "./api";
 
 /** React Query wiring for the Channel Inventory workspace. */
 
@@ -10,10 +11,11 @@ export const PREVIEW_QUERY_KEY = [ENDPOINTS.preview] as const;
 export const PUBLISHING_STATUS_QUERY_KEY = [ENDPOINTS.syncStatus] as const;
 const PUBLISHING_STATUS_REFRESH_MS = 30_000;
 
-export function useChannelInventoryView(productId: number | null) {
+export function useChannelInventoryView(productId: number | null, options: { enabled?: boolean } = {}) {
   return useQuery({
     queryKey: [...VIEW_QUERY_KEY, productId],
     queryFn: () => fetchView(productId),
+    enabled: options.enabled ?? true,
     // Switching the product in focus refetches the same page; keep the last
     // good view on screen instead of flashing to a loading state.
     placeholderData: keepPreviousData,
@@ -41,6 +43,23 @@ export function usePublicationStatus(publicationTargetId: number, productId: num
   return useQuery({
     queryKey: [ENDPOINTS.publicationStatus, publicationTargetId, productId],
     queryFn: () => fetchPublicationStatus(publicationTargetId, productId),
+    refetchInterval: PUBLISHING_STATUS_REFRESH_MS,
+    retry: false,
+  });
+}
+
+export const stockLinkStatusQueryKey = (publicationTargetId: number) => [ENDPOINTS.stockLinkStatus, publicationTargetId] as const;
+
+/**
+ * Read only for destinations that can have a stock-link policy (`enabled`); a 404 or bad answer on a first read reads
+ * as unsupported. Each refresh passes the cached answer, so a failed refresh after a supported one keeps it (TST-1).
+ */
+export function useStockLinkStatus(publicationTargetId: number, enabled: boolean) {
+  const queryClient = useQueryClient();
+  return useQuery({
+    queryKey: stockLinkStatusQueryKey(publicationTargetId),
+    queryFn: () => fetchStockLinkStatus(publicationTargetId, queryClient.getQueryData<StockLinkStatus>(stockLinkStatusQueryKey(publicationTargetId))),
+    enabled,
     refetchInterval: PUBLISHING_STATUS_REFRESH_MS,
     retry: false,
   });

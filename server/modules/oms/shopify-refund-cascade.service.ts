@@ -11,11 +11,20 @@ import {
 import {
   markShipmentCancelled,
   recomputeOrderStatusFromShipments,
-} from "../orders/shipment-rollup";
+} from "../orders/shipment-rollup-and-context.api";
 import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
-import { recordOmsWmsAuthorityCleanupAudit } from "../wms/oms-wms-authority-cleanup-audit.repository";
-import { applyRefundAuthorityToWmsOrderItem } from "../wms/order-item-commands";
-import { createExpectedWmsReturn } from "../wms/expected-return-commands";
+import { recordOmsWmsAuthorityCleanupAudit } from "../wms/shipment-execution-and-projection.api";
+import { applyRefundAuthorityToWmsOrderItem } from "../wms/order-intake-and-items.api";
+import { createExpectedWmsReturn } from "../wms/returns-receipt.api";
+import { refreshWmsOrderItemAggregateCountsOnRefundInWms } from "../wms/wms-order-mutations.api";
+import {
+  setOutboundShipmentReviewFlagInWms,
+  updateShipmentItemCommercialRequestedQtyInWms,
+} from "../wms/outbound-shipment-mutations.api";
+import { observeChannelMerchandiseQuantity } from "./domain/channel-merchandise-quantity";
+import { channelMerchandiseDemandReduction } from "./domain/channel-merchandise-demand";
+import { shopifyMerchandiseSnapshotSchema, type ShopifyMerchandiseSnapshot } from "./infrastructure/shopify-merchandise-snapshot";
+import type { EngineCancelResult } from "../shipping/engine-and-reconcile.api";
 
 const REFUND_LOCK_NAMESPACE = 918413;
 
@@ -50,24 +59,27 @@ interface RefundDemandReconciliationResult {
 }
 
 export interface ShopifyRefundCascadeHelpers {
+  /** Native merchandise evidence is required for item-affecting refunds. This is read-only. */
+  readMerchandiseSnapshot?: () => Promise<ShopifyMerchandiseSnapshot>;
   resolveOmsOrder: (
     db: any,
     args: { shopifyOrderId: string | number; channelId: number },
   ) => Promise<{ id: number } | null>;
   reconcileRefundOrderDemand?: (args: {
+    requiredAuthority?: "canonical";
     orderId: number;
     sourceEventId: string;
     releaseTargets: readonly { orderItemId: number; quantity: number }[];
     reason: string;
     userId?: string;
   }) => Promise<RefundDemandReconciliationResult>;
-  shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<unknown> };
+  shipstation?: { cancelOrder: (shipstationOrderId: number) => Promise<EngineCancelResult | unknown> };
   shippingEngine?: {
     cancel: (ref: {
       engine: string;
       engineOrderRef: string;
       engineShipmentRef?: string;
-    }) => Promise<unknown>;
+    }) => Promise<EngineCancelResult | unknown>;
   };
   pushShipment?: (shipmentId: number) => Promise<unknown>;
   recordReturnCase?: (args: {
@@ -112,6 +124,8 @@ interface OmsLineStateRow {
   id: number;
   external_line_item_id: string;
   channel_observed_quantity: number;
+  channel_current_quantity?: number | null;
+  channel_quantity_updated_at?: Date | string | null;
   paid_quantity: number;
   authority_fulfillable_quantity: number;
   cancelled_quantity: number;
@@ -233,6 +247,8 @@ async function loadAndLockOmsLines(
       ol.id,
       ol.external_line_item_id,
       ol.channel_observed_quantity,
+      ol.channel_current_quantity,
+      ol.channel_quantity_updated_at,
       ol.paid_quantity,
       ol.authority_fulfillable_quantity,
       ol.cancelled_quantity,
@@ -285,6 +301,8 @@ async function loadRefundAggregates(
       ol.id,
       ol.external_line_item_id,
       ol.channel_observed_quantity,
+      ol.channel_current_quantity,
+      ol.channel_quantity_updated_at,
       ol.paid_quantity,
       ol.authority_fulfillable_quantity,
       ol.cancelled_quantity,
@@ -351,8 +369,9 @@ async function persistRefundAdjustments(
   return inserted;
 }
 
-function deriveAuthorityForRefundLine(line: OmsLineStateRow) {
+function deriveAuthorityForRefundLine(line: OmsLineStateRow, useChannelQuantities = false) {
   return deriveRefundAuthority({
+    channelCurrentQuantity: useChannelQuantities ? line.channel_current_quantity : null,
     paidQuantity: Number(line.paid_quantity),
     previousAuthorityFulfillableQuantity: Number(line.authority_fulfillable_quantity),
     cancelledQuantity: Number(line.cancelled_quantity),
@@ -369,13 +388,17 @@ async function applyOmsLineAuthority(
     sourceInboxId: number | null;
     now: Date;
     lines: OmsLineStateRow[];
+    useChannelQuantities?: boolean;
+    previousLines?: ReadonlyMap<number, OmsLineStateRow>;
   },
 ): Promise<{ changed: number; warnings: string[]; lines: OmsLineStateRow[] }> {
   let changed = 0;
   const warnings: string[] = [];
+  const nextLines: OmsLineStateRow[] = [];
 
   for (const line of args.lines) {
-    const authority = deriveAuthorityForRefundLine(line);
+    const previous = args.previousLines?.get(Number(line.id)) ?? line;
+    const authority = deriveAuthorityForRefundLine(line, args.useChannelQuantities);
     const stateChanged =
       Number(line.authority_fulfillable_quantity) !== authority.authorityFulfillableQuantity ||
       Number(line.refunded_quantity) !== authority.refundedQuantity ||
@@ -406,6 +429,8 @@ async function applyOmsLineAuthority(
 
     const eventAuthority: OmsLineAuthorityState = {
       channelObservedQuantity: Number(line.channel_observed_quantity),
+      channelCurrentQuantity: line.channel_current_quantity,
+      channelQuantityUpdatedAt: line.channel_quantity_updated_at == null ? null : new Date(line.channel_quantity_updated_at),
       paidQuantity: Number(line.paid_quantity),
       authorityFulfillableQuantity: authority.authorityFulfillableQuantity,
       authorizationStatus: authority.authorizationStatus,
@@ -424,27 +449,30 @@ async function applyOmsLineAuthority(
       cancelledQuantity: Number(line.cancelled_quantity),
       refundedQuantity: authority.refundedQuantity,
       previous: {
-        channelObservedQuantity: Number(line.channel_observed_quantity),
-        paidQuantity: Number(line.paid_quantity),
-        authorityFulfillableQuantity: Number(line.authority_fulfillable_quantity),
-        authorizationStatus: String(line.authorization_status),
+        channelObservedQuantity: Number(previous.channel_observed_quantity),
+        channelCurrentQuantity: previous.channel_current_quantity,
+        paidQuantity: Number(previous.paid_quantity),
+        authorityFulfillableQuantity: Number(previous.authority_fulfillable_quantity),
+        authorizationStatus: String(previous.authorization_status),
       },
     });
 
-    line.authority_fulfillable_quantity = authority.authorityFulfillableQuantity;
-    line.refunded_quantity = authority.refundedQuantity;
-    line.authorization_status = authority.authorizationStatus;
+    nextLines.push({ ...line, authority_fulfillable_quantity: authority.authorityFulfillableQuantity,
+      refunded_quantity: authority.refundedQuantity, authorization_status: authority.authorizationStatus });
   }
 
-  return { changed, warnings, lines: args.lines };
+  return { changed, warnings, lines: nextLines };
 }
 
 async function applyWmsLineState(
   tx: any,
   args: {
     wmsOrderId: number;
+    refundExternalId: string;
+    useChannelQuantities: boolean;
     adjustments: ShopifyRefundLineAdjustment[];
     authorityLines: OmsLineStateRow[];
+    previousLines: ReadonlyMap<number, OmsLineStateRow>;
     now: Date;
   },
 ): Promise<{
@@ -574,12 +602,35 @@ async function applyWmsLineState(
       Number.isInteger(productVariantId) &&
       productVariantId! > 0
     ) {
-      const releaseQuantity = deriveRefundEventReservationReleaseQuantity({
-        line: authorityLine,
-        adjustment,
-        pickedQuantity,
-        fulfilledQuantity,
-      });
+      let releaseQuantity: number;
+      if (args.useChannelQuantities) {
+        // Save the physical demand change, so retries after a committed WMS
+        // leg can finish inventory reconciliation without deriving it again
+        // from a financial refund. A different refund sees no second delta.
+        const previous = args.previousLines.get(omsOrderLineId);
+        if (!previous) throw new Error("The previous channel merchandise authority is unavailable.");
+        const reduced = channelMerchandiseDemandReduction({
+          warehouseQuantity: Number(row.quantity),
+          previousAuthorityQuantity: Number(previous.authority_fulfillable_quantity),
+          currentAuthorityQuantity: authorityFulfillableQuantity,
+          pickedQuantity,
+          fulfilledQuantity,
+        });
+        const persisted = await tx.execute(sql`
+          UPDATE oms.order_line_adjustments SET merchandise_reduction_quantity =
+            COALESCE(merchandise_reduction_quantity, ${reduced})
+          WHERE order_line_id=${omsOrderLineId} AND source='shopify_webhook'
+            AND source_event_id=${args.refundExternalId} AND adjustment_type='refund'
+          RETURNING merchandise_reduction_quantity
+        `);
+        const rows = rowsOf<{ merchandise_reduction_quantity: number }>(persisted);
+        if (rows.length !== 1 || !Number.isSafeInteger(rows[0].merchandise_reduction_quantity)
+          || rows[0].merchandise_reduction_quantity < 0)
+          throw new Error("The saved channel merchandise reduction is unavailable.");
+        releaseQuantity = rows[0].merchandise_reduction_quantity;
+      } else {
+        releaseQuantity = deriveRefundEventReservationReleaseQuantity({ line: authorityLine, adjustment, pickedQuantity, fulfilledQuantity });
+      }
       if (releaseQuantity > 0) {
         releaseTargets.push({ orderItemId: item.id, quantity: releaseQuantity });
       }
@@ -587,24 +638,10 @@ async function applyWmsLineState(
   }
 
   if (changed > 0) {
-    await tx.execute(sql`
-      UPDATE wms.orders o
-      SET item_count = agg.item_count,
-          unit_count = agg.unit_count,
-          picked_count = agg.picked_count,
-          updated_at = ${args.now}
-      FROM (
-        SELECT
-          order_id,
-          COUNT(*)::int AS item_count,
-          COALESCE(SUM(quantity), 0)::int AS unit_count,
-          COALESCE(SUM(CASE WHEN requires_shipping <> 0 THEN picked_quantity ELSE 0 END), 0)::int AS picked_count
-        FROM wms.order_items
-        WHERE order_id = ${args.wmsOrderId}
-        GROUP BY order_id
-      ) agg
-      WHERE o.id = agg.order_id
-    `);
+    await refreshWmsOrderItemAggregateCountsOnRefundInWms(tx, {
+      wmsOrderId: args.wmsOrderId,
+      now: args.now,
+    });
   }
 
   return { changed, items, releaseTargets };
@@ -666,12 +703,11 @@ async function reconcileActiveShipmentItems(
     changedShipmentIds.add(allocation.shipmentId);
     // qty is physical/provider source evidence and must remain positive and
     // addressable even if the line is no longer commercially requested.
-    await tx.execute(sql`
-      UPDATE wms.outbound_shipment_items
-      SET commercial_requested_qty = ${allocation.nextQuantity}
-      WHERE id = ${allocation.shipmentItemId}
-        AND shipment_id = ${allocation.shipmentId}
-    `);
+    await updateShipmentItemCommercialRequestedQtyInWms(tx, {
+      shipmentItemId: allocation.shipmentItemId,
+      shipmentId: allocation.shipmentId,
+      nextQuantity: allocation.nextQuantity,
+    });
   }
 
   const shipmentResult = await tx.execute(sql`
@@ -727,13 +763,7 @@ async function reconcileActiveShipmentItems(
     }
 
     if (reviewReason) {
-      await tx.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = true,
-            review_reason = ${reviewReason},
-            updated_at = ${args.now}
-        WHERE id = ${shipmentId}
-      `);
+      await setOutboundShipmentReviewFlagInWms(tx, shipmentId, reviewReason, args.now);
     }
 
     if (!contentsChanged && remainingQuantity > 0 && !reviewReason) continue;
@@ -902,6 +932,7 @@ async function applyInternalRefundState(
     wmsOrderId: number | null;
     refundExternalId: string;
     refundPayload: Record<string, unknown>;
+    merchandise?: ShopifyMerchandiseSnapshot;
     adjustments: ShopifyRefundLineAdjustment[];
     sourceInboxId: number | null;
     now: Date;
@@ -911,11 +942,28 @@ async function applyInternalRefundState(
   },
 ): Promise<InternalRefundResult> {
   return db.transaction(async (tx: any) => {
+    if (args.merchandise)
+      await tx.execute(sql`SELECT id FROM oms.oms_orders WHERE id=${args.omsOrderId} FOR UPDATE`);
     await tx.execute(sql`
       SELECT pg_advisory_xact_lock(${REFUND_LOCK_NAMESPACE}, ${args.omsOrderId})
     `);
 
     let lines = await loadAndLockOmsLines(tx, args.omsOrderId, args.adjustments);
+    const previousLines = new Map(lines.map(line => [Number(line.id), line]));
+    if (args.merchandise) {
+      const channelLines = new Map(args.merchandise.lines.map(line => [line.id.replace(/^gid:\/\/shopify\/LineItem\//, ""), line]));
+      for (const line of lines) {
+        const native = channelLines.get(String(line.external_line_item_id));
+        if (!native) throw new Error("The refunded line is absent from the verified channel snapshot.");
+        const observation = observeChannelMerchandiseQuantity({
+          purchasedQuantity: native.quantity, currentQuantity: native.currentQuantity, updatedAt: args.merchandise.updatedAt,
+          previous: { channelCurrentQuantity: line.channel_current_quantity, channelQuantityUpdatedAt: line.channel_quantity_updated_at },
+        });
+        if (observation.stale) continue;
+        await tx.execute(sql`UPDATE oms.oms_order_lines SET channel_current_quantity=${observation.channelCurrentQuantity},
+          channel_quantity_updated_at=${observation.channelQuantityUpdatedAt} WHERE id=${line.id} AND order_id=${args.omsOrderId}`);
+      }
+    }
     const lineIdByExternalId = new Map(
       lines.map((line) => [String(line.external_line_item_id), Number(line.id)]),
     );
@@ -937,6 +985,8 @@ async function applyInternalRefundState(
       sourceInboxId: args.sourceInboxId,
       now: args.now,
       lines,
+      useChannelQuantities: args.merchandise !== undefined,
+      previousLines,
     });
 
     if (!args.wmsOrderId) {
@@ -954,8 +1004,11 @@ async function applyInternalRefundState(
 
     const wmsResult = await applyWmsLineState(tx, {
       wmsOrderId: args.wmsOrderId,
+      refundExternalId: args.refundExternalId,
+      useChannelQuantities: args.merchandise !== undefined,
       adjustments: args.adjustments,
       authorityLines: authorityResult.lines,
+      previousLines,
       now: args.now,
     });
     await refreshOmsLineMaterializedQuantities(tx, {
@@ -1301,16 +1354,24 @@ export async function applyShopifyRefundCascade(
     WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(omsOrder.id)})
        OR (source = 'shopify' AND source_table_id = ${String(omsOrder.id)})
     ORDER BY id
-    LIMIT 1
+    LIMIT 2
   `);
+  if (rowsOf(wmsOrderResult).length > 1)
+    throw Object.assign(new Error("A channel refund spans multiple warehouse partitions and requires quantity-allocation review."),
+      { code: "CHANNEL_REFUND_PARTITIONS_REQUIRE_REVIEW", context: { omsOrderId: omsOrder.id } });
   const wmsOrderIdRaw = rowsOf<any>(wmsOrderResult)[0]?.id;
   const wmsOrderId = wmsOrderIdRaw == null ? null : Number(wmsOrderIdRaw);
+
+  const merchandise = shopifyMerchandiseSnapshotSchema.parse(await helpers.readMerchandiseSnapshot?.());
+  if (merchandise.orderId.replace(/^gid:\/\/shopify\/Order\//, "") !== String(payload.order_id))
+    throw new Error("A matching, complete channel merchandise snapshot is required.");
 
   const internal = await applyInternalRefundState(db, {
     omsOrderId: omsOrder.id,
     wmsOrderId,
     refundExternalId,
     refundPayload: payload,
+    merchandise,
     adjustments,
     sourceInboxId: options.sourceInboxId ?? null,
     now,
@@ -1327,6 +1388,7 @@ export async function applyShopifyRefundCascade(
   }
   if (internal.releaseTargets.length > 0) {
     const reconciliation = await helpers.reconcileRefundOrderDemand!({
+      requiredAuthority: "canonical" as const,
       orderId: wmsOrderId!,
       sourceEventId: refundExternalId,
       releaseTargets: internal.releaseTargets,
@@ -1358,13 +1420,13 @@ export async function applyShopifyRefundCascade(
           now,
           skipEngineCancel: plan.skipEngineCancel,
           engineCancel: helpers.shippingEngine
-            ? async (ref) => { await helpers.shippingEngine!.cancel(ref); }
+            ? async (ref) =>
+                (await helpers.shippingEngine!.cancel(ref)) as EngineCancelResult | void
             : undefined,
           shipstation: helpers.shipstation
             ? {
-                removeFromList: async (shipstationOrderId: number) => {
-                  await helpers.shipstation!.cancelOrder(shipstationOrderId);
-                },
+                removeFromList: async (shipstationOrderId: number) =>
+                  (await helpers.shipstation!.cancelOrder(shipstationOrderId)) as EngineCancelResult | void,
               }
             : undefined,
         },

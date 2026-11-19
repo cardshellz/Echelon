@@ -13,6 +13,7 @@ const shipmentSchema = z.object({
   shipDate: optionalText, createDate: optionalText, voidDate: optionalText,
   voided: z.boolean().optional(), isReturnLabel: z.boolean().optional(),
   shipmentItems: z.unknown().optional(),
+  dimensions: z.unknown().optional(),
 }).passthrough();
 const pageSchema = z.object({ shipments: z.array(shipmentSchema).max(100), page: positiveId,
   pages: z.number().int().nonnegative().safe(), total: z.number().int().nonnegative().safe() });

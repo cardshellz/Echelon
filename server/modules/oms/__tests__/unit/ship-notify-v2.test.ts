@@ -31,8 +31,23 @@ import {
   beforeEach,
   afterEach,
 } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
+
+function readShipStationSource(): string {
+  const omsDir = resolve(__dirname, "../..");
+  const subDir = resolve(omsDir, "shipstation");
+  const subFiles = existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(subDir, f), "utf-8"))
+    : [];
+  return [
+    readFileSync(resolve(__dirname, "../../shipstation.service.ts"), "utf-8"),
+    ...subFiles,
+  ].join("\n");
+}
 
 import {
   createShipStationService,
@@ -486,7 +501,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     await expectCarrierPackageContentsRejection(mock, shipmentPayload);
   });
 
-  it("records a post-refund package for review without direct OMS or provider writes", async () => {
+  it("records a post-refund package from an unsupported channel for review without direct OMS or provider writes", async () => {
     const shipmentPayload = makeExactShipmentPayload();
     const mock = makeDb([
       // shipstation_order_id lookup
@@ -511,6 +526,9 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       { rows: [{ oms_fulfillment_order_id: "9999" }] },
       // finality guard
       { rows: [{ status: "shipped", financial_status: "refunded" }] },
+      // Provider capability does not apply Shopify quantity rules to another channel.
+      { rows: [{ channel_id: 37, external_order_id: "1", status: "shipped", financial_status: "refunded", cancelled_at: null }] },
+      { rows: [{ provider: "ebay" }] },
       // mark shipment review
       { rows: [] },
     ]);
@@ -544,6 +562,37 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       }),
       { executeImmediately: false },
     );
+  });
+
+  it("records a real package after a money refund when native merchandise still confirms those paid units", async () => {
+    const shipment = makeExactShipmentPayload();
+    const version = "2026-10-24T12:00:00.000Z";
+    const mock = makeDb([
+      { rows: [{ id: 501, order_id: 42, status: "queued" }] },
+      ...exactSingleItemSyncResponses(),
+      { rows: [{ id: 501, order_id: 42, status: "queued", tracking_number: null, carrier: null, tracking_url: null }] },
+      { rows: [] },
+      { rows: [{ oms_fulfillment_order_id: "9999" }] },
+      { rows: [{ status: "confirmed", financial_status: "refunded", channel_id: 36 }] },
+      { rows: [{ channel_id: 36, external_order_id: "1", status: "confirmed", financial_status: "refunded", cancelled_at: null }] },
+      { rows: [{ provider: "shopify" }] },
+      { rows: [{ externalLineItemId: "101", paidQuantity: 1, authorityFulfillableQuantity: 0,
+        channelCurrentQuantity: 1, channelQuantityUpdatedAt: version }] },
+    ]);
+    const read = vi.fn(async () => ({ orderId: "gid://shopify/Order/1", shopDomain: "synthetic.myshopify.com",
+      updatedAt: version, cancelled: false, lines: [{ id: "gid://shopify/LineItem/101", quantity: 1, currentQuantity: 1, unfulfilledQuantity: 0 }] }));
+    const service = createShipStationService(mock.db, undefined, {
+      fulfillmentAuthority: mock.fulfillmentAuthority as any, providerLabelObserver: mock.providerLabelObserver as any,
+      labelCommercialFulfillment: mock.labelCommercialFulfillment as any, relatedLabelReader: { findRelatedActiveLabels: async () => [] },
+      readChannelMerchandise: read,
+    });
+    const result = await service.processManualShipmentNotification(shipment,
+      { operator: "synthetic-test", reason: "refund_independent_physical_evidence", contentsAuthority: { source: "provider_exact" } });
+    expect(result.processed).toBe(true);
+    expect(read).toHaveBeenCalledExactlyOnceWith({ channelId: 36, orderId: "1" });
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledTimes(1);
+    expect(mock.calls.filter(call => call.tag === "insert").map(call => call.values.eventType))
+      .not.toContain("shipstation_shipped_after_final_order");
   });
 
   it("rejects non-ShipStation resource URLs before fetch", async () => {
@@ -1739,10 +1788,7 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
       }),
       { executeImmediately: false },
     );
-    const source = readFileSync(
-      resolve(__dirname, "../../shipstation.service.ts"),
-      "utf-8",
-    );
+    const source = readShipStationSource();
     expect(source).not.toContain("__fulfillmentPush");
   });
 
@@ -2408,8 +2454,13 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
   );
 
   it("shipment creation is unreachable for terminal or unknown parents (source invariants)", async () => {
-    const src = readFileSync(
-      resolve(__dirname, "../../shipstation.service.ts"),
+    const src = readShipStationSource();
+    const wmsShipmentsRepoSrc = readFileSync(
+      resolve(__dirname, "../../../wms/outbound-shipments-mutations.repository.ts"),
+      "utf-8",
+    );
+    const wmsShipmentItemsRepoSrc = readFileSync(
+      resolve(__dirname, "../../../wms/outbound-shipment-items-mutations.repository.ts"),
       "utf-8",
     );
     const fnStart = src.indexOf("async function resolveShipmentByOrderKey(");
@@ -2422,7 +2473,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
     const fulfilledTerminalGuardPos = fnBlock.indexOf(
       "distinct_physical_shipment_after_terminal_fulfillment",
     );
-    const splitInsertPos = fnBlock.indexOf("INSERT INTO wms.outbound_shipments");
+    const splitInsertPos = fnBlock.indexOf("insertShipStationChildOutboundShipmentInWms(");
     expect(terminalGuardPos).toBeGreaterThan(-1);
     expect(fulfilledTerminalGuardPos).toBeGreaterThan(terminalGuardPos);
     expect(splitInsertPos).toBeGreaterThan(terminalGuardPos);
@@ -2430,14 +2481,16 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
 
     // Full/duplicate packages REPAIR the parent mapping instead of creating
     // a second row.
-    expect(fnBlock).toContain("shipstation_duplicate_order_key_repaired");
+    expect(fnBlock).toContain("adoptDriftedShipStationOrderMappingOnOutboundShipmentInWms(");
+    expect(wmsShipmentsRepoSrc).toContain("shipstation_duplicate_order_key_repaired");
 
     // The split mutation is transactional, deduped, and preserves source IDs
     // on the parent so later physical packages can still reference them.
     expect(fnBlock).toContain("pg_advisory_xact_lock(918406");
     expect(fnBlock).toContain("external_fulfillment_id = ${externalFulfillmentId}");
-    expect(fnBlock).toContain("SET qty = qty - ${item.qty}");
-    expect(fnBlock).toContain(
+    expect(fnBlock).toContain("reduceParentShipmentItemAfterPhysicalSplitInWms(");
+    expect(wmsShipmentItemsRepoSrc).toContain("SET qty = qty - ${input.splitQty}");
+    expect(wmsShipmentItemsRepoSrc).toContain(
       "correction_for_shipment_item_id, split_root_shipment_item_id",
     );
     expect(fnBlock).toContain(
@@ -2447,10 +2500,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
   });
 
   it("routes legacy ShipStation order-id matches through package parity resolution", () => {
-    const src = readFileSync(
-      resolve(__dirname, "../../shipstation.service.ts"),
-      "utf-8",
-    );
+    const src = readShipStationSource();
     const fnStart = src.indexOf(
       "async function resolveWmsShipmentForShipNotify(",
     );
@@ -2474,10 +2524,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
   });
 
   it("repairs a terminal same-tracking replay before split-package logic can run", () => {
-    const src = readFileSync(
-      resolve(__dirname, "../../shipstation.service.ts"),
-      "utf-8",
-    );
+    const src = readShipStationSource();
     const fnStart = src.indexOf("async function resolveShipmentByOrderKey(");
     const fnBlock = src.slice(
       fnStart,
@@ -2490,7 +2537,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
       "if (safeLegacyTrackingRepair)",
     );
     const repairUpdatePos = fnBlock.indexOf(
-      "SET external_fulfillment_id = COALESCE(",
+      "repairLegacyTrackingOutboundShipmentRefsInWms(",
       repairGuardPos,
     );
     const repairReturnPos = fnBlock.indexOf(
@@ -2501,7 +2548,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
       "const parsedShipStationItems",
     );
     const splitInsertPos = fnBlock.indexOf(
-      "INSERT INTO wms.outbound_shipments",
+      "insertShipStationChildOutboundShipmentInWms(",
     );
 
     expect(repairGuardPos).toBeGreaterThan(-1);
@@ -2519,8 +2566,7 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
 //     items back to the owning WMS order(s) and shipping each, so tracking +
 //     the marketplace fulfillment push still flow to every merged order.
 describe("processShipNotify V2 :: combined/merged shipment recovery (source invariants)", () => {
-  const readSrc = () =>
-    readFileSync(resolve(__dirname, "../../shipstation.service.ts"), "utf-8");
+  const readSrc = () => readShipStationSource();
 
   it("recovers a shipped notify whose keyed shipment is dead by fanning out over shipment items", () => {
     const src = readSrc();

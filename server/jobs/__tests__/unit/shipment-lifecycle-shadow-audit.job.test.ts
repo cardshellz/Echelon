@@ -20,6 +20,7 @@ import {
   shipmentLifecycleShadowAuditConnectionString,
   shipmentLifecycleShadowAuditPoolConfig,
   summarizeShipmentLifecycleShadowAuditBatch,
+  type ShadowAuditPoolFactory,
 } from "../../shipment-lifecycle-shadow-audit.job";
 
 const SNAPSHOT_AT = "2026-08-21T12:00:00.000Z";
@@ -420,7 +421,7 @@ describe("shipment lifecycle read-only shadow job", () => {
     });
     const release = vi.fn();
     const end = vi.fn().mockResolvedValue(undefined);
-    const poolFactory = vi.fn(() => ({
+    const poolFactory = vi.fn((_config: Parameters<ShadowAuditPoolFactory>[0]) => ({
       connect: vi.fn().mockResolvedValue({ query, release }),
       end,
     }));

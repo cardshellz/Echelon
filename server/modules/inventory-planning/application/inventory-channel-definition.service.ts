@@ -6,7 +6,8 @@ import { applyChannelDefinitionSchema, channelDefinitionSelectionSchema, channel
 import { inventoryCutoverEvidenceHash } from "../domain/inventory-cutover-manifest";
 
 export class ChannelDefinitionError extends Error {
-  constructor(readonly code: string, message: string, readonly status = 409) {
+  /** `details`: operator-readable specifics (for example each problem a refused rule would create). */
+  constructor(readonly code: string, message: string, readonly status = 409, readonly details: readonly string[] = []) {
     super(message);
     this.name = "ChannelDefinitionError";
   }

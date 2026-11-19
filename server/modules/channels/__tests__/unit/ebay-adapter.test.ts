@@ -394,9 +394,19 @@ describe("eBay Listing Builder", () => {
     it("should include weight when available", () => {
       const items = builder.buildInventoryItems(SAMPLE_LISTING, defaultConfig);
       expect(items[0].payload.packageWeightAndSize?.weight).toEqual({
-        value: 120,
-        unit: "GRAM",
+        value: 5,
+        unit: "OUNCE",
       });
+    });
+
+    it("keeps fractional source weight, rounds publication and refuses an incomplete requirements map", () => {
+      const listing = structuredClone(SAMPLE_LISTING);
+      listing.variants[0].weightGrams = 120.25;
+      expect(builder.buildInventoryItems(listing, defaultConfig)[0].payload.packageWeightAndSize?.weight)
+        .toEqual({ value: 5, unit: "OUNCE" });
+      expect(listing.variants[0].weightGrams).toBe(120.25);
+      expect(() => builder.buildInventoryItems(listing, defaultConfig, { packageRequirementsByVariantId: new Map() }))
+        .toThrow(/Business policy selection is required/);
     });
 
     it("should include UPC in product aspects", () => {
@@ -991,6 +1001,9 @@ describe("eBay listing photo ownership", () => {
         fulfillment: { id:`owner-shipping-${variant.variantId}`, source:{scope:"variant" as const, productId:SAMPLE_LISTING.productId, variantId:variant.variantId} },
         return: { id:"owner-returns", source:{scope:"store" as const} },
         payment: { id:"owner-payment", source:{scope:"store" as const} },
+      }])),
+      packageRequirementsByVariantId: new Map(SAMPLE_LISTING.variants.map(variant => [variant.variantId, {
+        weight: true, dimensions: false,
       }])),
     }));
     const adapter = new EbayAdapter(createMockDb() as any, { resolve }, { resolveProductPolicies: resolvePolicies });

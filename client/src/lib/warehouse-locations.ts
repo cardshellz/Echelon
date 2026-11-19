@@ -20,7 +20,9 @@ export function isActiveWarehouseLocation(location: WarehouseLocationLike | null
 }
 
 export function isActionableWarehouseLocation(location: WarehouseLocationLike | null | undefined) {
-  return isActiveWarehouseLocation(location) && location?.warehouseId != null;
+  return isActiveWarehouseLocation(location)
+    && location?.warehouseId != null
+    && location.locationType !== "in_transit";
 }
 
 export function locationMatchesSearch(location: WarehouseLocationLike, search?: string) {

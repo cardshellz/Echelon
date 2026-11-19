@@ -44,7 +44,7 @@ export interface ListingShippingEstimateCatalogFactReader {
 export interface DropshipListingShippingEstimateDependencies {
   contexts: ListingShippingEstimateContextReader;
   catalog: Pick<DropshipListingPreviewRepository,
-    "listCatalogCandidates" | "listCatalogExposureRules" | "listSelectionRules" | "listVariantOverrides">;
+    "listCatalogCandidates" | "listCatalogExposureRules" | "listPickedVariantIds" | "listVariantOverrides">;
   calculation: DropshipShippingCalculationDependencies;
   /** Read only when a staff caller asks for calculation detail. */
   catalogFacts: ListingShippingEstimateCatalogFactReader;
@@ -172,10 +172,10 @@ export class DropshipListingShippingEstimateService {
   }
 
   private async assertVariantSelected(vendorId: number, productVariantId: number, now: Date): Promise<void> {
-    const [candidates, adminRules, rules, overrides] = await Promise.all([
+    const [candidates, adminRules, pickedIds, overrides] = await Promise.all([
       this.deps.catalog.listCatalogCandidates([productVariantId]),
       this.deps.catalog.listCatalogExposureRules(),
-      this.deps.catalog.listSelectionRules(vendorId),
+      this.deps.catalog.listPickedVariantIds(vendorId, [productVariantId]),
       this.deps.catalog.listVariantOverrides({ vendorId, productVariantIds: [productVariantId] }),
     ]);
     const candidate = candidates.find((row) => row.productVariantId === productVariantId);
@@ -183,7 +183,7 @@ export class DropshipListingShippingEstimateService {
       const decision = evaluateDropshipVendorCatalogSelection({
         candidate,
         adminExposureDecision: evaluateDropshipCatalogExposure(candidate, adminRules, now),
-        rules,
+        picked: pickedIds.has(productVariantId),
         override: overrides.find((row) => row.productVariantId === productVariantId) ?? null,
         // Selection does not depend on ATP. An estimate is not an inventory promise.
         rawAtpUnits: 0,

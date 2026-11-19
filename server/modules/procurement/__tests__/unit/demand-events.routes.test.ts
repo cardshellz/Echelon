@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 import http from "node:http";
@@ -21,7 +22,7 @@ vi.mock("../../../../routes/middleware", () => ({
   requirePermission: (resource: string, action: string) => {
     mocks.permissions.push([resource, action]);
     return (req: Request, _res: Response, next: NextFunction) => {
-      (req as Request & { session: { user: { id: string; role: string } } }).session = {
+      (req as any).session = {
         user: { id: "buyer-1", role: "admin" },
       };
       next();
@@ -70,7 +71,7 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
 }
 
 async function requestJson(url: string, method: string, path: string, body?: unknown) {
-  const response = await fetch(`${url}${path}`, {
+  const response = await requestLocalHttp(`${url}${path}`, {
     method,
     headers: { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),

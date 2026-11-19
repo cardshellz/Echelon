@@ -58,7 +58,7 @@ export class PostgresChannelOrderObservationWriter implements ChannelOrderObserv
         await client.query(`UPDATE oms.oms_order_lines SET cancelled_quantity=$2,authority_fulfillable_quantity=$3,
           authorization_status=$4,updated_at=$5 WHERE id=$1`, [prior.id, after.cancelled_quantity, after.authority_fulfillable_quantity, after.authorization_status, input.observedAt]);
       }
-      await client.query(`UPDATE oms.oms_orders SET status=CASE WHEN $2='cancelled' THEN 'cancelled' ELSE status END,
+      await client.query(`UPDATE oms.oms_orders SET status=CASE WHEN $2='cancelled' AND status NOT IN ('shipped','partially_shipped','delivered','refunded') AND shipped_at IS NULL THEN 'cancelled' ELSE status END,
         fulfillment_status=CASE WHEN $5='fulfilled' THEN 'fulfilled' ELSE fulfillment_status END,
         raw_payload=$3::jsonb,updated_at=$4 WHERE id=$1`,
       [input.orderId, input.status, JSON.stringify(input.rawPayload), input.observedAt, input.fulfillmentStatus]);

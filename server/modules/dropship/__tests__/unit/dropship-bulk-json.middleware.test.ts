@@ -14,6 +14,7 @@ import {
   EBAY_CATEGORY_RULES_TOO_LARGE_MESSAGE,
   LISTING_SETTINGS_TOO_LARGE_MESSAGE,
   PRICING_RULES_TOO_LARGE_MESSAGE,
+  SELECTION_CHANGE_TOO_LARGE_MESSAGE,
   isDropshipBulkJsonRequest,
   parseDropshipBulkJson,
   parseDropshipBulkJsonFor,
@@ -46,6 +47,11 @@ describe("the bulk JSON path table (plan PR 9, P8, section 3.6)", () => {
     ["POST", `${STORE}/listing-settings/category-moves/acknowledge`],
     ["post", `${STORE}/listing-settings/category-moves/acknowledge/`],
     ["POST", "/api/dropship/listings/stores/anything/pricing-rules/reviews"],
+    // Step 1's picks save and its preview (PLAN-B v4.1 §8): up to 20,000 ids.
+    ["POST", "/api/dropship/catalog/selection/changes"],
+    ["post", "/api/dropship/catalog/selection/changes/"],
+    ["POST", "/api/dropship/catalog/selection/changes/preview"],
+    ["POST", "/api/dropship/catalog/selection/changes/preview/"],
   ])("skips the global parser for %s %s", (method, path) => {
     expect(isDropshipBulkJsonRequest(method, path)).toBe(true);
   });
@@ -90,12 +96,22 @@ describe("the bulk JSON path table (plan PR 9, P8, section 3.6)", () => {
     ["POST", `${STORE}/listing-settings/category-moves/acknowledge/extra`],
     // PR 11's conversion apply: a key and two hashes, so the global parser (plan 7.B.1).
     ["POST", `${STORE}/listing-settings/conversion/apply`],
+    // Only the picks save's two POSTs: the summary read, the retired rules PUT, a longer path and the new-items
+    // acknowledge (B3, a small body) keep the global parser (TESTS-5).
+    ["GET", "/api/dropship/catalog/selection"],
+    ["PUT", "/api/dropship/catalog/selection-rules"],
+    ["GET", "/api/dropship/catalog/selection/changes"],
+    ["PUT", "/api/dropship/catalog/selection/changes"],
+    ["POST", "/api/dropship/catalog/selection"],
+    ["POST", "/api/dropship/catalog/selection/changes/extra"],
+    ["POST", "/api/dropship/catalog/selection/changes/preview/extra"],
+    ["POST", "/api/dropship/catalog/new-items/acknowledge"],
   ])("leaves %s %s to the global parser", (method, path) => {
     expect(isDropshipBulkJsonRequest(method, path)).toBe(false);
   });
 
-  it("lists eleven routes, each one method and one path", () => {
-    expect(BULK_JSON_PATHS.map((entry) => entry.method)).toEqual(["PUT", "POST", "POST", "PUT", "PUT", "PUT", "POST", "PUT", "POST", "POST", "POST"]);
+  it("lists twelve routes, each one method and one path pattern", () => {
+    expect(BULK_JSON_PATHS.map((entry) => entry.method)).toEqual(["PUT", "POST", "POST", "PUT", "PUT", "PUT", "POST", "PUT", "POST", "POST", "POST", "POST"]);
     expect(Object.isFrozen(BULK_JSON_PATHS)).toBe(true);
   });
 
@@ -106,6 +122,7 @@ describe("the bulk JSON path table (plan PR 9, P8, section 3.6)", () => {
     expect(PRICING_RULES_TOO_LARGE_MESSAGE).toBe(
       "These pricing rules are too large to save at once. Use category, product or product-line rules instead of long lists of single sizes.");
     expect(CONTENT_PROFILE_TOO_LARGE_MESSAGE).toBe("These descriptions are too large to save at once. Use fewer description groups or shorter text.");
+    expect(SELECTION_CHANGE_TOO_LARGE_MESSAGE).toBe("This change is too large to send at once. Change fewer items, then save.");
   });
 });
 

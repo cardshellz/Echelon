@@ -1,5 +1,6 @@
 import type { InsertAuthPermission, InsertAdjustmentReason } from "@shared/schema";
 import { WORK_CAPABILITIES, WORK_CAPABILITY_LABELS } from "@shared/warehouse-work";
+import { STAFF_CAPABILITIES } from "@shared/staff-capabilities";
 
 export const DEFAULT_ADJUSTMENT_REASONS: InsertAdjustmentReason[] = [
   { code: "PO_RECEIVED", name: "PO Received", description: "Inventory received from purchase order", transactionType: "receipt", requiresNote: 0, sortOrder: 10 },
@@ -20,6 +21,10 @@ export const DEFAULT_ADJUSTMENT_REASONS: InsertAdjustmentReason[] = [
 ];
 
 export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
+  ...STAFF_CAPABILITIES.map(capability => {
+    const [resource, action] = capability.key.split(":");
+    return { resource, action, description: capability.description, category: capability.category };
+  }),
   { resource: "warehouse_work", action: "view", description: "View draft warehouse station and workflow setup", category: "settings" },
   { resource: "warehouse_work", action: "configure", description: "Configure draft warehouse stations and workflow profiles", category: "settings" },
   { resource: "warehouse_work", action: "manage_access", description: "Manage draft employee warehouse work scopes", category: "users" },
@@ -47,7 +52,6 @@ export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
   { resource: "orders", action: "hold", description: "Put orders on hold", category: "orders" },
   { resource: "orders", action: "priority", description: "Change order priority", category: "orders" },
   { resource: "orders", action: "resolve_exception", description: "Resolve order exceptions", category: "orders" },
-  { resource: "picking", action: "view", description: "View picking queue", category: "picking" },
   { resource: "picking", action: "perform", description: "Perform picking operations", category: "picking" },
   { resource: "picking", action: "release_any", description: "Release another picker’s assignment without changing holds or pick progress", category: "picking" },
   { resource: "picking", action: "complete", description: "Mark picks as complete", category: "picking" },
@@ -86,6 +90,9 @@ export const DEFAULT_PERMISSIONS: InsertAuthPermission[] = [
   { resource: "warehouse", action: "manage", description: "Manage warehouse settings and replenishment rules", category: "warehouse" },
 ];
 
+// Historical default policy lists remain for compatibility/reference. Ordinary
+// startup registers only name/description definitions; these lists never prove
+// an employee's effective grants and must not restore revoked authority.
 export const SYSTEM_ROLES = {
   admin: {
     name: "Administrator",
@@ -98,7 +105,8 @@ export const SYSTEM_ROLES = {
     permissions: [
       "dashboard:view", "operations:view", "operations:triage", "operations:assign", "operations:view_technical",
       "inventory:view", "orders:view", "orders:claim", "orders:hold", "orders:priority", "orders:resolve_exception",
-      "picking:view", "picking:perform", "picking:complete", "picking:release_any", "purchasing:view", "purchasing:create", "purchasing:edit", "purchasing:cancel",
+      "picking:view", "picking:perform", "picking:complete", "picking:release_any", "picking:view_logs", "picking:view_metrics", "picking:manage_settings",
+      "purchasing:view", "purchasing:create", "purchasing:edit", "purchasing:cancel",
       "reports:view", "users:view", "shopify:view", "dropship:view", "locations:view",
     ],
   },

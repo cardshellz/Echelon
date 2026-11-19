@@ -8,13 +8,18 @@ import {
   inventoryLevels, inventoryTransactions, adjustmentReasons,
   channelFeeds, productVariants, warehouseLocations, productLocations,
 } from "../../../storage/base";
-import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-item-commands";
+import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-intake-and-items.api";
 import { getTableColumns } from "drizzle-orm";
 import { interpretInventoryShipmentQuantity, type InventoryShipmentQuantityEvidence } from "@shared/inventory/shipment-quantity";
 import { shipmentQuantityEvidenceProjection } from "./shipment-quantity-evidence.sql";
 import { openOperationalQuantityPosting } from "./operational-quantity-posting";
 import { lockInventoryCostGraph } from "./cost-evidence.repository";
 import { InventoryLotService } from "../lots.service";
+import {
+  updateChannelFeedByIdInChannels,
+  insertChannelFeedInChannels,
+  updateChannelFeedSyncStatusByIdInChannels,
+} from "../../channels/channel-feed-listing-mutations.api";
 
 export type InventoryTransactionHistory = InventoryTransaction & {
   shipmentQuantityEvidence: InventoryShipmentQuantityEvidence;
@@ -107,7 +112,9 @@ export interface IInventoryStorage {
 }
 
 export function createInventoryMethods(
-  db: typeof defaultDb = defaultDb,
+  // Both pool and caller-owned client executors expose these query methods.
+  // This repository never acquires a connection through the driver $client.
+  db: Omit<typeof defaultDb, "$client"> = defaultDb,
 ): IInventoryStorage {
   return {
   async getAllInventoryLevels(tx?: any): Promise<InventoryLevel[]> {
@@ -679,31 +686,15 @@ export function createInventoryMethods(
 
   async upsertChannelFeed(feed: InsertChannelFeed): Promise<ChannelFeed> {
     const existing = await (this as any).getChannelFeedByVariantAndChannel(feed.productVariantId, feed.channelType || "shopify");
-    
+
     if (existing) {
-      const result = await db
-        .update(channelFeeds)
-        .set({ ...feed, updatedAt: new Date() })
-        .where(eq(channelFeeds.id, existing.id))
-        .returning();
-      return result[0];
-    } else {
-      const result = await db.insert(channelFeeds).values(feed).returning();
-      return result[0];
+      return updateChannelFeedByIdInChannels(db, existing.id, feed);
     }
+    return insertChannelFeedInChannels(db, feed);
   },
 
   async updateChannelFeedSyncStatus(id: number, qty: number): Promise<ChannelFeed | null> {
-    const result = await db
-      .update(channelFeeds)
-      .set({ 
-        lastSyncedAt: new Date(),
-        lastSyncedQty: qty,
-        updatedAt: new Date()
-      })
-      .where(eq(channelFeeds.id, id))
-      .returning();
-    return result[0] || null;
+    return updateChannelFeedSyncStatusByIdInChannels(db, id, qty);
   },
 
   async getChannelFeedsByChannel(channelType: string): Promise<(ChannelFeed & { variant: ProductVariant })[]> {

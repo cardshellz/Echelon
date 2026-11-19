@@ -1,8 +1,8 @@
-import type {
-  MaterializeAndActivatePackageAllocationCommercialFulfillmentResult,
-  ChannelFulfillmentAuthorityService,
-} from "../oms/channel-fulfillment-authority.service";
-import { FulfillmentAuthorityError } from "../oms/channel-fulfillment-authority.repository";
+import {
+  FulfillmentAuthorityError,
+  type ChannelFulfillmentAuthorityService,
+  type MaterializeAndActivatePackageAllocationCommercialFulfillmentResult,
+} from "../oms/channel-fulfillment-authority.api";
 import type { StoredShippingProviderLabelObservation } from "./carrier-tracking.repository";
 import type { ShippingProviderLabelLinkResult } from "./carrier-tracking.repository";
 import {

@@ -44,8 +44,8 @@ import {
 // Words (R:190-199, R:503, R:510-513, R:581)
 // ---------------------------------------------------------------------------
 
-/** Where a vendor makes or edits eBay business policies (as `client/src/pages/EbaySettings.tsx`). */
-export const EBAY_SELLER_HUB_POLICIES_URL = "https://www.ebay.com/sh/sell-preferences/business-policies";
+/** Where a vendor makes or edits eBay business policies (as `client/src/pages/EbaySettings.tsx`); one constant in shared/. */
+export { EBAY_SELLER_HUB_POLICIES_URL } from "@shared/ebay-business-policies";
 
 const POLICY_KIND_WORDS: Readonly<Record<ListingSettingsPolicyKind, string>> = {
   shipping: "shipping",

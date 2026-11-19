@@ -1,3 +1,5 @@
+import { PostgresCustomerReturnWorkflowStore } from "./customer-return-workflow.repository";
+import { PostgresCustomerReturnProgressReader } from "./customer-return-progress.reader";
 import type { CustomerReturnCustomerSession } from "../application/customer-return-customer-auth.service";
 import { CustomerReturnOrderAccessService } from "../application/customer-return-order-access.service";
 import { PostgresCustomerReturnOrderAccessRepository } from "./customer-return-order-access.repository";
@@ -7,6 +9,8 @@ import { PostgresCustomerReturnCustomerOwnershipReader } from "./customer-return
 import { createCustomerReturnLiveService } from "./customer-return-live.composition";
 import { createCustomerReturnLabelServices } from "./customer-return-label.composition";
 import { PostgresCustomerReturnSettingsStore } from "./customer-return-label-settings.repository";
+import { CachedCustomerReturnOrderChoicesReader } from "./customer-return-order-choices.reader";
+import { PostgresOrderActionProjectionStore } from "../../customer-account/order-action-projection.api";
 
 /** Call only after verifying the request's customer session. The private label
  * services stay behind the exact order/RMA/command ownership boundary. */
@@ -21,17 +25,18 @@ export async function createCustomerReturnCustomerServices(session: CustomerRetu
   const settings = new PostgresCustomerReturnSettingsStore(db);
   return {
     orders: new CustomerReturnCustomerOrdersService({ principal, access, live,
+      choices: new CachedCustomerReturnOrderChoicesReader({ principal,
+        projection: new PostgresOrderActionProjectionStore(pool), now: () => new Date() }),
       reportUnavailableOrder: (context) => console.warn(JSON.stringify({
         event: "return_customer_order_unavailable", code: "RETURN_ORDER_INSPECTION_UNAVAILABLE",
         channelId: context.channelId, omsOrderId: context.omsOrderId, reason: context.reason, causeCode: context.causeCode,
       })),
-      shippingVersion: async () => {
-        const [current, control] = await Promise.all([settings.read(principal.channelId), settings.readControl(principal.channelId)]);
-        return current?.enabled && !control.paused ? current.version : null;
-      } }),
+      shippingVersion: () => settings.customerVersion(principal.channelId) }),
     operations: new CustomerReturnCustomerOperationsService({ principal, orderAccess: access,
       ownership: new PostgresCustomerReturnCustomerOwnershipReader(pool),
-      submissions: internal.submissions, labels: internal.labels }),
+      historyProgress: new PostgresCustomerReturnProgressReader(pool),
+      reportHistoryUnavailable: () => console.warn(JSON.stringify({ event: "customer_return_history_progress_unavailable", code: "RETURN_HISTORY_PROGRESS_UNAVAILABLE", channelId: principal.channelId })),
+      submissions: internal.submissions, labels: internal.labels, workflows: new PostgresCustomerReturnWorkflowStore(pool), now: () => new Date() }),
     download: internal.download,
   };
 }

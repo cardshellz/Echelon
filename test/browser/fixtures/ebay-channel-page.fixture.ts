@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./staff-authority.fixture";
 import { createListingIntentChangesMock, handleListingIntentChangesRequest } from "./listing-intent-changes.fixture";
 import { expect, type Page } from "@playwright/test";
 import { resolve } from "node:path";
@@ -32,6 +33,7 @@ export async function setupEbayChannelPage(page: Page, options: { readOnly?: boo
     connectionIssue: null as EbayListingIssue | null,
     syncError: null as string | null,
     feedProducts: null as unknown[] | null,
+    syncIncludedCount: 1,
     commands: [] as string[],
     requests: [] as string[],
     errors: [] as string[],
@@ -47,13 +49,10 @@ export async function setupEbayChannelPage(page: Page, options: { readOnly?: boo
     const req = route.request(),
       path = new URL(req.url()).pathname;
     if (await handleListingIntentChangesRequest(route, state.intentChanges)) return;
+    if (path === "/api/channels/67/sync-batches" && req.method() === "GET") return route.fulfill({ json: { batches: [] } });
     if (path === "/api/auth/me")
       return route.fulfill({
-        json: {
-          user: { id: "operator", role: "lead", username: "operator" },
-          roles: ["lead"],
-          permissions: options.readOnly ? ["channels:view"] : ["channels:view", "channels:edit"],
-        },
+        json: staffAuthorityFixture({ user: { id: "operator", role: "lead", username: "operator" }, permissions: options.readOnly ? ["channels:view"] : ["channels:view", "channels:edit"], systemRoles: ["lead"] }),
       });
     if (path === "/api/ebay/channel-config")
       return route.fulfill({
@@ -106,6 +105,7 @@ export async function setupEbayChannelPage(page: Page, options: { readOnly?: boo
       return route.fulfill({
         json: {
           total: state.feedProducts?.length ?? 1,
+          syncIncludedCount: state.syncIncludedCount,
           feed: state.feedProducts ?? [
             {
               id: 1,

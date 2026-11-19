@@ -5,7 +5,7 @@ import * as schema from "@shared/schema";
 const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
 const introducedColumns = new Set(["inventory_tracking_default", "inventory_tracking_override", "inventory_tracking", "catalog_product_id"]);
 const tables = [schema.shippingGroups, schema.products, schema.productVariants, schema.channels, schema.channelFeeds,
-  schema.channelListings, schema.omsOrders, schema.omsOrderLines, schema.omsOrderEvents,
+  schema.channelListings, schema.channelVariantOverrides, schema.omsOrders, schema.omsOrderLines, schema.omsOrderEvents,
   schema.omsOrderLineAuthorityEvents, schema.wmsOrders, schema.wmsOrderItems,
   schema.inventoryLevels, schema.inventoryLots, schema.buildComponentReservations, schema.inventoryAvailabilityClaimLines,
   schema.inventoryAvailabilityClaimResources, schema.auditEvents, schema.productLocations, schema.warehouseLocations,

@@ -169,8 +169,8 @@ describe("loadChosenSizes (plan PR 9, P12, 6.2 #5)", () => {
     };
   }
 
-  /** A catalog with every given size, all exposed by an include-all rule and chosen by the vendor's include-all rule. */
-  function reader(options: { sizes: number[]; hidden?: number[]; disabled?: number[]; notInCatalog?: number[] }) {
+  /** A catalog with every given size, all exposed by an include-all rule and picked by the vendor unless `unpicked`. */
+  function reader(options: { sizes: number[]; hidden?: number[]; disabled?: number[]; notInCatalog?: number[]; unpicked?: number[] }) {
     const calls: string[] = [];
     const catalog = {
       listCatalogExposureRules: vi.fn(async () => {
@@ -178,7 +178,10 @@ describe("loadChosenSizes (plan PR 9, P12, 6.2 #5)", () => {
         return [{ id: 1, scopeType: "catalog", action: "include" },
           ...(options.hidden ?? []).map((id, index) => ({ id: 10 + index, scopeType: "variant", action: "exclude", productVariantId: id }))];
       }),
-      listSelectionRules: vi.fn(async () => { calls.push("selectionRules"); return [{ id: 2, scopeType: "catalog", action: "include", isActive: true }]; }),
+      listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => {
+        calls.push(`picks:${ids.length}`);
+        return new Set(ids.filter((id) => !(options.unpicked ?? []).includes(id)));
+      }),
       listCatalogCandidates: vi.fn(async (ids: readonly number[]) => {
         calls.push(`candidates:${ids.length}`);
         // Out of order, as a reader may return them.
@@ -193,7 +196,7 @@ describe("loadChosenSizes (plan PR 9, P12, 6.2 #5)", () => {
     return { tx: { vendorId: VENDOR, catalog } as unknown as ChosenSizeReader, calls, catalog };
   }
 
-  it("checks only the given sizes, ascending and once, in batches of 250 with the rules read once", async () => {
+  it("checks only the given sizes, ascending and once, in batches of 250 with the exposure rules read once and the picks per batch", async () => {
     const sizes = Array.from({ length: 600 }, (_, index) => 1_000 + index);
     const { tx, calls, catalog } = reader({ sizes });
     const input = Object.freeze([...sizes].reverse().concat([1_000]));
@@ -202,10 +205,19 @@ describe("loadChosenSizes (plan PR 9, P12, 6.2 #5)", () => {
 
     expect(chosen.map((size) => size.productVariantId)).toEqual(sizes);
     expect(chosen[0]).toEqual({ productVariantId: 1_000, productId: 7, candidate: candidate(1_000) });
-    expect(calls).toEqual(["exposureRules", "selectionRules", "candidates:250", "overrides:250", "candidates:250", "overrides:250",
-      "candidates:100", "overrides:100"]);
+    expect(calls).toEqual(["exposureRules", "candidates:250", "overrides:250", "picks:250", "candidates:250", "overrides:250", "picks:250",
+      "candidates:100", "overrides:100", "picks:100"]);
     expect(catalog.listCatalogCandidates.mock.calls[0][0]).toEqual(sizes.slice(0, 250));
     expect(catalog.listVariantOverrides).toHaveBeenCalledWith({ vendorId: VENDOR, productVariantIds: sizes.slice(500) });
+    // The picks are read for each batch's own sizes, never the vendor's whole selection (PLAN-B v4.1 §9 row 2).
+    expect(catalog.listPickedVariantIds.mock.calls.map(([vendorId, ids]) => [vendorId, ids])).toEqual([
+      [VENDOR, sizes.slice(0, 250)], [VENDOR, sizes.slice(250, 500)], [VENDOR, sizes.slice(500)]]);
+  });
+
+  it("leaves out a size the vendor did not pick, though Card Shellz shows it (one-time picks)", async () => {
+    const { tx } = reader({ sizes: [101, 102, 103], unpicked: [102] });
+    const chosen = await loadChosenSizes(tx, [101, 102, 103], NOW, { keepCandidates: false });
+    expect(chosen.map((size) => size.productVariantId)).toEqual([101, 103]);
   });
 
   it("keeps only sizes Card Shellz shows and the vendor chose, and none the catalog no longer has", async () => {
@@ -243,7 +255,7 @@ describe("loadChosenSizes (plan PR 9, P12, 6.2 #5)", () => {
     const chosen = await loadChosenSizes(tx, sizes, NOW, { keepCandidates: false, firstOnly: true });
 
     expect(chosen.map((size) => size.productVariantId)).toEqual(sizes.slice(250, 500));
-    expect(calls).toEqual(["exposureRules", "selectionRules", "candidates:250", "overrides:250", "candidates:250", "overrides:250"]);
+    expect(calls).toEqual(["exposureRules", "candidates:250", "overrides:250", "picks:250", "candidates:250", "overrides:250", "picks:250"]);
     // Without firstOnly every batch is read.
     const every = reader({ sizes, hidden: sizes.slice(0, 250) });
     await expect(loadChosenSizes(every.tx, sizes, NOW, { keepCandidates: false })).resolves.toHaveLength(350);
@@ -287,7 +299,7 @@ describe("loadChosenSizes (plan PR 9, P12, 6.2 #5)", () => {
     expect(chosen).toHaveLength(301);
     expect(chosen.at(-1)?.productVariantId).toBe(1_302);
     expect(chosen.map((size) => size.productVariantId)).toEqual(sizes.filter((id) => id !== 1_001 && id !== 1_002).slice(0, 301));
-    expect(calls).toEqual(["exposureRules", "selectionRules", "candidates:250", "overrides:250", "candidates:250", "overrides:250"]);
+    expect(calls).toEqual(["exposureRules", "candidates:250", "overrides:250", "picks:250", "candidates:250", "overrides:250", "picks:250"]);
   });
 
   it("reads every batch in the pricing mode when the chosen sizes are exactly stopAbove, and keeps them all", async () => {
@@ -310,7 +322,7 @@ describe("loadChosenSizes (plan PR 9, P12, 6.2 #5)", () => {
     const frozen = Object.freeze({ ...kept, itemSpecifics: Object.freeze({ ...kept.itemSpecifics }), imageUrls: Object.freeze([...kept.imageUrls]) });
     const catalog = {
       listCatalogExposureRules: async () => [{ id: 1, scopeType: "catalog", action: "include" }],
-      listSelectionRules: async () => [{ id: 2, scopeType: "catalog", action: "include", isActive: true }],
+      listPickedVariantIds: async (_vendorId: number, ids: readonly number[]) => new Set(ids),
       listCatalogCandidates: async () => [frozen],
       listVariantOverrides: async () => [],
     };

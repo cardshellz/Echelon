@@ -84,6 +84,8 @@ describe("full quarantine real cost rendering", () => {
     expect(markup).not.toContain("costLine=");
     expect(markup).not.toContain("current source and lot history");
     expect(markup).not.toContain("automatic cost retry");
+    expect(markup).not.toContain("Receipt invoice costs");
+    expect(markup).not.toContain("View receipt costs and approvals");
   });
   it("keeps missing proof explicitly in review without a completion label", () => {
     const line = fullQuarantineCostStatus().lines[0];
@@ -95,6 +97,7 @@ describe("full quarantine real cost rendering", () => {
     expect(markup).toContain("Return reporting proof is missing.");
     expect(markup).toContain("no automatic cost retry");
     expect(markup).not.toContain(noInventoryEffectLabel);
+    expect(markup).not.toContain("Receipt invoice costs");
   });
   it("renders recorded return quantity and verified application without unknown-denominator or lot-posting claims", () => {
     const data = fullQuarantineWorkspace();

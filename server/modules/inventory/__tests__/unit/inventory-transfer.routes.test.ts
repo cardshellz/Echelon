@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { createServer, type Server } from "node:http";
@@ -16,7 +17,7 @@ vi.mock("../../../orders", () => ({ ordersStorage: {} }));
 vi.mock("../../../channels", () => ({ channelsStorage: {} }));
 vi.mock("../../../../routes/middleware", () => {
   const pass = (_req: Request, _res: Response, next: NextFunction) => next();
-  return { requirePermission: () => pass, requireAuth: pass, upload: { single: () => pass } };
+  return { requirePermission: () => pass, requireAuth: pass, requireAssignedSystemRole: () => pass, upload: { single: () => pass } };
 });
 import { registerInventoryRoutes } from "../../inventory.routes";
 
@@ -26,6 +27,7 @@ describe("inventory transfer HTTP contract", () => {
   const transfer = vi.fn();
   const queueSyncAfterInventoryChange = vi.fn();
   const completeMatchingTransferTask = vi.fn();
+  const createAndDispatch = vi.fn();
   beforeEach(async () => {
     vi.resetAllMocks();
     vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -34,12 +36,13 @@ describe("inventory transfer HTTP contract", () => {
     transfer.mockResolvedValue({ reservedMoved: 0, orderItemsRepointed: 0 });
     queueSyncAfterInventoryChange.mockResolvedValue(undefined);
     completeMatchingTransferTask.mockResolvedValue(undefined);
+    createAndDispatch.mockResolvedValue({ id: 41, transferNumber: "WT-00000041", status: "in_transit" });
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => { req.session = { user: { id: "operator" } } as Request["session"]; next(); });
     // Isolate only the ports invoked by this handler; real transactional owners
     // are covered by the PostgreSQL suite rather than mocked here.
-    app.locals.services = { inventoryTransfers: { transfer }, channelSync: { queueSyncAfterInventoryChange },
+    app.locals.services = { inventoryTransfers: { transfer }, interwarehouseTransfers: { createAndDispatch }, channelSync: { queueSyncAfterInventoryChange },
       replenishment: { completeMatchingTransferTask, checkReplenForLocation: vi.fn(async () => undefined) } } as unknown as typeof app.locals.services;
     registerInventoryRoutes(app);
     server = createServer(app);
@@ -48,20 +51,16 @@ describe("inventory transfer HTTP contract", () => {
   });
   afterEach(async () => { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); vi.restoreAllMocks(); });
   const body = { commandKey: "transfer:test", fromLocationId: 9, toLocationId: 10, variantId: 174, quantity: 50 };
-  const post = (payload: unknown) => fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const post = (payload: unknown) => requestLocalHttp(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
 
-  it("forwards exact locations, actor, arrival confirmation and retry identity to the existing owner", async () => {
-    expect((await post({ ...body, crossWarehouseArrivalConfirmed: true })).status).toBe(200);
-    expect(transfer).toHaveBeenCalledExactlyOnceWith({ ...body, crossWarehouseArrivalConfirmed: true }, "operator");
+  it("forwards exact locations, actor and retry identity to the existing bin-move owner", async () => {
+    expect((await post(body)).status).toBe(200);
+    expect(transfer).toHaveBeenCalledExactlyOnceWith(body, "operator");
     // The transaction/outbox owner controls publication and task credit.
     expect(queueSyncAfterInventoryChange).not.toHaveBeenCalled();
     expect(completeMatchingTransferTask).not.toHaveBeenCalled();
   });
-  it("does not silently opt existing callers into cross-warehouse movements", async () => {
-    expect((await post(body)).status).toBe(200);
-    expect(transfer.mock.calls[0][0]).not.toHaveProperty("crossWarehouseArrivalConfirmed");
-  });
-  it.each([{ quantity: 1.5 }, { quantity: "50cases" }, { crossWarehouseArrivalConfirmed: "true" }, { toLocationId: 9 }])(
+  it.each([{ quantity: 1.5 }, { quantity: "50cases" }, { toLocationId: 9 }])(
     "returns structured validation failures from the application owner: %s", async patch => {
       transfer.mockImplementationOnce(async payload => inventoryTransferRequestSchema.parse(payload));
       const response = await post({ ...body, ...patch });
@@ -71,18 +70,18 @@ describe("inventory transfer HTTP contract", () => {
       expect(storage.getWarehouseLocationById).not.toHaveBeenCalled();
     });
   it("returns a structured conflict and does not publish when the owner rejects the movement", async () => {
-    transfer.mockRejectedValue(new InventoryQuantityError("TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED", "Confirm arrival", { fromWarehouseId: 2, toWarehouseId: 1 }));
+    transfer.mockRejectedValue(new InventoryQuantityError("INTERWAREHOUSE_TRANSFER_WORKFLOW_REQUIRED", "Create a warehouse transfer", { fromWarehouseId: 2, toWarehouseId: 1 }));
     const response = await post(body);
     expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ code: "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED", context: { fromWarehouseId: 2, toWarehouseId: 1 } });
+    expect(await response.json()).toMatchObject({ code: "INTERWAREHOUSE_TRANSFER_WORKFLOW_REQUIRED", context: { fromWarehouseId: 2, toWarehouseId: 1 } });
     expect(queueSyncAfterInventoryChange).not.toHaveBeenCalled();
     expect(completeMatchingTransferTask).not.toHaveBeenCalled();
   });
   it("preserves a replayed application rejection's status, code and context", async () => {
-    transfer.mockRejectedValue(new AppError("Confirm arrival", "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED", 409, { fromWarehouseId: 2 }));
+    transfer.mockRejectedValue(new AppError("Create a warehouse transfer", "INTERWAREHOUSE_TRANSFER_WORKFLOW_REQUIRED", 409, { fromWarehouseId: 2 }));
     const response = await post(body);
     expect(response.status).toBe(409);
-    expect(await response.json()).toMatchObject({ code: "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED", context: { fromWarehouseId: 2 } });
+    expect(await response.json()).toMatchObject({ code: "INTERWAREHOUSE_TRANSFER_WORKFLOW_REQUIRED", context: { fromWarehouseId: 2 } });
   });
   it("preserves command concurrency conflicts and retry guidance", async () => {
     transfer.mockRejectedValue(new FinancialCommandError("Command is running", 409, "FINANCIAL_COMMAND_IN_PROGRESS",
@@ -91,6 +90,37 @@ describe("inventory transfer HTTP contract", () => {
     expect(response.status).toBe(409);
     expect(response.headers.get("Retry-After")).toBe("1");
     expect(await response.json()).toMatchObject({ code: "FINANCIAL_COMMAND_IN_PROGRESS", context: { commandId: 7 } });
+  });
+  it("routes cross-warehouse dispatches to the durable workflow owner", async () => {
+    const response = await requestLocalHttp(url.replace(/\/transfer$/, "/interwarehouse-transfers"), {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect(response.status).toBe(201);
+    expect(createAndDispatch).toHaveBeenCalledExactlyOnceWith(body, "operator");
+    expect(await response.json()).toMatchObject({ transferNumber: "WT-00000041", status: "in_transit" });
+  });
+  it("returns matching no-commit evidence when an inter-warehouse command is rejected", async () => {
+    createAndDispatch.mockRejectedValueOnce(new AppError(
+      "Only unreserved inventory can be dispatched.",
+      "TRANSFER_BLOCKED_BY_RESERVATION",
+      409,
+      { availableAtSource: 12 },
+    ));
+    const response = await requestLocalHttp(url.replace(/\/transfer$/, "/interwarehouse-transfers"), {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      code: "TRANSFER_BLOCKED_BY_RESERVATION",
+      context: {
+        availableAtSource: 12,
+        interwarehouseCommandReceipt: {
+          contractVersion: "interwarehouse_transfer_v1",
+          commandKey: body.commandKey,
+          outcome: "rejected",
+        },
+      },
+    });
   });
   it("reports unexpected application failures as server failures without exposing internals", async () => {
     transfer.mockRejectedValue(new Error("private database connection details"));

@@ -14,6 +14,7 @@ import { apiRequest } from "@/lib/queryClient";
 import { format } from "date-fns";
 import { playSoundWithHaptic } from "@/lib/sounds";
 import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
+import { InterwarehouseTransferQueue } from "@/components/inventory/InterwarehouseTransferQueue";
 
 interface Transfer {
   id: number;
@@ -154,6 +155,7 @@ export default function Transfers() {
 
     if (isMobile) {
       setSourceLocationCode(fromCode);
+      setFromLocationId(loc.id);
       if (qty) setMobileQuantity(qty);
       setMobileStep("sku");
     } else {
@@ -168,6 +170,25 @@ export default function Transfers() {
   });
 
   const warehouseMap = new Map(warehouses.map(w => [w.id, w.code]));
+  const selectedFromLocation = locations.find((location) => location.id === fromLocationId);
+  const selectedToLocation = locations.find((location) => location.id === toLocationId);
+  const isCrossWarehouse = selectedFromLocation?.warehouseId != null
+    && selectedToLocation?.warehouseId != null
+    && selectedFromLocation.warehouseId !== selectedToLocation.warehouseId;
+  const normalizedSourceCode = sourceLocationCode.trim().toUpperCase();
+  const sourceExactMatches = actionableLocations.filter(
+    (location) => location.code.trim().toUpperCase() === normalizedSourceCode,
+  );
+  const sourceSelectionMatchesInput = !!selectedFromLocation
+    && selectedFromLocation.code.trim().toUpperCase() === normalizedSourceCode;
+  const destinationCandidates = actionableLocations.filter((location) => location.id !== fromLocationId);
+  const normalizedDestinationCode = destLocationCode.trim().toUpperCase();
+  const destinationExactMatches = destinationCandidates.filter(
+    (location) => location.code.trim().toUpperCase() === normalizedDestinationCode,
+  );
+  const destinationSelectionMatchesInput = !!selectedToLocation
+    && selectedToLocation.id !== fromLocationId
+    && selectedToLocation.code.trim().toUpperCase() === normalizedDestinationCode;
   
   const { data: skusAtLocation = [] } = useQuery<SkuResult[]>({
     queryKey: ["/api/inventory/skus/search", "location", fromLocationId],
@@ -220,7 +241,13 @@ export default function Transfers() {
   
   const transferMutation = useMutation({
     mutationFn: async (data: { fromLocationId: number; toLocationId: number; variantId: number; quantity: number; notes?: string; moveReserved?: boolean }) => {
-      return inventoryCommand("/api/inventory/transfer", data);
+      const source = locations.find((location) => location.id === data.fromLocationId);
+      const destination = locations.find((location) => location.id === data.toLocationId);
+      const crossWarehouse = source?.warehouseId != null && destination?.warehouseId != null
+        && source.warehouseId !== destination.warehouseId;
+      return inventoryCommand(crossWarehouse
+        ? "/api/inventory/interwarehouse-transfers"
+        : "/api/inventory/transfer", data);
     },
     onSuccess: async (transferResult: any) => {
       playSoundWithHaptic("success", "classic", true);
@@ -229,6 +256,7 @@ export default function Transfers() {
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/skus/search"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/sku-locations"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/by-bin"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/inventory/interwarehouse-transfers"] });
 
       // If this transfer came from a cycle count, sync the expected qty
       if (cycleCountCtx) {
@@ -247,6 +275,11 @@ export default function Transfers() {
         } catch {
           toast({ title: "Transfer Complete", description: "Inventory moved, but failed to update cycle count. Sync manually." });
         }
+      } else if (transferResult?.transferNumber) {
+        toast({
+          title: "Warehouse Transfer Dispatched",
+          description: `${transferResult.transferNumber} is in transit. Destination stock will update only when it is received.`,
+        });
       } else if (transferResult?.reservedMoved > 0) {
         toast({
           title: "Transfer Complete",
@@ -266,7 +299,19 @@ export default function Transfers() {
       // Reserved stock blocks the transfer: offer to move the reservation too
       // (Option A) instead of dead-ending. Re-fires with moveReserved: true.
       const context = error?.context ?? error?.responseBody?.context;
+      const source = locations.find((location) => location.id === variables.fromLocationId);
+      const destination = locations.find((location) => location.id === variables.toLocationId);
+      const crossWarehouseRequest = source?.warehouseId != null && destination?.warehouseId != null
+        && source.warehouseId !== destination.warehouseId;
       if (error?.code === "TRANSFER_BLOCKED_BY_RESERVATION" && context) {
+        if (crossWarehouseRequest) {
+          toast({
+            title: "Reserved stock cannot be dispatched",
+            description: `Only ${context.availableAtSource ?? 0} unreserved unit(s) are available at the source. Release or reallocate the open-order reservation before shipping more to another warehouse.`,
+            variant: "destructive",
+          });
+          return;
+        }
         setReservationPrompt({ payload: variables, ...context });
         return;
       }
@@ -276,6 +321,14 @@ export default function Transfers() {
         try {
           const body = JSON.parse(error.message.replace(/^\d+:\s*/, ""));
           if (body.context) {
+            if (crossWarehouseRequest) {
+              toast({
+                title: "Reserved stock cannot be dispatched",
+                description: `Only ${body.context.availableAtSource ?? 0} unreserved unit(s) are available at the source. Release or reallocate the open-order reservation before shipping more to another warehouse.`,
+                variant: "destructive",
+              });
+              return;
+            }
             setReservationPrompt({ payload: variables, ...body.context });
             return;
           }
@@ -345,11 +398,12 @@ export default function Transfers() {
   };
   
   const handleMobileSubmit = () => {
-    const sourceLoc = actionableLocations.find(l => l.code.toUpperCase() === sourceLocationCode.toUpperCase());
-    const destLoc = actionableLocations.find(l => l.code.toUpperCase() === destLocationCode.toUpperCase());
+    const sourceLoc = actionableLocations.find(l => l.id === fromLocationId && l.code.trim().toUpperCase() === normalizedSourceCode);
+    const destLoc = actionableLocations.find(l => l.id === toLocationId && l.code.trim().toUpperCase() === normalizedDestinationCode);
+    const parsedQuantity = Number(mobileQuantity);
     
-    if (!sourceLoc || !destLoc || !selectedSku || !mobileQuantity) {
-      toast({ title: "Missing Fields", description: "Please complete all steps", variant: "destructive" });
+    if (!sourceLoc || !destLoc || sourceLoc.id === destLoc.id || !selectedSku || !Number.isSafeInteger(parsedQuantity) || parsedQuantity <= 0) {
+      toast({ title: "Transfer needs attention", description: "Re-select the source, destination, SKU, and quantity before submitting.", variant: "destructive" });
       return;
     }
     
@@ -357,7 +411,7 @@ export default function Transfers() {
       fromLocationId: sourceLoc.id,
       toLocationId: destLoc.id,
       variantId: selectedSku.variantId,
-      quantity: parseInt(mobileQuantity)
+      quantity: parsedQuantity
     });
   };
   
@@ -438,17 +492,22 @@ export default function Transfers() {
                   <ScanLine className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
                   <Input
                     value={sourceLocationCode}
-                    onChange={(e) => setSourceLocationCode(e.target.value.toUpperCase())}
+                    onChange={(e) => {
+                      setSourceLocationCode(e.target.value.toUpperCase());
+                      setFromLocationId(null);
+                      setSelectedSku(null);
+                      setVariantId(null);
+                    }}
                     placeholder="A-01-01"
                     className="pl-10 h-14 text-xl text-center uppercase"
                     autoFocus
                     data-testid="input-source-location"
                   />
                 </div>
-                {sourceLocationCode && !actionableLocations.find(l => l.code.toUpperCase() === sourceLocationCode) && (
+                {normalizedSourceCode && !sourceSelectionMatchesInput && sourceExactMatches.length !== 1 && (
                   <div className="border rounded-md max-h-48 overflow-y-auto">
                     {actionableLocations
-                      .filter(loc => loc.code.toUpperCase().includes(sourceLocationCode))
+                      .filter(loc => loc.code.toUpperCase().includes(normalizedSourceCode))
                       .slice(0, 10)
                       .map(loc => (
                         <button
@@ -468,16 +527,16 @@ export default function Transfers() {
                           </span>
                         </button>
                       ))}
-                    {actionableLocations.filter(loc => loc.code.toUpperCase().includes(sourceLocationCode)).length === 0 && (
+                    {actionableLocations.filter(loc => loc.code.toUpperCase().includes(normalizedSourceCode)).length === 0 && (
                       <p className="px-4 py-3 text-sm text-muted-foreground">No matching bins</p>
                     )}
                   </div>
                 )}
                 <Button
                   className="w-full h-14 text-lg"
-                  disabled={!sourceLocationCode || !actionableLocations.find(l => l.code.toUpperCase() === sourceLocationCode)}
+                  disabled={!normalizedSourceCode || (!sourceSelectionMatchesInput && sourceExactMatches.length !== 1)}
                   onClick={() => {
-                    const loc = actionableLocations.find(l => l.code.toUpperCase() === sourceLocationCode);
+                    const loc = sourceSelectionMatchesInput ? selectedFromLocation : sourceExactMatches[0];
                     if (loc) {
                       setFromLocationId(loc.id);
                       playSoundWithHaptic("scan", "classic", true);
@@ -631,7 +690,10 @@ export default function Transfers() {
                   <ScanLine className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
                   <Input
                     value={destLocationCode}
-                    onChange={(e) => setDestLocationCode(e.target.value.toUpperCase())}
+                    onChange={(e) => {
+                      setDestLocationCode(e.target.value.toUpperCase());
+                      setToLocationId(null);
+                    }}
                     placeholder="B-02-03"
                     className="pl-10 h-14 text-xl text-center uppercase"
                     autoFocus
@@ -639,14 +701,16 @@ export default function Transfers() {
                   />
                 </div>
 
-                {destLocationCode && destLocationCode.toUpperCase() === sourceLocationCode.toUpperCase() && (
+                {normalizedDestinationCode
+                  && normalizedDestinationCode === normalizedSourceCode
+                  && destinationExactMatches.length === 0 && (
                   <p className="text-sm text-red-500">Destination must be different from source</p>
                 )}
 
-                {destLocationCode && !actionableLocations.find(l => l.code.toUpperCase() === destLocationCode) && (
+                {normalizedDestinationCode && !destinationSelectionMatchesInput && destinationExactMatches.length !== 1 && (
                   <div className="border rounded-md max-h-48 overflow-y-auto">
-                    {actionableLocations
-                      .filter(loc => loc.code.toUpperCase().includes(destLocationCode) && loc.code.toUpperCase() !== sourceLocationCode.toUpperCase())
+                    {destinationCandidates
+                      .filter(loc => loc.code.toUpperCase().includes(normalizedDestinationCode))
                       .slice(0, 10)
                       .map(loc => (
                         <button
@@ -666,7 +730,7 @@ export default function Transfers() {
                           </span>
                         </button>
                       ))}
-                    {actionableLocations.filter(loc => loc.code.toUpperCase().includes(destLocationCode) && loc.code.toUpperCase() !== sourceLocationCode.toUpperCase()).length === 0 && (
+                    {destinationCandidates.filter(loc => loc.code.toUpperCase().includes(normalizedDestinationCode)).length === 0 && (
                       <p className="px-4 py-3 text-sm text-muted-foreground">No matching bins</p>
                     )}
                   </div>
@@ -675,12 +739,11 @@ export default function Transfers() {
                 <Button
                   className="w-full h-14 text-lg"
                   disabled={
-                    !destLocationCode ||
-                    !actionableLocations.find(l => l.code.toUpperCase() === destLocationCode) ||
-                    destLocationCode.toUpperCase() === sourceLocationCode.toUpperCase()
+                    !normalizedDestinationCode ||
+                    (!destinationSelectionMatchesInput && destinationExactMatches.length !== 1)
                   }
                   onClick={() => {
-                    const loc = actionableLocations.find(l => l.code.toUpperCase() === destLocationCode);
+                    const loc = destinationSelectionMatchesInput ? selectedToLocation : destinationExactMatches[0];
                     if (loc) {
                       setToLocationId(loc.id);
                       playSoundWithHaptic("scan", "classic", true);
@@ -707,14 +770,18 @@ export default function Transfers() {
                 <div className="bg-slate-100 rounded-lg p-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">From:</span>
-                    <Badge variant="outline" className="text-lg px-3 py-1">{sourceLocationCode}</Badge>
+                    <Badge variant="outline" className="text-lg px-3 py-1">
+                      {sourceLocationCode}{selectedFromLocation?.warehouseId ? ` · ${warehouseMap.get(selectedFromLocation.warehouseId) ?? ""}` : ""}
+                    </Badge>
                   </div>
                   <div className="flex justify-center">
                     <ArrowRight className="h-6 w-6 text-muted-foreground" />
                   </div>
                   <div className="flex items-center justify-between">
                     <span className="text-muted-foreground">To:</span>
-                    <Badge variant="outline" className="text-lg px-3 py-1">{destLocationCode}</Badge>
+                    <Badge variant="outline" className="text-lg px-3 py-1">
+                      {destLocationCode}{selectedToLocation?.warehouseId ? ` · ${warehouseMap.get(selectedToLocation.warehouseId) ?? ""}` : ""}
+                    </Badge>
                   </div>
                   <hr />
                   <div className="flex items-center justify-between">
@@ -726,6 +793,12 @@ export default function Transfers() {
                     <span className="font-bold text-xl">{mobileQuantity}</span>
                   </div>
                 </div>
+                {isCrossWarehouse && (
+                  <div className="rounded-lg border border-blue-200 bg-blue-50 p-4 text-sm text-blue-900">
+                    <p className="font-medium">This is a warehouse shipment.</p>
+                    <p className="mt-1">Confirming will remove the stock from {warehouseMap.get(selectedFromLocation?.warehouseId ?? 0)} and track it as In Transit. It becomes available at {warehouseMap.get(selectedToLocation?.warehouseId ?? 0)} only after receiving scans the physical count.</p>
+                  </div>
+                )}
                 
                 <Button
                   className="w-full h-16 text-xl bg-green-600 hover:bg-green-700"
@@ -738,11 +811,18 @@ export default function Transfers() {
                   ) : (
                     <Check className="h-6 w-6 mr-2" />
                   )}
-                  Confirm Transfer
+                  {isCrossWarehouse ? "Dispatch Transfer" : "Confirm Move"}
                 </Button>
               </div>
             )}
           </CardContent>
+        </Card>
+
+        <Card className="mb-4">
+          <CardHeader className="pb-2">
+            <CardTitle className="text-sm font-medium">Warehouse transfers awaiting receipt</CardTitle>
+          </CardHeader>
+          <CardContent><InterwarehouseTransferQueue compact /></CardContent>
         </Card>
         
         {transfers.length > 0 && (
@@ -856,6 +936,13 @@ export default function Transfers() {
                 </div>
               )}
             </div>
+
+            {isCrossWarehouse && (
+              <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+                <p className="font-medium">Inter-warehouse dispatch</p>
+                <p className="mt-1">Stock leaves the source now and stays in transit until the destination posts its received count. It will not be sellable at the destination early.</p>
+              </div>
+            )}
             
             <div className="space-y-2">
               <div className="flex items-center justify-between">
@@ -1012,16 +1099,19 @@ export default function Transfers() {
               ) : (
                 <ArrowRight className="h-4 w-4 mr-2" />
               )}
-              Move Inventory
+              {isCrossWarehouse ? "Dispatch Warehouse Transfer" : "Move Inventory"}
             </Button>
           </CardContent>
         </Card>
         
         <Card>
           <CardHeader>
-            <CardTitle>Recent Transfers</CardTitle>
+            <CardTitle>Warehouse transfer orders</CardTitle>
           </CardHeader>
           <CardContent>
+            <InterwarehouseTransferQueue />
+            <div className="mt-6 border-t pt-5">
+              <h3 className="mb-3 font-medium">Recent bin moves</h3>
             {transfersLoading ? (
               <div className="flex justify-center py-8">
                 <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
@@ -1066,6 +1156,7 @@ export default function Transfers() {
                 ))}
               </div>
             )}
+            </div>
           </CardContent>
         </Card>
       </div>

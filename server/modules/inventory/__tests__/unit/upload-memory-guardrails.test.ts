@@ -1,5 +1,7 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { resolve, join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { UPLOAD_MAX_BYTES } from "../../../../routes/middleware";
 
@@ -50,20 +52,47 @@ describe("in-memory upload limits", () => {
 });
 
 describe("V8 heap ceiling", () => {
-  const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
+  it("runs the same bounded Node command for Heroku and npm", () => {
+    const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
+    const web = readFileSync(join(REPO, "Procfile"), "utf8")
+      .split(/\r?\n/).find(line => line.startsWith("web:"));
+    expect(web).toBe(`web: ${pkg.scripts.start}`);
+    expect(pkg.scripts.start).toBe("bash scripts/start-web.sh");
 
-  it("tells V8 the dyno's limit instead of letting it read the host's RAM", () => {
-    // Without this, V8 sizes its heap from the host's memory (many GB on Heroku),
-    // stays lazy about collecting, and is killed at the 512MB dyno quota while
-    // still holding garbage it would have freed.
-    expect(pkg.scripts.start).toMatch(/--max-old-space-size=\d+/);
-  });
-
-  it("leaves headroom for everything that lives outside the heap", () => {
-    const cap = Number(/--max-old-space-size=(\d+)/.exec(pkg.scripts.start)?.[1]);
-    // Buffers, native memory and the runtime itself also count toward the 512MB
-    // quota, so the heap alone must not be allowed to consume it.
-    expect(cap).toBeGreaterThan(0);
-    expect(cap).toBeLessThan(512);
+    // Run the production launcher with a tiny stand-in entry point so the test
+    // observes Node's effective limits, environment, and process handoff.
+    const tempRoot = realpathSync(tmpdir());
+    const directory = mkdtempSync(join(tempRoot, "echelon-web-launch-"));
+    if (dirname(realpathSync(directory)) !== tempRoot) throw new Error("Unexpected test directory");
+    try {
+      mkdirSync(join(directory, "dist"));
+      writeFileSync(join(directory, "dist", "index.cjs"), [
+        "const v8 = require('node:v8');",
+        "console.log(JSON.stringify({ pid: process.pid, nodeEnv: process.env.NODE_ENV,",
+        "  args: process.execArgv, heapLimit: v8.getHeapStatistics().heap_size_limit }));",
+      ].join("\n"));
+      const windowsBash = join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe");
+      const bash = process.platform === "win32" && existsSync(windowsBash) ? windowsBash : "bash";
+      const environment: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: "test" };
+      delete environment.NODE_OPTIONS;
+      const result = spawnSync(bash, [join(REPO, "scripts", "start-web.sh")], {
+        cwd: directory, env: environment, encoding: "utf8", timeout: 15_000,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status, result.stderr).toBe(0);
+      const runtime = JSON.parse(result.stdout) as {
+        pid: number; nodeEnv: string; args: string[]; heapLimit: number;
+      };
+      expect(runtime.nodeEnv).toBe("production");
+      expect(runtime.args).toContain("--max-old-space-size=384");
+      expect(runtime.args).toContain("--max-semi-space-size=16");
+      // Assert V8's *total* limit, which includes the young generation. The old
+      // test only checked old space and missed the actual 576 MiB total limit.
+      expect(runtime.heapLimit).toBeGreaterThan(384 * 1024 * 1024);
+      expect(runtime.heapLimit).toBeLessThanOrEqual(448 * 1024 * 1024);
+      if (process.platform !== "win32") expect(runtime.pid).toBe(result.pid);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 });

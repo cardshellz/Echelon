@@ -10,7 +10,7 @@ const now = new Date("2026-05-07T18:30:00.000Z");
 
 describe("PgDropshipListingPushOpsRepository", () => {
   it("requeues retryable failed job items and records an ops audit event", async () => {
-    const query = vi.fn(async (sql: string) => {
+    const query = vi.fn(async (sql: string, _params?: unknown[]) => {
       const sqlText = String(sql);
       if (sqlText === "BEGIN" || sqlText === "COMMIT") {
         return { rows: [] };
@@ -152,7 +152,7 @@ function makeJobRow(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function makeClient(query: ReturnType<typeof vi.fn>): PoolClient {
+function makeClient(query: unknown): PoolClient {
   return { query, release: vi.fn() } as unknown as PoolClient;
 }
 

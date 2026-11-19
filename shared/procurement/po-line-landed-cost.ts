@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { purchaseTaxCostsSchema } from "./purchase-tax-costs";
 
 const cents = z.number().int().safe();
 const id = z.number().int().positive().safe();
@@ -19,6 +20,7 @@ const inputSchema = z.object({
     }),
   ),
   costs: z.object({
+    taxCosts: purchaseTaxCostsSchema.optional(),
     summary: z.object({
       totalCents: cents,
       poAmountCents: cents,
@@ -74,6 +76,17 @@ export function projectPoLineLandedCosts(input: unknown): PoLineLandedCosts {
   const poLines = parsed.data.poLines.filter(
     (line) => line.status !== "cancelled",
   );
+  if (costs.taxCosts) {
+    const tax = costs.taxCosts;
+    if (tax.inventoryLandedCents === null || tax.reason !== null) return { status: "unavailable", reason: tax.reason ?? "Review the saved tax treatment before using inventory costs." };
+    const selected = tax.lines.filter(row => poLines.some(line => line.id === row.purchaseOrderLineId));
+    if (selected.length !== tax.lines.length || new Set(selected.map(row => row.purchaseOrderLineId)).size !== selected.length
+      || selected.some(row => row.supplierInventoryCents === null || row.inventoryLandedCents === null)
+      || selected.reduce((sum, row) => sum + BigInt(row.inventoryLandedCents!), BigInt(0)) !== BigInt(tax.inventoryLandedCents))
+      return { status: "unavailable", reason: "The selected inventory costs do not reconcile to their purchase lines." };
+    return { status: "complete", lines: selected.map(row => ({ purchaseOrderLineId: row.purchaseOrderLineId, pieces: row.pieces,
+      supplierCents: row.supplierInventoryCents!, shipmentCents: row.shipmentInventoryCents, totalCents: row.inventoryLandedCents! })), poLevelAdjustmentCents: 0 };
+  }
   if (costs.summary.combinedCostCents === null)
     return {
       status: "unavailable",

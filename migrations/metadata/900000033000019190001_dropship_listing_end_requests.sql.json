@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000033000019190001_dropship_listing_end_requests.sql",
+  "generation": 33,
+  "pr": 1919,
+  "ordinal": 1,
+  "after": [
+    "900000032000019150001_retire_catalog_shipping_package_type.sql"
+  ]
+}

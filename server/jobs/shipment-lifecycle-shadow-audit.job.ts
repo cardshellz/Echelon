@@ -11,7 +11,7 @@ import {
   type PersistedConfirmedCarrierEvidenceRow,
   type PersistedDeclaredPackageEvidence,
   type PersistedShippingProviderLabelEventRow,
-} from "../modules/shipping/declared-package-lifecycle-shadow.domain";
+} from "../modules/shipping/declared-package-lifecycle.api";
 import {
   SHIPMENT_LIFECYCLE_SHADOW_AUDIT_LIMITS,
   ShipmentLifecycleShadowAuditRepositoryError,
@@ -20,7 +20,7 @@ import {
   type NormalizedShipmentLifecycleShadowAuditRepositoryOptions,
   type ShipmentLifecycleShadowAuditBatch,
   type ShipmentLifecycleShadowAuditRepositoryOptions,
-} from "../modules/shipping/shipment-lifecycle-shadow-audit.repository";
+} from "../modules/shipping/declared-package-lifecycle.api";
 
 interface ShadowAuditPoolClient extends Pick<PoolClient, "query" | "release"> {}
 

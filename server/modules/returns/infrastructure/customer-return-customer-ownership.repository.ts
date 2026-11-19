@@ -1,3 +1,4 @@
+import { returnOwnerPredicate } from "./customer-return-owner-predicate";
 import type { Pool } from "pg";
 import { z } from "zod";
 import {
@@ -26,10 +27,10 @@ export class PostgresCustomerReturnCustomerOwnershipReader implements CustomerRe
           o.external_order_number, a.created_at
         FROM returns.customer_return_authorizations a
         JOIN oms.oms_orders o ON o.id = a.oms_order_id AND o.channel_id = a.channel_id
-        WHERE a.channel_id = $1 AND o.external_customer_id = $2
-          AND ($3::bigint IS NULL OR a.id < $3)
-        ORDER BY a.id DESC LIMIT $4`,
-      [principal.channelId, principal.externalCustomerId, input.beforeAuthorizationId ?? null, input.pageSize + 1]);
+        WHERE a.channel_id = $1 AND ${returnOwnerPredicate(principal, 4).sql}
+          AND ($2::bigint IS NULL OR a.id < $2)
+        ORDER BY a.id DESC LIMIT $3`,
+      [principal.channelId, input.beforeAuthorizationId ?? null, input.pageSize + 1, ...returnOwnerPredicate(principal, 4).values]);
       const rows = z.array(z.object({ id: databaseId, authorization_number: z.string(), oms_order_id: databaseId,
         external_order_number: z.string().nullable(), created_at: z.coerce.date(),
       }).strict()).max(input.pageSize + 1).parse(result.rows);
@@ -47,8 +48,8 @@ export class PostgresCustomerReturnCustomerOwnershipReader implements CustomerRe
       const result = await this.database.query(`SELECT a.oms_order_id, a.id AS authorization_id
         FROM returns.customer_return_authorizations a
         JOIN oms.oms_orders o ON o.id = a.oms_order_id AND o.channel_id = a.channel_id
-        WHERE a.id = $1 AND a.channel_id = $2 AND o.external_customer_id = $3`,
-      [authorizationId, principal.channelId, principal.externalCustomerId]);
+        WHERE a.id = $1 AND a.channel_id = $2 AND ${returnOwnerPredicate(principal, 3).sql}`,
+      [authorizationId, principal.channelId, ...returnOwnerPredicate(principal, 3).values]);
       const row = z.array(orderRow).max(1).parse(result.rows)[0];
       return row ? customerReturnOwnedAuthorizationSchema.parse({ authorizationId: row.authorization_id, omsOrderId: row.oms_order_id }) : null;
     });
@@ -63,8 +64,8 @@ export class PostgresCustomerReturnCustomerOwnershipReader implements CustomerRe
       const result = await this.database.query(`SELECT c.oms_order_id, c.authorization_id
         FROM returns.customer_return_submission_commands c
         JOIN oms.oms_orders o ON o.id = c.oms_order_id AND o.channel_id = c.channel_id
-        WHERE c.idempotency_key = $1 AND c.channel_id = $2 AND o.external_customer_id = $3`,
-      [key, principal.channelId, principal.externalCustomerId]);
+        WHERE c.idempotency_key = $1 AND c.channel_id = $2 AND ${returnOwnerPredicate(principal, 3).sql}`,
+      [key, principal.channelId, ...returnOwnerPredicate(principal, 3).values]);
       const row = z.array(orderRow).max(1).parse(result.rows)[0];
       return row ? customerReturnOwnedCommandSchema.parse({ authorizationId: row.authorization_id, omsOrderId: row.oms_order_id }) : null;
     });

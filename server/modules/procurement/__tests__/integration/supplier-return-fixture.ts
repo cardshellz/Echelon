@@ -9,6 +9,7 @@ export const supplierReturnReadFixtureTables = [
   schema.supplierReturnCostEntries, schema.supplierReturnCreditEntitlements,
   schema.supplierReturnCreditLinks, schema.supplierReturnReportingEvents,
   schema.supplierReturnCreditReviews, schema.supplierReturnFollowups,
+  schema.supplierHeaderCostReviews,
 ];
 
 export async function installSupplierReturnCompletionFixture(pool: {

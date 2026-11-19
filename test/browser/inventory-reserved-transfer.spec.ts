@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 async function setup(page: Page, lostResponse = false, frozenFirst = false) {
@@ -49,11 +50,9 @@ needed: 1, onHandAtSource: 1, availableAtSource: 0, reservedAtSource: 1, sourceC
     }
     if (url.pathname === "/api/auth/me")
       return route.fulfill({
-        json: {
-          user: {
+        json: staffAuthorityFixture({ user: {
             id: "operator", username: "operator", role: "admin"
-          }, roles: ["admin"], permissions: []
-        }
+          }, permissions: [], systemRoles: ["admin"] })
       });
     if (url.pathname === "/api/warehouse/locations")
       return route.fulfill({
@@ -114,9 +113,7 @@ async function prepare(page: Page, mobile: boolean) {
   }
 }
 async function confirm(page: Page) {
-  await page.getByRole("button", {
-    name: /^(Move Inventory|Confirm Transfer)$/
-  }).click();
+  await page.locator('[data-testid="button-desktop-transfer"], [data-testid="button-confirm-transfer"]').click();
   await expect(page.getByRole("dialog")).toContainText("0");
   await page.getByRole("button", {
     name: "Move reserved too", exact: true
@@ -156,7 +153,7 @@ test("retries a lost reserved-move response with the original confirmed command 
 test("starts a fresh command after the server proves a frozen-bin request was rejected", async ({ page }, info) => {
   const state = await setup(page, false, true);
   await prepare(page, info.project.name === "mobile");
-  await page.getByRole("button", { name: /^(Move Inventory|Confirm Transfer)$/ }).click();
+  await page.locator('[data-testid="button-desktop-transfer"], [data-testid="button-confirm-transfer"]').click();
   await expect(page.getByText("Source bin is frozen for cycle counting", { exact: true })).toBeVisible();
   await confirm(page);
   await expect(page.getByText("Inventory moved. 1 reserved unit(s) followed the stock; 1 pending order line(s) re-pointed to the new bin.", { exact: true })).toBeVisible();

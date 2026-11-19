@@ -39,6 +39,7 @@ export const shipmentWorkListItemSchema = z.object({
   containerSize: text.optional(), containerCapacityCbm: text.optional(), bolNumber: text.optional(),
   houseBol: text.optional(), trackingNumber: text.optional(), totalWeightKg: text.optional(),
   totalVolumeCbm: text.optional(), totalGrossVolumeCbm: text.optional(), grossWeightKg: text.optional(),
+  physicalMeasurementIssue: z.object({ code: z.string(), message: z.string() }).strict().nullable().optional(),
   palletCount: count.nullable().optional(), totalPieces: count.nullable().optional(), totalCartons: count.nullable().optional(),
   allocationMethodDefault: text.optional(), internalNotes: text.optional(), createdBy: text.optional(), closedBy: text.optional(),
   shipDate: date.optional(), etd: date.optional(), actualArrival: date.optional(), customsClearedDate: date.optional(),

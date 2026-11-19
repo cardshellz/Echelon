@@ -130,11 +130,12 @@ integration("private return inspection against migration-defined PostgreSQL", ()
       INSERT INTO inventory.inventory_transactions(transaction_type,variant_qty_delta,order_id,order_item_id) VALUES('return',1,202,303)`);
     const snapshot = await reader.read(input);
     expect(snapshot?.wmsItems).toHaveLength(3);
+    expect(snapshot?.wmsItems.find(item => item.wmsOrderItemId === 303)?.omsOrderLineId).toBe(102);
     expect(snapshot?.legacyClaims).toHaveLength(1);
     expect(snapshot?.unallocatedReturns).toHaveLength(1);
     expect(snapshot?.inventoryReturnEvidence).toHaveLength(1);
-    expect(snapshot?.issues).toContainEqual({ code: "legacy_claim_allocation_unknown", omsOrderLineId: null });
-    expect(snapshot?.issues).toContainEqual({ code: "inventory_return_correlation_unknown", omsOrderLineId: null });
+    expect(snapshot?.issues).toContainEqual({ code: "legacy_claim_allocation_unknown", omsOrderLineId: 102 });
+    expect(snapshot?.issues).toContainEqual({ code: "inventory_return_correlation_unknown", omsOrderLineId: 102 });
   });
 
   it("retains root claims and legacy expected claims once each, without guessing child correlation", async () => {

@@ -1,11 +1,11 @@
 import {
   formatCents,
-  formatStatus,
   type DropshipOrderAcceptResponse,
   type DropshipOrderDetail,
   type DropshipOrderListItem,
 } from "@/lib/dropship-ops-surface";
 import { formatPoints } from "@/lib/dropship-wallet-guidance";
+import { vendorLedgerStatusLabel } from "@/lib/dropship-vendor-labels";
 
 /**
  * How an order was, or will be, paid from the wallet, in the vendor's words
@@ -41,7 +41,7 @@ export function describeOrderPayment(order: Pick<DropshipOrderDetail, "walletLed
     parts.push({ label: "From cash", value: formatCents(cashCents) });
   }
   if (cash) {
-    parts.push({ label: "Status", value: formatStatus(cash.status) });
+    parts.push({ label: "Status", value: vendorLedgerStatusLabel(cash.status) });
     parts.push({ label: "Cash balance after", value: cash.availableBalanceAfterCents === null ? "Not recorded" : formatCents(cash.availableBalanceAfterCents) });
   }
   if (rewards) {

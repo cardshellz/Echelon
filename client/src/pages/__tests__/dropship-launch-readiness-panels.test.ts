@@ -9,7 +9,11 @@ import { describe, expect, it } from "vitest";
  * blocker appeared in three of them at once, so an operator could not tell how
  * many problems they actually had. These pins keep each panel to one job.
  */
-const source = readFileSync(join(__dirname, "..", "Dropship.tsx"), "utf8");
+const pageSource = readFileSync(join(__dirname, "..", "Dropship.tsx"), "utf8");
+const source = readFileSync(
+  join(__dirname, "..", "dropship-admin", "DogfoodReadinessTab.tsx"),
+  "utf8",
+);
 
 function componentSource(start: string, end: string): string {
   const from = source.indexOf(start);
@@ -20,8 +24,23 @@ function componentSource(start: string, end: string): string {
 }
 
 describe("Dropship launch readiness panels", () => {
+  it("wires DogfoodReadinessTab onto the dogfood tab of Dropship.tsx", () => {
+    expect(pageSource).toContain(
+      'import("./dropship-admin/DogfoodReadinessTab")',
+    );
+    expect(pageSource).toContain(
+      '<TabsContent value="dogfood" className="m-0">',
+    );
+    expect(pageSource).toContain(
+      "<DogfoodReadinessTab onOpenSmokeOpsSearch={openSmokeOpsSearch} />",
+    );
+  });
+
   it("states the verdict once and sends the reader to the panel that owns the detail", () => {
-    const gate = componentSource("function DogfoodLaunchGatePanel", "function LaunchGateMetric");
+    const gate = componentSource(
+      "function DogfoodLaunchGatePanel",
+      "function LaunchGateMetric",
+    );
 
     // The verdict and its status stay.
     expect(gate).toContain("Can we run live orders?");
@@ -37,8 +56,14 @@ describe("Dropship launch readiness panels", () => {
   });
 
   it("names the checklist once, with its filters, counts and rows in one panel", () => {
-    const tab = componentSource("function DogfoodReadinessTab", "function ListingPushOpsTab");
-    const table = componentSource("function DogfoodReadinessTable", "function ListingPushJobsTable");
+    const tab = componentSource(
+      "function DogfoodReadinessTab",
+      "function SystemReadinessPanel",
+    );
+    const table = componentSource(
+      "function DogfoodReadinessTable",
+      "\nexport {",
+    );
 
     expect(tab).toContain("Launch checklist");
     expect(tab).toContain('data-testid="launch-checklist-counts"');
@@ -54,7 +79,10 @@ describe("Dropship launch readiness panels", () => {
   });
 
   it("says that smoke evidence answers a different question from the checklist", () => {
-    const smoke = componentSource("function DogfoodSmokePanel", "function DogfoodSmokeCandidateCard");
+    const smoke = componentSource(
+      "function DogfoodSmokePanel",
+      "function DogfoodSmokeCandidateCard",
+    );
 
     expect(smoke).toContain("Has a real order run end to end?");
     expect(smoke).toContain("Separate from the launch checklist");
@@ -62,8 +90,22 @@ describe("Dropship launch readiness panels", () => {
     expect(smoke).toContain("{smoke.message}");
   });
 
+  it("(PLAN-B v4.1 V17) counts the vendor's chosen items, not rules, and shows a dash when an older server sends no count", () => {
+    const table = componentSource(
+      "function DogfoodReadinessTable",
+      "\nexport {",
+    );
+    expect(table).toContain('Items chosen:{" "}');
+    expect(table).toContain('{item.metrics.vendorSelectedItemCount ?? "—"}');
+    expect(table).not.toContain("Vendor include");
+    expect(table).not.toContain("vendorSelectionIncludeRuleCount");
+  });
+
   it("keeps the environment panel and the manual sweeps as their own jobs", () => {
-    const tab = componentSource("function DogfoodReadinessTab", "function ListingPushOpsTab");
+    const tab = componentSource(
+      "function DogfoodReadinessTab",
+      "function SystemReadinessPanel",
+    );
 
     expect(tab).toContain("<SystemReadinessPanel");
     expect(tab).toContain("<WorkerSweepPanel");

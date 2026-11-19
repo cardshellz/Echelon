@@ -6,6 +6,7 @@ import {
   catalogStepPath,
   catalogStoreName,
   catalogStoreOptions,
+  catalogStoreOwnName,
   catalogStoreStorageKey,
   chooseCatalogStore,
   chooseStepTick,
@@ -62,12 +63,11 @@ describe("catalog step locations", () => {
 });
 
 describe("catalog step ticks", () => {
-  it("ticks Choose once any active include rule exists, and claims nothing while rules load", () => {
+  it("ticks Choose once anything is selected (the summary's count, PLAN-B v4.1 V25), and claims nothing while it loads", () => {
     expect(chooseStepTick(undefined)).toBe("unknown");
-    expect(chooseStepTick([])).toBe("todo");
-    expect(chooseStepTick([{ action: "exclude", isActive: true }])).toBe("todo");
-    expect(chooseStepTick([{ action: "include", isActive: false }])).toBe("todo");
-    expect(chooseStepTick([{ action: "exclude" }, { action: "include" }])).toBe("done");
+    expect(chooseStepTick(0)).toBe("todo");
+    expect(chooseStepTick(1)).toBe("done");
+    expect(chooseStepTick(10_050)).toBe("done");
   });
 
 });
@@ -503,7 +503,16 @@ describe("catalog store choice", () => {
 
   it("names a store by its display name, then its domain, then its platform", () => {
     expect(catalogStoreName(secondEbay)).toBe("second-store");
-    expect(catalogStoreName({ externalDisplayName: null, shopDomain: null, platform: "ebay" })).toBe("Ebay store name pending");
+    expect(catalogStoreName({ externalDisplayName: null, shopDomain: null, platform: "ebay" })).toBe("eBay store");
+  });
+
+  it("gives the push outcome words the store's own name, or none rather than the placeholder", () => {
+    expect(catalogStoreOwnName(secondEbay)).toBe("second-store");
+    expect(catalogStoreOwnName({ externalDisplayName: "Marz Cards", shopDomain: "marz.example", platform: "ebay" })).toBe("Marz Cards");
+    // Settings labels the button "Reconnect eBay store"; the words then name the store's Reconnect button instead.
+    expect(catalogStoreOwnName({ externalDisplayName: null, shopDomain: null, platform: "ebay" })).toBeNull();
+    expect(catalogStoreOwnName({ externalDisplayName: "", shopDomain: "", platform: "ebay" })).toBeNull();
+    expect(catalogStoreOwnName(null)).toBeNull();
   });
 
   it("uses the preferred store while it can be chosen, else the first eBay store, else none", () => {

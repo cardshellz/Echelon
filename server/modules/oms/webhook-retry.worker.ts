@@ -2,11 +2,17 @@ import { webhookRetryQueue } from "@shared/schema";
 import { observeRuntimeWork } from "../../platform/observability/runtime-memory";
 import { eq, lte, and, sql } from "drizzle-orm";
 import { incr } from "../../instrumentation/metrics";
-import { createShipmentForOrder } from "../wms/create-shipment";
+import { createShipmentForOrder } from "../wms/shipment-execution-and-projection.api";
 import { describeWmsSyncFailure } from "./domain/wms-sync-failure";
 import {
+  createLateEditResidualShipment,
   movePendingShipmentItemsToLateEditResidual,
-} from "../wms/late-order-shipment-coverage";
+} from "../wms/shipment-execution-and-projection.api";
+import {
+  cancelEmptiedByLineHoldOutboundShipmentInWms,
+  flagOutboundShipmentPushRetryFailureReviewInWms,
+  setOutboundShipmentReviewFlagInWms,
+} from "../wms/outbound-shipment-mutations.api";
 // Stable error code for a deterministic, non-retryable ShipStation push
 // rejection (bad address/total/country, not-pushable status, finalized order).
 // Imported (not string-literal'd) so a rename stays in sync. shipstation.service
@@ -28,13 +34,16 @@ const SHOPIFY_PUSH_CLIENT_NOT_SET = "shopify_push_client_not_set";
 // by a unit test).
 const SHOPIFY_PUSH_INVALID_INPUT = "shopify_push_invalid_input";
 const RETRY_SCOPE_UNIQUE_INDEX_PREFIX = "uq_webhook_retry_pending_";
-type RetryDispatchItem = {
+export const WEBHOOK_RETRY_CLAIM_LEASE_MS = 60_000;
+export const WEBHOOK_RETRY_LOOPBACK_TIMEOUT_MS = 30_000;
+export type RetryDispatchItem = {
   id: number;
   provider: string;
   topic: string;
   payload: any;
   attempts: number;
   sourceInboxId?: number | null;
+  claimLeaseUntil?: Date | string | null;
 };
 
 /**
@@ -198,7 +207,12 @@ export async function startWebhookRetryWorker(
  */
 export async function enqueueShipStationRetry(
   dbArg: any,
-  payload: { resource_url: string }
+  payload: { resource_url: string },
+  options?: {
+    sourceInboxId?: number | null;
+    lastError?: string | null;
+    nextRetryAt?: Date;
+  },
 ): Promise<void> {
   if (!payload || typeof payload.resource_url !== "string" || payload.resource_url.length === 0) {
     throw new Error("enqueueShipStationRetry: payload.resource_url required");
@@ -216,13 +230,15 @@ export async function enqueueShipStationRetry(
     provider: "shipstation",
     topic: "SHIP_NOTIFY",
     payload: { resource_url: payload.resource_url },
+    ...(options?.sourceInboxId ? { sourceInboxId: options.sourceInboxId } : {}),
+    ...(options?.lastError ? { lastError: options.lastError } : {}),
     // attempts defaults to 0, status defaults to 'pending' via schema defaults,
     // but set them explicitly so tests don't depend on DB defaults.
     attempts: 0,
     status: "pending",
-    // First retry ~5 minutes out. Worker's exponential backoff takes over
+    // First retry ~5 minutes out by default. Worker's exponential backoff takes over
     // on subsequent failures (2^attempts minutes).
-    nextRetryAt: new Date(Date.now() + 5 * 60_000),
+    nextRetryAt: options?.nextRetryAt ?? new Date(Date.now() + 5 * 60_000),
   });
 }
 
@@ -233,9 +249,19 @@ export async function enqueueShipStationRetry(
 export interface RetryShipStationService {
   processShipNotify(resourceUrl: string): Promise<number>;
   pushShipment?(shipmentId: number): Promise<unknown>;
+  cancelOrder?(
+    shipstationOrderId: number,
+  ): Promise<{
+    state: "cancelled" | "already_cancelled" | "not_found" | "already_shipped";
+    providerStatus?: string;
+  }>;
   appendShipmentItems?(
     shipmentId: number,
     shipmentItemIds: readonly number[],
+  ): Promise<{ state: "applied" | "already_applied" | "not_editable"; providerStatus: string }>;
+  setShipmentItemQuantity?(
+    shipmentId: number,
+    shipmentItemId: number,
   ): Promise<{ state: "applied" | "already_applied" | "not_editable"; providerStatus: string }>;
   syncWmsOrderShipStationHoldState?(
     wmsOrderId: number,
@@ -568,6 +594,44 @@ export async function enqueueShipStationShipmentPushRetry(
   });
 }
 
+export async function enqueueShipStationShipmentCancelRetry(
+  dbArg: any,
+  shipmentId: number,
+  cause?: unknown,
+): Promise<void> {
+  if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+    throw new Error(
+      `enqueueShipStationShipmentCancelRetry: shipmentId must be a positive integer (got ${shipmentId})`,
+    );
+  }
+  const message =
+    cause instanceof Error
+      ? cause.message
+      : typeof cause === "string"
+        ? cause
+        : cause == null
+          ? ""
+          : String(cause);
+
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "internal",
+    topic: "shipstation_shipment_cancel",
+    scope: sql`payload->>'shipmentId' = ${String(shipmentId)}`,
+  })) {
+    return;
+  }
+
+  await insertWebhookRetryQueueRow(dbArg, {
+    provider: "internal",
+    topic: "shipstation_shipment_cancel",
+    payload: { shipmentId },
+    attempts: 0,
+    status: "pending",
+    lastError: message || null,
+    nextRetryAt: new Date(),
+  });
+}
+
 export async function enqueueShippingEngineShipmentAmendRetry(
   dbArg: any,
   shipmentId: number,
@@ -616,6 +680,53 @@ export async function enqueueShippingEngineShipmentAmendRetry(
       shipmentItemIds: normalizedItemIds,
       amendmentKey,
     },
+    attempts: 0,
+    status: "pending",
+    lastError: message || null,
+    nextRetryAt: new Date(),
+  });
+}
+
+export const SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC = "shipping_engine_shipment_quantity_amend";
+
+/**
+ * Queue a provider quantity amend for one package row the shipping engine
+ * already holds. The payload names only the row: the target quantity is
+ * recomputed from current WMS demand when the amend runs, so a later edit
+ * before dispatch is applied too, and replays are idempotent.
+ */
+export async function enqueueShippingEngineShipmentQuantityAmendRetry(
+  dbArg: any,
+  shipmentId: number,
+  shipmentItemId: number,
+  cause?: unknown,
+): Promise<void> {
+  if (!Number.isInteger(shipmentId) || shipmentId <= 0) {
+    throw new Error(
+      `enqueueShippingEngineShipmentQuantityAmendRetry: shipmentId must be a positive integer (got ${shipmentId})`,
+    );
+  }
+  if (!Number.isInteger(shipmentItemId) || shipmentItemId <= 0) {
+    throw new Error(
+      `enqueueShippingEngineShipmentQuantityAmendRetry: shipmentItemId must be a positive integer (got ${shipmentItemId})`,
+    );
+  }
+  const amendmentKey = `${shipmentId}:${shipmentItemId}`;
+  const message =
+    cause instanceof Error ? cause.message : typeof cause === "string" ? cause : cause == null ? "" : String(cause);
+
+  if (await hasPendingRetryForScope(dbArg, {
+    provider: "internal",
+    topic: SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC,
+    scope: sql`payload->>'amendmentKey' = ${amendmentKey}`,
+  })) {
+    return;
+  }
+
+  await insertWebhookRetryQueueRow(dbArg, {
+    provider: "internal",
+    topic: SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC,
+    payload: { shipmentId, shipmentItemId, amendmentKey },
     attempts: 0,
     status: "pending",
     lastError: message || null,
@@ -1127,19 +1238,12 @@ async function flagShipStationPushRetryExhausted(
   dbArg: any,
   shipmentId: number,
 ): Promise<void> {
-  await dbArg.execute(sql`
-    UPDATE wms.outbound_shipments
-    SET requires_review = true,
-        review_reason = CASE
-          WHEN review_reason IS NULL
-            OR review_reason = 'inventory_deduction_missing_item_data'
-          THEN 'shipstation_push_retry_exhausted'
-          ELSE review_reason
-        END,
-        updated_at = NOW()
-    WHERE id = ${shipmentId}
-      AND status NOT IN ('shipped', 'cancelled', 'voided')
-  `);
+  await flagOutboundShipmentPushRetryFailureReviewInWms(
+    dbArg,
+    shipmentId,
+    "shipstation_push_retry_exhausted",
+    true,
+  );
 }
 
 async function recordShipStationPushRetryFailure(
@@ -1243,6 +1347,129 @@ export async function dispatchShipStationShipmentPushRetry(
     } else {
       console.warn(
         `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_push, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+}
+
+export async function dispatchShipStationShipmentCancelRetry(
+  dbArg: any,
+  item: RetryDispatchItem,
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  const payload = item.payload as { shipmentId?: number } | null;
+  const shipmentId = payload?.shipmentId;
+
+  if (
+    typeof shipmentId !== "number" ||
+    !Number.isInteger(shipmentId) ||
+    shipmentId <= 0
+  ) {
+    await markRowDead(
+      dbArg,
+      item,
+      "malformed payload: shipmentId missing or invalid",
+    );
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed shipstation_shipment_cancel payload)`,
+    );
+    return "malformed";
+  }
+
+  const eng = resolveShippingEngine(dbArg);
+  const ssSvc = resolveShipStationService(dbArg);
+  if (!eng && (!ssSvc || typeof ssSvc.cancelOrder !== "function")) {
+    await keepPending(
+      dbArg,
+      item.id,
+      "shipping engine not available on db.__shippingEngine",
+    );
+    console.warn(
+      `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}) deferred - engine unavailable`,
+    );
+    return "pending";
+  }
+
+  try {
+    const shipmentRows = await dbArg.execute(sql`
+      SELECT os.id,
+             os.status,
+             os.shipping_engine,
+             os.engine_order_ref,
+             os.engine_shipment_ref,
+             os.shipstation_order_id,
+             os.shipstation_order_key,
+             (SELECT COUNT(*)::int FROM wms.outbound_shipment_items osi WHERE osi.shipment_id = os.id) AS remaining_items
+      FROM wms.outbound_shipments os
+      WHERE os.id = ${shipmentId}
+      LIMIT 1
+    `);
+    const row = shipmentRows?.rows?.[0];
+    if (!row) {
+      await markRowSuccess(dbArg, item);
+      return "success";
+    }
+    const currentStatus = String(row.status ?? "");
+    const remainingItems = Number(row.remaining_items ?? 0);
+    if (
+      ["cancelled", "voided", "shipped", "returned", "lost"].includes(currentStatus) ||
+      remainingItems > 0
+    ) {
+      await markRowSuccess(dbArg, item);
+      return "success";
+    }
+    if (currentStatus === "labeled") {
+      await setOutboundShipmentReviewFlagInWms(dbArg, shipmentId, "line_item_held_after_label");
+      await markRowSuccess(dbArg, item);
+      return "success";
+    }
+
+    const { engineRefFromRow } = await import("../shipping");
+    const ref = engineRefFromRow(row as any);
+    if (!ref) {
+      await cancelEmptiedByLineHoldOutboundShipmentInWms(dbArg, shipmentId);
+      await markRowSuccess(dbArg, item);
+      return "success";
+    }
+
+    const cancelOutcome = eng
+      ? await eng.cancel(ref)
+      : await ssSvc!.cancelOrder!(Number(row.shipstation_order_id));
+
+    if (cancelOutcome.state === "already_shipped") {
+      await setOutboundShipmentReviewFlagInWms(
+        dbArg,
+        shipmentId,
+        "provider_already_shipped_held_line",
+      );
+    } else {
+      await cancelEmptiedByLineHoldOutboundShipmentInWms(dbArg, shipmentId);
+    }
+
+    await markRowSuccess(dbArg, item);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}, state=${cancelOutcome.state}) succeeded`,
+    );
+    return "success";
+  } catch (err: any) {
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      { topic: "shipstation_shipment_cancel", shipmentId },
+    );
+    if (status === "dead") {
+      await setOutboundShipmentReviewFlagInWms(
+        dbArg,
+        shipmentId,
+        "shipstation_cancel_retry_exhausted",
+      );
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (shipstation_shipment_cancel, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
       );
     }
     return status;
@@ -1370,6 +1597,141 @@ export async function dispatchShippingEngineShipmentAmendRetry(
   }
 }
 
+/**
+ * Error codes from a provider quantity amend that identical retries can never
+ * fix (the engine order lost the line, or the row is not a customer line).
+ * These dead-letter immediately instead of burning the retry budget.
+ */
+export const PERMANENT_QUANTITY_AMEND_ERROR_CODES = new Set([
+  "SS_PUSH_QUANTITY_AMEND_LINE_MISSING",
+  SS_PUSH_INVALID_SHIPMENT,
+]);
+
+export async function dispatchShippingEngineShipmentQuantityAmendRetry(
+  dbArg: any,
+  item: RetryDispatchItem,
+): Promise<"success" | "pending" | "dead" | "malformed"> {
+  const payload = item.payload as {
+    shipmentId?: number;
+    shipmentItemId?: number;
+    amendmentKey?: string;
+  } | null;
+  const shipmentId = Number(payload?.shipmentId);
+  const shipmentItemId = Number(payload?.shipmentItemId);
+  if (
+    !Number.isInteger(shipmentId) || shipmentId <= 0 ||
+    !Number.isInteger(shipmentItemId) || shipmentItemId <= 0 ||
+    payload?.amendmentKey !== `${shipmentId}:${shipmentItemId}`
+  ) {
+    await markRowDead(dbArg, item, "malformed payload: shipmentId, shipmentItemId, or amendmentKey invalid");
+    console.error(
+      `${LOG_PREFIX} Item ${item.id} moved to DLQ (malformed ${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC} payload)`,
+    );
+    return "malformed";
+  }
+
+  const eng = resolveShippingEngine(dbArg);
+  const ssSvc = resolveShipStationService(dbArg);
+  if (
+    (!eng || typeof eng.setShipmentItemQuantity !== "function") &&
+    (!ssSvc || typeof ssSvc.setShipmentItemQuantity !== "function")
+  ) {
+    await keepPending(dbArg, item.id, "shipping engine quantity amendment API is unavailable");
+    console.warn(
+      `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) deferred - engine unavailable`,
+    );
+    return "pending";
+  }
+
+  try {
+    const result = eng && typeof eng.setShipmentItemQuantity === "function"
+      ? await eng.setShipmentItemQuantity({ shipmentId, shipmentItemId })
+      : await ssSvc!.setShipmentItemQuantity!(shipmentId, shipmentItemId);
+
+    if (result.state === "not_editable") {
+      // The engine positively reported the order locked (shipped/cancelled):
+      // the extra units go in a separate residual package instead.
+      if (typeof dbArg?.transaction !== "function") {
+        throw new Error("database transaction API is required for late-edit residual fallback");
+      }
+      const residual = await dbArg.transaction(async (tx: any) => {
+        const source = await tx.execute(sql`
+          SELECT os.order_id, os.channel_id, osi.order_item_id
+          FROM wms.outbound_shipment_items osi
+          JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
+          WHERE osi.id = ${shipmentItemId} AND os.id = ${shipmentId}
+          LIMIT 1
+        `);
+        const row = source.rows?.[0] as any;
+        if (!row || row.order_item_id == null) {
+          throw Object.assign(new Error(`shipment item ${shipmentItemId} is not a customer line on shipment ${shipmentId}`), {
+            code: SS_PUSH_INVALID_SHIPMENT,
+          });
+        }
+        const created = await createLateEditResidualShipment(
+          tx,
+          Number(row.order_id),
+          row.channel_id == null ? null : Number(row.channel_id),
+          [Number(row.order_item_id)],
+          { useXactLock: true },
+        );
+        if (created.shipmentItemIds.length > 0) {
+          await enqueueShipStationShipmentPushRetry(
+            tx,
+            created.shipmentId,
+            `provider status ${result.providerStatus} locked shipment ${shipmentId}; quantity growth moved to residual`,
+          );
+        }
+        await markRowSuccess(tx, item);
+        return created;
+      });
+      console.log(
+        `${LOG_PREFIX} Item ${item.id} routed ${residual.addedQuantity} unit(s) from locked shipment ${shipmentId} to residual shipment ${residual.shipmentId}`,
+      );
+      return "success";
+    }
+
+    await markRowSuccess(dbArg, item);
+    console.log(
+      `${LOG_PREFIX} Item ${item.id} amended quantity of shipment item ${shipmentItemId} on shipment ${shipmentId} (${result.state}, providerStatus=${result.providerStatus})`,
+    );
+    return "success";
+  } catch (err: any) {
+    // ShipStationPushError carries its code on context; plain errors on .code.
+    const errorCode = err?.context?.code ?? err?.code;
+    if (PERMANENT_QUANTITY_AMEND_ERROR_CODES.has(errorCode)) {
+      await markRowDead(dbArg, item, `${errorCode}: ${err?.message || String(err)}`);
+      console.error(JSON.stringify({
+        level: "error",
+        action: "shipping_engine_quantity_amend",
+        outcome: "dead_lettered",
+        error_code: errorCode,
+        shipment_id: shipmentId,
+        shipment_item_id: shipmentItemId,
+        retry_item_id: item.id,
+        message: err?.message || String(err),
+      }));
+      return "dead";
+    }
+    const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      dbArg,
+      item,
+      err?.message || String(err),
+      { topic: SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC, shipmentId },
+    );
+    if (status === "dead") {
+      console.error(
+        `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) moved to DLQ after ${attempts} attempts`,
+      );
+    } else {
+      console.warn(
+        `${LOG_PREFIX} Item ${item.id} (${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC}, shipment=${shipmentId}) failed. Next retry at ${nextRetryAt.toISOString()}`,
+      );
+    }
+    return status;
+  }
+}
+
 export async function dispatchShipStationHoldSyncRetry(
   dbArg: any,
   item: RetryDispatchItem,
@@ -1434,7 +1796,7 @@ export async function dispatchShipStationHoldSyncRetry(
   try {
     let touched = 0;
     if (eng) {
-      const { engineRefFromRow } = await import("../shipping/adapters/shipstation.adapter");
+      const { engineRefFromRow } = await import("../shipping/engine-and-reconcile.api");
       const shipments = await dbArg.execute(sql`
         SELECT shipping_engine, engine_order_ref, engine_shipment_ref,
                shipstation_order_id, shipstation_order_key
@@ -1556,7 +1918,7 @@ export async function dispatchShipStationSortRankSyncRetry(
   try {
     let touched2 = 0;
     if (eng2) {
-      const { engineRefFromRow } = await import("../shipping/adapters/shipstation.adapter");
+      const { engineRefFromRow } = await import("../shipping/engine-and-reconcile.api");
       const shipments = await dbArg.execute(sql`
         SELECT shipping_engine, engine_order_ref, engine_shipment_ref,
                shipstation_order_id, shipstation_order_key
@@ -1926,12 +2288,49 @@ export async function dispatchEbayWebhookRetry(
  * Optional `meta` lets callers shape the headline (e.g. include the
  * shipment id / topic). Per Overlord D6.
  */
+function buildClaimedRowWhere(item: {
+  id: number;
+  attempts?: number;
+  claimLeaseUntil?: Date | string | null;
+}) {
+  const predicates = [
+    eq(webhookRetryQueue.id, item.id),
+    eq(webhookRetryQueue.status, "pending"),
+  ];
+  if (typeof item.attempts === "number" && Number.isInteger(item.attempts)) {
+    predicates.push(eq(webhookRetryQueue.attempts, item.attempts));
+  }
+  if (item.claimLeaseUntil != null) {
+    const leaseDate =
+      item.claimLeaseUntil instanceof Date
+        ? item.claimLeaseUntil
+        : new Date(item.claimLeaseUntil);
+    if (!Number.isNaN(leaseDate.getTime())) {
+      predicates.push(eq(webhookRetryQueue.nextRetryAt, leaseDate));
+    }
+  }
+  return and(...predicates);
+}
+
+function wasRowUpdateApplied(result: unknown): boolean {
+  if (!result || typeof result !== "object") return true;
+  const rowCount = (result as { rowCount?: unknown }).rowCount;
+  return typeof rowCount === "number" ? rowCount > 0 : true;
+}
+
 export async function recordRetryFailure(
   dbArg: any,
-  item: { id: number; attempts: number; topic?: string; payload?: any; sourceInboxId?: number | null },
+  item: {
+    id: number;
+    attempts: number;
+    topic?: string;
+    payload?: any;
+    sourceInboxId?: number | null;
+    claimLeaseUntil?: Date | string | null;
+  },
   errMessage: string,
   meta: { topic?: string; orderId?: number; shipmentId?: number } = {},
-): Promise<{ attempts: number; status: "dead" | "pending"; nextRetryAt: Date }> {
+): Promise<{ attempts: number; status: "dead" | "pending"; nextRetryAt: Date; applied?: boolean }> {
   const attempts = item.attempts + 1;
   const status: "dead" | "pending" = attempts >= MAX_ATTEMPTS ? "dead" : "pending";
 
@@ -1939,7 +2338,7 @@ export async function recordRetryFailure(
   const delayMinutes = Math.pow(2, attempts);
   const nextRetryAt = new Date(Date.now() + delayMinutes * 60000);
 
-  await dbArg
+  const updateResult = await dbArg
     .update(webhookRetryQueue)
     .set({
       attempts,
@@ -1948,7 +2347,12 @@ export async function recordRetryFailure(
       lastError: errMessage,
       updatedAt: new Date(),
     })
-    .where(eq(webhookRetryQueue.id, item.id));
+    .where(buildClaimedRowWhere(item));
+
+  const applied = wasRowUpdateApplied(updateResult);
+  if (!applied) {
+    return { attempts, status, nextRetryAt, applied: false };
+  }
 
   if (status === "dead") {
     await mirrorRetryStatusToInbox(dbArg, item, "dead", errMessage);
@@ -1970,7 +2374,7 @@ export async function recordRetryFailure(
     );
   }
 
-  return { attempts, status, nextRetryAt };
+  return { attempts, status, nextRetryAt, applied: true };
 }
 
 /**
@@ -1980,18 +2384,19 @@ export async function recordRetryFailure(
  */
 async function markRowDead(
   dbArg: any,
-  item: { id: number; sourceInboxId?: number | null },
+  item: { id: number; attempts?: number; sourceInboxId?: number | null; claimLeaseUntil?: Date | string | null },
   reason: string,
 ): Promise<void> {
-  await dbArg
+  const updateResult = await dbArg
     .update(webhookRetryQueue)
     .set({
       status: "dead",
       lastError: reason,
       updatedAt: new Date(),
     })
-    .where(eq(webhookRetryQueue.id, item.id));
+    .where(buildClaimedRowWhere(item));
 
+  if (!wasRowUpdateApplied(updateResult)) return;
   await mirrorRetryStatusToInbox(dbArg, item, "dead", reason);
 }
 
@@ -2029,19 +2434,12 @@ async function markShopifyFulfillmentPushPermanentlyFailed(
   if (typeof dbArg?.execute === "function") {
     // Same review_reason preservation rules as the ShipStation twin: overwrite
     // the auto-cleared inventory reason, preserve any other manual reason.
-    await dbArg.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = true,
-          review_reason = CASE
-            WHEN review_reason IS NULL
-              OR review_reason = 'inventory_deduction_missing_item_data'
-            THEN ${`permanent_fulfillment_push_failure: ${reason}`}
-            ELSE review_reason
-          END,
-          updated_at = NOW()
-      WHERE id = ${shipmentId}
-        AND status NOT IN ('cancelled', 'voided')
-    `);
+    await flagOutboundShipmentPushRetryFailureReviewInWms(
+      dbArg,
+      shipmentId,
+      `permanent_fulfillment_push_failure: ${reason}`,
+      false,
+    );
   }
   await markRowDead(dbArg, item, reason);
 }
@@ -2061,19 +2459,12 @@ async function markShipmentPushPermanentlyFailed(
     //   - DO preserve any OTHER pre-existing manual reason (e.g.
     //     'refund_after_ship'): that context is still valid and shouldn't be lost.
     //   - When unset, record the namespaced permanent-push cause for ops.
-    await dbArg.execute(sql`
-      UPDATE wms.outbound_shipments
-      SET requires_review = true,
-          review_reason = CASE
-            WHEN review_reason IS NULL
-              OR review_reason = 'inventory_deduction_missing_item_data'
-            THEN ${`permanent_push_failure: ${reason}`}
-            ELSE review_reason
-          END,
-          updated_at = NOW()
-      WHERE id = ${shipmentId}
-        AND status NOT IN ('shipped', 'cancelled', 'voided')
-    `);
+    await flagOutboundShipmentPushRetryFailureReviewInWms(
+      dbArg,
+      shipmentId,
+      `permanent_push_failure: ${reason}`,
+      true,
+    );
   }
   await markRowDead(dbArg, item, reason);
 }
@@ -2102,13 +2493,14 @@ async function keepPending(
  */
 async function markRowSuccess(
   dbArg: any,
-  item: { id: number; sourceInboxId?: number | null },
+  item: { id: number; attempts?: number; sourceInboxId?: number | null; claimLeaseUntil?: Date | string | null },
 ): Promise<void> {
-  await dbArg
+  const updateResult = await dbArg
     .update(webhookRetryQueue)
     .set({ status: "success", updatedAt: new Date() })
-    .where(eq(webhookRetryQueue.id, item.id));
+    .where(buildClaimedRowWhere(item));
 
+  if (!wasRowUpdateApplied(updateResult)) return;
   await mirrorRetryStatusToInbox(dbArg, item, "succeeded", null);
 }
 
@@ -2198,20 +2590,69 @@ export async function dispatchShipStationRetry(
   }
 }
 
-async function processPendingWebhooks(
-  dependencies: WebhookRetryWorkerDependencies,
-) {
-  const defaultDb = getDefaultDb();
-  const pending = await defaultDb
+export async function claimDueWebhookRetryBatch(
+  dbArg: any,
+  options: { limit?: number; now?: Date; leaseMs?: number } = {},
+): Promise<RetryDispatchItem[]> {
+  const now = options.now ?? new Date();
+  const limit = options.limit ?? 50;
+  const leaseMs = options.leaseMs ?? WEBHOOK_RETRY_CLAIM_LEASE_MS;
+  const claimLeaseUntil = new Date(now.getTime() + leaseMs);
+
+  if (typeof dbArg?.execute === "function") {
+    const result = await dbArg.execute(sql`
+      WITH due AS (
+        SELECT id
+        FROM oms.webhook_retry_queue
+        WHERE status = 'pending'
+          AND next_retry_at <= ${now.toISOString()}::timestamptz
+        ORDER BY next_retry_at ASC, id ASC
+        LIMIT ${limit}
+        FOR UPDATE SKIP LOCKED
+      )
+      UPDATE oms.webhook_retry_queue AS q
+      SET next_retry_at = ${claimLeaseUntil.toISOString()}::timestamptz,
+          updated_at = NOW()
+      FROM due
+      WHERE q.id = due.id
+      RETURNING
+        q.id,
+        q.provider,
+        q.topic,
+        q.payload,
+        q.source_inbox_id AS "sourceInboxId",
+        q.attempts,
+        q.next_retry_at AS "nextRetryAt"
+    `);
+    const rows = Array.isArray(result?.rows) ? result.rows : [];
+    return rows.map((row: any) => ({
+      id: Number(row.id),
+      provider: String(row.provider),
+      topic: String(row.topic),
+      payload: row.payload,
+      attempts: Number(row.attempts ?? 0),
+      sourceInboxId: row.sourceInboxId != null ? Number(row.sourceInboxId) : null,
+      claimLeaseUntil: row.nextRetryAt ? new Date(row.nextRetryAt) : claimLeaseUntil,
+    }));
+  }
+
+  return dbArg
     .select()
     .from(webhookRetryQueue)
     .where(
       and(
         eq(webhookRetryQueue.status, "pending"),
-        lte(webhookRetryQueue.nextRetryAt, new Date())
-      )
+        lte(webhookRetryQueue.nextRetryAt, now),
+      ),
     )
-    .limit(50); // process in chunks
+    .limit(limit);
+}
+
+async function processPendingWebhooks(
+  dependencies: WebhookRetryWorkerDependencies,
+) {
+  const defaultDb = getDefaultDb();
+  const pending = await claimDueWebhookRetryBatch(defaultDb, { limit: 50 });
 
   if (pending.length === 0) return;
 
@@ -2289,6 +2730,20 @@ async function processPendingWebhooks(
 
     if (
       item.provider === "internal" &&
+      item.topic === "shipstation_shipment_cancel"
+    ) {
+      try {
+        await dispatchShipStationShipmentCancelRetry(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} shipstation_shipment_cancel dispatch threw: ${branchErr?.message || branchErr}`,
+        );
+      }
+      continue;
+    }
+
+    if (
+      item.provider === "internal" &&
       item.topic === "shipping_engine_shipment_amend"
     ) {
       try {
@@ -2296,6 +2751,20 @@ async function processPendingWebhooks(
       } catch (branchErr: any) {
         console.error(
           `${LOG_PREFIX} Item ${item.id} shipping_engine_shipment_amend dispatch threw: ${branchErr?.message || branchErr}`,
+        );
+      }
+      continue;
+    }
+
+    if (
+      item.provider === "internal" &&
+      item.topic === SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC
+    ) {
+      try {
+        await dispatchShippingEngineShipmentQuantityAmendRetry(defaultDb, item as any);
+      } catch (branchErr: any) {
+        console.error(
+          `${LOG_PREFIX} Item ${item.id} ${SHIPPING_ENGINE_SHIPMENT_QUANTITY_AMEND_TOPIC} dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
@@ -2376,10 +2845,17 @@ async function processPendingWebhooks(
         continue;
       }
 
-      const FULFILLMENT_TOPICS = new Set(["fulfillments/create", "fulfillments/update"]);
+      const SHOPIFY_ROUTE_TOPICS = new Set([
+        "fulfillments/create",
+        "fulfillments/update",
+        "products/create",
+        "products/update",
+        "products/delete",
+      ]);
       const KNOWN_TOPICS = new Set([
         "orders/paid", "orders/updated", "orders/cancelled", "orders/fulfilled",
         "refunds/create", "fulfillments/create", "fulfillments/update",
+        "products/create", "products/update", "products/delete",
       ]);
 
       // Unknown topic → dead immediately (non-retryable bad data)
@@ -2392,7 +2868,7 @@ async function processPendingWebhooks(
       try {
         console.log(`${LOG_PREFIX} Retrying shopify item ${item.id} (${item.topic}), attempt ${item.attempts + 1}`);
 
-        const basePath = FULFILLMENT_TOPICS.has(item.topic)
+        const basePath = SHOPIFY_ROUTE_TOPICS.has(item.topic)
           ? "/api/shopify/webhooks"
           : "/api/oms/webhooks";
         const url = `http://127.0.0.1:${process.env.PORT || 5000}${basePath}/${item.topic}`;
@@ -2408,6 +2884,7 @@ async function processPendingWebhooks(
             ...sourceHeaders,
           },
           body: JSON.stringify(item.payload),
+          signal: AbortSignal.timeout(WEBHOOK_RETRY_LOOPBACK_TIMEOUT_MS),
         });
 
         if (res.ok) {
@@ -2417,11 +2894,12 @@ async function processPendingWebhooks(
           throw new Error(`Local API returned ${res.status}`);
         }
       } catch (itemErr: any) {
-        const { status, attempts, nextRetryAt } = await recordRetryFailure(
+        const { status, attempts, nextRetryAt, applied } = await recordRetryFailure(
           defaultDb,
           item as any,
           itemErr?.message || String(itemErr),
         );
+        if (applied === false) continue;
 
         if (status === "dead") {
           // Shopify-specific dead-letter format for Discord alerter
@@ -2460,6 +2938,7 @@ async function processPendingWebhooks(
           "x-shopify-shop-domain": payloadDomain,
         },
         body: JSON.stringify(item.payload),
+        signal: AbortSignal.timeout(WEBHOOK_RETRY_LOOPBACK_TIMEOUT_MS),
       });
 
       if (res.ok) {
@@ -2471,11 +2950,12 @@ async function processPendingWebhooks(
         throw new Error(`Local API returned ${res.status}`);
       }
     } catch (itemErr: any) {
-      const { status, attempts, nextRetryAt } = await recordRetryFailure(
+      const { status, attempts, nextRetryAt, applied } = await recordRetryFailure(
         defaultDb,
         item as any,
         itemErr?.message || String(itemErr)
       );
+      if (applied === false) continue;
 
       if (status === "dead") {
         console.error(`${LOG_PREFIX} Item ${item.id} moved to DLQ (dead letter) after ${attempts} attempts`);

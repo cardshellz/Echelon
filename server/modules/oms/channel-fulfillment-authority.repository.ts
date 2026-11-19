@@ -1,9 +1,18 @@
-import { reconcileEbayLabelReplacement as reconcileLabelReplacement, readLabelReplacementMaterialization, type AuthorizedLabelReplacement, type EbayLabelReplacementResult } from "./ebay-label-replacement.repository";
+import { reconcileEbayLabelReplacement as reconcileLabelReplacement, readLabelReplacementMaterialization, type AuthorizedLabelReplacement, type EbayLabelReplacementResult, type LabelReplacementOperation } from "./ebay-label-replacement.repository";
+import { applyPackageReconciliation, loadPackageReconciliationSnapshot, packageReconciliationInputFromProof,
+  completePackageReconciliation, readReconciliationCommand, type PackageChannelReadback,
+  readReconciliationChannelScopes, loadReconciliationReplay, type PackageReconciliationChannelScope,
+  findPendingPackageReconciliations, recordPackageReconciliationFailure, recordPackageReconciliationTrackingIntent,
+  type PackageReconciliationCommand, type PackageReconciliationResult, type PackageReconciliationSnapshot } from "./package-reconciliation.repository";
+import { planPackageReconciliation } from "./package-reconciliation.domain";
 import { createHash } from "node:crypto";
-import { PackageAllocationSourceIdentityError } from "../shipping/package-allocation-source-identity.domain";
+import { enqueueShopifyLabelReplacementRecovery } from "./shopify-label-void-intake.repository";
+import { PackageAllocationSourceIdentityError } from "../shipping/package-allocation-authority.api";
+import { flagOutboundShipmentsExceedingLineAuthorityInWms } from "../wms/outbound-shipment-mutations.api";
 
 import { sql } from "drizzle-orm";
 import { z } from "zod";
+import { usesChannelMerchandiseQuantities } from "./domain/channel-merchandise-policy";
 import {
   canonicalCarrierValue,
   carrierIdentity,
@@ -238,9 +247,19 @@ export interface ClaimChannelFulfillmentCommandsInput {
 }
 
 export interface ChannelFulfillmentAuthorityRepository {
-  reconcileEbayLabelReplacement?(labelId: number, now: Date): Promise<EbayLabelReplacementResult | null>;
+  loadPackageReconciliationSnapshot?(sourceItemIds: readonly number[]): Promise<PackageReconciliationSnapshot>;
+  reconcilePackages?(command: PackageReconciliationCommand, now: Date): Promise<PackageReconciliationResult>;
+  readPackageReconciliation?(commandKey: string): Promise<PackageReconciliationResult | null>;
+  completePackageReconciliation?(commandId: number, readbacks: readonly PackageChannelReadback[], now: Date): Promise<Readonly<{ replayed: boolean; resolvedReviewIds: readonly number[] }>>;
+  readPackageReconciliationChannelScopes?(commandId: number): Promise<readonly PackageReconciliationChannelScope[]>;
+  loadPackageReconciliationReplay?(commandKey: string): ReturnType<typeof loadReconciliationReplay>;
+  findPendingPackageReconciliations?(limit: number, now: Date): ReturnType<typeof findPendingPackageReconciliations>;
+  recordPackageReconciliationFailure?(commandKey: string, code: string, now: Date): Promise<void>;
+  recordPackageReconciliationTrackingIntent?(input: Parameters<typeof recordPackageReconciliationTrackingIntent>[1], now: Date): Promise<void>;
+  markPackageReconciliationProjected?(commandId: number, physicalShipmentId: number, now: Date): Promise<void>;
+  reconcileEbayLabelReplacement?(labelId: number, now: Date, operation?: LabelReplacementOperation): Promise<EbayLabelReplacementResult | null>;
   markEbayLabelReplacementProjected?(labelId: number, now: Date): Promise<void>;
-  findWaitingEbayLabelReplacements?(limit: number): Promise<readonly number[]>;
+  findWaitingEbayLabelReplacements?(limit: number, now: Date): Promise<readonly number[]>;
   resolveLegacyPhysicalPackage(legacyWmsShipmentId: number): Promise<ResolvedLegacyPhysicalPackage>;
   validatePhysicalPackageIdentity(input: MaterializePhysicalPackageInput): Promise<void>;
   materializePhysicalPackage(input: MaterializePhysicalPackageInput): Promise<MaterializePhysicalPackageResult>;
@@ -287,6 +306,9 @@ interface LegacyPackageRow {
   channel_order_line_id: string | null;
   oms_order_status: string | null;
   oms_financial_status: string | null;
+  channel_id?: number;
+  channel_current_quantity?: number | null;
+  channel_quantity_updated_at?: Date | string | null;
   paid_quantity: number | null;
   authority_fulfillable_quantity: number | null;
   cancelled_quantity: number | null;
@@ -693,6 +715,11 @@ function normalizeCustomerItems(rows: readonly LegacyPackageRow[]): {
         refundedQuantity: row.refunded_quantity,
         refundCancelQuantity: row.refund_cancel_quantity,
         refundOtherQuantity: row.refund_other_quantity,
+        ...(usesChannelMerchandiseQuantities(channelProvider)
+          && row.channel_current_quantity != null && row.channel_quantity_updated_at != null
+          && Number.isFinite(new Date(row.channel_quantity_updated_at).getTime())
+          ? { useChannelQuantities: true, channelCurrentQuantity: row.channel_current_quantity,
+            channelQuantityUpdatedAt: new Date(row.channel_quantity_updated_at).toISOString() } : {}),
       });
     } catch (error) {
       if (!(error instanceof ChannelFulfillmentQuantityAuthorityError)) throw error;
@@ -906,6 +933,7 @@ async function loadPackageAllocationCommercialCustomerItems(
       oms_line.external_line_item_id AS channel_order_line_id,
       oms_order.status AS oms_order_status,
       oms_order.financial_status AS oms_financial_status,
+      oms_order.channel_id,oms_line.channel_current_quantity,oms_line.channel_quantity_updated_at,
       oms_line.paid_quantity::int AS paid_quantity,
       oms_line.authority_fulfillable_quantity::int AS authority_fulfillable_quantity,
       oms_line.cancelled_quantity::int AS cancelled_quantity,
@@ -1246,6 +1274,7 @@ async function loadLegacyPackageRows(
       oms_line.external_line_item_id AS channel_order_line_id,
       oms_order.status AS oms_order_status,
       oms_order.financial_status AS oms_financial_status,
+      oms_order.channel_id,oms_line.channel_current_quantity,oms_line.channel_quantity_updated_at,
       oms_line.paid_quantity::int AS paid_quantity,
       oms_line.authority_fulfillable_quantity::int AS authority_fulfillable_quantity,
       oms_line.cancelled_quantity::int AS cancelled_quantity,
@@ -2336,6 +2365,10 @@ async function findLineWritebackDecisions(
       reviewReason: item.reviewReason,
       commercialAuthorizedQuantity: item.commercialAuthorizedQuantity,
       cumulativePhysicalQuantity: shippedQuantity,
+        ...(item.quantityAuthority.useChannelQuantities === true ? { verifiedShopifyQuantity: {
+          currentQuantity: item.quantityAuthority.channelCurrentQuantity!, paidQuantity: item.quantityAuthority.paidQuantity,
+          sourceUpdatedAt: item.quantityAuthority.channelQuantityUpdatedAt!,
+        } } : {}),
       ...(quantityBasis === "commercial"
         ? { cumulativeCommercialQuantity: commercialQuantity }
         : {}),
@@ -2350,16 +2383,7 @@ async function findLineWritebackDecisions(
           .map((candidate) => candidate.legacyWmsShipmentId),
       )];
       const affectedIds = buildIdList(affectedLegacyShipmentIds);
-      await tx.execute(sql`
-        UPDATE wms.outbound_shipments
-        SET requires_review = true,
-            review_reason = COALESCE(
-              NULLIF(BTRIM(review_reason), ''),
-              'physical_shipment_exceeds_current_line_authority'
-            ),
-            updated_at = NOW()
-        WHERE id IN (${affectedIds})
-      `);
+      await flagOutboundShipmentsExceedingLineAuthorityInWms(tx, affectedIds);
     }
   }
 
@@ -4146,7 +4170,8 @@ export function createChannelFulfillmentAuthorityRepository(
         contextRows = contextRows.filter(row => authorizedReplacement.sourceItemIds.includes(Number(row.legacy_shipment_item_id)));
         if (contextRows.length !== authorizedReplacement.sourceItemIds.length
           || contextRows.some(row => (row.channel_provider !== 'shopify' && row.channel_provider !== 'ebay') || !authorizedReplacement.sourceItems.some(item =>
-            item.sourceShipmentItemId === Number(row.legacy_shipment_item_id) && item.quantity <= Number(row.quantity_shipped)))) {
+            item.sourceShipmentItemId === Number(row.legacy_shipment_item_id) && item.quantity <= (authorizedReplacement.sourceCapacities?.find(
+              capacity => capacity.sourceItemId === item.sourceShipmentItemId)?.quantity ?? Number(row.quantity_shipped))))) {
           throw new FulfillmentAuthorityError("PACKAGE_IDENTITY_CONFLICT", "Replacement differs from its exact authorized package allocation");
         }
         contextRows = contextRows.map(row => ({ ...row, quantity_shipped: authorizedReplacement.sourceItems.find(
@@ -4295,9 +4320,44 @@ export function createChannelFulfillmentAuthorityRepository(
     return transactionOverride ? execute(transactionOverride) : db.transaction(execute);
   }
 
-  async function reconcileEbayLabelReplacement(labelId: number, now: Date): Promise<EbayLabelReplacementResult | null> {
-    return db.transaction(async (tx: any) => reconcileLabelReplacement(tx, labelId, now,
-      (input, authority) => materializePhysicalPackage(input, authority, tx)), { isolationLevel: 'serializable' });
+  async function reconcileEbayLabelReplacement(labelId: number, now: Date, operation: LabelReplacementOperation = "label_observation"): Promise<EbayLabelReplacementResult | null> {
+    return db.transaction(async (tx: any) => {
+      const original = await reconcileLabelReplacement(tx, labelId, now,
+        (input, authority) => materializePhysicalPackage(input, authority, tx), operation);
+      if (original?.outcome !== 'review' || original.reason !== 'multiple_active_replacement_candidates') return original;
+      // A complete source can contain a relabel and a still-unused split portion.
+      // The original conserving transfer does not have that source-capacity view.
+      // Keep its strict behavior for ambiguous, over-capacity or incomplete sets.
+      const { readLabelEvidence } = await import('./ebay-label-replacement.repository');
+      const current = await readLabelEvidence(tx, labelId);
+      if (current.lifecycle?.outcome !== 'projected' || !current.lifecycle.projection.authoritativeContents?.length) return original;
+      const snapshot = await loadPackageReconciliationSnapshot(tx, current.lifecycle.projection.authoritativeContents.map(item => item.wmsShipmentItemId), true);
+      const input = packageReconciliationInputFromProof(snapshot, null, null);
+      const plan = planPackageReconciliation(input);
+      if (plan.outcome !== 'ready' || !plan.labelIdsToMaterialize.includes(labelId)) return original;
+      await applyPackageReconciliation(tx, {
+        commandKey: `current-packages:${plan.evidenceHash}`, expectedSnapshotHash: snapshot.hash, expectedPlanHash: plan.evidenceHash,
+        sourceItemIds: [...snapshot.sourceIds], actor: 'system:shipstation_label_replacement', reason: 'Reconcile exact replacement and additional split portions against original source capacity',
+        mode: 'live', correction: null, providerProof: null,
+      }, now, (target, authority) => materializePhysicalPackage({ ...target, ...(operation === 'repair' ? { notifyCustomer: false } : {}) }, authority, tx));
+      const applied = firstRow<{ physical_shipment_id: string }>(await tx.execute(sql`SELECT physical_shipment_id FROM wms.ebay_label_replacement_work WHERE shipping_provider_label_id = ${labelId} AND state = 'applied'`));
+      if (!applied) throw new Error('Current-package reconciliation omitted its requested label');
+      return { outcome: 'applied', materialized: await readLabelReplacementMaterialization(tx, Number(applied.physical_shipment_id)) };
+    }, { isolationLevel: 'serializable' });
+  }
+
+  async function reconcilePackages(command: PackageReconciliationCommand, now: Date): Promise<PackageReconciliationResult> {
+    for (let attempt=1; ; attempt++) {
+      try { return await db.transaction((tx: any) => applyPackageReconciliation(tx, command, now,
+        (input, authority) => materializePhysicalPackage(input, authority, tx)), { isolationLevel: 'serializable' }); }
+      catch (error) {
+        const failure = error as {code?:string;constraint?:string;cause?:{code?:string;constraint?:string}};
+        const code = failure.code ?? failure.cause?.code;
+        const constraint = failure.constraint ?? failure.cause?.constraint;
+        if (attempt>=3 || !(code==='40001'||code==='40P01'||(code==='23505'&&constraint==='package_reconciliation_commands_command_key_key'))) throw error;
+        console.warn(JSON.stringify({code:'PACKAGE_RECONCILIATION_TRANSACTION_RETRY',attempt,postgresCode:code}));
+      }
+    }
   }
 
   async function markEbayLabelReplacementProjected(labelId: number, now: Date): Promise<void> {
@@ -4305,8 +4365,27 @@ export function createChannelFulfillmentAuthorityRepository(
       WHERE shipping_provider_label_id = ${labelId} AND state = 'applied' AND projected_at IS NULL`);
   }
 
-  async function findWaitingEbayLabelReplacements(limit: number): Promise<readonly number[]> {
+  async function findWaitingEbayLabelReplacements(limit: number, now: Date): Promise<readonly number[]> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new FulfillmentAuthorityError("INVALID_INPUT", "Invalid replacement batch limit");
+    // Also adopt corrections completed before replacement work was durable.
+    // The unique label key preserves review/applied work and concurrent claims.
+    await enqueueShopifyLabelReplacementRecovery(db, now, { limit });
+    // An audited contents correction is new evidence, not a blind retry of a
+    // review. Consume it once; another rejection advances updated_at past it.
+    await db.execute(sql`
+      WITH corrected AS (
+        SELECT work.shipping_provider_label_id
+        FROM wms.shipping_provider_label_events correction
+        JOIN wms.ebay_label_replacement_work work ON work.shipping_provider_label_id = correction.shipping_provider_label_id
+        WHERE correction.event_type = 'contents_recovered' AND work.state = 'review'
+          AND correction.received_at > work.updated_at AND correction.received_at <= ${now}
+        ORDER BY correction.received_at, work.shipping_provider_label_id LIMIT ${limit}
+        FOR UPDATE OF work SKIP LOCKED
+      )
+      UPDATE wms.ebay_label_replacement_work work SET state = 'waiting',
+        reason = 'contents_correction_completed', updated_at = ${now}
+      FROM corrected WHERE corrected.shipping_provider_label_id = work.shipping_provider_label_id AND work.state = 'review'
+    `);
     return rowsOf<{ shipping_provider_label_id: string }>(await db.execute(sql`
       SELECT shipping_provider_label_id FROM wms.ebay_label_replacement_work
       WHERE state = 'waiting' OR (state = 'applied' AND projected_at IS NULL) ORDER BY updated_at, shipping_provider_label_id LIMIT ${limit}`))
@@ -4315,6 +4394,7 @@ export function createChannelFulfillmentAuthorityRepository(
 
   async function claimCommands(
     input: ClaimChannelFulfillmentCommandsInput,
+    transactionOverride?: any,
   ): Promise<readonly ClaimedChannelFulfillmentCommand[]> {
     if (
       !(input.now instanceof Date)
@@ -4338,7 +4418,7 @@ export function createChannelFulfillmentAuthorityRepository(
     }
     const leaseExpiresAt = new Date(input.now.getTime() + input.leaseDurationMs);
 
-    return db.transaction(async (tx: any) => {
+    const execute = async (tx: any): Promise<readonly ClaimedChannelFulfillmentCommand[]> => {
       const expired = rowsOf<{
         id: number;
         attempt_count: number;
@@ -4555,10 +4635,11 @@ export function createChannelFulfillmentAuthorityRepository(
           }),
           items: Object.freeze(itemsByCommand.get(Number(row.id)) ?? []),
         })));
-    });
+    };
+    return transactionOverride ? execute(transactionOverride) : db.transaction(execute);
   }
 
-  async function completeAttempt(input: CompleteChannelFulfillmentAttemptInput): Promise<void> {
+  async function completeAttempt(input: CompleteChannelFulfillmentAttemptInput, transactionOverride?: any): Promise<void> {
     if (
       !Number.isInteger(input.commandId)
       || input.commandId <= 0
@@ -4569,7 +4650,7 @@ export function createChannelFulfillmentAuthorityRepository(
     ) {
       throw new FulfillmentAuthorityError("INVALID_INPUT", "Invalid command completion input");
     }
-    await db.transaction(async (tx: any) => {
+    const execute = async (tx: any): Promise<void> => {
       const command = firstRow<any>(await tx.execute(sql`
         SELECT *
         FROM oms.channel_fulfillment_pushes
@@ -4650,11 +4731,39 @@ export function createChannelFulfillmentAuthorityRepository(
             updated_at = ${input.completedAt}
         WHERE id = ${input.commandId}
       `);
-    });
+    };
+    if (transactionOverride) await execute(transactionOverride); else await db.transaction(execute);
   }
 
   return {
     reconcileEbayLabelReplacement,
+    reconcilePackages,
+    readPackageReconciliation: (commandKey) => readReconciliationCommand(db, commandKey),
+    loadPackageReconciliationReplay: (commandKey) => loadReconciliationReplay(db, commandKey),
+    findPendingPackageReconciliations: (limit, now) => findPendingPackageReconciliations(db, limit, now),
+    recordPackageReconciliationFailure: (commandKey, code, now) => db.transaction((tx:any)=>recordPackageReconciliationFailure(tx,commandKey,code,now)),
+    recordPackageReconciliationTrackingIntent: (input,now) => db.transaction((tx:any)=>recordPackageReconciliationTrackingIntent(tx,input,now)),
+    markPackageReconciliationProjected: async (commandId,physicalShipmentId,now) => {
+      positiveIntegerSchema.parse(commandId);positiveIntegerSchema.parse(physicalShipmentId);z.date().parse(now);
+      await db.execute(sql`UPDATE wms.ebay_label_replacement_work SET projected_at=${now}
+        WHERE package_reconciliation_command_id=${commandId} AND physical_shipment_id=${physicalShipmentId} AND state='applied' AND projected_at IS NULL`);
+    },
+    readPackageReconciliationChannelScopes: (commandId) => readReconciliationChannelScopes(db, commandId),
+    completePackageReconciliation: (commandId, readbacks, now) => db.transaction((tx: any) => completePackageReconciliation(tx, commandId, readbacks, now,
+      async (id,readback) => {
+        const leaseToken=createHash('sha256').update(`package-reconciliation-readback:${commandId}:${id}`).digest('hex');
+        const claimed=await claimCommands({commandIds:[id],now,leaseToken,leaseDurationMs:30_000,limit:1},tx);
+        if(claimed.length!==1||claimed[0].id!==id){
+          const state=firstRow(await tx.execute(sql`SELECT command.push_status,command.next_attempt_at,command.attempt_count,command.max_attempts,
+            work.projected_at,label.label_status FROM oms.channel_fulfillment_pushes command
+            LEFT JOIN wms.ebay_label_replacement_work work ON work.physical_shipment_id=command.physical_shipment_id
+            LEFT JOIN wms.shipping_provider_labels label ON label.id=work.shipping_provider_label_id WHERE command.id=${id}`));
+          throw new FulfillmentAuthorityError('LEASE_OWNERSHIP_LOST','The exact reconciliation readback command could not be claimed',{commandId:id,state});
+        }
+        await completeAttempt({commandId:id,leaseToken,outcome:'success',startedAt:now,completedAt:now,providerResponseId:readback.fulfillmentId,
+          metadata:{operation:'adopt_verified_existing_fulfillment',packageReconciliationCommandId:commandId,readback,providerMutationPerformed:false,notifyCustomer:false}},tx);
+      }), { isolationLevel: 'serializable' }),
+    loadPackageReconciliationSnapshot: (sourceItemIds) => db.transaction((tx: any) => loadPackageReconciliationSnapshot(tx, sourceItemIds), { isolationLevel: 'repeatable read', accessMode: 'read only' }),
     findWaitingEbayLabelReplacements,
     markEbayLabelReplacementProjected,
     resolveLegacyPhysicalPackage,

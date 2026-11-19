@@ -109,7 +109,7 @@ describe("shipment cost application command boundary", () => {
 });
 
 const recordedCost: InboundFreightCost = {
-  id: 31, inboundShipmentId: 7, costType: "freight", description: null,
+  id: 31, inboundShipmentId: 7, costType: "freight", description: null, taxTypeId: null,
   estimatedCents: 100, actualCents: null, currency: "USD", exchangeRate: "1.0000",
   allocationMethod: null, costStatus: "estimated", invoiceNumber: null, invoiceDate: null,
   dueDate: null, paidDate: null, performedByName: null, performedByVendorId: null, vendorId: null,

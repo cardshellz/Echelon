@@ -70,7 +70,7 @@ function buildPurchasingMock(overrides: Record<string, any> = {}) {
 function buildApp(purchasing: any): Express {
   const app = express();
   app.use(express.json());
-  app.locals.services = { purchasing };
+  app.locals.services = { purchasing } as any;
   registerPurchasingAdminRoutes(app);
   return app;
 }

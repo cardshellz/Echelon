@@ -1,18 +1,45 @@
+import {
+  createAccountNativeSummariesWorker,
+  customerAccountServices,
+} from "./modules/customer-account/runtime.api";
+import {
+  createCustomerReturnWorkflowWorker,
+  startCustomerReturnWorkflowScheduler,
+  type ReturnWorkflowReport,
+} from "./modules/returns/runtime-workflow.api";
+import { createChannelSyncBatchService } from "./channel-sync-batch.composition";
+import { registerChannelSyncBatchRoutes } from "./modules/marketplace-listings/infrastructure/channel-sync-batch.routes";
 import { createListingIntentPropagationService } from "./listing-intent-propagation.composition";
 import { registerListingIntentPropagationRoutes } from "./modules/marketplace-listings/infrastructure/listing-intent-propagation.routes";
 import { ebayListingSyncService } from './modules/channels/ebay-listing-sync';
 import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
 import { startWalmartStockConnectionWorker } from "./modules/channels/adapters/walmart/walmart-stock-connection.service";
-import { createOrderEditService } from "./modules/order-edits/order-edit.composition";
-import { registerOrderEditRoutes } from "./modules/order-edits/interfaces/order-edit.routes";
-import { registerCustomerAccountRoutes } from "./modules/customer-account/interfaces/customer-account.routes";
-import { customerAccountServices } from "./modules/customer-account/infrastructure/customer-account.composition";
-import { startOrderEditScheduler } from "./modules/order-edits/infrastructure/order-edit-scheduler";
+import { startShopifyProductConnectionWorker } from "./modules/catalog/shopify-product-connection.worker";
+import { createDefaultShopifyProductConnectionService } from "./services/shopify-product-connection";
+import {
+  createOrderEditService,
+  registerOrderEditRoutes,
+  startOrderEditScheduler,
+} from "./modules/order-edits/runtime.api";
+import { registerCustomerAccountRoutes } from "./modules/customer-account/routes.api";
+import {
+  createOrderActionProjectionWorker,
+  startOrderActionProjectionScheduler,
+  type OrderActionProjectionReport,
+} from "./modules/customer-account/order-action-projection.api";
+import { createPackageHistoryWorker, startPackageHistoryScheduler } from "./modules/shipping/package-history-and-delivery.api";
+import { logger } from "./platform/observability/logger";
+import { reportBackgroundWork } from "./platform/observability/background-work-report";
 import { hasPermission } from "./modules/identity";
 import { startListingPublicationWorker } from "./modules/marketplace-listings/application/listing-publication-worker";
-import { startArchonOrderDelivery } from "./modules/oms/archon-order-delivery.worker";
+import {
+  startArchonOrderDelivery,
+  startFulfillmentSweeper,
+  startChannelFulfillmentCommandWorker,
+} from "./modules/oms/channel-fulfillment-authority.api";
 import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
+import { createStaffSessionGate } from "./modules/identity/staff-session.api";
 import connectPgSimple from "connect-pg-simple";
 import { Pool } from "pg";
 import cookieParser from "cookie-parser";
@@ -23,97 +50,108 @@ import { createServer } from "http";
 import { setupWebSocket } from "./websocket";
 // REMOVED: order-sync-listener deleted (Phase 3 - duplicate path eliminated)
 // REMOVED: reconciliation rebuilt without syncSingleOrder for OMS decoupling
-import { initReconciliation, startShopifyReconciliation } from "./modules/orders/shopify-order-reconciliation";
-import { runStartupMigrations, db } from "./db";
+import {
+  initReconciliation,
+  runStartupZombieOrderRepair,
+  startOmsWmsCancelReconcileScheduler,
+  startShopifyReconciliation,
+} from "./modules/orders/reconciliation-and-repair.api";
+import { db } from "./db";
 import { createServices } from "./services";
-import { startEbayOrderPolling, setShipStationService, setWmsServices, setWmsSyncService } from "./modules/oms/ebay-order-ingestion";
-import { startBillingScheduler } from "./modules/subscriptions/subscription.scheduler";
-import { startDropshipListingPushWorker } from "./modules/dropship/infrastructure/dropship-listing-push-job-runner";
-import { startDropshipOrderProcessingWorker } from "./modules/dropship/infrastructure/dropship-order-processing-runner";
-import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastructure/dropship-ebay-order-intake-runner";
-import { startDropshipReturnsMaintenanceWorker } from "./modules/dropship/infrastructure/dropship-returns-maintenance-runner";
-import { startDropshipReturnIntakeWorker } from "./modules/dropship/infrastructure/dropship-return-intake-runner";
-import { startDropshipUsdcWatcherWorker } from "./modules/dropship/infrastructure/dropship-usdc-watcher-runner";
-import { startDropshipCostDetectionWorker } from "./modules/dropship/infrastructure/dropship-cost-detection-runner";
-import { startDropshipCategoryMarksWorker } from "./modules/dropship/infrastructure/dropship-category-marks-runner";
-import { startDropshipRulesConversionWorker } from "./modules/dropship/infrastructure/dropship-rules-conversion-runner";
+import {
+  startEbayOrderPolling,
+  setShipStationService,
+  setWmsServices,
+  setWmsSyncService,
+  createEbayOrderWebhookHandler,
+  reingestEbayOrder,
+  startEbayFulfillmentStuckOrderScheduler,
+} from "./modules/oms/channel-order-intake.api";
+import { startBillingScheduler } from "./modules/subscriptions/runtime-scheduler.api";
 import {
   setDropshipFulfillmentSync,
   setDropshipInventoryRuntimeAuthorityGate,
-} from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
-import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
-import { startChannelFulfillmentCommandWorker } from "./modules/oms/channel-fulfillment-command.worker";
+  setDropshipMarketplaceCancelStop,
+  startDropshipCatalogArrivalsWorker,
+  startDropshipCategoryMarksWorker,
+  startDropshipCostDetectionWorker,
+  startDropshipEbayOrderIntakeWorker,
+  startDropshipListingEndWorker,
+  startDropshipListingPushWorker,
+  startDropshipMarketplaceSyncBackWorker,
+  startDropshipOrderProcessingWorker,
+  startDropshipProcessHeartbeatFromEnv,
+  startDropshipReturnIntakeWorker,
+  startDropshipReturnsMaintenanceWorker,
+  startDropshipRulesConversionWorker,
+  startDropshipUsdcWatcherWorker,
+} from "./modules/dropship/runtime-workers.api";
+import { createDropshipMarketplaceCancelStop } from "./modules/oms/dropship-order-authority.api";
 import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-freeze-guard.scheduler";
-import { startOmsFlowReconciliationScheduler } from "./modules/oms/oms-flow-reconciliation.service";
-import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
-import { startControlTowerProjectionScheduler } from "./modules/operations/control-tower-v2.scheduler";
-import { startPoEmailOutboxWorker } from "./modules/procurement/po-email-outbox.worker";
-import { startReceiptCostRecoveryWorker } from "./modules/procurement/receipt-cost-recovery.worker";
-import { createReceiptCostRecoveryRepository } from "./modules/procurement/receipt-cost-recovery.repository";
-import { startInboundTrackingScheduler } from "./modules/procurement/inbound-tracking.runtime";
-import { startCostReportingWorker } from "./modules/procurement/cost-reporting.service";
+import {
+  startOmsFlowReconciliationScheduler,
+  startOmsOpsAlertScheduler,
+} from "./modules/oms/operations-observability.api";
+import { startControlTowerProjectionScheduler } from "./modules/operations/projection-scheduler.api";
+import {
+  createReceiptCostRecoveryRepository,
+  startCostReportingWorker,
+  startInboundTrackingScheduler,
+  startPoEmailOutboxWorker,
+  startReceiptCostRecoveryWorker,
+} from "./modules/procurement/runtime-workers.api";
 import { startVariantAvailabilitySyncWorker } from "./modules/channels/variant-availability-sync.worker";
 import {
-  startInventoryPublicationSweepScheduler,
-  type InventoryPublicationSweepSchedulerHandle,
-} from "./modules/channels/inventory-publication-sweep.scheduler";
-import { startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
+  startEchelonSyncScheduler,
+  startEbayListingReconciliationScheduler,
+  startShopifyMappingReconcileScheduler,
+} from "./modules/channels/runtime-schedulers.api";
+import { requestInventoryPublicationWorkerRun, startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
+import { startPublicationWakeListener } from "./modules/inventory-planning/infrastructure/publication-wake-listener";
 import { startQuantityPublicationCatchupWorker } from "./modules/inventory-planning/application/quantity-publication-catchup.worker";
+import { startStockLinkRunner } from "./modules/inventory-planning/infrastructure/stock-link-runner";
+import { startProductSyncWorkflowRunner } from "./modules/inventory-planning/infrastructure/product-sync-workflow.runner";
+import { registerProductSyncWorkflowRoutes } from "./modules/inventory-planning/interfaces/http/inventory-product-sync.routes";
 import { startFinancialCommandRetentionWorker } from "./platform/commands/financial-command-retention.worker";
 import {
   startWebhookRetryWorker,
   enqueueShipStationRetry,
-  enqueueShipStationSortRankSyncRetry,
-} from "./modules/oms/webhook-retry.worker";
-import { createEbayOrderWebhookHandler, reingestEbayOrder } from "./modules/oms/ebay-order-ingestion";
-import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
-import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
-import { eq, and, sql } from "drizzle-orm";
-import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
-import { cancelWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
-import { runStartupZombieOrderRepair } from "./modules/orders/zombie-order-repair";
-import { startPickingFollowupWorker } from "./modules/wms/picking-followup.worker";
-import { engineRefFromRow, toEngineRef } from "./modules/shipping";
-import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-reconciliation.scheduler";
-import { startShipStationLabelReconciliationScheduler } from "./modules/oms/shipstation-label-reconciliation.scheduler";
+  buildShipStationWebhookInboxInput,
+  recordWebhookReceived,
+  markWebhookProcessing,
+  markWebhookSucceeded,
+  markWebhookFailed,
+  registerOmsWebhooks,
+} from "./modules/oms/webhook-retry.api";
+import { startShopifyBridgeListener } from "./modules/oms/shopify-intake.api";
+import { startPickingFollowupWorker } from "./modules/wms/picking-execution.api";
+import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-and-dispatch.api";
+import { startShipStationLabelReconciliationScheduler } from "./modules/oms/shipstation-execution.api";
 import {
   installShipStationTrackingRawBodyCapture,
   registerShipStationTrackingWebhook,
-} from "./modules/shipping/shipstation-tracking-webhook.routes";
-import { installGlobalJsonBodyParser } from "./modules/shipping-engine/interfaces/http/rate-table-admin-body.middleware";
-import { createDefaultShipStationV2WebhookVerifier } from "./modules/shipping/shipstation-webhook-auth";
-import { createCarrierTrackingProjectionReader } from "./modules/shipping/carrier-tracking-projection.repository";
-import { registerCarrierTrackingProjectionRoutes } from "./modules/shipping/carrier-tracking-projection.routes";
-import { deriveReconcileEvent } from "./modules/shipping/reconcile-derive";
-import type { SafeUser } from "@shared/schema";
-import {
-  channels as channelsTable,
-  inventoryAvailabilityRuntimeAuthority,
-  syncLog as syncLogTable,
-} from "@shared/schema";
+} from "./modules/shipping/shipstation-tracking-transport.api";
+import { installGlobalJsonBodyParser } from "./modules/shipping-engine/routes.api";
+import { createDefaultShipStationV2WebhookVerifier } from "./modules/shipping/shipstation-tracking-transport.api";
+import { createCarrierTrackingProjectionReader } from "./modules/shipping/carrier-tracking-and-dispatch.api";
+import { registerCarrierTrackingProjectionRoutes } from "./modules/shipping/carrier-tracking-and-dispatch.api";
+import { startWmsShipStationReconcileScheduler } from "./modules/shipping/engine-and-reconcile.api";
 import { pool as dbPool } from "./db";
-import * as http from "http";
 import { createEbayAuthConfig, EbayAuthService } from "./modules/channels/adapters/ebay/ebay-auth.service";
 import { createEbayApiClient } from "./modules/channels/adapters/ebay/ebay-api.client";
-import { requireAuth } from "./routes/middleware";
+import { requirePermission } from "./routes/middleware";
 import {
   envBoundedPositiveInteger,
-  envFlagEnabled,
   envPositiveInteger,
   getSchedulerDisableReason,
   schedulerIsDisabled,
 } from "./infrastructure/scheduler-config";
+import { registerScheduledJob } from "./infrastructure/job-registry";
 import { reportError, runWithContext } from "./platform/observability";
 import { createHttpRequestLogger } from "./platform/observability/http-request-log";
-import { observeRuntimeRequests, observeRuntimeWork, startRuntimeMemoryTelemetry } from "./platform/observability/runtime-memory";
+import { observeRuntimeRequests, startRuntimeMemoryTelemetry } from "./platform/observability/runtime-memory";
 import { getPostgresPoolSnapshot } from "./infrastructure/postgres-pool-observability";
 import { getSchedulerLockPoolSnapshot } from "./infrastructure/scheduler-lock";
-
-declare module "express-session" {
-  interface SessionData {
-    user?: SafeUser;
-  }
-}
 
 const app = express();
 const httpServer = createServer(app);
@@ -127,12 +165,6 @@ httpServer.once("close", stopMemoryTelemetry);
 app.use(observeRuntimeRequests);
 
 // setupWebSocket is deferred until sessionMiddleware is created
-
-declare module "http" {
-  interface IncomingMessage {
-    rawBody: unknown;
-  }
-}
 
 installShipStationTrackingRawBodyCapture(app);
 
@@ -191,6 +223,7 @@ const sessionMiddleware = session({
 });
 
 app.use(sessionMiddleware);
+app.use(createStaffSessionGate());
 
 // Initialize WebSocket server with session support
 setupWebSocket(httpServer, sessionMiddleware);
@@ -311,108 +344,11 @@ function buildShipStationWebhookTargetUrl(targetUrl: string): string {
 
 app.use(createHttpRequestLogger());
 
-/**
- * Echelon Sync Scheduler — periodically runs the Echelon orchestrator
- * as the sole sync engine, respecting the sync control hierarchy:
- *
- *   sync_settings.global_enabled → per-channel sync_enabled → sync_mode (live/dry_run)
- *
- * Replaces the old channelSync.syncAllProducts() scheduled interval.
- */
-function startEchelonSyncScheduler(
-  services: ReturnType<typeof createServices>,
-): InventoryPublicationSweepSchedulerHandle | null {
-  if (logSchedulerDisabled("echelon-sync", "Echelon sync scheduler", "ECHELON_SYNC_SCHEDULER_DISABLED")) {
-    return null;
-  }
-
-  async function runSweep() {
-    const startTime = Date.now();
-    try {
-      // 1. Check global kill switch
-      const globalSettings = await services.syncSettings.getGlobalSettings();
-      if (!globalSettings.globalEnabled) {
-        return; // Silently skip — global sync is off
-      }
-
-      // The coordinator is the sole work-creation resolver for both runtime
-      // authorities. Provider admission independently rechecks every live I/O.
-      try {
-        const result = await services.inventoryPublicationWork.syncAllProducts("scheduled_sync");
-        if (result.skippedReason) {
-          log(`[Echelon Sync] Sweep skipped: ${result.skippedReason}`, "echelon-sync");
-          await services.syncSettings.updateLastSweep(Date.now() - startTime);
-          return;
-        }
-        log(result.authority === "canonical"
-          ? "[Echelon Sync] Completed canonical live-target planning"
-          : "[Echelon Sync] Completed exact legacy channel planning", "echelon-sync");
-
-        // Log results to sync_log
-        for (const inv of result.inventory) {
-          for (const detail of (inv.details || [])) {
-            await services.syncSettings.writeSyncLog({
-              channelId: inv.channelId,
-              channelName: inv.channelName,
-              action: "inventory_push",
-              sku: detail.sku,
-              productVariantId: detail.variantId,
-              previousValue: detail.previousQty != null ? String(detail.previousQty) : null,
-              newValue: String(detail.allocatedQty),
-              status: detail.status === "success" ? "pushed" : detail.status === "dry_run" ? "dry_run" : detail.status === "error" ? "error" : "skipped",
-              errorMessage: detail.error || null,
-              source: "sweep",
-            });
-          }
-        }
-
-        const totalPushed = result.inventory.reduce((s: number, i: any) => s + i.variantsPushed, 0);
-        const totalErrors = result.inventory.reduce((s: number, i: any) => s + i.variantsErrored, 0);
-        log(
-          `[Echelon Sync] Orchestrator: ${totalPushed} pushed, ${totalErrors} errors across ${result.inventory.length} channels`,
-          "echelon-sync",
-        );
-      } catch (err: any) {
-        log(`[Echelon Sync] Orchestrator error: ${err.message}`, "echelon-sync");
-        await services.syncSettings.writeSyncLog({
-          channelId: null,
-          channelName: "ALL",
-          action: "inventory_push",
-          status: "error",
-          errorMessage: err.message,
-          source: "sweep",
-        });
-      }
-
-      const durationMs = Date.now() - startTime;
-      await services.syncSettings.updateLastSweep(durationMs);
-      log(`[Echelon Sync] Sweep completed in ${durationMs}ms`, "echelon-sync");
-    } catch (err: any) {
-      console.warn("[Echelon Sync] Sweep error:", err?.message);
-    }
-  }
-
-  return startInventoryPublicationSweepScheduler({
-    readControl: () => services.syncSettings.getGlobalSettings(),
-    runSweep: () => observeRuntimeWork("inventory.sync_sweep", runSweep),
-    logger: {
-      info: (message) => log(`[Echelon Sync] ${message}`, "echelon-sync"),
-      error: (message) => console.warn(`[Echelon Sync] ${message}`),
-    },
-  });
-}
-
 (async () => {
-  // Run startup migrations to ensure database schema is up to date
-  if (envFlagEnabled("SKIP_STARTUP_MIGRATIONS")) {
-    console.warn("Startup migrations skipped (SKIP_STARTUP_MIGRATIONS=true)");
-  } else {
-    try {
-      await runStartupMigrations();
-    } catch (err) {
-      console.error("Startup migrations failed, continuing anyway:", err);
-    }
-  }
+  // The web process never changes table structure. Schema is applied in the
+  // release phase (scripts/release.sh) before this process starts. Schema
+  // changes at boot need exclusive locks on live tables, and one blocked lock
+  // kept every dyno from starting (outages on 2026-11-10 and 2026-11-11).
 
   // Create WMS service container and attach to app for route handlers
   const services = createServices(db, dbPool);
@@ -422,7 +358,12 @@ function startEchelonSyncScheduler(
   // initOrderSyncServices(services);
 
   // Start Echelon sync scheduler (replaces old channelSync scheduler)
-  app.locals.inventoryPublicationSweepScheduler = startEchelonSyncScheduler(services);
+  app.locals.inventoryPublicationSweepScheduler = startEchelonSyncScheduler({
+    db,
+    syncSettings: services.syncSettings,
+    inventoryPublicationWork: services.inventoryPublicationWork,
+    log,
+  });
 
   // Authenticated ShipStation V2 carrier-status observations. This public
   // endpoint is registered before session-protected application routes and
@@ -436,7 +377,7 @@ function startEchelonSyncScheduler(
     reader: createCarrierTrackingProjectionReader(db),
   });
 
-  // --- ShipStation SHIP_NOTIFY webhook (BEFORE auth middleware; shared-secret verified) ---
+  // --- ShipStation SHIP_NOTIFY webhook (P1.6: persist to inbox → ACK → process from inbox) ---
   app.post("/api/shipstation/webhooks/ship-notify", async (req, res) => {
     const { resource_url, resource_type } = req.body || {};
     const verification = verifyShipStationWebhook(req);
@@ -453,29 +394,53 @@ function startEchelonSyncScheduler(
       return res.status(400).json({ error: "Invalid webhook resource_url" });
     }
 
+    let inboxReceiptId: number;
     try {
-      console.log(`[ShipStation Webhook] Received SHIP_NOTIFY`);
-      const processed = await services.shippingEngine.processWebhook(resource_url);
-      console.log(`[ShipStation Webhook] Processed ${processed} shipment(s)`);
+      const receipt = await recordWebhookReceived(
+        db,
+        buildShipStationWebhookInboxInput(req, resource_url, req.body),
+      );
+      if (!receipt.inserted && (receipt.status === "succeeded" || receipt.status === "processing")) {
+        console.log(`[ShipStation Webhook] Duplicate SHIP_NOTIFY (inbox=${receipt.id}, status=${receipt.status}), skipping`);
+        return res.status(200).json({ status: "ok", duplicate: true, inboxId: receipt.id });
+      }
+      inboxReceiptId = receipt.id;
+      await markWebhookProcessing(db, inboxReceiptId);
+    } catch (inboxErr: any) {
+      console.error(`[ShipStation Webhook] Failed to persist SHIP_NOTIFY to webhook_inbox: ${inboxErr?.message || inboxErr}`);
+      return res.status(500).json({ error: "Webhook inbox unavailable" });
+    }
 
-      return res.status(200).json({ status: "ok", processed });
+    // Durable receipt persisted: ACK immediately before processing from inbox.
+    res.status(200).json({ status: "accepted", inboxId: inboxReceiptId });
+
+    try {
+      console.log(`[ShipStation Webhook] Processing SHIP_NOTIFY (inbox=${inboxReceiptId})`);
+      const processed = await services.shippingEngine.processWebhook(resource_url);
+      await markWebhookSucceeded(db, inboxReceiptId);
+      console.log(`[ShipStation Webhook] Processed ${processed} shipment(s) (inbox=${inboxReceiptId})`);
     } catch (err: any) {
       console.error(
-        `[ShipStation Webhook] processShipNotify failed, enqueueing for retry: ${err.message}`
+        `[ShipStation Webhook] processShipNotify failed (inbox=${inboxReceiptId}), enqueueing for retry: ${err.message}`
       );
-
-      // Enqueue for the webhook-retry worker. Best-effort: if the enqueue
-      // itself fails we still 500 so SS's own retry layer can take over —
-      // we don't want an enqueue blip to mask the original processing error.
       try {
-        await enqueueShipStationRetry(db, { resource_url });
+        await markWebhookFailed(db, inboxReceiptId, err);
+      } catch (markErr: any) {
+        console.error(
+          `[ShipStation Webhook] failed to mark inbox ${inboxReceiptId} failed: ${markErr?.message || markErr}`
+        );
+      }
+
+      try {
+        await enqueueShipStationRetry(db, { resource_url }, {
+          sourceInboxId: inboxReceiptId,
+          lastError: err?.message || String(err),
+        });
       } catch (enqueueErr: any) {
         console.error(
           `[ShipStation Webhook] retry-queue enqueue failed: ${enqueueErr?.message || enqueueErr}`
         );
       }
-
-      return res.status(500).json({ error: "Internal error" });
     }
   });
 
@@ -501,6 +466,19 @@ function startEchelonSyncScheduler(
   });
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
+  // OMS's stop for accepted dropship orders eBay cancelled (eBay sync-back plan v4 §7.2): dropship asks, OMS cancels.
+  setDropshipMarketplaceCancelStop(createDropshipMarketplaceCancelStop({
+    db,
+    reservation: services.reservation,
+    // The engine's own answer (cancelled, already cancelled, already shipped or not found) decides the stop (review MS1).
+    engine: services.shipStation
+      ? { cancelOrder: (engineOrderRef: number) => services.shipStation.cancelOrder(engineOrderRef) }
+      : undefined,
+    clock: () => new Date(),
+  }));
+  const channelSyncBatches = createChannelSyncBatchService();
+  registerChannelSyncBatchRoutes(app, channelSyncBatches);
+  startListingPublicationWorker(channelSyncBatches, "channel_sync_batch_admission_worker");
   const listingIntentPropagation=createListingIntentPropagationService();
   registerListingIntentPropagationRoutes(app,listingIntentPropagation);
   startListingPublicationWorker(listingIntentPropagation, "listing_intent_propagation_worker");
@@ -509,6 +487,12 @@ function startEchelonSyncScheduler(
   startListingPublicationWorker(services.listingUpdates, "listing_update_worker");
   startListingPublicationWorker(services.listingLifecycle, "listing_lifecycle_worker");
   startWalmartStockConnectionWorker(services.walmartStockConnection);
+  startShopifyProductConnectionWorker(createDefaultShopifyProductConnectionService({
+    startInventorySync: (command, actor) => services.productInventorySync.start(command, actor),
+    onConnected: async (_productId, variantIds) => {
+      for (const variantId of variantIds) services.inventoryCore.triggerNotifyChange(variantId, "shopify_product_connection");
+    },
+  }));
 
   if (process.env.WALMART_ORDER_POLLING_ENABLED !== "false" && !schedulersDisabled("WALMART_ORDER_POLLING_DISABLED")) {
     startWalmartOrderPolling(services.walmartOrderPoll, services.walmart);
@@ -549,12 +533,9 @@ function startEchelonSyncScheduler(
 
     // Admin: manually reingest an eBay order that the poller missed.
     // POST /api/admin/ebay/reingest { orderId: '21-14508-76944' }
-    app.post("/api/admin/ebay/reingest", requireAuth, async (req, res) => {
+    app.post("/api/admin/ebay/reingest", requirePermission("channels", "sync"), async (req, res) => {
       try {
-        const role = (req.session as any)?.user?.role;
-        if (role !== "admin" && role !== "lead") {
-          return res.status(403).json({ error: "admin/lead only" });
-        }
+
         const { orderId } = req.body || {};
         if (!orderId || typeof orderId !== "string") {
           return res.status(400).json({ error: "orderId (string) required" });
@@ -573,112 +554,19 @@ function startEchelonSyncScheduler(
   }
 
   // Dropship V2 vendor eBay intake now polls connected vendor stores into the dropship order intake pipeline.
-  // ---- eBay Listing Reconciliation (every 30 minutes) ----
-  // Checks synced listings against eBay to detect ended/deleted items
-  const RECONCILE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
-  let reconcileRunning = false;
-
-  async function runEbayReconciliation() {
-    if (reconcileRunning) return;
-    reconcileRunning = true;
-    try {
-      const client = await dbPool.connect();
-      try {
-        // Check if there are any synced eBay listings to verify
-        const countResult = await client.query(
-          `SELECT COUNT(*) AS cnt FROM channels.channel_listings WHERE channel_id = 67 AND sync_status = 'synced'`,
-        );
-        const count = parseInt(countResult.rows[0]?.cnt || "0");
-        if (count === 0) {
-          return; // Nothing to reconcile
+  startEbayListingReconciliationScheduler({
+    db,
+    dbPool,
+    notify: (event, payload) =>
+      (
+        services as {
+          notifications?: {
+            notify?: (e: string, p: Record<string, unknown>) => void;
+          };
         }
-
-        const internalApiKey = process.env.INTERNAL_API_KEY;
-        if (!internalApiKey) {
-          console.warn("[eBay Reconcile] Skipping scheduled listing reconciliation: INTERNAL_API_KEY is not configured");
-          return;
-        }
-
-        // Call the reconcile endpoint through the same internal API contract used by other workers.
-        const port = process.env.PORT || 5000;
-        const reqData = JSON.stringify({});
-        const options = {
-          hostname: "127.0.0.1",
-          port,
-          path: "/api/ebay/listings/reconcile?_internal=1",
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Content-Length": Buffer.byteLength(reqData),
-            "Authorization": `Bearer ${internalApiKey}`,
-          },
-        };
-
-        await new Promise<void>((resolve, reject) => {
-          const req = http.request(options, (res: any) => {
-            let body = "";
-            res.on("data", (chunk: string) => (body += chunk));
-            res.on("end", () => {
-              if (res.statusCode < 200 || res.statusCode >= 300) {
-                console.warn(
-                  `[eBay Reconcile] Scheduled endpoint returned ${res.statusCode}: ${body.slice(0, 300)}`,
-                );
-                resolve();
-                return;
-              }
-
-              try {
-                const data = JSON.parse(body);
-                const changes = (data.ended || 0) + (data.deleted || 0);
-                if (data.checked > 0) {
-                  console.log(
-                    `[eBay Reconcile] checked=${data.checked} active=${data.active} ended=${data.ended} deleted=${data.deleted} errors=${data.errors}`,
-                  );
-                }
-                if (changes > 0) {
-                  console.log(`[eBay Reconcile] ⚠️ ${changes} listing(s) ended/deleted on eBay — check listing feed`);
-                  // Fire notification
-                  try {
-                    // @ts-ignore
-                    services.notifications?.notify?.("listing_status_change", {
-                      title: `eBay Listings Changed`,
-                      message: `${changes} listing(s) ended or deleted on eBay since last check`,
-                      data: { ended: data.ended, deleted: data.deleted, changes: data.changes },
-                    });
-                  } catch {}
-                }
-              } catch { /* ignore parse errors */ }
-              resolve();
-            });
-          });
-          req.on("error", (err: any) => {
-            console.warn(`[eBay Reconcile] Scheduled run failed: ${err.message}`);
-            resolve(); // Don't reject — just log
-          });
-          req.write(reqData);
-          req.end();
-        });
-      } finally {
-        client.release();
-      }
-    } catch (err: any) {
-      console.warn(`[eBay Reconcile] Scheduled error: ${err.message}`);
-    } finally {
-      reconcileRunning = false;
-    }
-  }
-
-  if (!schedulersDisabled("EBAY_LISTING_RECONCILE_DISABLED")) {
-    // Start after 2 minutes (let server settle), then every 30 min
-    setTimeout(() => {
-      const runObserved = () => observeRuntimeWork("channels.ebay_listing_reconcile", runEbayReconciliation);
-      void runObserved();
-      setInterval(runObserved, RECONCILE_INTERVAL_MS);
-      log("[eBay Reconcile] Scheduled reconciliation started (every 30 min)", "ebay-reconcile");
-    }, 2 * 60 * 1000);
-  } else {
-    logSchedulerDisabled("ebay-reconcile", "eBay listing reconciliation", "EBAY_LISTING_RECONCILE_DISABLED");
-  }
+      ).notifications?.notify?.(event, payload),
+    log,
+  });
 
   // Register ShipStation SHIP_NOTIFY webhook if environment variables are configured (idempotent, non-blocking)
   if (!schedulersDisabled("SHIPSTATION_WEBHOOK_REGISTRATION_DISABLED")) {
@@ -715,11 +603,49 @@ function startEchelonSyncScheduler(
   }
 
   const orderEdits = createOrderEditService(dbPool, services);
+  if (!schedulersDisabled()) {
+    try {
+      const packages = createPackageHistoryWorker(dbPool, db, event => {
+        const { action, ...fields } = event;
+        reportBackgroundWork(action, fields);
+      });
+      if (packages) httpServer.once("close", startPackageHistoryScheduler(packages, () => {
+        logger.error("shipping_package_history_sweep", { outcome: "failed", error_code: "PACKAGE_HISTORY_SWEEP_FAILED" });
+      }));
+      else logger.warn("shipping_package_history_start", { outcome: "unconfigured", error_code: "PACKAGE_HISTORY_PROVIDER_NOT_CONFIGURED" });
+    } catch {
+      logger.error("shipping_package_history_start", { outcome: "failed", error_code: "PACKAGE_HISTORY_CONFIGURATION_INVALID" });
+    }
+    try {
+      const reportReturns: ReturnWorkflowReport = event =>
+        console.info(JSON.stringify(event));
+      const returnWorkflow = await createCustomerReturnWorkflowWorker(reportReturns);
+      httpServer.once("close", startCustomerReturnWorkflowScheduler(returnWorkflow, reportReturns));
+    } catch {
+      logger.error("customer_return_workflow_start", { outcome: "failed", error_code: "RETURN_WORKFLOW_CONFIGURATION_INVALID" });
+    }
+    const reportActions: OrderActionProjectionReport = ({ action, ...event }) => {
+      reportBackgroundWork(action, event);
+    };
+    try {
+      const actionWorker = createOrderActionProjectionWorker(dbPool, orderEdits, reportActions);
+      const nativeWorker = createAccountNativeSummariesWorker(dbPool, reportActions);
+      httpServer.once("close", startOrderActionProjectionScheduler({ run: async () => {
+        const outcomes = await Promise.allSettled([actionWorker.run(), nativeWorker.run()]);
+        if (outcomes.some(outcome => outcome.status === "rejected")) throw new Error("ACCOUNT_PROJECTION_SWEEP_FAILED");
+      } }, reportActions));
+    } catch {
+      // A read-model configuration problem must not prevent the shared service
+      // from starting. The account's existing authorization gate still applies.
+      logger.error("order_action_projection_start", { outcome: "failed", error_code: "ORDER_ACTION_CONFIG_INVALID" });
+    }
+  }
   // Register the exact account suffix before the existing returns proxy's 404.
   // Its default-off gate does not change staff APIs or public return access.
   registerCustomerAccountRoutes(app, { services: customerAccountServices(dbPool, orderEdits),
     report: event => console.error(JSON.stringify({ event: "customer_account_request_failed", ...event })) });
   await registerRoutes(httpServer, app);
+  registerProductSyncWorkflowRoutes(app, services.productInventorySync);
 
   registerOrderEditRoutes(app, { service: orderEdits, hasPermission,
     report: event => console.error(JSON.stringify({ event: "order_edit_request_failed", ...event })) });
@@ -754,14 +680,11 @@ function startEchelonSyncScheduler(
   // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || "5000", 10);
   try {
-    const res = await db.execute(sql`SELECT id, product_variant_id, warehouse_location_id, variant_qty FROM inventory.inventory_levels WHERE variant_qty < 0`);
-    if ((res as any).rows.length > 0) {
-      console.warn(`[Startup Warning] Found ${(res as any).rows.length} negative inventory levels. They have NOT been cleared.`);
-    }
+    await services.inventoryAlerts.warnNegativeInventoryBalances();
 
     // P1-18 extracted: Startup fix for dangling completed items has been moved to scripts/backfill/fix-dangling-order-items.ts
   } catch (err) {
-    console.error("[Startup Fix] Failed to clear negative inventory balances or dangling items", err);
+    console.error("[Startup Fix] Failed to check negative inventory balances", err);
   }
 
   // Crash handlers — surface unhandled errors instead of silent death.
@@ -781,9 +704,16 @@ function startEchelonSyncScheduler(
 
   httpServer.listen(
     listenOptions,
-    () => {
+    async () => {
+      // First: this process's catalog code version heartbeat (step 1 plan S2-5
+      // §4.9 item 1). Its first write is awaited, bounded and never throws,
+      // before any worker below starts (the dropship stock planner is the
+      // inventory publication selection-work worker, not only the dropship
+      // block), so a later release's gates count every running worker. It is
+      // not a scheduler: DISABLE_SCHEDULERS does not stop it.
+      await startDropshipProcessHeartbeatFromEnv();
       log(`serving on port ${port}`);
-      
+
       // REMOVED: order-sync-listener deleted (duplicate path)
       // Now using: Echelon OMS webhooks → oms_orders → wmsSync → orders
 
@@ -840,6 +770,7 @@ function startEchelonSyncScheduler(
           recoverPendingPickingCommands: () => services.picking.recoverPendingPickingCommands(),
           recoverReplenishmentFollowups: () => services.replenishment.recoverReplenishmentFollowups(),
           recoverInventoryTransfers: () => services.inventoryTransfers.recoverPending(),
+          recoverInterwarehouseTransfers: () => services.interwarehouseTransfers.recoverPending(),
           recoverSupplierReturns: () => services.supplierReturnFollowups.recoverPending(),
         });
         httpServer.once("close", () => worker.stop());
@@ -859,6 +790,13 @@ function startEchelonSyncScheduler(
 
       if (!schedulersDisabled("INVENTORY_PUBLICATION_WORKER_DISABLED")) {
         startInventoryPublicationOutboxWorker(services.inventoryPublicationOutbox, services.inventoryPublicationSelectionWork);
+        // Committed work wakes the worker at once; its timer is only the backstop.
+        const wakeListener = startPublicationWakeListener(dbPool, requestInventoryPublicationWorkerRun);
+        httpServer.once("close", () => {
+          void wakeListener.stop().catch(() => {
+            console.error(JSON.stringify({ event: "publication_wake_listener_shutdown_failed", code: "PUBLICATION_WAKE_LISTENER_SHUTDOWN_FAILED" }));
+          });
+        });
         const catchupWorker = startQuantityPublicationCatchupWorker(services.quantityPublicationCatchup, {
           reconcile: () => services.ebayPublicationReconciliation.processDue(),
         });
@@ -873,6 +811,17 @@ function startEchelonSyncScheduler(
           "Inventory publication outbox worker",
           "INVENTORY_PUBLICATION_WORKER_DISABLED",
         );
+      }
+
+      // Channels PR2 (PLAN-CH2 v4.1 §7.1): link each Shopify size to its store item by SKU, one tick a minute, one
+      // process of the cluster at a time (advisory lock STOCK_LINK_LOCK_ID). STOCK_LINK_AUTO_DISABLED stops it for every store.
+      if (!schedulersDisabled("STOCK_LINK_AUTO_DISABLED")) {
+        const stockLinkRunner = startStockLinkRunner(services.stockLink);
+        if (stockLinkRunner) httpServer.once("close", () => stockLinkRunner.stop());
+        const productSyncRunner = startProductSyncWorkflowRunner(services.productInventorySync);
+        httpServer.once("close", () => productSyncRunner.stop());
+      } else {
+        logSchedulerDisabled("scheduler", "Stock link runner", "STOCK_LINK_AUTO_DISABLED");
       }
 
       if (!schedulersDisabled("PO_EMAIL_OUTBOX_WORKER_DISABLED")) {
@@ -997,774 +946,65 @@ function startEchelonSyncScheduler(
         startDropshipReturnIntakeWorker();
         startDropshipUsdcWatcherWorker();
         startDropshipCostDetectionWorker();
+        startDropshipListingEndWorker();
+        startDropshipCatalogArrivalsWorker();
         startDropshipCategoryMarksWorker();
         startDropshipRulesConversionWorker();
+        startDropshipMarketplaceSyncBackWorker();
       } else {
         logSchedulerDisabled("scheduler", "Dropship workers");
       }
     }
   );
 
-  // eBay order reconciliation — check for stuck orders every 4 hours
-  if (!schedulersDisabled("EBAY_FULFILLMENT_RECONCILE_DISABLED")) {
-    const runEbayReconcile = async () => {
+  startEbayFulfillmentStuckOrderScheduler({
+    db,
+    shippingEngine: services.shippingEngine,
+  });
+
+  startOmsWmsCancelReconcileScheduler({
+    db,
+    reservation: services.reservation,
+    shippingEngine: services.shippingEngine,
+  });
+
+  startShopifyMappingReconcileScheduler({ db });
+
+  // Startup & periodic reconciliation for orders whose line state is already
+  // terminal but whose aggregate warehouse status remained active.
+  registerScheduledJob({
+    name: "orders.zombie_order_reconcile",
+    cadenceMs: 6 * 60 * 60 * 1000,
+    initialDelayMs: 12_000,
+    advisoryLockId: 918507,
+    writableStates: [
+      "wms.orders.warehouse_status:completed|cancelled",
+      "inventory.inventory_levels.reserved_qty",
+    ],
+    deadLetterPolicy: "log_and_retry_next_tick",
+    disableEnvVar: "ZOMBIE_ORDER_RECONCILE_DISABLED",
+    db,
+    gateInitialRunOnSchedule: true,
+    run: async () => {
       try {
-        const engine = services.shippingEngine;
-        if (!engine?.isConfigured()) return;
-
-        // Find eBay OMS orders stuck in "confirmed" for > 2 hours,
-        // joining through WMS to get engine columns from outbound_shipments.
-        const stuckOrders = await db.execute(sql`
-          SELECT DISTINCT ON (o.id)
-                 o.id, o.external_order_id, o.external_order_number,
-                 o.shipstation_order_id AS oms_shipstation_order_id,
-                 os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
-                 os.shipstation_order_id, os.shipstation_order_key
-          FROM oms.oms_orders o
-          LEFT JOIN wms.orders w ON w.oms_fulfillment_order_id = o.id::text
-          LEFT JOIN wms.outbound_shipments os ON os.order_id = w.id
-            AND os.status NOT IN ('cancelled', 'voided')
-          WHERE o.channel_id = 67
-            AND o.status = 'confirmed'
-            AND o.created_at < NOW() - INTERVAL '2 hours'
-          ORDER BY o.id, os.engine_order_ref NULLS LAST
-          LIMIT 50
-        `);
-        if (stuckOrders.rows.length === 0) return;
-
-        console.log(`[eBay Reconcile] Found ${stuckOrders.rows.length} stuck orders, checking engine...`);
-
-        for (const order of stuckOrders.rows) {
-          try {
-            let ref = engineRefFromRow(order);
-            if (!ref && order.oms_shipstation_order_id) {
-              ref = toEngineRef(Number(order.oms_shipstation_order_id));
-            }
-            if (!ref) {
-              console.warn(`[eBay Reconcile] No engine ref for OMS order ${order.id} — skipping`);
-              continue;
-            }
-
-            const engineState = await engine.getState(ref);
-            if (engineState && engineState.status === "shipped") {
-              const orderNumber = String(order.external_order_number ?? "").trim();
-              if (!engine.applyInboundShipmentAuthority || !orderNumber) {
-                console.error(JSON.stringify({
-                  code: "EBAY_RECONCILE_PHYSICAL_AUTHORITY_UNAVAILABLE",
-                  omsOrderId: Number(order.id),
-                  externalOrderId: order.external_order_id ?? null,
-                  orderNumber: orderNumber || null,
-                  engine: engine.engineName,
-                }));
-                continue;
-              }
-
-              const processed = await engine.applyInboundShipmentAuthority({
-                engineRef: ref,
-                orderNumber,
-              });
-              console.log(JSON.stringify({
-                code: "EBAY_RECONCILE_PHYSICAL_AUTHORITY_APPLIED",
-                omsOrderId: Number(order.id),
-                externalOrderId: order.external_order_id ?? null,
-                orderNumber,
-                processedPhysicalShipments: processed,
-              }));
-            }
-          } catch (e: any) {
-            console.warn(`[eBay Reconcile] Failed to check order ${order.id}: ${e.message}`);
-          }
-          // Rate limit
-          await new Promise(r => setTimeout(r, 500));
-        }
-      } catch (err: any) {
-        console.warn("[eBay Reconcile] Sweep error:", err?.message);
-      }
-    };
-    
-    // Run immediately on boot, then every hour
-    const runObservedEbayReconcile = () => observeRuntimeWork("channels.ebay_fulfillment_reconcile", runEbayReconcile);
-    setTimeout(runObservedEbayReconcile, 5000);
-    setInterval(runObservedEbayReconcile, 1 * 60 * 60 * 1000);
-  } else {
-    logSchedulerDisabled("ebay-reconcile", "eBay fulfillment reconciliation", "EBAY_FULFILLMENT_RECONCILE_DISABLED");
-  }
-
-  // OMS<->WMS cancellation reconciliation catches webhook delivery failures
-  // where a commercially terminal order still has active warehouse work.
-  // Shipped state is deliberately excluded: only canonical physical-shipment
-  // projection may advance WMS fulfillment quantities or shipped status.
-  if (!schedulersDisabled("OMS_WMS_RECONCILE_DISABLED")) {
-    const runOmsWmsReconcile = async () => {
-      try {
-        const divergent: any = await db.execute(sql`
-          SELECT w.id, w.order_number, oms.status AS oms_status
-          FROM wms.orders w
-          JOIN oms.oms_orders oms ON (
-                  (w.source = 'oms'     AND w.oms_fulfillment_order_id = oms.id::text)
-              OR  (w.source = 'shopify' AND w.source_table_id = oms.id::text)
-                )
-          WHERE oms.status IN ('cancelled', 'refunded')
-            AND w.warehouse_status IN ('ready', 'in_progress', 'ready_to_ship', 'completed')
-        `);
-        const corrected: any[] = [];
-        for (const row of divergent.rows as any[]) {
-          // P0.1c: cancels go through the single entrypoint so the missed-
-          // webhook cases (exactly what this sweep catches) release their
-          // reservations instead of leaking them.
-          const transResult = await cancelWmsOrderAndRelease(
-            db,
-            services.reservation,
-            row.id,
-            "oms_wms_reconcile",
-          );
-          if (transResult.transitioned) {
-            await db.execute(sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${row.id}`);
-            corrected.push(row);
-          }
-        }
-        if (corrected.length > 0) {
-          console.warn(`[OMS<->WMS Reconcile] Corrected ${corrected.length} divergent order(s):`,
-            corrected.map((r: any) => `${r.order_number} (oms=${r.oms_status})`).join(", "));
-
-          const cancelledIds = corrected.map((r: any) => r.id);
-          if (cancelledIds.length > 0) {
-            try {
-              const ssRows: any = await db.execute(sql`
-                SELECT os.id AS shipment_id, os.shipstation_order_id,
-                       os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
-                       os.shipstation_order_key
-                FROM wms.outbound_shipments os
-                WHERE os.order_id = ANY(${cancelledIds})
-                  AND COALESCE(os.engine_order_ref, os.shipstation_order_id::text) IS NOT NULL
-                  AND os.status NOT IN ('cancelled', 'shipped', 'voided', 'returned', 'lost')
-                  AND os.shipped_at IS NULL  -- never cancel a shipment that already shipped (terminal)
-              `);
-              const engine = services.shippingEngine;
-              if (engine?.isConfigured() && ssRows.rows.length > 0) {
-                for (const row of ssRows.rows) {
-                  try {
-                    const ref = engineRefFromRow(row);
-                    if (!ref) continue;
-                    const cancelResult = await engine.cancel(ref);
-                    // P0.3: only "already_shipped" proves a package left the
-                    // building. "already_cancelled" used to fall into the same
-                    // alreadyInState branch and got recorded as SHIPPED —
-                    // resurrecting dead orders.
-                    if (cancelResult?.state === "already_shipped") {
-                      await db.execute(sql`
-                        UPDATE wms.outbound_shipments
-                        SET status = 'shipped', updated_at = NOW()
-                        WHERE id = ${row.shipment_id}
-                          AND status NOT IN ('shipped', 'returned', 'lost')
-                      `);
-                      console.log(`[OMS<->WMS Reconcile] Engine order ${ref.engineOrderRef} already shipped — recorded shipped for shipment ${row.shipment_id}`);
-                    } else {
-                      // cancelled now, already_cancelled, or not_found: the
-                      // shipment is dead. Status predicate so a concurrent
-                      // SHIP_NOTIFY can never be clobbered post-network-call.
-                      await db.execute(sql`
-                        UPDATE wms.outbound_shipments SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
-                        WHERE id = ${row.shipment_id}
-                          AND status NOT IN ('shipped', 'returned', 'lost')
-                      `);
-                      console.log(`[OMS<->WMS Reconcile] Cancelled engine order ${ref.engineOrderRef} for shipment ${row.shipment_id} (${cancelResult?.state ?? "cancelled"})`);
-                    }
-                  } catch (ssErr: any) {
-                    console.warn(`[OMS<->WMS Reconcile] Failed to cancel engine order for shipment ${row.shipment_id}: ${ssErr?.message}`);
-                  }
-                }
-              }
-            } catch (err: any) {
-              console.warn("[OMS<->WMS Reconcile] SS cascade error:", err?.message);
-            }
-          }
-        }
-      } catch (err: any) {
-        console.warn("[OMS<->WMS Reconcile] Sweep error:", err?.message);
-      }
-    };
-    const runObservedOmsWmsReconcile = () => observeRuntimeWork("orders.oms_wms_reconcile", runOmsWmsReconcile);
-    setTimeout(runObservedOmsWmsReconcile, 15_000);
-    setInterval(runObservedOmsWmsReconcile, 60 * 60 * 1000);
-  } else {
-    logSchedulerDisabled("scheduler", "OMS WMS reconciliation", "OMS_WMS_RECONCILE_DISABLED");
-  }
-
-  // Shopify product-mapping reconciliation. Webhooks keep identity current; this
-  // is the backstop for what they miss (a webhook that never fired, a bulk edit,
-  // a restore). Reports by default; set SHOPIFY_MAPPING_AUTO_RETIRE=1 to let it
-  // retire the mappings the domain has already judged safe.
-  if (!schedulersDisabled("SHOPIFY_MAPPING_RECONCILE_DISABLED")) {
-    const runShopifyMappingReconcile = async () => {
-      try {
-        const { runShopifyMappingReconciliation } = await import("./jobs/shopify-mapping-reconciliation.job");
-        await runShopifyMappingReconciliation();
-      } catch (err: any) {
-        console.warn("[mapping-reconciler] sweep error:", err?.message);
-      }
-    };
-    // Well clear of boot so a scan never competes with startup work.
-    const runObservedShopifyMapping = () => observeRuntimeWork("channels.shopify_mapping_reconcile", runShopifyMappingReconcile);
-    setTimeout(runObservedShopifyMapping, 5 * 60 * 1000);
-    setInterval(runObservedShopifyMapping, 24 * 60 * 60 * 1000);
-  } else {
-    logSchedulerDisabled("scheduler", "Shopify mapping reconciliation", "SHOPIFY_MAPPING_RECONCILE_DISABLED");
-  }
-
-  // Startup reconciliation for orders whose line state is already terminal
-  // but whose aggregate warehouse status remained active. This may transition
-  // only the order aggregate through its owning service. It must not infer
-  // shipped item quantities or mutate shipment facts.
-  setTimeout(async () => {
-    try {
-      // Zombie orders: active warehouse_status but no pending shippable items.
-      // These get stuck in the pick queue forever because nothing triggers
-      // their status transition. Orders whose live OMS order still owes units
-      // are skipped and reported (zombie-order-repair.ts), not cancelled out
-      // from under the OMS.
-      const { transitioned: zombieFixed } = await runStartupZombieOrderRepair({
-        db,
-        reservation: services.reservation,
-      });
-      if (zombieFixed.length > 0) {
-        console.warn(`[Data Repair] Transitioned ${zombieFixed.length} zombie order(s) with no pending items:`,
-          zombieFixed.join(', '));
-      }
-    } catch (err: any) {
-      console.warn("[Data Repair] Zombie-order reconciliation error:", err?.message);
-    }
-  }, 12_000);
-
-  // One-time duplicate shipment cleanup: for each order with multiple
-  // active shipments, keep the one furthest along and cancel the rest.
-  // Also cancels the duplicate in ShipStation if it has a SS order ID.
-  //
-  // DISABLED 2026-06-15. This job conflated legitimate SPLIT shipments (one
-  // order legitimately ships as multiple packages) with duplicates: it ranks
-  // shipments per order and cancels all but one — and its candidate set
-  // INCLUDED already-shipped shipments. That cancelled 606 shipments that had
-  // already shipped (shipped_at + tracking set), with a null voided_reason,
-  // making their units look un-shipped (root cause of the stale-partial /
-  // "lost order" symptoms). A shipped shipment is TERMINAL and must never be
-  // cancelled. True duplicate-SS-order prevention belongs at shipment-creation
-  // time (idempotency key), not a destructive boot-time sweep — see the
-  // fulfillment-state redesign. Gated off by default; set
-  // ENABLE_DUP_SHIPMENT_CLEANUP=true only to force a (still-unsafe) run.
-  setTimeout(async () => {
-    if (process.env.ENABLE_DUP_SHIPMENT_CLEANUP !== "true") {
-      return;
-    }
-    try {
-      const dupes = await db.execute(sql`
-        WITH ranked AS (
-          SELECT
-            os.id,
-            os.order_id,
-            os.status,
-            os.shipstation_order_id,
-            os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
-            os.shipstation_order_key,
-            ROW_NUMBER() OVER (
-              PARTITION BY os.order_id
-              ORDER BY CASE os.status
-                WHEN 'shipped'  THEN 0
-                WHEN 'labeled'  THEN 1
-                WHEN 'queued'   THEN 2
-                WHEN 'planned'  THEN 3
-                ELSE 5
-              END,
-              os.created_at ASC
-            ) AS rn
-          FROM wms.outbound_shipments os
-          WHERE os.status NOT IN ('voided', 'cancelled')
-        )
-        SELECT id, order_id, status,
-               shipping_engine, engine_order_ref, engine_shipment_ref,
-               shipstation_order_id, shipstation_order_key
-        FROM ranked
-        WHERE rn > 1
-      `);
-      if (dupes.rows.length > 0) {
-        const engine = services.shippingEngine;
-        for (const row of dupes.rows as any[]) {
-          await db.execute(sql`
-            UPDATE wms.outbound_shipments
-            SET status = 'cancelled', cancelled_at = NOW(), updated_at = NOW()
-            WHERE id = ${row.id}
-          `);
-          const ref = engineRefFromRow(row);
-          if (ref && engine?.isConfigured()) {
-            try {
-              await engine.cancel(ref);
-            } catch (ssErr: any) {
-              console.warn(`[Data Repair] Could not cancel engine order ${ref.engineOrderRef}: ${ssErr?.message}`);
-            }
-          }
-        }
-        console.warn(
-          `[Data Repair] Cancelled ${dupes.rows.length} duplicate shipment(s):`,
-          (dupes.rows as any[]).map((r: any) => `shipment ${r.id} (order ${r.order_id}, status=${r.status})`).join(', '),
-        );
-      }
-    } catch (err: any) {
-      console.warn("[Data Repair] Duplicate shipment cleanup error:", err?.message);
-    }
-  }, 15_000);
-
-  // One-time sort_rank recompute for active orders (formula changed from
-  // relative-to-sync-time SLA to absolute-deadline encoding).
-  setTimeout(async () => {
-    try {
-      const { recomputeAllActiveSortRanksDetailed } = await import("./modules/orders/orders.storage");
-      const { updated, orderIds } = await recomputeAllActiveSortRanksDetailed();
-      if (updated > 0) {
-        console.log(`[Sort-Rank] Recomputed sort_rank for ${updated} active order(s)`);
-        for (const orderId of orderIds) {
-          await enqueueShipStationSortRankSyncRetry(
-            db,
-            orderId,
-            "startup sort_rank recompute",
-          );
-        }
-        console.log(`[Sort-Rank] Queued ShipStation customField1 sync for ${orderIds.length} active order(s)`);
-      }
-    } catch (err: any) {
-      console.warn("[Sort-Rank] Recompute error:", err?.message);
-    }
-  }, 20_000);
-
-  // WMS<->ShipStation reconciliation.
-  //
-  // Reads from wms.outbound_shipments. Each shipment owns its own provider
-  // order identity;
-  // we fetch SS state and dispatch via the shipment-rollup helpers
-  // (markShipmentShipped/Cancelled/Voided), then recompute order status.
-  // Tracks freshness via outbound_shipments.last_reconciled_at.
-  if (!schedulersDisabled("SHIPSTATION_RECONCILE_DISABLED")) {
-
-    // ── V2: shipment-based reconcile ────────────────────────────────────
-    const runShipStationReconcileV2 = async () => {
-      try {
-        const engine = services.shippingEngine;
-        if (!engine?.isConfigured()) return;
-
-        // Select active shipments that have been pushed to ShipStation and
-        // haven't been checked recently. last_reconciled_at IS NULL rows
-        // come first so new shipments are verified promptly.
-        const rows: any = await db.execute(sql`
-          SELECT os.id AS shipment_id, os.order_id,
-                 os.shipstation_order_id, os.status AS wms_shipment_status,
-                 os.tracking_number, os.carrier,
-                 os.shipping_engine, os.engine_order_ref, os.engine_shipment_ref,
-                 os.shipstation_order_key, os.created_at,
-                 w.order_number,
-                 w.oms_fulfillment_order_id AS oms_id,
-                 (SELECT oo.status FROM oms.oms_orders oo
-                   WHERE (w.source = 'oms' AND w.oms_fulfillment_order_id = oo.id::text)
-                      OR (w.source_table_id = oo.id::text)
-                   LIMIT 1) AS oms_order_status
-          FROM wms.outbound_shipments os
-          JOIN wms.orders w ON w.id = os.order_id
-          WHERE COALESCE(os.engine_order_ref, os.shipstation_order_id::text) IS NOT NULL
-            AND os.status IN ('queued', 'labeled', 'shipped')
-            AND COALESCE(os.requires_review, false) = false
-            AND (
-              os.last_reconciled_at IS NULL
-              OR os.last_reconciled_at < NOW() - INTERVAL '1 hour'
-            )
-          ORDER BY os.last_reconciled_at NULLS FIRST, os.id ASC
-          LIMIT 100
-        `);
-
-        if (!rows.rows?.length) return;
-
-        let markedShipped = 0;
-        let markedCancelled = 0;
-        let markedVoided = 0;
-
-        for (const row of rows.rows) {
-          const shipmentId: number = row.shipment_id;
-          const ref = engineRefFromRow(row);
-          try {
-            if (!ref) {
-              console.warn(
-                `[Reconcile V2] No engine ref for shipment ${shipmentId} — skipping`,
-              );
-              continue;
-            }
-
-            // 1. Fetch engine order state + shipments
-            const engineState = await engine.getState(ref);
-            const orderNumber = String(row.order_number ?? "").trim();
-            const canonicalShipments = await engine.getShipments(
-              ref,
-              orderNumber ? { orderNumber } : undefined,
-            );
-            if (!engineState) {
-              const hasShippedPackageFact = canonicalShipments.some(
-                (shipment) => shipment.kind === "shipped",
-              );
-              const hasVoidedPackageFact = canonicalShipments.some(
-                (shipment) => shipment.kind === "voided",
-              );
-              if (
-                (row.wms_shipment_status === "queued" ||
-                  row.wms_shipment_status === "labeled") &&
-                (hasShippedPackageFact || hasVoidedPackageFact) &&
-                engine.applyInboundShipmentAuthority &&
-                orderNumber
-              ) {
-                const processed = await engine.applyInboundShipmentAuthority({
-                  engineRef: ref,
-                  orderNumber,
-                });
-                if (hasShippedPackageFact) markedShipped += processed;
-                else markedVoided += processed;
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET last_reconciled_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
-                continue;
-              }
-
-              // The engine order 404s. A frequent cause is ShipStation "Combine
-              // Orders": it merges this order into another and DESTROYS this SS
-              // order. The stable order-number lookup above gets first chance to
-              // recover any physical package facts. If none exist, surface a
-              // stranded, non-terminal shipment (order not cancelled; not
-              // brand-new, so a transient API miss can't trip it) for review,
-              // and stamp last_reconciled_at so we stop hammering the engine API.
-              // Shipped rows / cancelled orders are left untouched.
-              const stranded =
-                (row.wms_shipment_status === "queued" ||
-                  row.wms_shipment_status === "labeled") &&
-                row.oms_order_status !== "cancelled" &&
-                row.created_at != null &&
-                new Date(row.created_at).getTime() <
-                  Date.now() - 2 * 60 * 60 * 1000;
-              if (stranded) {
-                console.warn(
-                  `[Reconcile V2] Engine order ${ref.engineOrderRef} not found (shipment=${shipmentId}, status=${row.wms_shipment_status}) — flagging stranded shipment for review`,
-                );
-                const already: any = await db.execute(sql`
-                  SELECT COALESCE(requires_review, false) AS rr
-                  FROM wms.outbound_shipments WHERE id = ${shipmentId}
-                `);
-                const alreadyFlagged = already?.rows?.[0]?.rr === true;
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET requires_review = true,
-                      review_reason = CASE WHEN COALESCE(requires_review, false)
-                                           THEN review_reason ELSE 'engine_order_not_found' END,
-                      last_reconciled_at = NOW(),
-                      updated_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
-                if (
-                  !alreadyFlagged &&
-                  row.oms_id &&
-                  String(row.oms_id).match(/^[0-9]+$/)
-                ) {
-                  try {
-                    await db.execute(sql`
-                      INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-                      VALUES (
-                        ${Number(row.oms_id)},
-                        'engine_order_not_found',
-                        ${JSON.stringify({
-                          wmsShipmentId: shipmentId,
-                          engineOrderRef: ref.engineOrderRef,
-                          wmsShipmentStatus: row.wms_shipment_status,
-                        })}::jsonb,
-                        NOW()
-                      )
-                    `);
-                  } catch (auditErr: any) {
-                    console.warn(
-                      `[Reconcile V2] not-found audit insert failed for shipment ${shipmentId}:`,
-                      auditErr?.message,
-                    );
-                  }
-                }
-              } else {
-                console.warn(
-                  `[Reconcile V2] Engine order ${ref.engineOrderRef} not found (shipment=${shipmentId}) — skipping`,
-                );
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET last_reconciled_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
-              }
-              continue;
-            }
-
-            // 2. Derive reconcile event from canonical types
-            let event: { kind: string; [key: string]: any } | null =
-              deriveReconcileEvent({
-                engineState,
-                currentWmsShipmentStatus: row.wms_shipment_status,
-                currentTrackingNumber: row.tracking_number,
-                currentCarrier: row.carrier,
-                shipments: canonicalShipments,
-                // Cancel is WMS-owned: only follow an engine-side cancel when the
-                // order itself is cancelled; otherwise it's flagged for review.
-                orderIsCancelled: row.oms_order_status === "cancelled",
-              });
-
-            // Provider package facts must flow through the same authoritative
-            // resolver as webhooks. Directly applying one canonical ShipStation
-            // event to this parent row corrupts split orders: package one can
-            // mark the full parent shipped while package two is never discovered.
-            if (event && (event.kind === "shipped" || event.kind === "voided")) {
-              if (!engine.applyInboundShipmentAuthority || !orderNumber) {
-                const reason = !engine.applyInboundShipmentAuthority
-                  ? "shipping_engine_missing_inbound_package_authority"
-                  : "shipping_engine_inbound_package_missing_order_number";
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET requires_review = true,
-                      review_reason = COALESCE(NULLIF(review_reason, ''), ${reason}),
-                      last_reconciled_at = NOW(),
-                      updated_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
-                console.error(JSON.stringify({
-                  code: "SHIPPING_RECONCILE_PHYSICAL_AUTHORITY_REQUIRED",
-                  shipmentId,
-                  orderNumber: orderNumber || null,
-                  engine: engine.engineName,
-                  eventKind: event.kind,
-                  reason,
-                }));
-                continue;
-              }
-              const processed = await engine.applyInboundShipmentAuthority({
-                engineRef: ref,
-                orderNumber,
-              });
-              if (event.kind === "shipped") markedShipped += processed;
-              if (event.kind === "voided") markedVoided += processed;
-              await db.execute(sql`
-                UPDATE wms.outbound_shipments
-                SET last_reconciled_at = NOW()
-                WHERE id = ${shipmentId}
-              `);
-              continue;
-            }
-
-            // 3. Push WMS shipped/cancelled status outward when engine has drifted.
-            if (!event) {
-              if (
-                engineState.status !== "shipped" &&
-                row.wms_shipment_status === "shipped"
-              ) {
-                await engine.markShipped(ref, {
-                  shipDate: new Date(),
-                  trackingNumber: row.tracking_number || "",
-                  carrierCode: row.carrier || "other",
-                  notifyCustomer: false,
-                });
-                console.log(`[Reconcile V2] Outbound sync: marked engine order ${ref.engineOrderRef} shipped`);
-                markedShipped++;
-
-                await db.execute(sql`
-                  UPDATE wms.outbound_shipments
-                  SET last_reconciled_at = NOW()
-                  WHERE id = ${shipmentId}
-                `);
-                continue;
-              } else if (
-                engineState.status !== "cancelled" &&
-                row.wms_shipment_status === "cancelled"
-              ) {
-                const cancelResult = await engine.cancel(ref);
-                // P0.3: only "already_shipped" may be recorded as shipped;
-                // "already_cancelled" was previously conflated with it and
-                // resurrected dead orders.
-                if (cancelResult?.state === "already_shipped") {
-                  await db.execute(sql`
-                    UPDATE wms.outbound_shipments
-                    SET status = 'shipped', last_reconciled_at = NOW(), updated_at = NOW()
-                    WHERE id = ${shipmentId}
-                      AND status NOT IN ('shipped', 'returned', 'lost')
-                  `);
-                  console.log(`[Reconcile V2] Outbound sync: engine order ${ref.engineOrderRef} already shipped — recorded shipped`);
-                  markedShipped++;
-                } else {
-                  console.log(`[Reconcile V2] Outbound sync: cancelled engine order ${ref.engineOrderRef} (${cancelResult?.state ?? "cancelled"})`);
-                  markedCancelled++;
-                  await db.execute(sql`
-                    UPDATE wms.outbound_shipments
-                    SET last_reconciled_at = NOW()
-                    WHERE id = ${shipmentId}
-                  `);
-                }
-                continue;
-              }
-            }
-
-            if (!event) {
-              // No divergence — stamp to prove we checked
-              await db.execute(sql`
-                UPDATE wms.outbound_shipments
-                SET last_reconciled_at = NOW()
-                WHERE id = ${shipmentId}
-              `);
-              continue;
-            }
-
-            if (event.kind === "review") {
-              // Engine-side cancel of a LIVE order: a discrepancy, not a fact.
-              // Flag for review (surfaces in the SHIPMENT_REQUIRES_REVIEW bucket);
-              // do NOT cancel the shipment or let a push resurrect it
-              // (ENGINE-CANCEL-DIVERGENCE-DESIGN.md).
-              await db.execute(sql`
-                UPDATE wms.outbound_shipments
-                SET requires_review = true,
-                    review_reason = CASE WHEN COALESCE(requires_review, false)
-                                         THEN review_reason ELSE ${event.reason} END,
-                    last_reconciled_at = NOW(),
-                    updated_at = NOW()
-                WHERE id = ${shipmentId}
-              `);
-              if (row.oms_id && String(row.oms_id).match(/^[0-9]+$/)) {
-                try {
-                  await db.execute(sql`
-                    INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-                    VALUES (
-                      ${Number(row.oms_id)},
-                      'engine_cancel_flagged_for_review',
-                      ${JSON.stringify({ wmsShipmentId: shipmentId, engineOrderRef: ref.engineOrderRef, reason: event.reason })}::jsonb,
-                      NOW()
-                    )
-                  `);
-                } catch (auditErr: any) {
-                  console.warn(`[Reconcile V2] review audit insert failed for shipment ${shipmentId}:`, auditErr?.message);
-                }
-              }
-              console.log(`[Reconcile V2] shipment=${shipmentId} flagged for review (${event.reason}) — ShipStation cancelled but the order is live`);
-              continue;
-            }
-
-            // 4. Dispatch via shipment-rollup helpers. Thread the
-            //    fulfillment-push handle so a reconcile-driven re-ship
-            //    converges Shopify tracking too (void→re-ship heal /
-            //    CHANNEL_TRACKING_STALE), matching the SHIP_NOTIFY path.
-            const { wmsOrderId, changed } = await dispatchShipmentEvent(
-              db,
-              shipmentId,
-              event as any,
-            );
-
-            if (changed) {
-              // 5. Recompute order-level warehouse_status
-              const rollup = await recomputeOrderStatusFromShipments(
-                db,
-                wmsOrderId,
-              );
-              console.log(
-                `[ShipStation Reconcile V2] shipment=${shipmentId} → ${event.kind}, ` +
-                  `order ${wmsOrderId} warehouse_status=${rollup.warehouseStatus}`,
-              );
-
-              // 6. Track operational cancellation/void repair counts. Shipped
-              //    fulfillment is projected by the canonical authority below.
-              if (event.kind === "cancelled") markedCancelled++;
-              if (event.kind === "voided") markedVoided++;
-
-              // Record audit event
-              if (row.oms_id && row.oms_id.match(/^[0-9]+$/)) {
-                const omsId = Number(row.oms_id);
-                try {
-                  await db.execute(sql`
-                    INSERT INTO oms.oms_order_events (order_id, event_type, details, created_at)
-                    VALUES (
-                      ${omsId},
-                      ${event.kind === "shipped"
-                        ? "shipped_via_shipstation"
-                        : event.kind === "cancelled"
-                          ? "cancelled_via_shipstation"
-                          : "voided_via_shipstation"},
-                      ${JSON.stringify({
-                        wmsShipmentId: shipmentId,
-                        engineOrderRef: ref.engineOrderRef,
-                        ...(event.kind === "shipped"
-                          ? { trackingNumber: event.trackingNumber, carrier: event.carrier }
-                          : { reason: (event as any).reason }),
-                      })}::jsonb,
-                      NOW()
-                    )
-                  `);
-                } catch (auditErr: any) {
-                  console.warn(
-                    `[ShipStation Reconcile V2] audit insert failed for order ${omsId}:`,
-                    auditErr?.message,
-                  );
-                }
-              }
-            }
-
-            // 7. Stamp last_reconciled_at
-            await db.execute(sql`
-              UPDATE wms.outbound_shipments
-              SET last_reconciled_at = NOW()
-              WHERE id = ${shipmentId}
-            `);
-
-            // Rate limit — ShipStation allows ~40 req/min
-            await new Promise(r => setTimeout(r, 1000));
-          } catch (err: any) {
-            console.warn(
-              `[Reconcile V2] Failed to reconcile order ${row.order_id} / engineRef ${ref?.engineOrderRef}:`,
-              err?.message,
-            );
-            const errMsg = String(err?.message || err).slice(0, 255);
-            // A transient DB connection/pool timeout means we couldn't CHECK this shipment
-            // this run — it's infra, not a shipment problem. Don't flag it for human review
-            // (and don't attempt another DB write that would also fail); the next sweep
-            // retries. Only a genuine reconcile failure gets a review flag.
-            const isTransientDbError = /timeout exceeded when trying to connect|connection terminated|ECONNRESET|too many clients|Client has encountered a connection error/i.test(errMsg);
-            if (!isTransientDbError) {
-              await db.execute(sql`
-                UPDATE wms.outbound_shipments
-                SET last_reconciled_at = NOW(),
-                    requires_review = true,
-                    review_reason = ${errMsg}
-                WHERE id = ${shipmentId}
-              `);
-            }
-          }
-        }
-
-        if (markedShipped || markedCancelled || markedVoided) {
+        const { transitioned: zombieFixed } = await runStartupZombieOrderRepair({
+          db,
+          reservation: services.reservation,
+        });
+        if (zombieFixed.length > 0) {
           console.warn(
-            `[ShipStation Reconcile V2] Swept ${rows.rows.length} candidate(s): ` +
-              `${markedShipped} shipped, ${markedCancelled} cancelled, ${markedVoided} voided`,
+            `[Data Repair] Transitioned ${zombieFixed.length} zombie order(s) with no pending items:`,
+            zombieFixed.join(", "),
           );
         }
       } catch (err: any) {
-        console.warn("[ShipStation Reconcile V2] Sweep error:", err?.message);
+        console.warn("[Data Repair] Zombie-order reconciliation error:", err?.message);
       }
-    };
+    },
+  });
 
-    // The provider-order-based fallback is retired. Reconciliation always
-    // resolves physical package facts through the provider-neutral adapter
-    // and canonical fulfillment authority.
-    const runShipStationReconcile = async () => {
-      await runShipStationReconcileV2();
-
-      // Run the engine queue sweeper (review-only — flags stranded orders).
-      const engine = services.shippingEngine;
-      await engine?.sweepQueue?.().catch((e: any) => console.warn("[Engine Sweeper] error:", e.message));
-    };
-
-    const runObservedShipStationReconcile = () => observeRuntimeWork("shipping.wms_reconcile", runShipStationReconcile);
-    setTimeout(runObservedShipStationReconcile, 30_000);
-    setInterval(runObservedShipStationReconcile, 10 * 60 * 1000); // Every 10 minutes
-  } else {
-    logSchedulerDisabled("scheduler", "ShipStation reconciliation", "SHIPSTATION_RECONCILE_DISABLED");
-  }
+  startWmsShipStationReconcileScheduler({
+    db,
+    shippingEngine: services.shippingEngine,
+  });
 })();

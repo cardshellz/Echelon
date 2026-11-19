@@ -153,9 +153,9 @@ describe("InventoryChannelQuantityRuntimeService", () => {
       channelId: 67,
       target: { destinationKind: "channel_connection" },
       triggeredBy: "listing_preview",
-    }, async () => [])).rejects.toMatchObject<Partial<InventoryChannelQuantityRuntimeError>>({
+    }, async () => [])).rejects.toMatchObject({
       code: "CANONICAL_CHANNEL_QUANTITY_TARGET_AMBIGUOUS",
-    });
+    } satisfies Partial<InventoryChannelQuantityRuntimeError>);
   });
 
   it("collapses equivalent destinations only for an explicitly channel-level read", async () => {

@@ -11,31 +11,31 @@ import { verifiedPostgresPoolConfig } from "../infrastructure/verified-postgres-
 import {
   createHistoricalShipStationContentsClient,
   type HistoricalShipStationContentsClient,
-} from "../modules/shipping/historical-shipstation-contents-audit.client";
+} from "../modules/shipping/historical-shipstation-contents.api";
 import {
   HistoricalShipStationContentsSystemRecoveryRepositoryError,
   PgHistoricalShipStationContentsSystemRecoveryRepository,
   type PersistedHistoricalShipStationContentsSystemRecovery,
-} from "../modules/shipping/historical-shipstation-contents-system-recovery.repository";
+} from "../modules/shipping/historical-shipstation-contents.api";
 import {
   HistoricalShipStationContentsSystemRecoveryService,
   HistoricalShipStationContentsSystemRecoveryServiceError,
-} from "../modules/shipping/historical-shipstation-contents-system-recovery.service";
+} from "../modules/shipping/historical-shipstation-contents.api";
 import {
   HistoricalShipStationContentsAuditJobError,
   runHistoricalShipStationContentsAuditJob,
   type HistoricalShipStationContentsAuditJobResult,
 } from "./historical-shipstation-contents-audit.job";
-import { HistoricalShipStationContentsAuditRepositoryError } from "../modules/shipping/historical-shipstation-contents-audit.repository";
+import { HistoricalShipStationContentsAuditRepositoryError } from "../modules/shipping/historical-shipstation-contents.api";
 import {
   HistoricalShipStationContentsReviewRepositoryError,
   PgHistoricalShipStationContentsReviewRepository,
-} from "../modules/shipping/historical-shipstation-contents-review.repository";
+} from "../modules/shipping/historical-shipstation-contents.api";
 import {
   HistoricalShipStationContentsReviewService,
   HistoricalShipStationContentsReviewServiceError,
-} from "../modules/shipping/historical-shipstation-contents-review.service";
-import type { HistoricalShipStationContentsReviewReason } from "../modules/shipping/historical-shipstation-contents-audit.service";
+} from "../modules/shipping/historical-shipstation-contents.api";
+import type { HistoricalShipStationContentsReviewReason } from "../modules/shipping/historical-shipstation-contents.api";
 
 const POSTGRES_BIGINT_MAX = BigInt("9223372036854775807");
 const PREVIEW_CONTRACT_VERSION = 2 as const;

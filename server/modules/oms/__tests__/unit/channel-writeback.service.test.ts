@@ -113,7 +113,7 @@ describe("channel-writeback.service", () => {
   });
 
   it("joins WMS orders through a typed OMS id so the OMS primary key stays indexable", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
+    const execute = vi.fn(async (_query?: unknown) => ({ rows: [] }));
 
     await getChannelWritebackHealth({ execute }, { windowDays: 30, sampleLimit: 25 });
 
@@ -125,7 +125,7 @@ describe("channel-writeback.service", () => {
   });
 
   it("supports unbounded historical convergence and recognizes reconciled Shopify evidence", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
+    const execute = vi.fn(async (_query?: unknown) => ({ rows: [] }));
 
     await findChannelWritebackCandidates({ execute }, {
       minAgeMinutes: 60,
@@ -134,7 +134,7 @@ describe("channel-writeback.service", () => {
       excludeRetryStates: false,
     });
 
-    const text = JSON.stringify(execute.mock.calls[0]?.[0]);
+    const text = dialect.sqlToQuery(execute.mock.calls[0]?.[0] as any).sql;
     expect(text).toContain("shopify_fulfillment_reconciled");
     expect(text).toContain("coverageVersion");
     expect(text).toContain("writebackComplete");
@@ -147,6 +147,10 @@ describe("channel-writeback.service", () => {
     expect(text).toContain("wms.effective_physical_shipment_items");
     expect(text).toContain("physical_item.label_replacement_source_item_id");
     expect(text).toContain("allocation_source.source_wms_shipment_item_id) = eligible_item.id");
+    expect(text).toContain("SUM(covered_item.quantity)");
+    expect(text).toContain("MAX(push_item.quantity_pushed)");
+    expect(text).toContain("coverage_label.label_status IN ('voided', 'superseded')");
+    expect(text).toContain("oms.shopify_label_void_work coverage_void");
     expect(text).toContain("LEFT JOIN LATERAL");
     expect(text).not.toMatch(
       /c\.provider = 'shopify'[^)]*shopify_fulfillment_id[^)]*IS NOT NULL/,
@@ -158,7 +162,7 @@ describe("channel-writeback.service", () => {
 
 describe("findDropshipWritebackCandidates", () => {
   it("finds shipped dropship packages with tracking and no dropship command", async () => {
-    const execute = vi.fn(async () => ({
+    const execute = vi.fn(async (_query?: unknown) => ({
       rows: [{
         shipment_id: "5501",
         wms_order_id: "3301",
@@ -198,7 +202,7 @@ describe("findDropshipWritebackCandidates", () => {
   });
 
   it("bounds its inputs and drops malformed rows", async () => {
-    const execute = vi.fn(async () => ({
+    const execute = vi.fn(async (_query?: unknown) => ({
       rows: [
         { shipment_id: null, wms_order_id: 1, oms_order_id: 2 },
         { shipment_id: "0", wms_order_id: 1, oms_order_id: 2 },

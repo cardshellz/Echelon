@@ -30,13 +30,22 @@ describe("return box measurement validation", () => {
     expect(input.parcels[0].dimensions.lengthMm).toBe(254);
   });
 
-  it("blocks missing catalog weights for selected items", () => {
+  it("requires an actual packed weight when catalog weights are missing", () => {
     const unknown = lines.map(line => ({ ...line, unitWeightGrams: line.id === "line-b" ? null : line.unitWeightGrams }));
-    expect(() => validateCustomerReturnBoxPlan(unknown, plan())).toThrow("product weight");
+    expect(() => validateCustomerReturnBoxPlan(unknown, plan())).toThrow("measured packed weight");
     expect(validateCustomerReturnBoxPlan(unknown, {
       selections: [{ lineId: "line-a", quantity: 1, reasonCode: null }],
       parcels: [{ dimensions, originalBoxId: null, items: [{ lineId: "line-a", quantity: 1 }] }],
     }).parcels[0].weightGrams).toBe(138);
+  });
+
+  it("uses a measured weight only for unknown products and enforces the known subtotal", () => {
+    const unknown = lines.map(line => ({ ...line, unitWeightGrams: line.id === "line-b" ? null : line.unitWeightGrams }));
+    const measured = { ...plan(), parcels: plan().parcels.map(parcel => ({ ...parcel, packedWeightGrams: 500 })) };
+    expect(validateCustomerReturnBoxPlan(unknown, measured).parcels.map(parcel => parcel.weightGrams)).toEqual([500,500]);
+    expect(() => validateCustomerReturnBoxPlan(lines, measured)).toThrow("measured packed weight");
+    expect(() => validateCustomerReturnBoxPlan(unknown, { ...measured,
+      parcels: measured.parcels.map(parcel => ({ ...parcel, packedWeightGrams: 1 })) })).toThrow("measured packed weight");
   });
 
   it("accepts an original size only from this order's verified presets", () => {

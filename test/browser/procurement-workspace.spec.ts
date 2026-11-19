@@ -1,8 +1,10 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { purchaseCostApplicationsFixture } from "../fixtures/purchase-cost-applications";
 import { purchaseCostTraceFixture } from "../fixtures/purchase-cost-trace";
 import { expect, test, type Page } from "@playwright/test";
 import type { PurchaseWorkspace } from "../../shared/procurement/purchase-workspace";
 import { installFixtures, po } from "./procurement-fixtures";
+import { openReceiptCostHistory } from "./procurement-cost-review-helpers";
 
 // Fictional shared/split documents exercise scope and navigation, never live data.
 function workspace(): PurchaseWorkspace {
@@ -47,8 +49,8 @@ function workspace(): PurchaseWorkspace {
   };
 }
 
-async function setup(page: Page) {
-  const failures = await installFixtures(page);
+async function setup(page: Page, permissions?: readonly string[]) {
+  const failures = await installFixtures(page, { permissions });
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: workspace() }));
   return failures;
 }
@@ -206,9 +208,9 @@ test("recorded cost history shows exact lot lineage and COGS with a separate rec
   const traceData = purchaseCostApplicationsFixture();
   const data = { ...workspace(), costTrace: traceData };
   data.receipts[0] = { ...data.receipts[0], status: "closed", closedDate: "2026-09-07T12:00:00Z" };
-  await page.route("**/api/auth/me", (route) => route.fulfill({ json: {
-    user: { id: "test-user", username: "test", role: "admin" }, permissions: ["purchasing:approve"], roles: ["admin"],
-  } }));
+  await page.route("**/api/auth/me", (route) => route.fulfill({ json: staffAuthorityFixture({
+    user: { id: "test-user", username: "test", role: "admin" }, permissions: ["purchasing:view", "purchasing:approve"], systemRoles: ["admin"],
+  }) }));
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: data }));
   const keys: string[] = [];
   await page.route("**/api/receiving/31/retry-costs", async (route) => {
@@ -243,6 +245,7 @@ test("recorded cost history shows exact lot lineage and COGS with a separate rec
   await expect(inspector(page).getByRole("heading", { name: "Invoice TEST-INV-71", exact: true })).toBeFocused();
   expect(new URL(page.url()).searchParams.get("inspect")).toBe("invoice:71");
   const request = trace.getByTestId("receipt-cost-request-61");
+  await openReceiptCostHistory(page);
   await expect(request).toContainText("Physical receipt: Closed");
   await expect(request).toContainText("The stock receipt is recorded separately from its costs");
   await request.getByRole("button", { name: "Apply current supplier costs", exact: true }).click();
@@ -266,7 +269,7 @@ test("recorded cost history shows exact lot lineage and COGS with a separate rec
 });
 
 test("cost history stays inspectable without exposing a retry to users without approval capability", async ({ page }) => {
-  const failures = await setup(page);
+  const failures = await setup(page, ["purchasing:view", "inventory:view"]);
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: { ...workspace(), costTrace: purchaseCostApplicationsFixture() } }));
   await page.goto("/purchase-orders/17?tab=lifecycle");
   await expect(page.getByTestId("receipt-cost-request-61")).toContainText("Retry required");

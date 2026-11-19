@@ -128,10 +128,10 @@ describe("local description authority", () => {
   beforeEach(() => {
     saved = null; profile = noContentProfile;
     tx = { vendorId: 10, catalog: {
-      loadStoreContext: vi.fn(async () => ({ vendorId: 10, storeConnectionId: 22, platform: "ebay", vendorStatus: "onboarding",
-        entitlementStatus: "active", storeStatus: "needs_reauth", setupStatus: "incomplete", storeLaunchReady: false })),
-      listCatalogCandidates: vi.fn(async () => [contentCandidate()]), listCatalogExposureRules: vi.fn(async () => [{ scopeType: "catalog", action: "include" }]),
-      listSelectionRules: vi.fn(async () => [{ id: 1, scopeType: "catalog", action: "include" }]), listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
+      loadStoreContext: vi.fn(async () => ({ vendorId: 10, storeConnectionId: 22, platform: "ebay" as const, vendorStatus: "onboarding" as const,
+        entitlementStatus: "active", storeStatus: "needs_reauth" as const, setupStatus: "incomplete", storeLaunchReady: false })),
+      listCatalogCandidates: vi.fn(async () => [contentCandidate()]), listCatalogExposureRules: vi.fn(async () => [{ scopeType: "catalog" as const, action: "include" as const }]),
+      listPickedVariantIds: vi.fn(async (_vendorId: number, ids: readonly number[]) => new Set(ids)), listVariantOverrides: vi.fn(async () => []), listExistingListings: vi.fn(async () => []),
     },
       loadProfile: vi.fn(async () => profile), loadSaved: vi.fn(async () => saved), findReplay: vi.fn(async () => false),
       loadListingSettingLayers: vi.fn(async () => EMPTY_LISTING_SETTING_LAYERS),
@@ -168,9 +168,12 @@ describe("local description authority", () => {
   it.each(["missing", "unexposed", "unselected"])("rejects %s catalog item", async (mode) => {
     if (mode === "missing") vi.mocked(tx.catalog.listCatalogCandidates).mockResolvedValue([]);
     if (mode === "unexposed") vi.mocked(tx.catalog.listCatalogExposureRules).mockResolvedValue([]);
-    if (mode === "unselected") vi.mocked(tx.catalog.listSelectionRules).mockResolvedValue([]);
+    if (mode === "unselected") vi.mocked(tx.catalog.listPickedVariantIds).mockResolvedValue(new Set());
     await expect(service.saveForMember("member", target, request())).rejects.toMatchObject({ code: "DROPSHIP_CONTENT_NOT_AVAILABLE" });
     expect(tx.saveListing).not.toHaveBeenCalled();
+    // The vendor's picks are read for this one size only (PLAN-B v4.1 §9 row 2).
+    expect(vi.mocked(tx.catalog.listPickedVariantIds).mock.calls.every(([vendorId, ids]) => vendorId === tx.vendorId && ids.length === 1))
+      .toBe(true);
   });
   it("rejects another owner's store before reading content", async () => {
     vi.mocked(tx.catalog.loadStoreContext).mockResolvedValue(null);

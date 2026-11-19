@@ -12,6 +12,8 @@ import React, { useState, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import { ShopifyOwnershipReview } from "@/components/ShopifyOwnershipReview";
+import { InventoryProductSyncButton } from "@/features/channel-inventory/components/InventoryProductSync";
+import { ListingMemberConflictNotice } from "@/features/channel-listing-publication/ListingMemberConflictNotice";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -42,6 +44,7 @@ import {
   type ShopifyProductSyncResult,
 } from "@/lib/shopify-product-sync-result";
 import { useAuth } from "@/lib/auth";
+import { shopifyProductFetch } from "@/lib/shopify-product-connection";
 import {
   InventoryRuntimeAuthorityBadge,
   useInventoryRuntimeAuthority,
@@ -271,11 +274,7 @@ export default function ShopifyChannelPage() {
 
   // --- Sync from Shopify mutation ---
   const syncFromShopifyMutation = useMutation({
-    mutationFn: async () => {
-      const res = await fetch("/api/shopify/sync-products", { method: "POST", credentials: "include" });
-      if (!res.ok) throw new Error("Sync failed");
-      return res.json() as Promise<ShopifyProductSyncResult>;
-    },
+    mutationFn: () => shopifyProductFetch<ShopifyProductSyncResult>("/api/shopify/sync-products", {}),
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
@@ -286,8 +285,8 @@ export default function ShopifyChannelPage() {
         variant: outcome.needsReview ? "destructive" : "default",
       });
     },
-    onError: () => {
-      toast({ title: "Sync Failed", variant: "destructive" });
+    onError: (error: Error) => {
+      toast({ title: "Sync Failed", description: error.message, variant: "destructive" });
     },
   });
 
@@ -546,6 +545,8 @@ export default function ShopifyChannelPage() {
           </p>
         </div>
       </div>
+
+      {shopifyChannel && <ListingMemberConflictNotice key={shopifyChannel.id} channelId={shopifyChannel.id} enabled={hasPermission("channels", "view")} />}
 
       {/* Section 1: Store Setup */}
       <Card>
@@ -861,7 +862,7 @@ export default function ShopifyChannelPage() {
               </CardTitle>
               <CardDescription>Products and their Shopify push status</CardDescription>
             </div>
-            <div className="flex flex-col sm:flex-row gap-2">
+            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
               <Button
                 variant="outline"
                 size="sm"
@@ -989,7 +990,7 @@ export default function ShopifyChannelPage() {
               </div>
 
               {/* Feed table */}
-              <div className="border rounded-lg overflow-hidden">
+              <div className="overflow-x-auto rounded-lg border">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -998,7 +999,7 @@ export default function ShopifyChannelPage() {
                       <TableHead className="w-[120px]">Shopify ID</TableHead>
                       <TableHead className="w-[110px] text-center">Status</TableHead>
                       <TableHead className="w-[120px]">Last Synced</TableHead>
-                      {/* Push action column disabled */}
+                      <TableHead className="w-[160px]">Inventory</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -1055,7 +1056,9 @@ export default function ShopifyChannelPage() {
                             <span className="text-xs text-muted-foreground">Never</span>
                           )}
                         </TableCell>
-                        {/* Push button removed — feature disabled */}
+                        <TableCell>
+                          <InventoryProductSyncButton productId={item.productId} disabled={!item.isActive} />
+                        </TableCell>
                       </TableRow>
                     ))}
                     {filteredFeed.length === 0 && (

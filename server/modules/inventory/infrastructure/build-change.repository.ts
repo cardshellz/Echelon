@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 
 type QueryDb = {
-  execute: (query: unknown) => Promise<{ rows: any[] }>;
+  execute: (query: any) => Promise<{ rows: any[] }>;
 };
 
 export class BuildChangeRepository {

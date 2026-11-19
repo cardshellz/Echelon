@@ -1,7 +1,7 @@
 import type { Pool, PoolClient, QueryResultRow } from "pg";
 import { z } from "zod";
 import { walmartStatusSchema, type WalmartChannelStatus, type WalmartConnectInput } from "@shared/types/walmart-channel";
-import type { FulfillmentProviderCredentialRecord } from "../../../shipping-engine/application/connected-fulfillment-method-catalog.service";
+import type { FulfillmentProviderCredentialRecord } from "../../../shipping-engine/fulfillment-routing-and-connections.api";
 import { WalmartApiError } from "./walmart-client";
 
 const LOCK_NAMESPACE = 94122;

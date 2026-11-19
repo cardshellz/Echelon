@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000038000019430001_catalog_variant_mpn_listing_intent.sql",
+  "generation": 38,
+  "pr": 1943,
+  "ordinal": 1,
+  "after": [
+    "900000032000019150001_retire_catalog_shipping_package_type.sql",
+    "900000037000019410001_shopify_product_connections.sql"
+  ]
+}

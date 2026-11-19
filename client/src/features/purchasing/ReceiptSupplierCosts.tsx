@@ -3,7 +3,9 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { usePoShipmentCosts } from "./use-po-shipment-costs";
 import { useShipmentCostReview } from "./use-shipment-cost-review";
-import { PurchaseSupplierCostReview } from "./PurchaseSupplierCostReview";
+import { CostReviewPanel } from "./CostReviewPanel";
+import { poCostReviewShipments, shipmentCostReviewLines } from "@shared/procurement/cost-review-adapters";
+import { PurchaseTaxReview } from "./PurchaseTaxReview";
 
 /** A receipt can belong to a consolidated shipment. Scope by receipt membership,
  * not SKU or the shipment's first PO, and reuse the current posting projection. */
@@ -28,9 +30,14 @@ export function ReceiptSupplierCosts({
   const lines = supplier?.lines.filter((line) =>
     line.receipts.some((receipt) => receipt.receiptId === receiptId),
   );
+  const purchaseLineIds = new Set(lines?.map(line => line.purchaseOrderLineId));
+  const shipmentLines = shipmentId !== null && shipment.data ? shipmentCostReviewLines(shipment.data)
+    : purchase.data ? poCostReviewShipments(purchase.data) : [];
   return (
     <Card role="region" aria-label="Receipt supplier cost status">
       <CardContent className="p-3 space-y-3">
+        <p className="text-sm text-muted-foreground">Inventory costs inherit the saved purchase and supplier-invoice tax treatment. Receiving does not change tax eligibility.</p>
+        {[...new Set(lines?.map(line => line.purchaseOrderId) ?? (purchaseOrderId ? [purchaseOrderId] : []))].map(id => <PurchaseTaxReview key={id} target={{ kind: "purchase_order", id }} label="View purchase tax treatment" />)}
         {review.isPending && (
           <p role="status">Loading current receipt costs…</p>
         )}
@@ -44,8 +51,9 @@ export function ReceiptSupplierCosts({
         )}
         {review.isSuccess &&
           (lines?.length ? (
-            <PurchaseSupplierCostReview
-              status={{ lines }}
+            <CostReviewPanel
+              supplier={{ lines }}
+              shipments={shipmentLines.filter(line => line.purchaseOrderLineId !== null && purchaseLineIds.has(line.purchaseOrderLineId))}
               navigation={navigation}
             />
           ) : (

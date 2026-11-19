@@ -177,7 +177,7 @@ describe("DropshipWalletService", () => {
       eventType: "dropship_wallet_funding_failed",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship wallet funding failed",
+      title: "A payment to your wallet failed",
       idempotencyKey: "stripe-funding-failed:pi_failed_1",
       payload: {
         vendorId: 10,

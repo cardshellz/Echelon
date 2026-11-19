@@ -1,3 +1,4 @@
+import { readIntegerCents, readIntegerMills } from "@shared/money-read";
 import { hasPoInvoiceHistory, readPoInvoiceHistory } from "./po-invoice-history.repository";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { and, eq, ne, sql } from "drizzle-orm";
@@ -415,17 +416,15 @@ export function vendorCatalogPricingMatches(
 ): boolean {
   const catalogBasis = vendorProduct.pricingBasis ?? "legacy_unknown";
   const catalogUnitCostMills = storedInteger(
-    vendorProduct.unitCostMills ?? Number(vendorProduct.unitCostCents ?? 0) * 100,
+    vendorProduct.unitCostMills ?? readIntegerCents(vendorProduct.unitCostCents ?? 0, "catalog unit cost", true) * 100,
     "vendor_product.unit_cost_mills",
   );
   if (catalogBasis === "per_piece" && pricing.basis === "per_piece") {
-    return pricing.unitCostMills === Number(
-      vendorProduct.quotedUnitCostMills ?? catalogUnitCostMills,
-    );
+    return pricing.unitCostMills === readIntegerMills(vendorProduct.quotedUnitCostMills ?? catalogUnitCostMills, "computed amount", true);
   }
   if (catalogBasis === "per_purchase_uom" && pricing.basis === "per_purchase_uom") {
     return (
-      pricing.quotedCostMillsPerUom === Number(vendorProduct.quotedUnitCostMills) &&
+      pricing.quotedCostMillsPerUom === readIntegerMills(vendorProduct.quotedUnitCostMills, "quoted unit cost", true) &&
       pricing.piecesPerUom === Number(vendorProduct.piecesPerPurchaseUom) &&
       pricing.purchaseUom.trim().toLowerCase() ===
         String(vendorProduct.purchaseUom ?? "").trim().toLowerCase()
@@ -824,30 +823,28 @@ function lineValues(
     BigInt(normalized.totalProductCostCents) + BigInt(packagingCostCents),
     "line_total_cents",
   );
-  const expectedReceiveVariantId = context.receiveVariant?.id ?? null;
-  const expectedReceiveUnits = expectedReceiveVariantId == null
-    ? null
-    : input.expectedReceiveUnitsPerVariant ?? context.receiveVariant?.unitsPerVariant ?? 1;
   const catalogQuote = (input.pricingSource ?? "manual") === "vendor_catalog"
     ? context.vendorProduct
     : null;
+  const identity = lineIdentityValues(input.productId, context, input.expectedReceiveUnitsPerVariant);
 
   return {
     purchaseOrderId,
+    receiptCostingEnabled: 1,
     lineNumber,
     lineType: "product" as const,
-    productId: input.productId,
-    productVariantId: expectedReceiveVariantId,
-    expectedReceiveVariantId,
-    expectedReceiveUnitsPerVariant: expectedReceiveUnits,
+    productId: identity.productId,
+    productVariantId: identity.productVariantId,
+    expectedReceiveVariantId: identity.expectedReceiveVariantId,
+    expectedReceiveUnitsPerVariant: identity.expectedReceiveUnitsPerVariant,
     vendorProductId: input.vendorProductId ?? null,
-    sku: context.product.sku ?? context.receiveVariant?.sku ?? null,
-    productName: context.product.name,
+    sku: identity.sku,
+    productName: identity.productName,
     vendorSku: input.vendorSku ?? context.vendorProduct?.vendorSku ?? null,
     description: input.description ?? null,
     notes: input.notes ?? null,
-    unitOfMeasure: context.receiveVariant?.name?.split(" ")?.[0]?.toLowerCase() ?? context.product.baseUnit,
-    unitsPerUom: expectedReceiveUnits ?? 1,
+    unitOfMeasure: identity.unitOfMeasure,
+    unitsPerUom: identity.unitsPerUom,
     orderQty: normalized.orderQty,
     unitCostCents: normalized.unitCostCents,
     unitCostMills: normalized.unitCostMills,
@@ -872,6 +869,58 @@ function lineValues(
     status: "open" as const,
     createdAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
     updatedAt: sql`date_trunc('milliseconds', transaction_timestamp())`,
+  };
+}
+
+/** The catalog identity a product line stores: one derivation shared by line
+ * creation and reviewed product corrections, so the two cannot drift apart. */
+function lineIdentityValues(
+  productId: number,
+  context: Awaited<ReturnType<typeof resolveLineContext>>,
+  requestedReceiveUnits: number | null | undefined,
+) {
+  const expectedReceiveVariantId = context.receiveVariant?.id ?? null;
+  const expectedReceiveUnits = expectedReceiveVariantId == null
+    ? null
+    : requestedReceiveUnits ?? context.receiveVariant?.unitsPerVariant ?? 1;
+  return {
+    productId,
+    productVariantId: expectedReceiveVariantId,
+    expectedReceiveVariantId,
+    expectedReceiveUnitsPerVariant: expectedReceiveUnits,
+    sku: context.product.sku ?? context.receiveVariant?.sku ?? null,
+    productName: context.product.name,
+    unitOfMeasure: context.receiveVariant?.name?.split(" ")?.[0]?.toLowerCase() ?? context.product.baseUnit,
+    unitsPerUom: expectedReceiveUnits ?? 1,
+  };
+}
+
+/** Shared creation rules for draft commands and reviewed commercial amendments.
+ * This prepares values only; the caller owns approval, totals and persistence. */
+export async function preparePurchaseOrderLine(
+  tx: import("./po-quantity-amendment.repository").AmendmentTransaction,
+  header: typeof purchaseOrders.$inferSelect, lineNumber: number,
+  input: AddLineValue,
+) {
+  const parsed = addLineValueSchema.parse(input);
+  const context = await resolveLineContext(tx, header, parsed);
+  const normalized = normalizePricing(parsed.pricing);
+  return { values: lineValues(header.id, lineNumber, parsed, normalized, context), context };
+}
+
+/** Identity rules for a reviewed product correction on an existing line. The
+ * product, receiving unit and supplier catalog item pass the same checks as
+ * line creation (row locks included); the line's pricing is not touched here.
+ * The caller owns eligibility, approval, audit and persistence. */
+export async function preparePurchaseOrderLineIdentity(
+  tx: import("./po-quantity-amendment.repository").AmendmentTransaction,
+  header: typeof purchaseOrders.$inferSelect,
+  input: { productId: number; expectedReceiveVariantId: number; expectedReceiveUnitsPerVariant: number; vendorProductId: number | null },
+) {
+  const context = await resolveLineContext(tx, header, { ...input, pricingSource: "manual" });
+  return {
+    values: { ...lineIdentityValues(input.productId, context, input.expectedReceiveUnitsPerVariant), vendorProductId: input.vendorProductId },
+    context,
   };
 }
 
@@ -1284,8 +1333,8 @@ export function createPurchaseOrderLineCommands(
       }
       const totalProductCostCents = input.pricing === undefined
         ? storedInteger(line.totalProductCostCents, "total_product_cost_cents")
-        : Number(patch.totalProductCostCents);
-      const resolvedPackagingCostCents = Number(patch.packagingCostCents);
+        : readIntegerCents(patch.totalProductCostCents, "total product cost", true);
+      const resolvedPackagingCostCents = readIntegerCents(patch.packagingCostCents, "resolved packaging cost", true);
       const discountCents = storedInteger(line.discountCents, "discount_cents");
       const taxCents = storedInteger(line.taxCents, "tax_cents");
       patch.lineTotalCents = safeMoney(

@@ -845,6 +845,12 @@ function seedReturnsPoolAndIntakes(fixture: FixtureBuilder, ids: { noInspectionC
 export interface FinanceFixtureOptions {
   /** Adds FINANCE_DST_ORDERS (and their debits) to the program. */
   readonly dstOrders?: boolean;
+  /**
+   * Order K (cancelled in OMS) was stopped after eBay cancelled it, and its
+   * charge went back to PackRat's wallet on Oct 4 (eBay sync-back's
+   * marketplace-cancel refund, dropship-marketplace-order-cancel.repository.ts).
+   */
+  readonly marketplaceCancelRefund?: boolean;
 }
 
 /** Every row of the §6.4 program, in an order the inserts can follow. */
@@ -856,6 +862,12 @@ export function buildFinanceFixture(options: FinanceFixtureOptions = {}): readon
   const acme = seedAcmeLedger(fixture);
   const packRat = seedPackRatAndV14Ledger(fixture);
   seedReturnsPoolAndIntakes(fixture, { ...acme, ...packRat });
+  if (options.marketplaceCancelRefund) {
+    fixture.led(13, "refund_credit", 800, "2026-10-04T10:00:00.000Z", {
+      reference: { referenceType: "order_marketplace_cancel_refund", referenceId: "1010" },
+      metadata: { intakeId: 1010, source: "ebay_marketplace_cancel", orderDebitRefundCents: 800, advanceFeeRefundCents: 0, rewardsRefundCents: 0 },
+    });
+  }
   return fixture.finish();
 }
 

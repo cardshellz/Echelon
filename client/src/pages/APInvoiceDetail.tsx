@@ -1,3 +1,9 @@
+import { SupplierHeaderCosts } from "@/features/purchasing/SupplierHeaderCosts";
+import { ReceiptInvoiceCosts } from "@/features/purchasing/ReceiptInvoiceCosts";
+import { FreightInvoiceCosts } from "@/features/purchasing/FreightInvoiceCosts";
+import { InvoiceTransitionHistory, InvoiceTransitionReview } from "@/features/purchasing/InvoiceTransitionReview";
+import type { ApInvoiceTransitionAction } from "@shared/procurement/ap-invoice-transition";
+import { createFinancialCommandIntentStore, financialCommandFetchJson } from "@/lib/financial-command";
 import { SupplierCreditLink } from "@/features/purchasing/SupplierCreditLink";
 import { ApPaymentRecovery } from "@/features/purchasing/ApPaymentRecovery";
 import { useApPaymentCommands } from "@/features/purchasing/use-ap-payment-commands";
@@ -6,6 +12,7 @@ import { formatPaymentCalendarDate } from "@shared/procurement/ap-payment-contra
 import { InvoicePurchaseOrderSelector } from "@/features/purchasing/InvoicePurchaseOrderSelector";
 import { invalidateApInvoiceQueries, invalidateApPaymentQueries } from "@/features/purchasing/ap-work-list-query";
 import { InvoiceLineCostReview } from "@/features/purchasing/InvoiceLineCostReview";
+import { PurchaseTaxReview } from "@/features/purchasing/PurchaseTaxReview";
 import { invalidatePurchaseCosts } from "@/lib/invalidate-purchase-costs";
 import { InvoiceShipmentReplacement } from "@/features/purchasing/InvoiceShipmentReplacement";
 import { invoiceSourceCapabilitiesSchema } from "@shared/procurement/shipment-billing-ownership";
@@ -58,13 +65,6 @@ import {
   Ship,
 } from "lucide-react";
 import { format, parseISO } from "date-fns";
-import {
-  createFinancialCommandIntentStore,
-  financialCommandFetchJson,
-  financialCommandRetryDelay,
-  shouldRetryFinancialCommand,
-} from "@/lib/financial-command";
-
 function formatCents(cents: number | null | undefined): string {
   if (!cents && cents !== 0) return "$0.00";
   return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -83,14 +83,6 @@ function formatUnitCost(
 function formatDate(d: string | null | undefined) {
   if (!d) return "—";
   try { return format(parseISO(d), "MMM d, yyyy"); } catch { return d; }
-}
-
-function apLedgerOutcomeDescription(result: any): string | undefined {
-  const outcome = result?.apLedgerOutcome;
-  if (!outcome) return undefined;
-  const poIds = Array.isArray(outcome.affectedPurchaseOrderIds) ? outcome.affectedPurchaseOrderIds : [];
-  if (poIds.length) return `Updated linked POs: ${poIds.join(", ")}`;
-  return outcome.message;
 }
 
 function createApCommandIdempotencyKey(prefix: string): string {
@@ -166,24 +158,20 @@ export default function APInvoiceDetail() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const paymentCommands = useApPaymentCommands();
-  const [invoiceLifecycleIntent] = useState(() =>
-    createFinancialCommandIntentStore(() => createApCommandIdempotencyKey("ap-invoice")),
-  );
   const procurementNavigation = useProcurementNavigation();
   const invoiceId = procurementNavigation.record?.kind === "invoice" ? procurementNavigation.record.id : null;
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [matchIntent] = useState(() => createFinancialCommandIntentStore(() => crypto.randomUUID()));
 
   // Tabs
   const activeTab = procurementNavigation.tab;
   const setActiveTab = procurementNavigation.setTab;
 
   // Dialogs
-  const [showDisputeDialog, setShowDisputeDialog] = useState(false);
-  const [showVoidDialog, setShowVoidDialog] = useState(false);
+  const [transitionAction, setTransitionAction] = useState<ApInvoiceTransitionAction | null>(null);
   const [showLinkPoDialog, setShowLinkPoDialog] = useState(false);
   const [showPaymentDialog, setShowPaymentDialog] = useState(false);
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
-  const [reason, setReason] = useState("");
   const [linkPoId, setLinkPoId] = useState("");
 
   // Editing
@@ -245,76 +233,8 @@ export default function APInvoiceDetail() {
     void invalidateApInvoiceQueries(queryClient);
     queryClient.invalidateQueries({ queryKey: ["/api/ap/summary"] });
     queryClient.invalidateQueries({ queryKey: ["/api/ap/command-events?limit=8"] });
+    queryClient.invalidateQueries({ queryKey: [`/api/vendor-invoices/${invoiceId}/transition-history`] });
   };
-
-  async function action(endpoint: string, body?: any) {
-    if (endpoint === "approve" && (!sourceCapabilities.success || !sourceCapabilities.data.approval.allowed)) {
-      throw new Error(sourceCapabilities.success ? sourceCapabilities.data.approval.reason : sourceUnavailableReason);
-    }
-    const url = `/api/vendor-invoices/${invoiceId}/${endpoint}`;
-    const effectiveBody = body ?? null;
-    const idempotencyKey = invoiceLifecycleIntent.acquire({
-      method: "POST",
-      url,
-      body: effectiveBody,
-    });
-    try {
-      const result = await financialCommandFetchJson<any>(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Idempotency-Key": idempotencyKey,
-        },
-        body: body ? JSON.stringify(body) : undefined,
-      });
-      return { result, idempotencyKey };
-    } catch (error) {
-      invoiceLifecycleIntent.fail(idempotencyKey, error);
-      throw error;
-    }
-  }
-
-  // ── Mutations ──
-
-  const approveMutation = useMutation({
-    mutationFn: () => action("approve"),
-    retry: shouldRetryFinancialCommand,
-    retryDelay: financialCommandRetryDelay,
-    onSuccess: ({ result, idempotencyKey }) => {
-      invoiceLifecycleIntent.complete(idempotencyKey);
-      invalidate();
-      toast({ title: "Invoice approved", description: apLedgerOutcomeDescription(result) });
-    },
-    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
-  });
-
-  const disputeMutation = useMutation({
-    mutationFn: () => action("dispute", { reason }),
-    retry: shouldRetryFinancialCommand,
-    retryDelay: financialCommandRetryDelay,
-    onSuccess: ({ result, idempotencyKey }) => {
-      invoiceLifecycleIntent.complete(idempotencyKey);
-      invalidate();
-      setShowDisputeDialog(false);
-      setReason("");
-      toast({ title: "Invoice disputed", description: apLedgerOutcomeDescription(result) });
-    },
-    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
-  });
-
-  const voidMutation = useMutation({
-    mutationFn: () => action("void", { reason }),
-    retry: shouldRetryFinancialCommand,
-    retryDelay: financialCommandRetryDelay,
-    onSuccess: ({ result, idempotencyKey }) => {
-      invoiceLifecycleIntent.complete(idempotencyKey);
-      invalidate();
-      setShowVoidDialog(false);
-      setReason("");
-      toast({ title: "Invoice voided", description: apLedgerOutcomeDescription(result) });
-    },
-    onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
-  });
 
   const linkPoMutation = useMutation({
     mutationFn: () => {
@@ -434,8 +354,13 @@ export default function APInvoiceDetail() {
   });
 
   const matchMutation = useMutation({
-    mutationFn: () => action("match"),
-    onSuccess: () => { invalidate(); toast({ title: "Match completed" }); },
+    mutationFn: async () => {
+      const url = `/api/vendor-invoices/${invoiceId}/match`;
+      const key = matchIntent.acquire({ method: "POST", url, body: null });
+      try { await financialCommandFetchJson(url, { method: "POST", headers: { "Idempotency-Key": key } }); return key; }
+      catch (error) { matchIntent.fail(key, error); throw error; }
+    },
+    onSuccess: key => { matchIntent.complete(key); invalidate(); toast({ title: "Match completed" }); },
     onError: (e: Error) => { invalidate(); toast({ title: "Error", description: e.message, variant: "destructive" }); },
   });
 
@@ -527,6 +452,10 @@ export default function APInvoiceDetail() {
 
   const status = invoice.status;
   const canApprove = hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.approval.allowed && ["received", "disputed"].includes(status);
+  // Keep a financial review mounted while its parent invoice refetches. This
+  // cached document identity only opens the review; its own current context and
+  // locked server approval enforce authority and source/impact versions.
+  const recordedSourceCapabilities = invoiceSourceCapabilitiesSchema.safeParse(invoice.id === invoiceId ? invoice.sourceCapabilities : undefined);
   const canDispute = hasPermission("purchasing", "edit") && ["received", "approved", "partially_paid"].includes(status);
   const canVoid = hasPermission("purchasing", "approve") && status !== "voided" && invoice.paidAmountCents === 0 && invoice.creditedAmountCents === 0 && invoice.hasSupplierCreditHistory === false;
   const canPay = !invoiceError && !invoiceRefreshing && hasPermission("purchasing", "approve") && sourceCapabilities.success && sourceCapabilities.data.payment.allowed && !invoice.paymentReviewRequired && !invoice.settlementReviewRequired && ["approved", "partially_paid"].includes(status);
@@ -604,8 +533,12 @@ export default function APInvoiceDetail() {
 
         {!isVoided && (
           <div className="flex gap-2 flex-wrap justify-end">
-            {canApprove && (
-              <Button size="sm" onClick={() => approveMutation.mutate()} disabled={approveMutation.isPending}>
+            {invoiceId !== null && <SupplierHeaderCosts target={{ kind: "invoice", id: invoiceId }} />}
+            {invoiceId !== null && recordedSourceCapabilities.success && recordedSourceCapabilities.data.freightSourceLineIds.length > 0 && (
+              <FreightInvoiceCosts invoiceId={invoiceId} label={canApprove ? "Review & approve" : "Shipment costs"} />
+            )}
+            {canApprove && sourceCapabilities.success && sourceCapabilities.data.freightSourceLineIds.length === 0 && (
+              <Button size="sm" onClick={() => setTransitionAction("approve")}>
                 <CheckCircle className="h-4 w-4 mr-1" />
                 Approve
               </Button>
@@ -620,13 +553,13 @@ export default function APInvoiceDetail() {
               </Button>
             )}
             {canDispute && (
-              <Button size="sm" variant="outline" className="text-red-600 border-red-200" onClick={() => setShowDisputeDialog(true)}>
+              <Button size="sm" variant="outline" className="text-red-600 border-red-200" onClick={() => setTransitionAction("dispute")}>
                 <AlertTriangle className="h-4 w-4 mr-1" />
                 Dispute
               </Button>
             )}
             {canVoid && (
-              <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => setShowVoidDialog(true)}>
+              <Button size="sm" variant="ghost" className="text-muted-foreground" onClick={() => setTransitionAction("void")}>
                 <XCircle className="h-4 w-4 mr-1" />
                 Void
               </Button>
@@ -786,7 +719,9 @@ export default function APInvoiceDetail() {
                             <span className={`text-xs px-1.5 py-0.5 rounded ${match.className}`}>{match.label}</span>
                             <InvoiceQuantityCorrection lineId={line.id} lineNumber={line.lineNumber} needsCorrection={["qty_discrepancy", "over_billed", "price_discrepancy"].includes(line.matchStatus)} allowMatched={line.purchaseOrderLineId != null && invoice.status !== "voided"} onSaved={invalidate} />
                           </TableCell>
-                          <TableCell><InvoiceLineCostReview line={line} invoiceId={invoice.id} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} /></TableCell>
+                          <TableCell><div className="flex flex-wrap gap-2"><InvoiceLineCostReview line={line} invoiceId={invoice.id} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} />
+                            {line.purchaseOrderLineId && <ReceiptInvoiceCosts purchaseOrderLineId={line.purchaseOrderLineId} />}
+                            {line.purchaseOrderLineId && invoice.status !== "voided" && <PurchaseTaxReview target={{ kind: "invoice_line", id: line.id }} label="Tax amounts" />}</div></TableCell>
                           {canEdit && (
                             <TableCell>
                               <Button size="sm" variant="ghost" className="min-h-[44px] min-w-[44px] text-muted-foreground"
@@ -1014,43 +949,9 @@ export default function APInvoiceDetail() {
         </CardContent>
       </Card>
 
-      {/* ── Dispute Dialog ── */}
-      <Dialog open={showDisputeDialog} onOpenChange={setShowDisputeDialog}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Dispute Invoice</DialogTitle>
-            <DialogDescription>Describe the discrepancy with this invoice.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <Textarea placeholder="Reason for dispute..." value={reason} onChange={(e) => setReason(e.target.value)} rows={3} />
-            <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setShowDisputeDialog(false)}>Cancel</Button>
-              <Button variant="destructive" onClick={() => disputeMutation.mutate()} disabled={!reason || disputeMutation.isPending}>
-                {disputeMutation.isPending ? "Saving..." : "Mark Disputed"}
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* ── Void Dialog ── */}
-      <Dialog open={showVoidDialog} onOpenChange={setShowVoidDialog}>
-        <DialogContent className="max-w-md">
-          <DialogHeader>
-            <DialogTitle>Void Invoice</DialogTitle>
-            <DialogDescription>This cannot be undone. Provide a reason.</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            <Textarea placeholder="Void reason..." value={reason} onChange={(e) => setReason(e.target.value)} rows={3} />
-            <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setShowVoidDialog(false)}>Cancel</Button>
-              <Button variant="destructive" onClick={() => voidMutation.mutate()} disabled={!reason || voidMutation.isPending}>
-                {voidMutation.isPending ? "Voiding..." : "Void Invoice"}
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+      {invoiceId !== null && <InvoiceTransitionHistory invoiceId={invoiceId} />}
+      {invoiceId !== null && transitionAction && <InvoiceTransitionReview key={`${invoiceId}:${transitionAction}`} invoiceId={invoiceId}
+        action={transitionAction} onClose={() => setTransitionAction(null)} onSaved={invalidate} />}
 
       {/* ── Link PO Dialog ── */}
       <Dialog open={showLinkPoDialog} onOpenChange={setShowLinkPoDialog}>

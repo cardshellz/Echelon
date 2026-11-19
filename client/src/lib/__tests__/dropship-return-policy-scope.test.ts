@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import type {
+  DropshipStoreConnectionLifecycleStatus,
+  DropshipStorePlatform,
+} from "../dropship-ops-surface";
 import {
   RETURN_POLICY_ANY_STORE_VALUE,
   RETURN_POLICY_GLOBAL_VENDOR_VALUE,
@@ -35,11 +39,11 @@ function storeRow(overrides: {
   vendorId: number;
   vendorBusinessName?: string | null;
   vendorEmail?: string | null;
-  platform?: string;
-  status?: string;
+  platform?: DropshipStorePlatform;
+  status?: DropshipStoreConnectionLifecycleStatus;
   externalDisplayName?: string | null;
   shopDomain?: string | null;
-}) {
+}): Parameters<typeof buildReturnPolicyStoreOptions>[0][number] {
   return {
     storeConnectionId: overrides.storeConnectionId,
     platform: overrides.platform ?? "ebay",
@@ -255,6 +259,7 @@ describe("returnFeeRowToEditFormState", () => {
       faultCategory: "customer",
       amountType: "flat_cents",
       amount: 1500,
+      isDefault: false,
       vendorId: 3,
       storeConnectionId: 8,
       priority: 2,
@@ -263,6 +268,7 @@ describe("returnFeeRowToEditFormState", () => {
       faultCategory: "customer",
       amountType: "flat_cents",
       amount: "1500",
+      isDefault: false,
       vendorId: "3",
       storeConnectionId: "8",
       priority: "2",
@@ -275,12 +281,14 @@ describe("returnFeeRowToEditFormState", () => {
       faultCategory: "vendor",
       amountType: "percent",
       amount: 15,
+      isDefault: true,
       vendorId: null,
       storeConnectionId: null,
       priority: 0,
     });
     expect(state.amountType).toBe("percent");
     expect(state.amount).toBe("15");
+    expect(state.isDefault).toBe(true);
     expect(state.vendorId).toBe("");
     expect(state.storeConnectionId).toBe("");
   });
@@ -291,6 +299,7 @@ describe("returnFeeRowToEditFormState", () => {
       faultCategory: "marketplace",
       amountType: "flat_cents",
       amount: 0,
+      isDefault: false,
       vendorId: 21,
       storeConnectionId: null,
       priority: 5,
@@ -300,6 +309,7 @@ describe("returnFeeRowToEditFormState", () => {
       faultCategory: "marketplace",
       amountType: "flat_cents",
       amount: "0",
+      isDefault: false,
       vendorId: "21",
       storeConnectionId: "",
       priority: "5",
@@ -312,6 +322,7 @@ describe("returnFeeRowToEditFormState", () => {
       faultCategory: "carrier",
       amountType: "flat_cents",
       amount: 250,
+      isDefault: false,
       vendorId: 4,
       storeConnectionId: null,
       priority: 0,

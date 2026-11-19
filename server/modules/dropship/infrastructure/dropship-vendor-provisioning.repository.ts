@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import type { Pool, PoolClient } from "pg";
 import {
   dropshipVendorStandingReasonEnum,
@@ -48,7 +49,7 @@ interface StoreConnectionSummaryRow {
 
 interface CatalogSetupSummaryRow {
   admin_exposure_rule_count: string | number;
-  vendor_selection_rule_count: string | number;
+  vendor_selected_item_count: string | number;
 }
 
 interface WalletSetupSummaryRow {
@@ -216,18 +217,20 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
                AND (ends_at IS NULL OR ends_at > now())
            ) AS admin_exposure_rule_count,
            (
+             -- The vendor's one-time picks (PLAN-B v4.1 §9 row 7): its rules are frozen and no longer its selection.
              SELECT COUNT(*)
-             FROM dropship.dropship_vendor_selection_rules
+             FROM dropship.dropship_vendor_selected_variants
              WHERE vendor_id = $1
-               AND action = 'include'
-               AND is_active = true
-           ) AS vendor_selection_rule_count`,
+           ) AS vendor_selected_item_count`,
         [vendorId],
       );
       const row = result.rows[0];
+      const vendorSelectedItemCount = Number(row?.vendor_selected_item_count ?? 0);
       return {
         adminExposureRuleCount: Number(row?.admin_exposure_rule_count ?? 0),
-        vendorSelectionRuleCount: Number(row?.vendor_selection_rule_count ?? 0),
+        vendorSelectedItemCount,
+        // Kept one release with the pick count, so a page that still reads it agrees with the gate (V17).
+        vendorSelectionRuleCount: vendorSelectedItemCount,
       };
     } finally {
       client.release();
@@ -293,8 +296,8 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
       );
       const row = result.rows[0];
       return {
-        availableBalanceCents: Number(row?.available_balance_cents ?? 0),
-        pendingBalanceCents: Number(row?.pending_balance_cents ?? 0),
+        availableBalanceCents: readIntegerCents(row?.available_balance_cents ?? 0, "available balance", true),
+        pendingBalanceCents: readIntegerCents(row?.pending_balance_cents ?? 0, "pending balance", true),
         activeFundingMethodCount: Number(row?.active_funding_method_count ?? 0),
         activeStripeFundingMethodCount: Number(row?.active_stripe_funding_method_count ?? 0),
         activeStripeCardFundingMethodCount: Number(row?.active_stripe_card_funding_method_count ?? 0),

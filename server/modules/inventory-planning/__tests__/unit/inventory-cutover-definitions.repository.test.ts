@@ -37,8 +37,15 @@ const write = (count = 1) => ({ rows: [], rowCount: count });
 
 describe("cutover definition promotion owner", () => {
   it.each(TABLES)("promotes reviewed %s using only its allowlisted tables", async (kind, key, table, active, draft) => {
-    const { client, query } = clientWith([fence(), head(), version(), write(), write()]);
+    const wake = { rows: [] };
+    const { client, query } = clientWith([fence(), head(), version(), write(), write(), ...(kind === "variant_mapping" ? [wake] : [])]);
     await expect(promoteInventoryCutoverDefinitionsInsideTransaction(client, manifest(kind, key), AUDIT)).resolves.toBe(1);
+    // Channels PR5: only a newly sealed variant mapping wakes the catch-up rows parked for its item, in the same transaction.
+    expect(query).toHaveBeenCalledTimes(kind === "variant_mapping" ? 6 : 5);
+    if (kind === "variant_mapping") {
+      expect(query.mock.calls[5]).toEqual([expect.stringContaining("UPDATE inventory.quantity_publication_catchup"), [[10], AUDIT.occurredAt.toISOString()]]);
+      expect(query.mock.calls[5][0]).toContain("FOR UPDATE OF c SKIP LOCKED");
+    }
     expect(query.mock.calls[0][0]).toContain("assert_cutover_admission_fence_owner");
     expect(query.mock.calls[1]).toEqual([expect.stringContaining(`inventory.${table}_heads`), [key]]);
     expect(query.mock.calls[1][0]).toContain("FOR UPDATE");

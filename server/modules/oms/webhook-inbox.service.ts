@@ -46,6 +46,17 @@ const REPLAYABLE_SHOPIFY_OMS_TOPICS = new Set([
   "refunds/create",
   "fulfillments/create",
   "fulfillments/update",
+  "products/create",
+  "products/update",
+  "products/delete",
+]);
+
+const MUTABLE_SHOPIFY_FALLBACK_TOPICS = new Set([
+  "orders/updated",
+  "orders/fulfilled",
+  "fulfillments/create",
+  "fulfillments/update",
+  "products/update",
 ]);
 
 function isReplayableWebhookInboxTopic(provider: string, topic: string): boolean {
@@ -54,6 +65,9 @@ function isReplayableWebhookInboxTopic(provider: string, topic: string): boolean
   }
   if (provider === "ebay") {
     return topic.toLowerCase().includes("order");
+  }
+  if (provider === "shipstation") {
+    return topic === "SHIP_NOTIFY";
   }
   return false;
 }
@@ -86,13 +100,21 @@ function extractShopifyPayloadEventId(topic: string, payload: any): string | nul
     if (payload.id) return String(payload.id);
   }
 
-  return String(
-    payload.admin_graphql_api_id ??
-      payload.id ??
-      payload.order_id ??
-      payload.name ??
-      "",
-  ) || null;
+  const entityId =
+    String(
+      payload.admin_graphql_api_id ??
+        payload.id ??
+        payload.order_id ??
+        payload.name ??
+        "",
+    ) || null;
+  if (!entityId) return null;
+
+  if (MUTABLE_SHOPIFY_FALLBACK_TOPICS.has(topic)) {
+    return `${entityId}:payload:${sha256(stableJson(payload))}`;
+  }
+
+  return entityId;
 }
 
 export function buildWebhookIdempotencyKey(input: {
@@ -373,6 +395,34 @@ export function buildEbayWebhookInboxInput(
       "user-agent": headerValue(req, "user-agent") || "",
       "x-ebay-signature": headerValue(req, "x-ebay-signature") || "",
       "x-ebay-transmission-id": headerValue(req, "x-ebay-transmission-id") || "",
+    },
+  };
+}
+
+export function buildShipStationWebhookInboxInput(
+  req: Request,
+  resourceUrl: string,
+  payload: unknown,
+): WebhookInboxInput {
+  let sourceDomain: string | null = "shipstation";
+  try {
+    sourceDomain = new URL(resourceUrl).host || "shipstation";
+  } catch {
+    sourceDomain = "shipstation";
+  }
+  const urlDigest = sha256(resourceUrl);
+  const eventId = resourceUrl.length <= 180 ? resourceUrl : `url:${urlDigest}`;
+
+  return {
+    provider: "shipstation",
+    topic: "SHIP_NOTIFY",
+    eventId,
+    idempotencyKey: `shipstation:SHIP_NOTIFY:${urlDigest}`,
+    sourceDomain,
+    payload,
+    headers: {
+      "user-agent": headerValue(req, "user-agent") || "",
+      "x-shipstation-webhook-id": headerValue(req, "x-shipstation-webhook-id") || "",
     },
   };
 }

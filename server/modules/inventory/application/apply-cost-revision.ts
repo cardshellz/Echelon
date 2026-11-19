@@ -1,7 +1,9 @@
+import { receiptSegmentCost } from "@shared/procurement/receipt-cost-segments";
 import { normalizeLotCosts, lotCostNeedsReview, lotCostTotals, hasExactLotCostTotals } from "../domain/lot-cost";
 import { costForQuantityIntervals, validateCostQuantityIntervals, type CostQuantityInterval } from "../domain/cost-quantity-intervals";
 import { ensureLotCostQuantityBasis } from "../infrastructure/cost-quantity.repository";
 import { readCostQuantityReview } from "./cost-quantity-review";
+import { reviewRepairedOrderCosts } from "./repaired-cost-order-review";
 import { postCostReconciliation, readReconciliationLedger, reconciliationScope } from "../infrastructure/cost-reconciliation.repository";
 import { planCostReconciliation } from "./plan-cost-reconciliation";
 import { sql } from "drizzle-orm";
@@ -11,6 +13,7 @@ import { applyNoInventoryEffect } from "./apply-no-inventory-effect";
 import { projectCostForFrozenLot, replaceCostComponent } from "../domain/cost-application.domain";
 import { CostEvidenceError, costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction, type RecordedCostRevision } from "../infrastructure/cost-evidence.repository";
 import type { SupplierReturnCostAdjustment } from "@shared/procurement/supplier-return";
+import { readReceivingLineCostProvenance } from "../../procurement/cost-source-evidence.api";
 
 const MAX_APPLICATION_LOTS = 10_000;
 const MAX_APPLICATION_EDGES = 100_000;
@@ -31,7 +34,8 @@ export interface CostRevisionApplicationResult {
 export interface CostComponentWriter {
   revalueComponent(lotId: number, component: CostComponent, unitMills: number, reason: string, tx: CostEvidenceTransaction): Promise<{ cogsRowsUpdated: number; totalCogsDeltaCents: number; supplierReturnAdjustments?: SupplierReturnCostAdjustment[] } | null>;
   revalueExactComponent?(lotId: number, component: CostComponent, totalMills: number, basisQuantity: number,
-    reason: string, actorId: string, tx: CostEvidenceTransaction, recordedAt?: Date, sourceRevisionId?: number): Promise<{ cogsRowsUpdated: number; totalCogsDeltaCents: number; supplierReturnAdjustments?: SupplierReturnCostAdjustment[] } | null>;
+    reason: string, actorId: string, tx: CostEvidenceTransaction, recordedAt?: Date, sourceRevisionId?: number,
+    options?: { excludedOrderCostIds: readonly number[] }): Promise<{ cogsRowsUpdated: number; totalCogsDeltaCents: number; supplierReturnAdjustments?: SupplierReturnCostAdjustment[] } | null>;
 }
 
 export interface CostApplicationOptions {
@@ -55,16 +59,31 @@ export async function applyCostRevision(
   const source = revision.contract;
   if (source.inventoryEffect) return applyNoInventoryEffect(tx, revision, actorId, now);
   const shipmentLineId = source.scope.kind === "shipment_line" ? source.scope.inboundShipmentLineId : null;
-  const rootsResult = await tx.execute(sql`
-    SELECT origin.*, line.cost_source_kind, line.cost_source_evidence,
-      EXISTS(SELECT 1 FROM procurement.receipt_reversals reversal WHERE reversal.receiving_line_id = origin.receiving_line_id) AS has_reversal
+  const originsResult = await tx.execute(sql`
+    SELECT origin.*
     FROM inventory.effective_lot_cost_origins origin
-    JOIN procurement.receiving_lines line ON line.id = origin.receiving_line_id
     WHERE origin.purchase_order_line_id = ${source.scope.purchaseOrderLineId}
       AND (${shipmentLineId}::integer IS NULL OR origin.inbound_shipment_line_id = ${shipmentLineId})
     ORDER BY origin.inventory_lot_id LIMIT ${MAX_APPLICATION_LOTS + 1}
   `);
-  const roots = rootsResult.rows;
+  const provenanceByReceivingLineId = await readReceivingLineCostProvenance(
+    tx,
+    originsResult.rows.map((origin) => costInteger(origin.receiving_line_id, "origin.receivingLineId", 1)),
+  );
+  const roots = originsResult.rows.flatMap((origin) => {
+    const provenance = provenanceByReceivingLineId.get(costInteger(origin.receiving_line_id, "origin.receivingLineId", 1));
+    if (!provenance) return [];
+    return [{
+      ...origin,
+      cost_source_kind: provenance.cost_source_kind,
+      cost_source_evidence: provenance.cost_source_evidence,
+      has_reversal: provenance.has_reversal,
+    }];
+  });
+  const verifiedSalesOnly = roots.some(root => root.cost_source_evidence?.historicalCostLinks?.verifiedSalesOnly === true);
+  if (verifiedSalesOnly && !writer.revalueExactComponent) {
+    throw new CostEvidenceError("COST_EXACT_WRITER_REQUIRED", "Repaired history requires the exact costing owner with verified-sale protection.");
+  }
   const rootIds = roots.map((root) => costInteger(root.inventory_lot_id, "root.inventoryLotId", 1));
   const issues: CostIssue[] = [];
   if (historicalReconciliation === "preserve") {
@@ -166,9 +185,14 @@ export async function applyCostRevision(
     for (const root of roots) {
       const lot = lots.get(Number(root.inventory_lot_id))!;
       try {
-        const projection = projectCostForFrozenLot({ totalMills: source.totalMills, basePieces: source.basePieces,
-          startBasePiece: costInteger(shipmentLineId === null ? root.purchase_start_base_piece : root.shipment_start_base_piece, "startBasePiece"),
-          lotQuantity: costInteger(root.received_variant_qty, "receivedVariantQty", 1), unitsPerVariantSnapshot: costInteger(root.units_per_variant_snapshot, "unitsPerVariantSnapshot", 1) });
+        const quantity = costInteger(root.received_variant_qty, "receivedVariantQty", 1);
+        const units = costInteger(root.units_per_variant_snapshot, "unitsPerVariantSnapshot", 1);
+        const pieces = costInteger((BigInt(quantity)*BigInt(units)).toString(), "root pieces", 1);
+        const start = costInteger(shipmentLineId === null ? root.purchase_start_base_piece : root.shipment_start_base_piece, "startBasePiece");
+        const receiptCost = source.receiptCostSegments ? receiptSegmentCost(source.receiptCostSegments, start, pieces, Number(root.receiving_line_id)) : null;
+        const projection = projectCostForFrozenLot({ totalMills: receiptCost?.totalMills ?? source.totalMills,
+          basePieces: receiptCost ? pieces : source.basePieces, startBasePiece: receiptCost ? 0 : start,
+          lotQuantity: quantity, unitsPerVariantSnapshot: units });
         projections.set(lot.id, { lot, unitMills: projection.unitMills, remainderMills: projection.remainderMills, allocatedMills: projection.allocatedMills, quantity: projection.lotQuantity });
       } catch (error) {
         issues.push({ code: "COST_SOURCE_INTERVAL_REVIEW", message: `Lot ${lot.id} is outside the captured source quantity: ${error instanceof Error ? error.message : "invalid interval"}` });
@@ -244,13 +268,22 @@ export async function applyCostRevision(
       basisQuantity: target.quantity, component: source.component, totalMills: target.allocatedMills, currency: source.currency!,
     }));
   }
-  const allIssues = [...issues, ...quantityReviews];
+  const orderReview = verifiedSalesOnly
+    ? await reviewRepairedOrderCosts(tx, lotIds) : null;
+  // A remaining stock discrepancy must not send an already reviewed receipt
+  // through the same transfer/repacking approval again. Mixed receipt scopes
+  // retain the repair action until all of their source histories are reviewed.
+  const costLinksAlreadyReviewed = roots.length > 0
+    && roots.every(root => root.cost_source_evidence?.historicalCostLinks?.verifiedSalesOnly === true);
+  const allIssues = [...issues, ...quantityReviews.map(issue => costLinksAlreadyReviewed
+    ? { ...issue, costLinksAlreadyReviewed: true as const } : issue), ...(orderReview?.issues ?? [])];
   const receivedBasePieces = roots.reduce((sum,root) => sum + BigInt(String(root.received_variant_qty))*BigInt(String(root.units_per_variant_snapshot)),BigInt(0));
   const reconciliation = historicalReconciliation === "preserve" ? null : await planCostReconciliation(tx,revision,allIssues,
     issues.length===0 && source.basePieces!==null && receivedBasePieces===BigInt(source.basePieces));
   const identity = { costAllocationVersion: writer.revalueExactComponent ? 3 : 1, sourceRevisionId: revision.id, lotIds, graph: edgeResult.rows, issues: allIssues,
     ...(reconciliation ? { reconciliation:reconciliation.identity } : {}),
     ...(historicalReconciliation === "preserve" ? { historicalReconciliation } : {}),
+    ...(orderReview ? { verifiedOrderEvidence:{fingerprint:orderReview.evidenceVersion,records:orderReview.evidence} } : {}),
     targets: targets.map((target) => ({ id: target.lot.id, unitMills: target.unitMills, remainderMills: target.remainderMills,
       allocatedMills: target.allocatedMills, quantity: target.quantity })) };
   const planFingerprint = costFingerprint(identity);
@@ -281,7 +314,8 @@ export async function applyCostRevision(
       }, component: source.component, unitMills: target.unitMills });
       if (after.totalMills < 0) throw new CostEvidenceError("COST_NEGATIVE_LOT", "The current lot owner cannot represent a negative total.", { lotId: lot.id });
       const revalue = writer.revalueExactComponent
-        ? await writer.revalueExactComponent(lot.id,source.component,target.allocatedMills,target.quantity,`source_revision:${revision.id}`,actorId,tx,now,revision.id)
+        ? await writer.revalueExactComponent(lot.id,source.component,target.allocatedMills,target.quantity,`source_revision:${revision.id}`,actorId,tx,now,revision.id,
+          orderReview ? {excludedOrderCostIds:orderReview.excludedIds} : undefined)
         : await writer.revalueComponent(lot.id, source.component, target.unitMills, `source_revision:${revision.id}`, tx);
       if (!revalue) throw new CostEvidenceError("COST_LOT_DISAPPEARED", "A locked cost application lot was not updated.", { lotId: lot.id });
       result.lotsUpdated++;

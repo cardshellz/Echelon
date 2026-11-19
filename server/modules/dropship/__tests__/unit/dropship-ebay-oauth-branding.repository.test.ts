@@ -1,4 +1,4 @@
-import type { Pool, PoolClient, QueryResult } from "pg";
+import type { Pool, PoolClient, QueryResult, QueryResultRow } from "pg";
 import { describe, expect, it } from "vitest";
 import type { DropshipEbayOAuthBrandingCommandContext } from "../../application/dropship-ebay-oauth-branding-service";
 import { PgDropshipEbayOAuthBrandingRepository } from "../../infrastructure/dropship-ebay-oauth-branding.repository";
@@ -232,7 +232,7 @@ class BrandingClient {
 
   constructor(private readonly scenario: BrandingScenario) {}
 
-  async query<T>(
+  async query<T extends QueryResultRow = QueryResultRow>(
     sql: string,
     params: unknown[] = [],
   ): Promise<QueryResult<T>> {
@@ -249,7 +249,7 @@ class BrandingClient {
         this.scenario === "replay" ||
           this.scenario === "idempotency-conflict"
           ? []
-          : [{ id: 91 } as T],
+          : [{ id: 91 } as unknown as T],
       );
     }
     if (
@@ -266,7 +266,7 @@ class BrandingClient {
               : "request-hash",
           entity_type: "dropship_channel_connection_branding_revisions",
           entity_id: "41",
-        } as T,
+        } as unknown as T,
       ]);
     }
     if (
@@ -274,7 +274,7 @@ class BrandingClient {
         "FROM dropship.dropship_channel_connection_branding_revisions",
       ) && normalized.includes("WHERE id = $1")
     ) {
-      return result([brandingRow({ id: 41 }) as T]);
+      return result([brandingRow({ id: 41 }) as unknown as T]);
     }
     if (
       normalized.includes(
@@ -299,7 +299,7 @@ class BrandingClient {
                         : {}),
                     }
                   : {},
-              ) as T,
+              ) as unknown as T,
             ]
           : [],
       );
@@ -322,13 +322,13 @@ class BrandingClient {
           action: verified
             ? "external_update_verified"
             : "name_requested",
-        }) as T,
+        }) as unknown as T,
       ]);
     }
     if (
       normalized.includes("UPDATE dropship.dropship_admin_config_commands")
     ) {
-      return result([{ id: 91 } as T]);
+      return result([{ id: 91 } as unknown as T]);
     }
     return result([]);
   }
@@ -382,7 +382,7 @@ function brandingRow(
   };
 }
 
-function result<T>(rows: T[]): QueryResult<T> {
+function result<T extends QueryResultRow>(rows: T[]): QueryResult<T> {
   return {
     command: "SELECT",
     rowCount: rows.length,

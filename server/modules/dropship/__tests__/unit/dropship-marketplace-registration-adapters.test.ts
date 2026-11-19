@@ -43,7 +43,7 @@ describe("DropshipMarketplaceRegistrationOwnerReader", () => {
       loadStoreConnection: vi.fn(async () => ({
         id: 21,
         vendorId: 10,
-        platform: "ebay",
+        platform: "ebay" as const,
         status: "connected",
         marketplaceIds: ["EBAY_US"],
       })),
@@ -397,7 +397,7 @@ describe("DropshipEbayRegistrationCredentialAdapter", () => {
         loadStoreConnection: vi.fn(async () => ({
           id: 21,
           vendorId: 10,
-          platform: "ebay",
+          platform: "ebay" as const,
           status: "connected",
           marketplaceIds: ["EBAY_US"],
         })),
@@ -422,7 +422,7 @@ describe("DropshipEbayRegistrationCredentialAdapter", () => {
         loadStoreConnection: vi.fn(async () => ({
           id: 21,
           vendorId: 10,
-          platform: "ebay",
+          platform: "ebay" as const,
           status: "connected",
           marketplaceIds: ["EBAY_CA"],
         })),
@@ -649,7 +649,7 @@ function makeCredentials(
     shopDomain: null,
     externalAccountId: "legacy-seller-login",
     providerEnvironment: "sandbox",
-    externalAccountIdentityScheme: "legacy_username",
+    externalAccountIdentityScheme: null,
     externalAccountVerifiedAt: null,
     externalDisplayName: "Legacy Seller",
     config: {},

@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { customerReturnPolicyShippingInputSchema } from "../../shared/returns/return-policy-shipping.contract";
+import { defaultCustomerReturnShippingGuardrails } from "../../shared/returns/customer-return-shipping-guardrails";
 
 /** Isolated browser transport fixture; no provider or application database calls. */
 export async function installPolicyShippingFixtures(
@@ -8,6 +9,7 @@ export async function installPolicyShippingFixtures(
     shipping?: boolean;
     uncertainFirstSave?: boolean;
     staleFirstSave?: boolean;
+    guardrails?: boolean;
   } = {},
 ) {
   const address = {
@@ -30,6 +32,7 @@ export async function installPolicyShippingFixtures(
     destinationAddress: address,
     policyId: 3,
     version: 3,
+    ...(options.guardrails === false ? {} : { parcelGuardrails: defaultCustomerReturnShippingGuardrails() }),
   };
   const initial = {
     id: 3,

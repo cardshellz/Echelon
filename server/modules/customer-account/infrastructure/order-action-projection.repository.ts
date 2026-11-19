@@ -1,0 +1,264 @@
+import type { Pool } from "pg";
+import { z } from "zod";
+import { customerAccountOrderSummariesInputSchema } from "@shared/customer-account/customer-account-orders";
+import { customerOrderActionReferenceKey, customerOrderActionPageSchema, customerOrderActionsSchema, customerOrderActionSnapshotSchema, type CustomerOrderActionSnapshot } from "@shared/customer-account/order-actions";
+import { orderActionScopeSchema, orderActionMaintenanceIdsSchema, scheduledActionCandidateSchema,
+  type ScheduledActionCandidate, type OrderActionScope, type OrderActionProjectionStore, type OrderActionProjectionRefresher } from "../application/order-action-projection.ports";
+import { canDeferClosedRefresh } from "../domain/order-action-refresh";
+import { logger } from "../../../platform/observability/logger";
+
+const LEASE_MS = 5 * 60_000;
+const CUSTOMER_REFRESH_COOLDOWN_MS = 60_000;
+const MAX_INSPECTION_ATTEMPTS = 5;
+// The local backlog pass must not materialize unbounded historical snapshots.
+// Oversized rows remain on the ordinary, individually leased inspection path.
+const MAX_CANDIDATE_SNAPSHOT_BYTES = 64 * 1024;
+const principalSchema = z.object({ channelId: z.number().int().positive().safe(), externalCustomerId: z.string().regex(/^[1-9][0-9]*$/).max(30) });
+const resultRowSchema = z.object({
+  externalOrderId: z.string(), orderReference: z.string(), omsOrderId: z.coerce.number().int().positive().safe(),
+  snapshot: z.unknown().nullable(), current: z.boolean(), failed: z.boolean(),
+  verifiedAt: z.coerce.date().nullable(), validUntil: z.coerce.date().nullable(),
+});
+
+/** The customer read is a bounded local lookup. It cannot enqueue work or call
+ * a provider. Ownership is checked against current OMS, not the cached document. */
+export class PostgresOrderActionProjectionStore implements OrderActionProjectionStore, OrderActionProjectionRefresher {
+  private readonly shopDomains: readonly string[];
+  private readonly maintenanceIds: readonly number[] | null;
+  constructor(private readonly pool: Pick<Pool, "query">, shopDomains: readonly string[] = [], maintenanceIds?: readonly number[]) {
+    this.shopDomains = Object.freeze(z.array(z.string().regex(/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/)).max(20).parse(shopDomains));
+    this.maintenanceIds = maintenanceIds === undefined ? null : Object.freeze(orderActionMaintenanceIdsSchema.parse(maintenanceIds));
+  }
+
+  async read(raw: Parameters<OrderActionProjectionStore["read"]>[0], now: Date) {
+    const { channelId, externalCustomerId } = principalSchema.parse(raw);
+    const input = customerAccountOrderSummariesInputSchema.parse({ orders: raw.orders });
+    z.date().parse(now);
+    const ids = input.orders.map(order => order.externalOrderId);
+    const result = await this.pool.query(`SELECT replace(o.external_order_id,'gid://shopify/Order/','') AS "externalOrderId",
+      o.external_order_number AS "orderReference",o.id AS "omsOrderId",p.snapshot,
+      COALESCE(p.computed_generation=p.generation AND p.valid_until>$4 AND p.verified_at<=$4
+        AND p.next_refresh_at<>'-infinity'::timestamptz
+        AND NOT EXISTS(SELECT 1 FROM oms.customer_order_action_invalidations dirty WHERE dirty.oms_order_id=o.id),false) AS current,
+      COALESCE(p.last_error_code IS NOT NULL AND p.next_refresh_at<>'-infinity'::timestamptz,false) AS failed,p.verified_at AS "verifiedAt",p.valid_until AS "validUntil"
+      FROM oms.oms_orders o LEFT JOIN oms.customer_order_actions p ON p.oms_order_id=o.id
+      WHERE o.channel_id=$1 AND o.external_customer_id=$2
+      AND (o.external_order_id=ANY($3::text[]) OR o.external_order_id=ANY($5::text[]))`,
+    [channelId, externalCustomerId, ids, now, ids.map(id => `gid://shopify/Order/${id}`)]);
+    const rows = z.array(resultRowSchema).max(ids.length * 2).parse(result.rows);
+    return customerOrderActionPageSchema.parse({ orders: input.orders.map(identity => {
+      const matches = rows.filter(row => row.externalOrderId === identity.externalOrderId
+        && customerOrderActionReferenceKey(row.orderReference) === customerOrderActionReferenceKey(identity.orderReference));
+      // Ambiguous and foreign orders never acquire capabilities through a cache.
+      const row = matches.length === 1 ? matches[0] : null;
+      const value = { ...identity, omsOrderId: row?.omsOrderId ?? null,
+        state: !row ? "not_managed" : row.current && row.snapshot ? "ready" : row.failed ? "failed" : "refreshing",
+        snapshot: row?.current && row.snapshot ? row.snapshot : null,
+        verifiedAt: row?.verifiedAt?.toISOString() ?? null, validUntil: row?.validUntil?.toISOString() ?? null };
+      const parsed = customerOrderActionsSchema.safeParse(value);
+      if (parsed.success) return parsed.data;
+      logger.error("customer_order_action_lookup", { outcome: "invalid", omsOrderId: row?.omsOrderId,
+        error_code: "ORDER_ACTION_PROJECTION_INVALID" });
+      return { ...value, state: "failed", snapshot: null };
+    }) });
+  }
+
+  async requestRefresh(raw: Parameters<OrderActionProjectionRefresher["requestRefresh"]>[0], now: Date): Promise<void> {
+    const { channelId, externalCustomerId } = principalSchema.parse(raw);
+    const input = customerAccountOrderSummariesInputSchema.parse({ orders: raw.orders });
+    z.date().parse(now);
+    // Reuse the worker's existing urgent deadline. An atomic upsert cannot
+    // duplicate work, reset the bounded retry budget, or steal a live lease.
+    // Exact paired identity and current ownership are checked in this statement;
+    // a customer's browser cannot promote another order or manufacture grants.
+    const result = await this.pool.query(`WITH requested AS (
+      SELECT * FROM jsonb_to_recordset($3::jsonb) AS r("externalOrderId" text,"orderReference" text)
+    ), owned AS (
+      SELECT o.id FROM requested r JOIN oms.oms_orders o ON o.channel_id=$1 AND o.external_customer_id=$2
+      AND o.external_order_id IN(r."externalOrderId",'gid://shopify/Order/'||r."externalOrderId")
+      AND regexp_replace(o.external_order_number,'^#','')=regexp_replace(r."orderReference",'^#','')
+      WHERE (SELECT count(*) FROM oms.oms_orders sibling WHERE sibling.channel_id=$1 AND sibling.external_customer_id=$2
+        AND sibling.external_order_id IN(r."externalOrderId",'gid://shopify/Order/'||r."externalOrderId"))=1
+    ) INSERT INTO oms.customer_order_actions(oms_order_id) SELECT id FROM owned ORDER BY id
+    ON CONFLICT(oms_order_id) DO UPDATE SET next_refresh_at='-infinity'
+    WHERE oms.customer_order_actions.next_refresh_at<>'-infinity'::timestamptz
+      AND (oms.customer_order_actions.lease_until IS NULL OR oms.customer_order_actions.lease_until<=$4)
+      AND oms.customer_order_actions.attempts<$6
+      AND (oms.customer_order_actions.verified_at IS NULL OR oms.customer_order_actions.verified_at<=$5)
+      AND (oms.customer_order_actions.snapshot IS NULL OR oms.customer_order_actions.valid_until<=$4
+        OR oms.customer_order_actions.last_error_code IS NOT NULL)`,
+    [channelId, externalCustomerId, JSON.stringify(input.orders), now,
+      new Date(now.getTime() - CUSTOMER_REFRESH_COOLDOWN_MS), MAX_INSPECTION_ATTEMPTS]);
+    logger.info("customer_order_action_refresh", { outcome: "requested", channelId, externalCustomerId,
+      requestedCount: input.orders.length, queuedCount: result.rowCount ?? 0 });
+  }
+
+  async drainInvalidations(limit: number): Promise<number> {
+    z.number().int().min(1).max(1_000).parse(limit);
+    // Source transactions only append events. Coalescing/locking a derived row
+    // belongs to this worker, so source writes cannot deadlock on cache updates.
+    const result = await this.pool.query(`WITH pending AS MATERIALIZED (
+      SELECT id,oms_order_id FROM oms.customer_order_action_invalidations ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED
+    ), refreshed AS (
+      INSERT INTO oms.customer_order_actions(oms_order_id)
+      SELECT DISTINCT o.id FROM pending dirty JOIN oms.oms_orders o ON o.id=dirty.oms_order_id
+      JOIN channels.channels c ON c.id=o.channel_id WHERE c.provider='shopify' AND o.external_customer_id ~ '^[1-9][0-9]*$'
+      AND EXISTS(SELECT 1 FROM channels.channel_connections cc WHERE cc.channel_id=c.id AND cc.shop_domain=ANY($2::text[]))
+      ORDER BY o.id ON CONFLICT(oms_order_id) DO UPDATE SET
+        generation=oms.customer_order_actions.generation+1,next_refresh_at='-infinity',attempts=0,last_error_code=NULL,last_error_class=NULL
+      RETURNING oms_order_id
+    ) DELETE FROM oms.customer_order_action_invalidations WHERE id IN (SELECT id FROM pending)
+      AND (SELECT count(*) FROM refreshed)>=0`, [limit, this.shopDomains]);
+    return result.rowCount ?? 0;
+  }
+
+  async seed(limit: number): Promise<number> {
+    z.number().int().min(1).max(200).parse(limit);
+    const result = await this.pool.query(`INSERT INTO oms.customer_order_actions(oms_order_id)
+      SELECT o.id FROM oms.oms_orders o JOIN channels.channels c ON c.id=o.channel_id
+      WHERE c.provider='shopify' AND c.status='active' AND o.external_customer_id ~ '^[1-9][0-9]*$'
+      AND EXISTS(SELECT 1 FROM channels.channel_connections cc WHERE cc.channel_id=c.id AND cc.shop_domain=ANY($2::text[]))
+      AND ($3::bigint[] IS NULL OR o.id=ANY($3::bigint[]))
+      AND NOT EXISTS(SELECT 1 FROM oms.customer_order_actions p WHERE p.oms_order_id=o.id)
+      ORDER BY o.id DESC LIMIT $1 ON CONFLICT DO NOTHING`, [limit, this.shopDomains, this.maintenanceIds]);
+    return result.rowCount ?? 0;
+  }
+
+  /** Read bounded, already-inspected scheduled rows; eligibility remains in the
+   * shared application/domain owner. Never include urgent customer requests. */
+  async scheduledCandidates(limit: number, now: Date): Promise<ScheduledActionCandidate[]> {
+    z.number().int().min(1).max(50).parse(limit); z.date().parse(now);
+    const result = await this.pool.query(`SELECT p.oms_order_id AS "omsOrderId",p.generation::text AS generation,
+      p.verified_at AS "verifiedAt",p.next_refresh_at AS "nextRefreshAt",p.snapshot
+      FROM oms.customer_order_actions p JOIN oms.oms_orders o ON o.id=p.oms_order_id
+      JOIN channels.channels c ON c.id=o.channel_id
+      JOIN channels.channel_connections cc ON cc.channel_id=c.id AND cc.shop_domain IS NOT NULL
+      WHERE c.provider='shopify' AND c.status='active' AND cc.shop_domain=ANY($3::text[])
+      AND ($4::bigint[] IS NULL OR o.id=ANY($4::bigint[]))
+      AND o.external_customer_id ~ '^[1-9][0-9]*$' AND o.external_order_id ~ '^(gid://shopify/Order/)?[1-9][0-9]*$'
+      AND o.external_order_number IS NOT NULL AND p.snapshot IS NOT NULL AND p.verified_at IS NOT NULL
+      AND octet_length(p.snapshot::text)<=$5
+      AND p.computed_generation=p.generation AND p.last_error_code IS NULL
+      AND p.next_refresh_at<=$2 AND p.next_refresh_at<>'-infinity'::timestamptz
+      AND (p.lease_until IS NULL OR p.lease_until<=$2)
+      AND NOT EXISTS(SELECT 1 FROM oms.customer_order_action_invalidations d WHERE d.oms_order_id=o.id)
+      AND (SELECT count(*) FROM channels.channel_connections sibling WHERE sibling.channel_id=c.id AND sibling.shop_domain IS NOT NULL)=1
+      ORDER BY p.next_refresh_at,p.oms_order_id LIMIT $1`, [limit,now,this.shopDomains,this.maintenanceIds,MAX_CANDIDATE_SNAPSHOT_BYTES]);
+    return z.array(scheduledActionCandidateSchema).max(limit).parse(result.rows);
+  }
+
+  /** Compare every fact used in the decision. A customer request, new source
+   * invalidation, lease or changed observation wins over this optimization. */
+  async deferClosed(raw: readonly ScheduledActionCandidate[], now: Date): Promise<number> {
+    z.date().parse(now);
+    const schema = scheduledActionCandidateSchema.extend({snapshot:customerOrderActionSnapshotSchema})
+      .refine(value=>canDeferClosedRefresh(value.snapshot),"Only closed, fully inspected actions may be deferred")
+      .refine(value=>Buffer.byteLength(JSON.stringify(value.snapshot),"utf8")<=MAX_CANDIDATE_SNAPSHOT_BYTES,"The snapshot exceeds the bounded local review size");
+    const candidates = z.array(schema).max(50).refine(values=>new Set(values.map(value=>value.omsOrderId)).size===values.length).parse(raw);
+    if (!candidates.length) return 0;
+    const result = await this.pool.query(`WITH candidates AS (
+      SELECT * FROM jsonb_to_recordset($1::jsonb) AS x("omsOrderId" bigint,generation bigint,
+        "verifiedAt" timestamptz,"nextRefreshAt" timestamptz,snapshot jsonb)
+    ) UPDATE oms.customer_order_actions p SET next_refresh_at='infinity'::timestamptz
+      FROM candidates x WHERE p.oms_order_id=x."omsOrderId" AND p.generation=x.generation
+      AND p.computed_generation=p.generation AND p.snapshot=x.snapshot AND p.verified_at=x."verifiedAt"
+      AND p.next_refresh_at=x."nextRefreshAt" AND p.next_refresh_at<=$2 AND p.next_refresh_at<>'-infinity'::timestamptz
+      AND p.last_error_code IS NULL AND (p.lease_until IS NULL OR p.lease_until<=$2)
+      AND NOT EXISTS(SELECT 1 FROM oms.customer_order_action_invalidations d WHERE d.oms_order_id=p.oms_order_id)
+      AND EXISTS(SELECT 1 FROM oms.oms_orders o JOIN channels.channels c ON c.id=o.channel_id
+        JOIN channels.channel_connections cc ON cc.channel_id=c.id AND cc.shop_domain IS NOT NULL
+        WHERE o.id=p.oms_order_id AND c.provider='shopify' AND c.status='active' AND cc.shop_domain=ANY($3::text[])
+        AND ($4::bigint[] IS NULL OR o.id=ANY($4::bigint[]))
+        AND o.external_customer_id ~ '^[1-9][0-9]*$' AND o.external_order_id ~ '^(gid://shopify/Order/)?[1-9][0-9]*$'
+        AND o.external_order_number IS NOT NULL
+        AND (SELECT count(*) FROM channels.channel_connections sibling WHERE sibling.channel_id=c.id AND sibling.shop_domain IS NOT NULL)=1)`,
+    [JSON.stringify(candidates),now,this.shopDomains,this.maintenanceIds]);
+    return result.rowCount ?? 0;
+  }
+
+  async claim(limit: number, now: Date, leaseId: string): Promise<OrderActionScope[]> {
+    z.number().int().min(1).max(10).parse(limit); z.date().parse(now); z.string().uuid().parse(leaseId);
+    const result = await this.pool.query(`WITH eligible AS MATERIALIZED (
+      SELECT p.oms_order_id,cc.id AS connection_id FROM oms.customer_order_actions p
+      JOIN oms.oms_orders o ON o.id=p.oms_order_id JOIN channels.channels c ON c.id=o.channel_id
+      JOIN channels.channel_connections cc ON cc.channel_id=c.id AND cc.shop_domain IS NOT NULL
+      WHERE c.provider='shopify' AND c.status='active' AND o.external_customer_id ~ '^[1-9][0-9]*$'
+      AND cc.shop_domain=ANY($5::text[])
+      AND ($6::bigint[] IS NULL OR o.id=ANY($6::bigint[]))
+      AND o.external_order_id ~ '^(gid://shopify/Order/)?[1-9][0-9]*$'
+      AND o.external_order_number IS NOT NULL AND p.next_refresh_at<=$2
+      AND (p.lease_until IS NULL OR p.lease_until<=$2)
+      AND NOT EXISTS(SELECT 1 FROM oms.customer_order_action_invalidations dirty WHERE dirty.oms_order_id=o.id)
+      AND (SELECT count(*) FROM channels.channel_connections sibling WHERE sibling.channel_id=c.id AND sibling.shop_domain IS NOT NULL)=1
+    ), first_slot AS MATERIALIZED (
+      SELECT p.oms_order_id,eligible.connection_id FROM eligible
+      JOIN oms.customer_order_actions p ON p.oms_order_id=eligible.oms_order_id
+      WHERE p.next_refresh_at<=$2 AND (p.lease_until IS NULL OR p.lease_until<=$2)
+      ORDER BY (p.next_refresh_at='-infinity'::timestamptz AND (p.verified_at IS NOT NULL OR p.attempts>0)) DESC,
+        (p.verified_at IS NOT NULL OR p.attempts>0) DESC,p.next_refresh_at,p.oms_order_id DESC
+      LIMIT 1 FOR UPDATE OF p SKIP LOCKED
+    ), remaining_slots AS MATERIALIZED (
+      SELECT p.oms_order_id,eligible.connection_id FROM eligible
+      JOIN oms.customer_order_actions p ON p.oms_order_id=eligible.oms_order_id
+      WHERE p.next_refresh_at<=$2 AND (p.lease_until IS NULL OR p.lease_until<=$2)
+      AND p.oms_order_id NOT IN(SELECT oms_order_id FROM first_slot)
+      -- One immediately-executable slot prefers due published evidence; another
+      -- prefers unbuilt history. Either lane may use idle capacity in the other.
+      -- Neither a busy active-order lane nor initial backfill can starve the other.
+      ORDER BY (p.verified_at IS NULL) DESC,p.next_refresh_at,p.oms_order_id DESC
+      LIMIT ($1-(SELECT count(*) FROM first_slot)) FOR UPDATE OF p SKIP LOCKED
+    ), pending AS (
+      SELECT * FROM first_slot UNION ALL SELECT * FROM remaining_slots
+    ), leased AS (UPDATE oms.customer_order_actions p SET lease_id=$3,lease_until=$4
+      FROM pending WHERE pending.oms_order_id=p.oms_order_id
+      RETURNING p.*,pending.connection_id)
+    SELECT p.oms_order_id AS "omsOrderId",o.channel_id AS "channelId",p.connection_id AS "connectionId",
+      replace(o.external_order_id,'gid://shopify/Order/','') AS "externalOrderId",o.external_customer_id AS "externalCustomerId",
+      o.external_order_number AS "orderReference",p.generation::text AS generation,p.lease_id::text AS "leaseId",p.attempts
+      FROM leased p JOIN oms.oms_orders o ON o.id=p.oms_order_id`, [limit, now, leaseId, new Date(now.getTime() + LEASE_MS), this.shopDomains, this.maintenanceIds]);
+    return z.array(orderActionScopeSchema.extend({ omsOrderId: z.coerce.number().int().positive().safe() })).max(limit).parse(result.rows);
+  }
+
+  async complete(raw: OrderActionScope, snapshot: CustomerOrderActionSnapshot, now: Date, validUntil: Date,
+    failureClass?: "permanent" | "transient", refreshAt: Date | null = validUntil): Promise<boolean> {
+    const scope = orderActionScopeSchema.parse(raw); const value = customerOrderActionSnapshotSchema.parse(snapshot);
+    z.date().parse(now); z.date().min(now).parse(validUntil);
+    if (refreshAt !== null) z.date().min(now).max(validUntil).parse(refreshAt);
+    customerOrderActionsSchema.parse({ externalOrderId: scope.externalOrderId, orderReference: scope.orderReference,
+      omsOrderId: scope.omsOrderId, state: "ready", verifiedAt: now.toISOString(), validUntil: validUntil.toISOString(), snapshot: value });
+    if (value.order && value.order.connectionId !== scope.connectionId) throw new Error("ORDER_ACTION_CONNECTION_MISMATCH");
+    const failed = value.orderFailed || value.returnFailed;
+    const classification = failed ? z.enum(["permanent", "transient"]).parse(failureClass ?? "transient") : null;
+    if (classification === "transient" && refreshAt === null)
+      throw new Error("A transient inspection failure requires a retry deadline.");
+    if (classification === null && refreshAt === null && !canDeferClosedRefresh(value))
+      throw new Error("Only complete closed action evidence may be deferred.");
+    const result = await this.pool.query(`UPDATE oms.customer_order_actions p SET
+      snapshot=$4::jsonb,computed_generation=generation,verified_at=$5,valid_until=$6,
+      next_refresh_at=CASE WHEN $11::text='permanent' OR ($11::text='transient' AND attempts>=4)
+        OR ($11::text IS NULL AND $12::timestamptz IS NULL) THEN 'infinity'::timestamptz ELSE $12 END,
+      lease_id=NULL,lease_until=NULL,attempts=CASE WHEN $11::text IS NULL THEN 0 ELSE LEAST(attempts+1,30) END,
+      last_error_code=CASE WHEN $11::text IS NULL THEN NULL ELSE 'ORDER_ACTION_PARTIAL_INSPECTION_FAILED' END,
+      last_error_class=CASE WHEN $11::text='transient' AND attempts>=4 THEN 'permanent' ELSE $11::text END
+      WHERE oms_order_id=$1 AND generation=$2::bigint AND lease_id=$3 AND lease_until>$5
+      AND NOT EXISTS(SELECT 1 FROM oms.customer_order_action_invalidations dirty WHERE dirty.oms_order_id=p.oms_order_id)
+      AND EXISTS(SELECT 1 FROM oms.oms_orders o WHERE o.id=p.oms_order_id AND o.channel_id=$7
+        AND o.external_customer_id=$8 AND o.external_order_id IN ($9,$10))`,
+    [scope.omsOrderId, scope.generation, scope.leaseId, JSON.stringify(value), now, validUntil, scope.channelId,
+      scope.externalCustomerId, scope.externalOrderId, `gid://shopify/Order/${scope.externalOrderId}`, classification, refreshAt]);
+    if (!result.rowCount) await this.pool.query(`UPDATE oms.customer_order_actions SET lease_id=NULL,lease_until=NULL
+      WHERE oms_order_id=$1 AND lease_id=$2`, [scope.omsOrderId, scope.leaseId]);
+    return result.rowCount === 1;
+  }
+
+  async fail(raw: OrderActionScope, now: Date, retryAt: Date, code: string): Promise<void> {
+    const scope = orderActionScopeSchema.parse(raw); z.date().parse(now); z.date().min(now).parse(retryAt);
+    z.literal("ORDER_ACTION_INSPECTION_FAILED").parse(code);
+    await this.pool.query(`UPDATE oms.customer_order_actions SET lease_id=NULL,lease_until=NULL,
+      attempts=CASE WHEN generation=$2::bigint THEN LEAST(attempts+1,30) ELSE 0 END,
+      last_error_code=CASE WHEN generation=$2::bigint THEN $4 ELSE NULL END,
+      last_error_class=CASE WHEN generation<>$2::bigint THEN NULL WHEN attempts>=4 THEN 'permanent' ELSE 'transient' END,
+      next_refresh_at=CASE WHEN generation<>$2::bigint THEN next_refresh_at WHEN attempts>=4 THEN 'infinity'::timestamptz ELSE $5 END
+      WHERE oms_order_id=$1 AND lease_id=$3`, [scope.omsOrderId, scope.generation, scope.leaseId, code, retryAt]);
+  }
+}

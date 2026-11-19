@@ -123,7 +123,8 @@ describe("shared shipment allocation basis", () => {
   });
   it.each(["by_volume", "by_weight", "by_chargeable_weight"])("retains missing dimensional evidence for %s", (method) => {
     const basis = buildShipmentAllocationBasis([{ ...line, totalVolumeCbm: null, totalWeightKg: null, chargeableWeightKg: null }], method);
-    expect(basis).toMatchObject({ usedFallback: true, missingDimensionLineIds: [11] });
+    expect(basis).toMatchObject({ usedFallback: false, basisTotal: 0, missingDimensionLineIds: [11] });
+    expect(() => allocateShipmentCents(100, basis)).toThrow(/positive physical allocation basis/);
   });
   it("does not require PO source fields for line-count or dimension allocation", () => {
     const source = { lineId: 11, qtyShipped: 0, totalVolumeCbm: "1", totalWeightKg: "1", chargeableWeightKg: "1" };
@@ -156,6 +157,7 @@ describe("shared shipment allocation basis", () => {
     expect(allocateCentsFromNumericBasis(2, [{ lineId: 3, basis: 1 }, { lineId: 1, basis: 1 }, { lineId: 2, basis: 1 }])
       .map((entry) => entry.allocatedCents)).toEqual([0, 1, 1]);
     expect(allocateCentsFromNumericBasis(0, [])).toEqual([]);
+    expect(allocateCentsFromNumericBasis(100, [{ lineId: 1, basis: 0 }, { lineId: 2, basis: 1 }]).map(row => row.allocatedCents)).toEqual([0, 100]);
     expect(() => allocateCentsFromNumericBasis(1, [{ lineId: 1, basis: 0 }])).toThrow(/positive/);
   });
   it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1])("rejects unsupported charge %s", (value) => {

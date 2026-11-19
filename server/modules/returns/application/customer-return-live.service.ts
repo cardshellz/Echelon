@@ -1,3 +1,4 @@
+import { prepareCustomerReturnSelectedLines } from "./customer-return-intake-preparation";
 import { createHash } from "node:crypto";
 import { customerReturnPackingLimits } from "@shared/returns/customer-return-shipping-guardrails";
 import { z } from "zod";
@@ -7,35 +8,42 @@ import {
   customerReturnLiveReviewSchema, customerReturnLiveStateSchema,
   type CustomerReturnLiveLookupInput, type CustomerReturnLiveOrder, type CustomerReturnLiveReview, type CustomerReturnLiveState,
 } from "../../../../shared/returns/customer-return-live.contract";
-import { evaluateCustomerReturnEligibility,
+import { evaluatePurchasedCustomerReturnEligibility,
   type CustomerReturnEligibilityOutput, type CustomerReturnEligibilityInput } from "../domain/customer-return-eligibility";
 import { CustomerReturnOrderReferenceError, normalizeCustomerReturnOrderReference } from "../domain/customer-return-order-reference";
 import { CustomerReturnBoxPlanError, validateCustomerReturnBoxPlan } from "./customer-return-box-plan";
 import { CustomerReturnLiveError } from "./customer-return-live-error";
 import { CustomerReturnIntakeError } from "./customer-return-intake.ports";
-import { customerReturnOriginAddress, customerReturnPreflightShipments } from "./customer-return-shipping-plan";
+import { assertCustomerReturnShippingReady, customerReturnOriginAddress, customerReturnPreflightShipments } from "./customer-return-shipping-plan";
 import { quoteCustomerReturnShipment, customerReturnShippingQuoteError } from "./customer-return-shipping-quote";
-import type { ReturnRateProvider } from "../../shipping-engine/application/return-rate-provider.port";
+import type { ReturnRateProvider } from "../../shipping-engine/return-shipping-and-labels.api";
 import type { CustomerReturnLabelSettings } from "@shared/returns/customer-return-label.contract";
 import { resolveCustomerReturnPortalPolicy, type CustomerReturnPortalPolicyReader } from "./customer-return-policy";
 import { snapshotReturnPolicy } from "../domain/return-case";
 import type { PreparedCustomerReturnIntake } from "./customer-return-intake.ports";
-import { readCustomerReturnLiveClaims } from "./customer-return-live-claims";
+import { readPurchasedCustomerReturnClaims } from "./customer-return-live-claims";
 import { projectCustomerReturnLiveDelivery } from "./customer-return-live-delivery";
 import { customerReturnProviderGid as gid } from "./customer-return-live-identity";
 import { customerReturnPublicLineId, readCustomerReturnOriginalBoxes, type ReturnBoxReporter } from "./customer-return-live-packaging";
-import type { CustomerReturnPackageDimensionsReader } from "./customer-return-package-dimensions.ports";
+import type { CustomerReturnPackageDimensionsReader, CustomerReturnStoredPackageDimensionsReader } from "./customer-return-package-dimensions.ports";
 import { CustomerReturnLocalInspectionError, customerReturnInspectionShopSchema, customerReturnLocalInspectionSnapshotSchema,
   type CustomerReturnLocalInspectionReader, type CustomerReturnLocalInspectionSnapshot } from "./customer-return-local-inspection.ports";
 import { CustomerReturnShopifySnapshotError, customerReturnShopifySnapshotSchema,
   type CustomerReturnShopifySnapshotReader, type CustomerReturnShopifySnapshot } from "./customer-return-shopify-snapshot.ports";
 import { customerReturnCanonicalOrderScopeSchema, type CustomerReturnCanonicalOrderScope } from "./customer-return-order-access.service";
+import type { CustomerReturnBoxMeasurements } from "./customer-return-box-measurements.ports";
+import type { PackageHistoryReadPort } from "@shared/shipping/package-history";
+import { projectHistoricalReturnBoxes } from "./customer-return-package-history";
+import { MAX_RETURN_ORIGINAL_BOXES, type CustomerReturnBoxOption } from "@shared/returns/customer-return-parcel";
 
 const MAX_OBSERVATION_AGE_MS = 120_000;
 export interface CustomerReturnLiveDependencies {
   local: CustomerReturnLocalInspectionReader;
   shopify: CustomerReturnShopifySnapshotReader;
   dimensions: CustomerReturnPackageDimensionsReader;
+  storedDimensions?: CustomerReturnStoredPackageDimensionsReader;
+  measurements?: CustomerReturnBoxMeasurements;
+  packageHistory?: PackageHistoryReadPort;
   policies: CustomerReturnPortalPolicyReader;
   reportBoxDiagnostic?: ReturnBoxReporter;
   rates?: ReturnRateProvider;
@@ -45,6 +53,9 @@ export interface CustomerReturnLiveDependencies {
 /** Trusted application evidence for the separately authorized private write service. */
 export interface CustomerReturnIntakeInspection {
   order: CustomerReturnLiveOrder;
+  /** Canonical boxes need returns-side measurement retention. Historical boxes
+   * already have immutable shipping evidence and must not be retained as WMS boxes. */
+  canonicalBoxOptions?: readonly CustomerReturnBoxOption[];
   local: CustomerReturnLocalInspectionSnapshot;
   provider: CustomerReturnShopifySnapshot;
   facts: CustomerReturnEligibilityInput;
@@ -92,6 +103,8 @@ export class CustomerReturnLiveService {
       if (order.sourceRevision !== input.sourceRevision
         || normalizeCustomerReturnOrderReference(input.orderReference) !== order.orderReference) throw changed();
       const plan = validateCustomerReturnBoxPlan(order.lines, { selections: input.selections, parcels: input.parcels }, order.boxOptions, order.packingLimits);
+      assertCustomerReturnShippingReady(inspection.shippingSettings);
+      prepareCustomerReturnSelectedLines(input.selections, inspection);
       await this.verifyReviewShipping(inspection, plan);
       return customerReturnLiveReviewSchema.parse({ mode: "admin_live", sourceRevision: order.sourceRevision,
         effects: "none", orderReference: order.orderReference, ...plan, refundMethod: "manual_shopify" });
@@ -105,6 +118,8 @@ export class CustomerReturnLiveService {
       const { order } = inspection;
       if (order.sourceRevision !== input.sourceRevision) throw changed();
       const plan = validateCustomerReturnBoxPlan(order.lines, { selections: input.selections, parcels: input.parcels }, order.boxOptions, order.packingLimits);
+      assertCustomerReturnShippingReady(inspection.shippingSettings);
+      prepareCustomerReturnSelectedLines(input.selections, inspection);
       await this.verifyReviewShipping(inspection, plan);
       return customerReturnLiveReviewSchema.parse({ mode: "admin_live", sourceRevision: order.sourceRevision,
         effects: "none", orderReference: order.orderReference, ...plan, refundMethod: "manual_shopify" });
@@ -144,12 +159,35 @@ export class CustomerReturnLiveService {
     }));
     if (canonicalScope) verifyProviderOwnership(provider, canonicalScope);
     verifyIdentity(first, provider, reference);
-    const boxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic);
+    const canonicalBoxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic,
+      this.dependencies.measurements, this.dependencies.storedDimensions);
+    const boxOptions = [...canonicalBoxOptions];
+    if (this.dependencies.packageHistory) {
+      try {
+        const history = await this.dependencies.packageHistory.read({
+          omsOrderId: first.order.omsOrderId,
+          channelId: shop.channelId,
+          externalOrderId: first.order.externalOrderId,
+        });
+        if (history) {
+          const originalBoxes = projectHistoricalReturnBoxes(first, provider, history);
+          if (originalBoxes.length + boxOptions.length > MAX_RETURN_ORIGINAL_BOXES)
+            throw new Error("RETURN_BOX_HISTORY_LIMIT");
+          boxOptions.push(...originalBoxes);
+        }
+      } catch {
+        // Package-history outages do not change eligibility. Customers can
+        // enter their actual box size; the classified diagnostic is observable.
+        const event = { operation: "original_box_dimensions" as const, code: "RETURN_BOX_HISTORY_UNAVAILABLE" };
+        try { (this.dependencies.reportBoxDiagnostic ?? (value => console.warn(JSON.stringify(value))))(event); }
+        catch { console.warn(JSON.stringify(event)); }
+      }
+    }
     const finalRaw = await this.dependencies.local.read(lookup);
     if (finalRaw === null) throw changed();
     const local = customerReturnLocalInspectionSnapshotSchema.parse(finalRaw);
     if (canonicalScope) verifyCanonicalOwnership(local, canonicalScope);
-    if (canonical(first) !== canonical(local)) throw changed();
+    if (canonical(purchasedReturnSource(first, provider)) !== canonical(purchasedReturnSource(local, provider))) throw changed();
     const operationalPolicy = await this.readPolicy(shop.channelId);
     if (canonical(firstPolicy) !== canonical(operationalPolicy)) throw changed();
     const now = this.dependencies.now();
@@ -159,7 +197,7 @@ export class CustomerReturnLiveService {
       if (age < 0 || age > MAX_OBSERVATION_AGE_MS) throw changed();
     }
     verifyIdentity(local, provider, reference);
-    const claims = readCustomerReturnLiveClaims(local, provider);
+    const claims = readPurchasedCustomerReturnClaims(local, provider);
     const delivery = projectCustomerReturnLiveDelivery({ shopify: provider, local });
     const policy = { channelId: shop.channelId, version: operationalPolicy.version,
       returnWindowDays: operationalPolicy.snapshot.returnWindowDays };
@@ -169,44 +207,64 @@ export class CustomerReturnLiveService {
         destinationCountryCode: provider.order.destinationCountryCode, purchasedAt: provider.order.createdAt,
         lines: provider.lines.map(line => ({ lineId: line.id, sku: line.sku, requiresShipping: line.requiresShipping,
           purchasedQuantity: line.quantity, claims: claims.get(line.id)!.claims,
-          allocations: provider.fulfillments.flatMap(fulfillment => fulfillment.lines.filter(item => item.lineItemId === line.id && item.quantity > 0)
-            .map(item => ({ allocationId: item.id, fulfillmentId: fulfillment.id, fulfillmentLineItemId: item.id,
-              quantity: item.quantity, status: fulfillment.status === "SUCCESS" ? "active" as const : "cancelled" as const,
-              deliveryEvidence: delivery.get(item.id)?.blocked ? [] : (delivery.get(item.id)?.evidence ?? []), staffDeliveryOverride: null }))),
+          allocations: [],
         })),
       },
     };
-    const eligibility = evaluateCustomerReturnEligibility(facts);
+    const eligibility = evaluatePurchasedCustomerReturnEligibility(facts);
     const cancelled = local.order.cancelledAt !== null || provider.order.cancelledAt !== null;
     const lines = eligibility.lines.map(line => {
       const display = provider.lines.find(candidate => candidate.id === line.lineId)!;
       const known = claims.get(line.lineId)!;
-      const blockedDelivery = line.allocations.some(allocation => allocation.sourceStatus === "active" && delivery.get(allocation.allocationId)?.blocked);
-      const unexplainedQuantity = display.quantity - Math.min(display.currentQuantity, display.refundableQuantity) > known.reconciledRefundQuantity;
-      const verificationNeeded = known.unresolved || unexplainedQuantity || known.unallocatedRefund;
+      const verificationNeeded = known.unresolved;
       const unitWeightGrams = local.lines.find(candidate => candidate.externalLineItemId !== null
         && gid("LineItem", candidate.externalLineItemId) === line.lineId)!.unitWeightGrams;
       return { id: customerReturnPublicLineId(shop.channelId, provider.order.id, line.lineId),
         title: display.title, variant: display.variantTitle, sku: display.sku, unitWeightGrams,
-        purchasedQuantity: line.purchasedQuantity, deliveredQuantity: line.deliveredQuantity,
+        purchasedQuantity: line.purchasedQuantity, deliveredQuantity: provider.fulfillments.filter(item => item.status === "SUCCESS").flatMap(item => item.lines)
+          .filter(item => item.lineItemId === line.lineId && !delivery.get(item.id)?.blocked && delivery.get(item.id)?.evidence.some(event => event.status === "delivered"))
+          .reduce((sum, item) => sum + item.quantity, 0),
         alreadyReturningQuantity: known.returningQuantity,
         eligibleQuantity: cancelled || verificationNeeded ? 0 : line.eligibleQuantity,
         message: verificationNeeded ? "These quantities need verification before a return can be started."
-          : blockedDelivery ? "Some shipments need delivery verification. Only confirmed quantities are available to return."
           : liveLineMessage(line, policy.returnWindowDays),
       };
     });
+    // Do not advertise quantities that the write path cannot accept. This uses
+    // the same purchased-line preparation as review and submission.
+    for (const line of lines) {
+      if (line.eligibleQuantity === 0) continue;
+      try {
+        assertCustomerReturnShippingReady(operationalPolicy.shippingSettings);
+        customerReturnOriginAddress(provider.order.shippingAddress);
+        prepareCustomerReturnSelectedLines(
+          [
+            {
+              lineId: line.id,
+              quantity: line.eligibleQuantity,
+              reasonCode: null,
+            },
+          ],
+          { local, provider, eligibility, facts },
+        );
+      } catch (error) {
+        if (!(error instanceof CustomerReturnIntakeError)) throw error;
+        line.eligibleQuantity = 0;
+        line.message = error.message;
+      }
+    }
     const message = cancelled ? "This order has been canceled. Contact us for help with a return."
       : provider.order.destinationCountryCode !== "US" ? "This return portal is available for U.S. orders only." : null;
     // Optional provider measurements do not invalidate a custom box when a
     // dimension service recovers. Claimed original boxes are checked against
     // freshly read IDs and exact dimensions in validateCustomerReturnBoxPlan.
-    const sourceRevision = createHash("sha256").update(canonical({ policy, operationalPolicy, local, provider, lines, message })).digest("hex");
+    const sourceRevision = createHash("sha256").update(canonical({ policy, operationalPolicy, source: purchasedReturnSource(local, provider),
+      lines: lines.map(({ deliveredQuantity: _delivery, ...line }) => line), message })).digest("hex");
     const order = customerReturnLiveOrderSchema.parse({ mode: "admin_live", sourceRevision, orderReference: reference,
       packingLimits: operationalPolicy.packingLimits,
       purchasedAt: provider.order.createdAt, evaluatedAt: eligibility.evaluatedAt,
       returnWindowEndsAt: eligibility.returnWindowEndsAt, message, lines, boxOptions });
-    return { order, local, provider, facts, eligibility, shippingSettings: operationalPolicy.shippingSettings, operationalPolicy: {
+    return { order, canonicalBoxOptions, local, provider, facts, eligibility, shippingSettings: operationalPolicy.shippingSettings, operationalPolicy: {
       id: operationalPolicy.id, version: operationalPolicy.version, snapshot: operationalPolicy.snapshot,
     } };
   }
@@ -263,13 +321,19 @@ function verifyCanonicalOwnership(local: CustomerReturnLocalInspectionSnapshot, 
 function verifyProviderOwnership(provider: CustomerReturnShopifySnapshot, scope: CustomerReturnCanonicalOrderScope): void {
   // Normalize trusted numeric/GID customer identities as strings: Number would
   // make distinct Shopify IDs above the safe integer limit compare as equal.
-  if (!provider.order.customerId || provider.order.customerId !== gid("Customer", scope.externalCustomerId)) {
+  const expectedCustomer = scope.verifiedPurchase ? scope.verifiedPurchase.customerId
+    : scope.externalCustomerId === null ? null : gid("Customer", scope.externalCustomerId);
+  if (provider.order.customerId !== expectedCustomer || (scope.verifiedPurchase
+      && provider.order.email?.toLowerCase() !== scope.verifiedPurchase.email.toLowerCase())) {
     throw new CustomerReturnLiveError("RETURN_LIVE_ORDER_NOT_FOUND", "This order is unavailable for returns.", 404);
   }
 }
 
-// The existing Shopify ingestion writes created_at to OMS ordered_at. processedAt
-// can differ for imported/backdated orders and is not that field's provenance.
+// Identity comes from the exact channel/order/customer and purchased-line links,
+// not a replicated order date. Legacy OMS ingestion can retain a receipt time.
+// The freshly verified Shopify createdAt owns purchase/window calculations;
+// processedAt and local ordered_at must not override it. Both observations remain
+// validated and included in sourceRevision, so mid-read/review changes still fail.
 function verifyIdentity(local: CustomerReturnLocalInspectionSnapshot, provider: CustomerReturnShopifySnapshot, reference: string): void {
   // Legacy OMS imports retain country names; Shopify returns ISO codes. Compare
   // their identities without rewriting evidence or inventing a missing country.
@@ -278,7 +342,6 @@ function verifyIdentity(local: CustomerReturnLocalInspectionSnapshot, provider: 
   if (provider.shop.channelId !== local.shop.channelId || provider.shop.connectionId !== local.shop.connectionId
     || provider.shop.shopDomain !== local.shop.shopDomain || provider.order.id !== gid("Order", local.order.externalOrderId)
     || sourceOrderReference(provider.order.name) !== reference
-    || Date.parse(provider.order.createdAt) !== Date.parse(local.order.purchasedAt)
     || provider.order.destinationCountryCode !== localCountry
     || local.lines.length !== provider.lines.length) throw unavailable();
   const localIds = new Set<string>();
@@ -292,6 +355,20 @@ function verifyIdentity(local: CustomerReturnLocalInspectionSnapshot, provider: 
   }
 }
 
+/** Only facts used by purchase entitlement or label creation invalidate review.
+ * Delivery/picking observations and financial refund updates are independent. */
+function purchasedReturnSource(local: CustomerReturnLocalInspectionSnapshot, provider: CustomerReturnShopifySnapshot) {
+  // Guest contact evidence is reauthorized against its verified purchase scope.
+  // Adding this read field must not invalidate existing signed-in/staff review
+  // receipts or already queued label intents whose entitlement facts are equal.
+  const { updatedAt: _updated, email: _contactEmail, ...purchase } = provider.order;
+  return { shop: local.shop, localOrder: local.order,
+    localLines: local.lines.map(line => ({ omsOrderLineId: line.omsOrderLineId, externalLineItemId: line.externalLineItemId,
+      quantity: line.quantity, requiresShipping: line.requiresShipping, unitWeightGrams: line.unitWeightGrams })),
+    purchase, purchasedLines: provider.lines.map(({ currentQuantity: _current, refundableQuantity: _refundable, ...line }) => line),
+    claims: [...readPurchasedCustomerReturnClaims(local, provider)].map(([lineId, claims]) => ({ lineId, ...claims })) };
+}
+
 function liveLineMessage(line: CustomerReturnEligibilityOutput["lines"][number], windowDays: number): string | null {
   if (line.reasons.includes("return_window_elapsed")) return `The ${windowDays}-day return window has ended.`;
   if (line.reasons.includes("non_physical_item")) return "This item does not require a return shipment.";
@@ -299,8 +376,6 @@ function liveLineMessage(line: CustomerReturnEligibilityOutput["lines"][number],
     return "These quantities need verification before a return can be started.";
   }
   if (line.claimedQuantity === line.purchasedQuantity && line.claimedQuantity > 0) return "These items are already in a return.";
-  if (line.deliveredQuantity === 0) return "Delivery has not been confirmed for these items yet.";
-  if (line.deliveredQuantity < line.purchasedQuantity) return "Only the confirmed delivered quantity is available to return.";
   if (line.claimedQuantity > 0) return "Some of these items are already in a return.";
   return null;
 }

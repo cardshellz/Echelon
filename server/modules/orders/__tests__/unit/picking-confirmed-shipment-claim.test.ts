@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
@@ -85,8 +85,18 @@ describe("shortClaimMessage", () => {
 });
 
 describe("shipped-order claim contract", () => {
-  const repository = readFileSync(resolve(process.cwd(),
-    "server/modules/inventory-planning/infrastructure/inventory-availability-claim.repository.ts"), "utf8");
+  const claimRepositoryDir = resolve(
+    process.cwd(),
+    "server/modules/inventory-planning/infrastructure/claim-repository",
+  );
+  const repository = [
+    readFileSync(resolve(process.cwd(),
+      "server/modules/inventory-planning/infrastructure/inventory-availability-claim.repository.ts"), "utf8"),
+    ...readdirSync(claimRepositoryDir)
+      .filter((entry) => entry.endsWith(".ts"))
+      .sort()
+      .map((entry) => readFileSync(resolve(claimRepositoryDir, entry), "utf8")),
+  ].join("\n");
 
   it("limits a shipped order's demand to units that shipped without a pick record", () => {
     expect(repository).toMatch(/WHEN \$2::boolean THEN GREATEST\(\s*LEAST\(COALESCE\(item\.quantity, 0\), COALESCE\(item\.fulfilled_quantity, 0\)\)\s*- COALESCE\(item\.picked_quantity, 0\), 0\)/);

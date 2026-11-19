@@ -10,6 +10,7 @@ const dialect = new PgDialect();
 
 const recordedLine = () => ({
   id: 11, receivingOrderId: 10, productId: 1, productVariantId: 100,
+  sku: "OLD-RECEIVE-PACK",
   purchaseOrderLineId: null as number | null, inboundShipmentLineId: null as number | null,
   unitsPerVariantSnapshot: 250 as number | null, expectedQty: 4, receivedQty: 2, damagedQty: 1,
   putawayLocationId: 99, putawayComplete: 0, status: "partial", unitCost: 4, unitCostMills: 375,
@@ -43,7 +44,7 @@ function harness(options: {
       queries.push(rendered);
       if (rendered.sql.includes("FROM catalog.product_variants")) {
         return { rows: [{ id: rendered.params[0], product_id: options.catalogProductId ?? 1,
-          units_per_variant: options.catalogFactor ?? 1, is_active: options.catalogActive ?? true }] };
+          units_per_variant: options.catalogFactor ?? 1, is_active: options.catalogActive ?? true, sku: "SELECTED-RECEIVE-PACK" }] };
       }
       if (rendered.sql.includes("FROM procurement.purchase_orders")) return { rows: options.purchaseSource ? [{ id: options.purchaseSource.purchaseOrderId }] : [] };
       if (rendered.sql.includes("FROM procurement.purchase_order_lines")) return { rows: options.purchaseSource ? [{ id: options.purchaseSource.id }] : [] };
@@ -101,6 +102,7 @@ describe("ReceivingService frozen count commands", () => {
     const result = await test.service.updateLine(11, request, ACTOR);
     expect(request).toEqual({ productVariantId: 101, expectedUnitVersion: receivingUnitVersion(before) });
     expect(result).toMatchObject({ productVariantId: 101, unitsPerVariantSnapshot: 1,
+      sku: "SELECTED-RECEIVE-PACK",
       expectedQty: 1000, receivedQty: 500, damagedQty: 250, status: "partial",
       unitCost: 4, unitCostMills: 375, updatedAt: NOW, unitVersion: test.version() });
     expect(test.storage.updateReceivingLine).toHaveBeenCalledOnce();

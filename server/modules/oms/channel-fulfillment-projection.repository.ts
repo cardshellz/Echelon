@@ -1,18 +1,25 @@
 import { sql } from "drizzle-orm";
 
-import { projectPhysicalShipmentToWms } from "../wms/channel-fulfillment-projection.repository";
+import { projectPhysicalShipmentToWms } from "../wms/shipment-execution-and-projection.api";
+import { projectReconciledLegacyHeaders } from "../wms/shipment-execution-and-projection.api";
 import { FulfillmentAuthorityError } from "./channel-fulfillment-authority.repository";
+import { omsWarehouseFinancialStopSql } from "./order-merchandise-state.sql";
 
 export interface ChannelFulfillmentProjector {
   projectPhysicalShipment(physicalShipmentId: number): Promise<void>;
+  projectReconciledPhysicalShipment?(physicalShipmentId: number): Promise<void>;
+}
+
+export interface PackageReconciliationProjector extends ChannelFulfillmentProjector {
+  projectReconciledPhysicalShipment(physicalShipmentId: number): Promise<void>;
 }
 
 /**
  * Coordinate the WMS and OMS projections of one immutable physical package in
  * a single transaction. Each table mutation remains implemented by its owner.
  */
-export function createChannelFulfillmentProjector(db: any): ChannelFulfillmentProjector {
-  async function projectPhysicalShipment(physicalShipmentId: number): Promise<void> {
+export function createChannelFulfillmentProjector(db: any, clock: () => Date = () => new Date()): PackageReconciliationProjector {
+  async function projectPhysicalShipment(physicalShipmentId: number, reconcileLegacyHeaders: boolean): Promise<void> {
     if (!Number.isInteger(physicalShipmentId) || physicalShipmentId <= 0) {
       throw new FulfillmentAuthorityError(
         "INVALID_INPUT",
@@ -29,7 +36,7 @@ export function createChannelFulfillmentProjector(db: any): ChannelFulfillmentPr
     }
 
     await db.transaction(async (tx: any) => {
-      await projectPhysicalShipmentToWms(tx, physicalShipmentId);
+      await projectPhysicalShipmentToWms(tx, physicalShipmentId, clock);
 
       await tx.execute(sql`
         WITH affected_lines AS (
@@ -123,7 +130,8 @@ export function createChannelFulfillmentProjector(db: any): ChannelFulfillmentPr
             END,
             status = CASE
               WHEN oms_order.status IN ('cancelled', 'refunded')
-                OR oms_order.financial_status IN ('refunded', 'voided')
+                OR oms_order.status = 'delivered'
+                OR ${omsWarehouseFinancialStopSql(sql`oms_order.channel_id`, sql`oms_order.financial_status`)}
                 THEN oms_order.status
               WHEN rollup.required_lines > 0 AND rollup.fulfilled_lines = rollup.required_lines THEN 'shipped'
               ELSE oms_order.status
@@ -136,8 +144,12 @@ export function createChannelFulfillmentProjector(db: any): ChannelFulfillmentPr
         LEFT JOIN latest_tracking tracking ON tracking.order_id = rollup.order_id
         WHERE oms_order.id = rollup.order_id
       `);
+      if (reconcileLegacyHeaders) await projectReconciledLegacyHeaders(tx, physicalShipmentId, clock());
     });
   }
 
-  return Object.freeze({ projectPhysicalShipment });
+  return Object.freeze({
+    projectPhysicalShipment: (physicalShipmentId: number) => projectPhysicalShipment(physicalShipmentId, false),
+    projectReconciledPhysicalShipment: (physicalShipmentId: number) => projectPhysicalShipment(physicalShipmentId, true),
+  });
 }

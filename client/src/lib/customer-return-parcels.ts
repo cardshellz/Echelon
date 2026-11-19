@@ -1,6 +1,8 @@
 import type { CustomerReturnFlowOrder } from "@shared/returns/customer-return-flow.contract";
 import {
   calculateCustomerReturnProductWeight,
+  resolveCustomerReturnParcelWeight,
+  customerReturnPackedOuncesToGrams,
   customerReturnDimensionsSchema,
   type CustomerReturnDimensions,
 } from "@shared/returns/customer-return-parcel";
@@ -22,6 +24,7 @@ export type PreviewParcelSize =
 
 export interface PreviewParcelDraft {
   key: number;
+  packedWeightOunces?: string;
   items: { lineId: string; quantity: string }[];
   size: PreviewParcelSize;
 }
@@ -187,4 +190,15 @@ export function formatPreviewDimensions(
   dimensions: CustomerReturnDimensions,
 ): string {
   return `${formatDimensionInches(dimensions.lengthMm)} × ${formatDimensionInches(dimensions.widthMm)} × ${formatDimensionInches(dimensions.heightMm)} in`;
+}
+
+export function previewParcelLabelWeight(order: CustomerReturnFlowOrder, parcel: Pick<PreviewParcelDraft, "items" | "packedWeightOunces">): PreviewParcelWeight {
+  const calculated = previewParcelProductWeight(order, parcel);
+  if (calculated.status !== "unverified") return calculated;
+  const grams = customerReturnPackedOuncesToGrams(parcel.packedWeightOunces ?? "");
+  const resolved = resolveCustomerReturnParcelWeight(parcel.items.map(item => ({
+    quantity: readPreviewQuantity(item.quantity) ?? -1,
+    unitWeightGrams: order.lines.find(line => line.id === item.lineId)?.unitWeightGrams,
+  })), grams ?? undefined);
+  return resolved === null ? { status: "unverified", weightGrams: null } : { status: "ready", weightGrams: resolved };
 }

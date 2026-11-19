@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveReplenishmentAutoExecution } from "../../domain/replenishment-auto-execution";
+import { manualReplenishmentAutoOverride, resolveReplenishmentAutoExecution } from "../../domain/replenishment-auto-execution";
 import { classifyReplenishmentExecutionFailure } from "../../infrastructure/replenishment-execution-failure";
 
 describe("rule-owned automatic replenishment", () => {
@@ -115,5 +115,34 @@ describe("replenishment failure classification", () => {
     expect(
       classifyReplenishmentExecutionFailure(new Error("insufficient stock")),
     ).toMatchObject({ retryable: false });
+  });
+});
+
+describe("manual replenishment override", () => {
+  const inline = { replenMode: "inline", inlineReplenMaxUnits: null };
+  const decide = (autoReplen: number, autoReplenMethod: string | null, taskMethod: string) =>
+    resolveReplenishmentAutoExecution(manualReplenishmentAutoOverride({ autoReplen, autoReplenMethod, taskMethod }),
+      null, inline, 115_000, taskMethod);
+
+  it("runs a manual case break into a level-3 SKU whose tier default is pallet drop, always queue", () => {
+    // Task #2248: 23 x C5000 broken into C2500 (level 3) on FLOOR, warehouse Inline.
+    expect(decide(2, "pallet_drop", "case_break")).toEqual({ shouldAutoExecute: true, executionMode: "inline" });
+  });
+
+  it("keeps a queue override set for the same method", () => {
+    expect(decide(2, "case_break", "case_break")).toEqual({ shouldAutoExecute: false, executionMode: "queue" });
+  });
+
+  it("keeps an override that has no recorded method", () => {
+    expect(decide(2, null, "case_break")).toEqual({ shouldAutoExecute: false, executionMode: "queue" });
+  });
+
+  it("never makes a pallet drop run inline", () => {
+    expect(decide(1, "case_break", "pallet_drop")).toEqual({ shouldAutoExecute: false, executionMode: "queue" });
+  });
+
+  it("returns no override when none was configured", () => {
+    expect(manualReplenishmentAutoOverride({ autoReplen: null, autoReplenMethod: "case_break", taskMethod: "case_break" })).toBeNull();
+    expect(manualReplenishmentAutoOverride({ autoReplen: 1, autoReplenMethod: "full_case", taskMethod: "full_case" })).toBe(1);
   });
 });

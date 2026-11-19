@@ -8,6 +8,7 @@ import { executeEbayQuantityHttp } from "../../adapters/ebay/ebay-quantity-http"
 import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
 import type { EbayObservedOffer } from "../../listing-connectors/ebay-listing.connector";
 import type { EbayQuantityHttpRequest } from "../../quantity-publication-request";
+import type { ChannelPublishedContent } from "../../../marketplace-listings/domain/channel-publication-content";
 
 export const automaticSyncPhotos = [
   "https://example.test/current-front.jpg",
@@ -24,6 +25,10 @@ export class AutomaticSyncEbayProvider {
   private fault: { path: string; applyBeforeFailure: boolean; publicationOnly?: boolean } | null = null;
   private failPublicationPreflight: { read: "offer" | "group"; sku?: string } | null = null;
   private publicationGroupPrepared = false;
+  private groupExists = true;
+  private groupAttached = true;
+  private nextReadFailure: { path: string; status: number } | null = null;
+  private nextWriteRejection: { path: string; message: string } | null = null;
   private heldPreflightRead: { entered: () => void; gate: Promise<void> } | null = null;
   private held: { path: string; entered: () => void; gate: Promise<void> } | null = null;
   private readonly members = new Map<string, { item: EbayInventoryItem; offer: EbayObservedOffer }>();
@@ -33,7 +38,9 @@ export class AutomaticSyncEbayProvider {
     variesBy: { specifications: [{ name: "Pack Size", values: ["5"] }] },
   };
 
-  constructor(private readonly clock: () => Date, private readonly publicationEnabled = false, skus: readonly string[] = ["P5"]) {
+  constructor(private readonly clock: () => Date, private readonly publicationEnabled = false, skus: readonly string[] = ["P5"],
+    private readonly listingShape: "group" | "single" = "group") {
+    if (listingShape === "single" && skus.length !== 1) throw new Error("A single-listing provider fixture requires exactly one SKU.");
     for (const sku of skus) {
       if (!sku || this.members.has(sku)) throw new Error("Provider fixture requires distinct nonempty SKUs.");
       this.members.set(sku, {
@@ -52,6 +59,21 @@ export class AutomaticSyncEbayProvider {
 
   failNextPublicationPreflight(read: "offer" | "group" = "offer", sku?: string): void { this.failPublicationPreflight = { read, sku }; }
 
+  detachUnpublishedGroup(existingSkus: readonly string[] | null = null): void {
+    if (!this.publicationEnabled || [...this.members.values()].some(member => member.offer.status !== "UNPUBLISHED"))
+      throw new Error("Only unpublished fixture resources can be detached.");
+    this.groupAttached = false;
+    this.groupExists = existingSkus !== null;
+    if (existingSkus !== null) this.group.variantSKUs = [...existingSkus];
+  }
+
+  failNextRead(path: string, status = 503): void { this.nextReadFailure = { path, status }; }
+
+  rejectNextWrite(path: string, message: string): void {
+    if (this.nextWriteRejection) throw new Error("Only one provider rejection may be armed at a time.");
+    this.nextWriteRejection = { path, message };
+  }
+
   holdNextPublicationPreflightRead(): { entered: Promise<void>; release(): void } {
     if (this.heldPreflightRead) throw new Error("Only one publication read may be held at a time.");
     let entered!: () => void;
@@ -64,6 +86,18 @@ export class AutomaticSyncEbayProvider {
 
   snapshot(sku = "P5") {
     return structuredClone({ ...this.member(sku), group: this.group });
+  }
+
+  publishedContent(listingId: string): ChannelPublishedContent {
+    const published = [...this.members.values()].filter(member => member.offer.status === "PUBLISHED" && member.offer.listingId === listingId);
+    if (!published.length) throw new Error("The fake published listing does not exist.");
+    const urls = this.listingShape === "group" ? this.group.imageUrls : published[0].item.product?.imageUrls ?? [];
+    const policy = published[0].offer.listingPolicies;
+    return { listingId, skus: published.map(member => member.item.sku), policies: {
+      ...(policy?.fulfillmentPolicyId ? { shipping: policy.fulfillmentPolicyId } : {}),
+      ...(policy?.returnPolicyId ? { return: policy.returnPolicyId } : {}),
+      ...(policy?.paymentPolicyId ? { payment: policy.paymentPolicyId } : {}),
+    }, firstPhotoSource: urls[0] ?? null, photos: urls.map(url => ({ url, width: 640, height: 640 })) };
   }
 
   loseNextResponse(path: string, applyBeforeFailure = false): void {
@@ -101,6 +135,12 @@ export class AutomaticSyncEbayProvider {
         throw new EbayApiRequestError(status, `eBay API GET ${request.path} failed (${status}): ${body}`, body);
       } : undefined,
       request: async () => {
+        if (request.method === "GET" && this.nextReadFailure?.path === request.path) {
+          const failure = this.nextReadFailure; this.nextReadFailure = null;
+          return new Response(JSON.stringify({ errors: [{ errorId: 25001, message: "Injected read failure" }] }), { status: failure.status });
+        }
+        if (request.method === "GET" && request.path === "/sell/inventory/v1/inventory_item_group/PACK" && !this.groupExists)
+          return new Response(JSON.stringify({ errors: [{ errorId: 25705, message: "Inventory item group not found" }] }), { status: 404 });
         if (request.method === "GET" && this.heldPreflightRead && this.publicationGroupPrepared
           && request.path === "/sell/inventory/v1/inventory_item_group/PACK") {
           const held = this.heldPreflightRead;
@@ -117,6 +157,11 @@ export class AutomaticSyncEbayProvider {
         }
         if (request.method === "GET") return this.response(this.read(request.path));
         this.writes.push(request);
+        if (this.nextWriteRejection?.path === request.path) {
+          const rejection = this.nextWriteRejection;
+          this.nextWriteRejection = null;
+          return new Response(JSON.stringify({ errors: [{ errorId: 25002, category: "REQUEST", message: rejection.message }] }), { status: 400 });
+        }
         if (this.held?.path === request.path) {
           const held = this.held;
           this.held = null;
@@ -144,7 +189,7 @@ export class AutomaticSyncEbayProvider {
     const url = new URL(path, "https://example.test");
     if (url.pathname === "/commerce/identity/v1/user/") return { userId: "seller-36" };
     const sku = url.pathname.match(/^\/sell\/inventory\/v1\/inventory_item\/([^/]+)$/)?.[1];
-    if (sku) return { ...structuredClone(this.member(decodeURIComponent(sku)).item), groupIds: ["PACK"] };
+    if (sku) return { ...structuredClone(this.member(decodeURIComponent(sku)).item), groupIds: this.listingShape === "group" && this.groupAttached ? ["PACK"] : [] };
     if (url.pathname === "/sell/inventory/v1/inventory_item_group/PACK") return structuredClone(this.group);
     const offer = [...this.members.values()].find(member => url.pathname === `/sell/inventory/v1/offer/${member.offer.offerId}`)?.offer;
     if (offer) return structuredClone(offer);
@@ -171,6 +216,8 @@ export class AutomaticSyncEbayProvider {
     if (request.method === "PUT" && request.path === "/sell/inventory/v1/inventory_item_group/PACK") {
       const { inventoryItemGroupKey: _requestIdentity, ...body } = structuredClone(request.body as EbayInventoryItemGroup);
       this.group = body;
+      this.groupExists = true;
+      this.groupAttached = true;
       this.publicationGroupPrepared = true;
       return;
     }
@@ -184,13 +231,21 @@ export class AutomaticSyncEbayProvider {
         return { sku: row.sku, statusCode: 200, offers: (row.offers ?? []).map(offer => {
           if (offer.offerId !== current.offer.offerId) throw new Error("Unexpected fake eBay offer.");
           if (offer.availableQuantity !== undefined) current.offer.availableQuantity = offer.availableQuantity;
+          if (offer.price !== undefined) current.offer.pricingSummary = { ...current.offer.pricingSummary, price: offer.price };
           return { offerId: offer.offerId, statusCode: 200 };
         }) };
       }) };
     }
-    if (this.publicationEnabled && request.method === "POST" && request.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group") {
+    if (this.publicationEnabled && this.listingShape === "group" && request.method === "POST" && request.path === "/sell/inventory/v1/offer/publish_by_inventory_item_group") {
       for (const current of this.members.values()) current.offer = { ...current.offer, status: "PUBLISHED", listingId: "listing-20" };
       return { listingId: "listing-20" };
+    }
+    if (this.publicationEnabled && this.listingShape === "single" && request.method === "POST") {
+      const target = [...this.members.values()].find(current => request.path === `/sell/inventory/v1/offer/${current.offer.offerId}/publish`);
+      if (target) {
+        target.offer = { ...target.offer, status: "PUBLISHED", listingId: "listing-20" };
+        return { listingId: "listing-20" };
+      }
     }
     // Any accidental create/publish/delete in existing-listing recovery fails
     // the test instead of quietly manufacturing another listing.

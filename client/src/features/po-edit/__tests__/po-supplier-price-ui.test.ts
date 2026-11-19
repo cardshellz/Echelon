@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -6,10 +6,19 @@ function page(name: string): string {
   return readFileSync(join(process.cwd(), "client", "src", "pages", name), "utf8");
 }
 
+function pageWithSubmodules(name: string, submoduleDir: string): string {
+  const dir = join(process.cwd(), "client", "src", "pages", submoduleDir);
+  const submodules = readdirSync(dir)
+    .filter((entry) => entry.endsWith(".ts") || entry.endsWith(".tsx"))
+    .sort()
+    .map((entry) => readFileSync(join(dir, entry), "utf8"));
+  return [page(name), ...submodules].join("\n");
+}
+
 describe("PO supplier-price capture UI", () => {
   const fullEditor = page("PurchaseOrderEdit.tsx");
   const quickCreate = page("PurchaseOrders.tsx");
-  const detail = page("PurchaseOrderDetail.tsx");
+  const detail = pageWithSubmodules("PurchaseOrderDetail.tsx", "purchase-order-detail");
   const appShell = readFileSync(
     join(
       process.cwd(),

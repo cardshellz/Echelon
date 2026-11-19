@@ -25,6 +25,9 @@ import { ExistingListingIntentHandoff } from "../../infrastructure/existing-list
 import { PostgresListingMemberLifecycleRepository } from "../../infrastructure/pg-listing-member-lifecycle.repository";
 import { processListingMemberRetirement } from "../../application/process-listing-member-retirement";
 import type { IntentDelivery } from "../../domain/listing-intent-propagation";
+import { PostgresListingUpdateRepository } from "../../infrastructure/pg-listing-update.repository";
+import { listingUpdateRecord } from "../fixtures/listing-update.fixture";
+import { listingHash } from "../../domain/listing-publication";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -692,6 +695,36 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
       expect((await rows())[0].state).toBe("not_applicable");
       expect(sync).not.toHaveBeenCalled();
     });
+    it("AUDIT: an expired unsubmitted review does not become outstanding channel work", async () => {
+      await database.pool.query(`UPDATE channels.channels SET provider='walmart' WHERE id=34;
+        INSERT INTO channels.walmart_connections(channel_id,connection_id,partner_id,environment,ship_node_id,warehouse_id,revision,market)
+          VALUES(34,4,'partner-a','production','node-a',1,1,'US');
+        INSERT INTO channels.channel_product_overrides(id,channel_id,product_id,is_listed) VALUES(1,34,20,0)`);
+      await repository.expand(20, now);
+      await verifyZero(database.pool, now);
+      await database.pool.query(`UPDATE inventory.inventory_publication_targets SET external_scope_id='partner-a';
+        UPDATE inventory.inventory_publication_readbacks SET external_scope_id_snapshot='partner-a';
+        UPDATE inventory.inventory_publication_outbox SET external_scope_id_snapshot='partner-a',provider_key_snapshot='walmart'`);
+      const delivery = await claim();
+      expect(await lifecycle.assess(delivery)).toMatchObject({ state: "not_applicable" });
+      const original = listingUpdateRecord();
+      const account = { ...original.intent.account, channelId: 34, connectionId: 4, accountId: "partner-a", market: "US", environment: "production" as const, scopeId: "node-a" };
+      expect(delivery.destination).toMatchObject({ provider: account.provider, accountId: account.accountId,
+        environment: account.environment, marketplaceId: account.market });
+      const source = { ...original.intent.source, sku: "SKU-A", externalProductId: "listing-a" };
+      const intent = { ...original.intent, account, source, command: { ...original.intent.command,
+        sku: source.sku, sourceHash: listingHash({ account, current: source }) } };
+      const review = { ...original, intent, view: { ...original.view, sku: source.sku, reviewHash: listingHash(intent) } };
+      const updates = new PostgresListingUpdateRepository(database.pool);
+      await updates.insert(review, "operator");
+      expect(new Date(review.view.expiresAt).getTime()).toBeLessThan(now.getTime());
+      expect((await updates.get(34, review.view.id)).commandKey).toBeNull();
+      expect(await updates.list(34)).toEqual([]);
+      const outcome = await handoff().handoff(delivery);
+      await repository.finish(delivery, outcome, now);
+      expect((await rows())[0].state).toBe("not_applicable");
+    });
+
     it("keeps earlier listing operations outstanding instead of hiding their errors", async () => {
       await exclude();
       await verifyZero(database.pool, now);

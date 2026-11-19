@@ -10,6 +10,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ShopifyAdapter } from "../../adapters/shopify.adapter";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { createAdmittedQuantityTestOwner } from "../fixtures/quantity-publication-admission";
+import type { QuantityPublicationAdmission } from "../../../inventory-planning/application/quantity-publication-admission.port";
+
+function createQuantityAdmissionMock() {
+  const base = createAdmittedQuantityTestOwner();
+  const mocks = {
+    ...base,
+    inspectListingSetup: vi.fn<QuantityPublicationAdmission["inspectListingSetup"]>(),
+    runListingSetup: vi.fn<QuantityPublicationAdmission["runListingSetup"]>(async (input, work) => work(input)),
+  };
+  return mocks as typeof mocks & QuantityPublicationAdmission;
+}
 
 // ---------------------------------------------------------------------------
 // Mock DB that returns credentials
@@ -47,11 +58,11 @@ describe("Shopify Adapter", () => {
   let adapter: ShopifyAdapter;
   let db: ReturnType<typeof createMockDb>;
   let originalFetch: typeof globalThis.fetch;
-  let quantityAdmission: ReturnType<typeof createAdmittedQuantityTestOwner>;
+  let quantityAdmission: ReturnType<typeof createQuantityAdmissionMock>;
 
   beforeEach(() => {
     db = createMockDb();
-    quantityAdmission = createAdmittedQuantityTestOwner();
+    quantityAdmission = createQuantityAdmissionMock();
     adapter = new ShopifyAdapter(db as any, quantityAdmission);
     originalFetch = globalThis.fetch;
   });
@@ -456,8 +467,8 @@ describe("Shopify Adapter", () => {
       expect(body.product.variants[0].barcode).toBe("0123456789012"); // GTIN used as barcode
       expect(body.product.variants[0].price).toBe("14.99");
       expect(body.product.variants[0].compare_at_price).toBe("19.99");
-      expect(body.product.variants[0].weight).toBe(450);
-      expect(body.product.variants[0].weight_unit).toBe("g");
+      expect(body.product.variants[0].weight).toBe(16);
+      expect(body.product.variants[0].weight_unit).toBe("oz");
 
       // Image mapping
       expect(body.product.images).toHaveLength(1);

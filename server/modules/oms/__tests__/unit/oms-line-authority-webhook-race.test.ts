@@ -57,13 +57,15 @@ describe("oms-line-authority — non-authorizing events must not downgrade a fre
     expect(authority.authorizationStatus).toBe("authorized");
   });
 
-  it("orders/updated with STALE previous (seen) reverts to seen — reproduces the #59930 clobber", () => {
+  it("orders/updated with STALE previous (seen) on an unpaid order stays seen — reproduces the #59930 clobber", () => {
     // This is what the old code did: it passed the pre-paid snapshot as previous.
+    // (A fully paid update now grants first authority, #64592; the clobber is
+    // reproduced with the pre-payment status that snapshot carried.)
     const authority = deriveOmsLineAuthority({
       sourceTopic: "orders/updated",
       sourceEventId: "webhook_inbox:test",
       sourceInboxId: 1,
-      financialStatus: "paid",
+      financialStatus: "pending",
       quantity: 1,
       fulfillableQuantity: 1,
       previous: {

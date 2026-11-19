@@ -1,5 +1,9 @@
 # Customer account staging integration
 
+For the compatible live-theme configuration extension and production release
+sequence, see [CUSTOMER-ACCOUNT-PRODUCTION.md](CUSTOMER-ACCOUNT-PRODUCTION.md).
+The original single-theme configuration described here remains supported.
+
 This adds a storefront transport for the existing order edit engine and customer returns services. The theme assets are built with `npx vite build --config vite.customer-account.config.ts` and copied to the `cardshellz/cardshellz-theme` staging branch. The intended unpublished Shopify theme is **174740308127**. Do not publish it or copy these changes to the live theme during staging testing.
 
 The Shopify customer account templates render their own orders immediately. Order numbers open the native order details page. Re-order uses the existing theme cart executor with the selected order's available variants. Edit and address actions appear only after warehouse eligibility is verified. Return intake appears only when the canonical return policy and delivery evidence allow at least one item. Existing return labels remain accessible through the owned return history, independently of new-return eligibility.

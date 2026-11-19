@@ -38,7 +38,7 @@ describe("saveListingPriceInTransaction", () => {
         loadStoreContext: vi.fn<Catalog["loadStoreContext"]>(async () => context),
         listCatalogCandidates: vi.fn<Catalog["listCatalogCandidates"]>(async () => [candidate]),
         listCatalogExposureRules: vi.fn<Catalog["listCatalogExposureRules"]>(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
-        listSelectionRules: vi.fn<Catalog["listSelectionRules"]>(async () => [{ id: 1, scopeType: "catalog", action: "include" }]),
+        listPickedVariantIds: vi.fn<Catalog["listPickedVariantIds"]>(async (_vendorId, ids) => new Set(ids)),
         listVariantOverrides: vi.fn<Catalog["listVariantOverrides"]>(async () => []),
         listExistingListings: vi.fn<Catalog["listExistingListings"]>(async () => []),
         listPricingPolicies: vi.fn<Catalog["listPricingPolicies"]>(async () => []),
@@ -91,7 +91,7 @@ describe("saveListingPriceInTransaction", () => {
   });
 
   it.each([
-    ["unselected", () => { vi.mocked(tx.catalog.listSelectionRules).mockResolvedValue([]); }],
+    ["unselected", () => { vi.mocked(tx.catalog.listPickedVariantIds).mockResolvedValue(new Set()); }],
     ["unexposed", () => { vi.mocked(tx.catalog.listCatalogExposureRules).mockResolvedValue([]); }],
     ["missing", () => { vi.mocked(tx.catalog.listCatalogCandidates).mockResolvedValue([]); }],
   ])("refuses a %s size as not available before the replay lookup", async (_case, arrange) => {

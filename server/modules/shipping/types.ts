@@ -1,3 +1,4 @@
+import { parseDecimalCents, MoneyInputError } from "@shared/money-read";
 /**
  * Canonical shipping vocabulary — engine-agnostic types.
  *
@@ -97,15 +98,12 @@ export interface CanonicalShipmentItem {
  * exponents, negatives, or unsafe totals are rejected.
  */
 export function parseProviderAmountCents(value: unknown): number | null {
-  if (value === null || value === undefined || value === "") return null;
-  const raw = String(value).trim();
-  if (!/^\d+(?:\.\d{1,2})?$/.test(raw)) return null;
-
-  const [wholeRaw, fractionalRaw = ""] = raw.split(".");
-  const total = BigInt(wholeRaw) * BigInt(100)
-    + BigInt((fractionalRaw + "00").slice(0, 2));
-  if (total > BigInt(Number.MAX_SAFE_INTEGER)) return null;
-  return Number(total);
+  try {
+    return parseDecimalCents(typeof value === "string" ? value.trim() : value, "provider amount");
+  } catch (error) {
+    if (!(error instanceof MoneyInputError)) throw error;
+    return null;
+  }
 }
 
 // ─── Outbound push result ───────────────────────────────────────────
@@ -119,6 +117,16 @@ export interface EnginePushResult {
 export interface ShipmentItemAppendPayload {
   shipmentId: number;
   shipmentItemIds: readonly number[];
+}
+
+/**
+ * Raise the quantity of one package row the engine already holds to the
+ * current WMS demand for that order item. The target quantity is computed by
+ * the adapter at execution time, so the payload carries identity only.
+ */
+export interface ShipmentItemQuantityPayload {
+  shipmentId: number;
+  shipmentItemId: number;
 }
 
 export type EngineShipmentItemAppendState =

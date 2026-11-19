@@ -6,12 +6,22 @@ import {
   resetOmsOpsAlertStateForTests,
   sendOmsOpsAlert,
 } from "../../oms-ops-alert.service";
+import { getEbayOrderPollHeartbeat } from "../../ebay-order-poll-heartbeat";
+import { getOmsFlowReconciliationSchedulerHeartbeat } from "../../oms-flow-reconciliation.service";
+import { getOmsOpsAlertSchedulerHeartbeat } from "../../oms-ops-alert-heartbeat";
 import type { OmsOpsHealthSummary } from "../../ops-health.service";
+import { getWebhookRetryWorkerHeartbeat } from "../../webhook-retry.worker";
 
 function health(overrides: Partial<OmsOpsHealthSummary> = {}): OmsOpsHealthSummary {
   return {
     generatedAt: "2026-05-06T00:00:00.000Z",
     status: "critical",
+    workers: {
+      webhookRetry: getWebhookRetryWorkerHeartbeat(),
+      omsFlowReconciliation: getOmsFlowReconciliationSchedulerHeartbeat(),
+      omsOpsAlert: getOmsOpsAlertSchedulerHeartbeat(),
+      ebayOrderPoll: getEbayOrderPollHeartbeat(),
+    },
     counts: { critical: 2, warning: 1, info: 0 },
     issues: [
       {
@@ -36,6 +46,19 @@ function health(overrides: Partial<OmsOpsHealthSummary> = {}): OmsOpsHealthSumma
         sample: [],
       },
     ],
+    channelWriteback: {
+      generatedAt: "2026-05-06T00:00:00.000Z",
+      windowDays: 30,
+      shipped: 0,
+      complete: 0,
+      missing: 0,
+      masked: 0,
+      partialOrders: 0,
+      retrying: 0,
+      dead: 0,
+      byProvider: [],
+      exceptions: [],
+    },
     ...overrides,
   };
 }

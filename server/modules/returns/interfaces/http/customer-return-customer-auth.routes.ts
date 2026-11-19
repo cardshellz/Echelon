@@ -1,3 +1,4 @@
+import { CustomerReturnIntakeError } from "../../application/customer-return-intake.ports";
 import { randomBytes } from "node:crypto";
 import type { Express, NextFunction, Request, Response } from "express";
 import { z } from "zod";
@@ -33,7 +34,7 @@ export function returnCustomerError(res: Response, error: unknown) {
   const status = known ? Number(error.status) : error instanceof z.ZodError ? 400 : 503;
   // No token, signed proxy query, customer details, provider URL or raw exception.
   console.error(JSON.stringify({ event: "customer_return_request_failed", code }));
-  res.status(status).json({ error: { code, message: known ? error.message : status === 400
+  res.status(status).json({ error: { code, ...(error instanceof CustomerReturnIntakeError && error.reasonCode ? { reasonCode: error.reasonCode } : {}), message: known ? error.message : status === 400
     ? "The return request is invalid." : "Returns are temporarily unavailable. Please try again." } });
 }
 export function requireReturnCustomerCommand(req: Request, publicOrigin: string) {
@@ -105,8 +106,12 @@ export function registerCustomerReturnCustomerAuthRoutes(app: Express, dependenc
       const { proof } = z.object({ proof: z.string().min(1).max(RETURN_CUSTOMER_ENCODED_PROOF_MAX_LENGTH).regex(/^[A-Za-z0-9_-]+$/) }).strict().parse(req.body);
       const session = await auth.authenticate(req.session.returnLoginBrowserKey ?? "", proof);
       const user = req.session.user;
+      const staffCredentialVersion = req.session.staffCredentialVersion;
+      const staffCredentialCompletion = req.session.staffCredentialCompletion;
       await new Promise<void>((resolve, reject) => req.session.regenerate(error => error ? reject(error) : resolve()));
       if (user) req.session.user = user;
+      if (user && staffCredentialVersion) req.session.staffCredentialVersion = staffCredentialVersion;
+      if (staffCredentialCompletion) req.session.staffCredentialCompletion = staffCredentialCompletion;
       req.session.customerReturnSession = session;
       req.session.cookie.secure = true;
       await save(req);

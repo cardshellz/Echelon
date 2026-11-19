@@ -23,12 +23,14 @@ function bounded(rows: Row[]): Row[] {
 export async function readPoAmendmentDependencies(
   tx: AmendmentTransaction,
   lineIds: number[],
+  options: { shipmentIds?: readonly number[] } = {},
 ) {
   const shipments = bounded(
     (
       await tx.execute(sql`SELECT s.* FROM procurement.inbound_shipments s
-    WHERE s.status <> 'cancelled' AND EXISTS(SELECT 1 FROM procurement.inbound_shipment_lines l
-      WHERE l.inbound_shipment_id=s.id AND l.purchase_order_line_id=ANY(${sql.param(lineIds)}::int[]))
+    WHERE s.status <> 'cancelled' AND (s.id=ANY(${sql.param(options.shipmentIds ?? [])}::int[])
+      OR EXISTS(SELECT 1 FROM procurement.inbound_shipment_lines l
+      WHERE l.inbound_shipment_id=s.id AND l.purchase_order_line_id=ANY(${sql.param(lineIds)}::int[])))
     ORDER BY s.id LIMIT ${MAX_DEPENDENCY_ROWS + 1} FOR UPDATE`)
     ).rows,
   );

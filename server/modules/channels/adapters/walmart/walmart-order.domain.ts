@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
 import Decimal from "decimal.js";
-import type { OrderData } from "../../../oms/oms.service";
-import { channelOrderObservationSchema, type ChannelOrderObservation } from "../../../oms/channel-order-observation";
+import {
+  channelOrderObservationSchema,
+  type ChannelOrderObservation,
+  type OrderData,
+} from "../../../oms/channel-order-intake.api";
 import { WalmartApiError } from "./walmart-client";
 import type { WalmartOrder } from "./walmart-us-api";
 

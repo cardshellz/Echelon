@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient, QueryResult } from "pg";
+import { insertAuditEventDefaultTimestampPgQuery } from "../../infrastructure/transactional-audit";
 
 const REMEDIATION_CONTRACT_VERSION = 1;
 const REMEDIATION_ADVISORY_LOCK = 1_947_206_147;
@@ -649,40 +650,32 @@ export async function applyLegacyPoReceiveConfigRemediation(input: {
         relinkedLines++;
       }
 
-      await client.query(
-        `INSERT INTO public.audit_events (
-           level, actor, action, target, changes, context
-         ) VALUES (
-           'AUDIT', $1,
-           'purchase_order_line.receive_configuration_recovered',
-           $2, $3::jsonb, $4::jsonb
-         )`,
-        [
-          `user:${actorId}`,
-          `purchase_order_line:${target.lineId}`,
-          JSON.stringify({
-            before: beforeResult.rows[0].row,
-            after: updated.rows[0].row,
-          }),
-          JSON.stringify({
-            contractVersion: REMEDIATION_CONTRACT_VERSION,
-            source: "legacy_po_link_and_receiving_evidence",
-            previewHash: preview.previewHash,
-            action: target.action,
-            purchaseOrderId: target.purchaseOrderId,
-            poNumber: target.poNumber,
-            vendorId: target.vendorId,
-            productId: target.productId,
-            currentVendorProductId: target.currentVendorProductId,
-            targetVendorProductId: target.targetVendorProductId,
-            targetReceiveVariantId: target.targetReceiveVariantId,
-            targetReceiveUnitsPerVariant:
-              target.targetReceiveUnitsPerVariant,
-            receivingEvidence: target.receivingEvidence,
-            warnings: target.warnings,
-          }),
-        ],
-      );
+      await insertAuditEventDefaultTimestampPgQuery(client, {
+        actor: `user:${actorId}`,
+        action: "purchase_order_line.receive_configuration_recovered",
+        target: `purchase_order_line:${target.lineId}`,
+        changesJson: JSON.stringify({
+          before: beforeResult.rows[0].row,
+          after: updated.rows[0].row,
+        }),
+        contextJson: JSON.stringify({
+          contractVersion: REMEDIATION_CONTRACT_VERSION,
+          source: "legacy_po_link_and_receiving_evidence",
+          previewHash: preview.previewHash,
+          action: target.action,
+          purchaseOrderId: target.purchaseOrderId,
+          poNumber: target.poNumber,
+          vendorId: target.vendorId,
+          productId: target.productId,
+          currentVendorProductId: target.currentVendorProductId,
+          targetVendorProductId: target.targetVendorProductId,
+          targetReceiveVariantId: target.targetReceiveVariantId,
+          targetReceiveUnitsPerVariant:
+            target.targetReceiveUnitsPerVariant,
+          receivingEvidence: target.receivingEvidence,
+          warnings: target.warnings,
+        }),
+      });
       auditedLines++;
     }
 

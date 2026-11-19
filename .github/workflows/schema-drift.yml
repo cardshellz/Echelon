@@ -1,0 +1,135 @@
+# Schema drift: does a database built from this repository still have the same
+# structure as production?
+#
+# Nightly, after the Heroku job (scripts/publish-production-structure.ts) has
+# published production's structure to the `production-structure` branch. This
+# workflow never connects to production and holds no database credential.
+#
+# It posts to the ops alert webhook when the structures differ, and also when
+# the check could not run (for example the published copy is stale because the
+# Heroku job stopped), so a broken check is never mistaken for a clean one.
+#
+# On pull requests that touch the check, a self-check proves the tooling still
+# works, without production data and without alerting.
+name: Schema drift
+
+on:
+  schedule:
+    # 09:30 UTC daily. The Heroku job publishes at 09:00 UTC.
+    - cron: "30 9 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/schema-drift.yml"
+      - "migrations/baseline/**"
+      - "migrations/baseline-bootstrap.ts"
+      - "migrations/run-migrations.ts"
+      - "scripts/ci/check-schema-drift.ts"
+      - "scripts/ci/disposable-database.ts"
+      - "scripts/ci/pg-dump-17.sh"
+      - "scripts/ci/schema-drift-check-support.ts"
+      - "scripts/ci/structure-dump.ts"
+      - "scripts/migrations/baseline-format.mjs"
+      - "scripts/migrations/production-structure.mjs"
+      - "scripts/migrations/schema-drift.mjs"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: schema-drift-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ECHELON_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+  ECHELON_TEST_DATABASE_DISPOSABLE: "true"
+  MIGRATION_DATABASE_SSL: disable
+  PG_DUMP_PATH: scripts/ci/pg-dump-17.sh
+
+jobs:
+  self-check:
+    name: Schema drift self-check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        # Production's major version: the baseline is a PostgreSQL 17 dump.
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Prove the drift check detects a planted difference and no false one
+        run: node --import tsx scripts/ci/check-schema-drift.ts --self-check
+
+  compare-with-production:
+    name: Compare repository with production
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Fetch the published production structure
+        # If the branch does not exist yet, the check itself reports it (and
+        # alerts), which is clearer than a failed checkout.
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          ref: production-structure
+          path: production-structure
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Compare the repository with production
+        env:
+          SCHEMA_DRIFT_ALERT_WEBHOOK_URL: ${{ secrets.SCHEMA_DRIFT_ALERT_WEBHOOK_URL }}
+          SCHEMA_DRIFT_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: >-
+          node --import tsx scripts/ci/check-schema-drift.ts
+          --production-structure production-structure
+          --report schema-drift-report.json
+          --require-alert
+      - name: Keep the full comparison
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: schema-drift-report
+          path: schema-drift-report.json
+          if-no-files-found: ignore
+          retention-days: 30

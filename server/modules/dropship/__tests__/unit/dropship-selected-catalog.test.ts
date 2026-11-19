@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { DropshipListingCatalogCandidate } from "../../application/dropship-listing-preview-service";
 import {
+  countSelectedVariants,
   loadSelectedCandidates,
+  loadSelectedCategoryIds,
   loadSelectedProductIds,
+  loadSelectedVariantIds,
+  selectedVariantIdsAmong,
   type SelectedCatalogReader,
 } from "../../application/dropship-selected-catalog";
 import type { DropshipCatalogExposureRule } from "../../domain/catalog-exposure";
-import type { DropshipVendorSelectionRule, DropshipVendorVariantOverride } from "../../domain/vendor-selection";
+import type { DropshipVendorVariantOverride } from "../../domain/vendor-selection";
 import { GOLDEN_PREVIEW_CANDIDATES, GOLDEN_PREVIEW_NOW, GOLDEN_PREVIEW_VENDOR_ID } from "../fixtures/listing-preview-golden.fixture";
 
 /**
@@ -14,16 +18,19 @@ import { GOLDEN_PREVIEW_CANDIDATES, GOLDEN_PREVIEW_NOW, GOLDEN_PREVIEW_VENDOR_ID
  * candidates the views and reviews load, and the ids the first-mark job
  * loads, come from the same reads in the same order. Only
  * loadSelectedCandidates keeps candidates and refuses above 10,000.
+ * One-time picks (PLAN-B v4.1 §9 row 3; FIDELITY-3): the reader's keyset
+ * yields the vendor's picks only, so the scan reads no rules and no picks of
+ * its own; the stub's keyset below is over `picked` (the real keyset is
+ * pinned by the PostgreSQL picks suite).
  */
 
 const INCLUDE_CATALOG: DropshipCatalogExposureRule = { id: 1, scopeType: "catalog", action: "include" };
-const VENDOR_INCLUDES_CATALOG: DropshipVendorSelectionRule = { id: 2, vendorId: GOLDEN_PREVIEW_VENDOR_ID, scopeType: "catalog",
-  action: "include", autoConnectNewSkus: false, autoListNewSkus: false, isActive: true };
 
 interface CatalogScenario {
   candidates: readonly DropshipListingCatalogCandidate[];
   exposureRules?: readonly DropshipCatalogExposureRule[];
-  selectionRules?: readonly DropshipVendorSelectionRule[];
+  /** The vendor's picks; every candidate when absent (the golden vendor picked everything). */
+  picked?: readonly number[];
   overrides?: readonly DropshipVendorVariantOverride[];
   /** The ids each listVariantIds call answers, when the catalog's own keyset is not wanted (the cursor case). */
   variantIdPages?: number[][];
@@ -33,13 +40,15 @@ interface CatalogScenario {
 function readerOver(scenario: CatalogScenario): { reader: SelectedCatalogReader; calls: string[] } {
   const calls: string[] = [];
   const byId = new Map(scenario.candidates.map((candidate) => [candidate.productVariantId, candidate]));
-  const ids = [...byId.keys()].sort((left, right) => left - right);
+  const picked = new Set(scenario.picked ?? byId.keys());
+  // The keyset over the vendor's picks (SELR): a sellable size the vendor did not pick is never in it.
+  const ids = [...picked].sort((left, right) => left - right);
   const pages = scenario.variantIdPages ? [...scenario.variantIdPages] : null;
   const catalog = {
     listCatalogExposureRules: async () => { calls.push("exposureRules"); return structuredClone([...(scenario.exposureRules ?? [INCLUDE_CATALOG])]); },
-    listSelectionRules: async (vendorId: number) => {
-      calls.push(`selectionRules:${vendorId}`);
-      return structuredClone([...(scenario.selectionRules ?? [VENDOR_INCLUDES_CATALOG])]);
+    listPickedVariantIds: async (vendorId: number, variantIds: readonly number[]) => {
+      calls.push(`picks:${vendorId}:${variantIds.length}`);
+      return new Set(variantIds.filter((id) => picked.has(id)));
     },
     listCatalogCandidates: async (variantIds: readonly number[]) => {
       calls.push(`candidates:${variantIds.length}`);
@@ -76,10 +85,9 @@ const productIdsOf = (candidates: readonly DropshipListingCatalogCandidate[]) =>
 describe("loadSelectedProductIds (plan PR 9, 10.1)", () => {
   it.each([
     ["the golden catalog, every size chosen", {}],
-    ["the golden catalog with an excluded product, an unchosen size and a size switched off", {
+    ["the golden catalog with an excluded product, an unpicked size and a size switched off", {
       exposureRules: [INCLUDE_CATALOG, { id: 3, scopeType: "product", action: "exclude", productId: 200 }],
-      selectionRules: [VENDOR_INCLUDES_CATALOG, { id: 4, vendorId: GOLDEN_PREVIEW_VENDOR_ID, scopeType: "variant", action: "exclude",
-        productVariantId: 6002, isActive: true }],
+      picked: GOLDEN_PREVIEW_CANDIDATES.map((size) => size.productVariantId).filter((id) => id !== 6002),
       overrides: [{ productVariantId: 1001, enabledOverride: false }],
     }],
   ] as const)("answers the products of the sizes loadSelectedCandidates chooses, from the same reads, on %s", async (_label, rules) => {
@@ -95,7 +103,7 @@ describe("loadSelectedProductIds (plan PR 9, 10.1)", () => {
     expect(selected.length).toBeGreaterThan(0);
   });
 
-  it("is not a no-op filter: the rules of the second golden case leave products and sizes out", async () => {
+  it("is not a no-op filter: exposure and the override leave products and sizes out of the picked ones", async () => {
     const all = await loadSelectedProductIds(readerOver({ candidates: GOLDEN_PREVIEW_CANDIDATES }).reader, GOLDEN_PREVIEW_NOW);
     const ruled = await loadSelectedProductIds(readerOver({ candidates: GOLDEN_PREVIEW_CANDIDATES,
       exposureRules: [INCLUDE_CATALOG, { id: 3, scopeType: "product", action: "exclude", productId: 200 }] }).reader, GOLDEN_PREVIEW_NOW);
@@ -103,12 +111,24 @@ describe("loadSelectedProductIds (plan PR 9, 10.1)", () => {
     expect(ruled).toEqual(all.filter((productId) => productId !== 200));
     // A product stays while any of its sizes is chosen: 100 keeps 1002 and 600 keeps 6001.
     const sizes = await loadSelectedCandidates(readerOver({ candidates: GOLDEN_PREVIEW_CANDIDATES,
-      selectionRules: [VENDOR_INCLUDES_CATALOG, { id: 4, vendorId: GOLDEN_PREVIEW_VENDOR_ID, scopeType: "variant", action: "exclude",
-        productVariantId: 6002, isActive: true }],
+      picked: GOLDEN_PREVIEW_CANDIDATES.map((size) => size.productVariantId).filter((id) => id !== 6002),
       overrides: [{ productVariantId: 1001, enabledOverride: false }] }).reader, GOLDEN_PREVIEW_NOW);
     expect(sizes.map((size) => size.productVariantId)).toEqual(GOLDEN_PREVIEW_CANDIDATES.map((size) => size.productVariantId)
       .filter((id) => id !== 6002 && id !== 1001).sort((left, right) => left - right));
     expect(productIdsOf(sizes)).toEqual(all);
+  });
+
+  it("never reads or yields a sellable size the vendor did not pick, and reads no rules or picks of its own (FIDELITY-3)", async () => {
+    const pickedIds = [1001, 6001];
+    const scenario: CatalogScenario = { candidates: GOLDEN_PREVIEW_CANDIDATES, picked: pickedIds };
+    const scan = readerOver(scenario);
+    const ids = await loadSelectedVariantIds(scan.reader, GOLDEN_PREVIEW_NOW, "listing_push_run");
+    expect(ids).toEqual(pickedIds);
+    // One batch: the keyset yields the two picks, so only their candidates and overrides are read.
+    expect(scan.calls).toEqual(["exposureRules", "variantIds:0:250", "candidates:2", `overrides:${GOLDEN_PREVIEW_VENDOR_ID}:2`,
+      "variantIds:6001:250"]);
+    expect(await countSelectedVariants(readerOver(scenario).reader, GOLDEN_PREVIEW_NOW, new Set([6001, 2001])))
+      .toEqual({ selected: 2, selectedAmong: 1 });
   });
 
   it("accepts 10,001 chosen sizes, which loadSelectedCandidates refuses with its words, after the same 41 batches", async () => {
@@ -150,9 +170,56 @@ describe("loadSelectedProductIds (plan PR 9, 10.1)", () => {
     await expect(loadSelectedCandidates(readerOver(scenario).reader, GOLDEN_PREVIEW_NOW)).rejects.toThrow("Pricing catalog cursor did not advance.");
   });
 
-  it("answers an empty catalog with no product, after one read of each rule set", async () => {
+  it("answers an empty catalog with no product, after one read of the exposure rules", async () => {
     const { reader, calls } = readerOver({ candidates: [] });
     await expect(loadSelectedProductIds(reader, GOLDEN_PREVIEW_NOW)).resolves.toEqual([]);
-    expect(calls).toEqual(["exposureRules", `selectionRules:${GOLDEN_PREVIEW_VENDOR_ID}`, "variantIds:0:250"]);
+    expect(calls).toEqual(["exposureRules", "variantIds:0:250"]);
+  });
+});
+
+describe("loadSelectedCategoryIds (the categories a vendor sells from, PLAN-B v4.1 §11.1 stage 3)", () => {
+  it("answers the categories of the sizes loadSelectedCandidates chooses, from the same reads, and none for a size with no category", async () => {
+    const categorized = GOLDEN_PREVIEW_CANDIDATES.map((candidate, index) => ({ ...structuredClone(candidate),
+      categoryId: index % 3 === 0 ? null : 40 + (index % 2) }));
+    const scenario: CatalogScenario = { candidates: categorized,
+      overrides: [{ productVariantId: categorized[1].productVariantId, enabledOverride: false }] };
+    const candidates = readerOver(scenario);
+    const ids = readerOver(scenario);
+    const selected = await loadSelectedCandidates(candidates.reader, GOLDEN_PREVIEW_NOW, "listing_settings");
+    const categoryIds = await loadSelectedCategoryIds(ids.reader, GOLDEN_PREVIEW_NOW);
+    const expected = [...new Set(selected.flatMap((candidate) => candidate.categoryId === null ? [] : [candidate.categoryId]))]
+      .sort((left, right) => left - right);
+    expect(categoryIds).toEqual(expected);
+    expect(categoryIds.length).toBeGreaterThan(0);
+    expect(ids.calls).toEqual(candidates.calls);
+  });
+
+  it("leaves out a category whose only picked size is not exposed, and answers none for no picks", async () => {
+    const [first, second] = GOLDEN_PREVIEW_CANDIDATES;
+    const scenario: CatalogScenario = {
+      candidates: [{ ...structuredClone(first), categoryId: 50 }, { ...structuredClone(second), categoryId: 51 }],
+      exposureRules: [INCLUDE_CATALOG, { id: 4, scopeType: "variant", action: "exclude", productVariantId: second.productVariantId }],
+    };
+    await expect(loadSelectedCategoryIds(readerOver(scenario).reader, GOLDEN_PREVIEW_NOW)).resolves.toEqual([50]);
+    await expect(loadSelectedCategoryIds(readerOver({ ...scenario, picked: [] }).reader, GOLDEN_PREVIEW_NOW)).resolves.toEqual([]);
+  });
+});
+
+describe("selectedVariantIdsAmong (a publish run chunk's pre-filter; PLAN-B v4.1 §9 row 3b)", () => {
+  it("keeps the chunk's sizes that are picked, exposed and not turned off, from one bounded picks read", async () => {
+    const chunk = [6002, 1001, 2001, 6001, 1001];
+    const { reader, calls } = readerOver({ candidates: GOLDEN_PREVIEW_CANDIDATES,
+      picked: [1001, 2001, 6001],
+      exposureRules: [INCLUDE_CATALOG, { id: 3, scopeType: "variant", action: "exclude", productVariantId: 2001 }],
+      overrides: [{ productVariantId: 6001, enabledOverride: false }] });
+    await expect(selectedVariantIdsAmong(reader, chunk, GOLDEN_PREVIEW_NOW)).resolves.toEqual(new Set([1001]));
+    // The picks are read for the chunk's distinct ids only, never by a keyset over the selection.
+    expect(calls).toEqual(["exposureRules", `picks:${GOLDEN_PREVIEW_VENDOR_ID}:4`, "candidates:4", `overrides:${GOLDEN_PREVIEW_VENDOR_ID}:4`]);
+  });
+
+  it("reads nothing for an empty chunk", async () => {
+    const { reader, calls } = readerOver({ candidates: GOLDEN_PREVIEW_CANDIDATES });
+    await expect(selectedVariantIdsAmong(reader, [], GOLDEN_PREVIEW_NOW)).resolves.toEqual(new Set());
+    expect(calls).toEqual([]);
   });
 });

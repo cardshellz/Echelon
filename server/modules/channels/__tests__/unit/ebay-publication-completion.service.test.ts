@@ -1,63 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import { EbayMarketplaceRegistrationObserver } from "../../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-observer";
-import { EbayPublicationCompletionExecution, type PreparedEbayPublication } from "../../ebay-publication-completion.service";
-import { EbayMarketplaceListingConnector } from "../../listing-connectors/ebay-listing.connector";
-import { EbayListingSyncError, type EbayListingSyncIdentity } from "../../ebay-listing-sync.domain";
-import type { EbayListingExecutionContext } from "../../ebay-listing-sync.service";
-import { resolveEbayPublicationTarget } from "../../ebay-publication-completion.domain";
+import { EbayListingSyncError } from "../../ebay-listing-sync.domain";
 import { syncContentIntentHash } from "../../ebay-listing-sync-content";
-import { syncIdentity, syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
 import { EbayApiRequestError } from "../../adapters/ebay/ebay-api-error";
 import { QuantityProviderRequestTimeoutError } from "../../provider-request-limits";
 
-async function fixture(automaticRecovery?: ConstructorParameters<typeof EbayPublicationCompletionExecution>[4]) {
-  const base = syncProviderFixture();
-  let published = false; let visible = true;
-  const source: EbayListingSyncIdentity = { ...syncIdentity, groupKey: null,
-    variants: syncIdentity.variants.map(member => ({ ...member, externalSku: null, listingId: null, mappingExists: true })) };
-  const getOffers = base.client.getOffers;
-  base.client.getOffers = vi.fn(async (sku, marketplaceId) => ({ offers: (await getOffers(sku, marketplaceId)).offers.map(offer => ({ ...offer,
-    status: published && visible ? "PUBLISHED" : "UNPUBLISHED", listingId: published && visible ? "listing-20" : undefined })) }));
-  vi.mocked(base.client.publishOffer).mockImplementation(async () => { published = true; return { listingId: "listing-20" }; });
-  const observer = new EbayMarketplaceRegistrationObserver({ loadFreshCredential: async () => ({ accessToken: "test-only", environment: "production" }) }, {
-    get: async request => {
-      const url = new URL(request.path, "https://example.invalid");
-      if (url.pathname === "/commerce/identity/v1/user/") return { status: 200, body: { userId: source.accountId } };
-      if (url.pathname.includes("/inventory_item/")) return { status: 200, body: { sku: "P5", groupIds: [] } };
-      const offers = (await base.client.getOffers("P5", "EBAY_US")).offers.map(offer => ({ ...offer,
-        ...(offer.status === "PUBLISHED" ? { listing: { listingId: "listing-20", listingStatus: "ACTIVE" } } : {}) }));
-      return { status: 200, body: { offers, total: offers.length } };
-    },
-  }, { now: () => new Date("2026-10-11T20:00:00Z") });
-  const observationInput = { owner: { kind: "channel" as const, channelId: 1, productId: 20, provider: "ebay", marketplaceId: "EBAY_US" },
-    memberCandidates: [{ productVariantId: 101, sku: "P5", isActive: true, availableQuantity: 7 }] };
-  const inspect = () => observer.inspectExistingPublication(observationInput);
-  const original = await base.prepare();
-  const assertInventoryReady = vi.fn(async () => {});
-  const prepare = vi.fn(async (): Promise<PreparedEbayPublication> => {
-    const inspection = await inspect();
-    return { ...original, assertInventoryReady, sourceIdentity: source, identity: resolveEbayPublicationTarget(source, inspection), inspection, inspect,
-      draft: { ...original.draft, itemGroup: null, publishMode: "publish", hasExistingExternalIds: false,
-        existingOfferIdsByVariantId: { 101: "offer-101" } },
-      resolvePublishedIdentity: async () => (await inspect()).publication!,
-    };
-  });
-  const recovery = { reconcile: vi.fn(async (): Promise<{ busy: boolean; resolved: string[]; unresolved: string[] }> => ({ busy: false, resolved: [], unresolved: [] })) };
-  const context: EbayListingExecutionContext = { operation: "publish", publicationTarget: null, publicationAccepted: null,
-    publicationWriteStarted: false, publicationAcceptedRevision: null, claimedRevision: "1", publicationIntentHash: null,
-    publicationWriteCompleted: false, bindPublicationTarget: vi.fn(async value => { context.publicationTarget = value; }),
-    bindPublicationAccepted: vi.fn(async value => { context.publicationAccepted = value; }) };
-  const bind = vi.fn(); const compatibility = vi.fn(); const stages: string[] = [];
-  const stage = vi.fn(async (key: string, _hash: string, work: () => Promise<void>) => {
-    stages.push(`start:${key}`); if (key === "publish") context.publicationWriteStarted = true;
-    await work(); stages.push(`done:${key}`);
-    if (key === "publish") context.publicationWriteCompleted = true;
-  });
-  const executor = new EbayPublicationCompletionExecution(prepare, recovery, new EbayMarketplaceListingConnector(), compatibility, automaticRecovery);
-  return { ...base, source, prepare, recovery, context, bind, compatibility, stages, stage, executor, assertInventoryReady,
-    run: () => executor.execute(source, stage, null, bind, context),
-    setVisibility: (value: boolean) => { visible = value; }, setPublished: () => { published = true; } };
-}
+import { publicationCompletionFixture as fixture } from "../fixtures/ebay-publication-completion.fixture";
 
 describe("saved eBay publication completion", () => {
   it.each<[string, Error]>([

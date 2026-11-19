@@ -11,6 +11,7 @@
  */
 
 import { eq, and, sql } from "drizzle-orm";
+import { prepareChannelPublicationWeight } from "../marketplace-listings/domain/channel-package-weight";
 import {
   products,
   productVariants,
@@ -55,6 +56,7 @@ export interface ResolvedVariant {
   gtin: string | null;
   mpn: string | null;
   weight: number | null;
+  package: import("@shared/catalog/shipping-package").ChannelPackageFacts;
   price: number | null;
   compareAtPrice: number | null;
   shopifyVariantId: string | null;
@@ -142,7 +144,9 @@ export function createChannelProductPushService(db: any) {
         barcode: vo?.barcodeOverride || v.barcode,
         gtin: v.gtin || null,
         mpn: v.mpn || null,
-        weight: vo?.weightOverride || null,
+        weight: vo?.weightOverride ?? (v.weightGrams == null ? null : Number(v.weightGrams)),
+        package: { weightGrams: vo?.weightOverride ?? v.weightGrams, lengthMm: v.lengthMm,
+          widthMm: v.widthMm, heightMm: v.heightMm },
         price: pr?.price ?? v.priceCents ?? null,
         compareAtPrice: pr?.compareAtPrice ?? v.compareAtPriceCents ?? null,
         shopifyVariantId: v.shopifyVariantId,
@@ -544,8 +548,8 @@ export function createChannelProductPushService(db: any) {
         variant.compare_at_price = (v.compareAtPrice / 100).toFixed(2);
       }
       if (v.weight != null) {
-        variant.weight = v.weight;
-        variant.weight_unit = "g";
+        variant.weight = prepareChannelPublicationWeight({ value: v.weight, unit: "GRAM" }).ounces;
+        variant.weight_unit = "oz";
       }
       if (v.shopifyVariantId) {
         variant.id = Number(v.shopifyVariantId);

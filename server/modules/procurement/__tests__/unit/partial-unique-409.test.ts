@@ -8,6 +8,11 @@ import { describe, it, expect, vi } from "vitest";
 // letting the 500 leak through.
 // ─────────────────────────────────────────────────────────────────────────────
 
+vi.mock("../../../../platform/document-numbering/document-number.repository", () => ({
+  allocateDocumentNumber: vi.fn(async () => "PAY-20260503-002"),
+  readSuggestedInvoiceNumber: vi.fn(),
+}));
+
 // ── Shipment Tracking ────────────────────────────────────────────────────────
 
 describe("createShipment atomic duplicate shipment number rejection", () => {

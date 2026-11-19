@@ -1,5 +1,6 @@
 import { presentEbayListingJob } from "@shared/ebay-listing-progress";
 import type { EbayListingSyncJob } from "@shared/types/ebay-listing-sync";
+import { ChannelListingWarnings } from "@/components/channels/ChannelListingWarnings";
 
 /** Both listing surfaces render the same server evidence. This component never
  * polls, changes a job, or infers completion from a stage or elapsed time. */
@@ -13,6 +14,7 @@ export function EbayListingJobProgress({ job, label, detail }: {
     {presentation.verification && <p className="text-muted-foreground break-words">{presentation.verification}</p>}
     {presentation.activity && <p>{presentation.activity}</p>}
     {detail && job.state !== "completed" && <p className="text-muted-foreground break-words">{detail}</p>}
+    <ChannelListingWarnings warnings={job.warnings} />
     {presentation.times.map(({ label: timeLabel, at }) => <p key={timeLabel} className="text-xs text-muted-foreground">
       {timeLabel}: <time dateTime={at}>{new Date(at).toLocaleString()}</time>
     </p>)}

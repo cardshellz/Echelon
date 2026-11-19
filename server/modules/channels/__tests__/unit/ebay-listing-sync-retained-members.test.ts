@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { captureExistingEbayListingIdentity } from "../../ebay-existing-listing-identity";
 import { buildEbayRouteListingDraft } from "../../ebay-listing-draft";
 import { EbayMarketplaceListingConnector, type EbayListingLifecycleClient } from "../../listing-connectors/ebay-listing.connector";
-import { syncProviderFixture } from "../fixtures/ebay-listing-sync.fixture";
+import { syncProviderFixture, publishedContentFixture } from "../fixtures/ebay-listing-sync.fixture";
 import type { EbayInventoryItemGroup } from "../../adapters/ebay/ebay-types";
 
 function fixture() {
@@ -27,6 +27,7 @@ function fixture() {
     offerId: member.offerId!, listingId: member.listingId!, status: "PUBLISHED" as const }));
   const client: EbayListingLifecycleClient = {
     ...syncProviderFixture().client,
+    getPublishedListingContent:vi.fn(async()=>publishedContentFixture("listing-20",offers.map(offer=>offer.sku),group.imageUrls??[],offers[0].listingPolicies)),
     getInventoryItem: vi.fn(async sku => itemBySku.get(sku) ?? null),
     getInventoryItemGroup: vi.fn(async () => structuredClone(group)),
     getOffers: vi.fn(async sku => ({ offers: offers.filter(offer => offer.sku === sku).map(offer => structuredClone(offer)) })),

@@ -43,11 +43,12 @@ vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
 vi.mock("../../procurement", () => ({ procurementStorage: { getVendorById: vi.fn() } }));
 vi.mock("../../ap-ledger.service", () => ({}));
 vi.mock("../../po-document", () => ({ renderPoHtml: vi.fn() }));
-vi.mock("../../../notifications/email.service", () => ({}));
-vi.mock("../../../notifications/notifications.service", () => ({}));
+vi.mock("../../../notifications/email-delivery.api", () => ({}));
+vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
 import { registerPurchasingRoutes } from "../../procurement.routes";
 import { PurchasingError } from "../../purchasing.service";
+import { DocumentNumberError } from "../../../../platform/document-numbering/document-number";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -97,7 +98,7 @@ function buildApp(purchasing: any): Express {
     shipmentTracking: {},
     receiving: {},
     poExceptions: {},
-  };
+  } as any;
   registerPurchasingRoutes(app);
   return app;
 }
@@ -394,5 +395,31 @@ describe("PATCH /api/purchase-orders/:id", () => {
     expect(invalidId.status).toBe(400);
     expect(invalidId.body.details.code).toBe("INVALID_PURCHASE_ORDER_ID");
     expect(purchasing.updatePO).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("POST /api/purchase-orders/:id/create-receipt numbering", () => {
+  let server: { url: string; close: () => Promise<void> };
+  let purchasing: ReturnType<typeof buildPurchasingMock>;
+
+  beforeEach(async () => {
+    purchasing = buildPurchasingMock();
+    server = await startServer(buildApp(purchasing));
+  });
+
+  afterEach(async () => { await server.close(); });
+
+  it("preserves an exhausted receipt number as an actionable conflict", async () => {
+    const message = "Automatic document numbering is exhausted for RCV-20261025-.";
+    purchasing.executeLifecycleCommand.mockRejectedValue(
+      new DocumentNumberError("DOCUMENT_NUMBER_EXHAUSTED", message),
+    );
+
+    const { status, body } = await post(server.url, "/api/purchase-orders/10/create-receipt");
+
+    expect(status).toBe(409);
+    expect(body).toEqual({ error: message, code: "DOCUMENT_NUMBER_EXHAUSTED" });
+    expect(purchasing.executeLifecycleCommand).toHaveBeenCalledWith(10, "create_receipt", {}, "test-user");
   });
 });

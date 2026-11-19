@@ -1,8 +1,10 @@
+import type { ImpactSnapshot, DependencyCache } from "./test-impact.mjs";
 export interface BrowserSuiteDefinition {
   config: string;
   workflow: string;
   tests: RegExp;
   roots: string[];
+  appRoutes?: readonly string[];
   ownedPrefixes: string[];
   isolated?: boolean;
 }
@@ -17,7 +19,7 @@ export interface BrowserSelection {
   reason: string;
 }
 
-export const BROWSER_SUITES: Record<"orderEdits" | "procurement" | "dropship", BrowserSuiteDefinition>;
+export const BROWSER_SUITES: Record<"appBootstrap" | "orderEdits" | "procurement" | "procurementConnected" | "dropship", BrowserSuiteDefinition>;
 
 export function parseChangedFiles(output: string): BrowserFileChange[];
 
@@ -25,6 +27,7 @@ export function dependencyClosure(
   roots: readonly string[],
   files: ReadonlySet<string>,
   readSource: (file: string) => string,
+  edges?: Map<string, string[]>,
 ): Set<string>;
 
 export function selectBrowserSuite(options: {
@@ -34,6 +37,8 @@ export function selectBrowserSuite(options: {
   readSource: (file: string) => string;
   force?: boolean;
   definitions?: Readonly<Record<string, BrowserSuiteDefinition>>;
+  previous?: ImpactSnapshot;
+  dependencyCache?: DependencyCache;
 }): BrowserSelection;
 
 export function runSelection(
@@ -41,8 +46,4 @@ export function runSelection(
   root?: string,
 ): BrowserSelection;
 
-export function readBrowserChangeEvidence(environment: Record<string, string | undefined>, root: string): {
-  changes: BrowserFileChange[];
-  files: Set<string>;
-  readSource: (file: string) => string;
-};
+export { readTestChangeEvidence as readBrowserChangeEvidence } from "./test-impact.mjs";

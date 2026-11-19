@@ -10,6 +10,7 @@ import {
 import { DropshipError } from "../../domain/errors";
 import { EbayListingSyncError } from "../../../channels/ebay-listing-sync.domain";
 import { QuantityProviderRequestTimeoutError } from "../../../channels/provider-request-limits";
+import { ChannelProviderReadError, type ChannelProviderReadDiagnostic } from "@shared/channel-provider-read";
 
 /** Codes the shared connector and identity observer can raise on the Dropship push. */
 const PERMANENT = [
@@ -30,6 +31,16 @@ const TRANSIENT = [
 ] as const;
 
 describe("Dropship translation of shared eBay connector refusals", () => {
+  it.each([["unavailable", 503, true], ["invalid_response", 200, true], ["refused", 403, false], ["refused", 401, true]] as const)(
+    "retains safe native %s read diagnostics with HTTP %s", (kind, httpStatus, retryable) => {
+      const providerRead: ChannelProviderReadDiagnostic = { provider: "ebay", resource: "listing_package", method: "POST", kind, httpStatus };
+      const code = httpStatus === 401 ? "EBAY_AUTH_REQUIRED" : "EBAY_PACKAGE_READ_INVALID";
+      const translated = dropshipErrorFromEbayConnector(new EbayListingSyncError(code, "Package check failed.",
+        { cause: new ChannelProviderReadError(providerRead, { cause: new Error("private response body") }) }));
+      expect(translated).toMatchObject({ code, context: { retryable, providerRead, source: "ebay_listing_connector" } });
+      expect(JSON.stringify(translated)).not.toContain("private response body");
+      expect(isEbayConnectorAccessTokenRejection(translated)).toBe(httpStatus === 401);
+    });
   it("lists exactly the reviewed permanent codes", () => {
     expect([...PERMANENT_EBAY_CONNECTOR_CODES].sort()).toEqual([...PERMANENT].sort());
   });

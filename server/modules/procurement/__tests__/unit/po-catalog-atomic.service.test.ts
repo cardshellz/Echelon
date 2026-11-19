@@ -1,11 +1,18 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const source = readFileSync(
-  join(process.cwd(), "server", "modules", "procurement", "purchasing.service.ts"),
-  "utf8",
-);
+const procurementDir = join(process.cwd(), "server", "modules", "procurement");
+const purchasingSubDir = join(procurementDir, "purchasing");
+const source = [
+  readFileSync(join(procurementDir, "purchasing.service.ts"), "utf8"),
+  ...(existsSync(purchasingSubDir)
+    ? readdirSync(purchasingSubDir)
+        .filter((name) => name.endsWith(".ts"))
+        .sort()
+        .map((name) => readFileSync(join(purchasingSubDir, name), "utf8"))
+    : []),
+].join("\n");
 
 function section(start: string, end: string): string {
   const startPosition = source.indexOf(start);
@@ -33,7 +40,7 @@ describe("atomic PO and vendor-catalog persistence", () => {
 
   it("runs catalog capture inside both PO create and draft-replacement transactions", () => {
     const createFlow = section(
-      "const createAttempt = async (poNumber: string) => (internalOptions?.transaction ?? db).transaction",
+      "const createAttempt = async () => (internalOptions?.transaction ?? db).transaction",
       "let lastConflictingPoNumber",
     );
     const updateFlow = section(
@@ -52,7 +59,7 @@ describe("atomic PO and vendor-catalog persistence", () => {
     expect(updateWritePosition).toBeGreaterThan(updateCatalogPosition);
     expect(createFlow).toContain("(internalOptions?.transaction ?? db).transaction(async (tx: any)");
     expect(createFlow.indexOf("lockInventoryCostGraph(tx)")).toBeLessThan(createCatalogPosition);
-    expect(updateFlow).toContain("return db.transaction(async (tx: any)");
+    expect(updateFlow).toContain("return (transaction ?? db).transaction(async (tx: any)");
   });
 
   it("keeps the PO quote source unchanged when the same manual quote is captured", () => {

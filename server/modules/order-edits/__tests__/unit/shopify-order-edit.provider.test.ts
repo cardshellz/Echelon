@@ -139,6 +139,7 @@ const calcLine = (
   quantity = 2,
   price = "10.00",
   discounted = price,
+  description = "Echelon member pricing",
 ) => ({
   id: id("CalculatedLineItem", value),
   title: "Test product",
@@ -163,7 +164,7 @@ const calcLine = (
             appliedTo: "LINE",
             targetType: "LINE_ITEM",
             targetSelection: "EXPLICIT",
-            description: "Echelon member pricing",
+            description,
             value: {
               __typename: "MoneyV2",
               amount: decimal(cents(price) - cents(discounted)),
@@ -1535,7 +1536,7 @@ function harness(
   },
   codeOptions: Pick<
     ConstructorParameters<typeof ShopifyOrderEditProvider>[0],
-    "codeHistory" | "rewards"
+    "codeHistory" | "rewards" | "accountSummaries" | "reportAccountSummaryFailure"
   > = {},
 ) {
   const requests: Array<{ query: string; variables: Record<string, unknown> }> =
@@ -1556,7 +1557,7 @@ function harness(
     },
   );
   const reports =
-    vi.fn<(event: { operationId: string; code: string }) => void>();
+    vi.fn<(event: { operationId?: string; code: string }) => void>();
   const provider = new ShopifyOrderEditProvider({
     ...codeOptions,
     shippingCalculator,
@@ -1594,6 +1595,26 @@ async function reduction() {
 }
 
 describe("native tax rate display evidence", () => {
+  it("never changes an owned order read when optional cache validation or storage fails", async () => {
+    for (const invalidPresentation of [false,true]) {
+      const retain = vi.fn(async () => { if (!invalidPresentation) throw new Error("Synthetic cache outage"); });
+      const cacheReport = vi.fn();
+      const h = harness([rawOrder({ displayFinancialStatus: "PAID", ...(invalidPresentation ? {name:"X".repeat(60)} : {}) })],{},undefined,
+        {accountSummaries:{retain},reportAccountSummaryFailure:cacheReport});
+      expect((await h.provider.readOrder(4,"100","gid://shopify/Customer/1")).totalCents).toBe(2000);
+      expect(cacheReport).toHaveBeenCalledOnce(); expect(retain).toHaveBeenCalledTimes(invalidPresentation ? 0 : 1);
+      expect(h.requests).toHaveLength(1); expect(h.requests[0].query).not.toContain("mutation");
+    }
+  });
+
+  it("rejects a foreign signed-in customer before reading any saved reward/code history", async () => {
+    const history = { enrich: vi.fn() };
+    const h = harness([rawOrder()], {}, undefined, { codeHistory: history });
+    await expect(h.provider.readOrder(4, "100", "gid://shopify/Customer/999")).rejects.toMatchObject({ code: "CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE" });
+    expect(history.enrich).not.toHaveBeenCalled();
+    expect(h.requests).toHaveLength(1);
+    expect(h.requests[0].query).not.toContain("mutation");
+  });
   it("reads current tax rates without changing the existing order identity or amounts", async () => {
     const original = rawOrder({ currentTotalPriceSet: bag("21.20"), currentTotalTaxSet: bag("1.20"), netPaymentSet: bag("21.20"), transactions: [tx(1, "21.20")] });
     const enriched = { ...original, order: { ...original.order, currentTaxLines: [{ title: "State tax", ratePercentage: 6, priceSet: bag("1.20") }] } };
@@ -3885,7 +3906,7 @@ describe("ShopifyOrderEditProvider", () => {
     ).rejects.toMatchObject({ code: "QUOTE_PRICE_MISMATCH" });
   });
 
-  it("adds an already ordered variant as a separately tracked line at the projected member price", async () => {
+  it.each(["Echelon member pricing", "Shellz Club pricing"])("adds a separately tracked member-priced line with %s readback", async (description) => {
     const raw = rawOrder({
       customer: {
         id: id("Customer", 1),
@@ -3921,7 +3942,7 @@ describe("ShopifyOrderEditProvider", () => {
             "28.00",
             "8.00",
             [calcLine()],
-            [calcLine(2, 10, 1, "10.00", "8.00")],
+            [calcLine(2, 10, 1, "10.00", "8.00", description)],
           ),
         },
       },
@@ -3939,7 +3960,7 @@ describe("ShopifyOrderEditProvider", () => {
       discountedUnitPriceCents: 800,
     });
     expect(h.requests.at(-1)?.variables.discount).toEqual({
-      description: "Echelon member pricing",
+      description: "Shellz Club pricing",
       fixedValue: { amount: "2.00", currencyCode: "USD" },
     });
   });
@@ -4410,6 +4431,101 @@ describe("ShopifyOrderEditProvider", () => {
     },
   );
 
+  it("treats incomplete creation readback as retryable and finds the same refund on the next observation", async () => {
+    const raw = rawOrder({
+      lineItems: { nodes: [line(1, 10, 1)], pageInfo: { hasNextPage: false } },
+      currentSubtotalPriceSet: bag("10.00"),
+      currentTotalPriceSet: bag("10.00"),
+      totalOutstandingSet: bag("-10.00"),
+    });
+    const completed = {
+      id: id("Refund", 9),
+      note: "Echelon order edit edit-1",
+      totalRefundedSet: bag("10.00"),
+      transactions: {
+        nodes: [tx(2, "10.00", "REFUND", "SUCCESS", 1)],
+        pageInfo: { hasNextPage: false },
+      },
+    };
+    const h = harness([
+      raw,
+      raw,
+      {
+        refundCreate: {
+          refund: {
+            ...completed,
+            note: null,
+            totalRefundedSet: bag("0.00"),
+            transactions: { nodes: [], pageInfo: { hasNextPage: false } },
+          },
+          userErrors: [],
+        },
+      },
+      {
+        ...raw,
+        order: {
+          ...raw.order,
+          refunds: [
+            {
+              ...completed,
+              id: id("Refund", 8),
+              note: null,
+              totalRefundedSet: bag("0.00"),
+              transactions: { nodes: [], pageInfo: { hasNextPage: false } },
+            },
+            completed,
+          ],
+        },
+      },
+    ]);
+    const intent = refundIntent(await h.provider.readOrder(4, "100"));
+    await expect(
+      h.provider.refund(4, intent, NOW.toISOString()),
+    ).rejects.toMatchObject({ code: "REFUND_READBACK_PENDING" });
+    expect(await h.provider.observeRefund(4, intent)).toMatchObject({
+      status: "succeeded",
+      refundId: id("Refund", 9),
+    });
+    expect(
+      h.requests.filter((request) => request.query.includes("refundCreate")),
+    ).toHaveLength(1);
+  });
+
+  it("observes an absent refund without submitting a command even inside the idempotency window", async () => {
+    const h = harness([rawOrder(), rawOrder()]);
+    const intent = refundIntent(await h.provider.readOrder(4, "100"));
+    expect(await h.provider.observeRefund(4, intent)).toBeNull();
+    expect(
+      h.requests.every((request) => !request.query.includes("refundCreate")),
+    ).toBe(true);
+  });
+
+  it("leaves conflicting refund evidence for staff review without resubmitting", async () => {
+    const h = harness([
+      rawOrder(),
+      rawOrder({
+        refunds: [
+          {
+            id: id("Refund", 9),
+            note: "Echelon order edit edit-1",
+            totalRefundedSet: bag("10.00"),
+            transactions: {
+              nodes: [tx(2, "9.00", "REFUND", "SUCCESS", 1)],
+              pageInfo: { hasNextPage: false },
+            },
+          },
+        ],
+      }),
+    ]);
+    const intent = refundIntent(await h.provider.readOrder(4, "100"));
+    await expect(h.provider.observeRefund(4, intent)).rejects.toMatchObject({
+      code: "REFUND_REVIEW_EVIDENCE_MISMATCH",
+    });
+    expect(
+      h.requests.every((request) => !request.query.includes("refundCreate")),
+    ).toBe(true);
+  });
+
   it.each(["PENDING", "AWAITING_RESPONSE", "UNKNOWN"])(
     "reads an existing %s refund with no settled money without sending it again",
     async (status) => {
@@ -4803,7 +4919,7 @@ function additionQuote(baseline: OrderEditSnapshot): OrderEditQuote {
 // Exact observed Shopify scopes for #64008, with synthetic commercial identities.
 const addedMemberLineId =
   "gid://shopify/CalculatedLineItem/385de2d5-a4b7-49f3-9a8f-10a609b835fe";
-function memberCreditOrder(extraQuantity = 0, includeHistorical = false) {
+function memberCreditOrder(extraQuantity = 0, includeHistorical = false, description = "Echelon member pricing") {
   const memberApplication = {
     __typename: "AutomaticDiscountApplication",
     index: 0,
@@ -4828,7 +4944,7 @@ function memberCreditOrder(extraQuantity = 0, includeHistorical = false) {
     targetType: "LINE_ITEM",
     allocationMethod: "EACH",
     targetSelection: "EXPLICIT",
-    title: "Echelon member pricing",
+    title: description,
     value: { __typename: "MoneyV2", amount: "30.00", currencyCode: "USD" },
   };
   const original = {
@@ -4922,6 +5038,7 @@ function memberCreditCalculated(
   extraQuantity = 0,
   member = true,
   committed = false,
+  description = "Echelon member pricing",
 ) {
   const original = calcLine(1, 10, 1, "149.99");
   original.calculatedDiscountAllocations = [
@@ -4954,7 +5071,7 @@ function memberCreditCalculated(
     },
   ];
   const extra = {
-    ...calcLine(2, 10, extraQuantity, "149.99", member ? "119.99" : "149.99"),
+    ...calcLine(2, 10, extraQuantity, "149.99", member ? "119.99" : "149.99", description),
     id: committed ? id("CalculatedLineItem", 2) : addedMemberLineId,
     editableQuantityBeforeChanges: committed ? extraQuantity : 0,
   };
@@ -5551,16 +5668,16 @@ describe("member function pricing on protected quantity increases", () => {
         "gid://shopify/CalculatedLineItem/../../Order/1";
     expect(orderEditQuoteSchema.safeParse(quote).success).toBe(false);
   });
-  it("recovers an unpaid increase by removing only the added unit, retaining the original member discount and reward", async () => {
+  it.each(["Echelon member pricing", "Shellz Club pricing"])("recovers an unpaid increase with %s and preserves its original discount and reward", async (description) => {
     const { quote, snapshot } = await quoteMemberIncrease();
-    const pending = memberCreditOrder(1);
+    const pending = memberCreditOrder(1, false, description);
     const h = harness([
       pending,
-      begin(memberCreditCalculated(1, true, true)),
-      quantity(memberCreditCalculated(0, true, true)),
+      begin(memberCreditCalculated(1, true, true, description)),
+      quantity(memberCreditCalculated(0, true, true, description)),
       pending,
       { orderEditCommit: { order: { id: id("Order", 100) }, userErrors: [] } },
-      memberCreditOrder(0, true),
+      memberCreditOrder(0, true, description),
     ]);
     const restored = await h.provider.recoverUnpaid(
       4,

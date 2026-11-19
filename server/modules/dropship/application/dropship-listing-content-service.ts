@@ -119,15 +119,15 @@ export class DropshipListingContentService {
     });
   }
   private async authorizeListing(tx: ContentTransaction, variantId: number): Promise<DropshipListingCatalogCandidate> {
-    const [candidates, rules, selections, overrides] = await Promise.all([
-      tx.catalog.listCatalogCandidates([variantId]), tx.catalog.listCatalogExposureRules(), tx.catalog.listSelectionRules(tx.vendorId),
+    const [candidates, rules, pickedIds, overrides] = await Promise.all([
+      tx.catalog.listCatalogCandidates([variantId]), tx.catalog.listCatalogExposureRules(), tx.catalog.listPickedVariantIds(tx.vendorId, [variantId]),
       tx.catalog.listVariantOverrides({ vendorId: tx.vendorId, productVariantIds: [variantId] }),
     ]);
     const candidate = candidates.find((row) => row.productVariantId === variantId);
     if (candidate) {
       const exposure = evaluateDropshipCatalogExposure(candidate, rules, this.deps.clock.now());
       const selection = evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
-        rules: selections, rawAtpUnits: 0, override: overrides.find((row) => row.productVariantId === variantId) ?? null });
+        picked: pickedIds.has(variantId), rawAtpUnits: 0, override: overrides.find((row) => row.productVariantId === variantId) ?? null });
       if (exposure.exposed && selection.selected) return candidate;
     }
     throw new DropshipError("DROPSHIP_CONTENT_NOT_AVAILABLE", "Select an available catalog item before editing its description.");

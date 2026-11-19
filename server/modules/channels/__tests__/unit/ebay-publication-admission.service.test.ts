@@ -53,6 +53,13 @@ describe("durable eBay publication admission",()=>{
     expect(f.jobs.enqueue).not.toHaveBeenCalled();expect(f.jobs.recordAdmissionFailure).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       channelId:67,productId:232,commandKey:input.commandKey,actor:"operator",code:"EBAY_LISTING_PREFLIGHT_FAILED"}));
   });
+  it("does not seal an uncertain source read as a permanent eligibility refusal", async () => {
+    const f = fixture(); f.readSource.mockRejectedValueOnce(new Error("connection lost"));
+    expect(await admitEbayPublication(input, f.deps)).toMatchObject({ code: "EBAY_SYNC_ADMISSION_UNSAVED" });
+    expect(f.jobs.recordAdmissionFailure).not.toHaveBeenCalled(); expect(f.jobs.enqueue).not.toHaveBeenCalled();
+    expect(await admitEbayPublication(input, f.deps)).toMatchObject({ status: "queued" });
+    expect(f.jobs.enqueue).toHaveBeenCalledOnce();
+  });
   it("rejects malformed commands before reading anything",async()=>{
     const f=fixture();await expect(admitEbayPublication({...input,commandKey:"no"},f.deps)).rejects.toThrow();
     expect(f.jobs.getByCommand).not.toHaveBeenCalled();expect(f.readSource).not.toHaveBeenCalled();

@@ -36,6 +36,21 @@ describe("product definition review with a broken channel listing", () => {
     expect(impact.channels).toEqual([expect.objectContaining({ targetId: 1, proposed: "3" })]);
   });
 
+  // Channels PR1: a channel Shopify destination with 1 of 3 sizes unlinked is row-isolated, so
+  // the review says only that size is not updating and the linked sizes stay in the change.
+  it("names only the unlinked sizes of a row-isolated channel Shopify destination", async () => {
+    const shopifyIsolated = { publicationTargetId: 1, channelId: 35, channelName: "Shopify", errorCode: "CANONICAL_PUBLICATION_MAPPING_MISSING",
+      blockerCodes: ["PUBLICATION_TARGET_VARIANT_MAPPING_MISSING"], productVariantIds: [102], isolation: "rows" };
+    const linked = [101, 103].map(productVariantId => ({ ...shopifyRow, productVariantId, sku: `SKU-${productVariantId}` }));
+    preview.mockResolvedValue({ rows: linked, blockedTargets: [shopifyIsolated] });
+    const impact = await captureDefinitionImpact({} as never, [20],
+      async () => ({ snapshotFingerprint: "b".repeat(64), variants: [], warehouses: [] }) as never);
+    expect(impact.blockers).toEqual([]);
+    expect(impact.skippedDestinations).toEqual(["Shopify: stock is not updating for 1 unlinked item(s) "
+      + "(CANONICAL_PUBLICATION_MAPPING_MISSING: PUBLICATION_TARGET_VARIANT_MAPPING_MISSING). Fix that listing; this change still applies."]);
+    expect(impact.channels.map(row => row.variantId)).toEqual([101, 103]);
+  });
+
   it("changes the review fingerprint when a destination becomes blocked", async () => {
     const snapshot = async () => ({ snapshotFingerprint: "b".repeat(64), variants: [], warehouses: [] }) as never;
     preview.mockResolvedValue({ rows: [shopifyRow], blockedTargets: [] });

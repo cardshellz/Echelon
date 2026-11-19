@@ -3,22 +3,22 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /**
- * Guards the test-typecheck ratchet.
+ * Guards the test-typecheck ratchet (permanently locked at 0 excluded test files).
  *
- * `tsconfig.tests.json` holds the exclusion list: test files that were already
- * failing when tests were first type-checked. It is debt and must only ever
- * shrink — adding an entry silences a real type error instead of fixing it, and
- * hands back the protection every unlisted file has.
+ * `tsconfig.tests.json` previously held a grandfathered exclusion list of 252
+ * test files that failed when test type-checking was introduced. That debt has
+ * been burned down completely to 0 (`PRs #2113, #2115` + `P2-3C`). Never add an
+ * entry to `tsconfig.tests.json`: fix the type error in the test or contract.
  *
  * The check runs as two halves (server and client) because sources plus every
  * test file exhausts Node's default heap on a CI runner. Both halves inherit the
- * one exclusion list, and between them they must cover everything the base
+ * single shared config, and between them they must cover everything the base
  * tsconfig compiles, or a whole area could stop being checked unnoticed.
- *
- * If this fails because the count went UP, remove the entry you added and fix
- * the file. If it went DOWN, lower BASELINE — that is the ratchet working.
  */
-const BASELINE_EXCLUDED_TEST_FILES = 252;
+const BASELINE_EXCLUDED_TEST_FILES = 0;
+
+const LOCKED_EXCLUDED_TEST_FILES: readonly string[] = Object.freeze([]);
+const LOCKED_EXCLUDED_TEST_FILES_SET = new Set<string>(LOCKED_EXCLUDED_TEST_FILES);
 
 const FIXED_EXCLUSIONS = ["node_modules", "build", "dist"];
 const HALVES = ["tsconfig.tests.server.json", "tsconfig.tests.client.json"];
@@ -35,6 +35,11 @@ function ratchetExclusions(): string[] {
 }
 
 describe("test typecheck ratchet", () => {
+  it("permanently enforces zero excluded test files across the repository", () => {
+    expect(ratchetExclusions()).toEqual([]);
+    expect(readConfig("tsconfig.tests.json").exclude).toEqual(FIXED_EXCLUSIONS);
+  });
+
   it("never grows the exclusion list", () => {
     expect(ratchetExclusions().length).toBeLessThanOrEqual(BASELINE_EXCLUDED_TEST_FILES);
   });
@@ -47,6 +52,14 @@ describe("test typecheck ratchet", () => {
     for (const entry of ratchetExclusions()) {
       expect(entry).toMatch(/\.test\.tsx?$/);
     }
+  });
+
+  it("locks the exact excluded test paths so no newly broken test can be swapped in", () => {
+    expect(LOCKED_EXCLUDED_TEST_FILES.length).toBe(BASELINE_EXCLUDED_TEST_FILES);
+    const current = ratchetExclusions();
+    expect(new Set(current).size).toBe(current.length);
+    const unauthorized = current.filter((entry) => !LOCKED_EXCLUDED_TEST_FILES_SET.has(entry));
+    expect(unauthorized).toEqual([]);
   });
 
   it("covers every area the base tsconfig compiles, so no half is left unchecked", () => {

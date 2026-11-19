@@ -91,7 +91,7 @@ describe("immutable supplier return credit difference review", () => {
     it("never includes accepted-return credit money or references in gross purchase/shipment cost sources", () => {
         const credit = { id: 1, supplier_credit_id: 2, invoice_line_id: 3, amount_cents: 200, status: "approved",
             disposition: { kind: "accepted_stock_return", supplierReturnLineId: 4, quantity: 2, evidenceReference: "collection", component: "product" }, source_evidence: {} };
-        expect(resolveSupplierCreditReductions([], [credit])).toEqual({ productMills: BigInt(0), packagingMills: BigInt(0), basePieces: BigInt(0), issues: [], sources: [], returns: [] });
+        expect(resolveSupplierCreditReductions([], [credit])).toEqual({ productMills: BigInt(0), packagingMills: BigInt(0), basePieces: BigInt(0), taxInventoryMills: BigInt(0), taxRecoverableMills: BigInt(0), issues: [], sources: [], returns: [] });
         expect(resolveShipmentSupplierCredits({ charges: [], allocations: [], invoices: [], credits: [credit] })).toMatchObject({ issues: [], sources: [] });
     });
 });

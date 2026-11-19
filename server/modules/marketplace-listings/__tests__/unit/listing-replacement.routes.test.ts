@@ -266,7 +266,9 @@ class FakeResolver implements MarketplaceListingReplacementServiceResolver {
   input: any = null;
   executionInput: any = null;
   recoveryInput: any = null;
-  forOwner(owner: any) {
+  forOwner(
+    owner: any,
+  ): ReturnType<MarketplaceListingReplacementServiceResolver["forOwner"]> {
     this.owner = owner;
     return {
       plan: async (input: unknown) => {
@@ -287,7 +289,9 @@ class FakeResolver implements MarketplaceListingReplacementServiceResolver {
           stepKey: "switch_mapping.activate_target",
         };
       },
-    };
+    } as unknown as ReturnType<
+      MarketplaceListingReplacementServiceResolver["forOwner"]
+    >;
   }
 }
 function buildApp(resolver: MarketplaceListingReplacementServiceResolver) {

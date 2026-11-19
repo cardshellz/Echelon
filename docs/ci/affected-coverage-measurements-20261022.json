@@ -1,0 +1,252 @@
+{
+  "version": 1,
+  "date": "2026-10-22",
+  "applicationBase": "9079c72952557c2f8acccc921d5cf5ba9cd15f1b",
+  "ciImplementationCommit": "2e9b700fac76f12813173dacbb032432d38b9344",
+  "environment": {
+    "platform": "win32",
+    "node": "v24.19.0",
+    "playwright": "1.63.0",
+    "logicalProcessors": 24
+  },
+  "methodology": "One local before/after trial on a shared Windows development machine. Full and selected runs were sequential, each with four independent Playwright processes and separate ports/output folders. Other validation also ran on this machine. These measurements exclude hosted queue, npm/container setup and other workflows; they are not an end-to-end GitHub latency guarantee.",
+  "browser": {
+    "configuration": "playwright.inventory.config.ts",
+    "coverageProjects": [
+      "desktop",
+      "mobile"
+    ],
+    "baseline": {
+      "feature": "all",
+      "cases": 816,
+      "passed": 814,
+      "existingSkipped": 2,
+      "wallMs": 635498,
+      "runnerMs": 2234400,
+      "jobs": [
+        {
+          "shard": 1,
+          "code": 0,
+          "signal": null,
+          "ms": 635496.4468
+        },
+        {
+          "shard": 2,
+          "code": 0,
+          "signal": null,
+          "ms": 506000.2716
+        },
+        {
+          "shard": 3,
+          "code": 0,
+          "signal": null,
+          "ms": 613530.2262
+        },
+        {
+          "shard": 4,
+          "code": 0,
+          "signal": null,
+          "ms": 479372.6592
+        }
+      ]
+    },
+    "selected": {
+      "feature": "ebay",
+      "cases": 344,
+      "passed": 344,
+      "existingSkipped": 0,
+      "wallMs": 317174,
+      "runnerMs": 934721,
+      "jobs": [
+        {
+          "shard": 1,
+          "code": 0,
+          "signal": null,
+          "ms": 313777.6081
+        },
+        {
+          "shard": 2,
+          "code": 0,
+          "signal": null,
+          "ms": 153296.70909999998
+        },
+        {
+          "shard": 3,
+          "code": 0,
+          "signal": null,
+          "ms": 317154.8925
+        },
+        {
+          "shard": 4,
+          "code": 0,
+          "signal": null,
+          "ms": 150491.9149
+        }
+      ]
+    },
+    "savings": {
+      "wallMs": 318324,
+      "wallPercent": 50.09,
+      "runnerMs": 1299678,
+      "runnerPercent": 58.17
+    },
+    "command": "node node_modules/@playwright/test/cli.js test --config playwright.inventory.config.ts --shard=N/4 --forbid-only --reporter=line --output=<separate directory>",
+    "environment": "CI=1; BROWSER_FEATURE=all or ebay; INVENTORY_PLAYWRIGHT_PORT=5201..5204",
+    "excludedTrial": {
+      "feature": "ebay",
+      "shards": 2,
+      "wallMs": 465006,
+      "reason": "Failed initial mobile page setup: 45-second test timeout waiting for the fixture product. Not used for the successful comparison. No retries, timeout changes, skipped assertions or product fixes were added.",
+      "jobs": [
+        {
+          "shard": 1,
+          "code": 0,
+          "signal": null,
+          "ms": 456456.65150000015
+        },
+        {
+          "shard": 2,
+          "code": 1,
+          "signal": null,
+          "ms": 464990.46739999996
+        }
+      ]
+    }
+  },
+  "postgres": {
+    "applicationBase": "9079c72952557c2f8acccc921d5cf5ba9cd15f1b",
+    "version": 17,
+    "files": 17,
+    "passed": 337,
+    "wallMs": 214527,
+    "freshDatabaseAndProcessPerFile": true,
+    "ownedDatabasesRemaining": 0,
+    "clusterStopped": true
+  },
+  "coverageSafeguards": {
+    "originalDuplicateGuardFiles": 9,
+    "guardFilesNow": 10,
+    "unitDiscovery": "Full unit discovery equals the disjoint union of guard and remaining-unit lanes.",
+    "browserDiscovery": "Original full Playwright case IDs equal the union of all feature shards, with each desktop/mobile case exactly once.",
+    "uncertainty": "Full coverage; invalid, missing or contradictory execution plans cannot report success."
+  },
+  "limits": [
+    "PostgreSQL hosted CI uses PostgreSQL 16, while the local disposable cluster is PostgreSQL 17.",
+    "A complete PR is evaluated, not only its latest commit. Shared contracts or unclassified server composition still select full PostgreSQL coverage.",
+    "Procurement, returns and order editing retain real application startup dependencies.",
+    "Main advanced after this benchmark; its additional PostgreSQL tests remain in the authoritative manifest. Final branch guards/typecheck are run separately."
+  ],
+  "postMergeSelectionReplay": {
+    "mainCommit": "84abd1304bf3ce3a9b5f2ab18d197bf75c19a1c5",
+    "evaluatedCommit": "67d2c1357365d2dbb38d764ddc0649a73fd74a49",
+    "postgresManifestFiles": 222,
+    "scenarios": [
+      {
+        "changedPath": "client/src/pages/EbayChannelPage.tsx",
+        "postgresSelectedFiles": 0,
+        "postgresReasons": [],
+        "inventoryMatrix": {
+          "include": [
+            {
+              "feature": "ebay",
+              "shard": 1,
+              "shards": 4
+            },
+            {
+              "feature": "ebay",
+              "shard": 2,
+              "shards": 4
+            },
+            {
+              "feature": "ebay",
+              "shard": 3,
+              "shards": 4
+            },
+            {
+              "feature": "ebay",
+              "shard": 4,
+              "shards": 4
+            }
+          ]
+        },
+        "returnsRun": true,
+        "procurementRun": true
+      },
+      {
+        "changedPath": "server/modules/channels/ebay-listing-sync.service.ts",
+        "postgresSelectedFiles": 95,
+        "postgresReasons": [
+          {
+            "owner": "modules/channels",
+            "run": true,
+            "reason": "Suite-owned path: server/modules/channels/ebay-listing-sync.service.ts"
+          },
+          {
+            "owner": "modules/marketplace-listings",
+            "run": true,
+            "reason": "Transitive suite dependency: server/modules/channels/ebay-listing-sync.service.ts"
+          },
+          {
+            "owner": "modules/inventory-planning",
+            "run": true,
+            "reason": "Transitive suite dependency: server/modules/channels/ebay-listing-sync.service.ts"
+          },
+          {
+            "owner": "modules/catalog",
+            "run": true,
+            "reason": "Transitive suite dependency: server/modules/channels/ebay-listing-sync.service.ts"
+          },
+          {
+            "owner": "modules/oms",
+            "run": true,
+            "reason": "Transitive suite dependency: server/modules/channels/ebay-listing-sync.service.ts"
+          }
+        ],
+        "inventoryMatrix": {
+          "include": []
+        },
+        "returnsRun": false,
+        "procurementRun": false
+      },
+      {
+        "changedPath": "test/browser/ebay-listing-photos.spec.ts",
+        "postgresSelectedFiles": 0,
+        "postgresReasons": [],
+        "inventoryMatrix": {
+          "include": [
+            {
+              "feature": "ebay",
+              "shard": 1,
+              "shards": 4
+            },
+            {
+              "feature": "ebay",
+              "shard": 2,
+              "shards": 4
+            },
+            {
+              "feature": "ebay",
+              "shard": 3,
+              "shards": 4
+            },
+            {
+              "feature": "ebay",
+              "shard": 4,
+              "shards": 4
+            }
+          ]
+        },
+        "returnsRun": false,
+        "procurementRun": false
+      }
+    ],
+    "note": "Selection results, not additional test executions."
+  },
+  "postMergeValidation": {
+    "commit": "67d2c1357365d2dbb38d764ddc0649a73fd74a49",
+    "guardTestsPassed": 406,
+    "guardFilesPassed": 10,
+    "strictServerTestTypes": "passed",
+    "workflowYamlFilesParsed": 6
+  }
+}

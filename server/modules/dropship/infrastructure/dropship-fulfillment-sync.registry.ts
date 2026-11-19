@@ -1,6 +1,7 @@
 import type {
   DropshipCanonicalAcceptanceFulfillment,
   DropshipInventoryRuntimeAuthorityGate,
+  DropshipMarketplaceCancelStop,
   DropshipOmsFulfillmentSync,
 } from "../application/dropship-ports";
 
@@ -30,4 +31,15 @@ export function setDropshipInventoryRuntimeAuthorityGate(
 
 export function getDropshipInventoryRuntimeAuthorityGate(): DropshipInventoryRuntimeAuthorityGate | undefined {
   return inventoryRuntimeAuthority ?? undefined;
+}
+
+let marketplaceCancelStop: DropshipMarketplaceCancelStop | null = null;
+
+/** OMS's stop for accepted orders the marketplace cancelled (plan v4 §7.2), set at boot (server/index.ts). */
+export function setDropshipMarketplaceCancelStop(stop: DropshipMarketplaceCancelStop): void {
+  marketplaceCancelStop = stop;
+}
+
+export function getDropshipMarketplaceCancelStop(): DropshipMarketplaceCancelStop | undefined {
+  return marketplaceCancelStop ?? undefined;
 }

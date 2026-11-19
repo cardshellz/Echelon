@@ -4,6 +4,7 @@ import type { InventoryAvailabilityTransactionQueryClient } from "../application
 import { InventoryCutoverManifestError } from "../domain/inventory-cutover-manifest";
 import { assertInventoryCutoverFenceHeldInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { z } from "zod";
+import { wakeQuantityCatchupsForMappingsInsideTransaction } from "./quantity-catchup-parking.repository";
 
 // SQL identifiers are an internal exhaustive allowlist, never request text.
 const DEFINITION_TABLES = {
@@ -36,6 +37,7 @@ export async function promoteInventoryCutoverDefinitionsInsideTransaction(
   const audit = auditResult.data;
   await assertInventoryCutoverFenceHeldInsideTransaction(client);
   let promoted = 0;
+  const sealedMappingIds: number[] = [];
   for (const selection of manifest.selections) {
     const table = DEFINITION_TABLES[selection.kind];
     const heads = (await client.query<HeadEvidence>(
@@ -67,8 +69,12 @@ export async function promoteInventoryCutoverDefinitionsInsideTransaction(
       [selection.key, selection.definitionId, audit.actor, audit.reason, head.revision],
     );
     if (updated.rowCount !== 1) throw changed(selection);
+    if (selection.kind === "variant_mapping") sealedMappingIds.push(Number(selection.definitionId));
     promoted++;
   }
+  // Channels PR5 (PLAN-CH-v3 3.4 step 11): stock updates parked while this size had no link resume with it, in this
+  // same transaction, whichever writer sealed the link.
+  await wakeQuantityCatchupsForMappingsInsideTransaction(client, sealedMappingIds, audit.occurredAt);
   return promoted;
 }
 

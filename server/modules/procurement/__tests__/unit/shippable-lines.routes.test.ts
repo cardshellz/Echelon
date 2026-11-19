@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 // Planning endpoints have their own route suite; this fixture registers only the owner under test.
 vi.mock("../../purchase-planning-policy.routes", () => ({ registerPurchasePlanningPolicyRoutes: vi.fn() }));
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -41,8 +42,8 @@ vi.mock("../../../../modules/orders", () => ({ ordersStorage: {} }));
 vi.mock("../../procurement", () => ({ procurementStorage: { getVendorById: vi.fn() } }));
 vi.mock("../../ap-ledger.service", () => ({}));
 vi.mock("../../po-document", () => ({ renderPoHtml: vi.fn() }));
-vi.mock("../../../notifications/email.service", () => ({}));
-vi.mock("../../../notifications/notifications.service", () => ({}));
+vi.mock("../../../notifications/email-delivery.api", () => ({}));
+vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
 import { registerPurchasingRoutes } from "../../procurement.routes";
 
@@ -90,7 +91,7 @@ function buildApp(purchasing: any, shipmentTracking: any): Express {
     shipmentTracking,
     receiving: {},
     poExceptions: {},
-  };
+  } as any;
   registerPurchasingRoutes(app);
   return app;
 }
@@ -108,7 +109,7 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
 }
 
 async function get(baseUrl: string, path: string): Promise<{ status: number; body: any }> {
-  const res = await fetch(`${baseUrl}${path}`);
+  const res = await requestLocalHttp(`${baseUrl}${path}`);
   const text = await res.text();
   return { status: res.status, body: text ? JSON.parse(text) : null };
 }

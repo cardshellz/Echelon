@@ -1,5 +1,7 @@
 import type { Express, Response } from "express";
 import { parseWarehouseSettingsCreation, parseWarehouseSettingsId, parseWarehouseSettingsWrite, WarehouseSettingsWriteError } from "./domain/warehouse-settings-write";
+import { parseWarehouseLocationId, parseWarehouseLocationPatch, WarehouseLocationWriteError } from "./domain/warehouse-location-write";
+import { assertPickFaceAssignmentEligible } from "./location-integrity";
 import { registerWarehouseInventorySourceRoutes } from "./interfaces/warehouse-inventory-source.routes";
 import { z } from "zod";
 import { createBinAssignmentService, warehouseStorage } from "../warehouse";
@@ -12,12 +14,14 @@ import { inventoryStorage } from "../inventory";
 import { db } from "../../storage/base";
 const storage = { ...warehouseStorage, ...catalogStorage, ...inventoryStorage };
 import { requirePermission } from "../../routes/middleware";
-import { coerceTimeZone, parseCutoffMinutes } from "../orders/sort-rank";
+import { coerceTimeZone, parseCutoffMinutes } from "../orders/sort-rank-and-priority.api";
 import { getWarehouseById } from "./infrastructure/warehouse.repository";
 import { getSlaCutoffConfig } from "./settings.resolver";
-import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
-import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
-import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+import {
+  createInventoryLegacyAdminControlService,
+  INVENTORY_LEGACY_ADMIN_CONTROLS,
+  sendInventoryLegacyAdminControlError,
+} from "../inventory-planning/legacy-admin-control.api";
 
 import { insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertFulfillmentRoutingRuleSchema, routingMatchTypeEnum } from "@shared/schema";
 
@@ -26,6 +30,13 @@ type WarehouseRouteTransaction = Pick<typeof db, "select" | "insert" | "update" 
 function sendWarehouseSettingsWriteError(res: Response, error: unknown): boolean {
   if (!(error instanceof WarehouseSettingsWriteError)) return false;
   console.warn(JSON.stringify({ event: "warehouse_settings_write_rejected", code: error.code, context: error.context }));
+  res.status(error.statusCode).json({ error: error.message, details: { code: error.code, context: error.context } });
+  return true;
+}
+
+function sendWarehouseLocationWriteError(res: Response, error: unknown): boolean {
+  if (!(error instanceof WarehouseLocationWriteError)) return false;
+  console.warn(JSON.stringify({ event: "warehouse_location_write_rejected", code: error.code, context: error.context }));
   res.status(error.statusCode).json({ error: error.message, details: { code: error.code, context: error.context } });
   return true;
 }
@@ -88,7 +99,7 @@ export function registerWarehouseRoutes(app: Express) {
   app.get("/api/warehouses", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const warehouses = await storage.getAllWarehouses();
-      res.json(warehouses);
+      res.json(warehouses.filter((warehouse) => warehouse.warehouseType !== "system_transit"));
     } catch (error) {
       console.error("Error fetching warehouses:", error);
       res.status(500).json({ error: "Failed to fetch warehouses" });
@@ -490,7 +501,7 @@ export function registerWarehouseRoutes(app: Express) {
       const locations = await storage.getAllWarehouseLocations();
       const primarySkuMap = await storage.getSkusByWarehouseLocation();
 
-      const enriched = locations.map(loc => ({
+      const enriched = locations.filter((loc) => loc.locationType !== "in_transit").map(loc => ({
         ...loc,
         primarySku: primarySkuMap.get(loc.id) || null,
       }));
@@ -562,13 +573,15 @@ export function registerWarehouseRoutes(app: Express) {
 
   app.patch("/api/warehouse/locations/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
-      const location = await storage.updateWarehouseLocation(id, req.body);
+      const id = parseWarehouseLocationId(req.params.id);
+      const patch = parseWarehouseLocationPatch(req.body);
+      const location = await storage.updateWarehouseLocation(id, patch);
       if (!location) {
         return res.status(404).json({ error: "Location not found" });
       }
       res.json(location);
     } catch (error: any) {
+      if (sendWarehouseLocationWriteError(res, error)) return;
       console.error("Error updating warehouse location:", error);
       res.status(400).json({ error: error.message || "Failed to update location" });
     }
@@ -657,6 +670,11 @@ export function registerWarehouseRoutes(app: Express) {
       if (!targetLocation) {
         return res.status(404).json({ error: "Target location not found" });
       }
+      try {
+        assertPickFaceAssignmentEligible(targetLocation);
+      } catch (validationError: any) {
+        return res.status(400).json({ error: validationError.message });
+      }
       
       const reassigned = await storage.bulkReassignProducts(
         sourceLocationIds,
@@ -679,6 +697,7 @@ export function registerWarehouseRoutes(app: Express) {
       }
       
       const results = { created: 0, updated: 0, errors: [] as string[] };
+      const existingLocations = await storage.getAllWarehouseLocations();
       
       for (let i = 0; i < locations.length; i++) {
         const loc = locations[i];
@@ -710,7 +729,6 @@ export function registerWarehouseRoutes(app: Express) {
           const codeParts = [zone, aisle, bay, level, bin].filter(Boolean);
           const code = loc.code?.trim() || codeParts.join("-");
           
-          const existingLocations = await storage.getAllWarehouseLocations();
           let existing = existingLocations.find(l =>
             l.code === code &&
             (effectiveWarehouseId == null || l.warehouseId === effectiveWarehouseId)
@@ -731,6 +749,7 @@ export function registerWarehouseRoutes(app: Express) {
             bin,
             name: loc.name?.trim() || null,
             locationType: (loc.locationType || loc.location_type || existing?.locationType || "pick").trim(),
+            binType: (loc.binType || loc.bin_type || existing?.binType || "bin").toString().trim().toLowerCase(),
             isPickable: loc.isPickable !== undefined || loc.is_pickable !== undefined 
               ? parseInt(loc.isPickable ?? loc.is_pickable) 
               : (existing?.isPickable ?? 1),
@@ -747,10 +766,14 @@ export function registerWarehouseRoutes(app: Express) {
           };
           
           if (existing) {
-            await storage.updateWarehouseLocation(existing.id, locationData);
+            const updatedLoc = await storage.updateWarehouseLocation(existing.id, locationData);
+            if (updatedLoc) {
+              Object.assign(existing, updatedLoc);
+            }
             results.updated++;
           } else {
-            await storage.createWarehouseLocation(locationData);
+            const createdLoc = await storage.createWarehouseLocation(locationData);
+            existingLocations.push(createdLoc);
             results.created++;
           }
         } catch (err: any) {

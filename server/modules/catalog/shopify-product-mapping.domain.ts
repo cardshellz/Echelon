@@ -33,6 +33,7 @@ export interface ShopifyProductMappingSource {
   channel: {
     id: number;
     name: string;
+    isPrimary?: boolean;
   };
   variants: ShopifyProductMappingVariantEvidence[];
 }
@@ -67,8 +68,21 @@ export interface ShopifyVariantMappingResolution {
   remoteBarcode: string | null;
   remoteVariantId: string;
   remoteInventoryItemId: string;
-  matchedBy: "existing_id" | "exact_sku" | "import_binding";
+  matchedBy: "existing_id" | "exact_sku" | "import_binding" | "operator_selection";
   replacedVariantIds: string[];
+}
+
+/**
+ * An active SKU whose linked Shopify variant no longer exists on the verified
+ * product, and whose SKU matches no live variant there. Shopify cannot move a
+ * variant between products, so absence from the product's complete variant
+ * list means it was deleted. The repair records the SKU as not listed on this
+ * store instead of blocking every other SKU on the product.
+ */
+export interface ShopifyVariantDelistResolution {
+  variantId: number;
+  sku: string | null;
+  deletedVariantIds: string[];
 }
 
 export type ImportedShopifyProductMappingDecision =
@@ -82,6 +96,7 @@ export type ShopifyProductMappingRepairEvaluation =
       targetProductId: string;
       mappedVariantIds: string[];
       variantMappings: ShopifyVariantMappingResolution[];
+      delistedVariants: ShopifyVariantDelistResolution[];
     }
   | {
       ok: false;
@@ -263,6 +278,8 @@ export function evaluateShopifyProductMappingRepair(input: {
   verifiedRemoteVariants: readonly VerifiedShopifyVariantIdentity[];
   allowUnmappedAdoption?: boolean;
   importedVariantBindings?: readonly ImportedShopifyVariantBinding[];
+  /** Explicit IDs selected in the product connection review, never an import guess. */
+  operatorVariantBindings?: readonly ImportedShopifyVariantBinding[];
   expectedVariant?: {
     variantId: number;
     remoteVariantId: string | number | null | undefined;
@@ -329,7 +346,12 @@ export function evaluateShopifyProductMappingRepair(input: {
   const issues: Array<Record<string, unknown>> = [];
   const importedRemoteIdByVariantId = new Map<number, string>();
   const importedVariantIdByRemoteId = new Map<string, number>();
-  for (const [index, binding] of (input.importedVariantBindings ?? []).entries()) {
+  const operatorSelection = input.operatorVariantBindings !== undefined;
+  const explicitBindings = input.operatorVariantBindings ?? input.importedVariantBindings ?? [];
+  if (input.operatorVariantBindings && input.importedVariantBindings) {
+    return { ok: false, code: "SHOPIFY_MAPPING_NOT_REPAIRABLE", context: { reason: "Mixed mapping authorities" } };
+  }
+  for (const [index, binding] of explicitBindings.entries()) {
     const variantId = binding?.variantId;
     const remoteVariantId = normalizeShopifyId(binding?.remoteVariantId);
     if (!Number.isInteger(variantId) || variantId <= 0 || !remoteVariantId) {
@@ -364,6 +386,7 @@ export function evaluateShopifyProductMappingRepair(input: {
   }
 
   const variantMappings: ShopifyVariantMappingResolution[] = [];
+  const delistedVariants: ShopifyVariantDelistResolution[] = [];
   const assignedRemoteIds = new Map<string, number>();
   const activeVariants = input.summary.variants.filter((candidate) => candidate.isActive);
   const activeVariantIds = new Set(activeVariants.map((variant) => variant.variantId));
@@ -390,7 +413,7 @@ export function evaluateShopifyProductMappingRepair(input: {
     let selected = importedRemoteVariant ?? (verifiedIdMatches.length === 1 ? verifiedIdMatches[0] : null);
     let matchedBy: ShopifyVariantMappingResolution["matchedBy"] = "existing_id";
     if (importedRemoteId) {
-      matchedBy = "import_binding";
+      matchedBy = operatorSelection ? "operator_selection" : "import_binding";
       if (!importedRemoteVariant) {
         issues.push({
           code: "IMPORT_BINDING_REMOTE_VARIANT_NOT_FOUND",
@@ -411,7 +434,7 @@ export function evaluateShopifyProductMappingRepair(input: {
         continue;
       }
       if (
-        normalizedSku
+        !operatorSelection && normalizedSku
         && !skuMatchesVerifiedVariant(normalizedSku, importedRemoteVariant)
       ) {
         issues.push({
@@ -423,7 +446,7 @@ export function evaluateShopifyProductMappingRepair(input: {
         });
         continue;
       }
-      if (skuMatches.length === 1 && skuMatches[0].id !== importedRemoteId) {
+      if (!operatorSelection && skuMatches.length === 1 && skuMatches[0].id !== importedRemoteId) {
         issues.push({
           code: "IMPORT_BINDING_SKU_CONFLICT",
           variantId: variant.variantId,
@@ -472,6 +495,16 @@ export function evaluateShopifyProductMappingRepair(input: {
       matchedBy = "exact_sku";
       if (!normalizedSku) {
         issues.push({ code: "LOCAL_SKU_MISSING", variantId: variant.variantId });
+        continue;
+      }
+      if (skuMatches.length === 0 && existingIds.length > 0 && verifiedIdMatches.length === 0) {
+        // Every ID this SKU was linked to is gone from the verified product and
+        // no live variant carries its SKU: the Shopify variant was deleted.
+        delistedVariants.push({
+          variantId: variant.variantId,
+          sku: variant.sku,
+          deletedVariantIds: existingIds,
+        });
         continue;
       }
       if (skuMatches.length === 0) {
@@ -542,6 +575,15 @@ export function evaluateShopifyProductMappingRepair(input: {
     }
   }
 
+  if (activeVariants.length > 0 && variantMappings.length === 0 && delistedVariants.length > 0) {
+    // Delisting every SKU would leave the product attached to Shopify with
+    // nothing on it. That is an unmapping decision, not a repair.
+    issues.push({
+      code: "NO_ACTIVE_VARIANT_ON_SHOPIFY",
+      delistedVariantIds: delistedVariants.map((variant) => variant.variantId),
+    });
+  }
+
   if (issues.length > 0) {
     return {
       ok: false,
@@ -555,6 +597,7 @@ export function evaluateShopifyProductMappingRepair(input: {
     targetProductId,
     mappedVariantIds: variantMappings.map((variant) => variant.remoteVariantId).sort(),
     variantMappings,
+    delistedVariants,
   };
 }
 

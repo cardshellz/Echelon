@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po, receipt } from "./procurement-fixtures";
+import { costLinkRepair } from "../fixtures/cost-link-repair";
 import {
   correctionContext,
   correctionInput,
@@ -13,6 +14,8 @@ async function install(
     loseResponse = false,
     shipmentEdit = false,
     missingHistory = false,
+    repairLinks = false,
+    linksAlreadyReviewed = false,
   } = {},
 ) {
   const failures = await installFixtures(page);
@@ -31,44 +34,65 @@ async function install(
     poRemainingPieces: { before: 0, after: 0 },
   };
   const { receipts: _, ...shipmentInput } = correctionInput;
-  const reviewSummary = missingHistory
-    ? {
-        ...correctionSummary,
-        shipmentCostReview: {
-          beforeUnassignedMills: 500000,
-          afterUnassignedMills: 500000,
-          needsHistoryReview: true,
-          affectedLots: [
-            {
-              lotId: 501,
-              lotNumber: "RECEIPT-TRANSFER-LOT",
-              receiptId: 31,
-              receivedUnits: 2,
-              onHandUnits: 0,
-            },
-          ],
-        },
-        costResults: [
-          {
-            component: "landed" as const,
-            shipmentId: 42,
-            status: "review_required" as const,
-            lotsUpdated: 0,
-            orderCostsUpdated: 0,
-            orderCostDeltaCents: 0,
-            issues: [
+  const reviewSummary = repairLinks
+    ? { ...correctionSummary, costLinkRepair }
+    : missingHistory
+      ? {
+          ...correctionSummary,
+          shipmentCostReview: {
+            beforeUnassignedMills: 500000,
+            afterUnassignedMills: 500000,
+            needsHistoryReview: true,
+            affectedLots: [
               {
-                code: "COST_HISTORICAL_LINEAGE_MISSING",
-                message: "The recorded transfer is missing its cost link.",
+                lotId: 501,
+                lotNumber: "RECEIPT-TRANSFER-LOT",
+                receiptId: 31,
+                receivedUnits: 2,
+                onHandUnits: 0,
               },
             ],
           },
-        ],
-      }
-    : correctionSummary;
+          costResults: [
+            {
+              component: "landed" as const,
+              shipmentId: 42,
+              status: "review_required" as const,
+              lotsUpdated: 0,
+              orderCostsUpdated: 0,
+              orderCostDeltaCents: 0,
+              issues: [
+                {
+                  code: linksAlreadyReviewed
+                    ? "COST_UNRESOLVED_QUANTITY_RETAINED"
+                    : "COST_HISTORICAL_LINEAGE_MISSING",
+                  message: linksAlreadyReviewed
+                    ? "Three packs still have no recorded destination. Their cost remains unassigned."
+                    : "The recorded transfer is missing its cost link.",
+                  ...(linksAlreadyReviewed
+                    ? { costLinksAlreadyReviewed: true as const }
+                    : {}),
+                },
+              ],
+            },
+          ],
+        }
+      : correctionSummary;
   await page.route("**/api/**", async (route) => {
     const request = route.request(),
       path = new URL(request.url()).pathname;
+    const relationship = path.match(/^\/api\/procurement\/relationships\/(purchase|shipment|receipt)\/(\d+)$/);
+    if (relationship) return route.fulfill({ json: {
+      root: { kind: relationship[1], id: Number(relationship[2]) },
+      purchases: [{ id: 17, number: "TEST-PO-17" }],
+      purchaseLines: [{ id: 171, purchaseId: 17, lineNumber: 1, sku: "TEST-SKU", product: "Test product", orderedPieces: 2000 }],
+      shipments: [{ id: 42, number: "TEST-SHIP-42", status: "closed" }],
+      shipmentLines: [{ id: 1, shipmentId: 42, purchaseId: 17, purchaseLineId: 171, sku: "TEST-SKU", product: "Test product", shippedPieces: posted ? 2000 : 200 }],
+      receipts: [{ id: 31, number: "TEST-RECEIPT-31", status: "closed", purchaseId: 17, shipmentId: 42 }],
+      receiptLines: [{ id: 32, receiptId: 31, shipmentLineId: 1, purchaseLineId: 171, sku: "TEST-SKU", receivedUnits: 2, reversedUnits: 0, piecesPerUnit: posted || shipmentEdit ? 1000 : 100 }],
+      charges: [{ id: 401, shipmentId: 42, currency: "USD", cents: 5000 }],
+      allocations: [{ costId: 401, shipmentLineId: 1, currency: "USD", cents: 5000 }], costIssues: [],
+    } });
     if (missingHistory && path === "/api/purchase-orders/17/shipment-costs")
       return route.fulfill({
         json: {
@@ -133,7 +157,9 @@ async function install(
       const { previewVersion: _, ...expected } = shipmentEdit
         ? shipmentInput
         : correctionInput;
-      expect(request.postDataJSON()).toEqual(expected);
+      expect(request.postDataJSON()).toEqual(
+        repairLinks ? { ...expected, repairCostLinks: true } : expected,
+      );
       return route.fulfill({
         json: {
           sourceVersion: "a".repeat(64),
@@ -161,7 +187,8 @@ async function install(
         }
       }
       const current = correctionContext(posted);
-      if (posted && missingHistory) current.history[0].summary = reviewSummary;
+      if (posted && (missingHistory || repairLinks))
+        current.history[0].summary = reviewSummary;
       if (shipmentEdit) {
         current.receipts = correctionContext(true).receipts;
         if (posted) current.history[0].summary = shipmentSummary;
@@ -408,11 +435,9 @@ test("shipment edit reviews and saves shipped pieces while the correct receipt s
   expect(commands).toHaveLength(1);
   expect(commands[0].body).toEqual(expected);
   await dialog.getByRole("button", { name: "Done", exact: true }).click();
-  if (info.project.name === "mobile") {
-    await expect(
-      page.getByText("2,000 pieces", { exact: true }).filter({ visible: true }),
-    ).toBeVisible();
-  } else await expect(page.getByRole("table").first()).toContainText("2,000");
+  const relationshipLine = page.getByTestId("relationship-line-1");
+  await expect(relationshipLine).toContainText("2,000");
+  await expect(relationshipLine).toContainText("2,000 pieces received");
   await page.goto("/purchase-orders/17?tab=lines");
   await expect(
     page.getByRole("button", {
@@ -437,6 +462,144 @@ async function openCombinedFromShipment(page: Page) {
     .check();
   return dialog;
 }
+
+test("PO cost review opens the affected shipment's history repair in place", async ({
+  page,
+}) => {
+  const { commands, failures } = await install(page, { missingHistory: true });
+  await page.goto("/purchase-orders/17?tab=lines");
+  const originalUrl = page.url();
+  await page
+    .getByRole("button", { name: "Review costs", exact: true })
+    .click();
+  await page
+    .getByRole("button", {
+      name: "Review missing links",
+      exact: true,
+    })
+    .click();
+  const dialog = page.getByRole("dialog").last();
+  await expect(dialog).toBeVisible();
+  await expect(
+    dialog.getByRole("checkbox", {
+      name: "Also correct received quantities",
+      exact: true,
+    }),
+  ).toBeChecked();
+  await expect(
+    dialog.getByRole("checkbox", {
+      name: "Restore missing transfer and repacking cost links",
+      exact: true,
+    }),
+  ).toBeChecked();
+  await expect(dialog.getByLabel(/TEST-RECEIPT-31/)).toBeVisible();
+  expect(page.url()).toBe(originalUrl);
+  expect(commands).toEqual([]);
+  expect(failures).toEqual([]);
+});
+
+test("remaining stock gaps stay visible without asking for the same history approval again", async ({
+  page,
+}) => {
+  const { commands, failures } = await install(page, {
+    missingHistory: true,
+    linksAlreadyReviewed: true,
+  });
+  await page.goto("/purchase-orders/17?tab=lines");
+  await page
+    .getByRole("button", { name: "Review costs", exact: true })
+    .click();
+  await expect(
+    page.getByText(/The transfer and repacking links were already reviewed/),
+  ).toBeVisible();
+  await page
+    .getByTestId("cost-task-shipment:1")
+    .getByText("Saved records and technical details", { exact: true })
+    .click();
+  await expect(
+    page.getByText(
+      "Three packs still have no recorded destination. Their cost remains unassigned.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", {
+      name: "Review missing links",
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  expect(commands).toEqual([]);
+  expect(failures).toEqual([]);
+});
+
+test("one approval restores reviewed transfer and repacking links with quantity and cost before/after", async ({
+  page,
+}, info) => {
+  const { commands, failures } = await install(page, { repairLinks: true });
+  const dialog = await openCombinedFromShipment(page);
+  await dialog.getByLabel("Shipment TEST-SHIP-42").fill("2000");
+  await dialog.getByLabel(/TEST-RECEIPT-31/).fill("2000");
+  await dialog
+    .getByLabel("Reason / document reference")
+    .fill(correctionInput.reason);
+  await dialog
+    .getByRole("checkbox", { name: /^I checked the receipt/ })
+    .check();
+  await dialog
+    .getByRole("checkbox", {
+      name: /Restore missing transfer and repacking cost links/,
+    })
+    .check();
+  await dialog
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  await expect(dialog).toContainText("Recorded warehouse transfer");
+  await expect(dialog).toContainText("Recorded case opened into packs");
+  await expect(dialog).toContainText("Movements #802, #803");
+  await expect(dialog.getByRole("radio")).toHaveCount(0);
+  await expect(dialog).toContainText("New expense postings: 0");
+  await expect(dialog).toContainText("STORAGE-LOT: 1 CASE unit");
+  await dialog.getByText("Cost before and after for 1 lots").click();
+  const orderRow = dialog
+    .getByRole("row")
+    .filter({ hasText: "Linked order costs (1 records)" });
+  await expect(orderRow).toContainText("$1.00");
+  await expect(orderRow).toContainText("$3.50");
+  const approve = dialog.getByRole("button", {
+    name: "Approve shipment and receipt",
+    exact: true,
+  });
+  await expect(approve).toBeDisabled();
+  await dialog.getByRole("checkbox", { name: /I verified.*transfer/ }).check();
+  await expect(approve).toBeEnabled();
+  await expect(approve).toBeInViewport();
+  expect((await dialog.boundingBox())!.width).toBeLessThanOrEqual(
+    page.viewportSize()!.width,
+  );
+  await page.screenshot({
+    path: info.outputPath("cost-link-repair-preview.png"),
+  });
+  await approve.click();
+  await expect(dialog).toContainText("Cost links restored");
+  await expect(dialog).toContainText("Test Administrator");
+  expect(commands).toHaveLength(1);
+  expect(commands[0].body).toEqual({
+    ...correctionInput,
+    repairCostLinks: true,
+    costLinksConfirmed: true,
+  });
+  await dialog.getByRole("button", { name: "Done", exact: true }).click();
+  await openFromReceipt(page);
+  await page
+    .getByRole("dialog")
+    .last()
+    .getByText("Previous corrections and approvals (1)")
+    .click();
+  await expect(page.getByRole("dialog").last()).toContainText(
+    "Cost links restored",
+  );
+  expect(failures).toEqual([]);
+});
 
 test("shipment and receipt stay in one draft, review and administrator approval", async ({
   page,

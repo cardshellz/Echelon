@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000053000019980001_identity_access_audit_guard.sql",
+  "generation": 53,
+  "pr": 1998,
+  "ordinal": 1,
+  "after": [
+    "0107_audit_events.sql",
+    "900000052000019950001_shopify_oauth_authorization_challenges.sql"
+  ]
+}

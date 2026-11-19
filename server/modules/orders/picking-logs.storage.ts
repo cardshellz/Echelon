@@ -4,6 +4,7 @@ import {
   type Order, type OrderItem, type ProductVariant,
   pickingLogs, orders,
 } from "../../storage/base";
+import { insertWmsPickingLogRecord } from "../wms/picking-logs.api";
 
 export interface IPickingLogStorage {
   createPickingLog(log: InsertPickingLog): Promise<PickingLog>;
@@ -55,8 +56,7 @@ export interface IPickingLogStorage {
 
 export const pickingLogMethods: IPickingLogStorage = {
   async createPickingLog(log: InsertPickingLog): Promise<PickingLog> {
-    const result = await db.insert(pickingLogs).values(log).returning();
-    return result[0];
+    return insertWmsPickingLogRecord(db, log);
   },
 
   async getPickingLogsByOrderId(orderId: number): Promise<PickingLog[]> {

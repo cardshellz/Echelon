@@ -63,6 +63,7 @@ import { Separator } from "@/components/ui/separator";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/sheet";
 import { useAuth } from "@/lib/auth";
+import { PURCHASING_DASHBOARD_READ_PERMISSIONS, PURCHASING_READ_PERMISSION, RECEIVING_READ_PERMISSIONS } from "@/lib/procurement-access";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { NotificationBell } from "@/components/NotificationBell";
 import { PageDataHealth } from "@/components/page-data-health";
@@ -71,18 +72,21 @@ import { CUSTOMER_RETURN_PORTAL_PATH } from "@shared/returns/customer-return-por
 // --- Navigation types ---
 
 type NavPermission = { resource: string; action: string };
+type NavSystemRole = "admin" | "lead" | "picker";
 type NavLink = {
+  anyOfPermissions?: NavPermission[];
+  allOfPermissions?: NavPermission[];
   label: string;
   icon: LucideIcon;
   href: string;
-  roles?: string[];
+  roles?: NavSystemRole[];
   requiredPermission?: NavPermission;
 };
 type NavGroup = {
   label: string;
   icon: LucideIcon;
   children: NavLink[];
-  roles?: string[];
+  roles?: NavSystemRole[];
   requiredPermission?: NavPermission;
 };
 type NavEntry = NavLink | NavGroup;
@@ -147,41 +151,41 @@ const REORDER_ANALYSIS_HREF = "/reorder-analysis";
 const REORDER_ENGINE_NAV_LABEL = "Reorder Engine";
 
 const navStructure: NavEntry[] = [
-  { label: "Dashboard", icon: LayoutDashboard, href: "/", roles: ["admin", "lead"] },
-  { label: "Operations Control Tower", icon: BarChart3, href: "/oms/flow-monitor", roles: ["admin", "lead"] },
+  { label: "Dashboard", icon: LayoutDashboard, href: "/", requiredPermission: { resource: "inventory", action: "view" } },
+  { label: "Operations Control Tower", icon: BarChart3, href: "/oms/flow-monitor", requiredPermission: { resource: "operations", action: "view" } },
   {
     label: "Procurement",
     icon: ShoppingBag,
-    roles: ["admin", "lead"],
+
     children: [
-      { label: "Dashboard", icon: LayoutDashboard, href: "/purchasing" },
-      { label: "Purchase Orders", icon: FileText, href: "/purchase-orders" },
-      { label: "Reorder Analysis", icon: BarChart3, href: REORDER_ANALYSIS_HREF },
-      { label: "Demand Planner", icon: TrendingUp, href: "/demand-planner" },
-      { label: "Receiving", icon: Truck, href: "/receiving" },
-      { label: "Shipments", icon: Ship, href: "/shipments" },
-      { label: "Suppliers", icon: Building2, href: "/suppliers" },
+      { label: "Dashboard", icon: LayoutDashboard, href: "/purchasing", allOfPermissions: PURCHASING_DASHBOARD_READ_PERMISSIONS },
+      { label: "Purchase Orders", icon: FileText, href: "/purchase-orders", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
+      { label: "Reorder Analysis", icon: BarChart3, href: REORDER_ANALYSIS_HREF, requiredPermission: { resource: "inventory", action: "view" } },
+      { label: "Demand Planner", icon: TrendingUp, href: "/demand-planner", requiredPermission: PURCHASING_READ_PERMISSION },
+      { label: "Receiving", icon: Truck, href: "/receiving", anyOfPermissions: RECEIVING_READ_PERMISSIONS },
+      { label: "Shipments", icon: Ship, href: "/shipments", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
+      { label: "Suppliers", icon: Building2, href: "/suppliers", requiredPermission: PURCHASING_READ_PERMISSION },
     ],
   },
   {
     label: "Accounts Payable",
     icon: DollarSign,
-    roles: ["admin", "lead"],
+
     children: [
-      { label: "AP Dashboard", icon: BarChart3, href: "/ap" },
-      { label: "Invoices", icon: Receipt, href: "/ap-invoices" },
-      { label: "Payments", icon: CreditCard, href: "/ap-payments" },
-      { label: "Supplier Credits", icon: Receipt, href: "/supplier-credits" },
-      { label: "Supplier Returns", icon: Receipt, href: "/supplier-returns" },
+      { label: "AP Dashboard", icon: BarChart3, href: "/ap", requiredPermission: PURCHASING_READ_PERMISSION },
+      { label: "Invoices", icon: Receipt, href: "/ap-invoices", anyOfPermissions: [PURCHASING_READ_PERMISSION] },
+      { label: "Payments", icon: CreditCard, href: "/ap-payments", requiredPermission: PURCHASING_READ_PERMISSION },
+      { label: "Supplier Credits", icon: Receipt, href: "/supplier-credits", requiredPermission: PURCHASING_READ_PERMISSION },
+      { label: "Supplier Returns", icon: Receipt, href: "/supplier-returns", requiredPermission: PURCHASING_READ_PERMISSION },
     ],
   },
   {
     label: "Inventory",
     icon: Box,
-    roles: ["admin", "lead"],
+
     children: [
-      { label: "Stock Levels", icon: Box, href: "/inventory" },
-      { label: "Builds", icon: PackageCheck, href: "/inventory/builds" },
+      { label: "Stock Levels", icon: Box, href: "/inventory", requiredPermission: { resource: "inventory", action: "view" } },
+      { label: "Builds", icon: PackageCheck, href: "/inventory/builds", requiredPermission: { resource: "inventory", action: "view" } },
       {
         label: "Supply & Transformations",
         icon: GitBranch,
@@ -194,82 +198,84 @@ const navStructure: NavEntry[] = [
         href: "/inventory/cutover",
         requiredPermission: { resource: "inventory_planning", action: "view" },
       },
-      { label: "Warehouses", icon: Building2, href: "/warehouse" },
-      { label: "Pick Zones", icon: MapIcon, href: "/pick-zones" },
-      { label: "Slotting Setup", icon: MapPin, href: "/slotting-setup" },
-      { label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts" },
-      { label: "Transfers", icon: ArrowLeftRight, href: "/transfers" },
-      { label: "Replenishment", icon: RefreshCw, href: "/replenishment" },
-      { label: "History", icon: History, href: "/inventory/history", roles: ["admin"] },
-      { label: "Cost Dashboard", icon: DollarSign, href: "/inventory/costs", roles: ["admin"] },
+      { label: "Warehouses", icon: Building2, href: "/warehouse", requiredPermission: { resource: "inventory", action: "view" } },
+      { label: "Pick Zones", icon: MapIcon, href: "/pick-zones", requiredPermission: { resource: "inventory", action: "view" } },
+      { label: "Slotting Setup", icon: MapPin, href: "/slotting-setup", requiredPermission: { resource: "inventory", action: "view" } },
+      { label: "Cycle Counts", icon: ClipboardList, href: "/cycle-counts", requiredPermission: { resource: "inventory", action: "view" } },
+      { label: "Transfers", icon: ArrowLeftRight, href: "/transfers", requiredPermission: { resource: "inventory", action: "view" } },
+      { label: "Replenishment", icon: RefreshCw, href: "/replenishment", requiredPermission: { resource: "inventory", action: "view" } },
+      { label: "History", icon: History, href: "/inventory/history", requiredPermission: { resource: "inventory", action: "audit" } },
+      { label: "Cost Dashboard", icon: DollarSign, href: "/inventory/costs", requiredPermission: { resource: "inventory", action: "view" } },
     ],
   },
   {
     label: "Orders (OMS)",
     icon: Globe,
-    roles: ["admin", "lead"],
+
     children: [
-      { label: "Orders", icon: Globe, href: "/oms/orders" },
+      { label: "Orders", icon: Globe, href: "/oms/orders", requiredPermission: { resource: "orders", action: "view" } },
       { label: "Order editor pilot", icon: FileText, href: "/order-edits", requiredPermission: { resource: "orders", action: "edit" } },
-      { label: "Order History", icon: History, href: "/order-history" },
+      { label: "Order History", icon: History, href: "/order-history", requiredPermission: { resource: "orders", action: "view" } },
     ],
   },
   {
     label: "Returns",
     icon: RotateCcw,
-    roles: ["admin", "lead"],
+
     children: [
-      { label: "Cases", icon: ClipboardList, href: "/returns/cases" },
-      { label: "Customer portal", icon: Store, href: CUSTOMER_RETURN_PORTAL_PATH, roles: ["admin"] },
-      { label: "Policies", icon: FileText, href: "/return-policies", roles: ["admin"] },
-      { label: "Receiving", icon: PackageCheck, href: "/returns/receiving" },
+      { label: "Cases", icon: ClipboardList, href: "/returns/cases", requiredPermission: { resource: "inventory", action: "view" } },
+      { label: "Customer portal", icon: Store, href: CUSTOMER_RETURN_PORTAL_PATH, requiredPermission: { resource: "settings", action: "edit" } },
+      { label: "Policies", icon: FileText, href: "/return-policies", requiredPermission: { resource: "settings", action: "view" } },
+      { label: "Receiving", icon: PackageCheck, href: "/returns/receiving", requiredPermission: { resource: "inventory", action: "view" } },
     ],
   },
   {
     label: "Warehouse (WMS)",
     icon: ShoppingCart,
+    // Preserve these legacy membership-gated routes until their owning WMS slice
+    // migrates both server/page admission and navigation together.
     children: [
-      { label: "Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
-      { label: "Picking", icon: ClipboardList, href: "/picking" },
-      { label: "Assembly work", icon: PackageCheck, href: "/assembly" },
-      { label: "Pick Priority", icon: ArrowUpDown, href: "/pick-priority", roles: ["admin", "lead"] },
-      { label: "Packing", icon: PackageCheck, href: "/packing" },
+      { label: "Orders", icon: ShoppingCart, href: "/orders", requiredPermission: { resource: "orders", action: "view" } },
+      { label: "Picking", icon: ClipboardList, href: "/picking", requiredPermission: { resource: "picking", action: "view" } },
+      { label: "Assembly work", icon: PackageCheck, href: "/assembly", requiredPermission: { resource: "warehouse_work", action: "assembly" } },
+      { label: "Pick Priority", icon: ArrowUpDown, href: "/pick-priority", requiredPermission: { resource: "settings", action: "view" } },
+
     ],
   },
   {
     label: "Shipping",
     icon: Truck,
-    roles: ["admin", "lead"],
+
     children: [
-      { label: "Shipments", icon: Truck, href: "/outbound-shipments" },
-      { label: "Shipping Groups", icon: Layers, href: "/shipping-groups" },
-      { label: "Service Levels", icon: RouteIcon, href: "/shipping-service-levels", roles: ["admin"] },
-      { label: "Settings", icon: Package, href: "/shipping-settings", roles: ["admin"] },
+      { label: "Shipments", icon: Truck, href: "/outbound-shipments", requiredPermission: { resource: "shipments", action: "view" } },
+      { label: "Shipping Groups", icon: Layers, href: "/shipping-groups", requiredPermission: { resource: "inventory", action: "view" } },
+      { label: "Service Levels", icon: RouteIcon, href: "/shipping-service-levels", requiredPermission: { resource: "settings", action: "view" } },
+      { label: "Settings", icon: Package, href: "/shipping-settings", requiredPermission: { resource: "settings", action: "view" } },
     ],
   },
   {
     label: "Catalog & Channels",
     icon: Store,
-    roles: ["admin", "lead"],
+
     children: [
-      { label: "Catalog", icon: Package, href: "/catalog" },
-      { label: "Product Lines", icon: Tag, href: "/product-lines" },
-      { label: "Channels", icon: Store, href: "/channels" },
+      { label: "Catalog", icon: Package, href: "/catalog", requiredPermission: { resource: "inventory", action: "view" } },
+      { label: "Product Lines", icon: Tag, href: "/product-lines", requiredPermission: { resource: "channels", action: "view" } },
+      { label: "Channels", icon: Store, href: "/channels", requiredPermission: { resource: "channels", action: "view" } },
       {
         label: "Channel Inventory",
         icon: GitBranch,
         href: "/channels/inventory",
         requiredPermission: { resource: "inventory_planning", action: "view" },
       },
-      { label: "Allocation", icon: Layers, href: "/channel-allocation" },
-      { label: "Sync Log", icon: History, href: "/sync-log" },
-      { label: "Subscriptions", icon: Crown, href: "/subscriptions" },
+      { label: "Allocation", icon: Layers, href: "/channel-allocation", requiredPermission: { resource: "channels", action: "view" } },
+      { label: "Sync Log", icon: History, href: "/sync-log", requiredPermission: { resource: "channels", action: "view" } },
+      { label: "Subscriptions", icon: Crown, href: "/subscriptions", requiredPermission: { resource: "shellz", action: "admin" } },
     ],
   },
   {
     label: "Dropship",
     icon: Globe,
-    roles: ["admin", "lead"],
+    requiredPermission: { resource: "dropship", action: "view" },
     children: [
       { label: "Overview", icon: LayoutDashboard, href: "/dropship?tab=overview" },
       { label: "Launch Readiness", icon: Shield, href: "/dropship?tab=dogfood" },
@@ -295,9 +301,9 @@ const navStructure: NavEntry[] = [
   {
     label: "Vendors",
     icon: Users,
-    roles: ["admin", "lead"],
+
     children: [
-      { label: "All Vendors", icon: Users, href: "/vendors" },
+      { label: "All Vendors", icon: Users, href: "/vendors", requiredPermission: { resource: "dropship", action: "view" } },
     ],
   },
 ];
@@ -321,19 +327,21 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
   const search = useSearch();
   const locationPath = navPath(location);
   const currentHref = search ? `${locationPath}?${search}` : locationPath;
-  const { user, logout, hasPermission } = useAuth();
+  const { user, assignedRoles, logout, hasPermission, hasSystemRole } = useAuth();
+  const hasAssignedAccess = !!user && assignedRoles.length > 0;
+  const [logoutError, setLogoutError] = useState<string | null>(null);
 
   // Reorder Engine flag (see REORDER_ENGINE_NAV_LABEL above). Same query key
   // as ReorderAnalysisRoute in App.tsx so React Query dedupes the request.
-  // Only fetched for roles that can see the Procurement group — the endpoint
+  // Only fetched for roles that can see the Reorder Analysis link — the endpoint
   // is gated by requirePermission("purchasing", "view") and the label is
   // invisible to everyone else anyway. Fail-safe: undefined/error → legacy label.
   type ProcurementSettings = { useNewReorderCockpit?: boolean; [key: string]: unknown };
-  const canSeeProcurementNav = !!user && ["admin", "lead"].includes(user.role);
+  const canSeeReorderLink = hasAssignedAccess && hasPermission("purchasing", "view");
   const { data: procurementSettings } = useQuery<ProcurementSettings>({
     queryKey: ["/api/settings/procurement"],
     retry: false,
-    enabled: canSeeProcurementNav,
+    enabled: canSeeReorderLink,
   });
   const useNewReorderCockpit = procurementSettings?.useNewReorderCockpit === true;
 
@@ -375,11 +383,13 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
     }
   }, [locationPath]);
 
-  // Role-based filtering
-  const isVisible = (roles?: string[], permission?: NavPermission) => {
+  // Verified grants govern named capabilities. Unmapped surfaces retain their
+  // assigned system-role requirement, never the compatibility users.role label.
+  const isVisible = (roles?: NavSystemRole[], permission?: NavPermission) => {
+    if (!hasAssignedAccess) return false;
     if (permission) return hasPermission(permission.resource, permission.action);
     if (!roles) return true;
-    return Boolean(user && roles.includes(user.role));
+    return roles.some(role => hasSystemRole(role));
   };
 
   const handleGroupClick = (label: string) => {
@@ -392,8 +402,13 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
   };
 
   const handleLogout = async () => {
-    await logout();
-    window.location.href = "/login";
+    setLogoutError(null);
+    try {
+      await logout();
+      window.location.href = "/login";
+    } catch {
+      setLogoutError("Sign out could not be verified. Try again.");
+    }
   };
 
   return (
@@ -440,14 +455,19 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
               );
             }
 
-            // Group: filter children by role
+            // Explicit child access takes precedence; unconfigured children inherit
+            // their parent. Preserve that existing fallback for unrelated modules.
             const parentVisible = isVisible(entry.roles, entry.requiredPermission);
-            const visibleChildren = entry.children.filter((child) =>
-              child.requiredPermission
-                ? isVisible(child.roles, child.requiredPermission)
-                : child.roles
-                  ? isVisible(child.roles)
-                  : parentVisible);
+            const visibleChildren = entry.children.filter((child) => hasAssignedAccess && (
+              child.allOfPermissions
+                ? child.allOfPermissions.every(permission => hasPermission(permission.resource, permission.action))
+                : child.anyOfPermissions
+                  ? child.anyOfPermissions.some(permission => hasPermission(permission.resource, permission.action))
+                  : child.requiredPermission
+                    ? isVisible(child.roles, child.requiredPermission)
+                    : child.roles
+                      ? isVisible(child.roles)
+                      : parentVisible));
             if (visibleChildren.length === 0) return null;
 
             const GroupIcon = entry.icon;
@@ -540,7 +560,7 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
             </Avatar>
             <div className="flex flex-col overflow-hidden">
               <span className="text-sm font-medium truncate">{user.displayName || user.username}</span>
-              <span className="text-xs text-sidebar-foreground/50 truncate capitalize">{user.role}</span>
+              <span className="text-xs text-sidebar-foreground/50 truncate" data-testid="sidebar-assigned-roles">{assignedRoles.length ? assignedRoles.map(role => role.name).join(", ") : "No assigned roles"}</span>
             </div>
           </div>
         )}
@@ -555,6 +575,7 @@ const SidebarContent = ({ collapsed, mobile, onClose, onExpand }: {
           <LogOut size={16} />
           {(!collapsed || mobile) && <span>Log out</span>}
         </Button>
+        {logoutError && <p role="alert" className="text-xs text-destructive mt-2">{logoutError}</p>}
       </div>
     </div>
   );
@@ -590,8 +611,23 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const isMobile = useIsMobile();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const { user, hasPermission } = useAuth();
-  const isAdmin = user?.role === "admin";
+  const { user, assignedRoles, hasPermission, hasSystemRole, logout } = useAuth();
+  const hasAssignedAccess = !!user && assignedRoles.length > 0;
+  const canEditSettings = hasPermission("settings", "edit");
+  const canViewSettings = hasPermission("settings", "view");
+  const canViewProcurementSettings = hasPermission("purchasing", "view") || hasPermission("settings", "edit");
+  const canViewUsers = hasPermission("users", "view");
+  const canViewRoles = hasPermission("roles", "view");
+  const [logoutError, setLogoutError] = useState<string | null>(null);
+  const handleLogout = async () => {
+    setLogoutError(null);
+    try {
+      await logout();
+      window.location.href = "/login";
+    } catch {
+      setLogoutError("Sign out could not be verified. Try again.");
+    }
+  };
 
   return (
     <div className="flex h-screen bg-background overflow-hidden font-sans">
@@ -612,7 +648,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         <header className="h-14 border-b bg-card px-4 md:px-6 flex items-center justify-between gap-4 shrink-0 z-10">
           <div className="flex items-center gap-4 flex-1">
             {isMobile && (
-              <Button variant="ghost" size="icon" className="-ml-2 min-h-[44px] min-w-[44px]" onClick={() => setMobileOpen(true)}>
+              <Button variant="ghost" size="icon" aria-label="Open navigation" className="-ml-2 min-h-[44px] min-w-[44px]" onClick={() => setMobileOpen(true)}>
                 <Menu className="h-5 w-5" />
               </Button>
             )}
@@ -629,7 +665,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
 
           <div className="flex items-center gap-2">
             <NotificationBell />
-            {(isAdmin || hasPermission("purchasing", "view") || hasPermission("settings", "edit")) && (
+            {hasAssignedAccess && (canEditSettings || canViewSettings || canViewProcurementSettings || canViewUsers || canViewRoles) && (
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" size="icon" className="text-muted-foreground min-h-[44px] min-w-[44px]" data-testid="button-settings-menu">
@@ -639,52 +675,49 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 <DropdownMenuContent align="end" className="w-48">
                   <DropdownMenuLabel>Settings</DropdownMenuLabel>
                   <DropdownMenuSeparator />
-                  {isAdmin && <DropdownMenuItem asChild data-testid="link-general-settings">
+                  {canViewSettings && <DropdownMenuItem asChild data-testid="link-general-settings">
                     <Link href="/settings" className="w-full cursor-pointer">
                       <Cog className="mr-2 h-4 w-4" />
                       General Settings
                     </Link>
                   </DropdownMenuItem>}
-                  {(hasPermission("purchasing", "view") || hasPermission("settings", "edit")) && <DropdownMenuItem asChild data-testid="link-procurement-settings">
+                  {canViewProcurementSettings && <DropdownMenuItem asChild data-testid="link-procurement-settings">
                     <Link href="/settings/procurement" className="w-full cursor-pointer">
                       <ShoppingBag className="mr-2 h-4 w-4" />
                       Procurement
                     </Link>
                   </DropdownMenuItem>}
-                  {isAdmin && <>
-                  <DropdownMenuItem asChild data-testid="link-shipping-settings">
+                  {canViewSettings && <DropdownMenuItem asChild data-testid="link-shipping-settings">
                     <Link href="/shipping-settings" className="w-full cursor-pointer">
                       <Package className="mr-2 h-4 w-4" />
                       Shipping
                     </Link>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem asChild data-testid="link-integrations">
+                  </DropdownMenuItem>}
+                  {canEditSettings && <DropdownMenuItem asChild data-testid="link-integrations">
                     <Link href="/integrations" className="w-full cursor-pointer">
                       <Cable className="mr-2 h-4 w-4" />
                       Integrations
                     </Link>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem asChild>
+                  </DropdownMenuItem>}
+                  {canViewSettings && <DropdownMenuItem asChild>
                     <Link href="/notification-preferences" className="w-full cursor-pointer">
                       <Bell className="mr-2 h-4 w-4" />
                       Notifications
                     </Link>
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuLabel>Administration</DropdownMenuLabel>
-                  <DropdownMenuItem asChild data-testid="link-user-management">
+                  </DropdownMenuItem>}
+                  {(canViewUsers || canViewRoles) && <><DropdownMenuSeparator /><DropdownMenuLabel>Administration</DropdownMenuLabel></>}
+                  {canViewUsers && <DropdownMenuItem asChild data-testid="link-user-management">
                     <Link href="/users" className="w-full cursor-pointer">
                       <Users className="mr-2 h-4 w-4" />
                       User Management
                     </Link>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem asChild data-testid="link-roles-permissions">
+                  </DropdownMenuItem>}
+                  {canViewRoles && <DropdownMenuItem asChild data-testid="link-roles-permissions">
                     <Link href="/roles" className="w-full cursor-pointer">
                       <Shield className="mr-2 h-4 w-4" />
                       Roles & Permissions
                     </Link>
-                  </DropdownMenuItem>
-                  </>}
+                  </DropdownMenuItem>}
                 </DropdownMenuContent>
               </DropdownMenu>
             )}
@@ -704,13 +737,11 @@ export default function Layout({ children }: { children: React.ReactNode }) {
                 <DropdownMenuItem>Settings</DropdownMenuItem>
                 <DropdownMenuItem>Billing</DropdownMenuItem>
                 <DropdownMenuSeparator />
-                <DropdownMenuItem onClick={() => {
-                  fetch("/api/auth/logout", { method: "POST" }).then(() => {
-                    window.location.href = "/login";
-                  });
-                }}>Log out</DropdownMenuItem>
+                <DropdownMenuItem asChild><a href="/staff/password">Change password</a></DropdownMenuItem>
+                <DropdownMenuItem onClick={handleLogout}>Log out</DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+            {logoutError && <p role="alert" className="text-xs text-destructive">{logoutError}</p>}
           </div>
         </header>
 

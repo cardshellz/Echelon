@@ -10,6 +10,10 @@ export const acceptedReturnCreditSourceSchema = z.object({
     evidenceReference: z.string().min(1).max(1000),
     reviewedCosts: supplierReturnCostTotalsSchema,
     reviewedEntryIds: z.array(id).min(3).max(10000),
+    invoiceAttribution: z.object({ invoiceLineId: id, receivingLineId: id, receiptId: id, receiptNumber: z.string().min(1),
+        parts: z.array(z.object({ receivingLineId: id, receiptStartPiece: z.number().int().nonnegative().safe(),
+          invoiceStartPiece: z.number().int().nonnegative().safe(), pieces: id }).strict()).min(1).max(10000),
+    }).strict().optional(),
 }).strict().superRefine((value, context) => {
     if (!Number.isSafeInteger(value.quantity) || !value.intervals.every(row => Number.isSafeInteger(row.quantity)))
         return;
@@ -17,6 +21,12 @@ export const acceptedReturnCreditSourceSchema = z.object({
         || new Set(value.reviewedEntryIds).size !== value.reviewedEntryIds.length) {
         context.addIssue({ code: "custom", message: "Return credit source must retain exact selected quantity and unique value history." });
     }
+    const attribution = value.invoiceAttribution;
+    if (attribution && (attribution.parts.some(part => part.receivingLineId !== attribution.receivingLineId
+      || BigInt(part.receiptStartPiece) + BigInt(part.pieces) > BigInt(Number.MAX_SAFE_INTEGER)
+      || BigInt(part.invoiceStartPiece) + BigInt(part.pieces) > BigInt(Number.MAX_SAFE_INTEGER))
+      || attribution.parts.reduce((sum, part) => sum + BigInt(part.pieces), BigInt(0)) > BigInt(value.quantity) * BigInt(value.unitsPerVariant)))
+      context.addIssue({ code: "custom", message: "Returned invoice attribution must retain its original receipt and exact covered pieces." });
 });
 export type AcceptedReturnCreditSource = z.infer<typeof acceptedReturnCreditSourceSchema>;
 const cents = z.number().int().nonnegative().safe();

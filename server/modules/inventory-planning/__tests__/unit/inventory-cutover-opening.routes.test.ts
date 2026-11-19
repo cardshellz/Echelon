@@ -21,7 +21,7 @@ describe("authenticated complete opening verification routes", () => {
     hasPermission.mockReset().mockResolvedValue(true); vi.spyOn(console, "error").mockImplementation(() => undefined);
     session = { user: { id: "operator-1" } };
     service = { capture: vi.fn(async () => openingSource()), preview: vi.fn(async () => openingAssessment()), save: vi.fn(async () => openingSaved()) };
-    server = await startServer(service, () => session);
+    server = await startServer(service as unknown as Pick<InventoryCutoverOpeningService, "capture" | "preview" | "save">, () => session);
   });
   afterEach(async () => { await server.close(); vi.restoreAllMocks(); });
   it("captures only through activate permission and the session actor, without preview/save calls", async () => {

@@ -73,7 +73,7 @@ export function SafetyDefinitionReview({ head, scopeKey, onBlockedChange }: {
         <caption className="text-left font-medium">Warehouse ATP</caption>
         <thead><tr><th>SKU</th><th>Warehouse</th><th>Current</th><th>Your changes</th></tr></thead>
         <tbody>{review.atp.map(row => <tr key={`${row.variantId}:${row.warehouseId}`}>
-          <td className="break-all">{row.sku ?? row.variantId}</td><td>{row.warehouseName}</td><td>{row.current}</td><td>{row.proposed}</td>
+          <td className="break-all">{row.sku ?? row.variantId}</td><td>{row.warehouseName}</td><td>{row.current ?? "Unavailable"}</td><td>{row.proposed}</td>
         </tr>)}</tbody>
       </table></div>
       <details><summary>Channel quantities ({review.channels.length})</summary><ul className="max-h-60 overflow-auto text-sm">

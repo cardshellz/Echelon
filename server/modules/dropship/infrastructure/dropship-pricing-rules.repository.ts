@@ -35,8 +35,9 @@ export class PgDropshipPricingRulesRepository implements PricingRulesRepository 
       const vendorId = owner.rows[0]?.vendor_id;
       if (!vendorId) throw new DropshipError("DROPSHIP_STORE_CONNECTION_REQUIRED", "Store connection was not found.");
       const target = { vendorId, storeConnectionId, memberId };
-      const result = await operation({ vendorId,
-        ...selectedCatalogReaderForTransaction(client),
+      // The selected-catalog reads, bound to this vendor (its vendorId included).
+      const result = await operation({
+        ...selectedCatalogReaderForTransaction(client, vendorId),
         costs: PgShellzClubProductCostAdapter.forTransaction(client),
         loadProfile: () => readPricingProfile(client, storeConnectionId, vendorId),
         loadRuleLayers: (candidates) => readListingSettingLayers(client, { vendorId, storeConnectionId, candidates }),

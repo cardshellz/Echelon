@@ -1,3 +1,5 @@
+import { parseDecimalCents, readIntegerCents } from "@shared/money-read";
+
 /**
  * OMS Shopify Webhooks — Direct Shopify → OMS order ingestion
  *
@@ -28,8 +30,13 @@ import {
   deriveOmsLineAuthority,
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
-import { guardOrderEditShopifyIngress } from "../order-edits/infrastructure/order-edit-ingress-guard";
+import { guardOrderEditShopifyIngress } from "../order-edits/oms-coordination.api";
+import { syncWmsOrderAddressAndFinancialFromShopifyWebhookInWms } from "../wms/wms-order-mutations.api";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
+import {
+  isNonCancellableOmsOrderStatus,
+  transitionOmsOrderStatus,
+} from "./oms-order-status-core";
 import {
   applyShopifyRefundCascade,
   extractRefundLineAdjustments,
@@ -46,6 +53,7 @@ import type {
 } from "./channel-fulfillment-ingress.service";
 import rateLimit from "express-rate-limit";
 import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
+import type { EngineCancelResult } from "../shipping/engine-and-reconcile.api";
 import {
   buildShopifyWebhookInboxInput,
   enqueueWebhookInboxRetry,
@@ -59,8 +67,26 @@ import {
   enqueueOmsWmsSyncRetry,
   enqueueShipStationShipmentPushRetry,
 } from "./webhook-retry.worker";
-import type { ShippingEngine } from "../shipping/engine";
-import { recordShopifyRefundReturnCase } from "../returns/application/shopify-return-case.service";
+import type { ShippingEngine } from "../shipping/engine-and-reconcile.api";
+import { recordShopifyRefundReturnCase } from "../returns/shopify-return-intake.api";
+import { deriveShopifyRefundFinancialStatus } from "./domain/shopify-refund-financial-status";
+import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
+import { deriveShopifyChannelPaymentSettled } from "./domain/channel-payment-settlement";
+import { recordChannelAuthorityGap } from "./infrastructure/channel-authority-gap.repository";
+import { applyVersionedShopifyOrderMoney } from "./infrastructure/shopify-order-money.repository";
+import {
+  createShopifyOrderIntakeAdapter,
+  extractShopifyRisk,
+  getShopifyExternalOrderId,
+  mapShopifyOrderToOrderData,
+  shopifyDollarsToCents,
+  verifyShopifyHmacSignature,
+  type ExtractedShopifyRisk as ExtractedRisk,
+} from "./adapters/shopify-order-intake.adapter";
+import {
+  ensureChannelOrderQueuedForWmsSync,
+  ingestAndRoute,
+} from "./channel-order-ingest-and-route";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -68,10 +94,13 @@ import { recordShopifyRefundReturnCase } from "../returns/application/shopify-re
 
 const LOG_PREFIX = "[OMS Shopify Webhook]";
 const RETURN_CASE_SHOPIFY_RUNTIME_ENABLED = process.env.RETURN_CASE_SHOPIFY_RUNTIME_ENABLED === "true";
+const shopifyOrderIntakeAdapter = createShopifyOrderIntakeAdapter();
 
 function authorityLinePatch(state: OmsLineAuthorityState) {
   return {
     channelObservedQuantity: state.channelObservedQuantity,
+    channelCurrentQuantity: state.channelCurrentQuantity,
+    channelQuantityUpdatedAt: state.channelQuantityUpdatedAt,
     paidQuantity: state.paidQuantity,
     authorityFulfillableQuantity: state.authorityFulfillableQuantity,
     authorizationStatus: state.authorizationStatus,
@@ -87,24 +116,13 @@ async function ensureOmsOrderQueuedForWmsSync(
   omsOrderId: number,
   label: string,
 ): Promise<void> {
-  try {
-    const wmsOrderId = await wmsSyncService.syncOmsOrderToWms(omsOrderId);
-    if (!wmsOrderId) {
-      // `null` = sync intentionally skipped (order already final/fulfilled out-of-band) —
-      // a no-op, not a failure. Don't throw (that re-queues and dead-letters a harmless skip).
-      console.log(`${LOG_PREFIX} WMS sync skipped for ${label} — already fulfilled out-of-band; no-op`);
-      return;
-    }
-    console.log(`${LOG_PREFIX} Synced ${label} to WMS (wms=${wmsOrderId})`);
-  } catch (error: any) {
-    const message = error?.message ?? String(error);
-    console.error(`${LOG_PREFIX} WMS sync failed for ${label}: ${message}`);
-    await enqueueOmsWmsSyncRetry(
-      db,
-      omsOrderId,
-      error instanceof Error ? error : new Error(message),
-    );
-  }
+  await ensureChannelOrderQueuedForWmsSync({
+    db,
+    wmsSyncService,
+    omsOrderId,
+    label,
+    logPrefix: LOG_PREFIX,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +139,7 @@ interface WmsServices {
       options?: { disposition?: "release" | "cancel" },
     ) => Promise<any>;
     reconcileRefundOrderDemand: (args: {
+      requiredAuthority?: "canonical";
       orderId: number;
       sourceEventId: string;
       releaseTargets: readonly { orderItemId: number; quantity: number }[];
@@ -146,7 +165,9 @@ interface ShipStationService {
     carrierCode?: string | null;
     notifyCustomer?: boolean;
   }) => Promise<{ alreadyInState: boolean } | void>;
-  cancelOrder: (shipstationOrderId: number) => Promise<{ alreadyInState: boolean } | void>;
+  cancelOrder: (
+    shipstationOrderId: number,
+  ) => Promise<EngineCancelResult | { state: EngineCancelResult["state"]; alreadyInState?: boolean } | void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,145 +175,23 @@ interface ShipStationService {
 // ---------------------------------------------------------------------------
 
 function verifyShopifyHmac(rawBody: Buffer, hmacHeader: string | undefined): boolean {
-  if (!hmacHeader) return false;
-  // Try both app API secret and admin webhook secret
-  const secrets = [process.env.SHOPIFY_API_SECRET, process.env.SHOPIFY_WEBHOOK_SECRET].filter(Boolean) as string[];
-  for (const secret of secrets) {
-    const computed = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
-    try {
-      if (crypto.timingSafeEqual(Buffer.from(computed), Buffer.from(hmacHeader))) return true;
-    } catch {
-      if (computed === hmacHeader) return true;
-    }
-  }
-  return false;
+  return verifyShopifyHmacSignature(rawBody, hmacHeader);
 }
 
 // ---------------------------------------------------------------------------
-// Shopify payload → OMS OrderData mapping
+// Shopify payload → OMS OrderData mapping (delegated to ShopifyOrderIntakeAdapter)
 // ---------------------------------------------------------------------------
+
+function requireMappedCents(value: number | undefined, field: string): number {
+  if (value === undefined) throw new Error(`Shopify order mapping produced no ${field}`);
+  return value;
+}
 
 function dollarsToCents(value: string | number | undefined | null): number {
-  if (value === null || value === undefined) return 0;
-  return Math.round(parseFloat(String(value)) * 100);
+  return shopifyDollarsToCents(value);
 }
 
-// ---------------------------------------------------------------------------
-// C22b — Shopify fraud-risk extraction (§6 Group E, Decision D3)
-// ---------------------------------------------------------------------------
-//
-// Shopify exposes risk in two shapes depending on Admin API version:
-//
-//   - Modern (2024-10+): `risk_assessments` array, each entry carrying
-//     `risk_level` (LOW/MEDIUM/HIGH), optional `recommendation`, optional
-//     numeric `score`, and a `facts` array.
-//   - Legacy: a single `risk` object with `level` + `recommendation` and
-//     no numeric score.
-//
-// We collect whichever shape is present, defensively, and fall back to
-// NULL on absent / malformed data. Severity ordering for the modern
-// payload picks the highest-risk assessment so a single HIGH assessment
-// can't be hidden by a LOW one.
-//
-// Pure: no DB, no network, no globals. Exported via __test__ for unit
-// tests (Rule #9, Rule #13).
-
-const RISK_LEVEL_SEVERITY: Record<string, number> = {
-  low: 0,
-  medium: 1,
-  high: 2,
-};
-
-function normalizeRiskLevel(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim().toLowerCase();
-  if (trimmed.length === 0) return null;
-  return trimmed;
-}
-
-function normalizeRiskRecommendation(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim().toLowerCase();
-  if (trimmed.length === 0) return null;
-  return trimmed;
-}
-
-function parseRiskScore(value: unknown): string | null {
-  if (value === null || value === undefined) return null;
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return String(value);
-  }
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (trimmed.length === 0) return null;
-    const parsed = Number(trimmed);
-    if (Number.isFinite(parsed)) return String(parsed);
-  }
-  return null;
-}
-
-export interface ExtractedRisk {
-  riskLevel: string | null;
-  riskScore: string | null;
-  riskRecommendation: string | null;
-  riskFacts: unknown;
-}
-
-function extractShopifyRisk(shopifyOrder: any): ExtractedRisk {
-  const empty: ExtractedRisk = {
-    riskLevel: null,
-    riskScore: null,
-    riskRecommendation: null,
-    riskFacts: null,
-  };
-  if (!shopifyOrder || typeof shopifyOrder !== "object") return empty;
-
-  // Modern payload: risk_assessments array.
-  const assessments = (shopifyOrder as any).risk_assessments;
-  if (Array.isArray(assessments) && assessments.length > 0) {
-    let bestLevel: string | null = null;
-    let bestSeverity = -1;
-    let bestRecommendation: string | null = null;
-    let bestScore: string | null = null;
-
-    for (const a of assessments) {
-      if (!a || typeof a !== "object") continue;
-      const level = normalizeRiskLevel((a as any).risk_level ?? (a as any).level);
-      const severity = level !== null ? RISK_LEVEL_SEVERITY[level] ?? -1 : -1;
-      if (severity > bestSeverity) {
-        bestSeverity = severity;
-        bestLevel = level;
-        bestRecommendation = normalizeRiskRecommendation((a as any).recommendation);
-        bestScore = parseRiskScore((a as any).score);
-      }
-    }
-
-    return {
-      riskLevel: bestLevel,
-      riskScore: bestScore,
-      riskRecommendation: bestRecommendation,
-      riskFacts: assessments,
-    };
-  }
-
-  // Legacy payload: single risk object with level + recommendation.
-  const legacy = (shopifyOrder as any).risk;
-  if (legacy && typeof legacy === "object") {
-    const level = normalizeRiskLevel(legacy.level);
-    const recommendation = normalizeRiskRecommendation(legacy.recommendation);
-    if (level === null && recommendation === null) {
-      return empty;
-    }
-    return {
-      riskLevel: level,
-      riskScore: parseRiskScore(legacy.score),
-      riskRecommendation: recommendation,
-      riskFacts: legacy,
-    };
-  }
-
-  return empty;
-}
+export type { ExtractedRisk };
 
 // Exposed for unit testing the extractor in isolation. Keeping the
 // helper private to the module avoids leaking an internal contract;
@@ -330,7 +229,11 @@ export async function cascadeShopifyCancelToShipments(
   },
   opts: {
     now?: Date;
-    shipstation?: { removeFromList?: (id: number) => Promise<void> };
+    shipstation?: {
+      removeFromList?: (
+        id: number,
+      ) => Promise<EngineCancelResult | { state: EngineCancelResult["state"]; alreadyInState?: boolean } | void>;
+    };
     logPrefix?: string;
   } = {},
 ): Promise<{
@@ -418,14 +321,14 @@ export async function cancelOrderCascade(
     return { cascadeDetails: { noWmsOrder: true } };
   }
 
-  const rollupModule = await import("../orders/shipment-rollup");
-  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-status-core");
+  const rollupModule = await import("../orders/shipment-rollup-and-context.api");
+  const { cancelOrder: cancelWmsOrder } = await import("../orders/order-lifecycle-and-cancellation.api");
 
   const ssAdapter = opts.shipStationService
     ? {
         removeFromList: async (ssOrderId: number) => {
           try {
-            await opts.shipStationService!.cancelOrder(ssOrderId);
+            return await opts.shipStationService!.cancelOrder(ssOrderId);
           } catch (e: any) {
             console.error(`${LOG} SS cancel failed for ssOrderId=${ssOrderId}: ${e.message}`);
             throw e;
@@ -434,6 +337,7 @@ export async function cancelOrderCascade(
       }
     : undefined;
 
+  let hadShipmentCancelError = false;
   for (const wmsRow of wmsOrderRows) {
     if (opts.wmsServices) {
       try {
@@ -471,6 +375,9 @@ export async function cancelOrderCascade(
     );
 
     if (cascade.hadShipments) {
+      if (cascade.cascadeResults.some((r) => r.mode === "error")) {
+        hadShipmentCancelError = true;
+      }
       cancelCascadeDetails = {
         wmsOrderId: wmsRow.id,
         shipmentOutcomes: cascade.cascadeResults,
@@ -483,16 +390,29 @@ export async function cancelOrderCascade(
     }
   }
 
-  await db.insert(omsOrderEvents).values({
-    orderId: omsOrderId,
-    eventType: "cancelled",
-    details: {
-      source: opts.source,
-      reason: opts.reason,
-      cancelledAt: now.toISOString(),
-      ...cancelCascadeDetails,
-    },
-  });
+  if (hadShipmentCancelError) {
+    await db.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "cancel_cascade_incomplete",
+      details: {
+        source: opts.source,
+        reason: opts.reason,
+        cancelledAt: now.toISOString(),
+        ...cancelCascadeDetails,
+      },
+    });
+  } else {
+    await db.insert(omsOrderEvents).values({
+      orderId: omsOrderId,
+      eventType: "cancelled",
+      details: {
+        source: opts.source,
+        reason: opts.reason,
+        cancelledAt: now.toISOString(),
+        ...cancelCascadeDetails,
+      },
+    });
+  }
 
   return { cascadeDetails: cancelCascadeDetails };
 }
@@ -502,7 +422,7 @@ export async function cancelOrderCascade(
  * cancelled by the channel vs merely already-terminal on our side.
  *
  * `cancelNow` (drives cancelOrderCascade) is derived ONLY from the Shopify
- * payload — cancelled_at, or a refunded/voided financial_status. It must NEVER
+ * payload and verified native merchandise cancellation. It must NEVER
  * depend on our own existing OMS status: doing so created a self-perpetuating
  * loop where an order wrongly cancelled by another path got RE-cancelled by
  * every subsequent orders/updated webhook (#57977 accumulated 8 cascades on a
@@ -517,14 +437,14 @@ export async function cancelOrderCascade(
 export function deriveOmsUpdateFinality(
   payload: { cancelled_at?: unknown; financial_status?: string | null },
   existingStatus: string | null | undefined,
+  channelMerchandise?: { verifiedCancelled: boolean | null },
 ): { cancelNow: boolean; isFinal: boolean } {
-  const cancelNow =
-    Boolean(payload.cancelled_at) ||
-    payload.financial_status === "refunded" ||
-    payload.financial_status === "voided";
-  const isFinal =
-    cancelNow || existingStatus === "cancelled" || existingStatus === "refunded";
-  return { cancelNow, isFinal };
+  if (payload.cancelled_at) return { cancelNow: true, isFinal: true };
+  if (["refunded", "voided"].includes(payload.financial_status ?? "")
+    && channelMerchandise?.verifiedCancelled == null)
+    throw new Error("A fresh native merchandise observation is required before changing refunded warehouse work.");
+  const cancelNow = channelMerchandise?.verifiedCancelled === true;
+  return { cancelNow, isFinal: cancelNow || existingStatus === "cancelled" };
 }
 
 export const __test__ = {
@@ -540,105 +460,6 @@ export const __test__ = {
   mapShopifyOrderToOrderData,
   canonicalShipToFromShopifyUpdate,
 };
-
-function mapShopifyOrderToOrderData(shopifyOrder: any): ShopifyOrderData {
-  const shipping = shopifyOrder.shipping_address || {};
-  const shipToCountry = resolveProviderCountryCode(shipping.country_code, shipping.country);
-  const customer = shopifyOrder.customer || {};
-
-  // Use normalizer to extract line items with full discount splitting
-  const discountApplications = shopifyOrder.discount_applications || [];
-  const normalizedItems = normalizeShopifyLineItems(
-    shopifyOrder.line_items || [], 
-    discountApplications,
-    shopifyOrder.order_number
-  );
-
-  const lineItems: LineItemData[] = normalizedItems.map((item) => ({
-    externalLineItemId: item.externalLineItemId,
-    externalProductId: item.externalProductId,
-    externalVariantId: item.externalVariantId,
-    sku: item.sku,
-    title: item.title,
-    name: item.name,
-    variantTitle: item.variantTitle,
-    quantity: item.quantity,
-    currentQuantity: item.currentQuantity,
-    fulfillableQuantity: item.fulfillableQuantity,
-    paidPriceCents: item.paidPriceCents,
-    totalCents: item.totalCents,
-    taxCents: 0, // Tax handled at order level
-    discountCents: item.discountCents,
-    requiresShipping: item.requiresShipping,
-  }));
-
-  // Financial status
-  let financialStatus = shopifyOrder.financial_status || "paid";
-
-  // Fulfillment status
-  let fulfillmentStatus = shopifyOrder.fulfillment_status || "unfulfilled";
-
-  // OMS status
-  let status = "pending";
-  if (shopifyOrder.cancelled_at) {
-    status = "cancelled";
-  } else if (fulfillmentStatus === "fulfilled") {
-    status = "shipped";
-  } else if (financialStatus === "paid" || financialStatus === "partially_paid") {
-    status = "confirmed";
-  }
-
-  const customerName =
-    shipping.name ||
-    `${customer.first_name || ""} ${customer.last_name || ""}`.trim() ||
-    shopifyOrder.name;
-
-  // C22b — capture fraud risk from the webhook payload (§6 Group E D3).
-  // Defensive: if no risk data is present we leave all fields null.
-  const risk = extractShopifyRisk(shopifyOrder);
-
-  return {
-    externalOrderNumber: shopifyOrder.name || shopifyOrder.order_number?.toString(),
-    status,
-    financialStatus,
-    fulfillmentStatus,
-    riskLevel: risk.riskLevel,
-    riskScore: risk.riskScore,
-    riskRecommendation: risk.riskRecommendation,
-    riskFacts: risk.riskFacts,
-    customerName,
-    customerEmail: shopifyOrder.email || customer.email,
-    customerPhone: shipping.phone || customer.phone,
-    // Channel-agnostic customer id — for Shopify this is the Shopify customer id.
-    externalCustomerId: normalizeShopifyCustomerId(customer.id),
-    shipToName: shipping.name,
-    shipToCompany: shipping.company || null,
-    shipToAddress1: shipping.address1,
-    shipToAddress2: shipping.address2,
-    shipToCity: shipping.city,
-    shipToState: shipping.province_code || shipping.province,
-    shipToZip: shipping.zip,
-    shipToCountry,
-    shippingMethod: shopifyOrder.shipping_lines?.[0]?.title || null,
-    shippingMethodCode: shopifyOrder.shipping_lines?.[0]?.code || null,
-    // Card Shellz only offers 'standard' today. When expedited/overnight
-    // tiers launch, map from shipping_lines[0].code here.
-    shippingServiceLevel: "standard" as const,
-    subtotalCents: dollarsToCents(shopifyOrder.subtotal_price),
-    shippingCents: (shopifyOrder.shipping_lines || []).reduce(
-      (sum: number, s: any) => sum + dollarsToCents(s.price), 0
-    ),
-    taxCents: dollarsToCents(shopifyOrder.total_tax),
-    discountCents: dollarsToCents(shopifyOrder.total_discounts),
-    totalCents: dollarsToCents(shopifyOrder.total_price),
-    currency: shopifyOrder.currency || "USD",
-    rawPayload: shopifyOrder,
-    notes: shopifyOrder.note || undefined,
-    tags: shopifyOrder.tags ? shopifyOrder.tags.split(",").map((t: string) => t.trim()) : undefined,
-    orderedAt: shopifyOrder.created_at ? new Date(shopifyOrder.created_at) : new Date(),
-    lineItems,
-  };
-}
 
 function mapShopifyLineFulfillmentStatus(
   lineItem: any,
@@ -676,16 +497,7 @@ function mapShopifyLineFulfillmentStatus(
  * Plan ref: post-refactor C39 fix.
  */
 export function getExternalOrderId(shopifyOrder: any): string {
-  const raw = shopifyOrder?.admin_graphql_api_id || shopifyOrder?.id;
-  if (raw === undefined || raw === null) {
-    throw new Error("getExternalOrderId: missing admin_graphql_api_id and id on payload");
-  }
-  const s = String(raw).trim();
-  const PREFIX = "gid://shopify/Order/";
-  if (s.startsWith(PREFIX)) {
-    return s.substring(PREFIX.length);
-  }
-  return s;
+  return getShopifyExternalOrderId(shopifyOrder);
 }
 
 type CanonicalShipTo = {
@@ -893,7 +705,7 @@ export function registerOmsWebhooks(
     const shipments: Array<{ id: number }> = shipmentResult?.rows ?? [];
     if (shipments.length === 0) return;
 
-    const rollupModule = await import("../orders/shipment-rollup");
+    const rollupModule = await import("../orders/shipment-rollup-and-context.api");
     let anyRequiresReview = false;
     for (const shipment of shipments) {
       const result = await rollupModule.handleAddressChangeOnShipment(db, shipment.id, { now });
@@ -1043,103 +855,76 @@ export function registerOmsWebhooks(
       const channelId = await getChannelId(req, shopifyOrder);
       if (!channelId) throw new Error("Unknown Shopify channel domain");
 
-      // Dedup: check OMS first
-      const orderData = {
-        ...mapShopifyOrderToOrderData(shopifyOrder),
+      const normalizedOrder = shopifyOrderIntakeAdapter.normalizeOrder(shopifyOrder, {
+        channelId,
         sourceTopic: "orders/paid",
         sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
         sourceInboxId: inbox.receipt.id,
-      };
-      const omsOrder = await omsService.ingestOrder(channelId, externalOrderId, orderData);
-      if ((await db.transaction((tx: any) => guardOrderEditShopifyIngress(tx,omsOrder.id,shopifyOrder,new Date()))).skipOrder) {
-        await markInboxSucceeded(inbox.receipt); acknowledgeProcessed(req,res); return;
-      }
+      });
 
-      // Check if newly created (within last 5 seconds)
-      const isNew = omsOrder.createdAt && (Date.now() - new Date(omsOrder.createdAt).getTime()) < 5000;
-      if (!isNew) {
-        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already exists in OMS (id=${omsOrder.id}), ensuring routing`);
-      }
-
-      // Enrich with member tier (non-blocking, logs errors)
-      if (isNew) {
-        enrichOrderWithMemberTier(omsOrder.id, omsOrder.customerEmail || '').catch(err => {
-          console.error(`${LOG_PREFIX} Member tier enrichment failed:`, err);
-        });
-      }
-
-      // Sync to WMS via sync service. §6 C9b: legacy
-      // createWmsOrderFromShopify fallback removed (unreachable in
-      // prod per Overlord Q2 decision). If wmsSyncService is absent
-      // we fail loudly so the missing wiring is diagnosable.
-      if (!wmsSyncService) {
-        throw new Error("wmsSyncService required; legacy createWmsOrderFromShopify fallback removed (§6 C9b)");
-      }
-      await ensureOmsOrderQueuedForWmsSync(
+      const outcome = await ingestAndRoute({
+        db,
+        omsService,
         wmsSyncService,
-        omsOrder.id,
-        shopifyOrder.name || externalOrderId,
-      );
-
-      // OMS-level reservation (delegates to WMS reservation service).
-      // A near-simultaneous orders/updated webhook can create the OMS order
-      // before orders/paid finishes. In that case, do not treat "already
-      // exists" as routed; if no warehouse is assigned yet, finish the paid
-      // routing path now.
-      if (!omsOrder.warehouseId) {
-        try {
-          await omsService.reserveInventory(omsOrder.id);
-          await omsService.assignWarehouse(omsOrder.id);
-        } catch (e: any) {
-          console.error(`${LOG_PREFIX} Post-ingest processing failed for ${shopifyOrder.name}: ${e.message}`);
-        }
-      } else {
-        console.log(`${LOG_PREFIX} Order ${shopifyOrder.name} already has warehouse_id=${omsOrder.warehouseId}`);
-      }
-
-      // The post-ingest reservation / warehouse assignment path changes
-      // the exact state WMS needs. Run the idempotent sync once more and
-      // persist a retry if it cannot create/find the WMS order. This is the
-      // hard guarantee against OMS orders getting stuck after assignment
-      // with no WMS row and no retry handle.
-      await ensureOmsOrderQueuedForWmsSync(
-        wmsSyncService,
-        omsOrder.id,
-        shopifyOrder.name || externalOrderId,
-      );
-
-      // C22b — populate Shopify fulfillment-order line item IDs at ingest
-      // (§6 Group E D2/D4). Failure is non-fatal: C22c's Path B fallback
-      // re-resolves at push time. We swallow errors here so a Shopify GQL
-      // hiccup doesn't block ingestion of an otherwise good order.
-      try {
-        const externalGid = String(
-          shopifyOrder.admin_graphql_api_id ??
-            (shopifyOrder.id ? `gid://shopify/Order/${shopifyOrder.id}` : externalOrderId),
-        );
-        const summary = await (omsService as any).populateShopifyFulfillmentOrderIds?.(
-          omsOrder.id,
-          externalGid,
-          getShopifyAdminClient(),
-        );
-        if (summary) {
-          console.log(
-            `${LOG_PREFIX} FO IDs populated for ${shopifyOrder.name}: matched=${summary.matched} unmatched=${summary.unmatched} updates=${summary.updates}`,
+        order: normalizedOrder,
+        logPrefix: LOG_PREFIX,
+        label: shopifyOrder.name || externalOrderId,
+        alwaysSyncExistingAssigned: true,
+        afterIngested: async ({ omsOrder, isNew }) => {
+          const guard = await db.transaction((tx: any) =>
+            guardOrderEditShopifyIngress(tx, omsOrder.id, shopifyOrder, new Date()),
           );
-        }
-      } catch (err: any) {
-        console.error(
-          `${LOG_PREFIX} populateShopifyFulfillmentOrderIds failed for ${shopifyOrder.name}: ${err?.message ?? String(err)} (non-fatal; Path B fallback will retry at push)`,
-        );
+          if (guard.skipOrder) {
+            return { skipRouting: true };
+          }
+          if (isNew) {
+            enrichOrderWithMemberTier(omsOrder.id, omsOrder.customerEmail || "").catch((err) => {
+              console.error(`${LOG_PREFIX} Member tier enrichment failed:`, err);
+            });
+          }
+          if (!wmsSyncService) {
+            throw new Error("wmsSyncService required; legacy createWmsOrderFromShopify fallback removed (§6 C9b)");
+          }
+        },
+        afterRouted: async ({ omsOrder, isNew }) => {
+          try {
+            const externalGid = String(
+              shopifyOrder.admin_graphql_api_id ??
+                (shopifyOrder.id ? `gid://shopify/Order/${shopifyOrder.id}` : externalOrderId),
+            );
+            const summary = await (omsService as any).populateShopifyFulfillmentOrderIds?.(
+              omsOrder.id,
+              externalGid,
+              getShopifyAdminClient(),
+            );
+            if (summary) {
+              console.log(
+                `${LOG_PREFIX} FO IDs populated for ${shopifyOrder.name}: matched=${summary.matched} unmatched=${summary.unmatched} updates=${summary.updates}`,
+              );
+            }
+          } catch (err: any) {
+            console.error(
+              `${LOG_PREFIX} populateShopifyFulfillmentOrderIds failed for ${shopifyOrder.name}: ${err?.message ?? String(err)} (non-fatal; Path B fallback will retry at push)`,
+            );
+          }
+
+          console.log(
+            `${LOG_PREFIX} ✅ Processed ${isNew ? "new" : "existing"} order ${shopifyOrder.name} (OMS id=${omsOrder.id})`,
+          );
+          if (isNew) {
+            pushToMissionControl(omsOrder.id, "order.created");
+          }
+
+          await db.execute(sql`NOTIFY shopify_order_ingested`);
+        },
+      });
+
+      if (outcome.skippedByGuard) {
+        await markInboxSucceeded(inbox.receipt);
+        acknowledgeProcessed(req, res);
+        return;
       }
 
-      console.log(`${LOG_PREFIX} ✅ Processed ${isNew ? "new" : "existing"} order ${shopifyOrder.name} (OMS id=${omsOrder.id})`);
-      if (isNew) {
-        pushToMissionControl(omsOrder.id, "order.created");
-      }
-      
-      // M18: Trigger real-time backfill bridge
-      await db.execute(sql`NOTIFY shopify_order_ingested`);
       await markInboxSucceeded(inbox.receipt);
       acknowledgeProcessed(req, res);
     } catch (err: any) {
@@ -1188,24 +973,57 @@ export function registerOmsWebhooks(
 
       const nextShipTo = canonicalShipToFromShopifyUpdate(shopifyOrder, existing);
       const now = new Date();
+      // Shopify's own statement that the order is fully paid for its current
+      // contents. Lets a Shopify-admin edit that adds units without a new
+      // payment (e.g. #65696) raise paid authority. A malformed amount throws
+      // here, fails the inbox row, and is retried rather than authorizing.
+      const channelPaymentSettled = deriveShopifyChannelPaymentSettled({
+        financialStatus: shopifyOrder.financial_status,
+        totalOutstanding: shopifyOrder.total_outstanding,
+      });
       const isCancelledPayload = Boolean(shopifyOrder.cancelled_at);
       // cancelNow (channel truth) drives the cancel cascade; isFinalOmsState
       // (includes our existing terminal status) drives only the reconcile/
       // address-change skips. See deriveOmsUpdateFinality for why cancelNow must
       // never read existing.status (self-perpetuating re-cancel loop, #57977).
+      const nativeMerchandise = !isCancelledPayload && ["refunded", "voided"].includes(shopifyOrder.financial_status)
+        ? await readChannelShopifyMerchandise(db, { channelId, orderId: externalOrderId }) : null;
       const { cancelNow: isCancelledByChannel, isFinal: isFinalOmsState } =
-        deriveOmsUpdateFinality(shopifyOrder, existing.status);
+        deriveOmsUpdateFinality(shopifyOrder, existing.status, { verifiedCancelled: nativeMerchandise?.cancelled ?? null });
 
-      // Update OMS order fields
+      // Order money and the raw snapshot are channel facts that only a
+      // same-or-newer Shopify version may replace. One conditional statement
+      // keeps a late, older webhook from regressing them (the line ledger
+      // guards quantities the same way via channel_quantity_updated_at).
+      // Without a version the payload cannot be ordered, so money is left as is.
+      const channelVersion = shopifyOrder.updated_at ? new Date(shopifyOrder.updated_at) : null;
+      const hasChannelVersion = channelVersion !== null && Number.isFinite(channelVersion.getTime());
+      if (hasChannelVersion) {
+        await applyVersionedShopifyOrderMoney(db, {
+          omsOrderId: existing.id,
+          channelVersion: channelVersion!,
+          money: {
+            subtotalCents: requireMappedCents(orderData.subtotalCents, "subtotalCents"),
+            shippingCents: requireMappedCents(orderData.shippingCents, "shippingCents"),
+            taxCents: requireMappedCents(orderData.taxCents, "taxCents"),
+            discountCents: requireMappedCents(orderData.discountCents, "discountCents"),
+            totalCents: requireMappedCents(orderData.totalCents, "totalCents"),
+          },
+          rawPayload: shopifyOrder,
+        });
+      }
+
+      // Update OMS order fields (P1.2: never regress dispatched/refunded orders to cancelled)
+      const cancelledAtCandidate = shopifyOrder.cancelled_at
+        ? new Date(shopifyOrder.cancelled_at)
+        : now;
       await db
         .update(omsOrders)
         .set({
           ...(isCancelledPayload
             ? {
-                status: "cancelled",
-                cancelledAt: shopifyOrder.cancelled_at
-                  ? new Date(shopifyOrder.cancelled_at)
-                  : now,
+                status: sql`CASE WHEN ${omsOrders.status} NOT IN ('shipped', 'partially_shipped', 'delivered', 'refunded') AND ${omsOrders.shippedAt} IS NULL THEN 'cancelled' ELSE ${omsOrders.status} END`,
+                cancelledAt: sql`CASE WHEN ${omsOrders.status} NOT IN ('shipped', 'partially_shipped', 'delivered', 'refunded') AND ${omsOrders.shippedAt} IS NULL THEN COALESCE(${omsOrders.cancelledAt}, ${cancelledAtCandidate}) ELSE ${omsOrders.cancelledAt} END`,
               }
             : {}),
           financialStatus: shopifyOrder.financial_status || existing.financialStatus,
@@ -1224,7 +1042,8 @@ export function registerOmsWebhooks(
           shipToZip: nextShipTo.zip,
           shipToCountry: nextShipTo.country,
           notes: shopifyOrder.note ?? existing.notes,
-          rawPayload: shopifyOrder as any,
+          // Versioned payloads are written by the guarded statement above.
+          ...(hasChannelVersion ? {} : { rawPayload: shopifyOrder as any }),
           updatedAt: now,
         })
         .where(eq(omsOrders.id, existing.id));
@@ -1258,28 +1077,27 @@ export function registerOmsWebhooks(
 
       if (wmsOrderRows.length > 0) {
         const isPaidNow = shopifyOrder.financial_status === "paid" || shopifyOrder.financial_status === "partially_paid";
-        await db.execute(sql`
-          UPDATE wms.orders SET
-            shipping_name = ${nextShipTo.name},
-            shipping_company = ${nextShipTo.company},
-            shipping_address = ${nextShipTo.address1},
-            shipping_address2 = ${nextShipTo.address2},
-            shipping_city = ${nextShipTo.city},
-            shipping_state = ${nextShipTo.state},
-            shipping_postal_code = ${nextShipTo.zip},
-            shipping_country = ${nextShipTo.country},
-            financial_status = ${shopifyOrder.financial_status || "paid"},
-            warehouse_status = CASE
-              WHEN warehouse_status = 'pending' AND ${isPaidNow} THEN 'ready'
-              ELSE warehouse_status
-            END,
-            customer_name = ${nextShipTo.name || existing.customerName || null},
-            customer_email = ${shopifyOrder.email || existing.customerEmail || null}
-          WHERE (source = 'oms' AND oms_fulfillment_order_id = ${String(existing.id)})
-             OR (source = 'shopify' AND source_table_id = ${String(existing.id)})
-        `);
+        await syncWmsOrderAddressAndFinancialFromShopifyWebhookInWms(db, {
+          omsOrderIdText: String(existing.id),
+          shippingName: nextShipTo.name,
+          shippingCompany: nextShipTo.company,
+          shippingAddress: nextShipTo.address1,
+          shippingAddress2: nextShipTo.address2,
+          shippingCity: nextShipTo.city,
+          shippingState: nextShipTo.state,
+          shippingPostalCode: nextShipTo.zip,
+          shippingCountry: nextShipTo.country,
+          financialStatus: shopifyOrder.financial_status || "paid",
+          isPaidNow,
+          customerName: nextShipTo.name || existing.customerName || null,
+          customerEmail: shopifyOrder.email || existing.customerEmail || null,
+        });
 
-        if (isCancelledByChannel) {
+        if (
+          isCancelledByChannel &&
+          !isNonCancellableOmsOrderStatus(existing.status) &&
+          !existing.shippedAt
+        ) {
           await cancelOrderCascade(db, existing.id, {
             wmsServices,
             shipStationService,
@@ -1389,8 +1207,11 @@ export function registerOmsWebhooks(
                   ? Number(item.fulfillable_quantity)
                   : previousAuthority.fulfillableQuantity,
                 currentQuantity: readShopifyLineCurrentQuantity(item),
+                channelUpdatedAt: shopifyOrder.updated_at ?? null,
+                channelPaymentSettled,
                 previous: previousAuthority,
               });
+              if (authority.staleChannelObservation) return;
 
               await tx
                 .update(omsOrderLines)
@@ -1452,6 +1273,8 @@ export function registerOmsWebhooks(
                 ? Number(item.fulfillable_quantity)
                 : null,
               currentQuantity: readShopifyLineCurrentQuantity(item),
+              channelUpdatedAt: shopifyOrder.updated_at ?? null,
+              channelPaymentSettled,
             });
             // Insert new line and authority ledger atomically.
             await db.transaction(async (tx: any) => {
@@ -1512,18 +1335,26 @@ export function registerOmsWebhooks(
         for (const existingLine of existingLines) {
           if (existingLine.externalLineItemId && !shopifyLineIds.has(existingLine.externalLineItemId)) {
             if ((existingLine.quantity || 0) > 0) {
-              const authority = deriveOmsLineAuthority({
-                sourceTopic: "orders/updated",
-                sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
-                sourceInboxId: inbox.receipt.id,
-                financialStatus: shopifyOrder.financial_status,
-                quantity: 0,
-                fulfillableQuantity: 0,
-                currentQuantity: 0,
-                previous: existingLine,
-              });
               await db.transaction(async (tx: any) => {
                 if ((await guardOrderEditShopifyIngress(tx,existing.id,shopifyOrder,new Date())).skipLines) return;
+                // A newer native observation or paid event may have committed
+                // since the header snapshot. Removal uses the same row lock as
+                // matched-line updates and cannot overwrite that newer state.
+                const [lockedLine] = await tx.select().from(omsOrderLines)
+                  .where(eq(omsOrderLines.id, existingLine.id)).for("update").limit(1);
+                if (!lockedLine) throw new Error("The removed OMS line disappeared during channel reconciliation.");
+                const authority = deriveOmsLineAuthority({
+                  sourceTopic: "orders/updated",
+                  sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
+                  sourceInboxId: inbox.receipt.id,
+                  financialStatus: shopifyOrder.financial_status,
+                  quantity: 0,
+                  fulfillableQuantity: 0,
+                  currentQuantity: 0,
+                  channelUpdatedAt: shopifyOrder.updated_at ?? null,
+                  previous: lockedLine,
+                });
+                if (authority.staleChannelObservation) return;
                 await tx
                   .update(omsOrderLines)
                   .set({
@@ -1539,7 +1370,7 @@ export function registerOmsWebhooks(
                   orderLineId: existingLine.id,
                   eventType: "line_removed",
                   sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
-                  previous: existingLine,
+                  previous: lockedLine,
                   authority,
                 });
               });
@@ -1598,6 +1429,11 @@ export function registerOmsWebhooks(
               console.error(
                 `${LOG_PREFIX} WMS edit propagation failed for order ${shopifyOrder.name || externalOrderId}: ${propErr.message}`,
               );
+              await enqueueOmsWmsSyncRetry(
+                db,
+                existing.id,
+                propErr instanceof Error ? propErr : new Error(propErr?.message ?? String(propErr)),
+              );
             }
           } else {
             await enqueueOmsWmsSyncRetry(
@@ -1626,6 +1462,16 @@ export function registerOmsWebhooks(
           }
         }
       }
+
+      // Units Shopify sold that OMS still will not ship are never silent:
+      // awaiting payment is recorded as a visible state, and a fully paid
+      // order with unshippable units is an error for a human.
+      await recordChannelAuthorityGap(db, {
+        omsOrderId: existing.id,
+        externalOrderNumber: shopifyOrder.name ?? null,
+        channelPaymentSettled,
+        sourceEventId: orderData.sourceEventId,
+      });
 
       // Log event
       await db.insert(omsOrderEvents).values({
@@ -1723,23 +1569,38 @@ export function registerOmsWebhooks(
       }
 
       const now = new Date();
+      const cancelReason = shopifyOrder.cancel_reason || "cancelled_by_shopify";
+      const nextFinancialStatus = shopifyOrder.financial_status || existing.financialStatus;
 
-      // Update OMS order
-      await db
-        .update(omsOrders)
-        .set({
-          status: "cancelled",
-          cancelledAt: now,
-          financialStatus: shopifyOrder.financial_status || existing.financialStatus,
-          updatedAt: now,
-        })
-        .where(eq(omsOrders.id, existing.id));
+      // P1.2: Route OMS status transition through the state-machine chokepoint
+      const cancelVerdict = await transitionOmsOrderStatus(db, existing.id, {
+        to: "cancelled",
+        driver: "channel",
+        reason: cancelReason,
+        financialStatus: nextFinancialStatus,
+        now,
+      });
+
+      if (cancelVerdict.outcome === "blocked_by_state") {
+        if (nextFinancialStatus && nextFinancialStatus !== cancelVerdict.financialStatus) {
+          await db
+            .update(omsOrders)
+            .set({ financialStatus: nextFinancialStatus, updatedAt: now })
+            .where(eq(omsOrders.id, existing.id));
+        }
+        console.warn(
+          `${LOG_PREFIX} Blocked orders/cancelled regression on OMS order ${existing.id} (${shopifyOrder.name}): ${cancelVerdict.reason}`,
+        );
+        await markInboxSucceeded(inbox.receipt);
+        acknowledgeProcessed(req, res);
+        return;
+      }
 
       await cancelOrderCascade(db, existing.id, {
         wmsServices,
         shipStationService,
         source: "shopify_cancel_webhook",
-        reason: shopifyOrder.cancel_reason || "cancelled_by_shopify",
+        reason: cancelReason,
         logPrefix: LOG_PREFIX,
       });
 
@@ -1869,7 +1730,7 @@ export function registerOmsWebhooks(
   // =========================================================================
   // 5. POST /api/oms/webhooks/refunds/create
   // =========================================================================
-  app.post("/api/oms/webhooks/refunds/create", async (req: Request, res: Response) => {
+  app.post("/api/oms/webhooks/refunds/create", webhookLimiter, async (req: Request, res: Response) => {
     const refundPayload = verifyAndParse(req, res);
     if (!refundPayload) return;
 
@@ -1925,16 +1786,9 @@ export function registerOmsWebhooks(
 
       // Determine financial status
       const refundLineItems = refundPayload.refund_line_items || [];
-      const omsLines = await db
-        .select()
-        .from(omsOrderLines)
-        .where(eq(omsOrderLines.orderId, existing.id));
-
-      // This-payload full-line-refund signal (kept as a secondary trigger for
-      // 'refunded'; the primary trigger is CUMULATIVE money — see the UPDATE).
-      const totalOrderQty = omsLines.reduce((s: number, l: any) => s + l.quantity, 0);
-      const refundedQty = refundLineItems.reduce((s: number, l: any) => s + (l.quantity || 0), 0);
-      const fullQtyRefundedThisPayload = totalOrderQty > 0 && refundedQty >= totalOrderQty;
+      // Replacing an order-edit line can create a transaction-free bookkeeping
+      // refund for its entire old quantity. Physical disposition is owned by the
+      // cascade; quantities are never evidence that money was fully refunded.
 
       // Compute refund amount from Shopify transactions (authoritative source)
       const transactions: any[] = Array.isArray(refundPayload.transactions) ? refundPayload.transactions : [];
@@ -1973,22 +1827,35 @@ export function registerOmsWebhooks(
           return;
         }
 
+        const financialEvidence: {
+          rows: Array<{
+            total_cents: number | string | null;
+            refund_amount_cents: number | string | null;
+            financial_status: string | null;
+          }>;
+        } = await tx.execute(sql`
+          SELECT total_cents,refund_amount_cents,financial_status
+          FROM oms.oms_orders WHERE id=${existing.id} FOR UPDATE
+        `);
+        const financialRow = financialEvidence?.rows?.[0];
+        if (!financialRow) throw new Error("The refunded order no longer exists.");
+        const financialStatus = deriveShopifyRefundFinancialStatus({
+          totalCents: financialRow.total_cents,
+          previousRefundCents: financialRow.refund_amount_cents,
+          refundCents: thisRefundCents,
+          previousFinancialStatus: financialRow.financial_status,
+        });
         const updated: any = await tx.execute(sql`
           UPDATE oms.oms_orders SET
             refund_amount_cents = COALESCE(refund_amount_cents, 0) + ${thisRefundCents},
-            financial_status = CASE
-              WHEN COALESCE(refund_amount_cents, 0) + ${thisRefundCents} >= COALESCE(NULLIF(total_cents, 0), 2147483647)
-                THEN 'refunded'
-              WHEN ${fullQtyRefundedThisPayload} THEN 'refunded'
-              ELSE 'partially_refunded'
-            END,
-            refunded_at = ${now},
+            financial_status = ${financialStatus},
+            refunded_at = CASE WHEN ${thisRefundCents} > 0 THEN ${now} ELSE refunded_at END,
             updated_at = ${now}
           WHERE id = ${existing.id}
           RETURNING refund_amount_cents, financial_status
         `);
         cumulative = {
-          refundAmountCents: Number(updated?.rows?.[0]?.refund_amount_cents ?? 0),
+          refundAmountCents: readIntegerCents(updated?.rows?.[0]?.refund_amount_cents ?? 0, "refund amount", true),
           financialStatus: String(updated?.rows?.[0]?.financial_status ?? "partially_refunded"),
         };
 
@@ -2023,14 +1890,16 @@ export function registerOmsWebhooks(
         {
           // OMS already resolved above — short-circuit the helper.
           resolveOmsOrder: async () => ({ id: existing.id }),
+          readMerchandiseSnapshot: () => readChannelShopifyMerchandise(db, {
+            channelId, orderId: String(shopifyOrderId),
+          }),
           reconcileRefundOrderDemand: wmsServices
             ? async (args) => wmsServices.reservation.reconcileRefundOrderDemand(args)
             : undefined,
           shipstation: shipStationService
             ? {
-                cancelOrder: async (shipstationOrderId: number) => {
-                  await shipStationService.cancelOrder(shipstationOrderId);
-                },
+                cancelOrder: async (shipstationOrderId: number) =>
+                  shipStationService.cancelOrder(shipstationOrderId),
               }
             : undefined,
           shippingEngine: shippingEngine ?? undefined,

@@ -1,11 +1,15 @@
 import { z } from "zod";
 import type { CustomerRewards } from "./customer-rewards";
-import type { CustomerReturnCustomerSession } from "../../returns/application/customer-return-customer-auth.service";
-import type { CustomerReturnOrderAccessService } from "../../returns/application/customer-return-order-access.service";
-import type { OrderEditService } from "../../order-edits/application/order-edit.service";
-import type { OrderEditStore } from "../../order-edits/application/order-edit-store";
-import { customerOrderEditActorId } from "../../order-edits/domain/order-edit-actor";
-import { OrderEditError } from "../../order-edits/domain/order-edit-error";
+import type {
+  CustomerReturnCustomerSession,
+  CustomerReturnOrderAccessService,
+} from "../../returns/customer-return-access-contracts.api";
+import {
+  customerOrderEditActorId,
+  OrderEditError,
+  type OrderEditService,
+  type OrderEditStore,
+} from "../../order-edits/customer-account.api";
 import { orderEditQuoteInputSchema } from "@shared/order-edits/order-edit.contract";
 import {
   orderEditPreviewInputSchema,
@@ -20,12 +24,13 @@ import {
   customerAccountOrderIdentityInputSchema,
   customerAccountOrderIdentitySchema,
 } from "@shared/customer-account/customer-account.contract";
+import { customerOrderCancellationInputSchema } from "@shared/customer-account/order-cancellation";
 
 export class CustomerOrderEditService {
   private readonly actorId: string;
   constructor(
     private readonly dependencies: {
-      principal: CustomerReturnCustomerSession;
+      principal: Pick<CustomerReturnCustomerSession, "channelId" | "externalCustomerId" | "shopDomain">;
       rewards?: CustomerRewards;
       access: Pick<
         CustomerReturnOrderAccessService,
@@ -46,6 +51,7 @@ export class CustomerOrderEditService {
         | "reconcile"
         | "resume"
         | "abandon"
+        | "cancellations"
       >;
     },
   ) {
@@ -113,6 +119,25 @@ export class CustomerOrderEditService {
         };
     }
     return order;
+  }
+  async cancellationReview(connectionId: number, omsOrderId: number) {
+    await this.ownedScope(connectionId, omsOrderId);
+    return this.cancellations().review(connectionId, omsOrderId);
+  }
+  async submitCancellation(connectionId: number, omsOrderId: number, raw: unknown, commandKey: string) {
+    const body = customerOrderCancellationInputSchema.omit({ connectionId: true, omsOrderId: true }).parse(raw);
+    if (body.requestKey !== z.string().uuid().parse(commandKey)) throw new OrderEditError("ORDER_CANCELLATION_KEY_MISMATCH", "The cancellation reference does not match.", 400);
+    await this.ownedScope(connectionId, omsOrderId);
+    return this.cancellations().submit({ connectionId, omsOrderId, ...body }, this.actorId);
+  }
+  async cancellationStatus(connectionId: number, omsOrderId: number, requestKey: string) {
+    await this.ownedScope(connectionId, omsOrderId);
+    return this.cancellations().get(connectionId, omsOrderId, requestKey, this.actorId);
+  }
+  private cancellations() {
+    const service = this.dependencies.edits.cancellations;
+    if (!service) throw new OrderEditError("ORDER_CANCELLATION_UNAVAILABLE", "Online cancellation is temporarily unavailable.", 503);
+    return service;
   }
   async catalogCategories(connectionId: number, raw: unknown) {
     await this.ownedConnection(connectionId);
@@ -191,9 +216,9 @@ export class CustomerOrderEditService {
     await this.ownedScope(input.connectionId, input.omsOrderId);
     return this.dependencies.edits.quote(input, this.actorId);
   }
-  async operation(raw: string, codeEntryVersion?: "v1") {
+  async operation(raw: string, codeEntryVersion?: "v1", observationVersion?: "v1") {
     await this.ownedOperation(raw);
-    return this.dependencies.edits.get(raw, codeEntryVersion);
+    return this.dependencies.edits.get(raw, codeEntryVersion, observationVersion);
   }
   async progress(
     raw: string,

@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
 import {
+  insertIdempotencyKeyDrizzle,
+  updateIdempotencyKeyDrizzle,
+} from "../../../infrastructure/idempotency-keys.repository";
+import {
   buildRecipeComponents,
   buildRecipes,
   idempotencyKeys,
@@ -61,6 +65,9 @@ import {
 import { retrySerializableMasterDataTransaction } from "./serializable-master-data-transaction";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+// Statements only. A handle bound to one pinned client (the one-step set command) satisfies it as well
+// as a real transaction, and it leaves no way to open or end a transaction from inside a writer.
+type StatementTransaction = Pick<Transaction, "execute" | "insert" | "update" | "delete" | "select">;
 type Executor = typeof db | Transaction;
 
 const LOCATION_POLICY_LOCK_NAMESPACE = 918421;
@@ -384,7 +391,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
         assertReplayHash(replay.requestHash, command.requestHash);
         return { ...replay.result, alreadyApplied: true };
       }
-      await tx.insert(idempotencyKeys).values({
+      await insertIdempotencyKeyDrizzle(tx, {
         key: draftUpdateReceiptKey(command.idempotencyKey),
         requestHash: command.requestHash,
         responseBody: null,
@@ -478,15 +485,12 @@ implements InventoryAvailabilityMasterDataAdminStore {
         timestamp: command.occurredAt,
         emitStructuredLog: false,
       });
-      await tx
-        .update(idempotencyKeys)
-        .set({
-          responseBody: {
-            commandType: "transformation_model_draft_update",
-            result,
-          },
-        })
-        .where(eq(idempotencyKeys.key, draftUpdateReceiptKey(command.idempotencyKey)));
+      await updateIdempotencyKeyDrizzle(tx, draftUpdateReceiptKey(command.idempotencyKey), {
+        responseBody: {
+          commandType: "transformation_model_draft_update",
+          result,
+        },
+      });
       return result;
     }));
   }
@@ -813,7 +817,22 @@ implements InventoryAvailabilityMasterDataAdminStore {
       InventoryAvailabilityMasterDataAdminStore["createPromiseSafetyPolicyDraft"]
     >[0],
   ) {
-    return this.database.transaction(async (tx) => {
+    return this.database.transaction((tx) => this.createPromiseSafetyPolicyDraftInsideTransaction(tx, command));
+  }
+
+  /**
+   * The one writer of a new promise-safety version. The one-step set command
+   * (inventory-safety-definition.repository.ts `set`) supplies its own
+   * transaction so the saved version, its review and its apply commit or roll
+   * back together. The caller owns BEGIN/COMMIT; nothing here opens or ends a
+   * transaction.
+   */
+  async createPromiseSafetyPolicyDraftInsideTransaction(
+    tx: StatementTransaction,
+    command: Parameters<
+      InventoryAvailabilityMasterDataAdminStore["createPromiseSafetyPolicyDraft"]
+    >[0],
+  ) {
       const scopeKey = safetyPolicyScopeKey(command.scope);
       await lockIdempotencyKey(tx, command.idempotencyKey);
       await tx.execute(sql`
@@ -930,7 +949,6 @@ implements InventoryAvailabilityMasterDataAdminStore {
         definitionHash,
         alreadyApplied: false,
       };
-    });
   }
 }
 
@@ -1441,7 +1459,7 @@ function draftUpdateReceiptKey(idempotencyKey: string): string {
 }
 
 async function lockIdempotencyKey(
-  tx: Transaction,
+  tx: StatementTransaction,
   idempotencyKey: string,
 ): Promise<void> {
   await tx.execute(sql`
@@ -1453,7 +1471,7 @@ async function lockIdempotencyKey(
 }
 
 async function assertIdempotencyKeyUnusedByOtherType(
-  tx: Transaction,
+  tx: StatementTransaction,
   idempotencyKey: string,
   commandType:
     | "transformation_model"
@@ -1585,7 +1603,7 @@ function safetyPolicyColumns(
 }
 
 async function persistDraftAudit(
-  tx: Transaction,
+  tx: StatementTransaction,
   command: {
     actorId: string;
     changeReason: string;

@@ -169,6 +169,26 @@ describe("normalizeRatesResponse", () => {
     expect(normalizeRatesResponse(drifty)[0].amountCents).toBe(30);
   });
 
+  it.each([undefined, null, "1junk", -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects a present malformed shipping charge instead of quoting zero: %s", amount => {
+      expect(() => normalizeRatesResponse({ rate_response: { rates: [{
+        service_code: "fixture", shipping_amount: { currency: "usd", amount },
+      }] } })).toThrow(/ShipStation rate amount/);
+    },
+  );
+
+  it("retains exact per-component half-up rounding for sub-cent rate amounts", () => {
+    expect(normalizeRatesResponse({ rate_response: { rates: [{ service_code: "fixture",
+      shipping_amount: { amount: 1.005 }, other_amount: { amount: 0.005 },
+    }] } })[0].amountCents).toBe(102);
+  });
+
+  it("rejects aggregate overflow even when each component is valid", () => {
+    expect(() => normalizeRatesResponse({ rate_response: { rates: [{
+      service_code: "fixture", shipping_amount: { amount: "90071992547409.91" }, other_amount: { amount: "0.01" },
+    }] } })).toThrow(/ShipStation rate total/);
+  });
+
   it("returns an empty array for missing or malformed payloads", () => {
     expect(normalizeRatesResponse(null)).toEqual([]);
     expect(normalizeRatesResponse({})).toEqual([]);

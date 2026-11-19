@@ -1,6 +1,10 @@
 import { z } from "zod";
-import { costFingerprintSchema } from "./cost-source-contracts";
+import {
+  costFingerprintSchema,
+  costIssueSchema,
+} from "./cost-source-contracts";
 import { reconciliationDestinationSchema } from "./cost-reconciliation";
+import { costLinkRepairSummarySchema } from "./cost-link-repair";
 
 export const quantityCorrectionId = z
   .number()
@@ -27,13 +31,25 @@ export const quantityCorrectionInputSchema = z
     // Kept for older clients that send null. A quantity correction is not
     // authority to book a historical sale or an inventory write-off.
     historicalCostDestination: z.null().default(null),
+    repairCostLinks: z.literal(true).optional(),
     reason: z.string().trim().min(10).max(2000),
     evidenceConfirmed: z.literal(true),
   })
   .strict();
 export const quantityCorrectionApprovalSchema = quantityCorrectionInputSchema
-  .extend({ previewVersion: costFingerprintSchema })
-  .strict();
+  .extend({
+    previewVersion: costFingerprintSchema,
+    costLinksConfirmed: z.literal(true).optional(),
+  })
+  .strict()
+  .refine(
+    (value) => !value.repairCostLinks || value.costLinksConfirmed === true,
+    {
+      message:
+        "Confirm the transfer and repacking evidence shown in the preview.",
+      path: ["costLinksConfirmed"],
+    },
+  );
 export type QuantityCorrectionInput = z.infer<
   typeof quantityCorrectionInputSchema
 >;
@@ -95,6 +111,7 @@ export const quantityCorrectionSummarySchema = z
       after: z.string().nullable(),
     }),
     stockUnitChange: z.literal(0),
+    costLinkRepair: costLinkRepairSummarySchema.optional(),
     physicalTotals: z
       .object({
         netWeightKg: z.object({
@@ -123,7 +140,18 @@ export const quantityCorrectionSummarySchema = z
           lotsUpdated: quantity,
           orderCostsUpdated: quantity,
           orderCostDeltaCents: amount,
-          issues: z.array(z.object({ code: z.string(), message: z.string() })),
+          // Preview runs are rolled back; newly allocated financial row IDs are
+          // not stable approval inputs. Existing order identities are stable.
+          issues: z.array(
+            costIssueSchema
+              .pick({
+                code: true,
+                message: true,
+                orderCostReview: true,
+                costLinksAlreadyReviewed: true,
+              })
+              .strip(),
+          ),
         })
         .strict(),
     ),

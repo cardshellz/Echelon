@@ -44,7 +44,7 @@ async function mount(page: Page, view: { announced: AnnouncedChange[]; recent: R
           status: "active", entitlementStatus: "active", membershipGraceEndsAt: null, includedStoreConnections: 1, standingReason: null, pausedAt: null },
         entitlement: { memberId: "m-1", cardShellzEmail: "vendor@example.com", status: "active", planId: "ops", planName: "Ops", subscriptionId: "sub-1", includesDropship: true, reasonCode: "active" },
         storeConnections: { activeCount: 1, connectedCount: 1, launchReadyConnectedCount: 1, credentialAttentionCount: 0, needsAttentionCount: 0, totalCount: 1, includedLimit: 1, canConnectStore: false },
-        catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
+        catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, vendorSelectedItemCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
         wallet: { availableBalanceCents: 50_000, pendingBalanceCents: 0, activeFundingMethodCount: 1, activeStripeFundingMethodCount: 1, activeStripeCardFundingMethodCount: 1, activeUsdcBaseFundingMethodCount: 0,
           autoReloadEnabled: true, autoReloadFundingMethodId: 10, autoReloadFundingMethodActive: true, autoReloadFundingMethodReady: true, autoReloadFundingMethodIsCard: true },
         steps: [],
@@ -128,6 +128,8 @@ test("says when nothing is coming, and says a failed read failed", async ({ page
   expect(quiet.pageErrors).toEqual([]);
 
   const failed = await mount(page, { announced: [], recent: [], fail: true });
-  await expect(page.getByRole("alert")).toContainText("Dropship cost schedule tables do not exist yet.");
+  // The vendor reads what to do, never the server's own message.
+  await expect(page.getByRole("alert")).toContainText("We couldn't load cost changes. Reload the page to try again.");
+  await expect(page.getByRole("alert")).not.toContainText("Dropship cost schedule tables do not exist yet.");
   expect(failed.pageErrors).toEqual([]);
 });

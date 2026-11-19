@@ -94,6 +94,7 @@ export class EbayBusinessPolicyProvider {
               id,
               name,
               marketplaceId: scope.marketplaceId,
+              ...(kind === "fulfillment" ? { packageRequirements: fulfillmentPackageRequirements() } : {}),
               ...(typeof policy.description === "string"
                 ? { description: policy.description }
                 : {}),
@@ -120,4 +121,12 @@ export class EbayBusinessPolicyProvider {
       paymentPolicies: result[2],
     };
   }
+}
+
+/** Every policy scope and listing operation uses the same package rule.
+ * Dimensions affect shipping accuracy, but the shipping cost type alone does
+ * not prove that eBay will refuse this listing. Warn without inventing values;
+ * the saved execution owner retains any actual provider rejection. */
+function fulfillmentPackageRequirements() {
+  return { weight: true, dimensions: "recommended" as const };
 }

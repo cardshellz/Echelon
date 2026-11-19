@@ -45,6 +45,16 @@ describe("DropshipPortalDashboard contract", () => {
     expect(source).toContain("pausedForFunding: onboardingQuery.data ? isPausedForFunding(onboardingQuery.data.vendor) : false,");
   });
 
+  it("(PLAN-B v4.1 V18, TESTS-13) says the chosen items through the onboarding helper, never a rule count", () => {
+    expect(source).toContain('import { describeChosenItems, isOnboardingVendor, walletTodoDetail } from "@/lib/dropship-onboarding";');
+    const launch = source.slice(source.indexOf("function launchStepDetail"), source.indexOf("function launchStepTone"));
+    expect(launch).toContain("? `${describeChosenItems(onboarding.catalog.vendorSelectedItemCount)}.`");
+    const metric = source.slice(source.indexOf("function catalogMetricValue"), source.indexOf("function catalogMetricDetail"));
+    expect(metric).toContain("return describeChosenItems(onboarding.catalog.vendorSelectedItemCount);");
+    expect(source).not.toContain("vendorSelectionRuleCount");
+    expect(source).not.toMatch(/selection rule\(s\)|`\$\{[^}]*\} rule\(s\)`/);
+  });
+
   it("marks held orders in the recent list and counts them on the Orders metric", () => {
     expect(source).toContain("const heldDetail = describeHeldOrder(order, now);");
     expect(source).toContain('data-testid="recent-order-hold-detail"');

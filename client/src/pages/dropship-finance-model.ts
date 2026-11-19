@@ -1327,6 +1327,7 @@ const OWED_WALK_ROWS: readonly FinanceRowSpec[] = Object.freeze([
   { key: "owed.walk.return_credits_cs" },
   { key: "owed.walk.return_credits_pool" },
   { key: "owed.walk.disputes_won" },
+  { key: "owed.walk.order_refunds" },
   { key: "owed.walk.orders" },
   { key: "owed.walk.advance_fees" },
   { key: "owed.walk.return_fees" },
@@ -1490,8 +1491,11 @@ function returnsMemos(ctx: SectionContext): FinanceMemoView[] {
   if (staff && staff.amount !== null && isLineShown(staff, ctx.depth)) {
     memos.push(memo(ctx, "returns.staff_credits", `${lineWords(ctx, "returns.staff_credits")} · ${countAndMoney(staff)}`));
   }
+  // Orders eBay cancelled that Card Shellz stopped and refunded (eBay sync-back): counted and summed like staff credits.
   const refunds = ctx.lines.get("returns.memo.order_refunds");
-  if (refunds) {
+  if (refunds && refunds.amount !== null && isLineShown(refunds, ctx.depth)) {
+    memos.push(memo(ctx, "returns.memo.order_refunds", `${lineWords(ctx, "returns.memo.order_refunds")} · ${countAndMoney(refunds)}`));
+  } else if (refunds && refunds.amount === null) {
     memos.push(memo(ctx, "returns.memo.order_refunds", lineWords(ctx, "returns.memo.order_refunds"), {
       icon: "info",
       info: financeLineNote(refunds),

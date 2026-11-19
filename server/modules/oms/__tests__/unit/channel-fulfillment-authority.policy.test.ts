@@ -24,6 +24,23 @@ function input(
 }
 
 describe("channel fulfillment writeback authority policy", () => {
+  const verifiedShopifyQuantity = { currentQuantity: 2, paidQuantity: 2, sourceUpdatedAt: "2026-10-24T12:00:00Z" };
+  it("reports an existing physical package of verified active Shopify merchandise independently of a money refund", () => {
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({ omsFinancialStatus: "refunded", verifiedShopifyQuantity })))
+      .toEqual({ allowed: true, reasons: [] });
+  });
+  it.each(["cancelled", "refunded"])("does not reopen commercial status %s using monetary or quantity evidence", omsOrderStatus => {
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({ omsOrderStatus, omsFinancialStatus: "refunded", verifiedShopifyQuantity })).reasons)
+      .toContain("terminal_commercial_order");
+  });
+  it("retains voided-payment, unknown-source and actual unit-removal protections", () => {
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({ omsFinancialStatus: "voided", verifiedShopifyQuantity })).reasons).toContain("terminal_financial_order");
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({ omsFinancialStatus: "refunded" })).reasons).toContain("terminal_financial_order");
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({ omsFinancialStatus: "refunded",
+      verifiedShopifyQuantity: { ...verifiedShopifyQuantity, sourceUpdatedAt: "invalid" } })).reasons).toContain("terminal_financial_order");
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({ omsFinancialStatus: "refunded", commercialAuthorizedQuantity: 1,
+      verifiedShopifyQuantity: { ...verifiedShopifyQuantity, currentQuantity: 1 } })).reasons).toContain("physical_quantity_exceeds_current_authority");
+  });
   it("allows exact cumulative physical quantity within current authority", () => {
     expect(evaluateChannelFulfillmentWritebackPolicy(input())).toEqual({
       allowed: true,

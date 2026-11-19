@@ -11,7 +11,7 @@
 
 import { catalogStorage, createSharedProductPhotoImporter } from "../catalog";
 import { warehouseStorage } from "../warehouse";
-const storage = { ...catalogStorage, ...warehouseStorage };
+const importStorage = { ...catalogStorage, ...warehouseStorage };
 import { fetchShopifyCatalogProducts, type ShopifyCatalogProduct } from "../integrations/shopify";
 import { db, productCategories, eq, and } from "../../storage/base";
 import {
@@ -24,6 +24,8 @@ import {
   type ShopifyProductMappingService,
   type VerifiedShopifyProduct,
 } from "./shopify-product-mapping.service";
+import { retryPublicationSelectionWrite } from "../inventory-planning/publication-selection-retry";
+import { filterConnectionOwnedShopifyProducts } from "./shopify-import-connection-guard";
 
 // ---------------------------------------------------------------------------
 // Shopify product_type → Echelon product_type slug mapping
@@ -68,15 +70,15 @@ function normalizeCategorySlug(value: string): string {
     .replace(/^-|-$/g, "");
 }
 
-async function resolveImportedProductCategory(categoryName: string | null | undefined): Promise<{ categoryId: number | null; category: string | null }> {
-  const name = categoryName?.trim();
-  if (!name) {
-    return { categoryId: null, category: null };
-  }
-
-  const slug = normalizeCategorySlug(name);
+/**
+ * Echelon owns product categories: the import never changes an existing
+ * product's category and never creates one. A new product takes a category only
+ * when Shopify's productType matches an active category exactly.
+ */
+async function findActiveCategoryForNewProduct(productType: string | null | undefined): Promise<{ categoryId: number | null; category: string | null }> {
+  const slug = normalizeCategorySlug(productType ?? "");
   if (!slug) {
-    return { categoryId: null, category: name };
+    return { categoryId: null, category: null };
   }
 
   const [existing] = await db
@@ -84,21 +86,11 @@ async function resolveImportedProductCategory(categoryName: string | null | unde
     .from(productCategories)
     .where(and(eq(productCategories.slug, slug), eq(productCategories.isActive, true)));
 
-  if (existing) {
-    return { categoryId: existing.id, category: existing.name };
+  if (!existing) {
+    console.warn(JSON.stringify({ event: "shopify_import_category_unmatched", productType }));
+    return { categoryId: null, category: null };
   }
-
-  try {
-    const [created] = await db
-      .insert(productCategories)
-      .values({ name, slug })
-      .returning();
-    return { categoryId: created.id, category: created.name };
-  } catch (error: any) {
-    if (error?.code !== "23505") throw error;
-    const [category] = await db.select().from(productCategories).where(eq(productCategories.slug, slug));
-    return category ? { categoryId: category.id, category: category.name } : { categoryId: null, category: name };
-  }
+  return { categoryId: existing.id, category: existing.name };
 }
 
 // ---------------------------------------------------------------------------
@@ -170,6 +162,8 @@ type ShopifyMappingOwner = Pick<ShopifyProductMappingService, "repair">;
 
 export interface ProductImportDependencies {
   readonly mappingOwner?: ShopifyMappingOwner;
+  readonly sleep?: (milliseconds: number) => Promise<void>;
+  readonly filterConnectionOwnedProducts?: typeof filterConnectionOwnedShopifyProducts;
 }
 
 function emptyCanonicalMappingProjection(): ShopifyCanonicalMappingProjectionSummary {
@@ -251,8 +245,20 @@ const VARIANT_PATTERN = /^(.+)-(P|B|C)(\d+)$/i;
 export function createProductImportService(
   dependencies: ProductImportDependencies = {},
 ) {
-  const mappingOwner = dependencies.mappingOwner ?? createShopifyProductMappingService();
+  const mappingOwner = dependencies.mappingOwner ?? createShopifyProductMappingService({ sleep: dependencies.sleep });
+  const retryWrite = <Arguments extends unknown[], Result>(write: (...args: Arguments) => Promise<Result>) =>
+    (...args: Arguments) => retryPublicationSelectionWrite(() => write(...args), { sleep: dependencies.sleep });
+  // Each retried call owns one statement or complete storage transaction. A
+  // partially committed store-wide import is never replayed as one unit.
+  const storage = {
+    ...importStorage,
+    createProduct: retryWrite(importStorage.createProduct.bind(importStorage)),
+    updateProduct: retryWrite(importStorage.updateProduct.bind(importStorage)),
+    createProductVariant: retryWrite(importStorage.createProductVariant.bind(importStorage)),
+    updateProductVariant: retryWrite(importStorage.updateProductVariant.bind(importStorage)),
+  };
   const photoImporter = createSharedProductPhotoImporter(db, () => new Date());
+  const filterConnections = dependencies.filterConnectionOwnedProducts ?? filterConnectionOwnedShopifyProducts;
 
   async function projectCanonicalMapping(input: {
     productId: number;
@@ -313,7 +319,11 @@ export function createProductImportService(
   } = {}): Promise<ContentSyncResult> {
     console.log("Starting Shopify catalog sync...");
 
-    const shopifyProducts = options.shopifyProducts ?? await fetchShopifyCatalogProducts();
+    const shopifyProducts = await filterConnections(
+      options.shopifyProducts ?? await fetchShopifyCatalogProducts(),
+      db,
+      options.shopifyProducts ? undefined : { expectedShopDomain: process.env.SHOPIFY_SHOP_DOMAIN },
+    );
     const verifiedShopifyProducts = buildVerifiedShopifyProducts(shopifyProducts);
     const canonicalMappings = emptyCanonicalMappingProjection();
     console.log(`Fetched ${shopifyProducts.length} variants from Shopify`);
@@ -434,15 +444,11 @@ export function createProductImportService(
           }));
           continue;
         }
-        const productCategory = await resolveImportedProductCategory(firstVariant.productType);
-
         // Update content fields
         await storage.updateProduct(echelonProduct.id, {
           title: firstVariant.productTitle || firstVariant.title || undefined,
           description: firstVariant.description || undefined,
           brand: firstVariant.vendor || undefined,
-          categoryId: productCategory.categoryId,
-          category: productCategory.category,
           productType: resolveProductTypeSlug(firstVariant.productType, firstVariant.sku),
           tags: firstVariant.tags || undefined,
           status: firstVariant.status || undefined,
@@ -543,7 +549,11 @@ export function createProductImportService(
   } = {}): Promise<ProductSyncResult> {
     console.log("Starting Shopify product sync to products/product_variants tables...");
 
-    const shopifyProducts = options.shopifyProducts ?? await fetchShopifyCatalogProducts();
+    const shopifyProducts = await filterConnections(
+      options.shopifyProducts ?? await fetchShopifyCatalogProducts(),
+      db,
+      options.shopifyProducts ? undefined : { expectedShopDomain: process.env.SHOPIFY_SHOP_DOMAIN },
+    );
     const verifiedShopifyProducts = buildVerifiedShopifyProducts(shopifyProducts);
     const canonicalMappings = emptyCanonicalMappingProjection();
     console.log(`Fetched ${shopifyProducts.length} variants from Shopify`);
@@ -782,7 +792,6 @@ export function createProductImportService(
         continue;
       }
       let product = await storage.getProductBySku(baseSku);
-      const productCategory = await resolveImportedProductCategory(data.productType);
 
       if (product) {
         const mappingDecision = decideImportedShopifyProductMapping(
@@ -811,14 +820,13 @@ export function createProductImportService(
         }
         await storage.updateProduct(product.id, {
           name: data.baseName,
-          categoryId: productCategory.categoryId,
-          category: productCategory.category,
           productType: resolveProductTypeSlug(data.productType, baseSku),
           brand: data.vendor,
           description: data.description,
         });
         productsUpdated++;
       } else {
+        const productCategory = await findActiveCategoryForNewProduct(data.productType);
         product = await storage.createProduct({
           sku: baseSku,
           name: data.baseName,
@@ -927,7 +935,6 @@ export function createProductImportService(
 
       const existingVariant = await storage.getProductVariantBySku(sv.sku);
       let product = await storage.getProductBySku(sv.sku);
-      const productCategory = await resolveImportedProductCategory(sv.productType);
 
       if (product) {
         const mappingDecision = decideImportedShopifyProductMapping(
@@ -956,13 +963,12 @@ export function createProductImportService(
         }
         await storage.updateProduct(product.id, {
           name: sv.name,
-          categoryId: productCategory.categoryId,
-          category: productCategory.category,
           brand: sv.vendor,
           description: sv.description,
         });
         productsUpdated++;
       } else {
+        const productCategory = await findActiveCategoryForNewProduct(sv.productType);
         product = await storage.createProduct({
           sku: sv.sku,
           name: sv.name,
@@ -1155,7 +1161,12 @@ export function createProductImportService(
   async function syncProductsAndContent(): Promise<ShopifyProductAndContentSyncResult> {
     // One provider snapshot owns the whole command. Fetching twice could map an
     // older identity set and then report content from a newer set as one sync.
-    const shopifyProducts = await fetchShopifyCatalogProducts();
+    const rawShopifyProducts = await fetchShopifyCatalogProducts();
+    const shopifyProducts = await filterConnections(
+      rawShopifyProducts,
+      db,
+      { expectedShopDomain: process.env.SHOPIFY_SHOP_DOMAIN },
+    );
     const productResult = await syncProductsWithMultiUOM({ shopifyProducts });
     const contentResult = await syncContentAndAssets({
       projectCanonicalMappings: false,

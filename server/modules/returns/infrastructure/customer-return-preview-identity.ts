@@ -6,6 +6,6 @@ export const readCurrentPreviewIdentity: CustomerReturnPreviewIdentityReader = a
   const user = await identityStorage.getUser(userId);
   if (!user) return null;
   const roles = await identityStorage.getUserRoles(userId);
-  return { id: user.id, active: user.active, role: user.role,
+  return { id: user.id, active: user.active,
     roles: roles.map(role => ({ name: role.name, isSystem: role.isSystem })) };
 };

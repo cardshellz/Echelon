@@ -42,6 +42,12 @@ export type SaveChannelPricingRule = z.infer<typeof saveChannelPricingRuleSchema
 export type PricingRuleTarget = Pick<SaveChannelPricingRule, "scope" | "scopeId">;
 
 const centsSchema = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
+const storedCentsSchema = z.string().regex(/^(0|[1-9][0-9]*)$/)
+  .refine(value => BigInt(value) <= BigInt(Number.MAX_SAFE_INTEGER), "Stored price exceeds the supported range");
+export const expectedChannelPriceSchema = z.object({
+  price: storedCentsSchema, compareAtPrice: storedCentsSchema.nullable(), currency: z.string().regex(/^[A-Z]{3}$/),
+}).strict();
+export type ExpectedChannelPrice = z.infer<typeof expectedChannelPriceSchema>;
 export const saveChannelPriceSchema = z.object({
   price: centsSchema,
   compareAtPrice: centsSchema.nullable().optional(),

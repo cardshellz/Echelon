@@ -278,7 +278,7 @@ export function listingSettingRequestKeyChanged(storeConnectionId: number): Drop
 export interface ChosenSizeReader {
   readonly vendorId: number;
   readonly catalog: Pick<ListingPriceCatalogReader,
-    "listCatalogCandidates" | "listCatalogExposureRules" | "listSelectionRules" | "listVariantOverrides">;
+    "listCatalogCandidates" | "listCatalogExposureRules" | "listPickedVariantIds" | "listVariantOverrides">;
 }
 
 /** A chosen size: Card Shellz shows it and the vendor's selection includes it. */
@@ -312,9 +312,10 @@ export type PricingCatalogCandidate = Omit<DropshipListingCatalogCandidate, "des
 /**
  * Which of `sizeIds` are chosen and shown, in ascending id, by the content
  * service's rule: Card Shellz exposes the size and the vendor's selection
- * includes it (stock is not part of "chosen", rawAtpUnits 0). Exposure and
- * selection rules are read once; candidates and overrides per batch of 250,
- * so a write checks only its own sizes, never the whole catalog (plan P12).
+ * includes it (stock is not part of "chosen", rawAtpUnits 0). Exposure rules
+ * are read once; candidates, overrides and the vendor's picks per batch of
+ * 250, so a write checks only its own sizes, never the whole catalog or the
+ * whole selection (plan P12; PLAN-B v4.1 §9 row 2).
  * By default each chosen size keeps its whole candidate (ChosenSizeOptions).
  */
 export async function loadChosenSizes(tx: ChosenSizeReader, sizeIds: readonly number[], now: Date,
@@ -331,19 +332,19 @@ export async function loadChosenSizes(tx: ChosenSizeReader, sizeIds: readonly nu
   const stopAbove = options.keepCandidates === "pricing" ? options.stopAbove : null;
   // One read at a time: these share the transaction's one connection, which runs one statement at a time anyway.
   const exposureRules = await tx.catalog.listCatalogExposureRules();
-  const selectionRules = await tx.catalog.listSelectionRules(tx.vendorId);
   const chosen: Array<ChosenSize & { candidate?: PricingCatalogCandidate }> = [];
   for (let start = 0; start < ids.length; start += CHOSEN_SIZE_BATCH_SIZE) {
     const batch = ids.slice(start, start + CHOSEN_SIZE_BATCH_SIZE);
     const candidates = await tx.catalog.listCatalogCandidates(batch);
     const overrides = await tx.catalog.listVariantOverrides({ vendorId: tx.vendorId, productVariantIds: batch });
     const overrideById = new Map(overrides.map((row) => [row.productVariantId, row]));
+    const pickedIds = await tx.catalog.listPickedVariantIds(tx.vendorId, batch);
     const wanted = new Set(batch);
     for (const candidate of [...candidates].sort((left, right) => left.productVariantId - right.productVariantId)) {
       if (!wanted.has(candidate.productVariantId)) continue;
       const exposure = evaluateDropshipCatalogExposure(candidate, exposureRules, now);
       const selection = evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
-        rules: selectionRules, rawAtpUnits: 0, override: overrideById.get(candidate.productVariantId) ?? null });
+        picked: pickedIds.has(candidate.productVariantId), rawAtpUnits: 0, override: overrideById.get(candidate.productVariantId) ?? null });
       if (!exposure.exposed || !selection.selected) continue;
       const size = { productVariantId: candidate.productVariantId, productId: candidate.productId };
       if (options.keepCandidates === true) chosen.push({ ...size, candidate });

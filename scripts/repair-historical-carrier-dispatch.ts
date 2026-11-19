@@ -6,7 +6,7 @@ import type {
   HistoricalCarrierDispatchRepairCohort,
   HistoricalCarrierDispatchRepairPreview,
   RequeueReviewedCarrierDispatchCommandsResult,
-} from "../server/modules/shipping/carrier-tracking.repository";
+} from "../server/modules/shipping/carrier-tracking-and-dispatch.api";
 
 type Mode = "dry-run" | "execute";
 
@@ -210,7 +210,7 @@ async function main(): Promise<void> {
   }
   const [databaseModule, repositoryModule] = await Promise.all([
     import("../server/db"),
-    import("../server/modules/shipping/carrier-tracking.repository"),
+    import("../server/modules/shipping/carrier-tracking-and-dispatch.api"),
   ]);
   try {
     const result = await runHistoricalCarrierDispatchRepair(flags, {

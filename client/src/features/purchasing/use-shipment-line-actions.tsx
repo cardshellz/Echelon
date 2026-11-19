@@ -22,7 +22,7 @@ import { SHIPMENT_LINE_IMPORT_LIMIT } from "@shared/procurement/shipment-line-co
 import { z } from "zod";
 
 const shippableSchema = z.object({ lines: z.array(z.object({ id: z.number().int().positive(), sku: z.string().nullable(),
-  remainingQty: z.number().int().nonnegative(), orderQty: z.number().int().nonnegative().optional() }).passthrough()),
+  productName: z.string().nullable().optional(), remainingQty: z.number().int().nonnegative(), orderQty: z.number().int().nonnegative().optional() }).passthrough()),
   reviewRequiredLines: z.array(z.object({ id: z.number().int().positive(), sku: z.string().nullable(), code: z.string(), error: z.string() }).passthrough()).default([]) });
 type Modal = "add" | "import" | "edit" | "dimensions" | "recovery" | null;
 type DimensionRow = { editor: ShipmentLineEditor; status: "ready" | "saved" | "conflict" | "uncertain"; error?: string };
@@ -35,8 +35,8 @@ const message = (error: unknown) => error instanceof Error ? error.message : "Th
 const ambiguous = (error: unknown) => error instanceof FinancialCommandRequestError && error.ambiguous;
 
 /** UI orchestration only. The shared command boundary owns DTO validation and replay. */
-export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, editable }: {
-  shipmentId: number | null; navigationIdentity: string; lines: unknown[]; editable: boolean;
+export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, editable, draftAllowed }: {
+  shipmentId: number | null; navigationIdentity: string; lines: unknown[]; editable: boolean; draftAllowed: boolean;
 }) {
   const { user } = useAuth();
   const { toast } = useToast();
@@ -357,7 +357,7 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
           {poId && shippable.data?.lines.filter((line) => line.remainingQty > 0).map((line) => <div key={line.id} className="rounded border p-3 space-y-2">
             <label className="flex items-center gap-2"><input type="checkbox" checked={selections[line.id] !== undefined} onChange={(event) => setSelections((current) => { const next = { ...current }; if (event.target.checked) next[line.id] = shipmentQuantityDraft(line.remainingQty, parseShipmentUnits(line.shipmentUnits)); else delete next[line.id]; return next; })} />{line.sku ?? `PO line ${line.id}`}</label>
             <p className="text-xs text-muted-foreground">Remaining to ship: {line.remainingQty} pieces</p>
-            {selections[line.id] !== undefined && <ShipmentQuantityControl id={`po-line-${line.id}`} value={selections[line.id]} units={parseShipmentUnits(line.shipmentUnits)} maximumPieces={line.remainingQty} quantityLabel={`Pieces for ${line.sku ?? line.id}`} onChange={(draft) => setSelections((current) => ({ ...current, [line.id]: draft }))} />}
+            {selections[line.id] !== undefined && <ShipmentQuantityControl id={`po-line-${line.id}`} value={selections[line.id]} units={parseShipmentUnits(line.shipmentUnits)} productName={line.productName ?? line.sku ?? "Product"} draftAllowed={draftAllowed} maximumPieces={line.remainingQty} quantityLabel={`Pieces for ${line.sku ?? line.id}`} onChange={(draft) => setSelections((current) => ({ ...current, [line.id]: draft }))} />}
           </div>)}
           {poId && shippable.data && !shippable.data.lines.some((line) => line.remainingQty > 0) && <p>No remaining quantities are available to ship.</p>}
         </fieldset>
@@ -371,7 +371,7 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
           {!importRows && <><Label htmlFor="packing-list-file">Packing list CSV</Label><Input id="packing-list-file" type="file" accept=".csv" onChange={(event) => { const file = event.target.files?.[0]; if (file) parseFile(file); }} />
             {rawRows.length > 0 && <><p>{rawRows.length} data rows found</p><div className="grid grid-cols-1 sm:grid-cols-2 gap-3">{PACKING_LIST_FIELDS.map(({ field, label }) => <div key={field} className="space-y-1"><Label htmlFor={`mapping-${field}`}>{label}</Label><select id={`mapping-${field}`} className="w-full rounded border bg-background p-2" value={mapping[field] ?? "__skip__"} onChange={(event) => setMapping((current) => ({ ...current, [field]: event.target.value }))}><option value="__skip__">Skip</option>{headers.map((header) => <option key={header} value={header}>{header}</option>)}</select></div>)}</div><Button onClick={previewImport}>Preview rows</Button></>}
           </>}
-          {importRows && importRows.length > 0 && <><p className="text-xs text-muted-foreground">Review the configured count unit and exact piece total for each row. Shipping cartons describe physical packing. Errors refer to data rows, excluding the CSV header.</p><PackingListPreview rows={importRows} errors={rowErrors} unitOptions={packingCatalog.isError ? [] : packingCatalog.data?.rows ?? []} onChange={(index, field, value) => setImportRows((current) => current?.map((row, rowIndex) => rowIndex === index ? updatePackingListCell(row, field, value) : row) ?? null)} onQuantityChange={(index, draft, units) => setImportRows((current) => current?.map((row, rowIndex) => rowIndex === index ? updatePackingListQuantity(row, draft, units) : row) ?? null)} />
+          {importRows && importRows.length > 0 && <><p className="text-xs text-muted-foreground">Review the configured count unit and exact piece total for each row. Shipping cartons describe physical packing. Errors refer to data rows, excluding the CSV header.</p><PackingListPreview draftAllowed={draftAllowed} rows={importRows} errors={rowErrors} unitOptions={packingCatalog.isError ? [] : packingCatalog.data?.rows ?? []} onChange={(index, field, value) => setImportRows((current) => current?.map((row, rowIndex) => rowIndex === index ? updatePackingListCell(row, field, value) : row) ?? null)} onQuantityChange={(index, draft, units) => setImportRows((current) => current?.map((row, rowIndex) => rowIndex === index ? updatePackingListQuantity(row, draft, units) : row) ?? null)} />
             <div className="flex flex-wrap gap-2"><Button onClick={() => void runCommand({ operation: "import", body: { rows: importRows } })}>{busy ? "Importing…" : `Import ${importRows.length} rows`}</Button>{rawRows.length > 0 && <Button variant="outline" onClick={() => setImportRows(null)}>Change column mapping</Button>}</div></>}
           {importRows?.length === 0 && <p>All submitted rows were imported.</p>}
           {importRows && <Button variant="outline" onClick={() => { setImportRows(null); setRawRows([]); setRowErrors([]); setImportSummary(null); }}>Choose another CSV</Button>}
@@ -381,7 +381,8 @@ export function useShipmentLineActions({ shipmentId, navigationIdentity, lines, 
         <p className="text-xs text-muted-foreground">Line #{editor.id}</p>
         {editor.physicalReviewRequired && <p role="status" className="rounded border border-amber-500/50 p-3 text-sm">This line has recorded physical values that need review. Correcting notes preserves those values; physical changes must pass current validation.</p>}
         {editConflict && <div role="alert" className="rounded border p-3 text-sm">This line changed or is no longer available. Load its latest values and review them before saving.<Button className="mt-2 block" variant="outline" disabled={busy} onClick={() => void reloadEditor()}>Load latest line</Button></div>}
-        <ShipmentQuantityControl id={`line-edit-${editor.id}`} value={editor.quantity} units={editor.units} disabled={editorLocked}
+        <ShipmentQuantityControl id={`line-edit-${editor.id}`} value={editor.quantity} units={editor.units} disabled={editorLocked} draftAllowed={draftAllowed}
+          onUnitsChange={units => setEditor(current => current ? { ...current, units } : current)}
           onChange={(quantity) => setEditor((current) => current ? { ...current, quantity } : current)} />
         <fieldset disabled={editorLocked} className="space-y-3 rounded border p-3">
           <legend className="px-1 text-sm font-medium">Physical packing</legend>

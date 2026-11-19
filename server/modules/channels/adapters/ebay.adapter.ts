@@ -1,3 +1,4 @@
+import { parseDecimalCents } from "@shared/money-read";
 import { ebayBusinessPolicies } from "../ebay-business-policies";
 import { EbayBusinessPolicyError } from "@shared/ebay-business-policies";
 /**
@@ -45,7 +46,8 @@ import { QuantityPublicationAdmissionError } from "../../inventory-planning/doma
 
 import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service";
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
-import { EbayInventoryQuantityError, EbayInventoryQuantityPreflightError, ebayInventoryMarketplace, publishEbayInventoryQuantity, readEbayInventoryQuantity } from "./ebay/ebay-inventory-quantity";
+import { EbayApiRequestError } from "./ebay/ebay-api-error";
+import { EbayInventoryQuantityError, EbayInventoryQuantityPreflightError, discoverEbayInventoryOffers, ebayInventoryMarketplace, publishEbayInventoryQuantity, readEbayInventoryQuantity, type EbayDiscoveredOffer } from "./ebay/ebay-inventory-quantity";
 import { EBAY_QUANTITY_BATCH_LIMIT, EbayQuantityUpdateInputError, sendEbayQuantityUpdates } from "./ebay/ebay-quantity-update";
 import { EbayListingBuilder, createEbayListingBuilder } from "./ebay/ebay-listing-builder";
 import { mapCarrierToEbay } from "./ebay/ebay-category-map";
@@ -218,7 +220,8 @@ export class EbayAdapter implements IChannelAdapter {
         variants: photoVariants,
       }),
     });
-    const { inventoryItems, offers, itemGroup } = this.listingBuilder.buildListingDraft(listing, config, { photoPlan, variantListingPoliciesByVariantId: selectedPolicies.byVariantId });
+    const { inventoryItems, offers, itemGroup } = this.listingBuilder.buildListingDraft(listing, config, { photoPlan,
+      variantListingPoliciesByVariantId: selectedPolicies.byVariantId, packageRequirementsByVariantId: selectedPolicies.packageRequirementsByVariantId });
     const hasExistingIds = listing.variants.some(
       (v) => v.externalVariantId,
     );
@@ -252,6 +255,7 @@ export class EbayAdapter implements IChannelAdapter {
       status: pushResult.status,
       externalProductId: pushResult.externalProductId,
       externalVariantIds: pushResult.externalVariantIds,
+      ...(pushResult.warnings?.length ? { warnings: pushResult.warnings } : {}),
     };
   }
 
@@ -475,6 +479,27 @@ export class EbayAdapter implements IChannelAdapter {
       }
     }
     return results;
+  }
+
+  /**
+   * Channels PR4: every offer eBay holds for one SKU on the connection's marketplace, read with the exact verified
+   * publication account (the same client and discovery the quantity write uses). Read-only; the stock-link adapter
+   * (ebay-stock-link.adapter.ts) classifies its failures.
+   */
+  async discoverStockLinkOffers(channelId: number, channelConnectionId: number, externalScopeId: string, sku: string):
+    Promise<{ marketplaceId: string; offers: EbayDiscoveredOffer[] }> {
+    const client = await this.getApiClient(channelId, channelConnectionId, externalScopeId);
+    const metadata = await this.getConnectionMetadata(channelId, channelConnectionId);
+    const marketplaceId = ebayInventoryMarketplace(metadata.siteId);
+    // eBay answers "this SKU has no offer" with a 404 (25713) on the first page: an empty, complete answer.
+    const pages = { getInventoryOffersPage: async (pageSku: string, pageMarketplace: string, offset: number, limit: number) => {
+      try { return await client.getInventoryOffersPage(pageSku, pageMarketplace, offset, limit); }
+      catch (error) {
+        if (offset === 0 && error instanceof EbayApiRequestError && error.statusCode === 404) return { total: 0, offers: [] };
+        throw error;
+      }
+    } };
+    return { marketplaceId, offers: await discoverEbayInventoryOffers(pages, sku, marketplaceId) };
   }
 
   private async pushCanonicalInventory(
@@ -1084,7 +1109,7 @@ export class EbayAdapter implements IChannelAdapter {
     amount?: { value: string; currency: string } | null,
   ): number {
     if (!amount?.value) return 0;
-    return Math.round(parseFloat(amount.value) * 100);
+    return parseDecimalCents(amount.value, "provider amount");
   }
 
   private mapPaymentStatus(

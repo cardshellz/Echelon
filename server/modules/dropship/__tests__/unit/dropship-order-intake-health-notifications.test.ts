@@ -5,6 +5,7 @@ import {
   type DropshipOrderIntakeHealthRepositoryResult,
 } from "../../application/dropship-order-intake-health-service";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "../../application/dropship-notification-events";
+import type { DropshipNotificationSender } from "../../application/dropship-ports";
 import type {
   DropshipOrderIntakeHealthPolicy,
   DropshipOrderIntakeHealthStatus,
@@ -39,8 +40,11 @@ describe("DropshipOrderIntakeHealthService outage notifications", () => {
       eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_INTAKE_STOPPED,
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship order intake has stopped",
+      title: "Orders aren't coming in",
     }));
+    // Vendor words: no system names, workers or heartbeats.
+    const sent = (notificationSender.send.mock.calls as unknown as Array<[{ title: string; message: string }]>)[0][0];
+    expect(`${sent.title} ${sent.message}`).not.toMatch(/Echelon|heartbeat|worker|cursor|intake|Dropship/i);
   });
 
   it("alerts on stale-heartbeat degradation and preserves heartbeat evidence in the payload", async () => {
@@ -70,7 +74,7 @@ describe("DropshipOrderIntakeHealthService outage notifications", () => {
 
 function makeService(input: {
   repository: DropshipOrderIntakeHealthRepository;
-  notificationSender: { send: ReturnType<typeof vi.fn> };
+  notificationSender: DropshipNotificationSender;
 }) {
   return new DropshipOrderIntakeHealthService({
     ...input,
@@ -88,6 +92,7 @@ function fakeRepository(input: {
     recordPollSucceeded: vi.fn(async () => makeResult("healthy", "degraded", "poll_succeeded")),
     recordPollFailed: vi.fn(async () => input.failed ?? makeResult("warning", "healthy", "poll_failed")),
     recordStalePolls: vi.fn(async () => input.stale ?? []),
+    restoreStoresHeldOnlyByOrderIntakeHealth: vi.fn(async () => []),
   };
 }
 

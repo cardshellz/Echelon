@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { WmsShipmentPrerequisiteError, WmsSyncService } from "../../wms-sync.service";
+import type { ReconcileOrderDemandCommand } from "../../../channels/reservation.service";
 
 // 2026-10-08, #63964: three lines were authorized after the order's first
 // claim. reserveOrder refused the changed demand (ACTIVE_CLAIM_REPLACEMENT_REQUIRED),
@@ -31,21 +32,59 @@ describe("late lines after the order's first claim", () => {
     await expect(harness({ reserveOrder, reconcileOrderDemand })
       .reserveBeforeShipmentProcessing(209393, 120155, "existing_order_reconciliation")).resolves.toBeUndefined();
     expect(reconcileOrderDemand).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      orderId: 209393, demandChanged: true, sourceEventId: "wms_sync_claim_replacement:209393:9",
+      orderId: 209393, demandChanged: true, sourceEventId: "wms_sync_claim_reconciliation:209393:9:existing_order_reconciliation",
     }));
   });
 
   it("uses the same idempotency key on a retry, so the replacement replays", async () => {
     const reserveOrder = vi.fn(async () => { throw claimChanged("9"); });
-    const reconcileOrderDemand = vi.fn(async () => ({ reconciled: true, release: { released: 0, failed: [] }, reservation: reserved }));
+    const reconcileOrderDemand = vi.fn(async (_command: ReconcileOrderDemandCommand) => ({ reconciled: true, release: { released: 0, failed: [] }, reservation: reserved }));
     const service = harness({ reserveOrder, reconcileOrderDemand });
     await service.reserveBeforeShipmentProcessing(209393, 120155, "existing_order_reconciliation");
     await service.reserveBeforeShipmentProcessing(209393, 120155, "existing_order_reconciliation");
-    expect(new Set(reconcileOrderDemand.mock.calls.map(([command]: any[]) => command.sourceEventId)).size).toBe(1);
+    expect(new Set(reconcileOrderDemand.mock.calls.map(([command]) => command.sourceEventId)).size).toBe(1);
   });
 
   it("does not replace a claim for any other reservation failure", async () => {
     const reserveOrder = vi.fn(async () => { throw Object.assign(new Error("busy"), { code: "INVENTORY_LOCK_TIMEOUT" }); });
+    const reconcileOrderDemand = vi.fn();
+    await expect(harness({ reserveOrder, reconcileOrderDemand })
+      .reserveBeforeShipmentProcessing(209393, 120155, "existing_order_reconciliation"))
+      .rejects.toBeInstanceOf(WmsShipmentPrerequisiteError);
+    expect(reconcileOrderDemand).not.toHaveBeenCalled();
+  });
+
+  it("checks current demand even when reserveOrder successfully replays a canonical claim", async () => {
+    const reserveOrder = vi.fn(async () => ({ ...reserved, canonicalClaimId: "9" }));
+    const reconcileOrderDemand = vi.fn(async (_command: ReconcileOrderDemandCommand) => ({ reconciled: false, release: { released: 0, failed: [] }, reservation: reserved }));
+    await expect(harness({ reserveOrder, reconcileOrderDemand })
+      .reserveBeforeShipmentProcessing(209393, 120155, "existing_order_reconciliation")).resolves.toBeUndefined();
+    expect(reconcileOrderDemand).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ orderId: 209393, demandChanged: true }));
+  });
+
+  it("preserves legacy reservation behavior without a canonical reconciliation call", async () => {
+    const reserveOrder = vi.fn(async () => reserved);
+    const reconcileOrderDemand = vi.fn();
+    await harness({ reserveOrder, reconcileOrderDemand })
+      .reserveBeforeShipmentProcessing(209393, 120155, "existing_order_reconciliation");
+    expect(reserveOrder).toHaveBeenCalledTimes(1);
+    expect(reconcileOrderDemand).not.toHaveBeenCalled();
+  });
+
+  it("separates initial and existing sync receipts while keeping retries stable", async () => {
+    const reserveOrder = vi.fn(async () => ({ ...reserved, canonicalClaimId: "9" }));
+    const reconcileOrderDemand = vi.fn(async (_command: ReconcileOrderDemandCommand) => ({ reconciled: false, release: { released: 0, failed: [] }, reservation: reserved }));
+    const service = harness({ reserveOrder, reconcileOrderDemand });
+    await service.reserveBeforeShipmentProcessing(209393, 120155, "post_create");
+    await service.reserveBeforeShipmentProcessing(209393, 120155, "existing_order_reconciliation");
+    await service.reserveBeforeShipmentProcessing(209393, 120155, "existing_order_reconciliation");
+    const events = reconcileOrderDemand.mock.calls.map(([command]) => command.sourceEventId);
+    expect(events[0]).not.toBe(events[1]);
+    expect(events[1]).toBe(events[2]);
+  });
+
+  it("refuses a malformed canonical identity without reconciling demand", async () => {
+    const reserveOrder = vi.fn(async () => ({ ...reserved, canonicalClaimId: "invalid" }));
     const reconcileOrderDemand = vi.fn();
     await expect(harness({ reserveOrder, reconcileOrderDemand })
       .reserveBeforeShipmentProcessing(209393, 120155, "existing_order_reconciliation"))

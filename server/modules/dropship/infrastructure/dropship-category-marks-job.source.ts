@@ -60,7 +60,7 @@ export class PgDropshipCategoryMarksJobSource implements CategoryMarksJobSource 
     let rollbackFailure: Error | undefined;
     try {
       await client.query(SNAPSHOT_BEGIN_SQL);
-      const productIds = await loadSelectedProductIds({ vendorId, ...selectedCatalogReaderForTransaction(client) }, now);
+      const productIds = await loadSelectedProductIds(selectedCatalogReaderForTransaction(client, vendorId), now);
       await client.query("COMMIT");
       return productIds;
     } catch (error) {

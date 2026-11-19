@@ -1,7 +1,27 @@
 import { expect, test, type Locator, type Page, type TestInfo } from "@playwright/test";
 import { join, resolve } from "node:path";
 import { listingIntentChangeStatusSchema, type ListingIntentChangeStatus } from "../../shared/listing-intent-propagation";
+import {
+  createListingPushRunRequestSchema,
+  createListingPushRunResponseSchema,
+  emptyListingPushRunCounts,
+  listListingPushRunsResponseSchema,
+  listingPushRunDetailResponseSchema,
+  type ListingPushRunView,
+} from "../../shared/dropship/listing-push-runs";
+import {
+  dropshipCatalogCategoriesAnswerSchema,
+  dropshipCatalogIdsAnswerSchema,
+  dropshipCatalogNewItemsAnswerSchema,
+  dropshipCatalogSelectionSummarySchema,
+} from "../../shared/dropship/vendor-catalog-reads";
+import type { z } from "zod";
 import { listingIntentChangePage } from "./fixtures/listing-intent-changes.fixture";
+
+/** An answer typed against its shared contract, so a field the contract adds fails the stub type check (review round 2 CT11). */
+function contractAnswer<S extends z.ZodTypeAny>(schema: S, value: z.input<S>): z.output<S> {
+  return schema.parse(value);
+}
 
 // Playwright's serviceWorkers:block init script reads navigator.serviceWorker in
 // every frame, which throws in an opaque sandbox. This local-only harness
@@ -23,8 +43,10 @@ const EBAY_STORE = {
 };
 const SELECTED_ROW = {
   productId: 11, productVariantId: 101, productSku: "ENV-SGL", productName: "Envelope Single Pocket", variantSku: "ENV-SGL-P50",
-  variantName: "Pack of 50", category: "Mailers", productLineIds: [], productLineNames: [], unitsPerVariant: 50,
-  selectionDecision: { selected: true, reason: "selected", marketplaceQuantity: 25, quantityCapApplied: false, autoConnectNewSkus: true, autoListNewSkus: false },
+  variantName: "Pack of 50", category: "Mailers", categoryId: 30, productLineIds: [], productLineNames: [], unitsPerVariant: 50,
+  // PR B's row (V24, V27): the vendor's pick, and the category id step 1 filters by.
+  selectionDecision: { selected: true, reason: "selected", picked: true, marketplaceQuantity: 25, quantityCapApplied: false,
+    autoConnectNewSkus: false, autoListNewSkus: false },
   listingTier: { tier: "pack", eligible: true, reason: null, policyMinimumCents: 10_000, reserveShortfallCents: 0, balanceShortfallCents: 0 },
 };
 const PREVIEW_ROW = {
@@ -35,16 +57,17 @@ const PREVIEW_ROW = {
 };
 
 type VendorStatus = "onboarding" | "active" | "paused";
-interface PushReply { status: number; json: unknown; after?: (state: StubState) => void }
+/** How the next publish run create answers (step 1 plan S2-5 PR A: step 3 publishes through runs). */
+interface RunReply { status: number; json: unknown; after?: (state: StubState) => void }
 interface StubState {
   vendorStatus: VendorStatus;
   storeReady: boolean;
   proofs: Record<string, typeof LIVE_PROOF>;
-  pushReplies: PushReply[];
-  pushBodies: Array<Record<string, unknown>>;
+  runReplies: RunReply[];
+  runBodies: Array<Record<string, unknown>>;
   codesSent: string[];
-  pushCalls: number;
-  statusCalls: number;
+  runCalls: number;
+  runDetailCalls: number;
   previewCalls: number;
   onboardingReads: number;
   authReads: number;
@@ -64,7 +87,7 @@ function onboardingJson(state: StubState) {
       subscriptionId: "sub-1", includesDropship: true, reasonCode: "active" },
     storeConnections: { activeCount: 1, connectedCount: 1, launchReadyConnectedCount: state.storeReady ? 1 : 0, credentialAttentionCount: 0,
       needsAttentionCount: 0, totalCount: 1, includedLimit: 1, canConnectStore: false },
-    catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
+    catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, vendorSelectedItemCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
     wallet: { availableBalanceCents: 10_000, pendingBalanceCents: 0, activeFundingMethodCount: 1, activeStripeFundingMethodCount: 1,
       activeStripeCardFundingMethodCount: 1, activeUsdcBaseFundingMethodCount: 0, autoReloadEnabled: true, autoReloadFundingMethodId: 10,
       autoReloadFundingMethodActive: true, autoReloadFundingMethodReady: true, autoReloadFundingMethodIsCard: true, hasActiveFundingMethod: true,
@@ -105,7 +128,7 @@ function settingsJson(state: StubState) {
 }
 
 async function setup(page: Page, initial: Partial<StubState> = {}) {
-  const state: StubState = { vendorStatus: "active", storeReady: true, proofs: {}, pushReplies: [], pushBodies: [], codesSent: [], pushCalls: 0, statusCalls: 0,
+  const state: StubState = { vendorStatus: "active", storeReady: true, proofs: {}, runReplies: [], runBodies: [], codesSent: [], runCalls: 0, runDetailCalls: 0,
     previewCalls: 0, onboardingReads: 0, authReads: 0, unexpected: [], errors: [],
     history: [], historyRetryStatuses: [], historyRetryPaths: [], ...initial };
   page.on("pageerror", (error) => state.errors.push(error.message));
@@ -145,8 +168,28 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
       return route.fulfill({ json: listingSettingsSummary() });
     }
     if (path === "/api/dropship/catalog" && method === "GET") {
+      // Step 3's Check reads the selected ids (step 1 plan S2-5 §4.8), its list a page with the new summary.
+      if (url.searchParams.get("idsOnly") === "true") {
+        return route.fulfill({ json: dropshipCatalogIdsAnswerSchema.parse({ selectedIds: [101], notSelectedIds: [], total: 1 }) });
+      }
       return route.fulfill({ json: { rows: [SELECTED_ROW], total: 1, page: 1, limit: Number(url.searchParams.get("limit") ?? 50),
-        facets: { categories: [], productLines: [], products: [] } } });
+        facets: url.searchParams.get("includeFacets") === "false" ? null : { categories: [], productLines: [], products: [] },
+        summary: { matching: 1, matchingSelected: 1 } } });
+    }
+    // A journey that leaves the Catalog page lands on a portal path the harness renders as step 1, whose categories
+    // card reads its counts on mount (PLAN-B v4.1 §12.2, V26).
+    if (path === "/api/dropship/catalog/categories" && method === "GET") {
+      return route.fulfill({ json: contractAnswer(dropshipCatalogCategoriesAnswerSchema, {
+        categories: [{ categoryId: 30, name: "Mailers", rowCount: 1, selectedCount: 1 }], uncategorizedCount: 0 }) });
+    }
+    // The same step 1 reads its new-items notice on mount (PLAN-B v4.1 §11.4, B3): nothing new here.
+    if (path === "/api/dropship/catalog/new-items" && method === "GET") {
+      return route.fulfill({ json: contractAnswer(dropshipCatalogNewItemsAnswerSchema, { categories: [] }) });
+    }
+    if (path === "/api/dropship/catalog/selection" && method === "GET") {
+      const store = url.searchParams.get("storeConnectionId");
+      return route.fulfill({ json: contractAnswer(dropshipCatalogSelectionSummarySchema, { selectionRevisionId: 1, selectedTotal: 1, cap: 10_000, overCap: false,
+        store: store === null ? null : { storeConnectionId: Number(store), live: 0, notLive: 1 } }) });
     }
     if (path === "/api/dropship/catalog/selection-rules" && method === "GET") return route.fulfill({ json: { rules: [] } });
     if ((path === `/api/dropship/listings/stores/${STORE_ID}/pricing-rules`
@@ -158,17 +201,20 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
       return route.fulfill({ json: { preview: { vendorId: 1, storeConnectionId: STORE_ID, platform: "ebay", generatedAt: STAMP,
         rows: [PREVIEW_ROW], summary: { total: 1, ready: 1, blocked: 0, warning: 0 } } } });
     }
-    if (path === "/api/dropship/listing-push-jobs" && method === "POST") {
-      state.pushCalls += 1;
-      state.pushBodies.push(route.request().postDataJSON() as Record<string, unknown>);
-      const reply = state.pushReplies.shift();
-      if (!reply) { state.unexpected.push("POST listing-push-jobs without a scripted reply"); return route.fulfill({ status: 500, json: {} }); }
+    if (path === "/api/dropship/listing-push-runs" && method === "GET") return route.fulfill({ json: contractAnswer(listListingPushRunsResponseSchema, { runs: [] }) });
+    if (path === "/api/dropship/listing-push-runs" && method === "POST") {
+      state.runCalls += 1;
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      state.runBodies.push(body);
+      if (!createListingPushRunRequestSchema.safeParse(body).success) state.unexpected.push("POST listing-push-runs (body off contract)");
+      const reply = state.runReplies.shift();
+      if (!reply) { state.unexpected.push("POST listing-push-runs without a scripted reply"); return route.fulfill({ status: 500, json: {} }); }
       reply.after?.(state);
       return route.fulfill({ status: reply.status, json: reply.json });
     }
-    if (/^\/api\/dropship\/listing-push-jobs\/\d+$/.test(path) && method === "GET") {
-      state.statusCalls += 1;
-      return route.fulfill({ json: pushJobStatus(Number(path.split("/").pop())) });
+    if (/^\/api\/dropship\/listing-push-runs\/\d+$/.test(path) && method === "GET") {
+      state.runDetailCalls += 1;
+      return route.fulfill({ json: finishedRun(Number(path.split("/").pop())) });
     }
     if (path === "/api/dropship/auth/sensitive-actions/challenge/start" && method === "POST") {
       state.codesSent.push((route.request().postDataJSON() as { action: string }).action);
@@ -186,31 +232,24 @@ async function setup(page: Page, initial: Partial<StubState> = {}) {
   return state;
 }
 
-/** What the server answers for a push: the job, its items and the preview it queued from. */
-/** The worker's finished verdict for the job the page follows after queueing. */
-function pushJobStatus(jobId: number) {
-  return { job: { jobId, storeConnectionId: STORE_ID, platform: "ebay", environment: null, status: "completed", finished: true,
-    createdAt: STAMP, updatedAt: STAMP, completedAt: STAMP,
-    items: [{ itemId: 1, listingId: 100, productVariantId: 101, sku: "ENV-SGL-P50", productName: "Envelope Single Pocket",
-      variantName: "Pack of 50", status: "completed", errorCode: null, errorMessage: null, retryable: null,
-      externalListingId: "110552738912", published: null, listingUrl: null }] } };
+function runView(runId: number, overrides: Partial<ListingPushRunView> = {}): ListingPushRunView {
+  return { runId, storeConnectionId: STORE_ID, scope: "not_live", status: "processing", stopReason: null, selectionRevisionId: 1, targetCount: 1,
+    chunkSize: 500, chunkCount: 1, nextChunkIndex: 0, cancelRequestedAt: null, createdAt: STAMP, updatedAt: STAMP, completedAt: null, ...overrides };
 }
 
-function pushResponse(rows: Array<typeof PREVIEW_ROW>, jobStatus: "queued" | "failed" = "queued") {
-  const blocked = rows.filter((row) => row.previewStatus === "blocked").length;
-  return {
-    job: { jobId: 31, vendorId: 1, storeConnectionId: STORE_ID, status: jobStatus, idempotencyKey: "k", requestHash: "h",
-      createdAt: STAMP, updatedAt: STAMP },
-    items: rows.map((row, index) => ({ itemId: index + 1, jobId: 31, listingId: null, productVariantId: row.productVariantId,
-      status: row.previewStatus === "blocked" ? "blocked" : "queued", previewHash: row.previewHash, errorCode: null, errorMessage: null })),
-    preview: { vendorId: 1, storeConnectionId: STORE_ID, platform: "ebay", generatedAt: STAMP, rows,
-      summary: { total: rows.length, ready: rows.length - blocked, blocked, warning: 0 } },
-    idempotentReplay: false,
-  };
+/** The run create's answer: run 31 made from the selection's one size. */
+function createdRun() {
+  return contractAnswer(createListingPushRunResponseSchema, { run: runView(31), idempotentReplay: false });
+}
+
+/** The run the page follows after publishing: its one size published. */
+function finishedRun(runId: number) {
+  return contractAnswer(listingPushRunDetailResponseSchema, { run: runView(runId, { status: "completed", completedAt: STAMP, nextChunkIndex: 1 }),
+    counts: { ...emptyListingPushRunCounts(), completed: 1 }, problems: { items: [], nextCursor: null }, waitingUntil: null, drafts: 0 });
 }
 
 function listingCard(page: Page): Locator {
-  return page.locator("section").filter({ has: page.getByRole("heading", { name: "Listing preview and push" }) });
+  return page.locator("section").filter({ has: page.getByRole("heading", { name: "Check and publish" }) });
 }
 
 async function shot(page: Page, testInfo: TestInfo, locator: Locator, name: string) {
@@ -219,22 +258,25 @@ async function shot(page: Page, testInfo: TestInfo, locator: Locator, name: stri
   await page.screenshot({ path: join(SHOTS_DIR, `${testInfo.project.name}-${name}.png`) });
 }
 
-test("an onboarding vendor is told to activate, can still preview, and is never sent a code for a push the server would refuse", async ({ page }, testInfo) => {
+// Step 1 plan S2-5 PR A: step 3 publishes through runs ("Publish {n} new"), and its optional Check previews the
+// selection; the account's blocks, the step-up and the refusals keep their places in the step's card.
+test("an onboarding vendor is told to activate, can still check, and is never sent a code for a publish the server would refuse", async ({ page }, testInfo) => {
   const state = await setup(page, { vendorStatus: "onboarding" });
   const card = listingCard(page);
   const notice = card.getByTestId("listing-access-notice");
   await expect(notice).toHaveText(/Your account isn't active yet, so listings can't be pushed to your store\. Finish the steps on the Onboarding page and choose Activate \.ops\./);
   await expect(notice.getByRole("link", { name: "Go to Onboarding" })).toHaveAttribute("href", "/dropship-portal/onboarding");
 
-  await card.getByRole("button", { name: "Preview selected" }).click();
+  await card.getByRole("button", { name: "Check listings" }).click();
   await expect(card.getByText("Envelope Single Pocket, Pack of 50").first()).toBeVisible();
   // The row's price links to the product's drawer in Listing settings (PR 10h): the address is checked, not followed.
   await expect(card.getByRole("link", { name: "Change in Listing settings: ENV-SGL-P50" }))
     .toHaveAttribute("href", "/dropship-portal/catalog/setup?product=11&size=101");
-  await expect(card.getByRole("button", { name: "Queue ready listings" })).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Publish 1 new" })).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Publish all 1" })).toBeDisabled();
   await shot(page, testInfo, card, "catalog-access-onboarding");
   expect(state.previewCalls).toBe(1);
-  expect(state.pushCalls).toBe(0);
+  expect(state.runCalls).toBe(0);
   expect(state.codesSent).toEqual([]);
 
   await notice.getByRole("link", { name: "Go to Onboarding" }).click();
@@ -242,50 +284,51 @@ test("an onboarding vendor is told to activate, can still preview, and is never 
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("a paused vendor is sent to the Wallet page and cannot preview or push", async ({ page }) => {
+test("a paused vendor is sent to the Wallet page and cannot check or publish", async ({ page }) => {
   const state = await setup(page, { vendorStatus: "paused" });
   const card = listingCard(page);
   const notice = card.getByTestId("listing-access-notice");
   await expect(notice).toHaveText(/Selling is paused on your account, so listings can't be previewed or pushed\. The Wallet page shows why and what to do\./);
   await expect(notice.getByRole("link", { name: "Go to Wallet" })).toHaveAttribute("href", "/dropship-portal/wallet");
-  await expect(card.getByRole("button", { name: "Preview selected" })).toBeDisabled();
-  await expect(card.getByRole("button", { name: "Queue ready listings" })).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Check listings" })).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Publish 1 new" })).toBeDisabled();
   expect(state.previewCalls).toBe(0);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("a refusal after the page loaded shows in the listing card with its fix, then the reloaded account explains it", async ({ page }, testInfo) => {
-  const state = await setup(page, { vendorStatus: "active", proofs: { bulk_listing_push: LIVE_PROOF }, pushReplies: [{
+test("a refusal after the page loaded shows in the step's card with its fix, then the reloaded account explains it", async ({ page }, testInfo) => {
+  const state = await setup(page, { vendorStatus: "active", proofs: { bulk_listing_push: LIVE_PROOF }, runReplies: [{
     status: 403,
     json: { error: { code: "DROPSHIP_LISTING_VENDOR_BLOCKED",
       message: "Selling is paused on your account, so listings can't be previewed or pushed. The Wallet page shows why and what to do.",
-      context: { vendorId: 1, vendorStatus: "paused", action: "push", resolution: "resolve_pause" } } },
-    // The pause happened between loading the page and queueing the push.
+      context: { resolution: "resolve_pause" } } },
+    // The pause happened between loading the page and pressing Publish.
     after: (current) => { current.vendorStatus = "paused"; },
   }] });
   const card = listingCard(page);
   await expect(card.getByTestId("listing-access-notice")).toHaveCount(0);
-  const readsBeforePush = state.onboardingReads;
+  const readsBeforePublish = state.onboardingReads;
 
-  await card.getByRole("button", { name: "Preview selected" }).click();
-  await card.getByRole("button", { name: "Queue ready listings" }).click();
+  await card.getByRole("button", { name: "Check listings" }).click();
+  await expect(card.getByTestId("publish-check-summary")).toBeVisible();
+  await card.getByRole("button", { name: "Publish 1 new" }).click();
 
   const notice = card.getByTestId("listing-access-notice");
   await expect(notice).toHaveCount(1);
   await expect(notice).toContainText("Selling is paused on your account");
   await expect(notice.getByRole("link", { name: "Go to Wallet" })).toBeVisible();
-  await expect(card.getByRole("button", { name: "Queue ready listings" })).toBeDisabled();
-  await expect(card.getByRole("button", { name: "Preview selected" })).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Publish 1 new" })).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Check listings" })).toBeDisabled();
   await shot(page, testInfo, card, "catalog-access-refused-push");
-  expect(state.onboardingReads).toBeGreaterThan(readsBeforePush);
-  expect(state.pushCalls).toBe(1);
-  // The failure shows once, inside the listing card next to its button, never at the top of the page.
+  expect(state.onboardingReads).toBeGreaterThan(readsBeforePublish);
+  expect(state.runCalls).toBe(1);
+  // The failure shows once, inside the step's card next to its buttons, never at the top of the page.
   await expect(page.getByText("Selling is paused on your account", { exact: false })).toHaveCount(1);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
 test("an expired verification asks again instead of repeating the refusal", async ({ page }) => {
-  const state = await setup(page, { vendorStatus: "active", proofs: { bulk_listing_push: LIVE_PROOF }, pushReplies: [{
+  const state = await setup(page, { vendorStatus: "active", proofs: { bulk_listing_push: LIVE_PROOF }, runReplies: [{
     status: 403,
     json: { error: { code: "DROPSHIP_STEP_UP_REQUIRED", message: "Recent dropship sensitive-action verification is required.",
       context: { action: "bulk_listing_push" } } },
@@ -293,87 +336,80 @@ test("an expired verification asks again instead of repeating the refusal", asyn
     after: (current) => { current.proofs = {}; },
   }] });
   const card = listingCard(page);
-  await card.getByRole("button", { name: "Preview selected" }).click();
-  const authReadsBeforePush = state.authReads;
-  await card.getByRole("button", { name: "Queue ready listings" }).click();
+  const authReadsBeforePublish = state.authReads;
+  await card.getByRole("button", { name: "Publish 1 new" }).click();
 
-  await expect(card.getByRole("alert")).toHaveText("Your verification expired before the push was queued. Choose Queue ready listings again to verify.");
-  await expect.poll(() => state.authReads).toBeGreaterThan(authReadsBeforePush);
-  await card.getByRole("button", { name: "Queue ready listings" }).click();
-  await expect(card.getByText("Verification code to push listings")).toBeVisible();
+  await expect(card.getByRole("alert")).toHaveText("Your verification expired before publishing started. Press Publish again to verify.");
+  await expect.poll(() => state.authReads).toBeGreaterThan(authReadsBeforePublish);
+  await card.getByRole("button", { name: "Publish 1 new" }).click();
+  await expect(card.getByText("Verification code to publish listings")).toBeVisible();
   expect(state.codesSent).toEqual(["bulk_listing_push"]);
-  expect(state.pushCalls).toBe(1);
+  expect(state.runCalls).toBe(1);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
 test("a vendor with no ready store is sent to the store connection panel", async ({ page }) => {
   const state = await setup(page, { vendorStatus: "active", storeReady: false });
   const notice = listingCard(page).getByTestId("listing-access-notice");
-  await expect(notice).toHaveText(/Connect your eBay store and finish its setup before previewing or pushing listings\./);
+  await expect(notice).toHaveText(/Connect your eBay store and finish its setup before checking or publishing listings\./);
   await expect(notice.getByRole("link", { name: "Go to store connection" })).toHaveAttribute("href", "/dropship-portal/onboarding");
-  await expect(listingCard(page).getByRole("button", { name: "Preview selected" })).toBeDisabled();
+  await expect(listingCard(page).getByRole("button", { name: "Check listings" })).toBeDisabled();
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("queues in one click without a preview and shows what was queued", async ({ page }, testInfo) => {
+test("publishes in one press without a check and shows what was published", async ({ page }, testInfo) => {
   const state = await setup(page, { vendorStatus: "active", proofs: { bulk_listing_push: LIVE_PROOF },
-    pushReplies: [{ status: 201, json: pushResponse([PREVIEW_ROW]) }] });
+    runReplies: [{ status: 202, json: createdRun() }] });
   const card = listingCard(page);
 
-  await card.getByRole("button", { name: "Queue ready listings" }).click();
+  await card.getByRole("button", { name: "Publish 1 new" }).click();
 
-  // The page follows job 31 and shows what became of the listing, in the vendor's words.
-  await expect(card.getByTestId("listing-queue-result")).toContainText("Live on Test eBay Store: 1 listing.");
-  await expect(card.getByTestId("listing-push-outcome-1")).toHaveText("Envelope Single Pocket · Pack of 50 · ENV-SGL-P50: Live on Test eBay Store.");
-  // A finished job is never reported as still running.
-  await expect(card.getByTestId("listing-queue-result")).not.toContainText("Still not finished");
-  expect(state.statusCalls).toBeGreaterThanOrEqual(1);
-  await expect(card.getByText("This preview is out of date", { exact: false })).toHaveCount(0);
-  await expect(card.getByText("ENV-SGL-P50").first()).toBeVisible();
+  // The page follows run 31 and says what became of it, in the vendor's words.
+  await expect(card.getByTestId("publish-run-title")).toHaveText("Publishing finished.");
+  await expect(card.getByTestId("publish-run-counts")).toHaveText("1 published");
+  expect(state.runDetailCalls).toBeGreaterThanOrEqual(1);
+  await expect(card.getByText("These results are out of date", { exact: false })).toHaveCount(0);
   await shot(page, testInfo, card, "catalog-one-step-queued");
-  // One request, built from the selection alone: nothing is echoed from a preview.
+  // One request with a scope and the revision counted from: the server snapshots the selection, nothing is echoed.
   expect(state.previewCalls).toBe(0);
-  expect(state.pushCalls).toBe(1);
-  expect(state.pushBodies[0]).toEqual({
+  expect(state.runCalls).toBe(1);
+  expect(state.runBodies[0]).toEqual({
     storeConnectionId: STORE_ID,
-    productVariantIds: [101],
-    idempotencyKey: expect.stringMatching(/^listing-push:/),
-    reviewMode: "current_preview",
+    scope: "not_live",
+    idempotencyKey: expect.stringMatching(/^listing-push-run:/),
+    expectedSelectionRevisionId: 1,
   });
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("sends the same request once more when a listing changed while it was being queued", async ({ page }) => {
-  const state = await setup(page, { vendorStatus: "active", proofs: { bulk_listing_push: LIVE_PROOF }, pushReplies: [
-    { status: 409, json: { error: { code: "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
-      message: "Pricing rules or their cost basis changed while queueing. Generate a new preview." } } },
-    { status: 201, json: pushResponse([PREVIEW_ROW]) },
+test("sends the same request once more when a selection save held the vendor's lock", async ({ page }) => {
+  const state = await setup(page, { vendorStatus: "active", proofs: { bulk_listing_push: LIVE_PROOF }, runReplies: [
+    { status: 409, json: { error: { code: "DROPSHIP_LISTING_PUSH_RUN_BUSY", message: "Your choices are being saved. Publishing will start in a moment." } } },
+    { status: 202, json: createdRun() },
   ] });
   const card = listingCard(page);
 
-  await card.getByRole("button", { name: "Queue ready listings" }).click();
+  await card.getByRole("button", { name: "Publish 1 new" }).click();
 
-  await expect(card.getByTestId("listing-queue-result")).toContainText("Live on Test eBay Store: 1 listing.");
+  await expect(card.getByTestId("publish-run-title")).toHaveText("Publishing finished.");
   await expect(card.getByRole("alert")).toHaveCount(0);
-  expect(state.pushCalls).toBe(2);
-  // The refused attempt wrote nothing, so the retry reuses its key.
-  expect(state.pushBodies[1]).toEqual(state.pushBodies[0]);
+  expect(state.runCalls).toBe(2);
+  // The busy answer wrote nothing, so the retry reuses its key.
+  expect(state.runBodies[1]).toEqual(state.runBodies[0]);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
-test("says plainly when nothing selected was ready to queue", async ({ page }) => {
-  const blockedRow = { ...PREVIEW_ROW, previewStatus: "blocked", blockers: ["catalog_package_data_required"] };
+test("says plainly when everything selected is already on eBay", async ({ page }) => {
   const state = await setup(page, { vendorStatus: "active", proofs: { bulk_listing_push: LIVE_PROOF },
-    pushReplies: [{ status: 201, json: pushResponse([blockedRow], "failed") }] });
+    runReplies: [{ status: 422, json: { error: { code: "DROPSHIP_LISTING_PUSH_RUN_EMPTY",
+      message: "Everything selected is already on eBay. Use Publish all to re-send it.",
+      context: { scope: "not_live", liveCount: 1, selectedCount: 1 } } } }] });
   const card = listingCard(page);
 
-  await card.getByRole("button", { name: "Queue ready listings" }).click();
+  await card.getByRole("button", { name: "Publish 1 new" }).click();
 
-  await expect(card.getByTestId("listing-queue-result"))
-    .toHaveText("Nothing was queued: the selected listing is not ready. The table below shows why.");
-  // The row itself says why, under its status badge, in words (PR 10h): never the code.
-  await expect(card.getByTestId("listing-row-issues-101")).toHaveText("Card Shellz hasn't added this size's package size yet. Contact support.");
-  expect(state.pushCalls).toBe(1);
+  await expect(card.getByRole("alert")).toHaveText("Everything selected is already on eBay. Use Publish all to re-send it.");
+  expect(state.runCalls).toBe(1);
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 
@@ -404,7 +440,7 @@ test("saved listing attention uses the supported connection remedy and never off
   await history.getByRole("button", { name: "Resolve issue" }).click();
   await expect(page).toHaveURL(/\/dropship-portal\/onboarding$/);
   expect(state.historyRetryPaths).toEqual([]);
-  expect(state.pushCalls).toBe(0);
+  expect(state.runCalls).toBe(0);
   expect(state.codesSent).toEqual([]);
   expect(state.unexpected).toEqual([]);
   expect(state.errors).toEqual([]);
@@ -424,7 +460,7 @@ test("saved listing retry retains attention on failure and sends only the exact 
   await expect(history.getByRole("status")).toHaveText("Another update attempt has been requested. Check update status for its result.");
   await expect(history.getByRole("button", { name: "Retry update" })).toHaveCount(0);
   expect(state.historyRetryPaths).toEqual(Array(2).fill(`/api/dropship/listings/stores/${STORE_ID}/listing-intent-changes/9007199254740993/retry`));
-  expect(state.pushCalls).toBe(0);
+  expect(state.runCalls).toBe(0);
   expect(state.previewCalls).toBe(0);
   expect(state.codesSent).toEqual([]);
   expect(state.unexpected).toEqual([]);

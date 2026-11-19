@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { useToast } from "@/hooks/use-toast";
+import { useAuth } from "@/lib/auth";
 
 type PolicyRecord = { revision: number; policy: PurchasePlanningPolicy; products?: ProductChoice[] };
 type ProductChoice = { id: number; sku: string | null; name: string };
@@ -20,8 +21,11 @@ async function readJson<T>(url: string): Promise<T> {
 export function PurchasePlanningPolicyEditor() {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const policyQuery = useQuery<PolicyRecord>({ queryKey: ["/api/purchasing/planning-policy"], queryFn: () => readJson("/api/purchasing/planning-policy") });
-  const historyQuery = useQuery<{ changes: HistoryItem[] }>({ queryKey: ["/api/purchasing/planning-policy/history"], queryFn: () => readJson("/api/purchasing/planning-policy/history") });
+  const { hasPermission } = useAuth();
+  const canViewPolicy = hasPermission("purchasing", "view");
+  const canEditPolicy = hasPermission("purchasing", "edit");
+  const policyQuery = useQuery<PolicyRecord>({ queryKey: ["/api/purchasing/planning-policy"], enabled: canViewPolicy, queryFn: () => readJson("/api/purchasing/planning-policy") });
+  const historyQuery = useQuery<{ changes: HistoryItem[] }>({ queryKey: ["/api/purchasing/planning-policy/history"], enabled: canViewPolicy, queryFn: () => readJson("/api/purchasing/planning-policy/history") });
   const [draft, setDraft] = useState<PolicyRecord | null>(null);
   const [search, setSearch] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
@@ -40,10 +44,11 @@ export function PurchasePlanningPolicyEditor() {
   const productQuery = useQuery<{ items: ProductChoice[] }>({
     queryKey: ["/api/purchasing/planning-policy/products", searchTerm],
     queryFn: () => readJson(`/api/purchasing/planning-policy/products?search=${encodeURIComponent(searchTerm)}`),
-    enabled: searchTerm.length >= 2,
+    enabled: canViewPolicy && searchTerm.length >= 2,
   });
   const save = useMutation({
     mutationFn: async (record: PolicyRecord) => {
+      if (!canEditPolicy) throw new Error("Purchasing edit permission is required to change stock and growth policy.");
       const result = purchasePlanningPolicySchema.safeParse(record.policy);
       if (!result.success) throw new Error(result.error.issues.map((issue) => issue.message).join("; "));
       const fingerprint = JSON.stringify({ revision: record.revision, policy: result.data });
@@ -80,6 +85,7 @@ export function PurchasePlanningPolicyEditor() {
     setProductNames((names) => ({ ...names, [product.id]: `${product.sku ?? ""} · ${product.name}` }));
     setSearch("");
   };
+  if (!canViewPolicy) return <p className="text-sm text-muted-foreground">Purchasing view permission is required to review stock and growth policy.</p>;
   if (policyQuery.isLoading) return <div role="status" className="text-sm">Loading stock and growth policy…</div>;
   if (policyQuery.isError || !draft) return <div role="alert" className="text-sm text-destructive">Stock and growth policy could not be loaded.</div>;
   return <section className="space-y-4 rounded-lg border p-4" aria-labelledby="purchase-planning-policy-title">
@@ -87,6 +93,8 @@ export function PurchasePlanningPolicyEditor() {
       <h3 id="purchase-planning-policy-title" className="font-semibold">Stock targets and growth plan</h3>
       <p className="text-xs text-muted-foreground">Revision {draft.revision}. Targets use base pieces. Forecast events in Demand Planner add lumpy demand separately.</p>
     </div>
+    {!canEditPolicy && <p className="text-sm text-muted-foreground">Purchasing edit permission is required to change stock and growth policy.</p>}
+    <fieldset disabled={!canEditPolicy} className="space-y-4">
     <div className="grid gap-3 sm:grid-cols-2">
       <label className="text-xs">Uniform growth adjustment (%)
         <Input aria-label="Uniform growth adjustment (%)" type="number" min={-100} max={1000} step={1} value={Number.isFinite(draft.policy.growthPercent) ? draft.policy.growthPercent : ""} onChange={(event) => patch({ growthPercent: event.target.value === "" ? Number.NaN : Number(event.target.value) })} />
@@ -136,9 +144,10 @@ export function PurchasePlanningPolicyEditor() {
       </div>
       <p className="text-xs text-muted-foreground">Essential marks priority and requires a target. It does not claim guaranteed availability. Staged lead time replaces the supplier/product total only when enabled.</p>
     </fieldset>)}
+    </fieldset>
     {!purchasePlanningPolicySchema.safeParse(draft.policy).success && <p role="alert" className="text-xs text-destructive">Enter valid quantities and days. Essential products need a stock buffer or cover target; explicit stages must total 1 to 1460 days. Replacement forecasts need a reference and valid nonoverlapping dates.</p>}
     <div className="flex flex-wrap items-center gap-2">
-      <Button type="button" disabled={save.isPending || !purchasePlanningPolicySchema.safeParse(draft.policy).success} onClick={() => save.mutate(draft)}>{save.isPending ? "Saving…" : "Save stock and growth policy"}</Button>
+      <Button type="button" disabled={!canEditPolicy || save.isPending || !purchasePlanningPolicySchema.safeParse(draft.policy).success} onClick={() => save.mutate(draft)}>{save.isPending ? "Saving…" : "Save stock and growth policy"}</Button>
       <Button type="button" variant="outline" disabled={save.isPending} onClick={async () => { const result = await policyQuery.refetch(); if (result.data) { setDraft(result.data); submission.current = null; } }}>Reload current policy</Button>
     </div>
     <details className="text-xs"><summary className="cursor-pointer">Policy history</summary>

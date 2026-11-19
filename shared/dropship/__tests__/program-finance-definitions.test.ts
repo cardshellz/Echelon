@@ -309,7 +309,7 @@ describe("program finance definitions", () => {
     expect(FINANCE_LEDGER_TYPES).toHaveLength(15);
     for (const type of FINANCE_LEDGER_TYPES) expectWords(FINANCE_STAFF_LEDGER_LABELS[type], `ledger ${type}`);
     expect(FINANCE_STAFF_LEDGER_LABELS.insurance_pool_credit).toBe("Return credit (insurance pool)");
-    expect(FINANCE_STAFF_LEDGER_LABELS.refund_credit).toBe("Unexpected entry (nothing should write this)");
+    expect(FINANCE_STAFF_LEDGER_LABELS.refund_credit).toBe("Order refund (eBay cancelled after acceptance)");
     expect(FINANCE_STAFF_DEPOSIT_LABELS.manual).toBe("Staff wallet credit");
     expect(FINANCE_STAFF_LEDGER_STATUS_WORDS.pending).toBe("on the way");
   });

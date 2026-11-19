@@ -98,6 +98,7 @@ import {
   PROGRAM_WIDE,
   TABLE_MISSING,
   UNEXPECTED_TYPES,
+  isOrderRefund,
   abs,
   availableType,
   cashDeposit,
@@ -857,7 +858,7 @@ function returnsSection(build: Build): FinanceSections["returns"] {
   addFeePartLines(lines, build);
   lines.add(recordedLine("returns.net", fromCardShellz + fromPool - fees, { ...posted, operator: "equals" }));
   lines.add(recordedLine("returns.staff_credits", ledger.sum("amountP", staffCredit), { datedBy: "settled", count: ledger.sum("nP", staffCredit) }));
-  lines.add(notRecordedLine("returns.memo.order_refunds", "no_refund_path", "posted"));
+  lines.add(recordedLine("returns.memo.order_refunds", ledger.sum("amountP", isOrderRefund), { ...posted, count: ledger.sum("nP", isOrderRefund) }));
   lines.add(notRecordedLine("returns.memo.restocked_value", "restocked_value_not_saved", "posted"));
   lines.add(notRecordedLine("returns.memo.return_label_cost", "return_label_cost_not_saved", "posted"));
   lineWorking(lines, "returns.net", ["returns.credits_cs", "returns.credits_pool", "returns.fees"]);
@@ -902,7 +903,11 @@ function addWalkLines(lines: LineSet<"owed">, build: Build): void {
     moved += signed;
     lines.add(directedLine(movement.key, movement.usual === "minus" ? -signed : signed, movement.usual, { datedBy: movement.datedBy }));
   }
-  const other = ledger.sum("amountP", (group) => UNEXPECTED_TYPES.has(group.type));
+  // Order refunds of orders eBay cancelled (MS3/ARCH-1) have their own line; only entries nothing should write are "other".
+  const orderRefunds = ledger.sum("amountP", isOrderRefund);
+  moved += orderRefunds;
+  if (orderRefunds !== ZERO) lines.add(directedLine("owed.walk.order_refunds", orderRefunds, "plus", { datedBy: "posted" }));
+  const other = ledger.sum("amountP", (group) => UNEXPECTED_TYPES.has(group.type) && !isOrderRefund(group));
   moved += other;
   if (other !== ZERO) lines.add(directedLine("owed.walk.other", other, "plus", { datedBy: "posted" }));
   // Whatever the entries don't explain is shown, never absorbed (check W4 lists it).

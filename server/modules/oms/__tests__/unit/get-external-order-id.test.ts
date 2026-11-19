@@ -18,8 +18,7 @@ vi.hoisted(() => {
   process.env.DATABASE_URL ??= "postgres://stub:stub@localhost:5432/stub";
 });
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const { getExternalOrderId } = await import("../../oms-webhooks");
+import { getExternalOrderId } from "../../oms-webhooks";
 
 describe("getExternalOrderId", () => {
   it("strips GID prefix from admin_graphql_api_id", () => {

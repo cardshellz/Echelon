@@ -1203,10 +1203,10 @@
         {
           "key": "returns.memo.order_refunds",
           "operator": "none",
-          "amount": null,
+          "amount": 0,
           "unit": "cents",
-          "status": "not_recorded",
-          "reasonKey": "no_refund_path",
+          "status": "recorded",
+          "count": 0,
           "datedBy": "posted",
           "depth": "summary"
         },
@@ -2338,7 +2338,8 @@
       "difference": null,
       "ownerLineKeys": [
         "sales.billed",
-        "sales.waiting.cancelled_in_oms"
+        "sales.waiting.cancelled_in_oms",
+        "returns.memo.order_refunds"
       ]
     },
     {

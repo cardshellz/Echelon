@@ -14,6 +14,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { useToast } from "@/hooks/use-toast";
 import { Building2, Package, Bell, Clock, Save, Volume2, ShoppingCart, Plus, Pencil, Trash2, Info } from "lucide-react";
 import { useSettings } from "@/lib/settings";
+import { PurchaseTaxTypesSettings } from "@/features/purchasing/PurchaseTaxTypes";
 import { themeNames, themeDescriptions, previewTheme, type SoundTheme } from "@/lib/sounds";
 
 interface Settings {
@@ -552,6 +553,7 @@ export default function Settings() {
         </TabsContent>
 
         <TabsContent value="procurement" className="space-y-6">
+          <PurchaseTaxTypesSettings />
           <Card>
             <CardHeader>
               <div className="flex items-center justify-between">

@@ -14,6 +14,7 @@ import type {
   DropshipLogger,
   DropshipNotificationSender,
 } from "./dropship-ports";
+import { vendorPlatformName } from "../domain/vendor-platform-name";
 
 const positiveIdSchema = z.number().int().positive();
 const idempotencyKeySchema = z.string().trim().min(8).max(200);
@@ -24,6 +25,8 @@ const normalizedOrderLineSchema = z.object({
   externalLineItemId: z.string().trim().min(1).max(255).optional(),
   externalListingId: z.string().trim().min(1).max(255).optional(),
   externalOfferId: z.string().trim().min(1).max(255).optional(),
+  /** The line was sold from a multi-variation listing, as the marketplace's mapper reads its own line (review ARCH-10). */
+  marketplaceVariation: z.literal(true).optional(),
   sku: z.string().trim().min(1).max(120).optional(),
   productVariantId: positiveIdSchema.optional(),
   quantity: z.number().int().positive(),
@@ -228,10 +231,10 @@ export class DropshipOrderIntakeService {
       eventType: critical ? "dropship_order_intake_rejected" : "dropship_order_received",
       critical,
       channels: ["email", "in_app"],
-      title: critical ? "Dropship order rejected" : "New dropship order received",
+      title: critical ? "Order couldn't be taken" : "New order",
       message: critical
-        ? `A ${result.intake.platform} order could not be accepted: ${result.intake.rejectionReason ?? "unknown reason"}.`
-        : `A ${result.intake.platform} order is ready for dropship processing.`,
+        ? `An order from ${vendorPlatformName(result.intake.platform)} couldn't be taken: ${result.intake.rejectionReason ?? "no reason was given"}.`
+        : `You have a new ${vendorPlatformName(result.intake.platform)} order.`,
       payload: {
         intakeId: result.intake.intakeId,
         vendorId: result.intake.vendorId,

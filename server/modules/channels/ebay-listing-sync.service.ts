@@ -27,13 +27,18 @@ import { resolveEbayListingIssue } from "@shared/ebay-listing-issue";
 import { ebayListingFailureDiagnostic, type EbayListingFailureDiagnostic } from "./ebay-listing-failure-diagnostic";
 import type { EbayAutomaticPublicationRecoveryService, EbayRequestJournalContract } from "../inventory-planning/quantity-publication";
 import { withEbayQuantityRequestJournalContract } from "../inventory-planning/quantity-publication";
-import { recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
+import { ebayListingPublicationScopes, recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
+import type { QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
+import { logger as platformLogger } from "../../platform/observability/logger";
+import { runDueListingWork } from "../marketplace-listings/listing-work-runner";
 
 export interface PreparedEbayListingSync {
   sourceIdentity?: EbayListingSyncIdentity;
   providerObservation?: MarketplaceObservedListingPublication;
   identity: EbayListingSyncIdentity;
   assertInventoryReady?(context?: { commandKey: string; actor: string }): Promise<void>;
+  /** Channels PR4: ask the stock-link engine to check this listing's sizes now (best effort; see nudgeStockLink). */
+  requestStockLinkCheck?(): Promise<void>;
   client: EbayListingLifecycleClient;
   draft: Pick<
     EbayListingConnectorDraft,
@@ -47,6 +52,24 @@ export interface PreparedEbayListingSync {
     priceChanged: boolean;
   }>;
 }
+/**
+ * Channels PR4 (PLAN-CH-v3 §9 PR4, CH/ebay-listing-sync.service.ts read-only Sync): a Sync that finished without any
+ * eBay write asks the stock-link engine to check the listing's sizes now, so a live listing links without waiting for
+ * the background sweep. Deliberately best effort: the nudge only makes a check due sooner (the sweep finds every size
+ * anyway) and writes no stock, so its failure is logged at WARN and never fails or retries the read-only Sync.
+ */
+async function nudgeStockLink(prepared: Pick<PreparedEbayListingSync, "requestStockLinkCheck" | "identity">): Promise<void> {
+  if (!prepared.requestStockLinkCheck) return;
+  try {
+    await prepared.requestStockLinkCheck();
+  } catch (error) {
+    platformLogger.warn("channels.ebay_listing_sync.stock_link_nudge", { outcome: "failed",
+      product_id: prepared.identity.productId, connection_id: prepared.identity.connectionId,
+      error_code: error !== null && typeof error === "object" && "code" in error && typeof error.code === "string"
+        ? error.code : "STOCK_LINK_NUDGE_FAILED" });
+  }
+}
+
 export class EbayExistingListingSyncExecution
   implements EbayListingSyncExecution
 {
@@ -57,7 +80,48 @@ export class EbayExistingListingSyncExecution
     private readonly recovery: EbayListingRequestRecovery,
     private readonly connector: EbayMarketplaceListingConnector,
     private readonly automaticRecovery?: Pick<EbayAutomaticPublicationRecoveryService, "recover">,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
+
+  /** Fresh provider readback uses the same preparation and comparator as Sync.
+   * It never clears request evidence or performs a provider write. */
+  async inspectForRecovery(identity: EbayListingSyncIdentity, watchScopes: readonly QuantityPublicationScope[],
+    hasOutstanding: (scopes: readonly QuantityPublicationScope[]) => Promise<boolean>):
+    Promise<{ kind: "provider_match"; checkedAt: Date; evidenceHash: string; identityHash: string; proof: null } | null> {
+    const uniqueScopes = (members: readonly QuantityPublicationScope[]) =>
+      [...new Map(members.map(scope => [JSON.stringify(scope), scope])).values()];
+    const initialScopes = uniqueScopes([...watchScopes, ...ebayListingPublicationScopes(identity)]);
+    if (await hasOutstanding(initialScopes)) return null;
+    const prepared = await this.prepare(identity);
+    this.assertPreparedIdentity(identity, prepared);
+    const resolvedIdentity = ebayListingSyncIdentitySchema.parse(prepared.identity);
+    const scopes = uniqueScopes([...initialScopes, ...ebayListingPublicationScopes(resolvedIdentity)]);
+    if (await hasOutstanding(scopes)) return null;
+    try {
+      await this.verify(prepared, resolvedIdentity);
+    } catch (error) {
+      if (error instanceof EbayListingSyncError && error.code === "EBAY_SYNC_READBACK_PENDING") return null;
+      throw error;
+    }
+    if (await hasOutstanding(scopes)) return null;
+    return { kind: "provider_match", checkedAt: z.date().parse(this.clock()), evidenceHash: syncContentIntentHash(prepared.draft), proof: null,
+      identityHash: syncIdentityHash(resolvedIdentity) };
+  }
+
+  private assertPreparedIdentity(identity: EbayListingSyncIdentity, prepared: PreparedEbayListingSync): void {
+    if (prepared.sourceIdentity) {
+      assertEbayListingSourceIdentityUnchanged(identity, prepared.sourceIdentity);
+    } else if (syncIdentityHash(identity) !== syncIdentityHash(prepared.identity)) {
+      throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The listing mapping changed. Start a new sync with the current mapping.");
+    }
+  }
+
+  private verify(prepared: PreparedEbayListingSync, identity: EbayListingSyncIdentity): Promise<void> {
+    const offerIds: Record<number, string> = {};
+    for (const member of identity.variants) if (member.offerId) offerIds[member.variantId] = member.offerId;
+    return this.connector.verifyExistingListing({ client: prepared.client, draft: prepared.draft, identity, offerIds });
+  }
+
   async execute(
     identity: EbayListingSyncIdentity,
     stage: Parameters<EbayListingSyncExecution["execute"]>[1],
@@ -69,13 +133,7 @@ export class EbayExistingListingSyncExecution
     await stage("prepare_listing", syncIdentityHash(identity), async () => {
       prepared = await this.prepare(identity);
     });
-    if (prepared.sourceIdentity) {
-      assertEbayListingSourceIdentityUnchanged(identity, prepared.sourceIdentity);
-    } else if (syncIdentityHash(identity) !== syncIdentityHash(prepared.identity)) {
-      // Legacy callers provide an already resolved identity. Its group is part
-      // of the provider identity and cannot be treated as a catalog hint.
-      throw new EbayListingSyncError("EBAY_SYNC_IDENTITY_CHANGED", "The listing mapping changed. Start a new sync with the current mapping.");
-    }
+    this.assertPreparedIdentity(identity, prepared);
     const resolvedIdentity = ebayListingSyncIdentitySchema.parse(prepared.identity);
     // Persist the exact observed provider resources before any provider mutation.
     // A later retry cannot silently switch this job to another group or offer.
@@ -101,20 +159,12 @@ export class EbayExistingListingSyncExecution
     // retained inactive member's missing zero mapping cannot strand that check.
     // Ordinary read-only Sync still completes without opening paused inventory.
     if (hasRecurringRecovery) await prepareInventory();
-    const offerIds: Record<number, string> = {};
-    for (const member of resolvedIdentity.variants) {
-      if (member.offerId) offerIds[member.variantId] = member.offerId;
-    }
-    const verify = (): Promise<void> => this.connector.verifyExistingListing({
-      client: prepared.client,
-      draft: prepared.draft,
-      identity: resolvedIdentity,
-      offerIds,
-    });
+    const verify = (): Promise<void> => this.verify(prepared, resolvedIdentity);
     // A committed post-write checkpoint binds retries to accepted content. ATP
     // changes do not invalidate it; new content or a new command revision does.
     if (verificationIntentHash === contentHash) {
       await stage("verification", contentHash, verify);
+      await nudgeStockLink(prepared);
       return completedEbayListingSyncResult(prepared, new Set());
     }
     // Also adopt already-current content after a lost checkpoint or final local
@@ -126,6 +176,7 @@ export class EbayExistingListingSyncExecution
       // it: a second failed read must not leave a pre-write checkpoint that
       // prevents retrying the required content writes.
       if (context?.operation === "publish") await stage("verification", contentHash, async () => {});
+      await nudgeStockLink(prepared);
       return completedEbayListingSyncResult(prepared, new Set());
     } catch (error) {
       if (
@@ -163,7 +214,9 @@ export function completedEbayListingSyncResult(
     prepared: PreparedEbayListingSync,
     policyChanges: ReadonlySet<number>,
   ): EbayProductSyncResult {
+    const warnings = prepared.draft.inventoryItems.flatMap(item => item.packagePlan?.warnings ?? []);
     return ebayProductSyncResultSchema.parse({
+      ...(warnings.length ? { warnings } : {}),
       synced: prepared.variants.length,
       priceChanges: prepared.variants.filter((member) => member.priceChanged)
         .length,
@@ -233,6 +286,7 @@ export interface EbayListingSyncStore {
       message: string | null;
       nextAttemptAt: Date;
       resetAttempts?: boolean;
+      readRetry?: { failures: number; paused: boolean };
       diagnostic?: EbayListingFailureDiagnostic;
     },
     now: Date,
@@ -334,106 +388,107 @@ export class EbayListingSyncService {
     this.running = true;
     const result = { processed: 0, failed: 0 };
     try {
-      for (let index = 0; index < limit; index++) {
-        const claim = await this.store.claim(
+      await runDueListingWork({
+        limit: id ? 1 : limit,
+        claim: () => this.store.claim(
           this.now(),
           z.string().uuid().parse(this.uuid()),
           id,
-        );
-        if (!claim) break;
-        const { job } = claim;
-        const publicationProgress = { started: job.publicationWriteStarted,
-          completed: job.publicationWriteCompleted, accepted: job.publicationAccepted };
-        let withdrawalCompleted = job.withdrawalWriteCompleted;
-        let withdrawalStarted = job.withdrawalWriteStarted;
-        try {
-          const output = ebayProductSyncResultSchema.parse(
-            await this.executor.execute(
-              job.identity,
-              async (key, hash, work, journalContract) => {
-                await this.store.stage(job, key, hash, "started", this.now(), journalContract);
-                if (job.operation === "withdraw" && key === "withdraw") withdrawalStarted = true;
-                if (job.operation === "publish" && key === "publish") {
-                  publicationProgress.started = true;
-                }
-                if (journalContract) {
-                  if (!this.store.assertPublicationOwner) throw new EbayListingSyncError("EBAY_SYNC_OWNER_LOST", "Publication requires its original saved-job owner before admission.");
-                  // Revalidate this exact channel session/token after inventory
-                  // has acquired its scope locks. A delayed pre-admission read
-                  // must not let an old worker publish after session takeover.
-                  await withEbayQuantityRequestJournalContract(journalContract, work,
-                    () => this.store.assertPublicationOwner!(job));
-                } else await work();
-                await this.store.stage(job, key, hash, "completed", this.now());
-                if (job.operation === "publish" && key === "publish") publicationProgress.completed = true;
-                if (job.operation === "withdraw" && key === "withdraw") withdrawalCompleted = true;
+        ),
+        process: async claim => {
+          const { job } = claim;
+          const publicationProgress = { started: job.publicationWriteStarted,
+            completed: job.publicationWriteCompleted, accepted: job.publicationAccepted };
+          let withdrawalCompleted = job.withdrawalWriteCompleted;
+          let withdrawalStarted = job.withdrawalWriteStarted;
+          try {
+            const output = ebayProductSyncResultSchema.parse(
+              await this.executor.execute(
+                job.identity,
+                async (key, hash, work, journalContract) => {
+                  await this.store.stage(job, key, hash, "started", this.now(), journalContract);
+                  if (job.operation === "withdraw" && key === "withdraw") withdrawalStarted = true;
+                  if (job.operation === "publish" && key === "publish") {
+                    publicationProgress.started = true;
+                  }
+                  if (journalContract) {
+                    if (!this.store.assertPublicationOwner) throw new EbayListingSyncError("EBAY_SYNC_OWNER_LOST", "Publication requires its original saved-job owner before admission.");
+                    // Revalidate this exact channel session/token after inventory
+                    // has acquired its scope locks. A delayed pre-admission read
+                    // must not let an old worker publish after session takeover.
+                    await withEbayQuantityRequestJournalContract(journalContract, work,
+                      () => this.store.assertPublicationOwner!(job));
+                  } else await work();
+                  await this.store.stage(job, key, hash, "completed", this.now());
+                  if (job.operation === "publish" && key === "publish") publicationProgress.completed = true;
+                  if (job.operation === "withdraw" && key === "withdraw") withdrawalCompleted = true;
+                },
+                job.verificationRevision === job.claimedRevision
+                  ? job.verificationIntentHash
+                  : null,
+                (resolved, observation, source) => this.store.bindProviderIdentity(job, resolved, this.now(), observation, source),
+                { operation: job.operation, jobId: job.id, requestedBy: job.requestedBy, providerIdentity: job.providerIdentity, publicationTarget: job.publicationTarget,
+                  withdrawalWriteCompleted: job.withdrawalWriteCompleted,
+                  withdrawalWriteStarted: job.withdrawalWriteStarted,
+                  publicationAccepted: job.publicationAccepted, publicationWriteCompleted: job.publicationWriteCompleted,
+                  publicationWriteStarted: job.publicationWriteStarted, publicationAcceptedRevision: job.publicationAcceptedRevision,
+                  publicationIntentHash: job.publicationIntentHash,
+                  claimedRevision: job.claimedRevision ?? job.revision,
+                  ...(this.store.recoverTerminalPublicationWrite ? { recoverTerminalPublicationWrite: async (identity: EbayListingSyncIdentity) => {
+                    const recovered = await this.store.recoverTerminalPublicationWrite!(job, identity, this.now());
+                    if (recovered) publicationProgress.started = false;
+                    return recovered;
+                  } } : {}),
+                  ...(this.store.persistPreparedIntent ? { persistPreparedIntent: (intent: ChannelPreparedIntent) => this.store.persistPreparedIntent!(job, intent, this.now()) } : {}),
+                  bindPublicationTarget: target => this.store.bindPublicationTarget(job, target, this.now()),
+                  bindPublicationAccepted: async accepted => { await this.store.bindPublicationAccepted(job, accepted, this.now()); publicationProgress.accepted = accepted; } },
+              ),
+            );
+            await this.store.finish(
+              job,
+              {
+                state: output.errors ? "needs_attention" : "completed",
+                result: output,
+                code: output.errors ? "EBAY_LISTING_SYNC_INCOMPLETE" : null,
+                message: output.details.find((d) => !d.success)?.error ?? null,
+                nextAttemptAt: this.now(),
+                // A newer command can requeue this successful pass. Only failures
+                // consume its retry budget; every stage remains in the audit trail.
+                resetAttempts: output.errors === 0,
               },
-              job.verificationRevision === job.claimedRevision
-                ? job.verificationIntentHash
-                : null,
-              (resolved, observation, source) => this.store.bindProviderIdentity(job, resolved, this.now(), observation, source),
-              { operation: job.operation, jobId: job.id, requestedBy: job.requestedBy, providerIdentity: job.providerIdentity, publicationTarget: job.publicationTarget,
-                withdrawalWriteCompleted: job.withdrawalWriteCompleted,
-                withdrawalWriteStarted: job.withdrawalWriteStarted,
-                publicationAccepted: job.publicationAccepted, publicationWriteCompleted: job.publicationWriteCompleted,
-                publicationWriteStarted: job.publicationWriteStarted, publicationAcceptedRevision: job.publicationAcceptedRevision,
-                publicationIntentHash: job.publicationIntentHash,
-                claimedRevision: job.claimedRevision ?? job.revision,
-                ...(this.store.recoverTerminalPublicationWrite ? { recoverTerminalPublicationWrite: async (identity: EbayListingSyncIdentity) => {
-                  const recovered = await this.store.recoverTerminalPublicationWrite!(job, identity, this.now());
-                  if (recovered) publicationProgress.started = false;
-                  return recovered;
-                } } : {}),
-                ...(this.store.persistPreparedIntent ? { persistPreparedIntent: (intent: ChannelPreparedIntent) => this.store.persistPreparedIntent!(job, intent, this.now()) } : {}),
-                bindPublicationTarget: target => this.store.bindPublicationTarget(job, target, this.now()),
-                bindPublicationAccepted: async accepted => { await this.store.bindPublicationAccepted(job, accepted, this.now()); publicationProgress.accepted = accepted; } },
-            ),
-          );
-          await this.store.finish(
-            job,
-            {
-              state: output.errors ? "needs_attention" : "completed",
-              result: output,
-              code: output.errors ? "EBAY_LISTING_SYNC_INCOMPLETE" : null,
-              message: output.details.find((d) => !d.success)?.error ?? null,
-              nextAttemptAt: this.now(),
-              // A newer command can requeue this successful pass. Only failures
-              // consume its retry budget; every stage remains in the audit trail.
-              resetAttempts: output.errors === 0,
-            },
-            this.now(),
-          );
-          result.processed++;
-        } catch (error) {
-          result.failed++;
-          const failure = syncFailure(error, job.attempts, this.now());
-          // Never retire a publication's unresolved write barrier. A new command
-          // must join this job and retain its acceptance/start evidence.
-          if (job.operation === "publish" && (publicationProgress.started || publicationProgress.completed || publicationProgress.accepted)) {
-            failure.state = publicationProgress.accepted || publicationProgress.completed ? "recovering" : "awaiting_evidence";
-            failure.resetAttempts = true;
+              this.now(),
+            );
+            result.processed++;
+          } catch (error) {
+            result.failed++;
+            const failure = syncFailure(error, job.attempts, this.now(), job.readFailureCount ?? 0, job.code, !!job.providerRead);
+            // Never retire a publication's unresolved write barrier. A new command
+            // must join this job and retain its acceptance/start evidence.
+            if (job.operation === "publish" && (publicationProgress.started || publicationProgress.completed || publicationProgress.accepted)) {
+              failure.state = publicationProgress.accepted || publicationProgress.completed ? "recovering" : "awaiting_evidence";
+              failure.resetAttempts = true;
+            }
+            if (job.operation === "withdraw" && (withdrawalStarted || withdrawalCompleted)) {
+              failure.state = withdrawalCompleted ? "recovering" : "awaiting_evidence";
+              failure.resetAttempts = true;
+            }
+            const diagnostic = ebayListingFailureDiagnostic(error);
+            // Log before the final transaction: a failed database commit must not
+            // erase the original failure and its exact inventory scope.
+            console.error(JSON.stringify({ event: "ebay_listing_sync_followup", jobId: job.id,
+              productId: job.productId, ...diagnostic }));
+            // A failed final commit is retained as running. Never overwrite a newer
+            // owner's progress after losing this connection or its fencing token.
+            await this.store.finish(
+              job,
+              { ...failure, result: null, diagnostic },
+              this.now(),
+            );
+          } finally {
+            await claim.release();
           }
-          if (job.operation === "withdraw" && (withdrawalStarted || withdrawalCompleted)) {
-            failure.state = withdrawalCompleted ? "recovering" : "awaiting_evidence";
-            failure.resetAttempts = true;
-          }
-          const diagnostic = ebayListingFailureDiagnostic(error);
-          // Log before the final transaction: a failed database commit must not
-          // erase the original failure and its exact inventory scope.
-          console.error(JSON.stringify({ event: "ebay_listing_sync_followup", jobId: job.id,
-            productId: job.productId, ...diagnostic }));
-          // A failed final commit is retained as running. Never overwrite a newer
-          // owner's progress after losing this connection or its fencing token.
-          await this.store.finish(
-            job,
-            { ...failure, result: null, diagnostic },
-            this.now(),
-          );
-        } finally {
-          await claim.release();
-        }
-        if (id) break;
-      }
+        },
+      });
       return result;
     } finally {
       this.running = false;
@@ -458,6 +513,9 @@ export class EbayListingSyncService {
     return job ? this.withIssue(job) : null;
   }
   private withIssue<T extends EbayListingSyncJob>(job: T): T {
+    // The repository's revision-fenced diagnostic projection carries source
+    // fields that a code-only fallback cannot reconstruct. Keep that evidence.
+    if (job.issue?.code === job.code) return job;
     return job.code || job.state === "needs_attention" || job.state === "awaiting_evidence"
       ? { ...job, issue: resolveEbayListingIssue({ ...job, jobId: job.id }) }
       : job;

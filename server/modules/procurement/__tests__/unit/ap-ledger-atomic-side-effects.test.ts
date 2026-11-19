@@ -24,6 +24,13 @@ vi.mock("../../../identity/infrastructure/command-authority.repository", () => (
     permissions: ["purchasing:approve"], scopedPermissions: [] })),
 }));
 
+// Number allocation is exercised with real PostgreSQL in the payment acceptance suite.
+// This orchestration fixture keeps allocation independent of balance-read ordering.
+vi.mock("../../../../platform/document-numbering/document-number.repository", () => ({
+  allocateDocumentNumber: vi.fn(async () => "PAY-20260518-001"),
+  readSuggestedInvoiceNumber: vi.fn(),
+}));
+
 const tables = vi.hoisted(() => ({
   apPayments: {
     id: "ap_payments.id",
@@ -209,12 +216,26 @@ describe("AP ledger atomic side effects", () => {
     mocks.db.insert.mockReturnValue({ values: vi.fn(() => Promise.resolve([])) });
   });
 
+  it.each(["record_payment", "apply_payment", "void_payment"] as const)("rejects a missing/invalid %s clock before any database operation", async (command) => {
+    const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
+    const { lockInventoryCostGraph } = await import("../../../inventory/infrastructure/cost-evidence.repository");
+    const tx = buildTx([]);
+    for (const now of [undefined, null, new Date("invalid"), "2026-10-25"]) {
+      await expect(executeApPaymentCommandInTransaction(command, { now: now as Date, userId: "ops-user" }, tx))
+        .rejects.toMatchObject({ statusCode: 500, details: { code: "AP_PAYMENT_CLOCK_INVALID" } });
+    }
+    expect(lockInventoryCostGraph).not.toHaveBeenCalled();
+    expect(tx.execute).not.toHaveBeenCalled();
+    expect(tx.select).not.toHaveBeenCalled();
+    expect(tx.insert).not.toHaveBeenCalled();
+    expect(tx.update).not.toHaveBeenCalled();
+  });
+
   it("records payment, allocations, invoice balance, and PO aggregate inside one transaction", async () => {
     useFinancialSource(financialSource(2500));
     const { recordPayment } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
-      [],
       [{ invoicedAmountCents: 2500, status: "approved" }],
       [{ total: 2500 }],
       [{ purchaseOrderId: 7 }],
@@ -230,14 +251,21 @@ describe("AP ledger atomic side effects", () => {
       totalAmountCents: 2500,
       allocations: [{ vendorInvoiceId: 12, appliedAmountCents: 2500 }],
       createdBy: "ops-user",
-    });
+    }, { now: new Date("2026-10-25T12:00:00.000Z") });
 
     expect(payment).toEqual({ id: 21, paymentNumber: "PAY-20260518-001" });
     expect(mocks.db.transaction).toHaveBeenCalledTimes(1);
     expect(tx.insert).toHaveBeenCalledWith(tables.apPayments);
-    // One existing payment reservation plus two explicit credit-evidence reads.
-    expect(tx.execute).toHaveBeenCalledTimes(3);
+    // Allocation is isolated above; both credit-evidence reads still use this transaction.
+    expect(tx.execute).toHaveBeenCalledTimes(2);
     expect(tx.insert).toHaveBeenCalledWith(tables.apPaymentAllocations);
+    const paymentWrite = tx.insert.mock.results[tx.insert.mock.calls.findIndex(([table]: [unknown]) => table === tables.apPayments)].value;
+    const allocationWrite = tx.insert.mock.results[tx.insert.mock.calls.findIndex(([table]: [unknown]) => table === tables.apPaymentAllocations)].value;
+    expect(paymentWrite.values).toHaveBeenCalledWith(expect.objectContaining({ createdAt: new Date("2026-10-25T12:00:00.000Z"), updatedAt: new Date("2026-10-25T12:00:00.000Z") }));
+    expect(allocationWrite.values).toHaveBeenCalledWith([expect.objectContaining({ createdAt: new Date("2026-10-25T12:00:00.000Z") })]);
+    for (const result of tx.update.mock.results) expect(result.value.set).toHaveBeenCalledWith(expect.objectContaining({ updatedAt: new Date("2026-10-25T12:00:00.000Z") }));
+    const historyWrite = tx.insert.mock.results[tx.insert.mock.calls.findIndex(([table]: [unknown]) => table === tables.poStatusHistory)].value;
+    expect(historyWrite.values).toHaveBeenCalledWith(expect.objectContaining({ changedAt: new Date("2026-10-25T12:00:00.000Z") }));
     expect(tx.update).toHaveBeenCalledWith(tables.vendorInvoices);
     expect(tx.update).toHaveBeenCalledWith(tables.purchaseOrders);
     expect(mocks.detectFinancialExceptions).toHaveBeenCalledWith(7);
@@ -473,7 +501,6 @@ describe("AP ledger atomic side effects", () => {
     const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
-      [],
       [{ invoicedAmountCents: 2500, status: "approved" }],
       [{ total: 2500 }],
       [{ purchaseOrderId: 7 }],
@@ -488,7 +515,7 @@ describe("AP ledger atomic side effects", () => {
       return originalInsert(table);
     });
 
-    await expect(executeApPaymentCommandInTransaction("record_payment", {
+    await expect(executeApPaymentCommandInTransaction("record_payment", { now: new Date("2026-10-25T12:00:00.000Z"),
       payment: {
         vendorId: 4,
         paymentDate: new Date("2026-05-18T12:00:00Z"),
@@ -500,8 +527,8 @@ describe("AP ledger atomic side effects", () => {
     }, tx)).rejects.toThrow("audit unavailable");
 
     expect(tx.insert).toHaveBeenCalledWith(tables.apPayments);
-    // One existing payment reservation plus two explicit credit-evidence reads.
-    expect(tx.execute).toHaveBeenCalledTimes(3);
+    // Allocation is isolated above; both credit-evidence reads still use this transaction.
+    expect(tx.execute).toHaveBeenCalledTimes(2);
     expect(tx.insert).toHaveBeenCalledWith(tables.auditEvents);
   });
 
@@ -648,7 +675,6 @@ describe("AP ledger atomic side effects", () => {
     const { executeApPaymentCommandInTransaction } = await import("../../ap-ledger.service");
     const tx = buildTx([
       [{ id: 12, vendorId: 4, status: "approved", balanceCents: 2500 }],
-      [],
       [{ invoicedAmountCents: 2500, status: "approved" }],
       [{ total: 2500 }],
       [{ purchaseOrderId: 7 }],
@@ -657,7 +683,7 @@ describe("AP ledger atomic side effects", () => {
       [{ allocationId: 31, vendorInvoiceId: 12, appliedAmountCents: 2500 }],
       [{ id: 31, apPaymentId: 21, vendorInvoiceId: 12, appliedAmountCents: 2500, invoiceVendorId: 4, invoiceCurrency: "USD", invoiceStatus: "paid" }],
     ], { id: 21, paymentNumber: "PAY-20260518-001", vendorId: 4, currency: "USD", status: "completed", totalAmountCents: 2500, paymentCalendarDate: null });
-    const result = await executeApPaymentCommandInTransaction("record_payment", {
+    const result = await executeApPaymentCommandInTransaction("record_payment", { now: new Date("2026-10-25T12:00:00.000Z"),
       payment: {
         vendorId: 4,
         paymentDate: new Date("2026-05-18T12:00:00Z"),
@@ -695,7 +721,9 @@ describe("AP ledger atomic side effects", () => {
     ]);
     mocks.db.transaction.mockImplementation(async (callback) => callback(tx));
 
-    await voidPayment(21, "duplicate", "ops-user");
+    await voidPayment(21, "duplicate", "ops-user", { now: new Date("2026-10-25T12:00:00.000Z") });
+    for (const result of tx.update.mock.results) expect(result.value.set).toHaveBeenCalledWith(expect.objectContaining({ updatedAt: new Date("2026-10-25T12:00:00.000Z") }));
+    expect(tx.update.mock.results[0].value.set).toHaveBeenCalledWith(expect.objectContaining({ voidedAt: new Date("2026-10-25T12:00:00.000Z") }));
 
     expect(mocks.db.transaction).toHaveBeenCalledTimes(1);
     expect(tx.update).toHaveBeenCalledWith(tables.apPayments);

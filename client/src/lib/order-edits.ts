@@ -45,6 +45,11 @@ import {
   type OrderEditStatus,
 } from "@shared/order-edits/order-edit.contract";
 
+import {
+  orderEditCodeErrorParamsSchema,
+  type OrderEditCodeErrorParams,
+} from "@shared/order-edits/order-edit-code-errors";
+
 export const ORDER_EDITS_PATH = ORDER_EDIT_PAGE;
 export const ORDER_EDITS_API = ORDER_EDIT_API;
 
@@ -54,6 +59,7 @@ export class OrderEditRequestError extends Error {
     readonly code: string,
     readonly status: number | null,
     readonly uncertain: boolean,
+    readonly params?: OrderEditCodeErrorParams,
   ) {
     super(message);
     this.name = "OrderEditRequestError";
@@ -67,11 +73,13 @@ const serverError = z.object({
       z.object({
         message: z.string().min(1).max(500),
         code: z.string().max(100).optional(),
+        params: orderEditCodeErrorParamsSchema.optional(),
       }),
     ])
     .optional(),
   message: z.string().min(1).max(500).optional(),
   code: z.string().max(100).optional(),
+  params: orderEditCodeErrorParamsSchema.optional(),
 });
 
 /** A failed mutation can already have reached Shopify. The caller must retain its command key. */
@@ -152,6 +160,7 @@ export async function orderEditRequest<T>(
       nested?.code ?? value?.code ?? "ORDER_EDIT_REQUEST_FAILED",
       response.status,
       mutation && response.status >= 500,
+      nested?.params ?? value?.params,
     );
   }
   const parsed = schema.safeParse(body);
@@ -224,6 +233,7 @@ export function orderEditCanCommit(
 ): boolean {
   return (
     operation.status === "ready" &&
+    operation.commandInProgress !== true &&
     operation.error === null &&
     Number.isFinite(now) &&
     (operation.expiresAt === null || Date.parse(operation.expiresAt) > now)
@@ -295,7 +305,7 @@ export const orderEditStatusCopy: Record<
   },
 };
 
-export function createOrderEditTransport(request: typeof fetch = fetch) {
+export function createOrderEditTransport(request: typeof fetch = fetch, options: { observationVersion?: "v1" } = {}) {
   const read = <T>(
     path: string,
     schema: z.ZodType<T, z.ZodTypeDef, unknown>,
@@ -309,7 +319,7 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
     operationId.parse(id);
     // The operation UUID is also its stable command key across reloads. Actions are separately scoped server-side.
     const result = await orderEditRequest(
-      `/operations/${encodeURIComponent(id)}${action ? `/${action}` : "?codeEntryVersion=v1"}`,
+      `/operations/${encodeURIComponent(id)}${action ? `/${action}` : `?codeEntryVersion=v1${options.observationVersion ? "&observationVersion=v1" : ""}`}`,
       orderEditOperationSchema,
       action ? { method: "POST", key: id, body: {} } : { signal },
       request,
@@ -432,7 +442,7 @@ export function createOrderEditTransport(request: typeof fetch = fetch) {
       signal?: AbortSignal,
     ) => {
       const result = await read(
-        `/orders/${positiveId.parse(omsOrderId)}?connectionId=${positiveId.parse(connectionId)}&codeEntryVersion=v1`,
+        `/orders/${positiveId.parse(omsOrderId)}?connectionId=${positiveId.parse(connectionId)}&codeEntryVersion=v1&managementVersion=v2`,
         orderEditOrderSchema,
         signal,
       );

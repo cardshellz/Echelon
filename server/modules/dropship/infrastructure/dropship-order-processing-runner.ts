@@ -11,6 +11,8 @@ import type { DropshipWalletPolicyResolver } from "../domain/wallet-policy";
 import { createDropshipWalletPolicyServiceFromEnv } from "./dropship-wallet-policy.factory";
 import type { DropshipOrderCancellationService } from "../application/dropship-order-cancellation-service";
 import type { DropshipOrderProcessingResult } from "../application/dropship-order-processing-service";
+import type { DropshipMarketplaceOrderCancelService } from "../application/dropship-marketplace-order-cancel-service";
+import { createDropshipMarketplaceOrderCancelServiceFromEnv } from "./dropship-marketplace-order-cancel.factory";
 
 export interface DropshipOrderProcessingQueueRepository {
   recoverStaleProcessingIntakes(input: {
@@ -47,6 +49,8 @@ type DropshipOrderCancellationSweepService = Pick<
   DropshipOrderCancellationService,
   "processPendingCancellations"
 >;
+
+type DropshipMarketplaceCancelStopSweepService = Pick<DropshipMarketplaceOrderCancelService, "processDueStops">;
 
 interface DropshipOrderProcessingSweepService {
   processIntake(input: {
@@ -119,10 +123,19 @@ export class PgDropshipOrderProcessingQueueRepository implements DropshipOrderPr
   }): Promise<number[]> {
     // Revisit a hold only after its vendor wallet changes; reprocessing moves the
     // intake timestamp forward so the same wallet mutation cannot trigger it again.
+    // A retrying intake waits for its next attempt (plan v4 §7.1), so stuck
+    // intakes stop filling every pass: the pass orders by when each intake is
+    // due, and a newer order is never more than the 15-minute retry ceiling
+    // behind an older stuck one. A held intake eBay cancelled is due too, so
+    // the claim can cancel it once nothing is held (§7.2).
     const result = await this.dbPool.query<IntakeIdRow>(
       `SELECT oi.id
        FROM dropship.dropship_order_intake oi
-       WHERE oi.status IN ('received', 'retrying')
+       WHERE oi.status = 'received'
+          OR (
+            oi.status = 'retrying'
+            AND (oi.next_processing_attempt_at IS NULL OR oi.next_processing_attempt_at <= $2)
+          )
           OR (
             oi.status = 'payment_hold'
             AND oi.payment_hold_expires_at > $2
@@ -133,7 +146,12 @@ export class PgDropshipOrderProcessingQueueRepository implements DropshipOrderPr
                 AND wa.updated_at >= oi.updated_at
             )
           )
-       ORDER BY oi.received_at ASC, oi.id ASC
+          OR (
+            oi.status = 'payment_hold'
+            AND oi.marketplace_cancelled_at IS NOT NULL
+            AND (oi.next_processing_attempt_at IS NULL OR oi.next_processing_attempt_at <= $2)
+          )
+       ORDER BY COALESCE(oi.next_processing_attempt_at, oi.received_at) ASC, oi.id ASC
        LIMIT $1`,
       [input.limit, input.now],
     );
@@ -160,6 +178,8 @@ export async function runDropshipOrderProcessingSweep(input: {
   /** Wallet policy limits source; the staff-managed policy (with its env fallback) when absent. */
   walletPolicy?: DropshipWalletPolicyResolver;
   orderCancellationService?: DropshipOrderCancellationSweepService;
+  /** Accepted orders eBay cancelled: OMS stops them, stopped ones are refunded (plan v4 §7.2). */
+  marketplaceCancelStopService?: DropshipMarketplaceCancelStopSweepService;
   orderProcessingService?: DropshipOrderProcessingSweepService;
   batchSize?: number;
   staleProcessingMinutes?: number;
@@ -174,6 +194,9 @@ export async function runDropshipOrderProcessingSweep(input: {
   cancellationSucceeded: number;
   cancellationRetrying: number;
   cancellationFailed: number;
+  marketplaceCancelStopped: number;
+  marketplaceCancelReview: number;
+  marketplaceCancelRetrying: number;
   staleProcessingRecovered: number;
 }> {
   const repository = input.repository ?? new PgDropshipOrderProcessingQueueRepository();
@@ -201,6 +224,12 @@ export async function runDropshipOrderProcessingSweep(input: {
   const cancellation = await (
     input.orderCancellationService ?? createDropshipOrderCancellationServiceFromEnv()
   ).processPendingCancellations({
+    limit: batchSize,
+    workerId,
+  });
+  const marketplaceCancelStops = await (
+    input.marketplaceCancelStopService ?? createDropshipMarketplaceOrderCancelServiceFromEnv()
+  ).processDueStops({
     limit: batchSize,
     workerId,
   });
@@ -255,6 +284,9 @@ export async function runDropshipOrderProcessingSweep(input: {
     cancellationSucceeded: cancellation.succeeded,
     cancellationRetrying: cancellation.retrying,
     cancellationFailed: cancellation.failed,
+    marketplaceCancelStopped: marketplaceCancelStops.stopped,
+    marketplaceCancelReview: marketplaceCancelStops.review,
+    marketplaceCancelRetrying: marketplaceCancelStops.retrying,
     staleProcessingRecovered: recoveredStaleIntakeIds.length,
   };
 }
@@ -282,6 +314,9 @@ export function startDropshipOrderProcessingWorker(): void {
           || result.cancellationSucceeded > 0
           || result.cancellationRetrying > 0
           || result.cancellationFailed > 0
+          || result.marketplaceCancelStopped > 0
+          || result.marketplaceCancelReview > 0
+          || result.marketplaceCancelRetrying > 0
           || result.staleProcessingRecovered > 0
         ) {
           console.info(JSON.stringify({

@@ -43,9 +43,7 @@ describe("wms-sync: bridge-path OMS→WMS trigger + backfill correctness", () =>
       expect(WMS_SYNC_SRC).toMatch(
         /COALESCE\(oo\.fulfillment_status, ''\) <> 'fulfilled'/,
       );
-      expect(WMS_SYNC_SRC).toMatch(
-        /COALESCE\(oo\.financial_status, ''\)\s+NOT IN \('refunded', 'voided'\)/,
-      );
+      expect(WMS_SYNC_SRC).toContain('omsWarehouseCancellationSql("oo", { legacyFinancialStatuses: ["refunded", "voided"] })');
     });
 
     it("drains oldest-first so no stuck straggler is starved", () => {

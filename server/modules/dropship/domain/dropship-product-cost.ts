@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import type { DropshipProductCost, DropshipProductCostIssue, DropshipProductCostSource } from "../application/dropship-product-cost";
 
 export interface ShellzClubCostOverride {
@@ -39,7 +40,7 @@ export function parseShellzClubDecimalCents(value: unknown): number | null {
   if (typeof value !== "string" || !/^\d{1,16}(?:\.\d{1,2})?$/.test(value)) return null;
   const [whole, fraction = ""] = value.split(".");
   const cents = BigInt(whole) * BigInt(100) + BigInt(fraction.padEnd(2, "0"));
-  return cents <= MAX_SAFE_CENTS ? Number(cents) : null;
+  return cents <= MAX_SAFE_CENTS ? readIntegerCents(cents, "cents", true) : null;
 }
 
 export function normalizeShopifyCostIdentity(value: unknown, kind: "Product" | "ProductVariant" | "Collection"): string | null {

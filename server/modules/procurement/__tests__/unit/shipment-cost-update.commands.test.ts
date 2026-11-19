@@ -31,6 +31,16 @@ function harness() {
 }
 
 describe("audited shipment cost update command", () => {
+  it("binds measurement corrections to the authenticated user rather than the refresh principal", async () => {
+    const h = harness();
+    const body = { measurementCorrection: { sourceVersion: "a".repeat(64), previewVersion: "b".repeat(64), evidenceConfirmed: true,
+      reason: "Packing list confirms these dimensions", lines: [{ lineId: 1, measurements: { cartonCount: 1, dimensionBasis: "carton",
+        weightKg: "5", lengthCm: "10", widthCm: "10", heightCm: "10" } }] } };
+    await expect(h.commands.execute(42, body, "approver", descriptor)).rejects.toMatchObject({ code: "SHIPMENT_COST_UPDATE_SCOPE_INVALID" });
+    await expect(h.commands.execute(42, body, "approver", { ...descriptor, actorType: "user", actorId: "someone-else" })).rejects.toMatchObject({ code: "SHIPMENT_COST_UPDATE_SCOPE_INVALID" });
+    expect(h.repository.reserve).not.toHaveBeenCalled();
+    expect(await h.commands.execute(42, body, "approver", { ...descriptor, actorType: "user", actorId: "approver" })).toMatchObject({ httpStatus: 200 });
+  });
   it("uses one transaction, actor and clock, and replays the saved result without repeating work", async () => {
     const h = harness();
     expect(await h.commands.execute(42, {}, "approver", descriptor)).toMatchObject({ replayed: false, body: outcome });

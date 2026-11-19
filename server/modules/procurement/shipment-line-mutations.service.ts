@@ -7,14 +7,16 @@ import { auditEvents, type InboundShipment, type InboundShipmentLine, type Inser
 import {
   SHIPMENT_LINE_EDITABLE_FIELDS, SHIPMENT_LINE_IMPORT_LIMIT, shipmentLineDeleteSchema, shipmentLineFromPoSchema, shipmentLineEditableSchema,
   shipmentLinePatchSchema, shipmentLineResolveSchema, shipmentLineResourceIdSchema,
-  shipmentPackingListImportSchema, shipmentPackingListRowSchema, type ShipmentPackingListRow,
+  shipmentPackingListImportSchema, shipmentPackingListRowSchema, type ShipmentPackingListRow, type ShipmentLinePacking,
 } from "@shared/procurement/shipment-line-command";
 import type { ShipmentLineCommand } from "./shipment-line-commands";
 import { shipmentLineVersion, versionShipmentLine } from "./shipment-line-version";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
-import { computeShipmentLinePhysicalTotals, validateShipmentPhysicalTotals } from "./shipment-line-physical-values";
+import { computeShipmentLinePhysicalTotals } from "./shipment-line-physical-values";
+import { insertAuditEventDrizzle } from "../../infrastructure/transactional-audit";
 import { lockShipmentSourceCapacity } from "./shipment-source-capacity";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
+import type { ShipmentReceivingSetup } from "@shared/procurement/shipment-receiving-setup";
 
 type Dimensions = Pick<InboundShipmentLine, "weightKg" | "lengthCm" | "widthCm" | "heightCm">;
 interface LineStorage {
@@ -33,7 +35,9 @@ interface Dependencies {
   lockShipment(tx: any, id: number): Promise<InboundShipment>;
   resolveDimensions(variantId: number, vendorId: number | undefined, tx: any): Promise<Dimensions>;
   recomputeTotals(id: number, tx: any, now?: Date): Promise<void>;
-  refreshAllocations(tx: any, id: number, shipment: InboundShipment, now?: Date): Promise<unknown>;
+  materializePhysicalTotals(tx: any, shipment: InboundShipment, lines: InboundShipmentLine[], now: Date, actorId: string): Promise<void>;
+  refreshAllocations(tx: any, id: number, shipment: InboundShipment, now?: Date, actorId?: string): Promise<unknown>;
+  checkReceivingSetup(tx: any, shipmentId: number, required: boolean, options?: { previous?: ShipmentReceivingSetup; lockEvidence?: boolean }): Promise<ShipmentReceivingSetup>;
 }
 
 function reject(message: string, code: string, status = 409): never {
@@ -59,11 +63,15 @@ function physicalChange(before: InboundShipmentLine, patch: Partial<InsertInboun
 }
 
 export async function assertShipmentLineHistoryMutable(tx: any, shipmentId: number) {
-  // Receipts have shipment+PO-line provenance, not a shipment-line FK. An
-  // immutable history guard must therefore cover the entire shipment,
-  // including cancelled receipts and ambiguous duplicate source lines.
+  // Receipt provenance can be on the header or directly on a shipment line.
+  // Protect both forms, including cancelled receipts and ambiguous source
+  // lines, before replacing any part of the shipment's physical history.
   const result = await tx.execute(sql`
     SELECT EXISTS (SELECT 1 FROM procurement.receiving_orders WHERE inbound_shipment_id = ${shipmentId})
+      OR EXISTS (SELECT 1 FROM procurement.receiving_lines r
+        JOIN procurement.inbound_shipment_lines l ON l.id = r.inbound_shipment_line_id
+        WHERE l.inbound_shipment_id = ${shipmentId})
+      OR EXISTS (SELECT 1 FROM inventory.inventory_lots WHERE inbound_shipment_id = ${shipmentId})
       OR EXISTS (SELECT 1 FROM procurement.landed_cost_snapshots s
         JOIN procurement.inbound_shipment_lines l ON l.id = s.inbound_shipment_line_id
         WHERE l.inbound_shipment_id = ${shipmentId})
@@ -113,7 +121,7 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     return { variant, pieces, snapshot: selection.unitsPerVariant };
   }
 
-  async function createFromSource(tx: any, shipmentId: number, source: PurchaseOrderLine, qty: number, selection?: ShipmentUnitSelection): Promise<InsertInboundShipmentLine> {
+  async function createFromSource(tx: any, shipmentId: number, source: PurchaseOrderLine, qty: number, selection?: ShipmentUnitSelection, packing?: ShipmentLinePacking): Promise<InsertInboundShipmentLine> {
     if (selection && (!Number.isSafeInteger(source.productId) || Number(source.productId) <= 0)) reject("The purchase line needs a verified product before selecting a shipment unit.", "SHIPMENT_UNIT_PRODUCT_REQUIRED");
     const selected = selection ? await resolveSelection(tx, selection, source.productId, qty) : null;
     const variantId = selected?.variant.id ?? receiveVariant(source);
@@ -128,10 +136,16 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     const dimensions = variantId && (!selected || pack === 1)
       ? await dependencies.resolveDimensions(variantId, po?.vendorId, tx)
       : { weightKg: null, lengthCm: null, widthCm: null, heightCm: null };
+    // Piece measurements cannot become carton measurements merely by changing
+    // the label. A different basis needs its own explicit packing evidence.
+    const originalBasis = selected ? "piece" : cartonCount === null ? "piece" : "carton";
+    const measured = packing?.dimensionBasis && packing.dimensionBasis !== originalBasis
+      ? { weightKg: null, lengthCm: null, widthCm: null, heightCm: null } : dimensions;
     const line = { inboundShipmentId: shipmentId, purchaseOrderId: source.purchaseOrderId, purchaseOrderLineId: source.id,
       productVariantId: variantId, sku: variant?.sku ?? source.sku, qtyShipped: qty, cartonCount,
-      unitsPerVariantSnapshot: selected?.snapshot ?? null, dimensionBasis: selected ? "piece" as const : null, ...dimensions };
-    const validated = shipmentLineEditableSchema.safeParse({ ...dimensions, qtyShipped: qty, cartonCount, dimensionBasis: line.dimensionBasis });
+      unitsPerVariantSnapshot: selected?.snapshot ?? null, dimensionBasis: selected ? "piece" as const : null, ...measured, ...packing };
+    const validated = shipmentLineEditableSchema.safeParse({ weightKg: line.weightKg, lengthCm: line.lengthCm, widthCm: line.widthCm, heightCm: line.heightCm,
+      qtyShipped: qty, cartonCount: line.cartonCount, dimensionBasis: line.dimensionBasis });
     if (!validated.success) reject("Stored supplier or catalog dimensions cannot be represented on a shipment line. Review their precision and range.", "SHIPMENT_LINE_SOURCE_REVIEW_REQUIRED");
     return { ...line, ...computeShipmentLinePhysicalTotals(line) };
   }
@@ -158,7 +172,7 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
       const qty = selected?.qty ?? capacity.remainingQty;
       if (!data.lineSelections && !data.lineIds && qty === 0) continue;
       if (qty <= 0 || qty > capacity.remainingQty) reject(`PO line ${id} has ${capacity.remainingQty} pieces available for shipment; requested ${qty}.`, "SHIPMENT_LINE_QUANTITY_EXCEEDED");
-      lines.push(await createFromSource(tx, shipmentId, capacity.line, qty, selected?.unitSelection));
+      lines.push(await createFromSource(tx, shipmentId, capacity.line, qty, selected?.unitSelection, selected?.packing));
     }
     return lines;
   }
@@ -218,7 +232,7 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     return { lines, errors: errors.sort((left, right) => left.row - right.row) };
   }
 
-  async function executeLineCommandInTransaction(tx: any, command: ShipmentLineCommand, actorId: string, now: Date) {
+  async function applyLineCommand(tx: any, command: ShipmentLineCommand, actorId: string, now: Date, deferDerivedUpdates = false) {
     shipmentLineResourceIdSchema.parse(command.resourceId);
     if (typeof actorId !== "string" || !actorId.trim()) reject("An authenticated actor is required.", "SHIPMENT_LINE_ACTOR_REQUIRED", 401);
     if (!(now instanceof Date) || !Number.isFinite(now.getTime())) reject("A valid command clock is required.", "SHIPMENT_LINE_CLOCK_INVALID", 500);
@@ -231,6 +245,10 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     const shipmentId = initial?.inboundShipmentId ?? command.resourceId;
     const shipment = await dependencies.lockShipment(tx, shipmentId);
     if (shipment.status === "closed" || shipment.status === "cancelled") reject("Closed or cancelled shipment lines cannot be changed here.", "SHIPMENT_LINE_TERMINAL");
+    const guardedSetup = shipment.status === "booked" || shipment.status === "in_transit";
+    // This read is only the before/after baseline. Leave source/catalog locking
+    // to the write validation, after the PO-capacity locks have been acquired.
+    const setupBefore = guardedSetup && !deferDerivedUpdates ? await dependencies.checkReceivingSetup(tx, shipmentId, false, { lockEvidence: false }) : undefined;
     const before = await storage.getInboundShipmentLines(shipmentId, tx);
     const current = isLine ? before.find((line) => line.id === command.resourceId) : null;
     if (isLine && !current) reject("Shipment line not found.", "SHIPMENT_LINE_NOT_FOUND", 404);
@@ -314,13 +332,16 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
         result = { updated, total: before.length, reviewRequiredLines };
       } else reject("Unsupported shipment line command.", "SHIPMENT_LINE_OPERATION_INVALID", 400);
     }
-    if (affectsPhysical) {
-      validateShipmentPhysicalTotals(await storage.getInboundShipmentLines(shipmentId, tx));
+    if (affectsPhysical && !deferDerivedUpdates) {
+      // Drafts may be incomplete. Do not retroactively prevent corrections to
+      // delivered history; the operational booking/departure gates own readiness.
+      await dependencies.checkReceivingSetup(tx, shipmentId, guardedSetup, { previous: setupBefore });
+      await dependencies.materializePhysicalTotals(tx, shipment, await storage.getInboundShipmentLines(shipmentId, tx), now, actorId);
       await dependencies.recomputeTotals(shipmentId, tx, now);
-      await dependencies.refreshAllocations(tx, shipmentId, shipment, now);
+      await dependencies.refreshAllocations(tx, shipmentId, shipment, now, actorId);
     }
     const after = await storage.getInboundShipmentLines(shipmentId, tx);
-    await tx.insert(auditEvents).values({
+    await insertAuditEventDrizzle(tx, {
       timestamp: now, level: "AUDIT", actor: actorId, action: `procurement.shipment_line.${command.operation}`,
       target: `shipment:${shipmentId}`, changes: { before, after }, context: { shipmentId, lineId: isLine ? command.resourceId : null },
     });
@@ -330,5 +351,29 @@ export function createShipmentLineMutationOwner(dependencies: Dependencies) {
     if (command.operation === "import") return { ...(result as object), lines: created };
     return result;
   }
-  return { executeLineCommandInTransaction };
+  async function executeLineCommandInTransaction(tx: any, command: ShipmentLineCommand, actorId: string, now: Date) {
+    return applyLineCommand(tx, command, actorId, now);
+  }
+  /** One editor approval may replace the final line. Recalculate only after the
+   * complete set is saved, so an intermediate empty shipment is never allocated. */
+  async function executeLineBatchInTransaction(tx: any, shipmentId: number, commands: ShipmentLineCommand[], actorId: string, now: Date) {
+    await lockInventoryCostGraph(tx);
+    const shipment = await dependencies.lockShipment(tx, shipmentId);
+    const guardedSetup = shipment.status === "booked" || shipment.status === "in_transit";
+    const setupBefore = guardedSetup ? await dependencies.checkReceivingSetup(tx, shipmentId, false, { lockEvidence: false }) : undefined;
+    const results: unknown[] = [];
+    for (const command of commands) {
+      const line = ["update", "delete"].includes(command.operation) ? await storage.getInboundShipmentLineById(command.resourceId, tx) : null;
+      if (line ? line.inboundShipmentId !== shipmentId : command.resourceId !== shipmentId) reject("The edit contains a line from another shipment.", "SHIPMENT_EDITOR_SCOPE");
+      results.push(await applyLineCommand(tx, command, actorId, now, true));
+    }
+    const lines = await storage.getInboundShipmentLines(shipmentId, tx);
+    if (!lines.length) reject("A shipment needs at least one line. Cancel the shipment to remove the whole delivery.", "SHIPMENT_EDITOR_EMPTY");
+    await dependencies.checkReceivingSetup(tx, shipmentId, guardedSetup, { previous: setupBefore });
+    await dependencies.materializePhysicalTotals(tx, shipment, lines, now, actorId);
+    await dependencies.recomputeTotals(shipmentId, tx, now);
+    await dependencies.refreshAllocations(tx, shipmentId, shipment, now, actorId);
+    return results;
+  }
+  return { executeLineCommandInTransaction, executeLineBatchInTransaction };
 }

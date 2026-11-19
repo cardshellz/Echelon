@@ -1,4 +1,7 @@
 import { z } from "zod";
+import { providerReadDiagnosticFromError } from "@shared/channel-provider-read";
+import { ebayReadDiagnostic, ebayReadFailureKind } from "./ebay-read-diagnostic";
+import { isMissingEbayOfferCollection } from "../../../../channels/ebay-connector.api";
 
 import { listingRegistrationOwnerSnapshotSchema } from "../../../application/registration-dtos";
 import type {
@@ -18,6 +21,7 @@ import {
   type MarketplaceProviderAccountObservation,
 } from "../../../domain/listing-registration-plan";
 import { MarketplaceListingRegistrationError } from "../../../domain/registration-errors";
+import { planUnpublishedListingTarget, assertUnpublishedListingGroup, UnpublishedListingTargetError } from "../../../domain/unpublished-listing-target";
 import type { ListingOwnerRef } from "../../../domain/listing-replacement-plan";
 import {
   assertEbayRegistrationEnvironment,
@@ -38,6 +42,14 @@ const EBAY_PROVIDER = "ebay" as const;
 const DEFAULT_PAGE_SIZE = 200;
 const DEFAULT_MAX_PAGES = 1_000;
 const LIVE_LISTING_STATUSES = new Set(["ACTIVE", "OUT_OF_STOCK"]);
+
+const missingOffersSchema = z.object({
+  errors: z.array(z.object({ errorId: z.number().int() })).min(1),
+});
+function isMissingOfferCollection(response: EbayRegistrationReadResponse): boolean {
+  const parsed = missingOffersSchema.safeParse(response.body);
+  return parsed.success && isMissingEbayOfferCollection(response.status, parsed.data.errors.map(error => error.errorId));
+}
 
 const identityResponseSchema = z
   .object({
@@ -132,8 +144,8 @@ export interface EbayMarketplaceRegistrationObserverConfig {
 
 /**
  * Single provider-owned eBay observation algorithm shared by Channel and
- * Dropship owners. It has no provider write port and can therefore only read
- * and describe an already-published listing.
+ * Dropship owners. It describes published or unpublished resources through
+ * read ports; preparation and publication remain the execution owner's work.
  */
 export class EbayMarketplaceRegistrationObserver
   implements MarketplaceListingRegistrationObserver
@@ -261,34 +273,39 @@ export class EbayMarketplaceRegistrationObserver
 
   private async observeUnpublishedTarget(credential: EbayRegistrationReadCredential, marketplaceId: string,
     snapshots: readonly ObservedSku[], plannedGroupKey?: string | null): Promise<EbayListingInspection["unpublishedTarget"]> {
-    const permitsIncompletePreparation = plannedGroupKey !== undefined;
-    if (!snapshots.every(member => (permitsIncompletePreparation || member.inventoryItem !== null)
-      && (member.offers.length === 0 ? permitsIncompletePreparation : member.offers.length === 1
-        && member.offers[0].status === "UNPUBLISHED" && member.offers[0].sku === member.sku
-        && member.offers[0].listing === undefined))) return null;
-    const skus = snapshots.map(member => member.sku).sort(compareCanonicalText);
-    const groupIds = [...new Set(snapshots.flatMap(member => member.inventoryItem?.groupIds ?? []))];
-    if (snapshots.length === 1 && groupIds.length === 0) return { groupKey: null, skus };
-    if (groupIds.length > 1 || (!permitsIncompletePreparation &&
-      (groupIds.length !== 1 || snapshots.some(member => member.inventoryItem!.groupIds.length !== 1)))
-      || (groupIds.length === 0 && !plannedGroupKey))
-      throw observationError("EBAY_REGISTRATION_UNPUBLISHED_GROUP_AMBIGUOUS",
-        "The unpublished offers do not belong to one complete inventory group. Review their eBay group membership before publishing.", { groupVariantSkus: skus });
-    const groupKey = groupIds[0] ?? normalizeProviderText(plannedGroupKey!, "groupKey", 255);
-    if (plannedGroupKey !== undefined && groupKey !== plannedGroupKey)
-      throw observationError("EBAY_REGISTRATION_UNPUBLISHED_GROUP_CHANGED", "The inventory items now belong to a different group than this saved publication target.", { groupKey });
-    const group = await this.getInventoryItemGroup(credential, marketplaceId, groupKey, permitsIncompletePreparation && groupIds.length === 0);
-    if (group === null) return { groupKey, skus };
-    const observedSkus = normalizeUniqueTexts(group.variantSKUs, "variantSKUs", 100).sort(compareCanonicalText);
-    if (group.inventoryItemGroupKey !== undefined && group.inventoryItemGroupKey !== groupKey)
-      throw observationError("EBAY_REGISTRATION_GROUP_KEY_MISMATCH", "eBay returned a different inventory item group than requested.", { requestedGroupKey: groupKey });
-    if (skus.length !== observedSkus.length || skus.some((sku, index) => sku !== observedSkus[index]))
-      throw observationError("EBAY_REGISTRATION_UNPUBLISHED_GROUP_MEMBERSHIP_MISMATCH",
-        "The unpublished inventory group's complete SKU membership differs from the selected product.", { groupKey, groupVariantSkus: observedSkus });
-    const offerIds = snapshots.flatMap(member => member.offers.map(offer => offer.offerId));
-    if (new Set(offerIds).size !== offerIds.length)
-      throw observationError("EBAY_REGISTRATION_MEMBER_IDENTITY_DUPLICATE", "eBay returned the same offer for multiple unpublished SKUs.");
-    return { groupKey, skus };
+    let groupKey: string | null = null;
+    let observedSkus: readonly string[] = snapshots.map(member => member.sku).sort(compareCanonicalText);
+    try {
+      // Translate provider vocabulary only. The shared policy owns whether
+      // unpublished/absent resources can form a new or resumed publication.
+      const target = planUnpublishedListingTarget({ plannedGroupKey,
+        requiresGroup: snapshots.length > 1 || typeof plannedGroupKey === "string"
+          || snapshots.some(member => member.inventoryItem?.groupIds.length),
+        members: snapshots.map(member => ({
+        sku: member.sku, inventoryItemExists: member.inventoryItem !== null, groupKeys: [...(member.inventoryItem?.groupIds ?? [])],
+        offers: member.offers.map(offer => ({ id: offer.offerId, sku: offer.sku ?? null,
+          state: offer.status === "UNPUBLISHED" ? "unpublished" : "published", hasListing: offer.listing !== undefined })),
+      })) });
+      if (!target) return null;
+      groupKey = target.groupKey;
+      if (groupKey === null) return { groupKey, skus: target.skus };
+      const group = await this.getInventoryItemGroup(credential, marketplaceId, groupKey, target.allowMissingGroup);
+      if (group !== null) {
+        observedSkus = normalizeUniqueTexts(group.variantSKUs, "variantSKUs", 100).sort(compareCanonicalText);
+        if (group.inventoryItemGroupKey !== undefined && group.inventoryItemGroupKey !== groupKey)
+          throw observationError("EBAY_REGISTRATION_GROUP_KEY_MISMATCH", "eBay returned a different inventory item group than requested.", { requestedGroupKey: groupKey });
+      }
+      assertUnpublishedListingGroup(target, group === null ? null : observedSkus);
+      return { groupKey, skus: target.skus };
+    } catch (error) {
+      if (!(error instanceof UnpublishedListingTargetError)) throw error;
+      const codes = { GROUP_REQUIRED: "EBAY_REGISTRATION_UNPUBLISHED_GROUP_AMBIGUOUS",
+        GROUP_CHANGED: "EBAY_REGISTRATION_UNPUBLISHED_GROUP_CHANGED",
+        GROUP_MEMBERSHIP_MISMATCH: "EBAY_REGISTRATION_UNPUBLISHED_GROUP_MEMBERSHIP_MISMATCH",
+        MEMBER_IDENTITY_DUPLICATE: "EBAY_REGISTRATION_MEMBER_IDENTITY_DUPLICATE" } as const;
+      const observedGroupKey = error.groupKey ?? groupKey;
+      throw observationError(codes[error.code], error.message, { ...(observedGroupKey ? { groupKey: observedGroupKey } : {}), groupVariantSkus: observedSkus });
+    }
   }
 
   private publicationObservation(selected: SelectedPublication, providerAccount: MarketplaceProviderAccountObservation,
@@ -371,7 +388,7 @@ export class EbayMarketplaceRegistrationObserver
     const parsed = parseProviderResponse(
       identityResponseSchema,
       response.body,
-      "identity",
+      "identity", response,
     );
     return {
       provider: EBAY_PROVIDER,
@@ -588,7 +605,7 @@ export class EbayMarketplaceRegistrationObserver
     const parsed = parseProviderResponse(
       inventoryItemResponseSchema,
       response.body,
-      "inventory_item",
+      "inventory_item", response,
     );
     if (parsed.sku !== undefined && parsed.sku !== sku) {
       throw observationError(
@@ -628,7 +645,7 @@ export class EbayMarketplaceRegistrationObserver
     return parseProviderResponse(
       inventoryItemGroupResponseSchema,
       response.body,
-      "inventory_item_group",
+      "inventory_item_group", response,
     );
   }
 
@@ -655,11 +672,15 @@ export class EbayMarketplaceRegistrationObserver
         accessToken: credential.accessToken,
         marketplaceId,
       });
+      // getOffers reports an absent SKU with 404/25713, not only a 200 empty
+      // collection. Only an authoritative first-page absence is an empty read;
+      // disappearance during pagination is inconsistent evidence, never create authority.
+      if (offset === 0 && isMissingOfferCollection(response)) return [];
       assertSuccessfulRead(response, "offers", { sku });
       const page = parseProviderResponse(
         offersPageSchema,
         response.body,
-        "offers",
+        "offers", response,
       );
       if (page.total !== undefined) {
         if (expectedTotal !== null && expectedTotal !== page.total) {
@@ -934,7 +955,8 @@ function assertSuccessfulRead(
     throw observationError(
       "EBAY_REGISTRATION_PROVIDER_READ_FAILED",
       "An eBay read required for registration failed.",
-      { resource, status: response.status, ...context },
+      { resource, status: response.status, ...context,
+        providerRead: ebayReadDiagnostic(resource, ebayReadFailureKind(response.status), response) },
     );
   }
 }
@@ -943,6 +965,7 @@ function parseProviderResponse<T>(
   schema: z.ZodType<T>,
   value: unknown,
   resource: string,
+  response: EbayRegistrationReadResponse,
 ): T {
   const parsed = schema.safeParse(value);
   if (!parsed.success) {
@@ -951,6 +974,7 @@ function parseProviderResponse<T>(
       "eBay returned an invalid registration observation response.",
       {
         resource,
+        providerRead: ebayReadDiagnostic(resource, "invalid_response", response, parsed.error.issues),
         issues: parsed.error.issues.map((issue) => ({
           path: issue.path.join("."),
           code: issue.code,
@@ -1057,6 +1081,7 @@ function inspectionIssue(error: unknown): EbayListingInspectionIssue {
   const context = error.context;
   const safeText = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 255;
   return { code: error.code, message: error.message,
+    ...(providerReadDiagnosticFromError(error) ? { providerRead: providerReadDiagnosticFromError(error) } : {}),
     ...(typeof context.status === "number" ? { status: context.status } : {}),
     ...(safeText(context.sku) ? { sku: context.sku } : {}),
     ...(safeText(context.listingId) ? { listingId: context.listingId } : {}),

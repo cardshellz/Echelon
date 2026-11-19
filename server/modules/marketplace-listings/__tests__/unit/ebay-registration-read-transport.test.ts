@@ -66,6 +66,15 @@ describe("FetchEbayRegistrationReadTransport host routing", () => {
 });
 
 describe("FetchEbayRegistrationReadTransport bounds", () => {
+
+  it("keeps response status and request reference when a body exceeds the bound, without retrying an authorization refusal", async () => {
+    const transport = new FetchEbayRegistrationReadTransport(vi.fn(async () => new Response("ignored", {
+      status: 401, headers: { "content-length": "1025", "x-ebay-c-request-id": "read-bounded-123" },
+    })) as typeof fetch, { maxResponseBytes: 1_024 });
+    await expect(transport.get(request)).rejects.toMatchObject({ code: "EBAY_REGISTRATION_PROVIDER_RESPONSE_TOO_LARGE",
+      context: { providerRead: { provider: "ebay", resource: "inventory_item", method: "GET", kind: "refused", httpStatus: 401, requestId: "read-bounded-123" } } });
+  });
+
   it("classifies a provider read timeout and aborts the request", async () => {
     vi.useFakeTimers();
     const fetchFn = vi.fn((_url: string | URL | Request, init?: RequestInit) =>
@@ -82,7 +91,7 @@ describe("FetchEbayRegistrationReadTransport bounds", () => {
     const result = transport.get(request);
     const rejection = expect(result).rejects.toMatchObject({
       code: "EBAY_REGISTRATION_PROVIDER_READ_TIMEOUT",
-      context: expect.objectContaining({ timeoutMs: 25 }),
+      context: expect.objectContaining({ timeoutMs: 25, providerRead: { provider: "ebay", resource: "inventory_item", method: "GET", kind: "unavailable" } }),
     });
     await vi.advanceTimersByTimeAsync(25);
     await rejection;

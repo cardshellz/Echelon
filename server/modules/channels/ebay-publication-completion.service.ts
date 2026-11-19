@@ -5,7 +5,7 @@ import { assertEbayListingSourceIdentityUnchanged } from "./ebay-existing-listin
 import { EbayListingSyncError, syncStageHash, type EbayListingSyncIdentity } from "./ebay-listing-sync.domain";
 import { completedEbayListingSyncResult, EbayExistingListingSyncExecution, type EbayListingSyncExecution, type PreparedEbayListingSync } from "./ebay-listing-sync.service";
 import { syncContentIntentHash } from "./ebay-listing-sync-content";
-import { assertEbayPublicationTargetUnchanged, resolveEbayPublicationTarget } from "./ebay-publication-completion.domain";
+import { assertEbayPublicationTargetUnchanged, resolveEbayPublicationTarget, publicationInspectionError } from "./ebay-publication-completion.domain";
 import type { EbayListingConnectorDraft, EbayMarketplaceListingConnector, EbayPublishedListingIdentityResolver } from "./listing-connectors/ebay-listing.connector";
 import { recoverPriorEbayListingRequests, type EbayListingRequestRecovery } from "./ebay-listing-request-recovery";
 import { EbayApiRequestError } from "./adapters/ebay/ebay-api-error";
@@ -19,6 +19,25 @@ export interface PreparedEbayPublication extends PreparedEbayListingSync {
   assertInventoryReady(context?: { commandKey: string; actor: string }): Promise<void>;
   resolvePublishedIdentity: EbayPublishedListingIdentityResolver;
 }
+
+/** Ordinary Sync and restarted jobs use the same read-only preparation path.
+ * Existing unpublished offers are reusable resources, not a reason to demand
+ * an already-created group. The inspector verifies any proposed group before
+ * the saved execution owner binds it and checks canonical ownership. */
+export async function inspectEbayPublicationPreparation(input: {
+  source: EbayListingSyncIdentity;
+  savedTarget: EbayListingSyncIdentity | null;
+  newGroupKey: string;
+  inspect(plannedGroupKey?: string | null): Promise<EbayListingInspection>;
+}): Promise<EbayListingInspection> {
+  const inspection = await input.inspect();
+  if (inspection.publication || inspection.unpublishedTarget || inspection.skus.some(member => member.issue !== null)
+    || inspection.publicationIssue?.providerRead) return inspection;
+  const groupKey = input.savedTarget ? input.savedTarget.groupKey
+    : input.source.groupKey ?? (input.source.variants.length > 1 ? input.newGroupKey : null);
+  return input.inspect(groupKey);
+}
+
 /** Publication is an operation of the existing saved sync queue. The connector
  * owns provider primitives; inventory admission continues to own every write. */
 export class EbayPublicationCompletionExecution implements EbayListingSyncExecution {
@@ -114,10 +133,11 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
     await stage("publication_readback", syncStageHash(target), async () => {
       const inspection = await prepared.inspect();
       if (!inspection.publication) {
-        const issue = inspection.skus.find(member => member.issue)?.issue;
-        if (issue) throw new EbayListingSyncError(issue.code, issue.message);
+        const issue = inspection.skus.find(member => member.issue)?.issue
+          ?? (inspection.publicationIssue?.providerRead ? inspection.publicationIssue : null);
+        if (issue) throw publicationInspectionError(issue);
         throw new EbayListingSyncError(accepted || context.publicationWriteCompleted ? "EBAY_PUBLICATION_READBACK_PENDING" : "EBAY_PUBLICATION_RESPONSE_UNCERTAIN", accepted || context.publicationWriteCompleted
-          ? "eBay accepted the publication request, but its complete published listing is not visible yet. This saved job will check again."
+          ? "eBay accepted the publication request, but its complete published listing is not visible yet."
           : "The saved publication attempt has no confirmed completion and eBay still reports unpublished offers. No second publish request was sent. Review this job's recovery details before authorizing another attempt.");
       }
       verified = resolveEbayPublicationTarget(source, inspection);
@@ -136,7 +156,7 @@ export class EbayPublicationCompletionExecution implements EbayListingSyncExecut
         });
       } catch (error) {
         if (error instanceof EbayListingSyncError && error.code === "EBAY_SYNC_READBACK_PENDING")
-          throw new EbayListingSyncError("EBAY_PUBLICATION_READBACK_PENDING", "eBay's published listing is visible, but its accepted content and photos are still being verified. This saved publication will check again without republishing.", { cause: error });
+          throw new EbayListingSyncError("EBAY_PUBLICATION_READBACK_PENDING", error.message, { cause: error });
         throw error;
       }
     });

@@ -224,7 +224,11 @@ describe("projectDeclaredPackageLifecycle", () => {
     });
   });
 
-  it.each([
+  it.each<[
+    string,
+    NonNullable<Extract<DeclaredPackageLifecycleEvent, { kind: "outbound_label_observed" }>["contentsEvidence"]>,
+    string,
+  ]>([
     ["empty", { status: "empty" }, "package_contents_empty"],
     ["unrecognized", { status: "unrecognized" }, "package_contents_unrecognized"],
     ["malformed", { status: "malformed" }, "package_contents_malformed"],
@@ -236,7 +240,7 @@ describe("projectDeclaredPackageLifecycle", () => {
       },
       "package_contents_mixed",
     ],
-  ] as const)("keeps %s provider contents distinct and non-authoritative", (
+  ])("keeps %s provider contents distinct and non-authoritative", (
     _caseName,
     contentsEvidence,
     reviewReason,

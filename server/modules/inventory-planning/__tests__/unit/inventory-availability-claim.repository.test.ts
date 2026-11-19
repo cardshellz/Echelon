@@ -5,6 +5,7 @@ import { WarehouseWorkError } from "../../../warehouse/work/domain/work-configur
 import { InventoryQuantityError } from "../../../inventory/domain/quantity-ledger";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
+import type { CanonicalClaimLotAllocation } from "../../application/canonical-claim-inventory.port";
 import {
   InventoryAvailabilityClaimRepositoryError,
   PostgresInventoryAvailabilityClaimRepository,
@@ -37,9 +38,9 @@ function createInventoryWriter() {
     applyCycleCountAdjustment: vi.fn(),
     recordCycleCountNoop: vi.fn(async () => ({ adjustmentTransactionId: 900 })),
     approveCycleCountItem: vi.fn(async () => undefined),
-    reserveResource: vi.fn(async () => []),
+    reserveResource: vi.fn(async (): Promise<readonly CanonicalClaimLotAllocation[]> => []),
     releaseResources: vi.fn(async () => undefined),
-    reconcilePickResource: vi.fn(async () => []),
+    reconcilePickResource: vi.fn(async (): Promise<readonly CanonicalClaimLotAllocation[]> => []),
     reconcileObservedPickResource: vi.fn(),
     pickResources: vi.fn(),
     unpickResources: vi.fn(),
@@ -1065,6 +1066,9 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       })] })],
     }));
     const statements = fake.query.mock.calls.map(([text]) => String(text));
+    const movementEvidenceQuery = statements.find((text) =>
+      text.includes("FROM inventory.availability_claim_pick_movements"));
+    expect(movementEvidenceQuery).toContain("movement.order_item_cost_id");
     expect(statements.findIndex((text) => text.startsWith("UPDATE wms.order_items")))
       .toBeLessThan(statements.findIndex((text) => text.startsWith("INSERT INTO inventory.availability_claim_commands")));
     expect(fake.query.mock.calls.at(-1)?.[0]).toBe("COMMIT");
@@ -1989,6 +1993,8 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
         buildSystemNumber: "BLD-00000091",
         adoptedReservationQty: BigInt(5),
       })),
+      executeOperation: vi.fn(),
+      cancelOperation: vi.fn(),
     };
     const repository = new PostgresInventoryAvailabilityClaimRepository(
       inventoryWriter,
@@ -2061,7 +2067,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       throw new Error(`Unexpected query: ${text}`);
     });
     const inventoryWriter = createInventoryWriter();
-    const buildWriter = { handoffOperation: vi.fn() };
+    const buildWriter = { handoffOperation: vi.fn(), executeOperation: vi.fn(), cancelOperation: vi.fn() };
     const repository = new PostgresInventoryAvailabilityClaimRepository(
       inventoryWriter,
       fake.pool,
@@ -2516,7 +2522,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       createInventoryWriter(),
       fake.pool,
       () => FIXED_TIME,
-      { handoffOperation: vi.fn() },
+      { handoffOperation: vi.fn(), executeOperation: vi.fn(), cancelOperation: vi.fn() },
     );
 
     await expect(repository.handoffBuildOperation(command)).rejects.toEqual(expect.objectContaining({

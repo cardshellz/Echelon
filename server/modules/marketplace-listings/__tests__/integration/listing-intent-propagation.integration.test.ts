@@ -77,6 +77,27 @@ import { listingIntentBase } from "../fixtures/listing-intent.fixture";
         )
       ).rows;
 
+    it("propagates a new immutable photo rendition through the existing listing change owner", async () => {
+      await database.pool.query(`CREATE TABLE catalog.product_asset_versions(asset_id integer NOT NULL,content_hash text NOT NULL,
+        PRIMARY KEY(asset_id,content_hash));
+        CREATE FUNCTION catalog.reject_publication_image_version_mutation() RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN RAISE EXCEPTION 'immutable' USING ERRCODE='23514'; END $$;`);
+      await database.pool.query(await readFile("migrations/900000047000019770001_catalog_publication_renditions.sql","utf8"));
+      const source = "a".repeat(64), copy = "b".repeat(64);
+      await database.pool.query("INSERT INTO catalog.product_asset_versions VALUES(1,$1),(1,$2)",[source,copy]);
+      await database.pool.query(`INSERT INTO catalog.product_asset_renditions(asset_id,product_id,product_variant_id,source_hash,source_longest_side,profile,rendition_hash,created_at)
+        VALUES(1,20,NULL,$1,400,'minimum-500-v1',$2,$3)`,[source,copy,now]);
+      const observed = await changes();
+      expect(observed).toHaveLength(1);
+      expect(observed[0]).toMatchObject({source_relation:"catalog.product_asset_renditions",source_kind:"asset",operation:"INSERT",
+        after_scope:{asset_id:1,product_id:20,product_variant_id:null}});
+      await repository.expand(20,now);
+      const work = await deliveries();
+      expect(work).toHaveLength(4);
+      expect(work.every(row => row.product_id === 20)).toBe(true);
+      expect(work.find(row => row.destination.channelId === 34).variant_ids).toEqual([101,102]);
+    });
+
     async function installDropshipJobs(): Promise<PgDropshipListingPreviewRepository> {
       await database.pool.query(`
    CREATE SEQUENCE dropship.listing_test_ids START 100;
@@ -129,6 +150,7 @@ import { listingIntentBase } from "../fixtures/listing-intent.fixture";
             selected: true,
             reason: "selected",
             adminExposureReason: "exposed",
+            picked: true,
             includeRuleIds: [],
             excludeRuleIds: [],
             autoConnectNewSkus: false,
@@ -184,7 +206,7 @@ import { listingIntentBase } from "../fixtures/listing-intent.fixture";
         "0732_ebay_listing_sync_identity_admission.sql",
         "0736_ebay_listing_mapping_repairs.sql",
         "0737_ebay_publication_completion.sql",
-        "0741_ebay_durable_withdrawal.sql",
+        "0741_ebay_durable_withdrawal.sql", "900000021000018880001_channel_lifecycle_recovery.sql", "900000023000018880003_listing_work_settlement.sql",
         "900000010000018170001_ebay_saved_publication_continuation.sql",
       ])
         await database.pool.query(

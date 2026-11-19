@@ -381,11 +381,13 @@ function fakeCanonical(): InventoryAvailabilityClaimService {
     claimOrder: vi.fn(),
     replaceOrderClaim: vi.fn(),
     releaseOrderClaim: vi.fn(),
+    displaceForConfirmedShipment: vi.fn(),
     executePackageOperation: vi.fn(),
     executeBuildOperation: vi.fn(),
     handoffBuildOperation: vi.fn(),
     pickClaimLine: vi.fn(),
     unpickClaimLine: vi.fn(),
+    reconcileCycleCount: vi.fn(),
   });
 }
 
@@ -397,6 +399,7 @@ function fakeLegacy(): ReservationServiceContract {
     releaseOrderItemReservation: vi.fn(),
     reconcileOrderDemand: vi.fn(),
     reconcileRefundOrderDemand: vi.fn(),
+    reconcileCycleCountInventory: vi.fn(),
     reallocateOrphaned: vi.fn(),
     getOrderReservationStatus: vi.fn(),
     autoReserveOnSync: vi.fn(),

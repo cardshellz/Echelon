@@ -152,7 +152,7 @@ describe("Postgres inventory availability activation dry-run repository", () => 
 });
 
 function fakeClient(rowsFor: (sql: string) => Record<string, any>[]) {
-  const query = vi.fn(async (statement: unknown) => {
+  const query = vi.fn(async (statement: unknown, _params?: unknown[]) => {
     const sql = String(statement).trim();
     if (sql === "BEGIN" || sql === "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
       || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000035000019280001_retire_obsolete_receive_pack_warnings.sql",
+  "generation": 35,
+  "pr": 1928,
+  "ordinal": 1,
+  "after": [
+    "900000034000019260001_refresh_failed_return_options.sql"
+  ]
+}

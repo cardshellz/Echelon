@@ -1,5 +1,7 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page, type Locator } from "@playwright/test";
-import { installFixtures, receipt } from "./procurement-fixtures";
+import { installFixtures, po, receipt } from "./procurement-fixtures";
+import { openReceivingLineOptions, openReceivingPackSelector } from "./procurement-receiving-helpers";
 
 const version = "a".repeat(64), nextVersion = "b".repeat(64);
 const variants = [
@@ -8,7 +10,7 @@ const variants = [
 ];
 const makeLine = () => ({ id: 7, receivingOrderId: 31, sku: "TEST-PC1", productName: "Partial carton product", productId: 10, productVariantId: 2 as number | null,
   unitsPerVariantSnapshot: 1 as number | null, unitVersion: version, inboundShipmentLineId: 17, expectedQty: 501, receivedQty: 401, damagedQty: 3,
-  status: "partial", putawayLocationId: 5, putawayComplete: 0, unitCost: 25, notes: null, purchaseOrderLineId: 9 });
+  status: "partial", putawayLocationId: 5, putawayComplete: 0, barcode: null, unitCost: 25 as number | null, unitCostMills: 250 as number | null, notes: null, purchaseOrderLineId: 9 });
 
 function receiptWithLines(id: number, lines: ReturnType<typeof makeLine>[], status = "receiving") {
   return { ...receipt(id), status, sourceType: "shipment", warehouseId: 1, receivingLocationId: 5,
@@ -21,23 +23,24 @@ function receiptWithLines(id: number, lines: ReturnType<typeof makeLine>[], stat
 
 type Command = { path: string; body: Record<string, any> };
 
-async function setup(page: Page, options: { legacy?: boolean; unresolved?: boolean; conflict?: boolean; failRefresh?: boolean; delay?: boolean; exact?: boolean; lost?: boolean; drift?: boolean; manualConflict?: boolean; legacyFactorDrift?: boolean; draft?: boolean; unversionedOpen?: boolean; missingRefreshVersion?: boolean; shipmentCase?: boolean } = {}) {
+async function setup(page: Page, options: { catalogCreate?: boolean; catalogSku?: string; legacy?: boolean; unresolved?: boolean; conflict?: boolean; failRefresh?: boolean; delay?: boolean; exact?: boolean; lost?: boolean; drift?: boolean; manualConflict?: boolean; legacyFactorDrift?: boolean; draft?: boolean; unversionedOpen?: boolean; missingRefreshVersion?: boolean; shipmentCase?: boolean } = {}) {
   const failures = await installFixtures(page);
   const catalog = variants.map((variant) => ({ ...variant }));
   if (options.shipmentCase) { catalog[1].unitsPerVariant = 1000; catalog[1].name = "Case of 1000"; }
   const state = { line: { ...makeLine(), ...(options.exact ? { expectedQty: 500, receivedQty: 400, damagedQty: 50 } : {}),
-    ...(options.legacy ? { unitsPerVariantSnapshot: null } : {}), ...(options.unresolved ? { productVariantId: null } : {}),
+    ...(options.catalogSku ? { sku: options.catalogSku } : {}), ...(options.legacy ? { unitsPerVariantSnapshot: null } : {}), ...(options.unresolved ? { productVariantId: null } : {}),
     ...(options.drift ? { unitsPerVariantSnapshot: 50, expectedQty: 10, receivedQty: 8, damagedQty: 1 } : {}),
     ...(options.shipmentCase ? { sku: "TEST-TOP-STD-SLV-CLR", productName: "Toploader Essentials Clear and Easy Glide Combo Pack", productVariantId: 3, unitsPerVariantSnapshot: 1000, expectedQty: 525, receivedQty: 0, damagedQty: 0, status: "pending" } : {}) },
-    commands: [] as Command[], opened: !options.draft, conflictUsed: false, reads: 0, committed: false, manualConflictUsed: false, catalogConflictUsed: false };
+    commands: [] as Command[], addedLines: [] as ReturnType<typeof makeLine>[], opened: !options.draft, conflictUsed: false, reads: 0, committed: false, manualConflictUsed: false, catalogConflictUsed: false };
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
   await page.route("**/api/**", async (route) => {
     const req = route.request(), path = new URL(req.url()).pathname;
     const order = (id: number) => receiptWithLines(id,
-      [{ ...state.line, ...(id === 32 ? { id: 8, receivingOrderId: 32, sku: "OTHER-RECEIPT", receivedQty: 12 } : {}) }],
+      [{ ...state.line, ...(id === 32 ? { id: 8, receivingOrderId: 32, sku: "OTHER-RECEIPT", receivedQty: 12 } : {}) }, ...(id === 31 ? state.addedLines : [])],
       options.draft ? (state.opened ? "open" : "draft") : "receiving");
     if (req.method() === "GET") {
+      if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "test-user", username: "test", role: "admin" }, systemRoles: ["admin"], permissions: ["inventory:adjust", ...(options.catalogCreate ? ["inventory:create"] : [])] }) });
       if (path === "/api/product-variants") return route.fulfill({ json: catalog });
       if (path === "/api/warehouse/locations") return route.fulfill({ json: [{ id: 5, code: "RCV-01", name: "Receiving", warehouseId: 1, isActive: 1, locationType: "receiving" }] });
       if (/^\/api\/receiving\/(31|32)$/.test(path)) {
@@ -62,11 +65,12 @@ async function setup(page: Page, options: { legacy?: boolean; unresolved?: boole
       const body = req.postDataJSON(); state.commands.push({ path, body });
       if (options.manualConflict && !state.manualConflictUsed) {
         state.manualConflictUsed = true; catalog[1].unitsPerVariant = 100;
-        return route.fulfill({ status: 409, json: { error: "The catalog factor changed.", code: "RECEIVING_UNIT_CHANGED" } });
+        return route.fulfill({ status: 409, json: { error: "The catalog factor changed.", code: "RECEIVING_UNIT_CHANGED", details: { receivingEntryOutcome: "rejected", idempotencyKey: req.headers()["idempotency-key"] } } });
       }
       if (body.expectedUnitsPerVariant !== catalog.find((variant) => variant.id === body.productVariantId)?.unitsPerVariant) return route.fulfill({ status: 409, json: { error: "The selected factor was not reviewed" } });
-      const current = order(31);
-      return route.fulfill({ status: 201, json: { ...current, lines: [...current.lines, { ...makeLine(), ...body, id: 9, unitsPerVariantSnapshot: body.expectedUnitsPerVariant, unitVersion: nextVersion }] } });
+      state.addedLines.push({ ...makeLine(), ...body, id: 9, damagedQty: 0, unitCost: null, unitCostMills: null, unitsPerVariantSnapshot: body.expectedUnitsPerVariant, unitVersion: nextVersion });
+      return route.fulfill({ status: 201, json: { ...order(31),
+        entryCommand: { action: "add-line", targetId: 31, receivingOrderId: 31, receivingLineId: 9, actorId: "test-user", idempotencyKey: req.headers()["idempotency-key"] } } });
     }
     if (path === "/api/receiving/31/complete-all") {
       state.commands.push({ path, body: req.postDataJSON() });
@@ -114,9 +118,10 @@ async function setup(page: Page, options: { legacy?: boolean; unresolved?: boole
   });
   await page.goto("/receiving?open=31");
   await expect(page.getByRole("heading", { name: /Receipt TEST-RECEIPT-31/ })).toBeVisible();
+  await openReceivingLineOptions(page, 7);
   return { state, failures, release };
 }
-const control = (page: Page) => page.locator('[aria-label="Receive unit for line 7"]:visible');
+const control = (page: Page) => page.getByTestId("receipt-line-7");
 const count = (page: Page) => page.locator('input[aria-label="Received count for line 7"]:visible');
 const done = (page: Page) => page.locator('[data-testid="btn-complete-line-7"]:visible, [data-testid="btn-complete-line-mobile-7"]:visible');
 // The "Count saved" toast is raised by the same success handler that replaces the
@@ -149,7 +154,7 @@ test("a shipment count can be saved beside its field without horizontal scrollin
   await expect(page.getByText(/Use Confirm count beside each Received field/)).toBeVisible();
   await done(page).click();
   await expectCountSaved(page);
-  await expect(control(page)).toContainText("received: 525,000 pieces");
+  await expect(control(page)).toContainText("Received: 525,000 pieces");
   await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
   expect(state.commands).toEqual([
     { path: "/api/receiving/31/open", body: {} },
@@ -168,7 +173,7 @@ test("Enter saves actual shipment counts, including a zero edit to a completed l
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   await count(page).press("Enter");
   await expectCountSaved(page);
-  await expect(control(page)).toContainText("received: 525,000 pieces");
+  await expect(control(page)).toContainText("Received: 525,000 pieces");
   await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
   await expect(done(page)).toHaveCount(0);
   await expect(confirmedCount(page)).toHaveText("Count confirmed");
@@ -181,7 +186,7 @@ test("Enter saves actual shipment counts, including a zero edit to a completed l
   await expect(confirmedCount(page)).toHaveCount(0);
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   await count(page).press("Enter");
-  await expect(control(page)).toContainText("received: 0 pieces");
+  await expect(control(page)).toContainText("Received: 0 pieces");
   await expect(page.getByText("Unsaved count", { exact: true })).toHaveCount(0);
   await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
   expect(state.commands).toEqual([
@@ -231,14 +236,14 @@ test("starting a shipment receipt retains its version and saves 525 cases before
   const { state, failures } = await setup(page, { draft: true, shipmentCase: true });
   await page.getByTestId("btn-open-receipt").click();
   await expect(page.getByTestId("btn-complete-all")).toBeEnabled();
-  await expect(control(page)).toContainText("Expected: 525,000 pieces; received: 0 pieces");
+  await expect(control(page)).toContainText("Expected: 525,000 pieces / Received: 0 pieces");
   await count(page).fill("525"); await done(page).click();
   await expectCountSaved(page);
   expect(state.commands).toEqual([
     { path: "/api/receiving/31/open", body: {} },
     { path: "/api/receiving/lines/7", body: { receivedQty: 525, expectedUnitVersion: version } },
   ]);
-  await expect(control(page)).toContainText("received: 525,000 pieces");
+  await expect(control(page)).toContainText("Received: 525,000 pieces");
   await expect(page.getByTestId("btn-close-receipt")).toBeEnabled();
   await page.getByTestId("btn-close-receipt").click();
   await expect(page.getByText("Receipt closed — inventory updated", { exact: true })).toBeVisible();
@@ -315,7 +320,8 @@ async function expectModalFits(page: Page, dialog: Locator) {
 
 test("opening a receipt does not mutate units; Confirm count preserves partial counts and saved zero", async ({ page }, testInfo) => {
   const { state, failures } = await setup(page);
-  await expect(control(page)).toContainText("Expected: 501 pieces; received: 401 pieces; damaged: 3 pieces");
+  await expect(control(page)).toContainText("Expected: 501 pieces / Received: 401 pieces");
+  await expect(control(page)).toContainText("Damaged: 3 receive units (3 pieces)");
   expect(state.commands).toEqual([]);
   await done(page).click(); await expect.poll(() => state.commands.length).toBe(1);
   expect(state.commands[0].body).toEqual({ receivedQty: 401, expectedUnitVersion: version });
@@ -328,7 +334,7 @@ test("opening a receipt does not mutate units; Confirm count preserves partial c
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   await done(page).click(); await expect.poll(() => state.commands.length).toBe(2);
   expect(state.commands[1].body).toEqual({ receivedQty: 0, expectedUnitVersion: nextVersion });
-  await expect(control(page)).toContainText("received: 0 pieces");
+  await expect(control(page)).toContainText("Received: 0 pieces");
   await expect(count(page)).toHaveValue("0");
   await done(page).click(); await expect.poll(() => state.commands.length).toBe(3);
   expect(state.commands[2].body).toEqual({ receivedQty: 0, expectedUnitVersion: nextVersion });
@@ -343,12 +349,12 @@ test("opening a receipt does not mutate units; Confirm count preserves partial c
 
 test("legacy units require an explicit same-variant confirmation with counts unchanged", async ({ page }) => {
   const { state, failures } = await setup(page, { legacy: true });
-  await expect(control(page)).toContainText("base pieces unknown");
+  await expect(control(page)).toContainText("Confirm pack size");
   await expect(count(page)).toBeDisabled();
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   expect(state.commands).toEqual([]);
   await control(page).getByRole("button", { name: /Confirm these counts are in Piece/ }).click();
-  await expect(control(page)).toContainText("Expected: 501 pieces; received: 401 pieces");
+  await expect(control(page)).toContainText("Expected: 501 pieces / Received: 401 pieces");
   expect(state.commands[0].body).toEqual({ productVariantId: 2, confirmLegacyUnit: true, expectedUnitVersion: version, expectedUnitsPerVariant: 1 });
   expect(state.line).toMatchObject({ expectedQty: 501, receivedQty: 401, damagedQty: 3 });
   expect(failures).toEqual([]);
@@ -356,21 +362,24 @@ test("legacy units require an explicit same-variant confirmation with counts unc
 
 test("server converts expected received and damaged counts exactly; an inexact change needs review", async ({ page }) => {
   const { state, failures } = await setup(page, { exact: true });
-  await control(page).getByRole("combobox").selectOption("3");
-  await expect(control(page)).toContainText("Receive units of 50 pieces");
+  await openReceivingPackSelector(page, 7);
+  await control(page).getByRole("combobox", { name: "Receive variant for line 7" }).selectOption("3");
+  await expect(control(page)).toContainText("Pack of 50");
   await expect(count(page)).toHaveValue("8");
   expect(state.commands[0].body).toEqual({ productVariantId: 3, expectedUnitVersion: version });
   expect(state.line).toMatchObject({ expectedQty: 10, receivedQty: 8, damagedQty: 1 });
   await count(page).fill("7"); await done(page).click();
-  await expect(control(page)).toContainText("received: 350 pieces");
+  await expect(control(page)).toContainText("Received: 350 pieces");
   expect(failures).toEqual([]);
 });
 
 test("partial-carton conversion is rejected without resetting any count", async ({ page }) => {
   const { state, failures } = await setup(page);
-  await control(page).getByRole("combobox").selectOption("3");
+  await openReceivingPackSelector(page, 7);
+  await control(page).getByRole("combobox", { name: "Receive variant for line 7" }).selectOption("3");
   await expect(page.locator('[role="alert"]:visible').filter({ hasText: /cannot be represented/ }).first()).toBeVisible();
-  await expect(control(page)).toContainText("Expected: 501 pieces; received: 401 pieces; damaged: 3 pieces");
+  await expect(control(page)).toContainText("Expected: 501 pieces / Received: 401 pieces");
+  await expect(control(page)).toContainText("Damaged: 3 receive units (3 pieces)");
   expect(state.line.unitsPerVariantSnapshot).toBe(1);
   await expect(count(page)).toBeDisabled();
   expect(failures).toEqual([]);
@@ -421,7 +430,7 @@ test("late A response cannot overwrite a later A visit or the intervening receip
 
 test("catalog-factor drift requires an explicit server-owned rebase", async ({ page }) => {
   const { state, failures } = await setup(page, { drift: true });
-  await expect(control(page)).toContainText("Expected: 500 pieces; received: 400 pieces");
+  await expect(control(page)).toContainText("Expected: 500 pieces / Received: 400 pieces");
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   await control(page).getByRole("button", { name: /Review and apply current catalog factor/ }).click();
   await expect(count(page)).toHaveValue("400");
@@ -430,8 +439,8 @@ test("catalog-factor drift requires an explicit server-owned rebase", async ({ p
 });
 
 test("creating a catalog variant leaves receipt counts untouched until explicit unit confirmation", async ({ page }) => {
-  const { state, failures } = await setup(page, { legacy: true, unresolved: true });
-  await page.getByRole("button", { name: /^(SKU|SKU not linked)$/ }).first().click();
+  const { state, failures } = await setup(page, { legacy: true, unresolved: true, catalogCreate: true });
+  await page.getByRole("button", { name: /^Link SKU$/ }).first().click();
   const dialog = page.getByRole("dialog", { name: "Resolve SKU" });
   await expect(dialog).toBeVisible();
   await dialog.getByRole("button", { name: "Create catalog variant" }).click();
@@ -447,7 +456,7 @@ test("creating a catalog variant leaves receipt counts untouched until explicit 
 
 test("existing variant search also requires explicit legacy count-basis confirmation", async ({ page }) => {
   const { state, failures } = await setup(page, { legacy: true, unresolved: true });
-  await page.getByRole("button", { name: /^(SKU|SKU not linked)$/ }).first().click();
+  await page.getByRole("button", { name: /^Link SKU$/ }).first().click();
   const dialog = page.getByRole("dialog", { name: "Resolve SKU" });
   await dialog.getByRole("button", { name: /TEST-PC1 Piece/ }).click();
   expect(state.commands).toEqual([]);
@@ -481,7 +490,7 @@ test("partial-carton shipment preflight shows the exact piece receipt before cre
   });
   await page.goto("/shipments/42?tab=lines");
   await page.getByRole("button", { name: "Create Receipt", exact: true }).click();
-  const dialog = page.getByRole("dialog", { name: "Shipment receipt pack check" });
+  const dialog = page.getByRole("dialog", { name: "Receive shipment items" });
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("501 pieces");
   await expect(dialog).toContainText("Cartons (reference)");
@@ -503,7 +512,7 @@ test("legacy confirmation binds the visible factor and reloads catalog drift bef
   expect(state.line.unitsPerVariantSnapshot).toBeNull();
   await page.locator('button:visible').filter({ hasText: "Load latest line and discard count draft" }).click();
   await control(page).getByRole("button", { name: /Confirm these counts are in Piece \(2 pieces\)/ }).click();
-  await expect(control(page)).toContainText("Expected: 1,002 pieces; received: 802 pieces");
+  await expect(control(page)).toContainText("Expected: 1,002 pieces / Received: 802 pieces");
   expect(state.commands[1].body).toEqual({ productVariantId: 2, confirmLegacyUnit: true, expectedUnitVersion: version, expectedUnitsPerVariant: 2 });
   expect(failures).toEqual([]);
 });
@@ -519,7 +528,7 @@ test("manual add retains the selected factor and requires review after a stale c
   await dialog.getByRole("combobox", { name: "Put-away location", exact: true }).click();
   await page.getByRole("option", { name: /RCV-01/ }).click();
   await dialog.getByTestId("btn-confirm-add-line").click();
-  await expect(dialog.getByRole("alert")).toContainText("Refresh and reselect");
+  await expect(dialog.getByRole("alert").filter({ hasText: "Refresh and reselect" })).toContainText("Refresh and reselect");
   expect(state.commands[0].body).toMatchObject({ expectedQty: 10, receivedQty: 0, productVariantId: 3, expectedUnitsPerVariant: 50 });
   expect(state.commands[0].body).not.toHaveProperty("status");
   await expect(dialog.getByTestId("btn-confirm-add-line")).toBeDisabled();
@@ -562,6 +571,194 @@ test("unknown receipt coverage keeps existing receipts openable and other PO cho
   await expect(page).toHaveURL(/open=31/);
   expect(failures).toEqual([]);
 });
+
+for (const partial of [false, true]) {
+  test(`PO-direct custody exclusions preserve the original receipt and ${partial ? "allow unrelated eligible lines" : "block all covered lines"}`, async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
+    const failures = await installFixtures(page);
+    const writes: Array<{ path: string; idempotencyKey: string | undefined }> = [];
+    const warning = "PO-direct receiving excludes CUSTODY-SKU (line 1) because these lines have quarantine history. Use their shipment or original quarantine receipt."
+      + (partial ? " Unrelated eligible lines remain available for PO-direct receiving." : "");
+    const eligibleLine = { ...makeLine(), id: 8, receivingOrderId: 32,
+      purchaseOrderLineId: 18, sku: "ELIGIBLE-SKU", productName: "Unrelated eligible product",
+      expectedQty: 100, receivedQty: 0, damagedQty: 0, status: "pending" };
+    const created = { ...receiptWithLines(32, [eligibleLine], "draft"),
+      sourceType: "po", inboundShipmentId: null, purchaseOrderId: 17,
+      lines: [{ ...eligibleLine, inboundShipmentLineId: null }] };
+    await page.route("**/api/**", async route => {
+      const request = route.request(), path = new URL(request.url()).pathname;
+      if (request.method() === "GET") {
+        if (path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), poNumber: "PO-DIRECT-CUSTODY" } });
+        if (path === "/api/purchase-orders/17/receive-options") return route.fulfill({ json: {
+          shipmentOptions: [{ shipmentId: 42, shipmentNumber: "CUSTODY-SHIPMENT", purchaseOrderId: 17,
+            qtyShipped: partial ? 1100 : 1000, receivedBaseQty: 800, custodyBaseQty: 200,
+            heldBaseQty: 200, returnedBaseQty: 0, excessBaseQty: 0, remainingBaseQty: partial ? 100 : 0,
+            custodyReceiptIds: [31], lineCount: partial ? 2 : 1, status: "delivered", receivable: partial,
+            action: partial ? "create_receipt" : "blocked", reason: partial ? null : "These shipped pieces are already accounted for in receipt custody." }],
+          poDirect: { allowed: partial, warning, reason: partial ? null : "The remaining purchase lines have quarantine history.",
+            blockedPurchaseOrderLineIds: [17], custodyReceiptIds: [31] },
+        } });
+        if (path === "/api/receiving/32") return route.fulfill({ json: created });
+        return route.fallback();
+      }
+      if (path === "/api/purchase-orders/17/create-receipt" && request.method() === "POST") {
+        writes.push({ path, idempotencyKey: request.headers()["idempotency-key"] });
+        if (!partial) return route.fulfill({ status: 409, json: { error: "The remaining purchase lines have quarantine history." } });
+        return route.fulfill({ json: created });
+      }
+      return route.fallback();
+    });
+
+    const openPicker = async () => {
+      await page.goto("/purchase-orders/17?tab=lines");
+      await page.getByRole("region", { name: "Purchase order actions", exact: true })
+        .getByRole("button", { name: "Receive", exact: true }).click();
+    };
+    await openPicker();
+    const dialog = page.getByRole("dialog", { name: "Receive PO-DIRECT-CUSTODY", exact: true });
+    const direct = dialog.getByTestId("po-direct-receive-option");
+    await expect(direct).toContainText(warning);
+    const custodyLink = direct.getByRole("link", { name: "Review custody on receipt #31", exact: true });
+    await expect(custodyLink).toHaveAttribute("href", /\/receiving\?open=31/);
+    const create = direct.getByRole("button", { name: partial ? "Receive eligible PO lines" : "Receive against PO", exact: true });
+    if (partial) await expect(create).toBeEnabled();
+    else await expect(create).toBeDisabled();
+    await expectModalFits(page, dialog);
+    const box = (await dialog.boundingBox())!;
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.y + box.height).toBeLessThanOrEqual(page.viewportSize()!.height);
+    await page.screenshot({ path: testInfo.outputPath(`po-direct-${partial ? "partial" : "blocked"}.png`), animations: "disabled" });
+    await custodyLink.click();
+    await expect(page).toHaveURL(/\/receiving\?open=31/);
+    expect(writes).toEqual([]);
+    if (partial) {
+      await openPicker();
+      await page.getByTestId("po-direct-receive-option").getByRole("button", { name: "Receive eligible PO lines", exact: true }).click();
+      await expect(page).toHaveURL(/\/receiving\?open=32/);
+      expect(writes).toEqual([{ path: "/api/purchase-orders/17/create-receipt", idempotencyKey: expect.any(String) }]);
+      expect(writes[0].idempotencyKey).not.toBe("");
+      await expect(page.getByText("Unrelated eligible product", { exact: true }).filter({ visible: true })).toBeVisible();
+      await expect(page.getByText("CUSTODY-SKU", { exact: true })).toHaveCount(0);
+    }
+    expect(failures).toEqual([]);
+  });
+}
+
+for (const scenario of [
+  { name: "all held", received: 0, held: 100, returned: 0, remaining: 0, excess: 0 },
+  { name: "accepted and held", received: 60, held: 40, returned: 0, remaining: 0, excess: 0 },
+  { name: "custody and fresh remainder", received: 20, held: 30, returned: 10, remaining: 40, excess: 0 },
+  { name: "fully returned", received: 0, held: 0, returned: 100, remaining: 0, excess: 0 },
+  { name: "mixed-line excess and fresh remainder", received: 20, held: 60, returned: 10, remaining: 40, excess: 30 },
+] as const) {
+  test(`shipment custody stays separate from inventory on PO and both shipment entry paths: ${scenario.name}`, async ({ page }, testInfo) => {
+    test.setTimeout(90_000);
+    const failures = await installFixtures(page);
+    const state = { singlePo: false, writes: [] as Command[] };
+    const coverage = {
+      qtyShipped: 100, receivedBaseQty: scenario.received, heldBaseQty: scenario.held,
+      returnedBaseQty: scenario.returned, custodyBaseQty: scenario.held + scenario.returned,
+      remainingBaseQty: scenario.remaining, excessBaseQty: scenario.excess, custodyReceiptIds: [31],
+    };
+    const option = { ...coverage, shipmentId: 42, shipmentNumber: "CUSTODY-SHIPMENT", purchaseOrderId: 17,
+      poNumber: "PO-CUSTODY", lineCount: scenario.excess ? 2 : 1, status: "delivered", receivable: scenario.remaining > 0,
+      action: scenario.remaining > 0 ? "create_receipt" : "blocked",
+      reason: scenario.remaining > 0 ? null : "These shipped pieces are already accounted for in receipt custody." };
+    await page.route("**/api/**", async route => {
+      const request = route.request(), path = new URL(request.url()).pathname;
+      if (request.method() === "GET") {
+        if (path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), poNumber: "PO-CUSTODY" } });
+        if (path === "/api/purchase-orders/17/receive-options") return route.fulfill({ json: {
+          shipmentOptions: [option], poDirect: { allowed: false, warning: "Use the linked shipment or its existing custody receipt." },
+        } });
+        if (path === "/api/inbound-shipments/42") return route.fulfill({ json: {
+          id: 42, shipmentNumber: "CUSTODY-SHIPMENT", status: "delivered", mode: "sea_lcl", costs: [], statusHistory: [],
+          // In the mixed case, line17 has 90 observed against 60 planned; line18 still has 40 unarrived.
+          lines: (state.singlePo ? [17] : [17, 99]).flatMap(purchaseOrderId => purchaseOrderId === 17 && scenario.excess ? [
+            { id: 17, purchaseOrderId, purchaseOrderLineId: 17, sku: "CUSTODY-SKU", qtyShipped: 60 },
+            { id: 18, purchaseOrderId, purchaseOrderLineId: 18, sku: "FRESH-SKU", qtyShipped: 40 },
+          ] : [{
+            id: purchaseOrderId, purchaseOrderId, purchaseOrderLineId: purchaseOrderId, sku: "CUSTODY-SKU", qtyShipped: 100,
+          }]),
+        } });
+        if (path === "/api/inbound-shipments/42/po-receive-options") return route.fulfill({ json: { purchaseOrders: [option,
+          { shipmentId: 42, purchaseOrderId: 99, poNumber: "PO-POSTED", action: "blocked", receivable: false,
+            qtyShipped: 100, lineCount: 1, receivedBaseQty: 100, remainingBaseQty: 0,
+            custodyBaseQty: 0, heldBaseQty: 0, returnedBaseQty: 0, excessBaseQty: 0, custodyReceiptIds: [], reason: null },
+        ] } });
+        if (path === "/api/inbound-shipments/42/receipt-pack-resolution") return route.fulfill({ json: {
+          ...coverage, shipmentId: 42, shipmentNumber: "CUSTODY-SHIPMENT", status: "delivered", purchaseOrderId: 17,
+          poNumber: "PO-CUSTODY", canCreateReceipt: scenario.remaining > 0, unresolvedCount: 0,
+          lineCount: scenario.remaining > 0 ? 1 : 0, issue: option.reason,
+          lines: scenario.remaining > 0 ? [{ shipmentLineId: scenario.excess ? 18 : 17, purchaseOrderLineId: scenario.excess ? 18 : 17, sku: scenario.excess ? "FRESH-SKU" : "CUSTODY-SKU",
+            productId: 10, productName: "Custody product", qtyShipped: scenario.remaining, cartonCount: null,
+            unitsPerCarton: null, status: "resolved", blocking: false, issue: null, activeVariants: [],
+            matchedVariant: { id: 2, sku: "TEST-PC1", name: "Piece", unitsPerVariant: 1 },
+            receivePlan: { productVariantId: 2, unitsPerVariant: 1, expectedQty: scenario.remaining,
+              countsAsPieces: true, preferredVariantId: 3, preferredUnitsPerVariant: 50 },
+          }] : [],
+        } });
+        return route.fallback();
+      }
+      if (path === "/api/inbound-shipments/42/create-receipt" && request.method() === "POST") {
+        state.writes.push({ path, body: request.postDataJSON() });
+        if (scenario.remaining === 0) return route.fulfill({ status: 409, json: { error: "Custody source is already covered." } });
+        return route.fulfill({ json: receipt(32) });
+      }
+      return route.fallback();
+    });
+
+    const assertCoverage = async (scope: Locator) => {
+      await expect(scope).toContainText(`${scenario.received} pieces received into inventory`);
+      if (scenario.held) await expect(scope).toContainText(`${scenario.held} held in quarantine`);
+      if (scenario.returned) await expect(scope).toContainText(`${scenario.returned} returned to supplier`);
+      await expect(scope).toContainText(`${scenario.remaining} pieces remaining to receive`);
+      if (scenario.excess) await expect(scope).toContainText(`${scenario.excess} pieces above shipped quantity`);
+      await expect(scope.getByText("Received", { exact: true })).toHaveCount(0);
+      await expect(scope.getByRole("link", { name: "Review custody on receipt #31", exact: true }))
+        .toHaveAttribute("href", /\/receiving\?open=31/);
+    };
+    await page.goto("/purchase-orders/17?tab=lines");
+    await page.getByRole("region", { name: "Purchase order actions", exact: true })
+      .getByRole("button", { name: "Receive", exact: true }).click();
+    const poOption = page.getByTestId("po-receive-option-42");
+    await assertCoverage(poOption);
+    if (scenario.remaining) await expect(poOption.getByRole("button", { name: "Receive this shipment", exact: true })).toBeEnabled();
+    else await expect(poOption.getByRole("button", { name: "Receive this shipment", exact: true })).toHaveCount(0);
+    await poOption.getByRole("link", { name: "Review custody on receipt #31", exact: true }).click();
+    await expect(page).toHaveURL(/\/receiving\?open=31/);
+
+    await page.goto("/shipments/42");
+    await page.getByRole("button", { name: "Create Receipt", exact: true }).click();
+    const shipmentOption = page.getByTestId("shipment-receive-option-17");
+    await assertCoverage(shipmentOption);
+    if (scenario.remaining) await expect(shipmentOption.getByRole("button", { name: "Receive", exact: true })).toBeEnabled();
+    else await expect(shipmentOption.getByRole("button", { name: "Receive", exact: true })).toBeDisabled();
+
+    state.singlePo = true;
+    await page.goto("/shipments/42");
+    await page.getByRole("button", { name: "Create Receipt", exact: true }).click();
+    const packDialog = page.getByRole("dialog", { name: "Receive shipment items", exact: true });
+    await assertCoverage(packDialog);
+    await expectModalFits(page, packDialog);
+    await page.screenshot({ path: testInfo.outputPath(`custody-${scenario.name.replaceAll(" ", "-")}.png`), animations: "disabled" });
+    const create = packDialog.getByRole("button", { name: "Create receipt", exact: true });
+    if (scenario.remaining) {
+      await expect(packDialog).toContainText("40");
+      await expect(create).toBeEnabled();
+      await create.click();
+      await expect(page).toHaveURL(/\/receiving\?open=32/);
+      expect(state.writes).toEqual([{ path: "/api/inbound-shipments/42/create-receipt", body: { purchaseOrderId: 17 } }]);
+    } else {
+      await expect(create).toBeDisabled();
+      await expect(packDialog.getByRole("button", { name: "Open variants", exact: true })).toHaveCount(0);
+      await packDialog.getByRole("link", { name: "Review custody on receipt #31", exact: true }).click();
+      await expect(page).toHaveURL(/\/receiving\?open=31/);
+      expect(state.writes).toEqual([]);
+    }
+    expect(failures).toEqual([]);
+  });
+}
 
 test("a delayed receipt A reload cannot block receipt B or clear B's newer reload state", async ({ page }) => {
   const failures = await installFixtures(page);
@@ -627,3 +824,17 @@ test("a delayed receipt A reload cannot block receipt B or clear B's newer reloa
   await expect(healthyBCount).toBeEnabled();
   expect(failures).toEqual([]);
 });
+
+for (const sku of ["ZERO-C0", "TOO-LARGE-C2147483648"]) {
+  test(`invalid catalog pack suffix ${sku} blocks creation without changing receipt counts`, async ({ page }) => {
+    const { state, failures } = await setup(page, { unresolved: true, legacy: true, catalogCreate: true, catalogSku: sku });
+    const before = { ...state.line };
+    await page.getByRole("button", { name: /^Link SKU$/ }).click();
+    const dialog = page.getByRole("dialog", { name: "Resolve SKU" });
+    await expect(dialog.getByRole("alert")).toContainText("Verify the supplier SKU and pack size");
+    await expect(dialog.getByRole("button", { name: "Create catalog variant", exact: true })).toBeDisabled();
+    expect(state.commands).toEqual([]);
+    expect(state.line).toEqual(before);
+    expect(failures).toEqual([]);
+  });
+}

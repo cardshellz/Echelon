@@ -8,7 +8,6 @@ import {
   ClipboardList,
   Eye,
   Fingerprint,
-  History,
   Mail,
   MapPin,
   Package,
@@ -55,9 +54,7 @@ import {
   fetchJson,
   formatCents,
   formatDateTime,
-  formatStatus,
   postJson,
-  queryErrorMessage,
   type DropshipOrderAcceptResponse,
   type DropshipOnboardingState,
   type DropshipOrderListItem,
@@ -67,10 +64,17 @@ import {
   type DropshipPaymentHoldSummaryResponse,
 } from "@/lib/dropship-ops-surface";
 import {
-  VENDOR_ORDER_AUDIT_PAYLOAD_KEYS,
   type DropshipVendorOrderDetail,
   type DropshipVendorOrderDetailResponse,
 } from "@shared/dropship/vendor-order-detail";
+import {
+  vendorErrorMessage,
+  vendorMarketplaceOrderLabel,
+  vendorOrderStatusLabel,
+  vendorPlatformName,
+  vendorStoreStatusLabel,
+  vendorTrackingStatusLabel,
+} from "@/lib/dropship-vendor-labels";
 import { describeHeldOrderNeed, describeOrderAcceptance, describeOrderPayment } from "@/lib/dropship-order-payment";
 import {
   dropshipPortalPath,
@@ -237,7 +241,7 @@ export default function DropshipPortalOrders() {
       setVerificationCode("");
       setRejectTarget(null);
       setRejectReason("");
-      setMessage(orderRejectionMessage(response.result));
+      setMessage(orderRejectionMessage(response.result, order.platform));
     });
   }
 
@@ -299,7 +303,7 @@ export default function DropshipPortalOrders() {
       await task();
       return true;
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Dropship order request failed.");
+      setError(vendorErrorMessage(caught));
       return false;
     } finally {
       setPendingOrderAction(null);
@@ -316,7 +320,7 @@ export default function DropshipPortalOrders() {
               <ClipboardList className="h-6 w-6 text-[#C060E0]" />
               Orders
             </h1>
-            <p className="mt-1 text-sm text-zinc-500">Marketplace intake, acceptance, payment holds, and fulfillment handoff status.</p>
+            <p className="mt-1 text-sm text-zinc-500">Orders from your store, what each one needs from you, and where it is in shipping.</p>
           </div>
           <div className="flex flex-col gap-2 sm:flex-row">
             <div className="relative min-w-0 sm:w-80">
@@ -329,7 +333,7 @@ export default function DropshipPortalOrders() {
               </SelectTrigger>
               <SelectContent>
                 {statusOptions.map((option) => (
-                  <SelectItem key={option} value={option}>{option === "all" ? "All statuses" : formatStatus(option)}</SelectItem>
+                  <SelectItem key={option} value={option}>{option === "all" ? "All statuses" : vendorOrderStatusLabel(option)}</SelectItem>
                 ))}
               </SelectContent>
             </Select>
@@ -385,7 +389,7 @@ export default function DropshipPortalOrders() {
           <Alert variant="destructive" className="mt-5" data-testid="orders-payment-hold-error">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {queryErrorMessage(holdSummaryQuery.error, "Unable to check for orders waiting on payment.")}
+              {vendorErrorMessage(holdSummaryQuery.error, "We couldn't check for orders waiting on payment. Reload the page to try again.")}
             </AlertDescription>
           </Alert>
         )}
@@ -394,7 +398,7 @@ export default function DropshipPortalOrders() {
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
-              {queryErrorMessage(ordersQuery.error, "Unable to load dropship orders.")}
+              {vendorErrorMessage(ordersQuery.error, "We couldn't load your orders. Reload the page to try again.")}
             </AlertDescription>
           </Alert>
         )}
@@ -431,7 +435,7 @@ export default function DropshipPortalOrders() {
               <EmptyMedia variant="icon"><AlertCircle /></EmptyMedia>
               <EmptyHeader>
                 <EmptyTitle>Orders unavailable</EmptyTitle>
-                <EmptyDescription>The orders API request failed.</EmptyDescription>
+                <EmptyDescription>We couldn't load your orders. Reload the page to try again.</EmptyDescription>
               </EmptyHeader>
             </Empty>
           ) : ordersQuery.data?.items.length ? (
@@ -459,7 +463,7 @@ export default function DropshipPortalOrders() {
               <EmptyMedia variant="icon"><ClipboardList /></EmptyMedia>
               <EmptyHeader>
                 <EmptyTitle>No orders</EmptyTitle>
-                <EmptyDescription>No dropship orders match the current filters.</EmptyDescription>
+                <EmptyDescription>No orders match these filters.</EmptyDescription>
               </EmptyHeader>
             </Empty>
           )}
@@ -515,7 +519,7 @@ function OrderDetailSheet({
         <SheetHeader>
           <SheetTitle>{order ? order.externalOrderNumber || order.externalOrderId : "Order details"}</SheetTitle>
           <SheetDescription>
-            {order ? `${formatStatus(order.platform)} intake ${order.intakeId}` : "Marketplace intake detail"}
+            {order ? vendorMarketplaceOrderLabel({ platform: order.platform }) : "Order details"}
           </SheetDescription>
         </SheetHeader>
 
@@ -528,19 +532,19 @@ function OrderDetailSheet({
         ) : error ? (
           <Alert variant="destructive" className="mt-6">
             <AlertCircle className="h-4 w-4" />
-            <AlertDescription>{queryErrorMessage(error, "Unable to load order detail.")}</AlertDescription>
+            <AlertDescription>{vendorErrorMessage(error, "We couldn't load this order. Reload the page to try again.")}</AlertDescription>
           </Alert>
         ) : order ? (
           <div className="mt-6 space-y-6">
             <section className="grid gap-3 text-sm sm:grid-cols-2">
-              <DetailField label="Status" value={formatStatus(order.status)} />
-              <DetailField label="Store" value={order.storeConnection.externalDisplayName || formatStatus(order.storeConnection.platform)} />
-              <DetailField label="External ID" value={order.externalOrderId} />
-              <DetailField label="OMS order" value={order.omsOrderId ? String(order.omsOrderId) : "Not created"} />
+              <DetailField label="Status" value={vendorOrderStatusLabel(order.status)} />
+              <DetailField label="Store" value={order.storeConnection.externalDisplayName || vendorPlatformName(order.storeConnection.platform)} />
+              <DetailField label={`${vendorPlatformName(order.platform)} order ID`} value={order.externalOrderId} />
               <DetailField label="Received" value={formatDateTime(order.receivedAt)} />
               <DetailField label="Accepted" value={formatDateTime(order.acceptedAt)} />
-              <DetailField label="Marketplace status" value={order.marketplaceStatus || "Not recorded"} />
-              <DetailField label="Payment hold" value={formatDateTime(order.paymentHoldExpiresAt)} />
+              {order.paymentHoldExpiresAt && (
+                <DetailField label="Pay by" value={formatDateTime(order.paymentHoldExpiresAt)} />
+              )}
               {order.paymentHold && describeHeldOrderNeed(order.paymentHold).map((part) => (
                 <DetailField key={part.label} label={part.label} value={part.value} />
               ))}
@@ -548,7 +552,7 @@ function OrderDetailSheet({
 
             <Separator />
 
-            <OrderDetailSection icon={<Package className="h-4 w-4" />} title="Lines">
+            <OrderDetailSection icon={<Package className="h-4 w-4" />} title="Items">
               <div className="rounded-md border border-zinc-200">
                 <Table>
                   <TableHeader>
@@ -563,15 +567,12 @@ function OrderDetailSheet({
                     {order.lines.map((line) => (
                       <TableRow key={`${line.lineIndex}:${line.externalLineItemId ?? line.sku ?? "line"}`}>
                         <TableCell>
-                          <div className="font-medium">{line.title || "Untitled line"}</div>
-                          <div className="text-xs text-zinc-500">
-                            {line.productVariantId ? `Variant ${line.productVariantId}` : "Variant not linked"}
-                          </div>
+                          <div className="font-medium">{line.title || "Untitled item"}</div>
                         </TableCell>
                         <TableCell className="font-mono text-xs">{line.sku || "None"}</TableCell>
                         <TableCell className="text-right font-mono">{line.quantity}</TableCell>
                         <TableCell className="text-right">
-                          {line.lineRetailTotalCents === null ? "Not recorded" : formatCents(line.lineRetailTotalCents)}
+                          {line.lineRetailTotalCents === null ? "Not available" : formatCents(line.lineRetailTotalCents)}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -580,13 +581,13 @@ function OrderDetailSheet({
               </div>
             </OrderDetailSection>
 
-            <OrderDetailSection icon={<MapPin className="h-4 w-4" />} title="Ship To">
+            <OrderDetailSection icon={<MapPin className="h-4 w-4" />} title="Ship to">
               <div className="space-y-1 text-sm text-zinc-700">
                 {shipToAddressLines(order).map((line) => <div key={line}>{line}</div>)}
               </div>
             </OrderDetailSection>
 
-            <OrderDetailSection icon={<ReceiptText className="h-4 w-4" />} title="Marketplace Totals">
+            <OrderDetailSection icon={<ReceiptText className="h-4 w-4" />} title="What your buyer paid">
               <div className="grid gap-2 text-sm sm:grid-cols-2">
                 <DetailField label="Retail subtotal" value={formatNullableCents(order.totals?.retailSubtotalCents)} />
                 <DetailField label="Shipping paid" value={formatNullableCents(order.totals?.shippingPaidCents)} />
@@ -595,38 +596,25 @@ function OrderDetailSheet({
               </div>
             </OrderDetailSection>
 
-            <OrderDetailSection icon={<Wallet className="h-4 w-4" />} title="Acceptance Economics">
+            <OrderDetailSection icon={<Wallet className="h-4 w-4" />} title="Your cost">
               {order.economicsSnapshot ? (
                 <div className="grid gap-2 text-sm sm:grid-cols-2">
-                  <DetailField label="Wholesale" value={formatCents(order.economicsSnapshot.wholesaleSubtotalCents)} />
+                  <DetailField label="Products" value={formatCents(order.economicsSnapshot.wholesaleSubtotalCents)} />
                   <DetailField label="Shipping" value={formatCents(order.economicsSnapshot.shippingCents)} />
-                  <DetailField label="Total debit" value={formatCents(order.economicsSnapshot.totalDebitCents)} />
+                  <DetailField label="Total" value={formatCents(order.economicsSnapshot.totalDebitCents)} />
                 </div>
               ) : (
-                <p className="text-sm text-zinc-500">No accepted economics snapshot.</p>
+                <p className="text-sm text-zinc-500">Your cost shows here once the order is accepted.</p>
               )}
             </OrderDetailSection>
 
-            <OrderDetailSection icon={<ReceiptText className="h-4 w-4" />} title="Shipping Quote">
-              {order.shippingQuoteSnapshot ? (
-                <div className="grid gap-2 text-sm sm:grid-cols-2">
-                  <DetailField label="Quote" value={String(order.shippingQuoteSnapshot.quoteSnapshotId)} />
-                  <DetailField label="Warehouse" value={String(order.shippingQuoteSnapshot.warehouseId)} />
-                  <DetailField label="Packages" value={String(order.shippingQuoteSnapshot.packageCount)} />
-                  <DetailField label="Total shipping" value={formatCents(order.shippingQuoteSnapshot.totalShippingCents)} />
-                </div>
-              ) : (
-                <p className="text-sm text-zinc-500">No shipping quote snapshot recorded.</p>
-              )}
-            </OrderDetailSection>
-
-            <OrderDetailSection icon={<Truck className="h-4 w-4" />} title="Marketplace Tracking">
+            <OrderDetailSection icon={<Truck className="h-4 w-4" />} title="Shipping">
               {(order.trackingPushes ?? []).length ? (
                 <div className="rounded-md border border-zinc-200">
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead>Shipment</TableHead>
+                        <TableHead>Items</TableHead>
                         <TableHead>Tracking</TableHead>
                         <TableHead>Status</TableHead>
                         <TableHead>Updated</TableHead>
@@ -636,11 +624,7 @@ function OrderDetailSheet({
                       {(order.trackingPushes ?? []).map((push) => (
                         <TableRow key={push.pushId}>
                           <TableCell>
-                            <div className="font-medium">
-                              {push.wmsShipmentId ? `Shipment ${push.wmsShipmentId}` : "Order shipment"}
-                            </div>
-                            <div className="text-xs text-zinc-500">{formatStatus(push.platform)} push {push.pushId}</div>
-                            <div className="mt-2 space-y-1">
+                            <div className="space-y-1">
                               {push.lineItems.length ? push.lineItems.map((line, index) => (
                                 <div
                                   key={`${push.pushId}:${line.externalLineItemId ?? line.sku ?? index}`}
@@ -648,31 +632,24 @@ function OrderDetailSheet({
                                 >
                                   <span className="font-mono text-zinc-800">{line.quantity}x</span>{" "}
                                   <span>{trackingLineLabel(line)}</span>
-                                  {line.externalLineItemId && (
-                                    <div className="truncate text-zinc-500">Line {line.externalLineItemId}</div>
-                                  )}
                                 </div>
                               )) : (
-                                <div className="text-xs text-zinc-500">Line detail unavailable</div>
+                                <div className="text-xs text-zinc-500">Whole order</div>
                               )}
                             </div>
                           </TableCell>
                           <TableCell>
                             <div className="font-medium">{push.carrier}</div>
                             <div className="font-mono text-xs text-zinc-600">{push.trackingNumber}</div>
-                            {push.externalFulfillmentId && (
-                              <div className="mt-1 max-w-60 truncate text-xs text-zinc-500">
-                                Fulfillment {push.externalFulfillmentId}
-                              </div>
-                            )}
                           </TableCell>
                           <TableCell>
-                            <Badge variant="outline" className={statusTone(push.status)}>{formatStatus(push.status)}</Badge>
-                            {push.lastErrorMessage && (
-                              <div className="mt-1 max-w-60 text-xs text-rose-700">{push.lastErrorMessage}</div>
-                            )}
-                            {push.status === "failed" && push.retryable === false && (
-                              <div className="mt-1 text-xs text-zinc-500">Manual review required</div>
+                            <Badge variant="outline" className={statusTone(push.status)}>{vendorTrackingStatusLabel(push.status)}</Badge>
+                            {push.status === "failed" && (
+                              <div className="mt-1 max-w-60 text-xs text-rose-700">
+                                {push.retryable === false
+                                  ? `We couldn't send tracking to ${vendorPlatformName(push.platform)}. Card Shellz is looking into it.`
+                                  : `We couldn't send tracking to ${vendorPlatformName(push.platform)} yet. We'll keep trying.`}
+                              </div>
                             )}
                           </TableCell>
                           <TableCell className="whitespace-nowrap text-sm text-zinc-500">
@@ -685,40 +662,18 @@ function OrderDetailSheet({
                   </Table>
                 </div>
               ) : (
-                <p className="text-sm text-zinc-500">No marketplace tracking pushes recorded.</p>
+                <p className="text-sm text-zinc-500">No tracking yet. It shows here once the order ships.</p>
               )}
             </OrderDetailSection>
 
-            <OrderDetailSection icon={<Wallet className="h-4 w-4" />} title="Wallet Debit">
+            <OrderDetailSection icon={<Wallet className="h-4 w-4" />} title="Paid from your wallet">
               {orderPayment ? (
                 <div className="grid gap-2 text-sm sm:grid-cols-2" data-testid="order-wallet-payment">
                   {orderPayment.map((part) => <DetailField key={part.label} label={part.label} value={part.value} />)}
                 </div>
               ) : (
-                <p className="text-sm text-zinc-500">No wallet debit recorded.</p>
+                <p className="text-sm text-zinc-500">Nothing has been charged to your wallet for this order.</p>
               )}
-            </OrderDetailSection>
-
-            <OrderDetailSection icon={<History className="h-4 w-4" />} title="Audit">
-              <div className="space-y-3">
-                {order.auditEvents.length ? order.auditEvents.map((event) => (
-                  <div key={`${event.createdAt}:${event.eventType}`} className="border-l-2 border-zinc-200 pl-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-sm font-medium">{formatStatus(event.eventType)}</span>
-                      <Badge variant="outline" className={statusTone(event.severity)}>{formatStatus(event.severity)}</Badge>
-                    </div>
-                    <div className="mt-1 text-xs text-zinc-500">
-                      {formatDateTime(event.createdAt)} by {formatStatus(event.actorType)}
-                      {event.actorId ? ` ${event.actorId}` : ""}
-                    </div>
-                    {auditPayloadSummary(event.payload) && (
-                      <div className="mt-1 text-xs text-zinc-600">{auditPayloadSummary(event.payload)}</div>
-                    )}
-                  </div>
-                )) : (
-                  <p className="text-sm text-zinc-500">No audit events recorded.</p>
-                )}
-              </div>
             </OrderDetailSection>
           </div>
         ) : null}
@@ -758,7 +713,7 @@ function OrdersTable({
       <Table>
         <TableHeader>
           <TableRow>
-            <TableHead>Marketplace order</TableHead>
+            <TableHead>Order</TableHead>
             <TableHead>Store</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Ship to</TableHead>
@@ -778,19 +733,21 @@ function OrdersTable({
               <TableRow key={order.intakeId}>
                 <TableCell>
                   <div className="font-medium">{order.externalOrderNumber || order.externalOrderId}</div>
-                  <div className="text-xs text-zinc-500">{formatStatus(order.platform)} intake {order.intakeId}</div>
+                  <div className="text-xs text-zinc-500">{vendorMarketplaceOrderLabel({ platform: order.platform })}</div>
                 </TableCell>
                 <TableCell>
-                  <div className="font-medium">{order.storeConnection.externalDisplayName || formatStatus(order.storeConnection.platform)}</div>
-                  <div className="text-xs text-zinc-500">{order.storeConnection.shopDomain || formatStatus(order.storeConnection.status)}</div>
+                  <div className="font-medium">{order.storeConnection.externalDisplayName || vendorPlatformName(order.storeConnection.platform)}</div>
+                  <div className="text-xs text-zinc-500">{order.storeConnection.shopDomain || vendorStoreStatusLabel(order.storeConnection.status)}</div>
                   {!order.storeConnection.launchReady && (
-                    <div className="mt-1 text-xs text-amber-700">Store not launch-ready</div>
+                    <div className="mt-1 text-xs text-amber-700">Store needs attention</div>
                   )}
                 </TableCell>
                 <TableCell>
-                  <Badge variant="outline" className={statusTone(order.status)}>{formatStatus(order.status)}</Badge>
+                  <Badge variant="outline" className={statusTone(order.status)}>{vendorOrderStatusLabel(order.status)}</Badge>
                   {heldDetail && <div className="mt-1 text-xs font-medium text-amber-800" data-testid="order-hold-detail">{heldDetail}</div>}
-                  {order.rejectionReason && <div className="mt-1 max-w-60 truncate text-xs text-zinc-500">{order.rejectionReason}</div>}
+                  {/* Only a rejected order's reason is the vendor's own words; on a failed or retrying order the
+                      field holds the system's error text, which is not for vendors. */}
+                  {order.status === "rejected" && order.rejectionReason && <div className="mt-1 max-w-60 truncate text-xs text-zinc-500">{order.rejectionReason}</div>}
                 </TableCell>
                 <TableCell>{shipToLabel(order)}</TableCell>
                 <TableCell className="font-mono">{order.lineCount} / {order.totalQuantity}</TableCell>
@@ -877,8 +834,8 @@ function RejectOrderDialog({
           <DialogTitle>Reject order</DialogTitle>
           <DialogDescription>
             {order
-              ? `${order.externalOrderNumber || order.externalOrderId} will be marked rejected and queued for marketplace cancellation.`
-              : "Reject this dropship order."}
+              ? `${order.externalOrderNumber || order.externalOrderId} will be rejected, and we'll cancel it on ${vendorPlatformName(order.platform)}.`
+              : "Reject this order."}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-2">
@@ -944,13 +901,12 @@ function trackingLineLabel(line: DropshipOrderTrackingLineItemSummary): string {
   if (line.title && line.sku) return `${line.title} (${line.sku})`;
   if (line.title) return line.title;
   if (line.sku) return line.sku;
-  if (line.productVariantId) return `Variant ${line.productVariantId}`;
-  return "Marketplace line";
+  return "Item";
 }
 
 function shipToAddressLines(order: DropshipVendorOrderDetail): string[] {
   const shipTo = order.shipTo;
-  if (!shipTo) return ["No ship-to address recorded."];
+  if (!shipTo) return ["No shipping address yet."];
   const lines = [
     shipTo.name,
     shipTo.company,
@@ -961,25 +917,11 @@ function shipToAddressLines(order: DropshipVendorOrderDetail): string[] {
     shipTo.phone ? `Phone: ${shipTo.phone}` : null,
     shipTo.email ? `Email: ${shipTo.email}` : null,
   ].filter((line): line is string => typeof line === "string" && line.trim().length > 0);
-  return lines.length ? lines : ["No ship-to address recorded."];
+  return lines.length ? lines : ["No shipping address yet."];
 }
 
 function formatNullableCents(value: number | null | undefined): string {
-  return typeof value === "number" ? formatCents(value) : "Not recorded";
-}
-
-// The server sends only these audit keys (the vendor order contract), so the
-// page shows every key it receives, in the contract's order.
-function auditPayloadSummary(payload: Record<string, unknown>): string {
-  const parts = VENDOR_ORDER_AUDIT_PAYLOAD_KEYS.flatMap((key) => {
-    const value = payload[key];
-    if (value === null || value === undefined || value === "") return [];
-    if (key.endsWith("Cents") && typeof value === "number") {
-      return [`${formatStatus(key)}: ${formatCents(value)}`];
-    }
-    return [`${formatStatus(key)}: ${String(value)}`];
-  });
-  return parts.join(" | ");
+  return typeof value === "number" ? formatCents(value) : "Not available";
 }
 
 function SensitiveActionVerificationPanel({
@@ -1028,19 +970,19 @@ function canRejectOrder(order: DropshipOrderListItem): boolean {
   return rejectionStatuses.has(order.status) && order.storeConnection.launchReady && order.omsOrderId === null;
 }
 
-function orderRejectionMessage(result: DropshipOrderRejectResponse["result"]): string {
+function orderRejectionMessage(result: DropshipOrderRejectResponse["result"], platform: string): string {
   if (result.status === "cancelled") {
-    return `Order intake ${result.intakeId} was already rejected and cancelled.`;
+    return "This order was already rejected and cancelled.";
   }
-  return `Order intake ${result.intakeId} rejected and queued for marketplace cancellation.`;
+  return `Order rejected. We're cancelling it on ${vendorPlatformName(platform)}.`;
 }
 
 function acceptanceStateLabel(order: DropshipOrderListItem): string {
   if (order.status === "accepted") return "Accepted";
   if (order.status === "cancelled") return "Cancelled";
   if (order.status === "rejected") return "Rejected";
-  if (order.storeConnection.status !== "connected") return "Store blocked";
-  if (!order.storeConnection.launchReady) return "Store not launch-ready";
+  if (order.storeConnection.status !== "connected") return "Reconnect your store";
+  if (!order.storeConnection.launchReady) return "Store needs attention";
   return "Not available";
 }
 

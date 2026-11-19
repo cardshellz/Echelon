@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000042000019600001_order_action_trigger_variable_qualification.sql",
+  "generation": 42,
+  "pr": 1960,
+  "ordinal": 1,
+  "after": [
+    "900000041000019450003_return_parcel_receipts.sql"
+  ]
+}

@@ -36,7 +36,7 @@ const mediaMigration = "migrations/900000017000018580001_catalog_publication_med
   beforeEach(async () => {
     database = await createInventoryCutoverTestDatabase(url, disposable, cutoverCompositionBaseSql);
     await installEbayPublicationInventoryFixture(database.pool, { includePreflightRecoveryMigrations: true, seedPublicationJob: false });
-    for (const name of ["0731_ebay_listing_sync_verification_checkpoint.sql", "0732_ebay_listing_sync_identity_admission.sql", "0736_ebay_listing_mapping_repairs.sql", "0737_ebay_publication_completion.sql", "0741_ebay_durable_withdrawal.sql"])
+    for (const name of ["0731_ebay_listing_sync_verification_checkpoint.sql", "0732_ebay_listing_sync_identity_admission.sql", "0736_ebay_listing_mapping_repairs.sql", "0737_ebay_publication_completion.sql", "0741_ebay_durable_withdrawal.sql", "900000021000018880001_channel_lifecycle_recovery.sql", "900000023000018880003_listing_work_settlement.sql"])
       await database.pool.query(readFileSync(`migrations/${name}`, "utf8"));
     await database.pool.query(`CREATE TABLE catalog.product_assets(id integer PRIMARY KEY,product_id integer NOT NULL,
       product_variant_id integer,asset_type text NOT NULL DEFAULT 'image',url text,position integer NOT NULL DEFAULT 0,

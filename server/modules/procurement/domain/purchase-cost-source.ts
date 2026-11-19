@@ -1,17 +1,25 @@
-import { invoiceCostComponentEvidenceSchema } from "@shared/procurement/invoice-cost-evidence";
+import { z } from "zod";
+import { CostEvidenceError } from "../../inventory/infrastructure/cost-evidence-values";
+import { resolveReceiptInvoiceSources, type ReceiptInvoiceSource } from "./receipt-invoice-costs";
+import { invoiceCostComponentEvidenceSchema, invoiceGoodsAmounts } from "@shared/procurement/invoice-cost-evidence";
 import {
   costFingerprint,
   costInteger,
 } from "../../inventory/infrastructure/cost-evidence-values";
 import type { CostRevisionInput } from "../../inventory/infrastructure/cost-evidence.repository";
 import { resolveSupplierCreditReductions, type SupplierCreditCostRow } from "./supplier-credit-source";
+import { supplierCostReviewFactsSchema } from "@shared/procurement/cost-review-facts";
+import { purchaseTaxEvidence, purchaseTaxAmounts, taxTreatmentIssue } from "./purchase-tax";
+import { readIntegerMills } from "@shared/money-read";
+import { supplierHeaderAmounts } from "./supplier-header-costs";
+import { costIssueSchema } from "@shared/procurement/cost-source-contracts";
 
 /** The single product/packaging source decision, shared by posting and reads. */
-export function resolvePurchaseCostSource(source: {
+function purchaseInvoiceEvidence(source: {
   purchaseOrderLine: Record<string, unknown>;
   approvedInvoices: Record<string, unknown>[];
   supplierCredits?: SupplierCreditCostRow[];
-}): CostRevisionInput[] {
+}) {
   const { purchaseOrderLine: line, approvedInvoices } = source;
   const purchaseOrderLineId = costInteger(line.id, "purchaseOrderLineId", 1);
   const qty = costInteger(line.order_qty, "orderQty", 1);
@@ -30,9 +38,33 @@ export function resolvePurchaseCostSource(source: {
     && credits.basePieces > BigInt(0) && credits.issues.length === 0 && parsed.every(result => result.success)
     && parsed.reduce((sum, result) => sum + BigInt(result.success ? result.data.productMills : 0), BigInt(0)) === credits.productMills
     && parsed.reduce((sum, result) => sum + BigInt(result.success ? result.data.packagingMills : 0), BigInt(0)) === credits.packagingMills;
+  return { line, approvedInvoices, purchaseOrderLineId, qty, coverageQty, credits, approvedQty, parsed, fullQuarantineReturn };
+}
+
+/** The same source checks explained with their actual counts and invoice rows.
+ * Never add these display facts to a revision fingerprint. */
+export function purchaseCostReviewFacts(source: Parameters<typeof purchaseInvoiceEvidence>[0]) {
+  const evidence = purchaseInvoiceEvidence(source);
+  const currencies = new Set(evidence.approvedInvoices.map(row => row.currency == null ? null : String(row.currency)));
+  const currency = currencies.size === 1 ? [...currencies][0] : null;
+  return supplierCostReviewFactsSchema.parse({
+    quantityBasis: ["received", "closed"].includes(String(evidence.line.status)) ? "received" : "ordered",
+    expectedPieces: evidence.coverageQty,
+    invoicedPieces: costInteger(evidence.approvedQty.toString(), "invoicePieces", -Number.MAX_SAFE_INTEGER),
+    creditedPieces: costInteger(evidence.credits.basePieces.toString(), "creditedPieces"),
+    quantityMatches: evidence.fullQuarantineReturn || (evidence.coverageQty > 0 && evidence.approvedQty === BigInt(evidence.coverageQty)),
+    missingAmountLineIds: evidence.approvedInvoices.flatMap((row, index) => evidence.parsed[index].success ? [] : [costInteger(row.id, "invoiceLineId", 1)]),
+    invoiceAmountCents: currency === null ? null : costInteger(evidence.approvedInvoices.reduce((sum, row) => sum + BigInt(costInteger(row.line_total_cents, "invoiceLineAmount", -Number.MAX_SAFE_INTEGER)), BigInt(0)).toString(), "invoiceAmount", -Number.MAX_SAFE_INTEGER),
+    currency,
+  });
+}
+
+function resolveLegacyPurchaseCostSource(source: Parameters<typeof purchaseInvoiceEvidence>[0]): CostRevisionInput[] {
+  const { line, approvedInvoices, purchaseOrderLineId, qty, coverageQty, credits, approvedQty, parsed, fullQuarantineReturn } = purchaseInvoiceEvidence(source);
   // This is a source disposition, not proof of inventory completion. The
   // application owner must independently verify live custody and cost history.
-  let issue: { code: string; message: string } | null = null;
+  const headerIssue = (approvedInvoices.length ? approvedInvoices.find(row => row.header_cost_issue !== undefined)?.header_cost_issue : line.header_cost_issue);
+  let issue: { code: string; message: string } | null = headerIssue === undefined ? null : costIssueSchema.parse(headerIssue);
   if (
     !fullQuarantineReturn &&
     approvedInvoices.length > 0 &&
@@ -61,7 +93,7 @@ export function resolvePurchaseCostSource(source: {
     ).toString(),
     "packagingMills",
   );
-  let packagingTreatment: "separate" | "included_in_product" = "separate";
+  let packagingTreatment: "separate" | "included_in_product" | "combined" = "separate";
   if (actual) {
     let product = BigInt(0),
       packaging = BigInt(0);
@@ -70,6 +102,18 @@ export function resolvePurchaseCostSource(source: {
       if (!evidence.success)
         throw new Error("Validated invoice evidence changed in memory");
       const components = evidence.data;
+      const lineTaxes = purchaseTaxEvidence(approvedInvoices[index].tax_cost_evidence);
+      const taxes = [...lineTaxes, ...purchaseTaxEvidence(approvedInvoices[index].header_tax_cost_evidence)];
+      const tax = purchaseTaxAmounts(taxes);
+      const header = supplierHeaderAmounts(approvedInvoices[index].header_cost_evidence);
+      if (header.landedMills !== 0) issue ??= { code: "SUPPLIER_HEADER_SCOPE_REVIEW", message: "A shipment header charge cannot replace this product's supplier amount." };
+      let goods: ReturnType<typeof invoiceGoodsAmounts>;
+      try { goods = invoiceGoodsAmounts(components); }
+      catch (error) {
+        if (!(error instanceof RangeError)) throw error;
+        issue = { code: "INVOICE_ADJUSTMENT_REVIEW_REQUIRED", message: error.message };
+        goods = { productMills: components.productMills, packagingMills: components.packagingMills, adjustmentMills: 0 };
+      }
       const total =
         BigInt(components.productMills) +
         BigInt(components.packagingMills) +
@@ -83,8 +127,8 @@ export function resolvePurchaseCostSource(source: {
             ),
           ) *
             BigInt(100) ||
-        components.adjustmentMills !== 0 ||
-        (components.packagingTreatment === "included_in_product" &&
+        BigInt(components.adjustmentMills) !== BigInt(purchaseTaxAmounts(lineTaxes).taxMills) + BigInt(goods.adjustmentMills) ||
+        (components.packagingTreatment !== "separate" &&
           components.packagingMills !== 0)
       ) {
         issue = {
@@ -93,12 +137,14 @@ export function resolvePurchaseCostSource(source: {
             "The recorded invoice components do not have a supported, exact reconciliation to the document total.",
         };
       }
-      product += BigInt(components.productMills);
-      packaging += BigInt(components.packagingMills);
-      if (components.packagingTreatment === "included_in_product")
+      issue ??= taxTreatmentIssue(taxes);
+      product += BigInt(goods.productMills) + BigInt(header.productMills) + BigInt(tax.inventoryMills);
+      packaging += BigInt(goods.packagingMills) + BigInt(header.packagingMills);
+      if (components.packagingTreatment === "combined") packagingTreatment = "combined";
+      else if (components.packagingTreatment === "included_in_product" && packagingTreatment !== "combined")
         packagingTreatment = "included_in_product";
     }
-    const netProduct = product - credits.productMills;
+    const netProduct = product - credits.productMills - credits.taxInventoryMills;
     const netPackaging = packaging - credits.packagingMills;
     if (netProduct < BigInt(0) || netPackaging < BigInt(0)) issue = {
       code: "CREDIT_SOURCE_EXCEEDED", message: "Supplier credits exceed the original invoice component. Review the source; negative inventory cost is not supported.",
@@ -110,17 +156,32 @@ export function resolvePurchaseCostSource(source: {
       (netPackaging < BigInt(0) ? packaging : netPackaging).toString(),
       "invoice.packagingMills",
     );
-  } else if (
-    costInteger(line.discount_cents ?? 0, "discountCents") !== 0 ||
-    costInteger(line.tax_cents ?? 0, "taxCents") !== 0
-  ) {
+  } else if ((costInteger(line.discount_cents ?? 0, "discountCents") !== 0 && line.header_cost_evidence === undefined)
+    || (costInteger(line.tax_cents ?? 0, "taxCents") !== 0 && line.tax_cost_evidence === undefined)) {
     issue ??= {
       code: "PURCHASE_ADJUSTMENT_REVIEW",
       message:
         "The purchase has a discount or tax requiring an explicit cost component disposition.",
     };
   }
+  if (!actual && line.header_cost_evidence !== undefined) {
+    const header = supplierHeaderAmounts(line.header_cost_evidence);
+    const product = BigInt(productMills) + BigInt(header.productMills), packaging = BigInt(packagingMills) + BigInt(header.packagingMills);
+    if (product < BigInt(0) || packaging < BigInt(0) || header.landedMills !== 0) issue ??= {
+      code: "SUPPLIER_HEADER_COMPONENT_REVIEW", message: "Review the header allocation: it cannot make a goods component negative or replace shipment costs.",
+    };
+    else { productMills = readIntegerMills(product, "PO product and header"); packagingMills = readIntegerMills(packaging, "PO packaging and header"); }
+  }
+  if (!actual && line.tax_cost_evidence !== undefined) {
+    const taxes = purchaseTaxEvidence(line.tax_cost_evidence), amounts = purchaseTaxAmounts(taxes);
+    issue ??= taxTreatmentIssue(taxes);
+    productMills = readIntegerMills(BigInt(productMills) + BigInt(amounts.inventoryMills), "product and capitalized tax");
+  }
   issue ??= credits.issues[0] ?? null;
+  if (source.supplierCredits?.some(row => row.status === "approved" && typeof row.disposition === "object" && row.disposition !== null
+    && "receiptAllocation" in row.disposition)) issue ??= {
+    code: "CREDIT_RECEIPT_ATTRIBUTION_REQUIRED", message: "This credit belongs to a particular receipt. Restore its saved receipt costing assignment before changing costs.",
+  };
   const currency = actual
     ? approvedInvoices.every((row) => row.currency === "USD")
       ? "USD"
@@ -128,7 +189,7 @@ export function resolvePurchaseCostSource(source: {
     : line.currency === "USD"
       ? "USD"
       : null;
-  const sources: CostRevisionInput["sources"] = actual
+  const sources: CostRevisionInput["sources"] = actual || approvedInvoices.some(row => row.header_cost_issue !== undefined)
     ? approvedInvoices.map((row) => ({
         kind: "vendor_invoice_line" as const,
         documentId: costInteger(row.vendor_invoice_id, "invoiceId", 1),
@@ -174,4 +235,32 @@ export function resolvePurchaseCostSource(source: {
     issue,
     manualOverride: null,
   }));
+}
+
+export function resolvePurchaseCostSource(source: ReceiptInvoiceSource): CostRevisionInput[] {
+  if (!source.receiptCosting) return resolveLegacyPurchaseCostSource(source);
+  try {
+    // A proved complete return before acceptance has no receipt cost to assign.
+    // Preserve that existing source disposition and its independent live-history
+    // verification; this does not attribute a credit to any inventory batch.
+    if (
+      source.supplierCredits?.length &&
+      source.receiptCosting.receipts.length === 0 &&
+      source.receiptCosting.allocations.length === 0
+    ) {
+      const returned = resolveLegacyPurchaseCostSource(source);
+      if (
+        returned.length === 2 &&
+        returned.every(row => row.inventoryEffect && row.evidence === "confirmed")
+      ) return returned;
+    }
+    return resolveReceiptInvoiceSources(source, resolveLegacyPurchaseCostSource);
+  }
+  catch (error) {
+    if (!(error instanceof CostEvidenceError || error instanceof z.ZodError || error instanceof RangeError)) throw error;
+    // Invalidated receipt/invoice membership remains visible. Existing values
+    // are retained until an admin repairs coverage; never fall back to averaging.
+    return resolveLegacyPurchaseCostSource({ ...source, approvedInvoices: [] }).map(row => ({ ...row,
+      evidence: "review_required", issue: { code: "RECEIPT_INVOICE_ALLOCATION_REVIEW", message: error.message } }));
+  }
 }

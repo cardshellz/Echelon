@@ -18,4 +18,24 @@ describe("PO email transport and document hold presentation", () => {
     expect(poEmailDeliveryPresentation({ status: "partially_sent" }).canReplay).toBe(false);
     expect(poEmailDeliveryPresentation({ status: "sent" }).label).not.toBe("Delivered");
   });
+  it("disables replay when provider acceptance was already recorded before local finalize failed (PWF-01)", () => {
+    const result = poEmailDeliveryPresentation({
+      status: "dead_letter",
+      providerMessageId: "<provider-id@example.com>",
+      lastErrorCode: "LOCAL_FINALIZE_FAILED_AFTER_SMTP_ACCEPT",
+    });
+    expect(result.needsAttention).toBe(true);
+    expect(result.canReplay).toBe(false);
+    expect(result.description).toContain("prevent duplicate purchase orders");
+  });
+  it("surfaces uncertain provider outcome warning before manual replay (PWF-01)", () => {
+    const result = poEmailDeliveryPresentation({
+      status: "dead_letter",
+      lastErrorCode: "SMTP_OUTCOME_UNCERTAIN",
+    });
+    expect(result.label).toBe("Provider outcome uncertain");
+    expect(result.needsAttention).toBe(true);
+    expect(result.canReplay).toBe(true);
+    expect(result.description).toContain("Verify with the supplier or email provider before replaying");
+  });
 });

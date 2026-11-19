@@ -82,7 +82,7 @@ describe("existing-page opening verification panel", () => {
   });
   it("rejects handler bypass without authorization", async () => {
     render({ canActivate: false });
-    for (const [options] of vi.mocked(useMutation).mock.calls) await expect(options.mutationFn!({} as never, {} as never)).rejects.toThrow();
+    for (const [options] of vi.mocked(useMutation).mock.calls) await expect(options.mutationFn!({} as never)).rejects.toThrow();
     const query = vi.mocked(useQuery).mock.calls[0][0];
     await expect(async () => (query.queryFn as (input: unknown) => Promise<unknown>)({ signal: new AbortController().signal })).rejects.toThrow("authorized operator");
   });

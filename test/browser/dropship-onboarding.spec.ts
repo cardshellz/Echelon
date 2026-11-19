@@ -40,7 +40,7 @@ function onboardingJson(state: StubState) {
     entitlement: { memberId: "m-1", cardShellzEmail: "vendor@example.com", status: "active", planId: "ops", planName: "Ops", subscriptionId: "sub-1", includesDropship: true, reasonCode: "active" },
     storeConnections: { activeCount: state.storeReady ? 1 : 0, connectedCount: state.storeReady ? 1 : 0, launchReadyConnectedCount: state.storeReady ? 1 : 0,
       credentialAttentionCount: 0, needsAttentionCount: 0, totalCount: state.storeReady ? 1 : 0, includedLimit: 1, canConnectStore: !state.storeReady },
-    catalog: { adminExposureRuleCount: state.catalogOpen ? 1 : 0, vendorSelectionRuleCount: state.selectionSaved ? 2 : 0, adminCatalogAvailable: state.catalogOpen, hasVendorSelection: state.selectionSaved },
+    catalog: { adminExposureRuleCount: state.catalogOpen ? 1 : 0, vendorSelectionRuleCount: state.selectionSaved ? 2 : 0, vendorSelectedItemCount: state.selectionSaved ? 2 : 0, adminCatalogAvailable: state.catalogOpen, hasVendorSelection: state.selectionSaved },
     wallet: { availableBalanceCents: 0, pendingBalanceCents: 0, activeFundingMethodCount: state.walletReady ? 1 : 0, activeStripeFundingMethodCount: state.walletReady ? 1 : 0,
       activeStripeCardFundingMethodCount: state.walletReady ? 1 : 0, activeUsdcBaseFundingMethodCount: 0, autoReloadEnabled: state.walletReady, autoReloadFundingMethodId: state.walletReady ? 10 : null,
       autoReloadFundingMethodActive: state.walletReady, autoReloadFundingMethodReady: state.walletReady, autoReloadFundingMethodIsCard: state.walletReady,
@@ -109,7 +109,7 @@ test("shows one checklist with a button on each open step, the store panel below
   await expect(checklist.getByTestId("onboarding-step-store_connection")).toContainText("Your store is connected and launch ready.");
   await expect(checklist.getByTestId("onboarding-step-store_connection").getByRole("button")).toHaveCount(0);
   await expect(checklist.getByTestId("onboarding-step-catalog_available")).toContainText("Card Shellz has opened the catalog to you.");
-  await expect(checklist.getByTestId("onboarding-step-catalog_selection")).toContainText("2 product selection rules saved.");
+  await expect(checklist.getByTestId("onboarding-step-catalog_selection")).toContainText("2 items chosen to sell. Change them any time in Catalog.");
   await expect(checklist.getByTestId("onboarding-step-catalog_selection").getByRole("button", { name: "Open catalog" })).toBeVisible();
   const walletRow = checklist.getByTestId("onboarding-step-wallet_payment");
   await expect(walletRow).toContainText("To do");

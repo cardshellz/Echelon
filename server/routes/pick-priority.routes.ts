@@ -16,12 +16,23 @@
 // the Drizzle schema.
 
 import type { Express, Request, Response } from "express";
-import { sql } from "drizzle-orm";
 import { db } from "../db";
 import { requireAuth, requirePermission } from "./middleware";
-import { invalidatePickPrioritySettingsCache } from "../modules/orders/sort-rank";
-import { recomputeAllActiveSortRanksDetailed } from "../modules/orders/orders.storage";
-import { enqueueShipStationSortRankSyncRetry } from "../modules/oms/webhook-retry.worker";
+import {
+  readPickPriorityChannels,
+  updateChannelPickPrioritySlaDays,
+} from "../modules/channels/pick-priority-channel-sla.api";
+import { invalidatePickPrioritySettingsCache } from "../modules/orders/sort-rank-and-priority.api";
+import { recomputeAllActiveSortRanksDetailed } from "../modules/orders/sort-rank-and-priority.api";
+import { enqueueShipStationSortRankSyncRetry } from "../modules/oms/webhook-retry.api";
+import {
+  readPickPriorityPlans,
+  updatePlanModifiersUseCase,
+} from "../modules/subscriptions/pick-priority-plans.api";
+import {
+  readPickPrioritySettings,
+  upsertPickPrioritySetting,
+} from "../modules/warehouse/pick-priority-settings.api";
 
 // ---------------------------------------------------------------------------
 // Shape
@@ -84,108 +95,23 @@ function validateInt(n: unknown, min: number, max: number, label: string): numbe
 }
 
 // ---------------------------------------------------------------------------
-// Defaults (mirrored from sort-rank.ts; re-declared here so the API layer is
-// self-contained).
-// ---------------------------------------------------------------------------
-
-const DEFAULT_SHIPPING_BASE: Record<ShippingLevel, number> = {
-  standard: 100,
-  expedited: 300,
-  overnight: 500,
-};
-const DEFAULT_SLA_DAYS = 3;
-
-// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
 async function readSettings(): Promise<{ shippingBase: Record<ShippingLevel, number>; slaDefaultDays: number }> {
-  const shippingBase: Record<ShippingLevel, number> = { ...DEFAULT_SHIPPING_BASE };
-  let slaDefaultDays = DEFAULT_SLA_DAYS;
-
-  const rows = await db.execute<{ key: string; value: string | null }>(sql`
-    SELECT key, value
-    FROM warehouse.echelon_settings
-    WHERE key IN (
-      'priority.shipping_base.standard',
-      'priority.shipping_base.expedited',
-      'priority.shipping_base.overnight',
-      'priority.sla_default_days'
-    )
-  `);
-
-  for (const row of rows.rows) {
-    const n = row.value == null ? NaN : Number(row.value);
-    if (!Number.isFinite(n)) continue;
-    switch (row.key) {
-      case "priority.shipping_base.standard": shippingBase.standard = n; break;
-      case "priority.shipping_base.expedited": shippingBase.expedited = n; break;
-      case "priority.shipping_base.overnight": shippingBase.overnight = n; break;
-      case "priority.sla_default_days": slaDefaultDays = n; break;
-    }
-  }
-
-  return { shippingBase, slaDefaultDays };
+  return readPickPrioritySettings();
 }
 
 async function readChannels(): Promise<PickPriorityPayload["channels"]> {
-  // Order: active channels first, then by name. sla_days NULL = inherit global.
-  const rows = await db.execute<{
-    id: number;
-    name: string | null;
-    provider: string | null;
-    status: string | null;
-    sla_days: number | null;
-  }>(sql`
-    SELECT id, name, provider, status, sla_days
-    FROM channels.channels
-    ORDER BY (status = 'active') DESC, name
-  `);
-
-  return rows.rows.map((r) => ({
-    id: Number(r.id),
-    name: r.name ?? "(unnamed channel)",
-    provider: r.provider ?? "manual",
-    status: r.status ?? "pending_setup",
-    slaDays: r.sla_days == null ? null : Number(r.sla_days),
-  }));
+  return readPickPriorityChannels();
 }
 
 async function readPlans(): Promise<PickPriorityPayload["plans"]> {
-  const rows = await db.execute<{
-    id: string;
-    name: string | null;
-    tier_level: number | null;
-    priority_modifier: number;
-    primary_color: string | null;
-    is_active: boolean | null;
-  }>(sql`
-    SELECT id, name, tier_level, priority_modifier, primary_color, is_active
-    FROM membership.plans
-    ORDER BY COALESCE(tier_level, 9999), name
-  `);
-
-  return rows.rows.map((r) => ({
-    id: r.id,
-    name: r.name ?? "(unnamed plan)",
-    tierLevel: r.tier_level,
-    priorityModifier: Number(r.priority_modifier ?? 0),
-    primaryColor: r.primary_color,
-    isActive: r.is_active === true,
-  }));
+  return readPickPriorityPlans();
 }
 
 async function upsertSetting(key: string, value: number, type: string = "number"): Promise<void> {
-  // The four priority keys are seeded by migration 0559, so an UPDATE is
-  // sufficient in production. We keep an UPSERT here for dev environments
-  // where the seed may not have run.
-  await db.execute(sql`
-    INSERT INTO warehouse.echelon_settings (key, value, type, category, description)
-    VALUES (${key}, ${String(value)}, ${type}, 'pick_priority', NULL)
-    ON CONFLICT (key) DO UPDATE
-      SET value = EXCLUDED.value,
-          updated_at = now()
-  `);
+  await upsertPickPrioritySetting(key, value, type);
 }
 
 async function recomputeAndQueueActiveSortRankSync(
@@ -268,16 +194,21 @@ export function registerPickPriorityRoutes(app: Express): void {
         }
 
         if (body.planModifiers && typeof body.planModifiers === "object") {
+          const planModifierUpdates: Array<{ id: string; priorityModifier: number }> = [];
           for (const [planId, raw] of Object.entries(body.planModifiers)) {
             if (!planId || typeof planId !== "string") {
               throw new Error("planModifiers keys must be plan ids");
             }
             const v = validateInt(raw, PLAN_MOD_MIN, PLAN_MOD_MAX, `planModifiers[${planId}]`);
-            tasks.push(db.execute(sql`
-              UPDATE membership.plans
-              SET priority_modifier = ${v}
-              WHERE id = ${planId}
-            `));
+            planModifierUpdates.push({ id: planId, priorityModifier: v });
+          }
+          if (planModifierUpdates.length > 0) {
+            const actorUser = (req as any).session?.user;
+            const actor =
+              actorUser?.username ||
+              actorUser?.email ||
+              (actorUser?.id ? `staff:${actorUser.id}` : "staff_admin");
+            tasks.push(updatePlanModifiersUseCase(planModifierUpdates, actor));
             affectsSortRank = true;
           }
         }
@@ -290,20 +221,12 @@ export function registerPickPriorityRoutes(app: Express): void {
             }
             // null clears the per-channel SLA (channel reverts to global default).
             if (raw === null) {
-              tasks.push(db.execute(sql`
-                UPDATE channels.channels
-                SET sla_days = NULL, updated_at = now()
-                WHERE id = ${channelId}
-              `));
+              tasks.push(updateChannelPickPrioritySlaDays(channelId, null));
               affectsSortRank = true;
               continue;
             }
             const v = validateInt(raw, CHANNEL_SLA_MIN, CHANNEL_SLA_MAX, `channelSlaDays[${channelId}]`);
-            tasks.push(db.execute(sql`
-              UPDATE channels.channels
-              SET sla_days = ${v}, updated_at = now()
-              WHERE id = ${channelId}
-            `));
+            tasks.push(updateChannelPickPrioritySlaDays(channelId, v));
             affectsSortRank = true;
           }
         }

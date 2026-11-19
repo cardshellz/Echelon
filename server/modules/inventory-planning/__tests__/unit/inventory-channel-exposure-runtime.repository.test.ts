@@ -182,6 +182,19 @@ describe("PostgresInventoryChannelExposureRuntimeExecutor", () => {
     expect(holdRead?.params).toEqual([[91], [101]]);
   });
 
+  it("never reads the retired sales status table: a SKU is stopped by a Max 0 stock rule instead", async () => {
+    const client = fakeClient("canonical");
+    const executor = new PostgresInventoryChannelExposureRuntimeExecutor(
+      { connect: vi.fn(async () => client) } as never,
+      vi.fn(async () => ({ productId: 10 }) as never),
+    );
+
+    const context = await executor.execute(10, async (value) => value);
+
+    expect(context.publicationTargets[0]).not.toHaveProperty("salesStatusHolds");
+    expect(client.query.mock.calls.some((call) => sqlText((call as unknown[])[0]).includes("sales_status"))).toBe(false);
+  });
+
   it("loads a Dropship store as the exact transport owner while retaining its allocation channel", async () => {
     const client = fakeClient("canonical", { dropship: true });
     const executor = new PostgresInventoryChannelExposureRuntimeExecutor(
@@ -203,7 +216,9 @@ describe("PostgresInventoryChannelExposureRuntimeExecutor", () => {
 
 function fakeClient(
   authority: "legacy" | "canonical",
-  options: { invalidTargetRevision?: boolean; dropship?: boolean; held?: boolean; variantHeld?: boolean } = {},
+  options: {
+    invalidTargetRevision?: boolean; dropship?: boolean; held?: boolean; variantHeld?: boolean;
+  } = {},
 ) {
   const query = vi.fn(async (statement: unknown) => {
     const sql = sqlText(statement);

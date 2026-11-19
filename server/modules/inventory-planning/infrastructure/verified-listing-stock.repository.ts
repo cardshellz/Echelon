@@ -4,9 +4,10 @@ import type { VerifiedStockListing, VerifiedListingStockResult, VerifiedListingS
 import { InventoryPublicationMembershipError } from "../application/inventory-publication-membership.service";
 import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { readPublicationStockSelection } from "./inventory-publication-selection.reader";
-import { prepareVerifiedStockMapping } from "./verified-listing-stock-mapping.repository";
+import { linkVerifiedStockMapping } from "./verified-listing-stock-mapping.repository";
 import { assertRecreatedListingStockReady, readRecreationStockScope, recordRecreationStockReceipt } from "./listing-recreation-stock.repository";
 import { PublicationMappingPreparationStore, applyMappingPreparation, mappingPreparationDigest, mappingTargetBlockers, readTargets, reviewMappingPreparation } from "./publication-mapping-preparation.repository";
+import { blockedOnlyByMissingStockLink } from "../application/inventory-availability-runtime-publication.service";
 export class PostgresVerifiedListingStockStore implements VerifiedListingStockStore {
     private readonly transactions: PublicationMappingPreparationStore;
     constructor(pool: Pick<Pool, "connect">) { this.transactions = new PublicationMappingPreparationStore(pool); }
@@ -24,8 +25,12 @@ export class PostgresVerifiedListingStockStore implements VerifiedListingStockSt
                     id: number;
                 }>(`SELECT candidate.id FROM unnest($2::integer[]) candidate(id)
           WHERE NOT EXISTS(SELECT 1 FROM inventory.publication_variant_mapping_heads h JOIN inventory.publication_variant_mapping_versions m ON m.id=h.active_mapping_id
-            WHERE h.publication_target_id=$1 AND h.product_variant_id=candidate.id AND m.lifecycle_status='sealed')
-          AND EXISTS(SELECT 1 FROM channels.sync_settings WHERE global_enabled=true) ORDER BY candidate.id`, [targets[0].id, selected]);
+            WHERE h.publication_target_id=$1 AND h.product_variant_id=candidate.id AND m.lifecycle_status='sealed'
+              -- Channels PR4 (PLAN-CH-v3 §3.5): a sealed link whose SKU is not the feed's current SKU still needs work.
+              AND m.external_inventory_item_id IS NOT DISTINCT FROM (SELECT f.channel_sku FROM channels.channel_feeds f
+                WHERE f.channel_id=$3 AND f.product_variant_id=candidate.id AND f.is_active=1 AND f.quarantined_at IS NULL
+                ORDER BY f.id LIMIT 1))
+          AND EXISTS(SELECT 1 FROM channels.sync_settings WHERE global_enabled=true) ORDER BY candidate.id`, [targets[0].id, selected, channelId]);
                 pending.push(...result.rows.map(row => row.id));
             }
             return pending.sort((a, b) => a - b);
@@ -51,22 +56,34 @@ export class PostgresVerifiedListingStockStore implements VerifiedListingStockSt
                 return { state: "excluded", dryRun, receipt: null, quantities: [] };
             const actor = "walmart-stock-connection", requestHash = mappingPreparationDigest({ targetId: target.id, channelId: input.channelId, connectionId: input.connectionId,
                 variantId: input.productVariantId, sku: input.sku, externalProductId: input.externalProductId, actor,
-                ...(input.setupOperationId ? { setupOperationId: input.setupOperationId } : {}) });
+                ...(input.setupOperationId ? { setupOperationId: input.setupOperationId } : {}),
+                ...(input.replacesSku ? { replacesSku: input.replacesSku } : {}) });
             const recreation = await readRecreationStockScope(client, target.id, input);
             if (!input.setupOperationId) await assertRecreatedListingStockReady(client, [{ destinationKind: "channel_connection",
                 connectionId: input.connectionId, providerKey: "walmart", providerScopeType: "location",
                 externalScopeId: input.externalScopeId, externalInventoryItemId: input.sku,
                 productId: owner.productId, productVariantId: input.productVariantId }]);
-            const changed = await prepareVerifiedStockMapping(client, target.id, input, requestHash, actor, now);
+            const changed = await linkVerifiedStockMapping(client, scopeKeys, target, input, requestHash, actor, now) !== "none";
             if (recreation?.completed)
                 return { state: "already_connected", dryRun, receipt: null, quantities: [], publicationState: recreation.publicationState };
             if (!changed && !recreation)
                 return { state: "already_connected", dryRun, receipt: null, quantities: [] };
             const command = { publicationTargetId: target.id, expectedTargetRevision: target.revision, productId: owner.productId, productVariantIds: [input.productVariantId] };
-            const { review } = await reviewMappingPreparation(client, command, true);
+            const { review, targetRows } = await reviewMappingPreparation(client, command, true);
             if (!review.ready)
                 throw new InventoryPublicationMembershipError("STOCK_LISTING_ATP_NOT_READY", review.blockers.map(row => row.message).join(" "));
-            const receipt = await applyMappingPreparation(client, scopeKeys, { ...command, expectedReviewHash: review.reviewHash, idempotencyKey: `verified-stock:${requestHash}` }, actor, requestHash, now,
+            // Publish only this verified size. Each Walmart size links through its own
+            // verified listing, so a selected sibling that is not linked yet must not
+            // refuse this publication and roll the new link back (PLAN-CH-v3 PR1).
+            // That is the only sibling problem skipped. Any other sibling blocker makes
+            // every later fan-out withhold this whole destination (rowIsolatedVariantIds),
+            // which would freeze this size at its link-time quantity, so refuse as before.
+            const blockedSibling = targetRows.find(row => row.productVariantId !== input.productVariantId
+                && row.blockers.length > 0 && !blockedOnlyByMissingStockLink(row.blockers));
+            if (blockedSibling)
+                throw new InventoryPublicationMembershipError("STOCK_LISTING_ATP_NOT_READY",
+                    `Another size of this product (variant ${blockedSibling.productVariantId}) is not ready for this Walmart store: ${blockedSibling.blockers.map(row => row.message).join(" ")}`);
+            const receipt = await applyMappingPreparation(client, scopeKeys, { ...command, exactVariantScope: true, expectedReviewHash: review.reviewHash, idempotencyKey: `verified-stock:${requestHash}` }, actor, requestHash, now,
                 changed ? [input.productVariantId] : [], recreation ? [input.productVariantId] : []);
             if (recreation) await recordRecreationStockReceipt(client, recreation.id, target.id, input, actor, now);
             return { state: "connected", dryRun, receipt, quantities: review.quantities, ...(recreation ? { publicationState: "queued" as const } : {}) };

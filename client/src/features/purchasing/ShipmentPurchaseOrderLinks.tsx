@@ -4,7 +4,7 @@ import { shipmentPurchaseOrderReferencesSchema } from "@shared/procurement/shipm
 type Props = {
   purchaseOrders: unknown;
   legacyPurchaseOrderIds?: unknown[];
-  hrefFor: (purchaseOrderId: number) => string;
+  hrefFor: (purchaseOrderId: number, poNumber: string) => string;
 };
 
 export function ShipmentPurchaseOrderLinks({ purchaseOrders, legacyPurchaseOrderIds = [], hrefFor }: Props) {
@@ -28,7 +28,7 @@ export function ShipmentPurchaseOrderLinks({ purchaseOrders, legacyPurchaseOrder
       {references.map((purchase) => (
         <Link
           key={purchase.id}
-          href={hrefFor(purchase.id)}
+          href={hrefFor(purchase.id, purchase.poNumber)}
           onClick={(event) => event.stopPropagation()}
           className="inline-flex min-h-[44px] items-center break-words font-mono text-sm text-primary hover:underline md:min-h-0"
         >

@@ -763,6 +763,19 @@ FROM classified ORDER BY intake_id`;
     expect(summary.info.some((info) => info.key === "pool_record")).toBe(false);
   });
 
+  it("MS3/ARCH-1: an order eBay cancelled that Card Shellz stopped and refunded is no exception, is an order refund, and leaves the pool", async () => {
+    const schema = await variantSchema("refund", { marketplaceCancelRefund: true });
+    const summary = await financeService(schema).summary();
+    // K (charged 800, cancelled in OMS) is refunded in full: N1 has nothing left charged, and the refund is an expected entry.
+    expect(checkOf(summary, "N1")).toMatchObject({ result: "fine", exceptions: 0 });
+    expect(checkOf(summary, "N3")).toMatchObject({ result: "fine", exceptions: 0 });
+    expect(amountsOf(summary, "owed")).toMatchObject({ "owed.walk.order_refunds": 800, "owed.walk.closing": 379_860 + 800 });
+    expect(linesOf(summary, "owed").some((line) => line.key === "owed.walk.other" || line.key === "owed.walk.unexplained")).toBe(false);
+    expect(lineOf(summary, "returns", "returns.memo.order_refunds")).toMatchObject({ status: "recorded", amount: 800, count: 1 });
+    // K's 20 pool share went back with the refund in the same period.
+    expect(amountsOf(summary, "pool")).toMatchObject({ "pool.set_aside": 400 - 20, "pool.closing": -910 - 20 });
+  });
+
   it("cancellations still being sent to the marketplace (or retried) stay in the never-charged count", async () => {
     const schema = await variantSchema("inflight");
     // What the marketplace-cancellation worker leaves while it works (dropship-order-cancellation.repository.ts):

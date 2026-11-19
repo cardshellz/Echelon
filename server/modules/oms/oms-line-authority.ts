@@ -1,3 +1,5 @@
+import { ChannelQuantityEvidenceError, observeChannelMerchandiseQuantity } from "./domain/channel-merchandise-quantity";
+
 export const OMS_LINE_AUTHORIZATION_STATUSES = [
   "seen",
   "authorized",
@@ -19,13 +21,21 @@ export interface OmsLineAuthorityInput {
   quantity: number | null | undefined;
   fulfillableQuantity?: number | null;
   /**
-   * Shopify line `current_quantity`: the ordered quantity minus units removed
-   * by an order edit or cancellation. This, not `fulfillable_quantity`, is the
-   * commercial ceiling for what the warehouse still owes. Null/undefined when
-   * the channel payload does not carry it.
+   * Shopify's current merchandise (excludes removed/refunded units). A refund
+   * amount is never used to infer this quantity. Fulfillable is remaining work.
    */
   currentQuantity?: number | null;
+  channelUpdatedAt?: Date | string | null;
+  /**
+   * The channel's own statement that the order is fully paid for its CURRENT
+   * contents (see deriveShopifyChannelPaymentSettled). null/undefined means
+   * the channel did not state it, and only the topic-based rules apply.
+   */
+  channelPaymentSettled?: boolean | null;
   previous?: {
+    channelObservedQuantity?: number | null;
+    channelCurrentQuantity?: number | null;
+    channelQuantityUpdatedAt?: Date | string | null;
     paidQuantity?: number | null;
     authorityFulfillableQuantity?: number | null;
     cancelledQuantity?: number | null;
@@ -39,6 +49,9 @@ export interface OmsLineAuthorityInput {
 
 export interface OmsLineAuthorityState {
   channelObservedQuantity: number;
+  channelCurrentQuantity?: number | null;
+  channelQuantityUpdatedAt?: Date | null;
+  staleChannelObservation?: boolean;
   paidQuantity: number;
   authorityFulfillableQuantity: number;
   authorizationStatus: OmsLineAuthorizationStatus;
@@ -106,11 +119,74 @@ function finiteNonNegativeIntegerOrNull(
   field: string,
 ): number | null {
   if (value === null || value === undefined) return null;
+  if (field === "currentQuantity" && (!Number.isSafeInteger(value) || value < 0 || value > 2_147_483_647))
+    throw new ChannelQuantityEvidenceError("Current channel quantity must be a nonnegative PostgreSQL integer.");
   return requireNonNegativeInteger(value, field);
 }
 
 function isPaidFinancialStatus(status: string | null | undefined): boolean {
   return PAID_FINANCIAL_STATUSES.has(String(status ?? "").toLowerCase());
+}
+
+/**
+ * A line added to an already-paid order by a Shopify order edit arrives only
+ * via orders/updated: an equal-price swap creates no new payment, so no
+ * orders/paid follows. #64592 (2026-10-21) left such a line 'seen' with zero
+ * authority; nothing ever shipped it and the empty order was later cancelled.
+ *
+ * A readiness refresh may grant FIRST authority only when Shopify reports the
+ * whole order fully paid ("paid", not partially_paid: an edit that raised the
+ * total waits for that payment) and the line has never been paid or given any
+ * disposition. Refunded, cancelled and review lines keep their owning decision.
+ */
+function canGrantFirstAuthorityFromPaidRefresh(input: OmsLineAuthorityInput): boolean {
+  // The edit itself arrives as orders/updated; the shopify/reconcile poll does
+  // not grant first authority, so it never revives historical unpaid lines.
+  if (input.sourceTopic !== "orders/updated") return false;
+  if (String(input.financialStatus ?? "").toLowerCase() !== "paid") return false;
+  const previous = input.previous;
+  if (!previous) return true;
+  return Number(previous.paidQuantity ?? 0) === 0
+    && Number(previous.authorityFulfillableQuantity ?? 0) === 0
+    && Number(previous.cancelledQuantity ?? 0) === 0
+    && Number(previous.refundedQuantity ?? 0) === 0
+    && String(previous.authorizationStatus ?? "seen") === "seen";
+}
+
+/**
+ * A Shopify edit can raise a line's quantity on an already-paid order with no
+ * new payment event: when the edited total is not higher than what was paid,
+ * Shopify refunds or keeps the difference and sends no orders/paid. #65696
+ * (2026-11-16) added 2 units plus a 15% discount; the line stayed at its old
+ * paid quantity of 8 and the 2 units never reached WMS or ShipStation.
+ *
+ * The sales channel owns what was bought and paid for. When a fresh channel
+ * snapshot states the order is fully paid for its current contents
+ * (channelPaymentSettled), it may raise paid authority to the channel's
+ * quantity. Only increases are granted here: reductions keep flowing through
+ * the non-authorizing path so removal and cancellation semantics are unchanged.
+ * A stale snapshot never authorizes, because its payment statement is exactly
+ * as old as its quantity. Cancelled, refunded and review lines keep their
+ * owning decision.
+ */
+function canAuthorizeIncreaseFromSettledChannelSnapshot(
+  input: OmsLineAuthorityInput,
+  observation: { stale: boolean; channelQuantity: number },
+): boolean {
+  if (observation.stale) return false;
+  // Only a dated current_quantity is the channel's statement of what is
+  // bought now; without it the merchandise observation echoes the previous
+  // value and proves nothing about an increase.
+  if (input.currentQuantity == null || input.channelUpdatedAt == null) return false;
+  if (!READINESS_REFRESH_TOPICS.has(input.sourceTopic)) return false;
+  if (input.channelPaymentSettled !== true) return false;
+  const previous = input.previous;
+  if (!previous) return observation.channelQuantity > 0;
+  if (Number(previous.cancelledQuantity ?? 0) !== 0) return false;
+  if (Number(previous.refundedQuantity ?? 0) !== 0) return false;
+  const previousStatus = String(previous.authorizationStatus ?? "seen");
+  if (previousStatus !== "seen" && previousStatus !== "authorized") return false;
+  return observation.channelQuantity > Number(previous.paidQuantity ?? 0);
 }
 
 export function canSourceTopicAuthorizeOmsLine(sourceTopic: string): boolean {
@@ -181,11 +257,47 @@ export function deriveOmsLineAuthority(
     input.quantity,
     "quantity",
   );
+  // Legacy callers may have current_quantity without a source version. Keep
+  // their existing cap behavior, but never manufacture dated channel evidence
+  // from processing time or overwrite a verified observation with undated data.
+  if (input.currentQuantity != null && input.channelUpdatedAt == null && input.previous?.channelQuantityUpdatedAt != null)
+    throw new Error("A verified channel quantity cannot be replaced by an undated observation.");
+  const merchandise = observeChannelMerchandiseQuantity({
+    purchasedQuantity: observedQuantity,
+    currentQuantity: input.channelUpdatedAt == null ? null : input.currentQuantity,
+    updatedAt: input.channelUpdatedAt,
+    previous: input.previous,
+  });
+  const merchandiseValues = merchandise.channelCurrentQuantity === null ? {} : {
+    channelCurrentQuantity: merchandise.channelCurrentQuantity,
+    channelQuantityUpdatedAt: merchandise.channelQuantityUpdatedAt,
+  };
   const eventCanAuthorize =
-    canSourceTopicAuthorizeOmsLine(input.sourceTopic) &&
-    isPaidFinancialStatus(input.financialStatus);
+    (canSourceTopicAuthorizeOmsLine(input.sourceTopic) &&
+      isPaidFinancialStatus(input.financialStatus)) ||
+    canGrantFirstAuthorityFromPaidRefresh(input) ||
+    canAuthorizeIncreaseFromSettledChannelSnapshot(input, {
+      stale: merchandise.stale,
+      channelQuantity: merchandise.channelCurrentQuantity ?? observedQuantity,
+    });
+  // Freshness applies to Shopify's mutable merchandise observation, not to the
+  // independent payment fact. A paid webhook can arrive after a newer
+  // orders/updated webhook; preserve the newer quantity snapshot while still
+  // granting authority from the paid event.
+  if (merchandise.stale && !eventCanAuthorize) return {
+    staleChannelObservation: true,
+    channelObservedQuantity: requireNonNegativeInteger(input.previous?.channelObservedQuantity ?? observedQuantity, "previous.channelObservedQuantity"),
+    ...merchandiseValues,
+    paidQuantity: requireNonNegativeInteger(input.previous?.paidQuantity, "previous.paidQuantity"),
+    authorityFulfillableQuantity: requireNonNegativeInteger(input.previous?.authorityFulfillableQuantity, "previous.authorityFulfillableQuantity"),
+    authorizationStatus: statusAfterNonAuthorizingUpdate(input.previous?.paidQuantity ?? 0, input.previous?.authorizationStatus ?? "seen"),
+    authorizedAt: coerceDate(input.previous?.authorizedAt),
+    authorizedByEventId: input.previous?.authorizedByEventId ?? null,
+    authoritySourceTopic: input.sourceTopic,
+    authoritySourceInboxId: input.sourceInboxId ?? null,
+  };
   const incomingCurrentQuantity = finiteNonNegativeIntegerOrNull(
-    input.currentQuantity,
+    merchandise.channelCurrentQuantity ?? input.currentQuantity,
     "currentQuantity",
   );
 
@@ -218,6 +330,14 @@ export function deriveOmsLineAuthority(
       readinessCap,
     );
     let authorizationStatus = statusForQuantities(observedQuantity);
+    if (
+      merchandise.stale &&
+      incomingCurrentQuantity !== null &&
+      incomingCurrentQuantity < observedQuantity
+    ) {
+      authorizationStatus =
+        incomingCurrentQuantity === 0 ? "cancelled" : "partially_cancelled";
+    }
     if (input.sourceTopic === "walmart/acknowledged" && dispositionCap < observedQuantity) {
       const previousStatus = input.previous?.authorizationStatus;
       switch (previousStatus) {
@@ -231,6 +351,7 @@ export function deriveOmsLineAuthority(
 
     return {
       channelObservedQuantity: observedQuantity,
+      ...merchandiseValues,
       paidQuantity: observedQuantity,
       authorityFulfillableQuantity,
       authorizationStatus,
@@ -285,16 +406,18 @@ export function deriveOmsLineAuthority(
         incomingCurrentQuantity,
       }),
     )
-    : Math.min(previousFulfillableQuantity, paidQuantity);
+    : Math.min(previousFulfillableQuantity, paidQuantity, incomingCurrentQuantity ?? observedQuantity);
 
   return {
     channelObservedQuantity: observedQuantity,
+    ...merchandiseValues,
     paidQuantity,
     authorityFulfillableQuantity,
-    authorizationStatus: statusAfterNonAuthorizingUpdate(
-      paidQuantity,
-      previousAuthorizationStatus,
-    ),
+    authorizationStatus: merchandise.channelCurrentQuantity !== null && previousAuthorizationStatus !== "review"
+      ? merchandise.channelCurrentQuantity === 0 ? "cancelled"
+        : paidQuantity === 0 ? "seen"
+          : merchandise.channelCurrentQuantity < paidQuantity ? "partially_cancelled" : "authorized"
+      : statusAfterNonAuthorizingUpdate(paidQuantity, previousAuthorizationStatus),
     authorizedAt: coerceDate(input.previous?.authorizedAt),
     authorizedByEventId: input.previous?.authorizedByEventId ?? null,
     authoritySourceTopic: input.sourceTopic,

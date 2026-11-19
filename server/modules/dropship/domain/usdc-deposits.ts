@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 /**
  * USDC deposits into a Card Shellz-controlled wallet (funding design phase 6).
  *
@@ -127,7 +128,7 @@ export function usdcAtomicUnitsToCents(amountAtomicUnits: string): UsdcCentsConv
     throw depositInvalid("amountAtomicUnits", amountAtomicUnits, "is more cents than the wallet can hold");
   }
   return {
-    cents: Number(cents),
+    cents: readIntegerCents(cents, "cents", true),
     dustAtomicUnits: (atomic % USDC_ATOMIC_UNITS_PER_CENT).toString(),
   };
 }

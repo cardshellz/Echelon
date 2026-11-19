@@ -8,14 +8,26 @@ import type { OrderEditFinancials } from "@shared/order-edits/order-edit-financi
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { orderEditCanCommit } from "./order-edits";
 
+/** Interrupted submission can still be abandonable; that does not make its
+ * committing state an editable draft. Let the normal worker resolve it first. */
+export function orderEditHasEditableDraft(
+  operation: OrderEditOperation,
+): boolean {
+  return (
+    operation.commandInProgress !== true &&
+    operation.canAbandon &&
+    operation.requestedPlan !== undefined &&
+    ["preparing", "ready", "review_required"].includes(operation.status)
+  );
+}
+
 /** Only a known unsubmitted draft may be prepared again; submitted outcomes stay in reconciliation. */
 export function orderEditNeedsPreparation(
   operation: OrderEditOperation,
   now: number,
 ): boolean {
   return (
-    operation.canAbandon === true &&
-    operation.requestedPlan !== undefined &&
+    orderEditHasEditableDraft(operation) &&
     (operation.status === "preparing" ||
       operation.status === "review_required" ||
       (operation.status === "ready" &&
@@ -80,7 +92,10 @@ function displayedFinancials(
       .sort();
   return canonicalJson({
     ...totals,
-    itemDiscountLabels: [...totals.itemDiscountLabels].sort(),
+    // Rich allocations are what the customer sees. Shopify's auxiliary native
+    // labels can differ from the preview without changing any displayed term.
+    // Legacy responses still display these labels and must compare them.
+    itemDiscountLabels: itemDiscounts === undefined ? [...totals.itemDiscountLabels].sort() : [],
     shippingDiscountLabels: [...totals.shippingDiscountLabels].sort(),
     taxLines: (totals.taxLines ?? [])
       .map((value) => canonicalJson(value))

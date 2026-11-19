@@ -16,35 +16,95 @@ import { sql } from "drizzle-orm";
 
 const HELD_SHIPMENT_SOURCE = "line_item_hold";
 
+export type HoldSplitProviderSyncStatus =
+  | "not_needed"
+  | "queued_repush"
+  | "queued_cancel"
+  | "review_required_labeled";
+
+export class LineItemHoldNotFoundError extends Error {
+  constructor(wmsOrderId: number, orderItemId: number) {
+    super(`Line ${orderItemId} is not on WMS order ${wmsOrderId}`);
+    this.name = "LineItemHoldNotFoundError";
+  }
+}
+
+export class LineItemHoldEligibilityError extends Error {
+  constructor(
+    readonly status: string,
+    readonly pickedQuantity: number,
+    readonly fulfilledQuantity: number,
+  ) {
+    super("Line has already started picking or fulfillment and cannot be held");
+    this.name = "LineItemHoldEligibilityError";
+  }
+}
+
 export interface HoldSplitResult {
   heldShipmentId: number | null;
   mainShipmentId: number | null;
-  /** main was already in ShipStation (queued/labeled) → caller re-pushes it without the held line */
+  /** main was already in ShipStation (queued/labeled) → caller re-pushes or cancels it */
   mainShipmentPushed: boolean;
   /** main still has shippable items after the move (don't re-push an emptied shipment) */
   mainStillHasItems: boolean;
+  providerSyncStatus: HoldSplitProviderSyncStatus;
 }
 
 /**
  * Atomically mark a line held and split it into its own held shipment.
- * Returns null-ish ids when the line isn't in a shippable shipment (already
- * shipped/held/etc.) — the caller has already enforced "pending only" upstream.
+ * Re-validates pending/unpicked/unfulfilled state under FOR UPDATE inside the
+ * transaction (FW-04) and handles emptied main shipments safely (FW-03).
  */
 export async function holdLineItemWithSplit(
   db: any,
-  args: { wmsOrderId: number; orderItemId: number; reason: string; now: Date },
+  args: {
+    wmsOrderId: number;
+    orderItemId: number;
+    reason: string;
+    now: Date;
+    afterSplitInTransaction?: (tx: any, split: HoldSplitResult) => Promise<void>;
+  },
 ): Promise<HoldSplitResult> {
   const reason = args.reason.slice(0, 200);
   return await db.transaction(async (tx: any) => {
+    // 0. Lock the order_item row inside the transaction (FW-04) so concurrent
+    //    pick/ship completions cannot slip past a route-level precheck.
+    const lockedItemRows: any = await tx.execute(sql`
+      SELECT status,
+             COALESCE(picked_quantity, 0) AS picked_quantity,
+             COALESCE(fulfilled_quantity, 0) AS fulfilled_quantity
+      FROM wms.order_items
+      WHERE id = ${args.orderItemId} AND order_id = ${args.wmsOrderId}
+      FOR UPDATE
+    `);
+    const lockedItem = lockedItemRows?.rows?.[0];
+    if (!lockedItem) {
+      throw new LineItemHoldNotFoundError(args.wmsOrderId, args.orderItemId);
+    }
+    const itemStatus = String(lockedItem.status ?? "");
+    const pickedQuantity = Number(lockedItem.picked_quantity ?? 0);
+    const fulfilledQuantity = Number(lockedItem.fulfilled_quantity ?? 0);
+    if (
+      itemStatus !== "pending" ||
+      pickedQuantity > 0 ||
+      fulfilledQuantity > 0
+    ) {
+      throw new LineItemHoldEligibilityError(
+        itemStatus,
+        pickedQuantity,
+        fulfilledQuantity,
+      );
+    }
+
     // 1. Mark the line held (intent — same column P1 writes).
     await tx.execute(sql`
       UPDATE wms.order_items SET on_hold = true, hold_reason = ${reason}
       WHERE id = ${args.orderItemId}
     `);
 
-    // 2. Find the line's current shippable (non-held, non-terminal) shipment.
+    // 2. Find and lock the line's current shippable (non-held, non-terminal) shipment.
     const mainRows: any = await tx.execute(sql`
-      SELECT os.id, os.status, os.channel_id, os.shipstation_order_id
+      SELECT os.id, os.status, os.channel_id, os.shipstation_order_id, os.engine_order_ref
       FROM wms.outbound_shipment_items osi
       JOIN wms.outbound_shipments os ON os.id = osi.shipment_id
       WHERE osi.order_item_id = ${args.orderItemId}
@@ -53,12 +113,24 @@ export async function holdLineItemWithSplit(
         AND os.status NOT IN ('shipped', 'voided', 'cancelled', 'returned', 'lost')
       ORDER BY os.id
       LIMIT 1
+      FOR UPDATE OF os
     `);
     const main = mainRows?.rows?.[0];
     if (!main) {
-      return { heldShipmentId: null, mainShipmentId: null, mainShipmentPushed: false, mainStillHasItems: false };
+      const noMainResult: HoldSplitResult = {
+        heldShipmentId: null,
+        mainShipmentId: null,
+        mainShipmentPushed: false,
+        mainStillHasItems: false,
+        providerSyncStatus: "not_needed",
+      };
+      if (args.afterSplitInTransaction) {
+        await args.afterSplitInTransaction(tx, noMainResult);
+      }
+      return noMainResult;
     }
     const mainShipmentId = Number(main.id);
+    const mainStatus = String(main.status);
 
     // 3. Create the held shipment (planned, held=true — never pushed until released).
     const inserted: any = await tx.execute(sql`
@@ -76,17 +148,73 @@ export async function holdLineItemWithSplit(
       WHERE shipment_id = ${mainShipmentId} AND order_item_id = ${args.orderItemId}
     `);
 
-    // 5. Report whether the main still ships anything + was already pushed.
+    // 5. Report whether the main still ships anything + was already pushed (FW-03).
     const remainRows: any = await tx.execute(sql`
       SELECT COUNT(*)::int AS n FROM wms.outbound_shipment_items WHERE shipment_id = ${mainShipmentId}
     `);
     const mainStillHasItems = Number(remainRows?.rows?.[0]?.n ?? 0) > 0;
+    const hasProviderOrderRef =
+      (main.shipstation_order_id != null && Number(main.shipstation_order_id) > 0) ||
+      (typeof main.engine_order_ref === "string" && main.engine_order_ref.trim().length > 0);
     const mainShipmentPushed =
-      main.shipstation_order_id != null &&
-      Number(main.shipstation_order_id) > 0 &&
-      ["queued", "labeled"].includes(String(main.status));
+      hasProviderOrderRef &&
+      ["queued", "labeled"].includes(mainStatus);
 
-    return { heldShipmentId, mainShipmentId, mainShipmentPushed, mainStillHasItems };
+    let providerSyncStatus: HoldSplitProviderSyncStatus = "not_needed";
+    if (!mainStillHasItems) {
+      if (!mainShipmentPushed) {
+        // Emptied pre-push shipment: retire immediately so no empty planned shipment lingers.
+        await tx.execute(sql`
+          UPDATE wms.outbound_shipments
+          SET status = 'cancelled',
+              cancelled_at = ${args.now},
+              voided_reason = 'emptied_by_line_item_hold',
+              updated_at = ${args.now}
+          WHERE id = ${mainShipmentId} AND status = 'planned'
+        `);
+        providerSyncStatus = "not_needed";
+      } else if (mainStatus === "labeled") {
+        // Physical carrier label already exists — never erase physical truth (FW-03).
+        // Quarantine locally and surface for operator review / manual void.
+        await tx.execute(sql`
+          UPDATE wms.outbound_shipments
+          SET held = true,
+              held_at = ${args.now},
+              on_hold_reason = 'emptied_by_line_item_hold',
+              requires_review = true,
+              review_reason = 'line_item_held_after_label',
+              updated_at = ${args.now}
+          WHERE id = ${mainShipmentId}
+        `);
+        providerSyncStatus = "review_required_labeled";
+      } else {
+        // Emptied queued provider order: quarantine locally so pushShipment refuses it,
+        // and trigger durable provider cancellation.
+        await tx.execute(sql`
+          UPDATE wms.outbound_shipments
+          SET held = true,
+              held_at = ${args.now},
+              on_hold_reason = 'emptied_by_line_item_hold',
+              updated_at = ${args.now}
+          WHERE id = ${mainShipmentId}
+        `);
+        providerSyncStatus = "queued_cancel";
+      }
+    } else if (mainShipmentPushed) {
+      providerSyncStatus = "queued_repush";
+    }
+
+    const result: HoldSplitResult = {
+      heldShipmentId,
+      mainShipmentId,
+      mainShipmentPushed,
+      mainStillHasItems,
+      providerSyncStatus,
+    };
+    if (args.afterSplitInTransaction) {
+      await args.afterSplitInTransaction(tx, result);
+    }
+    return result;
   });
 }
 

@@ -12,8 +12,10 @@ import type {
 } from "../domain/listing-intent-propagation";
 import type { EbayListingSyncService } from "../../channels/ebay-listing-sync.service";
 import type { syncActiveListings } from "../../channels/ebay-listing-sync";
-import { PgDropshipListingPreviewRepository } from "../../dropship/infrastructure/dropship-listing-preview.repository";
-import type { DropshipListingPreviewService } from "../../dropship/application/dropship-listing-preview-service";
+import {
+  PgDropshipListingPreviewRepository,
+  type DropshipListingPreviewService,
+} from "../../dropship/listing-preview.api";
 
 const ACTOR = "system:listing-intent-propagation";
 const blocked = (code: string, message: string): IntentHandoff => ({
@@ -115,10 +117,10 @@ export class ExistingListingIntentHandoff implements ListingIntentHandoffPort {
         delivery.commandKey,
         d.channelId,
         ACTOR,
-        "sync",
       );
       if (prior) {
         if (
+          prior.operation === "withdraw" ||
           prior.productId !== delivery.productId ||
           prior.identity.connectionId !== d.connectionId ||
           prior.identity.accountId !== d.accountId ||
@@ -172,7 +174,7 @@ export class ExistingListingIntentHandoff implements ListingIntentHandoffPort {
       if (!job)
         return blocked(
           "LISTING_INTENT_LISTING_UNAVAILABLE",
-          "This product has no existing listing available to update. Review its saved listing mapping.",
+          "This sync request could not be confirmed. Open the listing workspace to check its saved request and blockers.",
         );
       return {
         state: "delivered",

@@ -1,0 +1,1139 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-25T22:49:47.316Z",
+  "validatedCode": {
+    "committedHead": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+    "testedParentHead": "0dd377683cc187c9d9828e747e3d3278404a3666",
+    "frozenRuntimePatchSha256": "537faaed8135526eccc05cef895cafb24123fb041c28fff1e1d995c230c85302",
+    "frozenFullPatchSha256": "e28500bb09fafb0d32ff8460e79dc5c3f6c4b4ad27aee3aaaf2bcc87ad6bbdc5",
+    "laterCommitExactlyContainsTestedPatch": true,
+    "equivalence": {
+      "file": "nullable-shipment-commit-equivalence-5dc5f1b4.json",
+      "sha256": "fe87e6c714b2a0b29059fe78e418fb33ab54644a5ddf1a29dfa111de1a084bff"
+    },
+    "frozenSnapshots": [
+      {
+        "file": "nullable-shipment-and-guard-frozen-0dd.json",
+        "sha256": "0037bd5da052092b233d49463562542aedaa340f92adf1262b83cdadc08a01fb"
+      },
+      {
+        "file": "nullable-shipment-and-guard-frozen-0dd-H4.json",
+        "sha256": "85051c3322b7bdaef66f3da877e7b6884861a6851233d7ae3fc5c4aee09f0f0d"
+      }
+    ],
+    "declarationOnlyDifference": "scripts/ci/browser-suite-impact.d.mts"
+  },
+  "clientAndBuildIdentity": {
+    "head": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+    "clientSharedFileCount": 1461,
+    "clientSharedSha256": "854f0264fa65813c9bf5977ab82e5616e7b7dbccb1d3fe13b66b96947e2e90f2",
+    "frontendIndexSha256": "5a05f07a240887015f5f0b225e86e09c70bc6430ec9d397edd9ef3dd1f39b478"
+  },
+  "baseMain": "31043e158a696fb1506d211be074e8e9bd8cf25b",
+  "boundary": "Local source/patch-equivalent tests on disposable fixtures only. No live-record repair, hosted CI, deployment or production acceptance is claimed.",
+  "connected": {
+    "discovery": {
+      "file": "connected-discovery-full-0dd37768.json",
+      "sha256": "86fb106defeeaa975a1d90f6b42e5d707bce245e7538f52129f041b27c62cf0c"
+    },
+    "monitorSummary": {
+      "file": "connected-final-monitor-summary-5dc5f1b4.json",
+      "sha256": "b02cb7cc811d752594324c3a5b77d9454c90a409ad10b318aa655b54214a5428"
+    },
+    "discovered": 46,
+    "passed": 46,
+    "failed": 0,
+    "skipped": 0,
+    "flaky": 0,
+    "reporterErrors": 0,
+    "exactCaseProjectCoverage": true,
+    "distinctShards": 4,
+    "sourceBoundary": "All four runners used stable final H4 pending source or its exact later commit. Earlier drifting/failed discovery attempts are excluded from final acceptance.",
+    "shards": [
+      {
+        "shard": 1,
+        "runner": {
+          "file": "connected-wrapper-1792968234311-33264.json",
+          "sha256": "90987ef851573890a228e8d3224a2752a6b30c6f65fb8e208fab1899dcfe6f08"
+        },
+        "command": [
+          "node",
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.procurement-connected.config.ts",
+          "--reporter=line,json",
+          "--global-timeout=720000",
+          "--output=C:\\Users\\owner\\Echelon\\outputs\\procurement-connected-verification-2026-10-25\\connected-artifacts-1792968234311-33264",
+          "--shard=1/4"
+        ],
+        "sourceBefore": {
+          "head": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "5a05f07a240887015f5f0b225e86e09c70bc6430ec9d397edd9ef3dd1f39b478"
+        },
+        "sourceAfter": {
+          "head": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "5a05f07a240887015f5f0b225e86e09c70bc6430ec9d397edd9ef3dd1f39b478"
+        },
+        "log": {
+          "file": "connected-1792968234311-33264.log",
+          "sha256": "ffba23272bbd8c4d8786ec7462bcf2040346e70db3a9946d20d4944834a27292"
+        },
+        "report": {
+          "file": "connected-1792968234311-33264.json",
+          "sha256": "22add5e8a9fa86915a406f2dbdd143776e82578b998442e9bca7d9147f3e1444"
+        },
+        "startedAt": "2026-10-25T22:43:54.311Z",
+        "finishedAt": "2026-10-25T22:47:37.391Z",
+        "reportDurationMs": 222390.098,
+        "counts": {
+          "passed": 12,
+          "failed": 0,
+          "skipped": 0,
+          "flaky": 0,
+          "reporterErrors": 0
+        },
+        "cases": [
+          {
+            "id": "4b28970336b13e56bf82-d4c34cc738c2dc2a5c78",
+            "file": "authority.spec.ts",
+            "title": "view-only lead cannot change receiving records through direct authenticated requests",
+            "project": "desktop"
+          },
+          {
+            "id": "4b28970336b13e56bf82-4d308c543635dc648370",
+            "file": "authority.spec.ts",
+            "title": "view-only lead sees disabled receive controls on a fresh receipt without pending recovery",
+            "project": "desktop"
+          },
+          {
+            "id": "4b28970336b13e56bf82-e09d47bc0115ff440248",
+            "file": "authority.spec.ts",
+            "title": "view-only lead cannot start, discard or import into an independently created draft",
+            "project": "desktop"
+          },
+          {
+            "id": "4b28970336b13e56bf82-e64ee503356406d89798",
+            "file": "authority.spec.ts",
+            "title": "a non-lead receiver with identical grants can reach the same receipt as the authorized API",
+            "project": "desktop"
+          },
+          {
+            "id": "4b28970336b13e56bf82-f6db3426e4f4da36dc17",
+            "file": "authority.spec.ts",
+            "title": "revocation after a committed lost response retains intent and restoration replays exactly once",
+            "project": "desktop"
+          },
+          {
+            "id": "4b28970336b13e56bf82-96f8334c38c22460d6c4",
+            "file": "authority.spec.ts",
+            "title": "expired persisted session preserves committed entry intent through real login and replay",
+            "project": "desktop"
+          },
+          {
+            "id": "4b28970336b13e56bf82-eac187afccc9a2fc1566",
+            "file": "authority.spec.ts",
+            "title": "another authenticated receiver cannot consume the original operator's pending intent",
+            "project": "desktop"
+          },
+          {
+            "id": "4b28970336b13e56bf82-4d8ea3f082ca960629e3",
+            "file": "authority.spec.ts",
+            "title": "receiving adjustment does not grant vendor or catalog creation",
+            "project": "desktop"
+          },
+          {
+            "id": "4b28970336b13e56bf82-e249e6d972b1fbdd0d9e",
+            "file": "authority.spec.ts",
+            "title": "a catalog creator can create metadata without gaining receipt adjustment authority",
+            "project": "desktop"
+          },
+          {
+            "id": "35279396d6a23ec842be-848cdf62eb5a20fcbec7",
+            "file": "catalog-validation.spec.ts",
+            "title": "catalog creation rejects invalid case factor before writes: ZERO-C0",
+            "project": "desktop"
+          },
+          {
+            "id": "35279396d6a23ec842be-49144539aa9452bf7c8e",
+            "file": "catalog-validation.spec.ts",
+            "title": "catalog creation rejects invalid case factor before writes: TOO-LARGE-C2147483648",
+            "project": "desktop"
+          },
+          {
+            "id": "35279396d6a23ec842be-f3aad5984aa1b7bb1874",
+            "file": "catalog-validation.spec.ts",
+            "title": "catalog creation rolls back its parent on variant failure and permits a clean retry",
+            "project": "desktop"
+          }
+        ]
+      },
+      {
+        "shard": 2,
+        "runner": {
+          "file": "connected-wrapper-1792968248697-80836.json",
+          "sha256": "c56e82a55a1bce99e1e669024a424780056485e33f5eb3f48373f215aa926b94"
+        },
+        "command": [
+          "node",
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.procurement-connected.config.ts",
+          "--reporter=line,json",
+          "--global-timeout=720000",
+          "--output=C:\\Users\\owner\\Echelon\\outputs\\procurement-connected-verification-2026-10-25\\connected-artifacts-1792968248697-80836",
+          "--shard=2/4"
+        ],
+        "sourceBefore": {
+          "head": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "5a05f07a240887015f5f0b225e86e09c70bc6430ec9d397edd9ef3dd1f39b478"
+        },
+        "sourceAfter": {
+          "head": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "5a05f07a240887015f5f0b225e86e09c70bc6430ec9d397edd9ef3dd1f39b478"
+        },
+        "log": {
+          "file": "connected-1792968248697-80836.log",
+          "sha256": "89cffe227efe47971fe3601866442e4db156d1ae0ac14b2ec244f44fb8f75678"
+        },
+        "report": {
+          "file": "connected-1792968248697-80836.json",
+          "sha256": "98744bd1554390a61c2d7d6db09cc02f51e1d9c1417a505d2ead2bd320a7877c"
+        },
+        "startedAt": "2026-10-25T22:44:08.698Z",
+        "finishedAt": "2026-10-25T22:47:49.627Z",
+        "reportDurationMs": 220228.24599999998,
+        "counts": {
+          "passed": 12,
+          "failed": 0,
+          "skipped": 0,
+          "flaky": 0,
+          "reporterErrors": 0
+        },
+        "cases": [
+          {
+            "id": "5d2868f7d23420c27cca-e650eaa52c899f9f6b3f",
+            "file": "navigation.spec.ts",
+            "title": "connected-viewer follows purchase, shipment Costs and freight invoice with preserved return context",
+            "project": "desktop"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-d710166f869ae84a4e06",
+            "file": "navigation.spec.ts",
+            "title": "connected-viewer follows a shared goods invoice to its other PO without replacing the original purchase anchor",
+            "project": "desktop"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-300504ca216cf6af5080",
+            "file": "navigation.spec.ts",
+            "title": "connected-picker follows purchase, shipment Costs and freight invoice with preserved return context",
+            "project": "desktop"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-425afc867d35d13c85af",
+            "file": "navigation.spec.ts",
+            "title": "connected-picker follows a shared goods invoice to its other PO without replacing the original purchase anchor",
+            "project": "desktop"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-faf50fefe770fe8ef9a1",
+            "file": "navigation.spec.ts",
+            "title": "a non-lead creator saves a fee-only purchase and keeps existing drafts read-only",
+            "project": "desktop"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-48d9e88fbfae7b941226",
+            "file": "navigation.spec.ts",
+            "title": "a non-lead purchasing reader can inspect AP work without receiving payment, credit or return authority",
+            "project": "desktop"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-b6968f3180d115704116",
+            "file": "navigation.spec.ts",
+            "title": "a non-lead read-only purchaser keeps draft detail and cannot enter or mutate its editor",
+            "project": "desktop"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-d2db5a62bd5540e03f34",
+            "file": "navigation.spec.ts",
+            "title": "a non-lead purchase editor can open an existing draft without gaining creation permission",
+            "project": "desktop"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-fcd5ab1c672e3536c5b0",
+            "file": "navigation.spec.ts",
+            "title": "a non-admin with both read grants can inspect the purchasing dashboard but cannot start auto-draft",
+            "project": "desktop"
+          },
+          {
+            "id": "53b6549a7a231b8ed108-3cfea4cd570ecbc9e4bb",
+            "file": "receiving-recovery.spec.ts",
+            "title": "committed case receipt survives lost response, reload, retry and close without duplicate stock",
+            "project": "desktop"
+          },
+          {
+            "id": "53b6549a7a231b8ed108-8ca8a81003c5099de838",
+            "file": "receiving-recovery.spec.ts",
+            "title": "lost finalization response retries against the committed receipt without a second stock posting",
+            "project": "desktop"
+          },
+          {
+            "id": "4b28970336b13e56bf82-8fbe4b823d4059e376b1",
+            "file": "authority.spec.ts",
+            "title": "view-only lead cannot change receiving records through direct authenticated requests",
+            "project": "mobile"
+          }
+        ]
+      },
+      {
+        "shard": 3,
+        "runner": {
+          "file": "connected-wrapper-1792968247994-60472.json",
+          "sha256": "94fd8426d77a3eae2882437e94ca9ea51413eacf8a72a8027d16fbbfa4b91477"
+        },
+        "command": [
+          "node",
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.procurement-connected.config.ts",
+          "--reporter=line,json",
+          "--global-timeout=720000",
+          "--output=C:\\Users\\owner\\Echelon\\outputs\\procurement-connected-verification-2026-10-25\\connected-artifacts-1792968247994-60472",
+          "--shard=3/4"
+        ],
+        "sourceBefore": {
+          "head": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "5a05f07a240887015f5f0b225e86e09c70bc6430ec9d397edd9ef3dd1f39b478"
+        },
+        "sourceAfter": {
+          "head": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "5a05f07a240887015f5f0b225e86e09c70bc6430ec9d397edd9ef3dd1f39b478"
+        },
+        "log": {
+          "file": "connected-1792968247994-60472.log",
+          "sha256": "4dc6e37177699e5e80bc88be99579fab148cc8c9827d6cc54089b78d4006360d"
+        },
+        "report": {
+          "file": "connected-1792968247994-60472.json",
+          "sha256": "f6baa05fe43a6dc0c1315ca790d4b73e46de7acd2788c27ec119c6367970c215"
+        },
+        "startedAt": "2026-10-25T22:44:07.994Z",
+        "finishedAt": "2026-10-25T22:47:37.550Z",
+        "reportDurationMs": 208969.02300000002,
+        "counts": {
+          "passed": 11,
+          "failed": 0,
+          "skipped": 0,
+          "flaky": 0,
+          "reporterErrors": 0
+        },
+        "cases": [
+          {
+            "id": "4b28970336b13e56bf82-10f4894d6fb5cc8fdb72",
+            "file": "authority.spec.ts",
+            "title": "view-only lead sees disabled receive controls on a fresh receipt without pending recovery",
+            "project": "mobile"
+          },
+          {
+            "id": "4b28970336b13e56bf82-76b9157508931ce2f6f9",
+            "file": "authority.spec.ts",
+            "title": "view-only lead cannot start, discard or import into an independently created draft",
+            "project": "mobile"
+          },
+          {
+            "id": "4b28970336b13e56bf82-edc28134856e988e3f8a",
+            "file": "authority.spec.ts",
+            "title": "a non-lead receiver with identical grants can reach the same receipt as the authorized API",
+            "project": "mobile"
+          },
+          {
+            "id": "4b28970336b13e56bf82-db0a5ed6168eedd337d5",
+            "file": "authority.spec.ts",
+            "title": "revocation after a committed lost response retains intent and restoration replays exactly once",
+            "project": "mobile"
+          },
+          {
+            "id": "4b28970336b13e56bf82-88a164a0fa33e84629b4",
+            "file": "authority.spec.ts",
+            "title": "expired persisted session preserves committed entry intent through real login and replay",
+            "project": "mobile"
+          },
+          {
+            "id": "4b28970336b13e56bf82-f1ce06de0ed76c00e897",
+            "file": "authority.spec.ts",
+            "title": "another authenticated receiver cannot consume the original operator's pending intent",
+            "project": "mobile"
+          },
+          {
+            "id": "4b28970336b13e56bf82-991a96789a97ee8f437a",
+            "file": "authority.spec.ts",
+            "title": "receiving adjustment does not grant vendor or catalog creation",
+            "project": "mobile"
+          },
+          {
+            "id": "4b28970336b13e56bf82-02e6479d8295a95c7d40",
+            "file": "authority.spec.ts",
+            "title": "a catalog creator can create metadata without gaining receipt adjustment authority",
+            "project": "mobile"
+          },
+          {
+            "id": "35279396d6a23ec842be-95cae8f2a89ec2cc1363",
+            "file": "catalog-validation.spec.ts",
+            "title": "catalog creation rejects invalid case factor before writes: ZERO-C0",
+            "project": "mobile"
+          },
+          {
+            "id": "35279396d6a23ec842be-e0bfbbb49d972771b9a5",
+            "file": "catalog-validation.spec.ts",
+            "title": "catalog creation rejects invalid case factor before writes: TOO-LARGE-C2147483648",
+            "project": "mobile"
+          },
+          {
+            "id": "35279396d6a23ec842be-850ff0c176658af0a8f2",
+            "file": "catalog-validation.spec.ts",
+            "title": "catalog creation rolls back its parent on variant failure and permits a clean retry",
+            "project": "mobile"
+          }
+        ]
+      },
+      {
+        "shard": 4,
+        "runner": {
+          "file": "connected-wrapper-1792968248698-6828.json",
+          "sha256": "3e98a0946f7fd341b516e833a0605831b4e8892c4cc101ac102a87c74082b8b4"
+        },
+        "command": [
+          "node",
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          "--config",
+          "playwright.procurement-connected.config.ts",
+          "--reporter=line,json",
+          "--global-timeout=720000",
+          "--output=C:\\Users\\owner\\Echelon\\outputs\\procurement-connected-verification-2026-10-25\\connected-artifacts-1792968248698-6828",
+          "--shard=4/4"
+        ],
+        "sourceBefore": {
+          "head": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "5a05f07a240887015f5f0b225e86e09c70bc6430ec9d397edd9ef3dd1f39b478"
+        },
+        "sourceAfter": {
+          "head": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+          "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "frontendIndexSha256": "5a05f07a240887015f5f0b225e86e09c70bc6430ec9d397edd9ef3dd1f39b478"
+        },
+        "log": {
+          "file": "connected-1792968248698-6828.log",
+          "sha256": "d2be9991f4378aa3b0c637de014c515850081637eaafb0bbb2cc72203ab6001a"
+        },
+        "report": {
+          "file": "connected-1792968248698-6828.json",
+          "sha256": "5367308fc8f58bf922994802c993f552b912249e5e4f0dcbc11ad2f727f27489"
+        },
+        "startedAt": "2026-10-25T22:44:08.699Z",
+        "finishedAt": "2026-10-25T22:47:38.544Z",
+        "reportDurationMs": 209135.361,
+        "counts": {
+          "passed": 11,
+          "failed": 0,
+          "skipped": 0,
+          "flaky": 0,
+          "reporterErrors": 0
+        },
+        "cases": [
+          {
+            "id": "5d2868f7d23420c27cca-201116f0c037711d7fc0",
+            "file": "navigation.spec.ts",
+            "title": "connected-viewer follows purchase, shipment Costs and freight invoice with preserved return context",
+            "project": "mobile"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-e11dfa34a87d3d1dcc74",
+            "file": "navigation.spec.ts",
+            "title": "connected-viewer follows a shared goods invoice to its other PO without replacing the original purchase anchor",
+            "project": "mobile"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-05b96ccd540088d57e90",
+            "file": "navigation.spec.ts",
+            "title": "connected-picker follows purchase, shipment Costs and freight invoice with preserved return context",
+            "project": "mobile"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-34d08843f969e278ad1f",
+            "file": "navigation.spec.ts",
+            "title": "connected-picker follows a shared goods invoice to its other PO without replacing the original purchase anchor",
+            "project": "mobile"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-927cfbd84a7ad80462f9",
+            "file": "navigation.spec.ts",
+            "title": "a non-lead creator saves a fee-only purchase and keeps existing drafts read-only",
+            "project": "mobile"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-e70e011f5cac8e17d76a",
+            "file": "navigation.spec.ts",
+            "title": "a non-lead purchasing reader can inspect AP work without receiving payment, credit or return authority",
+            "project": "mobile"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-b7a1becce19edb50ba8e",
+            "file": "navigation.spec.ts",
+            "title": "a non-lead read-only purchaser keeps draft detail and cannot enter or mutate its editor",
+            "project": "mobile"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-7006a46b6ad86ab796e5",
+            "file": "navigation.spec.ts",
+            "title": "a non-lead purchase editor can open an existing draft without gaining creation permission",
+            "project": "mobile"
+          },
+          {
+            "id": "5d2868f7d23420c27cca-97e50c75cf660fdfc45b",
+            "file": "navigation.spec.ts",
+            "title": "a non-admin with both read grants can inspect the purchasing dashboard but cannot start auto-draft",
+            "project": "mobile"
+          },
+          {
+            "id": "53b6549a7a231b8ed108-9d03b5517c05562fc8b2",
+            "file": "receiving-recovery.spec.ts",
+            "title": "committed case receipt survives lost response, reload, retry and close without duplicate stock",
+            "project": "mobile"
+          },
+          {
+            "id": "53b6549a7a231b8ed108-15af9cf159e9bfa30a07",
+            "file": "receiving-recovery.spec.ts",
+            "title": "lost finalization response retries against the committed receipt without a second stock posting",
+            "project": "mobile"
+          }
+        ]
+      }
+    ]
+  },
+  "mockedBrowser": {
+    "runner": {
+      "file": "browser-1792967365057-result.json",
+      "sha256": "5384e8a679ec7f8414ae34a20cb0f906003ef51ace58de9e013123993152af7c"
+    },
+    "command": [
+      "node",
+      "node_modules/@playwright/test/cli.js",
+      "test",
+      "-c",
+      "playwright.procurement.config.ts",
+      "test/browser/procurement-workspace.spec.ts",
+      "test/browser/procurement-planning.spec.ts",
+      "test/browser/procurement-pipeline.spec.ts",
+      "test/browser/procurement-cost-cross-screen.spec.ts",
+      "test/browser/procurement-cost-origin-repair.spec.ts",
+      "test/browser/procurement-supplier-document.spec.ts",
+      "test/browser/procurement-ap-work-lists.spec.ts",
+      "test/browser/procurement-ap-safeguards.spec.ts",
+      "test/browser/procurement-payment-completion.spec.ts",
+      "test/browser/procurement-supplier-credits.spec.ts",
+      "--workers=4",
+      "--reporter=line,json",
+      "--output=C:\\Users\\owner\\Echelon\\outputs\\procurement-connected-verification-2026-10-25\\browser-artifacts-1792967365057"
+    ],
+    "elapsedMs": 501919,
+    "sourceBefore": {
+      "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+      "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "untracked": []
+    },
+    "sourceAfter": {
+      "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+      "workingTreeSha256": "537faaed8135526eccc05cef895cafb24123fb041c28fff1e1d995c230c85302",
+      "untracked": []
+    },
+    "log": {
+      "file": "browser-1792967365057.log",
+      "sha256": "44c396249fd7181d38efef0545d2042bdaab2ddb3b5264aca2460fa1217e7072"
+    },
+    "passed": 308,
+    "failed": 0,
+    "skipped": 0,
+    "flaky": 0,
+    "reporterErrors": 0,
+    "report": {
+      "file": "browser-1792967365057.json",
+      "sha256": "aa2075e0151aa5409a139a10a169e99a401af813fd0d58a66cd8773accfad35b"
+    },
+    "reportDurationMs": 501353.392,
+    "indexWrapper": {
+      "file": "authority-browser-final-1792967365001-result.json",
+      "sha256": "1ebd6c16b4503cdc4eddc886f746b981fa9e9e43b9048161aeb9f8931b1fa797"
+    },
+    "sourceBoundary": "The runner started at clean0dd and ended at H3 as backend-only files changed. This is scoped UI/spec/build evidence, not whole-tree source stability.",
+    "scopedInputs": {
+      "fileCount": 1643,
+      "sha256": "1e8b69a3c29cf7482af4469a831bbd2484d4470fc4aa510263967bc1626dee1b",
+      "snapshots": [
+        {
+          "file": "authority-browser-scope-during-1792967365057.json",
+          "sha256": "b24f167eb01ba5a535601c2a46da98bb4f685b9ec0f737c55509ed4185e93048"
+        },
+        {
+          "file": "authority-browser-scope-after-1792967365057.json",
+          "sha256": "d257b93f1d18360a17b2567e2f6dcc385e61fb796efe2e0cea91e1ec102e4064"
+        }
+      ],
+      "unchangedThroughLaterCodeCommit": true,
+      "timingNote": "The during snapshot was captured after the browser runner started; its original wrapper separately records clean source at startup. It is not represented as a startup timestamp."
+    }
+  },
+  "build": {
+    "runner": {
+      "file": "build-1792968494681-result.json",
+      "sha256": "f5427c99664e48d43f03eaa160b8445b9fd983449aaf56ae98126724c6a34de6"
+    },
+    "command": [
+      "node",
+      "node_modules/tsx/dist/cli.mjs",
+      "script/build.ts"
+    ],
+    "elapsedMs": 16222,
+    "sourceBefore": {
+      "head": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+      "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "untracked": []
+    },
+    "sourceAfter": {
+      "head": "5dc5f1b4bd25dac4c83aab51b888f7b64cb7d7ca",
+      "workingTreeSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "untracked": []
+    },
+    "log": {
+      "file": "build-1792968494681.log",
+      "sha256": "e9caea6742451b61601263390123ce10184e51798ff0154de83b7e60ba9dcef5"
+    }
+  },
+  "runtimeUnit": {
+    "runner": {
+      "file": "unit-1792967881398-result.json",
+      "sha256": "6807a414c26ea4ea0ba63da1580f6eac8ed198e7877872ffe513d43b811c66e3"
+    },
+    "command": [
+      "node",
+      "node_modules/vitest/vitest.mjs",
+      "run",
+      "server/modules/procurement/__tests__/unit",
+      "shared/procurement",
+      "client/src/components/layout/__tests__/unit/procurement-sidebar-authority.test.ts",
+      "client/src/pages/__tests__/unit/ap-invoice-navigation.test.ts",
+      "server/modules/catalog/__tests__/unit/inventory-tracking-policy.test.ts",
+      "server/modules/catalog/__tests__/unit/variant-uom.test.ts",
+      "client/src/lib/__tests__/unit/exact-money-input.test.ts",
+      "shared/__tests__/unit/money-read.test.ts",
+      "shared/utils/__tests__/money.test.ts",
+      "server/modules/inventory/__tests__/unit/cost-resolver-money.test.ts",
+      "--maxWorkers=2",
+      "--allowOnly=false",
+      "--passWithNoTests=false",
+      "--reporter=default",
+      "--reporter=json",
+      "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-connected-verification-2026-10-25\\unit-1792967881398.json"
+    ],
+    "elapsedMs": 131514,
+    "sourceBefore": {
+      "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+      "workingTreeSha256": "537faaed8135526eccc05cef895cafb24123fb041c28fff1e1d995c230c85302",
+      "untracked": []
+    },
+    "sourceAfter": {
+      "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+      "workingTreeSha256": "537faaed8135526eccc05cef895cafb24123fb041c28fff1e1d995c230c85302",
+      "untracked": []
+    },
+    "log": {
+      "file": "unit-1792967881398.log",
+      "sha256": "9e480a4237f8ddba8c24736d6667297bd49de84fc1fd2ac662e401682e670561"
+    },
+    "report": {
+      "file": "unit-1792967881398.json",
+      "sha256": "51c2ab80f8b96c7d54b0eefd3db0974b551f06a1a627edd3136e100be4c49e4a"
+    },
+    "files": 296,
+    "passed": 5097,
+    "failed": 0,
+    "skipped": 0,
+    "todo": 0,
+    "sourceBoundary": "Ran on stable H3; exact H3 code is present in the later commit and only the optional non-runtime declaration differs in H4."
+  },
+  "guards": {
+    "runner": {
+      "file": "guards-1792968057624-result.json",
+      "sha256": "cd383bc1eaa88506a0250e8d16238fb7f1bf71fd8e5275a683de709b656501fe"
+    },
+    "command": [
+      "node",
+      "scripts/ci/run-test-lane.mjs",
+      "guards",
+      "--maxWorkers=2"
+    ],
+    "elapsedMs": 95315,
+    "sourceBefore": {
+      "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+      "workingTreeSha256": "e28500bb09fafb0d32ff8460e79dc5c3f6c4b4ad27aee3aaaf2bcc87ad6bbdc5",
+      "untracked": []
+    },
+    "sourceAfter": {
+      "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+      "workingTreeSha256": "e28500bb09fafb0d32ff8460e79dc5c3f6c4b4ad27aee3aaaf2bcc87ad6bbdc5",
+      "untracked": []
+    },
+    "log": {
+      "file": "guards-1792968057624.log",
+      "sha256": "0df0481ec0345211cd7eb33cbdc307fac3ebe34b5df91ac32ad75cfe8f0e7cd2"
+    },
+    "files": 11,
+    "passed": 420,
+    "failed": 0,
+    "skipped": 0,
+    "sourceBoundary": "Official guard lane ran on stable H4."
+  },
+  "typechecks": [
+    {
+      "runner": {
+        "file": "tsconfig-1792967881424-result.json",
+        "sha256": "8933ad6d7c6547bd2192e125311dd3a1df233f32e90ada05cac347d2b886d2f0"
+      },
+      "command": [
+        "node",
+        "--max-old-space-size=6144",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "--incremental",
+        "false",
+        "-p",
+        "tsconfig.json"
+      ],
+      "elapsedMs": 144421,
+      "sourceBefore": {
+        "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+        "workingTreeSha256": "537faaed8135526eccc05cef895cafb24123fb041c28fff1e1d995c230c85302",
+        "untracked": []
+      },
+      "sourceAfter": {
+        "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+        "workingTreeSha256": "537faaed8135526eccc05cef895cafb24123fb041c28fff1e1d995c230c85302",
+        "untracked": []
+      },
+      "log": {
+        "file": "tsconfig-1792967881424.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "scope": "application types, H3; the final H4 adds only the optional CI declaration"
+    },
+    {
+      "runner": {
+        "file": "tsconfig.tests.server-1792968059803-result.json",
+        "sha256": "3b27ac0e3a45552ed4ce1d5a665c486bad1eff59d6750896c6746238bf1dbde0"
+      },
+      "command": [
+        "node",
+        "--max-old-space-size=8192",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "--incremental",
+        "false",
+        "-p",
+        "tsconfig.tests.server.json"
+      ],
+      "elapsedMs": 92006,
+      "sourceBefore": {
+        "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+        "workingTreeSha256": "e28500bb09fafb0d32ff8460e79dc5c3f6c4b4ad27aee3aaaf2bcc87ad6bbdc5",
+        "untracked": []
+      },
+      "sourceAfter": {
+        "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+        "workingTreeSha256": "e28500bb09fafb0d32ff8460e79dc5c3f6c4b4ad27aee3aaaf2bcc87ad6bbdc5",
+        "untracked": []
+      },
+      "log": {
+        "file": "tsconfig.tests.server-1792968059803.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "scope": "server-test types including the corrected optional declaration, H4"
+    },
+    {
+      "runner": {
+        "file": "tsconfig.tests.connected-1792967880178-result.json",
+        "sha256": "e3b338304d00c3278dcb3ddc3925b48f696914ad5ffb1b120a978f41e44ac637"
+      },
+      "command": [
+        "node",
+        "--max-old-space-size=6144",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "--incremental",
+        "false",
+        "-p",
+        "tsconfig.tests.connected.json"
+      ],
+      "elapsedMs": 90548,
+      "sourceBefore": {
+        "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+        "workingTreeSha256": "537faaed8135526eccc05cef895cafb24123fb041c28fff1e1d995c230c85302",
+        "untracked": []
+      },
+      "sourceAfter": {
+        "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+        "workingTreeSha256": "537faaed8135526eccc05cef895cafb24123fb041c28fff1e1d995c230c85302",
+        "untracked": []
+      },
+      "log": {
+        "file": "tsconfig.tests.connected-1792967880178.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "scope": "connected-test types, H3; the final H4 adds only the optional CI declaration"
+    },
+    {
+      "runner": {
+        "file": "authority-types-1792967342192-result.json",
+        "sha256": "28ed3d49dfd7b6b4b9917c2dc68e627edf67a06962c0735355b340dedacf2e8f"
+      },
+      "command": [
+        "node",
+        "--max-old-space-size=6144",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "--incremental",
+        "false",
+        "-p",
+        "tsconfig.tests.client.json"
+      ],
+      "elapsedMs": 162065,
+      "log": {
+        "file": "authority-types-1792967342192.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "scope": "client-test types before the backend-only patch; all1461 client/shared bytes still match",
+      "testedHead": "0dd377683cc187c9d9828e747e3d3278404a3666",
+      "clientSharedSha256": "854f0264fa65813c9bf5977ab82e5616e7b7dbccb1d3fe13b66b96947e2e90f2"
+    },
+    {
+      "runner": {
+        "file": "authority-browser-types-1792967340394-result.json",
+        "sha256": "bab4b2a690f948fcebbe05fd03dd8ed7111cf733bd4ebd0204f77e702adbf1fe"
+      },
+      "command": [
+        "node",
+        "--max-old-space-size=6144",
+        "node_modules/typescript/bin/tsc",
+        "--noEmit",
+        "--incremental",
+        "false",
+        "-p",
+        "C:\\Users\\owner\\Echelon\\outputs\\procurement-connected-verification-2026-10-25\\tsconfig.browser.json"
+      ],
+      "elapsedMs": 15741,
+      "log": {
+        "file": "authority-browser-types-1792967340394.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      },
+      "scope": "all procurement browser specs before the backend-only patch; all1643 UI/spec/fixture/config bytes still match",
+      "testedHead": "0dd377683cc187c9d9828e747e3d3278404a3666",
+      "clientSharedSha256": "854f0264fa65813c9bf5977ab82e5616e7b7dbccb1d3fe13b66b96947e2e90f2"
+    }
+  ],
+  "postgresql": {
+    "passed": 245,
+    "failed": 0,
+    "skipped": 0,
+    "testedParentHead": "0dd377683cc187c9d9828e747e3d3278404a3666",
+    "capturedInputs": 5379,
+    "changedCapturedInputs": [
+      "server/__tests__/unit/dropship-browser-features.test.ts"
+    ],
+    "changedExecutedInputs": [],
+    "sourceBoundary": "Only the separately executed guard test changed among captured inputs during PostgreSQL suites. All executed backend/schema/fixture inputs and20 cost/money owners stayed unchanged; final bytes match the after-snapshot. Whole-tree source stability is not claimed.",
+    "ownerHashesUnchangedDuringRunAndThroughCodeCommit": {
+      "shared/money-read.ts": "4a6ee90f48118a7253c2c43334d46e0424b7a1a200dbe0bf6b7e4d9989c690da",
+      "shared/utils/money.ts": "310c562a68344afcc07ba5da3374d84ba4546547bd6ddfb07d49559b853454d3",
+      "server/modules/inventory/cost-resolver.ts": "5d3e3552a453053b577c46897a8b6468d13eef50056b7f193bcbe1f8e9f29012",
+      "server/modules/inventory/cogs.service.ts": "b98a3153549390943ede42a5e8a3230bc1dcb0f72852846cd10dea325ddfb97e",
+      "server/modules/inventory/application/inventory.use-cases.ts": "090d71e93d85ff32b027aa5234bfeb4eba77910b0ea257a4a56f155bbf34eb02",
+      "server/modules/inventory/domain/supplier-return-cost.ts": "68dd033ac8ac91a745f9e8b5cf45e71038d369ca30483574a1778c51bf959441",
+      "server/modules/procurement/receiving.service.ts": "bc7bf3bdd46c67d9a393cd1ba3dab721b2601934b1ee87717ed4187152a1ba39",
+      "server/modules/procurement/receive-validation.service.ts": "058bfa7a690d5f86fe3d9bef229c20b1a71becd55544c5306be2489c3ed78526",
+      "server/modules/procurement/receipt-reversal.service.ts": "d92654182578189f4d6e1e487dca28d6f7f10cd059300ae2972a05592ee4d17e",
+      "server/modules/procurement/purchasing.service.ts": "f256da415328ae2a61a60e9aca7866c2ea4300c954fc4632a222185e54643bb7",
+      "server/modules/procurement/procurement.storage.ts": "4b18d58beb671c132ef4f77f7d5e016c889016084a19c2ebc35f86205d102cf0",
+      "server/modules/procurement/ap-ledger.service.ts": "2204b62542aae2e08f878177a50cff3d3e0bbf382b9e08bfd1847ed8924b4beb",
+      "server/modules/procurement/cost-reporting.repository.ts": "c517e100f5a911432a5daf4fa581a5bfd740077bb25be1836577d436f8053128",
+      "server/modules/procurement/purchase-cost-status.repository.ts": "ad159b107a5230740c2d1695647aa70e600f52c3b4cab14b4a2a1663e7855d76",
+      "server/modules/procurement/purchase-cost-status-snapshot.repository.ts": "b222bef97c123e1efb8cca2fc52c101eae9792aabbfff0e0ce2b0523155a79cd",
+      "server/modules/procurement/shipment-cost-review.repository.ts": "51ca723f5478bce0b8d211c3fc7e92143016f33d60c0c18e86fce80487f5c97b",
+      "server/modules/procurement/shipment-tracking.service.ts": "65d8d20eb2a243f1672c2bceefe197c860c33a94782ffca361e643352c3f71e4",
+      "server/modules/procurement/shipment-health-evidence.repository.ts": "62d1f62e2f75bb176d42700e59d9102c97bd25c006b1f4e4ec852315bc36fdfb",
+      "server/modules/procurement/shipment-cost-posting-read.repository.ts": "d1a0ce7f77fed2e1f25e15ac12a0ea4dabdd0c8f445fde5973a3497f11915032",
+      "server/modules/procurement/domain/current-shipment-cost-source.ts": "b61c1576859e993ee5fca216b7c030c305ded9ff1a166b75e7fec823db9c57dd"
+    },
+    "snapshots": [
+      {
+        "file": "current-main-db-inputs-0dd37768-before.json",
+        "sha256": "b964031fb27d16cf54487e5a1df9ccf9a3530bd88dae14e6ede54ad092f12c0f"
+      },
+      {
+        "file": "current-main-db-inputs-0dd37768-after.json",
+        "sha256": "8ffb16ef44a693e8f2042f8a944cfffe9ba21645abe1ecf1124e92f3a5f42bb3"
+      }
+    ],
+    "summary": {
+      "file": "current-main-database-summary-0dd37768.json",
+      "sha256": "72c57e9473f45dd56c57f5446527a10a4866488dc2abc3b202d196a591071697"
+    },
+    "files": [
+      {
+        "testFile": "server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts",
+        "runner": {
+          "file": "db-01-receiving-cost-application-1792967693798-result.json",
+          "sha256": "b1b8fae4b0b2bd6a4e735fab882e0bbef659a951bbee17db022a18052ee64bd1"
+        },
+        "command": [
+          "node",
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts",
+          "--no-file-parallelism",
+          "--maxWorkers=1",
+          "--isolate",
+          "--allowOnly=false",
+          "--passWithNoTests=false",
+          "--reporter=default",
+          "--reporter=json",
+          "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-connected-verification-2026-10-25\\db-01-receiving-cost-application-1792967693798.json"
+        ],
+        "elapsedMs": 444299,
+        "sourceBefore": {
+          "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+          "workingTreeSha256": "31301784b5cd6cc1c84f5db954427a81e16a367d0fc46048afb7630192bc10b1",
+          "untracked": []
+        },
+        "sourceAfter": {
+          "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+          "workingTreeSha256": "e28500bb09fafb0d32ff8460e79dc5c3f6c4b4ad27aee3aaaf2bcc87ad6bbdc5",
+          "untracked": []
+        },
+        "log": {
+          "file": "db-01-receiving-cost-application-1792967693798.log",
+          "sha256": "07eb99b557f8e530dfa8c8e1e92d6f21a4e9f2dfada37a10e8350a4f1c1f4c89"
+        },
+        "report": {
+          "file": "db-01-receiving-cost-application-1792967693798.json",
+          "sha256": "6579ddc60eb393af62b15ce4b9cf0c6398e7e2f68a79ca951dd1aa10aebba97e"
+        },
+        "files": 1,
+        "passed": 209,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0,
+        "wholeTreeChangedDuringSuite": true
+      },
+      {
+        "testFile": "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
+        "runner": {
+          "file": "db-01-procurement-flow-cost-controlled-acceptance-1792967694924-result.json",
+          "sha256": "fd9a44b12195851dbadb579adbea0de387476bfaa936c4c6af3ef21704b9198c"
+        },
+        "command": [
+          "node",
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
+          "--no-file-parallelism",
+          "--maxWorkers=1",
+          "--isolate",
+          "--allowOnly=false",
+          "--passWithNoTests=false",
+          "--reporter=default",
+          "--reporter=json",
+          "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-connected-verification-2026-10-25\\db-01-procurement-flow-cost-controlled-acceptance-1792967694924.json"
+        ],
+        "elapsedMs": 82202,
+        "sourceBefore": {
+          "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+          "workingTreeSha256": "31301784b5cd6cc1c84f5db954427a81e16a367d0fc46048afb7630192bc10b1",
+          "untracked": []
+        },
+        "sourceAfter": {
+          "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+          "workingTreeSha256": "31301784b5cd6cc1c84f5db954427a81e16a367d0fc46048afb7630192bc10b1",
+          "untracked": []
+        },
+        "log": {
+          "file": "db-01-procurement-flow-cost-controlled-acceptance-1792967694924.log",
+          "sha256": "fd599cc5300b92d2df75f851ab82efa6b1415ba66a49057ae5ea0b8f2b789f86"
+        },
+        "report": {
+          "file": "db-01-procurement-flow-cost-controlled-acceptance-1792967694924.json",
+          "sha256": "91a5a2da98d152cc284a2d347bd1db37d1f9c748cdaa579edf379e53218b3ccc"
+        },
+        "files": 1,
+        "passed": 4,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0,
+        "wholeTreeChangedDuringSuite": false
+      },
+      {
+        "testFile": "server/modules/procurement/__tests__/integration/cost-reporting.integration.test.ts",
+        "runner": {
+          "file": "db-02-cost-reporting-1792967694924-result.json",
+          "sha256": "aea40a05c1e5e2f58a6aa624dff9e7a09d56cea9345e8ed8702270f90b83e4b0"
+        },
+        "command": [
+          "node",
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "server/modules/procurement/__tests__/integration/cost-reporting.integration.test.ts",
+          "--no-file-parallelism",
+          "--maxWorkers=1",
+          "--isolate",
+          "--allowOnly=false",
+          "--passWithNoTests=false",
+          "--reporter=default",
+          "--reporter=json",
+          "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-connected-verification-2026-10-25\\db-02-cost-reporting-1792967694924.json"
+        ],
+        "elapsedMs": 78237,
+        "sourceBefore": {
+          "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+          "workingTreeSha256": "31301784b5cd6cc1c84f5db954427a81e16a367d0fc46048afb7630192bc10b1",
+          "untracked": []
+        },
+        "sourceAfter": {
+          "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+          "workingTreeSha256": "537faaed8135526eccc05cef895cafb24123fb041c28fff1e1d995c230c85302",
+          "untracked": []
+        },
+        "log": {
+          "file": "db-02-cost-reporting-1792967694924.log",
+          "sha256": "d988c7fa64d93f60585b089e938db4e00532549d52e788ee530466362e32edf9"
+        },
+        "report": {
+          "file": "db-02-cost-reporting-1792967694924.json",
+          "sha256": "5f2c39f9d9d8f1f4888a1ecb9a769f9fd55a9c68e2cdd18309f086a2f0095ed1"
+        },
+        "files": 1,
+        "passed": 25,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0,
+        "wholeTreeChangedDuringSuite": true
+      },
+      {
+        "testFile": "server/modules/procurement/__tests__/integration/shipment-work-list.integration.test.ts",
+        "runner": {
+          "file": "db-03-shipment-work-list-1792967694924-result.json",
+          "sha256": "f9ff5daae453e043561002bcfb46cca7830106df0557e25b52b0e7818d4da360"
+        },
+        "command": [
+          "node",
+          "node_modules/vitest/vitest.mjs",
+          "run",
+          "server/modules/procurement/__tests__/integration/shipment-work-list.integration.test.ts",
+          "--no-file-parallelism",
+          "--maxWorkers=1",
+          "--isolate",
+          "--allowOnly=false",
+          "--passWithNoTests=false",
+          "--reporter=default",
+          "--reporter=json",
+          "--outputFile.json=C:\\Users\\owner\\Echelon\\outputs\\procurement-connected-verification-2026-10-25\\db-03-shipment-work-list-1792967694924.json"
+        ],
+        "elapsedMs": 3874,
+        "sourceBefore": {
+          "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+          "workingTreeSha256": "537faaed8135526eccc05cef895cafb24123fb041c28fff1e1d995c230c85302",
+          "untracked": []
+        },
+        "sourceAfter": {
+          "head": "0dd377683cc187c9d9828e747e3d3278404a3666",
+          "workingTreeSha256": "537faaed8135526eccc05cef895cafb24123fb041c28fff1e1d995c230c85302",
+          "untracked": []
+        },
+        "log": {
+          "file": "db-03-shipment-work-list-1792967694924.log",
+          "sha256": "08a2f1fc86c2216e3b0ea66362a90c728aa754ae0184fc7b7cf4969385c6a3f6"
+        },
+        "report": {
+          "file": "db-03-shipment-work-list-1792967694924.json",
+          "sha256": "9581218e5724718e980adae90fabf115373e1cd3bfcdf8f5be5a4c7b08288587"
+        },
+        "files": 1,
+        "passed": 7,
+        "failed": 0,
+        "skipped": 0,
+        "todo": 0,
+        "wholeTreeChangedDuringSuite": false
+      }
+    ],
+    "removedDisposableDatabases": 4
+  },
+  "finalCleanup": {
+    "audit": {
+      "file": "database-cleanup-audit-1792968486508.json",
+      "sha256": "d4001aae8949f0aa0aefb3f06f169a3eba132c4be0ba06d8db8fd83e76f8ee43"
+    },
+    "checkedAt": "2026-10-25T22:48:06.507Z",
+    "remainingTestDatabases": 0,
+    "remainingConnections": 0,
+    "readOnly": true,
+    "instance": "dedicated review_procurement on loopback PostgreSQL62873",
+    "scopedChildProcessAudit": {
+      "file": "final-connected-process-audit-5dc5f1b4.json",
+      "sha256": "37e79f052be662e2391136ca8ad4011f4fc4e32e3a4648b25c2b0e1b8dbf7905"
+    },
+    "remainingScopedChildProcesses": 0
+  },
+  "migrationPolicy": {
+    "report": {
+      "file": "migration-policy-final-5dc5f1b4.json",
+      "sha256": "1e12f87f334de9b06c33e00d194ed2ed868f365aada3a357ef53d42d8885b3ec"
+    },
+    "validatedMigrations": 557,
+    "base": "31043e158a696fb1506d211be074e8e9bd8cf25b",
+    "migrationFilesChangedFromBase": 0
+  },
+  "earlierDiagnostics": {
+    "nonFinalConnectedAttempt": {
+      "file": "connected-discovery-summary-0dd37768.json",
+      "sha256": "cfa5f5dcccbbbded19729c92c907a17d2c99050c61f5cde552dd00d74b82cd69"
+    },
+    "correctedTypeDeclarationFailure": {
+      "runner": {
+        "file": "tsconfig.tests.server-1792967881811-result.json",
+        "sha256": "bb39c1ddf49249613da71f737a5f70c093e1f8486f9bc94f3cf669af310c5995"
+      },
+      "log": {
+        "file": "tsconfig.tests.server-1792967881811.log",
+        "sha256": "a3b3dc46b7f4a815dfed3b1574757427edb04e8cbacde5b06b5697e5db444916"
+      },
+      "correction": "Existing runtime optional fourth argument was missing from its declaration; final H4 server types and guards above passed after correcting that declaration."
+    },
+    "previousSource": {
+      "connected222": {
+        "file": "connected-final-monitor-summary-22246006.json",
+        "sha256": "7212b9893513ef64ee7fcadcc3c97fa5865924e04c7226d9c8e84591985c17b9"
+      },
+      "mocked304": {
+        "file": "browser-1792965660733.json",
+        "sha256": "2acdab9ec67b2fe5e159f15f609e4f1243f73f47cc10c41d3b851c319bd284ef"
+      },
+      "note": "Retained as earlier-source history; neither is reused as final combined-source acceptance."
+    }
+  }
+}

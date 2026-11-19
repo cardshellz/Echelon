@@ -172,6 +172,18 @@ function setup() {
 }
 
 describe("Walmart listing provider", () => {
+  it.each([[0.01, 0.063], [0.1, 0.125], [1.00001, 1.063]] as const)("prepares %s pounds with shared ounce rounding and valid native precision", async (weight, expected) => {
+    const { provider } = setup();
+    const original = draft();
+    original.attributes.Orderable = { ...jsonObject(original.attributes.Orderable), ShippingWeight: weight };
+    const input = { catalog, draft: original, priceCents: 1299 };
+    const before = structuredClone(input);
+    const prepared = await provider.prepare(account, input);
+    expect(prepared.issues).toEqual([]);
+    expect(prepared.payload).toMatchObject({ Orderable: { ShippingWeight: expected } });
+    expect((await provider.prepare(account, input)).payload).toEqual(prepared.payload);
+    expect(input).toEqual(before);
+  });
   it("prepares the full product content and category for a proven recreation despite its retained local link", async () => {
     const { provider, api, channels } = setup();
     const input = { catalog: { ...catalog, alreadyLinked: true }, draft: draft(), priceCents: 1299 };
@@ -181,7 +193,7 @@ describe("Walmart listing provider", () => {
     expect(prepared.issues).toEqual([]);
     expect(prepared.feedType).toBe("MP_ITEM");
     expect(prepared.payload).toMatchObject({
-      Orderable: { sku: catalog.sku, price: 12.99, ShippingWeight: 0.1 },
+      Orderable: { sku: catalog.sku, price: 12.99, ShippingWeight: 0.125 },
       Visible: { [type]: { productName: catalog.title, brand: catalog.brand, mainImageUrl: catalog.images[0], pieceCount: 100 } },
     });
     expect(channels.assertListingNotStopped).toHaveBeenCalledWith(account, catalog.sku);

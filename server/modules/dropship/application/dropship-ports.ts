@@ -13,6 +13,8 @@ export interface DropshipClock {
 }
 
 export interface DropshipLogger {
+  /** Detail and expected repeats (root CLAUDE.md section 10); optional, so existing loggers stay valid. */
+  debug?(event: DropshipLogEvent): void;
   info(event: DropshipLogEvent): void;
   warn(event: DropshipLogEvent): void;
   error(event: DropshipLogEvent): void;
@@ -72,6 +74,21 @@ export interface DropshipCanonicalAcceptanceFulfillment {
     inventoryClaimId: string | null;
     reason: string;
   }): Promise<void>;
+}
+
+/**
+ * OMS's stop for an accepted dropship order the marketplace cancelled
+ * (server/modules/oms/dropship-marketplace-cancel.ts, plan v4 §7.2): OMS owns
+ * the order, so dropship only asks. Registered at boot with OMS's own handles.
+ * Any throw means "try again later"; the answer is computed from OMS's rows,
+ * so a retry gives the same one.
+ */
+export interface DropshipMarketplaceCancelStop {
+  /** `intakeId` is the dropship intake that asks: OMS writes it on its own event (CLAUDE.md §10 correlation). */
+  stopOrderForMarketplaceCancel(input: { omsOrderId: number; intakeId: number }): Promise<{
+    kind: "stopped" | "already_shipped" | "not_stopped" | "not_found";
+    shipments: ReadonlyArray<object>;
+  }>;
 }
 
 export interface DropshipOmsFulfillmentSyncRetryQueue {

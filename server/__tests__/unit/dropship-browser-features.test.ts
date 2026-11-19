@@ -12,10 +12,26 @@ import {
   fullDropshipBrowserPlan, runDropshipBrowserSelection, selectDropshipBrowserFeatures,
 } from "../../../scripts/ci/dropship-browser-impact.mjs";
 
+let cachedRepoSources: { files: Set<string>; readSource: (file: string) => string; dependencyCache: Map<unknown, unknown> } | undefined;
 function repositorySources() {
-  const files = new Set(execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-    { encoding: "utf8" }).split("\0").filter(Boolean));
-  return { files, readSource: (file: string) => readFileSync(file, "utf8") };
+  if (!cachedRepoSources) {
+    const files = new Set(execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      { encoding: "utf8" }).split("\0").filter(Boolean));
+    const sourceCache = new Map<string, string>();
+    cachedRepoSources = {
+      files,
+      readSource: (file: string) => {
+        let cached = sourceCache.get(file);
+        if (cached === undefined) {
+          cached = readFileSync(file, "utf8");
+          sourceCache.set(file, cached);
+        }
+        return cached;
+      },
+      dependencyCache: new Map(),
+    };
+  }
+  return cachedRepoSources;
 }
 
 function fixture(extra: Record<string, string> = {}) {
@@ -95,9 +111,9 @@ describe("affected feature browser selection", () => {
   });
 
   it.each(['import "./missing";', 'const feature = import(variable);', 'import "#unknown/alias";', 'const invalid = (;'])(
-    "runs the affected group when its dependency graph cannot be trusted: %s", source => {
+    "runs unfiltered coverage when a dependency graph cannot be trusted: %s", source => {
       const plan = select("docs/example.md", { "test/browser/fixtures/dropship-finance-harness.tsx": source });
-      expect(selectedFeatures(plan)).toEqual(["finance"]);
+      expect(plan.matrix).toEqual(fullDropshipBrowserPlan("uncertain").matrix);
       expect(plan.decisions.find(decision => decision.feature === "finance")?.reason).toContain("Dependency analysis was uncertain");
     },
   );
@@ -126,7 +142,8 @@ describe("affected feature browser selection", () => {
       const output = path.join(directory, "outputs");
       const plan = runDropshipBrowserSelection({ BROWSER_EVENT_NAME: "workflow_dispatch", GITHUB_OUTPUT: output });
       expect(readFileSync(output, "utf8")).toBe(`run=true\nmatrix=${JSON.stringify(plan.matrix)}\n`);
-      expect(plan.matrix.include.map(entry => entry.feature)).toEqual(["all", "all"]);
+      expect(plan.matrix.include.map(entry => [entry.feature, entry.shard, entry.shards]))
+        .toEqual([["all", 1, 4], ["all", 2, 4], ["all", 3, 4], ["all", 4, 4]]);
       expect(runDropshipBrowserSelection({ BROWSER_BASE_SHA: "main; echo injected", BROWSER_HEAD_SHA: "0".repeat(40) }).matrix)
         .toEqual(plan.matrix);
     } finally {
@@ -138,7 +155,14 @@ describe("affected feature browser selection", () => {
     ["client/src/pages/dropship/DropshipPortalWallet.tsx", ["wallet"]],
     ["shared/dropship/program-finance-money.ts", ["finance"]],
     // Listing settings PR 12 deleted the pricing rules panel and its own feature group; a step row is the listings group's.
-    ["client/src/pages/dropship/listing-settings/PriceDefaultRow.tsx", ["listings"]],
+    // Step 1 plan S2-5 PR A: the catalog-scale journeys render the same Catalog page (one harness), so it runs them too.
+    ["client/src/pages/dropship/listing-settings/PriceDefaultRow.tsx", ["listings", "catalog-scale"]],
+    ["client/src/pages/dropship/catalog/PublishStep.tsx", ["listings", "catalog-scale"]],
+    ["test/browser/dropship-policy-catalog-publish-runs.spec.ts", ["catalog-scale"]],
+    // PLAN-B v4.1 V29: step 1 at scale is the catalog-scale group's second spec.
+    ["test/browser/dropship-policy-catalog-choose-scale.spec.ts", ["catalog-scale"]],
+    // PLAN-C v4.1 §13.4: step 1's listing ends are its third.
+    ["test/browser/dropship-policy-catalog-end.spec.ts", ["catalog-scale"]],
     ["test/browser/dropship-policy-listing-settings-helpers.ts", ["listings"]],
     ["shared/ebay-listing-issue.ts", []],
     ["docs/migration-allocation.md", []],
@@ -184,11 +208,14 @@ describe("feature browser coverage registration", () => {
 
   it("registers every injected HTML entrypoint, including those hidden behind spec helpers", () => {
     const { files, readSource } = repositorySources();
+    // All groups inspect the same source snapshot. Reuse only parsed edges;
+    // every closure still traverses and validates its own spec entrypoints.
+    const dependencyEdges = new Map<string, string[]>();
     for (const [name, group] of Object.entries(DROPSHIP_BROWSER_FEATURES)) {
       const harnesses = new Set<string>();
       // Imports from specs reach helper files such as the catalog stubs. Their
       // HTML module strings are not TypeScript imports and need explicit roots.
-      for (const file of dependencyClosure(group.tests, files, readSource)) {
+      for (const file of dependencyClosure(group.tests, files, readSource, dependencyEdges)) {
         for (const match of readSource(file).matchAll(/["'](test\/browser\/fixtures\/[^"']+\.tsx)["']/g)) harnesses.add(match[1]);
       }
       expect([...harnesses].sort(), name).toEqual([...group.roots].sort());

@@ -4,67 +4,16 @@ import * as React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import {
-  type DropshipCatalogResponse,
-  type DropshipCatalogRow,
-} from "@/lib/dropship-ops-surface";
-import {
   ListingAccessNoticeView,
   describeCatalogListingTier,
-  fetchAllSelectedCatalogRows,
   formatIssue,
 } from "../DropshipPortalCatalog";
 import { describeListingAccess, listingAccessLink } from "@/lib/dropship-listing-access";
 import { Router } from "wouter";
 
-function row(productVariantId: number): DropshipCatalogRow {
-  return { productVariantId } as DropshipCatalogRow;
-}
-
-function page(input: {
-  rows: DropshipCatalogRow[];
-  total: number;
-  page: number;
-  limit: number;
-}): DropshipCatalogResponse {
-  return {
-    ...input,
-    facets: {
-      categories: [],
-      productLines: [],
-      products: [],
-    },
-  };
-}
-
 describe("DropshipPortalCatalog workflow", () => {
-  it("loads every selected catalog page and removes duplicate variants", async () => {
-    const loadPage = vi.fn(async (pageNumber: number) => {
-      if (pageNumber === 1) {
-        return page({
-          rows: [row(11), row(12)],
-          total: 3,
-          page: 1,
-          limit: 2,
-        });
-      }
-      return page({
-        rows: [row(12), row(13)],
-        total: 3,
-        page: 2,
-        limit: 2,
-      });
-    });
-
-    const rows = await fetchAllSelectedCatalogRows(loadPage);
-
-    expect(loadPage.mock.calls).toEqual([
-      [1, 200],
-      [2, 200],
-    ]);
-    expect(rows.map((catalogRow) => catalogRow.productVariantId)).toEqual([11, 12, 13]);
-  });
-
-  it("puts catalog choice before listing preview and reserves MFA for push", () => {
+  // Step 1 plan S2-5 PR A: step 3's body moved to catalog/PublishStep.tsx; its source pins moved to DropshipCatalogPublish.test.ts.
+  it("puts catalog choice before step 3's publish card", () => {
     const source = readFileSync(
       join(process.cwd(), "client", "src", "pages", "dropship", "DropshipPortalCatalog.tsx"),
       "utf8",
@@ -72,7 +21,7 @@ describe("DropshipPortalCatalog workflow", () => {
     // Step 1 stage 1: the choice moved into ChooseStep, which holds the filters, the heading and the table, in that order.
     const choose = readFileSync(join(process.cwd(), "client/src/pages/dropship/catalog/ChooseStep.tsx"), "utf8");
     const chooseStepPosition = source.indexOf("<ChooseStep");
-    const listingPreviewPosition = source.indexOf("<ListingPreviewPanel");
+    const listingPreviewPosition = source.indexOf("<PublishStep");
     const filterPosition = choose.indexOf("<CatalogFilterPanel");
     const availableCatalogPosition = choose.indexOf("{CHOOSE_WORDS.heading}");
     const catalogTablePosition = choose.indexOf("<ChooseTable");
@@ -86,9 +35,6 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(choose).not.toContain("manage_catalog_selection");
     expect(source).not.toContain("CatalogSelectionProofPanel");
     expect(source).not.toContain("manage_catalog_selection");
-    expect(source).toContain("MFA is requested only when you queue ready listings.");
-    expect(source).toContain('verifyPasskeyStepUp("bulk_listing_push")');
-    expect(source).toContain('startEmailStepUp("bulk_listing_push")');
   });
 
   it("names the required eBay category and the optional store shelf in step 3's preview, and keeps the shelf picker's words", () => {
@@ -105,7 +51,9 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(source).not.toContain("Your eBay Store organization (optional)");
     expect(source).not.toContain("The required eBay category comes from your eBay categories above.");
     const previewSource = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipListingPreview.tsx"), "utf8");
-    expect(source).toContain("<DropshipListingPreview");
+    // Step 3's table is in PublishStep since step 1 plan S2-5 PR A (the Check's results).
+    const publishSource = readFileSync(join(process.cwd(), "client/src/pages/dropship/catalog/PublishStep.tsx"), "utf8");
+    expect(publishSource).toContain("<DropshipListingPreview");
     expect(previewSource).toContain("Marketplace category");
     // The shelf row carries step 2's name ("Store shelf", R:90) through the words module (PR 10h).
     expect(previewSource).toContain("LISTING_PREVIEW_WORDS.storeShelf");
@@ -196,40 +144,5 @@ describe("listing access notice", () => {
       link: listingAccessLink("update_membership_payment") });
     expect(markup).toContain("Your .ops membership payment is past due.");
     expect(markup).not.toContain("<a ");
-  });
-
-  it("keeps listing failures inside the listing card and never emails a code for a blocked push", () => {
-    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalCatalog.tsx"), "utf8");
-    const pushHandler = source.slice(source.indexOf("async function pushListings()"), source.indexOf("async function runListingAction("));
-    expect(pushHandler.indexOf("if (pushAccessNotice) return;")).toBeGreaterThan(-1);
-    expect(pushHandler.indexOf("if (pushAccessNotice) return;")).toBeLessThan(pushHandler.indexOf("startEmailStepUp"));
-    expect(source).toContain("{listingError && (listingError.notice");
-    expect(source).not.toContain("A launch-ready store connection is required before listing preview or push.");
-    // An expired verification reloads the proof so the next click asks again.
-    const start = source.indexOf("function showListingError(");
-    // Step 1 stage 1 removed applyCatalogFilters, the next function before; chooseStore follows showListingError now.
-    const end = source.indexOf("function chooseStore(");
-    expect(start).toBeGreaterThan(-1);
-    expect(end).toBeGreaterThan(start);
-    const errorHandler = source.slice(start, end);
-    expect(errorHandler).toContain("if (isStepUpRequiredError(caught)) {");
-    expect(errorHandler).toContain("void refetchAuth();");
-  });
-
-  it("says any Listing settings save holds step 3, in plain words (Interim, PR 12 PROPOSAL)", () => {
-    const source = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalCatalog.tsx"), "utf8");
-    const words = ["Wait for your listing settings to finish saving, then queue again.", "Saving your listing settings…"];
-    for (const sentence of words) {
-      expect(source.split(sentence).length - 1, sentence).toBe(1);
-      expect(sentence).not.toMatch(/[A-Z]{2,}_[A-Z_]+/);
-      expect(sentence).not.toContain("Older settings");
-    }
-    // The queue guard sits where a pending save stops the push.
-    const pushHandler = source.slice(source.indexOf("async function pushListings()"), source.indexOf("async function queueListingsOnce("));
-    expect(pushHandler).toContain(`if (pendingPriceSavesRef.current > 0) {`);
-    expect(pushHandler).toContain(words[0]);
-    // A save no longer refreshes the preview, so the stale-preview line no longer says it does.
-    expect(source).not.toContain("Saving your listing price and refreshing the preview");
-    expect(source).not.toContain("Wait for your listing price to finish saving");
   });
 });

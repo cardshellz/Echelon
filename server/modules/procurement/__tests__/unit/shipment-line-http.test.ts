@@ -30,7 +30,7 @@ vi.mock("../../../../platform/commands/command-results.repository", () => ({
   createDrizzleFinancialCommandRepository: () => mocks.repository,
 }));
 vi.mock("../../ap-ledger.service", () => ({}));
-vi.mock("../../../notifications/notifications.service", () => ({}));
+vi.mock("../../../notifications/in-app-notifications.api", () => ({}));
 
 import { ShipmentTrackingError } from "../../shipment-tracking.service";
 import { ShipmentUnitOptionsError } from "../../shipment-unit-options.service";
@@ -73,7 +73,7 @@ beforeEach(async () => {
   service.executeLineCommandInTransaction.mockResolvedValue({ id: 31, inboundShipmentId: 7, version: "a".repeat(64) });
   const app = express();
   app.use(express.json());
-  app.locals.services = { shipmentTracking: service };
+  app.locals.services = { shipmentTracking: service } as any;
   registerInboundShipmentRoutes(app);
   server = createServer(app);
   await new Promise<void>((resolve) => { server!.listen(0, "127.0.0.1", resolve); });

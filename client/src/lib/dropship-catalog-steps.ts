@@ -5,7 +5,8 @@
  * which only touch the browser storage they are handed.
  */
 import type { ListingSettingsPolicyKind, ListingSettingsSummary } from "@shared/dropship/listing-settings";
-import { formatStatus, type DropshipStoreConnectionSummary, type DropshipVendorSelectionRule } from "./dropship-ops-surface";
+import type { DropshipStoreConnectionSummary } from "./dropship-ops-surface";
+import { vendorPlatformName } from "./dropship-vendor-labels";
 
 export const CATALOG_STEPS = ["choose", "setup", "publish"] as const;
 export type CatalogStep = (typeof CATALOG_STEPS)[number];
@@ -79,14 +80,13 @@ function isCatalogStep(value: string | undefined): value is CatalogStep {
 export type CatalogStepTick = "done" | "todo" | "unknown";
 
 /**
- * Step 1 is done once any active include rule exists. The catalog summary's
- * selected count replaces this when it ships (design PR 4).
+ * Step 1 is done once anything is selected: the selection summary's
+ * `selectedTotal` (PLAN-B v4.1 V25; one-time picks have no rules to read).
+ * `unknown` while the count loads or failed to load.
  */
-export function chooseStepTick(
-  rules: readonly Pick<DropshipVendorSelectionRule, "action" | "isActive">[] | undefined,
-): CatalogStepTick {
-  if (!rules) return "unknown";
-  return rules.some((rule) => rule.action === "include" && rule.isActive !== false) ? "done" : "todo";
+export function chooseStepTick(selectedTotal: number | undefined): CatalogStepTick {
+  if (selectedTotal === undefined) return "unknown";
+  return selectedTotal > 0 ? "done" : "todo";
 }
 
 export interface ListingSettingsRailInput {
@@ -256,7 +256,20 @@ export interface CatalogStoreOption {
 export function catalogStoreName(
   connection: Pick<DropshipStoreConnectionSummary, "externalDisplayName" | "shopDomain" | "platform">,
 ): string {
-  return connection.externalDisplayName || connection.shopDomain || `${formatStatus(connection.platform)} store name pending`;
+  return connection.externalDisplayName || connection.shopDomain || `${vendorPlatformName(connection.platform)} store`;
+}
+
+/**
+ * The store's own name, or null when it has none yet. For words that tell the
+ * vendor which Settings button to choose: without a name the button reads the
+ * placeholder catalogStoreName gives ("Reconnect eBay store"), so
+ * those words name "the store's Reconnect button" instead
+ * (dropship-listing-push-status unverifiedAccountWords).
+ */
+export function catalogStoreOwnName(
+  connection: Pick<DropshipStoreConnectionSummary, "externalDisplayName" | "shopDomain" | "platform"> | null,
+): string | null {
+  return connection?.externalDisplayName || connection?.shopDomain || null;
 }
 
 /** The launch-ready stores the rail lists, in the order the server returned them. */

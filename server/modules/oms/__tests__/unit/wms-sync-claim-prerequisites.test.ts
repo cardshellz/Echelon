@@ -2,9 +2,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ReservationServiceContract } from "../../../channels/reservation.service";
 
 import {
   admitInitialProviderShipmentAfterInventoryAuthority,
+  assertPaidPhysicalLineAuthority,
   requireRoutedWarehouseId,
   WmsShipmentPrerequisiteError,
   WmsSyncService,
@@ -60,6 +62,45 @@ describe("WMS shipment inventory prerequisites", () => {
     })).toBe(7);
   });
 
+  it("rejects a paid physical order whose payment never authorized its lines", () => {
+    expect(() =>
+      assertPaidPhysicalLineAuthority({
+        omsOrderId: 1178672,
+        financialStatus: "paid",
+        lines: [
+          {
+            id: 123649,
+            quantity: 20,
+            paidQuantity: 0,
+            requiresShipping: true,
+          },
+        ],
+      }),
+    ).toThrowError(
+      expect.objectContaining({
+        code: "WMS_SHIPMENT_PREREQUISITE_FAILED",
+        context: {
+          omsOrderId: 1178672,
+          financialStatus: "paid",
+          orderLineIds: [123649],
+        },
+      }),
+    );
+  });
+
+  it("allows legitimate zero-materialization states", () => {
+    expect(() =>
+      assertPaidPhysicalLineAuthority({
+        omsOrderId: 10,
+        financialStatus: "paid",
+        lines: [
+          { id: 1, quantity: 2, paidQuantity: 2, requiresShipping: true },
+          { id: 2, quantity: 1, paidQuantity: 0, requiresShipping: false },
+        ],
+      }),
+    ).not.toThrow();
+  });
+
   it("allows an untracked physical line when authority returns an explicit no-claim success", async () => {
     const reserveOrder = vi.fn(async () => ({
       orderId: 9901,
@@ -79,7 +120,7 @@ describe("WMS shipment inventory prerequisites", () => {
 
   it("keeps an explicit business shortfall eligible for discrepancy picking", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    const reserveOrder = vi.fn(async () => ({
+    const reservation = {
       orderId: 9902,
       canonicalClaimId: "71",
       reserved: 1,
@@ -87,8 +128,11 @@ describe("WMS shipment inventory prerequisites", () => {
       failed: [{ sku: "C25", orderItemId: 44, reason: "canonical ATP after safety is 0" }],
       totalBaseUnits: 25,
       totalPromisedBaseUnits: 0,
-    }));
-    const service = reservationHarness(reserveOrder);
+    };
+    const reserveOrder = vi.fn(async () => reservation);
+    const service = reservationHarness(reserveOrder, vi.fn(async () => ({
+      reconciled: false, release: { released: 0, failed: [] }, reservation,
+    })));
 
     await expect(service.reserveBeforeShipmentProcessing(9902, null, "explicit_shortfall"))
       .resolves.toBeUndefined();
@@ -235,6 +279,9 @@ describe("WMS shipment inventory prerequisites", () => {
 
 function reservationHarness(
   reserveOrder: (...args: any[]) => Promise<any>,
+  reconcileOrderDemand: ReservationServiceContract["reconcileOrderDemand"] = async () => {
+    throw new Error("Unexpected canonical demand reconciliation in reservation fixture");
+  },
 ): ReservationPrerequisiteHarness {
-  return new WmsSyncService({ reservation: { reserveOrder } } as any) as unknown as ReservationPrerequisiteHarness;
+  return new WmsSyncService({ reservation: { reserveOrder, reconcileOrderDemand } } as any) as unknown as ReservationPrerequisiteHarness;
 }

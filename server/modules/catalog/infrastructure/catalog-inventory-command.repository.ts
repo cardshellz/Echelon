@@ -1,10 +1,19 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 import type { db as applicationDatabase } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
-import { channelFeeds, inventoryLevels, productLocations, products, productVariants, replenRules, replenTasks } from "@shared/schema";
-import type { InventoryUseCases } from "../../inventory/application/inventory.use-cases";
-import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
-import { openOperationalQuantityPosting } from "../../inventory/infrastructure/operational-quantity-posting";
+import { channelFeeds, inventoryLevels, productLocations, products, productVariants } from "@shared/schema";
+import {
+  archiveProductReplenishmentInTx,
+  lockInventoryCostGraph,
+  openOperationalQuantityPosting,
+  type InventoryUseCases,
+} from "../../inventory/catalog-inventory.api";
+import { deactivateActiveChannelFeedsByVariantIdInChannels } from "../../channels/channel-feed-listing-mutations.api";
+import { deleteZeroInventoryLevelsByVariantIdInTx } from "../../inventory/cross-module-inventory-mutations.api";
+import {
+  deleteProductLocationsByVariantIdInWarehouse,
+  reassignProductLocationsToVariantInWarehouse,
+} from "../../warehouse/cross-module-warehouse-mutations.api";
 import { CatalogInventoryCommandError, CatalogInventoryCommandService,
   type CatalogInventoryCommandRepository, type CatalogInventoryUnitOfWork } from "../application/catalog-inventory-command.service";
 
@@ -52,31 +61,27 @@ export class PostgresCatalogInventoryCommandRepository implements CatalogInvento
             replenDeactivated: 0, replenTasksCancelled: 0, movedLocationCount: 0 };
           for (const sourceId of sourceVariantIds) {
             if (command.operation === "variant_merge") {
-              result.movedLocationCount += (await tx.update(productLocations)
-                .set({ productVariantId: command.targetVariantId!, updatedAt: now })
-                .where(eq(productLocations.productVariantId, sourceId)).returning({ id: productLocations.id })).length;
+              result.movedLocationCount += await reassignProductLocationsToVariantInWarehouse(
+                tx,
+                sourceId,
+                command.targetVariantId!,
+                now,
+              );
             } else {
               if (command.targetVariantId !== null) {
                 // Every ledger-era zero projection retains its historical identity.
-                if (!posting) result.inventoryCleared += (await tx.delete(inventoryLevels).where(and(
-                  eq(inventoryLevels.productVariantId, sourceId), eq(inventoryLevels.variantQty, 0),
-                  eq(inventoryLevels.reservedQty, 0), eq(inventoryLevels.pickedQty, 0), eq(inventoryLevels.packedQty, 0),
-                )).returning({ id: inventoryLevels.id })).length;
-                result.binAssignmentsCleared += (await tx.delete(productLocations).where(eq(productLocations.productVariantId, sourceId))
-                  .returning({ id: productLocations.id })).length;
+                if (!posting) result.inventoryCleared += await deleteZeroInventoryLevelsByVariantIdInTx(tx, sourceId);
+                result.binAssignmentsCleared += await deleteProductLocationsByVariantIdInWarehouse(tx, sourceId);
               }
               // is_active triggers retain listing identity and enqueue publication.
-              result.channelFeedsDeactivated += (await tx.update(channelFeeds).set({ isActive: 0, updatedAt: now })
-                .where(and(eq(channelFeeds.productVariantId, sourceId), eq(channelFeeds.isActive, 1))).returning({ id: channelFeeds.id })).length;
+              result.channelFeedsDeactivated += await deactivateActiveChannelFeedsByVariantIdInChannels(tx, sourceId, now);
             }
             await tx.update(productVariants).set({ isActive: false, updatedAt: now }).where(eq(productVariants.id, sourceId));
           }
           if (command.operation === "product_archive") {
-            result.replenDeactivated = (await tx.update(replenRules).set({ isActive: 0 })
-              .where(and(eq(replenRules.productId, command.sourceId), eq(replenRules.isActive, 1))).returning({ id: replenRules.id })).length;
-            result.replenTasksCancelled = (await tx.update(replenTasks).set({ status: "cancelled", completedAt: now })
-              .where(and(eq(replenTasks.productId, command.sourceId), inArray(replenTasks.status, ["pending", "assigned", "in_progress"])))
-              .returning({ id: replenTasks.id })).length;
+            const replen = await archiveProductReplenishmentInTx(tx, command.sourceId, now);
+            result.replenDeactivated = replen.replenDeactivated;
+            result.replenTasksCancelled = replen.replenTasksCancelled;
             await tx.update(products).set({ isActive: false, status: "archived", updatedAt: now }).where(eq(products.id, command.sourceId));
           }
           return result;

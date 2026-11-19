@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { currentShipmentCostSourceIssue } from "../../domain/current-shipment-cost-source";
+import { currentShipmentCostSourceIssue, shipmentCostSourceReadRequirement } from "../../domain/current-shipment-cost-source";
 import type { CostSourceRevision } from "@shared/procurement/cost-source-contracts";
 const source = (): CostSourceRevision => ({ contractVersion: 1, revision: 1, fingerprint: "a".repeat(64), component: "landed",
   scope: { kind: "shipment_line", purchaseOrderId: 1, purchaseOrderLineId: 2, inboundShipmentId: 10, inboundShipmentLineId: 30 },
@@ -7,6 +7,16 @@ const source = (): CostSourceRevision => ({ contractVersion: 1, revision: 1, fin
   currency: "USD", totalMills: 100000, basePieces: 80, evidence: "estimated", packagingTreatment: "not_applicable", issue: null, manualOverride: null });
 const check = (contract: unknown, currentFingerprint: string | undefined = "a".repeat(64)) => currentShipmentCostSourceIssue({ lineId: 30, shipmentId: 10, contract, currentFingerprint });
 describe("current shipment source evidence", () => {
+  it.each([null, undefined, {}, { ...source(), scope: { ...source().scope, inboundShipmentId: 11 } },
+    { ...source(), issue: { code: "LANDED_ALLOCATION_STALE", message: "Review changed allocation." } }])(
+    "does not require a live fingerprint when the source policy cannot consume one: %j", contract => {
+      expect(shipmentCostSourceReadRequirement({ lineId: 30, shipmentId: 10, contract }).needsCurrentFingerprint).toBe(false);
+      expect(check(contract, "a".repeat(64))).toEqual(check(contract, undefined));
+    });
+  it.each(["estimated", "confirmed"] as const)("requires live evidence for a valid %s source", evidence => {
+    expect(shipmentCostSourceReadRequirement({ lineId: 30, shipmentId: 10, contract: { ...source(), evidence } }))
+      .toEqual({ needsCurrentFingerprint: true, savedFingerprint: "a".repeat(64) });
+  });
   it.each(["estimated", "confirmed"] as const)("permits current %s evidence without pretending it is confirmed", evidence => {
     const contract = { ...source(), evidence }, before = JSON.stringify(contract);
     expect(check(contract)).toBeNull(); expect(JSON.stringify(contract)).toBe(before);

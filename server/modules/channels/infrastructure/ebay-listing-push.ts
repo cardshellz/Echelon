@@ -1,4 +1,5 @@
 import { ebayIntentAccount, prepareEbayChannelIntent } from "../ebay-prepared-intent";
+import { prepareEbayListingPackages } from "../adapters/ebay/ebay-listing-package";
 import { ebayBusinessPolicies } from "../ebay-business-policies";
 import { z } from "zod";
 import { db, pool, getDatabasePoolSnapshot } from "../../../db";
@@ -14,18 +15,26 @@ import { readExistingEbayListingIdentityForProduct } from "../ebay-listing-sync"
 import { createEbayMarketplaceRegistrationAdapters } from "../adapters/ebay/ebay-marketplace-registration.factory";
 import { observeExistingEbayPublication, assertEbayListingSourceIdentityUnchanged } from "../ebay-existing-listing-identity";
 import { resolveEbayPublicationTarget, assertEbayPublicationTargetUnchanged } from "../ebay-publication-completion.domain";
-import type { PreparedEbayPublication } from "../ebay-publication-completion.service";
-import { admitEbayPublication } from "../ebay-publication-admission.service";
+import { inspectEbayPublicationPreparation, type PreparedEbayPublication } from "../ebay-publication-completion.service";
 import { randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { drizzle } from "drizzle-orm/node-postgres";
 import * as schema from "@shared/schema";
 import { EbayAuthService, createEbayAuthConfig } from "../adapters/ebay/ebay-auth.service";
 import { ensureEbayListingInventoryReady } from "./ebay-listing-inventory-readiness";
+import { linkEbayListingStockBeforeChange } from "./ebay-listing-stock-link-hook";
+import { linkChannelEbayStock, readEbayStockLinkGaps } from "../../inventory-planning/quantity-publication";
+import { EbayListingChangeIntentRepository } from "./ebay-listing-change-intent.repository";
+
+/** The actor of a stock link made by a reviewed listing update or rebuild (its receipt and audit row). */
+const EBAY_LISTING_CHANGE_STOCK_ACTOR = "system:ebay-listing-change";
 
 const repository = new PostgresEbayListingPushRepository(pool, EBAY_CHANNEL_ID, () => new Date(),
   () => getDatabasePoolSnapshot().maximumConnections);
 const connector = new EbayMarketplaceListingConnector();
+const changeIntents = new EbayListingChangeIntentRepository(pool);
+/** The connector raises this before its first eBay write of an in-place update (updateExistingListing's review checks). */
+const UPDATE_REFUSED_BEFORE_EBAY_WRITE = "EBAY_LISTING_REVIEW_CHANGED";
 const metadataSchema = z.object({
   marketplaceId: z.string().trim().min(1).optional().default("EBAY_US"),
   merchantLocationKey: z.string().trim().min(1).optional().default("card-shellz-hq"),
@@ -96,6 +105,7 @@ async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>
       variationAspectName: isMultiVariant ? determineVariationAspectName(variants) : "",
       variantPrices: prices, atpByVariantId: new Map(quantities.map(row => [row.productVariantId, row.atpUnits])),
       marketplaceId: ctx.metadata.marketplaceId, ebayBrowseCategoryId: browseCategoryId, resolvedPoliciesByVariantId: resolvedPolicies.byVariantId,
+      packageRequirementsByVariantId: resolvedPolicies.packageRequirementsByVariantId,
       storeCategoryNames: category?.ebay_store_category_name ? [category.ebay_store_category_name] : [],
       merchantLocationKey: ctx.metadata.merchantLocationKey,
       ...(existingGroupKey === undefined ? {} : { existingGroupKey }),
@@ -119,6 +129,7 @@ async function preparePushDraft(input: { ctx: Awaited<ReturnType<typeof context>
     // connector rechecks this content contract before any subsequent write.
     draft = alignDraftVariationSchemaToLiveGroup({ draft: { ...draft, itemGroup: draft.itemGroup }, liveGroup });
   }
+  draft = await prepareEbayListingPackages(createEbayRouteListingLifecycleClient(clientInput), draft);
   draft.preparedIntent = prepareEbayChannelIntent({
     account: ebayIntentAccount({ channelId: EBAY_CHANNEL_ID, connectionId: ctx.connectionId, accountId: ctx.account.externalAccountId,
       environment: ctx.auth.getEnvironment(), marketplaceId: ctx.metadata.marketplaceId, merchantLocationKey: ctx.metadata.merchantLocationKey }),
@@ -156,15 +167,11 @@ export async function prepareEbayPublicationCompletion(source: EbayListingSyncId
     memberCandidates: source.variants.map(member => ({ productVariantId: member.variantId, sku: member.sku,
       isActive: true, availableQuantity: quantityByVariant.get(member.variantId) ?? 0 })) };
   const inspect = () => observer.inspectExistingPublication(observationInput);
-  let inspection = await inspect();
-  // A first publication can stop between inventory/offer/group writes. Its
-  // recorded target then authorizes checking that same incomplete preparation.
-  // Existing saved offers without a recorded target require complete topology.
-  if (!inspection.publication && !inspection.unpublishedTarget
-    && (savedTarget !== null || source.variants.every(member => member.offerId === null))) {
-    inspection = await observer.inspectExistingPublication({ ...observationInput,
-      unpublishedGroupKey: savedTarget ? savedTarget.groupKey : variants.length > 1 ? product.sku || `PROD-${product.id}` : null });
-  }
+  const inspection = await inspectEbayPublicationPreparation({ source, savedTarget,
+    newGroupKey: product.sku || `PROD-${product.id}`,
+    inspect: unpublishedGroupKey => observer.inspectExistingPublication({ ...observationInput,
+      ...(unpublishedGroupKey !== undefined ? { unpublishedGroupKey } : {}) }),
+  });
   const identity = resolveEbayPublicationTarget(source, inspection);
   if (savedTarget) assertEbayPublicationTargetUnchanged(savedTarget, identity);
   const { draft, clientInput, prices, resolvePublishedIdentity } = await preparePushDraft({ ctx, product, category,
@@ -182,11 +189,15 @@ export async function prepareEbayPublicationCompletion(source: EbayListingSyncId
       priceCents: prices.get(member.id)!, priceChanged: false })) };
 }
 
-async function executeProduct(productId: number, command: EbayListingPushRequest, onRateLimit?: (seconds: number) => void): Promise<EbayListingPushResult> {
+async function executeProduct(productId: number, command: EbayListingPushRequest, onRateLimit?: (seconds: number) => void,
+  actor?: string): Promise<EbayListingPushResult> {
   if (!command.rebuild && !command.updateExisting)
     throw new EbayListingSyncError("EBAY_PUBLICATION_OWNER_REQUIRED", "Initial publication must use its saved listing job.");
   return repository.withProductLock(productId, async () => {
     let productName = `Product ${productId}`;
+    // The reviewed change's record of the sizes it adds (ebay-listing-change-intent.repository.ts), once opened.
+    let openIntentReviewToken: string | null = null;
+    let ebayWritesMayHaveStarted = false;
     try {
       const ctx = await context();
       const product = await repository.readProduct(productId);
@@ -199,13 +210,41 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
       // including a legitimately withdrawn group after interrupted rebuilding.
       let existingIdentity: EbayListingSyncIdentity | null = null;
       if (command.rebuild?.mode === "preview") {
-        try { existingIdentity = await readExistingEbayListingIdentityForProduct(productId); }
+        // A reviewed change that stopped part-way can leave the size it was adding in eBay's group. This review
+        // exists to finish or replace that change, so those sizes must not make the listing unreadable.
+        const pendingAdditionSkus = listingIds.length === 1
+          ? await changeIntents.openAdditionSkus({ channelId: EBAY_CHANNEL_ID, productId, externalListingId: listingIds[0]! }) : [];
+        try { existingIdentity = await readExistingEbayListingIdentityForProduct(productId, pendingAdditionSkus); }
         catch (error) {
           const code = error && typeof error === "object" && "code" in error ? error.code : null;
           if (code === "EBAY_REGISTRATION_LISTING_NOT_FOUND" || code === "EBAY_REGISTRATION_LISTING_NOT_LIVE")
             throw new EbayListingSyncError("EBAY_SYNC_MAPPING_INVALID", "eBay did not expose this product as a live listing. If a rebuild was interrupted, resume it using its saved review. If that review is unavailable, an administrator must recover its original eBay group and offer mapping before running Analyze again.", { cause: error });
           throw error;
         }
+      }
+      if (reviewedPreview && listingIds.length === 1 && (command.updateExisting || command.rebuild?.mode === "execute")) {
+        const kind = command.updateExisting ? "listing_update" as const : "listing_rebuild" as const;
+        // A size this review adds has no saved eBay identity yet, so nothing else marks it as selected for stock.
+        // Record the reviewed addition first: the stock link below and every quantity write of the change read it.
+        const added = variants.filter(variant => reviewedPreview.addedSkus.includes(variant.sku));
+        if (added.length > 0) {
+          await changeIntents.open({ kind, channelId: EBAY_CHANNEL_ID, connectionId: ctx.connectionId, productId,
+            externalListingId: listingIds[0]!, reviewToken: reviewedPreview.confirmationToken,
+            actor: actor ?? EBAY_LISTING_CHANGE_STOCK_ACTOR,
+            members: added.map(variant => ({ productVariantId: variant.id, sku: variant.sku })) }, new Date());
+          openIntentReviewToken = reviewedPreview.confirmationToken;
+        }
+        // Channels PR4: link the new sizes' stock before anything is prepared or sent to eBay (a refusal sends nothing).
+        const quantities = await atpService.getAtpPerVariant(productId);
+        const atp = new Map(quantities.map(row => [row.productVariantId, row.atpUnits]));
+        await linkEbayListingStockBeforeChange({ kind,
+          channelId: EBAY_CHANNEL_ID, connectionId: ctx.connectionId, accountId: ctx.account.externalAccountId,
+          environment: ctx.auth.getEnvironment(), productId, listingId: listingIds[0]!, reviewToken: reviewedPreview.confirmationToken,
+          variants: variants.map(variant => ({ productVariantId: variant.id, sku: variant.sku, atpUnits: atp.get(variant.id) ?? 0 })),
+          actor: EBAY_LISTING_CHANGE_STOCK_ACTOR }, {
+          readGaps: input => readEbayStockLinkGaps(pool, input),
+          link: input => linkChannelEbayStock(pool, input, { now: new Date(), monotonicNow: () => performance.now() }),
+        });
       }
       const groupKey = existingIdentity?.groupKey ?? reviewedPreview?.groupKey ?? (product.sku || `PROD-${productId}`);
       if (reviewedPreview && existingIdentity && existingIdentity.groupKey !== reviewedPreview.groupKey)
@@ -220,6 +259,7 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
         const rebuildPreview = await connector.previewListingRebuild({ client, draft, currentExternalListingId: listingIds[0] });
         return { productId, productName, variantCount: variants.length, success: true, status: "success", listingId: listingIds[0], rebuildPreview };
       }
+      ebayWritesMayHaveStarted = true;
       result = command.updateExisting
         ? await connector.updateExistingListing({ client, draft, preview: command.updateExisting.preview })
         : await connector.executeListingRebuild({ client, draft, resolvePublishedIdentity, preview: command.rebuild!.mode === "execute" ? command.rebuild!.preview : neverPreview() });
@@ -229,6 +269,15 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
         if (error instanceof EbayListingSyncError) throw error;
         throw new EbayListingSyncError("EBAY_SYNC_PERSISTENCE_FAILED", "eBay returned a publication result, but Echelon could not save its complete local mapping. Retry this product to discover and verify its existing offers before further publication.", { cause: error });
       }
+      if (openIntentReviewToken) {
+        // Best effort by design: the saved listing identity now selects these sizes, so a row left open changes no
+        // decision and the next review of this product closes it. The applied change must not be reported as failed.
+        try { await changeIntents.close({ channelId: EBAY_CHANNEL_ID, productId, reviewToken: openIntentReviewToken, reason: "applied" }, new Date()); }
+        catch (closeError) {
+          console.error(JSON.stringify({ event: "ebay_listing_change_intent_close_failed", productId, reason: "applied",
+            message: closeError instanceof Error ? closeError.message : "Unknown error" }));
+        }
+      }
       return { productId, productName, variantCount: variants.length, success: true, status: "success", listingId: result.externalProductId,
         variantDetails: variants.map(variant => ({ sku: variant.sku, success: true })) };
     } catch (caught) {
@@ -236,7 +285,20 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
         ? new EbayListingSyncError("EBAY_LISTING_PREFLIGHT_FAILED", `Saved listing inputs are invalid: ${caught.issues.map(issue => issue.path.join(".") || "listing").join(", ").slice(0, 300)}. Review this product and its eBay connection settings before publishing.`, { cause: caught })
         : caught;
       let failure = ebayListingPushFailure(productId, error, productName);
-      console.error(JSON.stringify({ event: "ebay_listing_push_failed", productId, code: failure.code, message: failure.error }));
+      console.error(JSON.stringify({ event: "ebay_listing_push_failed", productId, code: failure.code, message: failure.error,
+        cause: describeUnclassifiedFailure(error) }));
+      // Nothing reached eBay: withdraw the reviewed additions so no size stays selected for stock without a listing.
+      // After eBay writes began the size may be on the live listing, so its record stays open and it keeps receiving
+      // stock updates until a later review applies or replaces it.
+      if (openIntentReviewToken && (!ebayWritesMayHaveStarted
+        || (command.updateExisting !== undefined && failure.code === UPDATE_REFUSED_BEFORE_EBAY_WRITE))) {
+        try { await changeIntents.close({ channelId: EBAY_CHANNEL_ID, productId, reviewToken: openIntentReviewToken, reason: "refused" }, new Date()); }
+        catch (closeError) {
+          // Reported, not rethrown: the operator needs the original refusal. The next review supersedes the open row.
+          console.error(JSON.stringify({ event: "ebay_listing_change_intent_close_failed", productId, reason: "refused",
+            message: closeError instanceof Error ? closeError.message : "Unknown error" }));
+        }
+      }
       if (command.rebuild?.mode !== "preview" && !(error instanceof EbayListingPushSkipped)
         && failure.code !== "EBAY_LISTING_ALREADY_PUBLISHED") {
         try { await repository.recordFailure(productId, failure.error ?? "Listing publication failed."); }
@@ -253,13 +315,28 @@ async function executeProduct(productId: number, command: EbayListingPushRequest
 }
 export const readEbayPushRecoveryIdentity = readEbayPublicationSource;
 
+/** What the public result hides when an error has no application code. Only identity fields are logged, never the
+ * message: database and transport messages can carry query parameters or credentials. */
+function describeUnclassifiedFailure(error: unknown): { name: string; code?: string; statusCode?: number; errorIds?: number[] } {
+  if (!(error instanceof Error)) return { name: typeof error };
+  const fields = error as Error & { code?: unknown; statusCode?: unknown; errorIds?: unknown };
+  return { name: error.name,
+    ...(typeof fields.code === "string" ? { code: fields.code.slice(0, 80) } : {}),
+    ...(typeof fields.statusCode === "number" ? { statusCode: fields.statusCode } : {}),
+    ...(Array.isArray(fields.errorIds) ? { errorIds: fields.errorIds.filter((id): id is number => typeof id === "number").slice(0, 10) } : {}) };
+}
+
 function neverPreview(): never { throw new Error("Reviewed rebuild execution requires a preview."); }
 
 export const ebayListingPushService = new EbayListingPushService({ execute: async (productId, command, onRateLimit, actor) => {
-  if (command.rebuild || command.updateExisting) return executeProduct(productId, command, onRateLimit);
-  const { ebayListingSyncService } = await import("./ebay-active-listing-sync");
-  return admitEbayPublication({ productId, actor: actor ?? "ebay-listing-publish",
-    commandKey: command.commands?.find(member => member.productId === productId)?.commandKey ?? randomUUID() }, {
-    channelId: EBAY_CHANNEL_ID, jobs: ebayListingSyncService, readSource: readEbayPublicationSource,
-  });
+  if (command.rebuild || command.updateExisting) return executeProduct(productId, command, onRateLimit, actor);
+  // Legacy Push endpoints are compatibility translations of the same Sync owner.
+  const { syncChannelListings } = await import("./ebay-channel-listing-sync");
+  const result = await syncChannelListings({ productIds: [productId] }, actor ?? "ebay-listing-publish",
+    command.commands?.find(member => member.productId === productId)?.commandKey ?? randomUUID());
+  const job = result.jobs[0];
+  const failure = result.details.find(detail => !detail.success);
+  return { productId, productName: `Product ${productId}`, variantCount: result.synced, job,
+    success: result.synced > 0 && result.errors === 0, status: result.errors ? "error" : result.pending ? "queued" : "success",
+    ...(failure ? { error: failure.error, code: failure.code, issue: failure.issue } : {}) };
 } });

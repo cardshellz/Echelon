@@ -9,6 +9,7 @@ import {
   CUSTOMER_RETURN_PORTAL_LEGACY_PATH as LEGACY_PATH,
 } from "../../shared/returns/customer-return-portal-paths";
 import { customerReturnLiveReviewInputSchema } from "../../shared/returns/customer-return-live.contract";
+import { validateCustomerReturnBoxPlan } from "../../server/modules/returns/application/customer-return-box-plan";
 import { MAX_RETURN_FLOW_PARCELS } from "../../shared/returns/customer-return-flow.contract";
 import { customerReturnPackingLimits, defaultCustomerReturnShippingGuardrails } from "../../shared/returns/customer-return-shipping-guardrails";
 import {
@@ -431,7 +432,7 @@ test("split shipments move directly from the first box into a new box without li
   await expect(
     page
       .getByTestId("preview-box-2")
-      .getByText("Original box size · 10 × 8 × 4 in", { exact: true }),
+      .getByText("10 × 8 × 4 in", { exact: true }),
   ).toBeVisible();
   await page.screenshot({
     animations: "disabled",
@@ -2361,7 +2362,7 @@ test("denied automatic settings refresh removes the existing return canvas and l
 test("archiving reviews fallback and preserves history while an uncertain retry uses the same intent", async ({
   page,
 }, testInfo) => {
-  const fixture = await installReturnPreviewFixtures(page);
+  const fixture = await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
   const policies = await installReturnPolicyFixtures(page, {
     fallback: true,
     failFirstArchive: true,
@@ -2432,7 +2433,7 @@ test("archiving reviews fallback and preserves history while an uncertain retry 
 test("archiving without a fallback requires review again when the impact changes", async ({
   page,
 }) => {
-  await installReturnPreviewFixtures(page);
+  await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
   const policies = await installReturnPolicyFixtures(page, {
     staleFirstArchive: true,
   });
@@ -2485,7 +2486,7 @@ for (const failure of ["invalidPreview", "deniedArchive"] as const) {
   test(
     failure + " cannot hide a policy as successfully archived",
     async ({ page }) => {
-      await installReturnPreviewFixtures(page);
+      await installReturnPreviewFixtures(page, { permissions: ["settings:view", "settings:edit"] });
       const policies = await installReturnPolicyFixtures(page, {
         [failure]: true,
       });
@@ -2731,7 +2732,7 @@ test("one matching original box defaults its dimensions and custom edits survive
     .click();
   const box = page.getByTestId("preview-box-1");
   await expect(
-    box.getByText("Original box size · 10 × 8 × 4 in", { exact: true }),
+    box.getByText("10 × 8 × 4 in", { exact: true }),
   ).toBeVisible();
   await expectNoCustomerWeights(page);
   await expect(box.getByRole("spinbutton", { name: /weight/i })).toHaveCount(0);
@@ -2900,22 +2901,39 @@ test("missing original dimensions require custom dimensions before review", asyn
   expect(fixture.failures).toEqual([]);
 });
 
-test("missing product weight cannot be edited or reviewed as zero", async ({
+test("missing product weight requires a real packed measurement before review", async ({
   page,
 }) => {
   const fixture = await installReturnPreviewFixtures(page);
-  const order = fixture.liveOrder();
+  const originalOrder = fixture.liveOrder();
+  const order = {
+    ...originalOrder,
+    boxOptions: [],
+    lines: originalOrder.lines.map((line, index) =>
+      index === 0 ? { ...line, unitWeightGrams: null } : line,
+    ),
+  };
+  const reviews: ReturnType<typeof customerReturnLiveReviewInputSchema.parse>[] = [];
   await page.route(`**${PREVIEW_API}/live/order`, (route) =>
-    route.fulfill({
-      json: {
-        ...order,
-        boxOptions: [],
-        lines: order.lines.map((line, index) =>
-          index === 0 ? { ...line, unitWeightGrams: null } : line,
-        ),
-      },
-    }),
+    route.fulfill({ json: order }),
   );
+  await page.route(`**${PREVIEW_API}/live/review`, (route) => {
+    const input = customerReturnLiveReviewInputSchema.parse(route.request().postDataJSON());
+    expect(input.sourceRevision).toBe(order.sourceRevision);
+    const plan = validateCustomerReturnBoxPlan(order.lines, {
+      selections: input.selections,
+      parcels: input.parcels,
+    }, order.boxOptions);
+    reviews.push(input);
+    return route.fulfill({ json: {
+      ...plan,
+      mode: "admin_live",
+      effects: "none",
+      sourceRevision: order.sourceRevision,
+      orderReference: order.orderReference,
+      refundMethod: "manual_shopify",
+    } });
+  });
   await page.goto(PORTAL_PATH);
   await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
   await page.getByRole("button", { name: "Find order", exact: true }).click();
@@ -2927,26 +2945,27 @@ test("missing product weight cannot be edited or reviewed as zero", async ({
     .getByRole("button", { name: "Continue to packing", exact: true })
     .click();
   const box = page.getByTestId("preview-box-1");
-  await expect(
-    box.getByText(
-      "We cannot prepare this box for return yet. Please contact support for help.",
-      { exact: true },
-    ),
-  ).toBeVisible();
-  await expectNoCustomerWeights(page);
+  const weight = box.getByRole("textbox", { name: "Packed box weight (ounces)", exact: true });
+  await expect(weight).toBeVisible();
   await expect(
     box.getByLabel("Length of box 1 in inches", { exact: true }),
   ).toHaveValue("");
   await enterCustomBoxDimensions(page, 1);
-  await expect(
-    page.getByRole("button", { name: "Review return", exact: true }),
-  ).toBeDisabled();
+  const review = page.getByRole("button", { name: "Review return", exact: true });
+  await expect(review).toBeDisabled();
+  for (const invalidWeight of ["0", "-1", "not a weight"]) {
+    await weight.fill(invalidWeight);
+    await expect(review).toBeDisabled();
+  }
   await expect(box.getByRole("spinbutton", { name: /weight/i })).toHaveCount(0);
-  expect(
-    fixture.previewRequests.some(
-      (request) => request.path === `${PREVIEW_API}/live/review`,
-    ),
-  ).toBe(false);
+  expect(reviews).toHaveLength(0);
+  await weight.fill("16");
+  await expect(review).toBeEnabled();
+  await review.click();
+  await expect(page.getByRole("heading", { name: "Review your return", exact: true })).toBeVisible();
+  expect(reviews).toHaveLength(1);
+  expect(reviews[0].parcels[0].packedWeightGrams).toBe(454);
+  expect(reviews[0].parcels[0].items[0]).not.toHaveProperty("unitWeightGrams");
   expect(fixture.failures).toEqual([]);
 });
 
@@ -3201,13 +3220,12 @@ test("unknown return history blocks only its item while another item can be revi
   expect(fixture.failures).toEqual([]);
 });
 
-test("unverified delivery stays unavailable with customer-safe explanation", async ({
+test("policy-restricted items show purchased quantity and their customer-safe reason", async ({
   page,
 }) => {
   const fixture = await installReturnPreviewFixtures(page);
   const order = fixture.liveOrder();
-  const message =
-    "We can't confirm delivery yet. Our team needs to verify it before you can return this item.";
+  const message = "The 365-day return window has ended.";
   await page.route(`**${PREVIEW_API}/live/order`, (route) =>
     route.fulfill({
       json: {
@@ -3227,10 +3245,12 @@ test("unverified delivery stays unavailable with customer-safe explanation", asy
   const line = page.getByTestId("preview-line-sample-line-1");
   await expect(line.getByText(message, { exact: true })).toBeVisible();
   await expect(line.getByRole("spinbutton")).toBeDisabled();
-  await expect(line.getByText(/0 confirmed delivered/)).toBeVisible();
+  await expect(line.getByText(`${order.lines[0].purchasedQuantity} purchased`, { exact: true })).toBeVisible();
+  await expect(line.getByText(/confirmed delivered/)).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Continue to packing", exact: true }),
   ).toBeDisabled();
+  expect(fixture.previewRequests.some(request => request.path.endsWith("/live/review"))).toBe(false);
   expect(fixture.failures).toEqual([]);
 });
 

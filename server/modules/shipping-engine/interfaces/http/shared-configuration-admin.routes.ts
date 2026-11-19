@@ -4,10 +4,12 @@ import { requirePermission } from "../../../../routes/middleware";
 import { SharedShippingConfigurationService } from "../../application/shared-configuration.service";
 import { ShippingConfigurationError } from "../../infrastructure/shared-configuration.repository";
 import { SharedShippingConfigurationRepository } from "../../infrastructure/shared-configuration.repository";
-import { readDropshipShippingCutoverConfig } from "../../../dropship/application/dropship-shipping-cutover-policy";
+import {
+  readDropshipShippingCutoverConfig,
+  resolveDropshipPackagingChannel,
+} from "../../../dropship/shipping-packaging.api";
 import { ChannelPackagingService } from "../../application/channel-packaging.service";
 import { ChannelPackagingRepository } from "../../infrastructure/channel-packaging.repository";
-import { resolveDropshipPackagingChannel } from "../../../dropship/infrastructure/dropship-packaging-channel";
 import { pool } from "../../../../db";
 
 export function registerSharedConfigurationAdminRoutes(

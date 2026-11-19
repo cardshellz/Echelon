@@ -55,6 +55,7 @@ import { selectCustomerReturnRate } from "../../domain/customer-return-rate-sele
 import { defaultCustomerReturnShippingGuardrails } from "@shared/returns/customer-return-shipping-guardrails";
 import { quoteCustomerReturnShipment } from "../../application/customer-return-shipping-quote";
 import { buildReturnLabelRequest, createShipStationReturnLabelAdapter } from "../../../shipping-engine/infrastructure/shipstation-return-label.adapter";
+import { customerReturnContactAddress } from "../../application/customer-return-shipping-plan";
 
 const connectionString = resolveReturnsTestDatabase(process.env, "intake");
 const integration = connectionString ? describe.sequential : describe.skip;
@@ -99,6 +100,46 @@ integration(
     async function authorize() {
       return intake.persist(preparedIntake());
     }
+    it.each([false, true])("freezes business contacts through mixed-box label creation and retry (lost response: %s)", async lostResponse => {
+      const businessPhone = "512-555-0100";
+      const current = await publishIntakeTestPolicyShipping(pool, { contactPhone: businessPhone });
+      const prepared = preparedIntake();
+      await bindIntakeTestPolicy(pool, prepared, current);
+      prepared.parcels = prepared.parcels.map(parcel => ({ ...parcel,
+        originAddress: customerReturnContactAddress(parcel.originAddress, current),
+        destinationAddress: customerReturnContactAddress(current.destinationAddress, current),
+      }));
+      const ordersBefore = (await pool.query("SELECT to_jsonb(o) AS snapshot FROM oms.oms_orders o ORDER BY id")).rows;
+      const accepted = await intake.persist(prepared);
+      expect((await intake.persist(prepared)).authorizationId).toBe(accepted.authorizationId);
+      // A later policy phone must not rewrite an accepted label manifest.
+      await publishIntakeTestPolicyShipping(pool, { contactPhone: "512-555-0199" });
+      const w = worker();
+      if (lostResponse) w.purchase.mockRejectedValueOnce(new ReturnLabelProviderError("RETURN_LABEL_TIMEOUT", "unknown", true));
+      for (let step = 0; step < (lostResponse ? 3 : 2); step++) {
+        await w.service.progress(36, accepted.authorizationId, "admin");
+      }
+      const status = await w.service.status(36, accepted.authorizationId);
+      expect(status.parcels.map(parcel => parcel.status)).toEqual(["ready", "ready"]);
+      expect(w.purchase).toHaveBeenCalledTimes(2);
+      expect(w.recover).toHaveBeenCalledTimes(lostResponse ? 1 : 0);
+      for (const [input] of [...w.purchase.mock.calls, ...w.recover.mock.calls]) {
+        expect(input.shipFrom.phone).toBe(businessPhone);
+        expect(input.shipTo.phone).toBe(businessPhone);
+        expect(buildReturnLabelRequest(input).shipment).toMatchObject({
+          ship_from: { phone: businessPhone }, ship_to: { phone: businessPhone },
+        });
+      }
+      const saved = (await pool.query("SELECT request_snapshot FROM returns.customer_return_label_attempts ORDER BY parcel_id")).rows;
+      expect(saved).toHaveLength(2);
+      for (const row of saved) {
+        expect(row.request_snapshot.shipFrom.phone).toBe(businessPhone);
+        expect(row.request_snapshot.shipTo.phone).toBe(businessPhone);
+      }
+      await w.service.progress(36, accepted.authorizationId, "admin");
+      expect(w.purchase).toHaveBeenCalledTimes(2);
+      expect((await pool.query("SELECT to_jsonb(o) AS snapshot FROM oms.oms_orders o ORDER BY id")).rows).toEqual(ordersBefore);
+    });
     it("uses the authorization's exact channel order for both boxes while keeping separate recovery keys", async () => {
       const accepted = await authorize();
       // A display-number collision in another channel must not select that order.

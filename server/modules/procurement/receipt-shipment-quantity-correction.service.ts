@@ -21,7 +21,7 @@ import {
   runTransactionalFinancialCommand,
   type FinancialCommandDescriptor,
 } from "../../platform/commands/transactional-command.service";
-import { readPurchaseApproverName } from "../identity/infrastructure/purchase-approval-access.repository";
+import { readPurchaseApproverName } from "../identity/purchase-approval-authority.api";
 import { COGSService } from "../inventory/cogs.service";
 import {
   costFingerprint,
@@ -57,6 +57,7 @@ import type {
 import { computeShipmentLinePhysicalTotals } from "./shipment-line-physical-values";
 import { assertReceivingQuarantineLineEditable } from "./receiving-quarantine.repository";
 import { ReceivingQuarantineError } from "./domain/receiving-quarantine";
+import { prepareCostLinkRepair, restoreCostLinks, summarizeCostLinkRepair } from "./cost-link-repair.service";
 
 export function quantityCorrectionScope(
   lineId: number,
@@ -182,6 +183,8 @@ async function executeCorrection(
   purpose: QuantityCorrectionPurpose,
 ) {
   const plan = planQuantityCorrection(source.facts, input, purpose);
+  if (input.repairCostLinks && purpose !== "receipt") throw new CostEvidenceError("COST_LINK_RECEIPT_REQUIRED", "Include the linked receipts when reviewing their historical cost links.");
+  const costLinkRepair = input.repairCostLinks ? await prepareCostLinkRepair(tx, source, plan) : null;
   // Both pending expectations and posted unit conversions must honor custody
   // evidence. The combined command cannot rewrite an accepted quarantine count.
   const receiptWrites = [
@@ -216,25 +219,17 @@ async function executeCorrection(
   const target = source.evidence.shipmentLines.find(
     (line) => line.id === source.facts.shipmentLineId,
   )!;
-  // Pieces change physical totals only when measurements were recorded per piece.
-  // Carton measurements describe the same cartons after a piece-count correction.
-  const pieceDimensions =
-    target.dimension_basis === "piece" ||
-    (target.dimension_basis == null && target.carton_count == null);
-  const physicalTotals = pieceDimensions
-    ? computeShipmentLinePhysicalTotals({
-        qtyShipped: plan.shippedPieces,
-        cartonCount:
-          target.carton_count == null
-            ? null
-            : integer(target.carton_count, "cartons"),
-        dimensionBasis: "piece",
-        weightKg: target.weight_kg == null ? null : String(target.weight_kg),
-        lengthCm: target.length_cm == null ? null : String(target.length_cm),
-        widthCm: target.width_cm == null ? null : String(target.width_cm),
-        heightCm: target.height_cm == null ? null : String(target.height_cm),
-      })
-    : undefined;
+  // Use the same saved physical basis as allocation and display. A piece-count
+  // correction does not multiply carton measurements by received pack factors.
+  const physicalSource = { qtyShipped: source.facts.shippedPieces,
+    cartonCount: target.carton_count == null ? null : integer(target.carton_count, "cartons"),
+    dimensionBasis: target.dimension_basis == null ? null : String(target.dimension_basis),
+    weightKg: target.weight_kg == null ? null : String(target.weight_kg),
+    lengthCm: target.length_cm == null ? null : String(target.length_cm),
+    widthCm: target.width_cm == null ? null : String(target.width_cm),
+    heightCm: target.height_cm == null ? null : String(target.height_cm) };
+  const currentPhysicalTotals = computeShipmentLinePhysicalTotals(physicalSource);
+  const physicalTotals = computeShipmentLinePhysicalTotals({ ...physicalSource, qtyShipped: plan.shippedPieces });
   const costReviewBefore = await readQuantityCorrectionCostReview(
     tx,
     source.facts.shipmentLineId,
@@ -249,7 +244,9 @@ async function executeCorrection(
     now,
     purpose,
     physicalTotals,
+    costLinkRepair?.evidence,
   );
+  if (costLinkRepair) await restoreCostLinks(tx, costLinkRepair, source, plan, actorId, now);
   const writer = new COGSService(tx);
   const poLineId = integer(target.purchase_order_line_id, "PO line", 1);
   const shipmentId = integer(source.evidence.shipment.id, "shipment", 1);
@@ -419,26 +416,12 @@ async function executeCorrection(
     pendingReceipts: plan.pendingReceipts,
     physicalTotals: {
       netWeightKg: {
-        before:
-          target.total_weight_kg == null
-            ? null
-            : String(target.total_weight_kg),
-        after:
-          physicalTotals?.totalWeightKg ??
-          (target.total_weight_kg == null
-            ? null
-            : String(target.total_weight_kg)),
+        before: currentPhysicalTotals.totalWeightKg,
+        after: physicalTotals.totalWeightKg,
       },
       volumeCbm: {
-        before:
-          target.total_volume_cbm == null
-            ? null
-            : String(target.total_volume_cbm),
-        after:
-          physicalTotals?.totalVolumeCbm ??
-          (target.total_volume_cbm == null
-            ? null
-            : String(target.total_volume_cbm)),
+        before: currentPhysicalTotals.totalVolumeCbm,
+        after: physicalTotals.totalVolumeCbm,
       },
     },
     shipmentPieces: {
@@ -492,6 +475,8 @@ async function executeCorrection(
           : unitCharge(landedAfter, plan.shippedPieces),
     },
     stockUnitChange: 0,
+    ...(costLinkRepair ? { costLinkRepair: await summarizeCostLinkRepair(tx, costLinkRepair,
+      costResults.flatMap(result=>result.issues.filter(issue=>issue.code==="COST_ORDER_SALE_UNVERIFIED").map(issue=>issue.message))) } : {}),
     costResults,
     historicalCost: {
       eligible: false,
@@ -677,7 +662,9 @@ export function createReceiptShipmentQuantityCorrectionService(
         work: async (tx) => {
           const source = await readSource(tx, lineId, actorId);
           assertReview(source, input.sourceVersion);
-          const { previewVersion, ...request } = input;
+          const { previewVersion, costLinksConfirmed: _costLinksConfirmed, ...request } = input as typeof input & { costLinksConfirmed?: true };
+          // Confirmation belongs to the final approval, not to the simulated
+          // preview input. Validate it above, then compare the same plan inputs.
           const review = preserveReceipts(request, source);
           const summary = await executeCorrection(
             tx,

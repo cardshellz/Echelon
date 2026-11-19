@@ -15,9 +15,10 @@ import { zeroPublicationIntents, type ActivePublicationVariantMapping } from "..
 import { readPublicationStockSelection } from "./inventory-publication-selection.reader";
 import { loadPublicationTargetScopes, PUBLICATION_TARGET_SCOPE_LOCK_SEED } from "./inventory-publication-target-stop.repository";
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
+import { insertAuditEventPgQuery } from "../../../infrastructure/transactional-audit";
 const id = z.number().int().positive();
 const targetSchema = z.object({ id, channel_id: id, channel_connection_id: id.nullable(), dropship_store_connection_id: id.nullable(),
-    destination_kind: z.enum(["channel_connection", "dropship_store_connection"]), provider_key: z.string(), provider_scope_type: z.enum(["location", "account"]),
+    destination_kind: z.enum(["channel_connection", "dropship_store_connection"]), provider_key: z.string().min(1), provider_scope_type: z.enum(["location", "account"]),
     external_scope_id: z.string(), revision: z.string(), state: z.enum(["disabled", "preview", "live"]), publication_authority: z.string(),
     hold_reason: z.string().nullable(), held_at: z.date().nullable(), source_ready: z.boolean() });
 export type MappingPreparationTarget = z.infer<typeof targetSchema>;
@@ -30,19 +31,32 @@ export interface PublicationMappingProposal {
 export const mappingPreparationDigest = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const fail = (code: string, message: string): never => { throw new InventoryPublicationMembershipError(code, message); };
 const blocker = (code: string, message: string, productVariantId: number | null = null): PublicationMembershipBlocker => ({ code, message, productVariantId, action: "configure_inventory" });
-export async function readTargets(client: PoolClient, channelId?: number, connectionId?: number, targetId?: number, lock = false): Promise<MappingPreparationTarget[]> {
+/** Channel destinations take their transport provider and Walmart source proof
+ * from the channel, exactly as before. A Dropship store destination's transport
+ * provider is its store platform (same rule as inventory-publication-target-enable.repository.ts);
+ * its policy channel (e.g. the internal 'manual' Dropship OMS channel) only
+ * supplies allocation dials, so the Walmart branches never apply to it. The
+ * policy channel must still be active, matching enable; the store connection's
+ * own status and account are proven by the Dropship readiness capture. */
+export async function readTargets(client: PoolClient, channelId?: number, connectionId?: number, targetId?: number, lock = false,
+    dropshipStoreConnectionId?: number): Promise<MappingPreparationTarget[]> {
     const result = await client.query(`SELECT t.id,t.channel_id,t.channel_connection_id,t.dropship_store_connection_id,t.destination_kind,
-    c.provider AS provider_key,t.provider_scope_type,t.external_scope_id,t.revision::text,t.state,t.publication_authority,t.hold_reason,t.held_at,
+    CASE t.destination_kind WHEN 'channel_connection' THEN c.provider ELSE lower(d.platform) END AS provider_key,
+    t.provider_scope_type,t.external_scope_id,t.revision::text,t.state,t.publication_authority,t.hold_reason,t.held_at,
     (EXISTS(SELECT 1 FROM inventory.publication_source_binding_heads h JOIN inventory.publication_source_binding_versions b
       ON b.id=h.active_binding_id AND b.lifecycle_status='sealed' JOIN inventory.publication_source_binding_members m ON m.binding_id=b.id WHERE h.publication_target_id=t.id)
     AND NOT EXISTS(SELECT 1 FROM inventory.publication_source_binding_heads h JOIN inventory.publication_source_binding_versions b ON b.id=h.active_binding_id
       JOIN inventory.publication_source_binding_members m ON m.binding_id=b.id LEFT JOIN warehouse.fulfillment_nodes n ON n.id=m.fulfillment_node_id
-      WHERE h.publication_target_id=t.id AND(n.id IS NULL OR n.lifecycle_status<>'active' OR(c.provider='walmart' AND n.warehouse_id IS DISTINCT FROM w.warehouse_id)))
-    AND c.status='active' AND(c.provider<>'walmart' OR(w.connection_id=t.channel_connection_id AND w.ship_node_id=t.external_scope_id AND t.provider_scope_type='location'))) IS TRUE AS source_ready
+      WHERE h.publication_target_id=t.id AND(n.id IS NULL OR n.lifecycle_status<>'active'
+        OR(t.destination_kind='channel_connection' AND c.provider='walmart' AND n.warehouse_id IS DISTINCT FROM w.warehouse_id)))
+    AND c.status='active' AND(t.destination_kind<>'channel_connection' OR c.provider<>'walmart'
+      OR(w.connection_id=t.channel_connection_id AND w.ship_node_id=t.external_scope_id AND t.provider_scope_type='location'))) IS TRUE AS source_ready
     FROM inventory.inventory_publication_targets t JOIN channels.channels c ON c.id=t.channel_id
-    LEFT JOIN channels.walmart_connections w ON w.channel_id=t.channel_id
+    LEFT JOIN channels.walmart_connections w ON w.channel_id=t.channel_id AND t.destination_kind='channel_connection'
+    LEFT JOIN dropship.dropship_store_connections d ON d.id=t.dropship_store_connection_id
     WHERE($1::integer IS NULL OR t.channel_id=$1) AND($2::integer IS NULL OR t.channel_connection_id=$2) AND($3::integer IS NULL OR t.id=$3)
-    ORDER BY t.id ${lock ? "FOR UPDATE OF t" : ""}`, [channelId ?? null, connectionId ?? null, targetId ?? null]);
+      AND($4::integer IS NULL OR t.dropship_store_connection_id=$4)
+    ORDER BY t.id ${lock ? "FOR UPDATE OF t" : ""}`, [channelId ?? null, connectionId ?? null, targetId ?? null, dropshipStoreConnectionId ?? null]);
     return result.rows.map(row => targetSchema.parse(row));
 }
 export function mappingTargetBlockers(target: MappingPreparationTarget): PublicationMembershipBlocker[] {
@@ -133,7 +147,10 @@ export async function reviewMappingPreparation(client: PoolClient, input: {
     const review = { publicationTargetId: target.id, targetRevision: target.revision, productId: input.productId, productVariantIds: [...input.productVariantIds].sort((a, b) => a - b),
         ready: blockers.length === 0, blockers, quantities, selectionFingerprint: selection.fingerprint,
         ...(input.verifiedListingScopeHash ? { verifiedListingScopeHash: input.verifiedListingScopeHash } : {}) };
-    return { target, review: { ...review, reviewHash: mappingPreparationDigest({ review, plan: plan.evidenceHash, proposal }) } };
+    // `targetRows`: every planned row of this destination with its blockers, so a caller
+    // that publishes only some sizes can check the others (verified-listing-stock.repository.ts).
+    return { target, review: { ...review, reviewHash: mappingPreparationDigest({ review, plan: plan.evidenceHash, proposal }) },
+        targetRows: targetPlan?.rows ?? [] };
 }
 /** Shares rollback and provider session locks with mapping promotion. No remote
  * I/O occurs while these configuration locks are held. */
@@ -186,6 +203,11 @@ export async function applyMappingPreparation(client: PoolClient, scopeKeys: str
     productVariantIds: readonly number[];
     allowRetainedZero?: boolean;
     verifiedListingScopeHash?: string;
+    /** Publish only the reviewed members, as a verified listing scope does.
+     * Callers that link one size at a time (Dropship eBay single-variant
+     * listings, verified Walmart listings) need it so an unmapped selected
+     * sibling cannot refuse the whole target. Default false: whole product. */
+    exactVariantScope?: boolean;
     expectedReviewHash: string;
     idempotencyKey: string;
 }, actor: string, requestHash: string, now: Date, changedVariantIds: readonly number[], replacementListingVariantIds: readonly number[] = []): Promise<PublicationMappingPreparationReceipt> {
@@ -212,22 +234,33 @@ export async function applyMappingPreparation(client: PoolClient, scopeKeys: str
             fail("STOCK_MAPPING_PROVIDER_BUSY", "A provider request is in flight. The saved listing will retry after it finishes.");
         scopeKeys.push(key);
     }
-    // Both callers only add exact missing mappings or seal an unchanged SKU
-    // identity. Promotion fences the mapping head's revision; no destination,
-    // source, policy or existing provider identity changes. Bumping the target
+    // Callers add exact missing mappings, seal an unchanged SKU identity, or (the
+    // stock-link engine, PLAN-CH2 v4.1 §4.3) seal a new item for a size whose old
+    // link it retired earlier in the same transaction. Promotion fences the mapping
+    // head's revision; no destination, source or policy changes. Bumping the target
     // revision would invalidate unrelated products and make their mapping gaps
     // roll back this preparation. The canonical owner below locks each affected
-    // target/variant pair and supersedes only a changed desired revision.
+    // target/variant pair and supersedes only a changed desired revision; rows of a
+    // retired item were superseded by the retire, and any enqueued later by a stale
+    // publisher are stopped by the outbox worker's identity check (§4.8, N5).
     const publisher = createTransactionScopedInventoryPublicationService(client, { channelId: target.channel_id,
         replacementListings: replacementListingVariantIds.map(productVariantId => ({ publicationTargetId: target.id, productVariantId })) });
     const result = await publisher.publishProduct({ productId: input.productId, publicationTargetId: target.id,
-        ...(input.verifiedListingScopeHash ? { productVariantIds: input.productVariantIds } : {}),
+        ...(input.verifiedListingScopeHash || input.exactVariantScope ? { productVariantIds: input.productVariantIds } : {}),
         dryRun: false, triggeredBy: "listing_mapping_preparation" }, async () => null);
     if (result.authority !== "canonical")
         return fail("STOCK_MAPPING_AUTHORITY_CHANGED", "Canonical stock authority changed during preparation.");
     const receipt = publicationMappingPreparationReceiptSchema.parse({ publicationTargetId: target.id, revision: target.revision, reviewHash: evidence.review.reviewHash, changedProductVariantIds: [...changedVariantIds], publicationRows: result.publication.enqueuedRows, appliedAt: now.toISOString(), appliedBy: actor, alreadyApplied: false });
     await client.query(`INSERT INTO inventory.publication_mapping_preparations(idempotency_key,publication_target_id,request_hash,actor,occurred_at,review,receipt)
     VALUES($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb)`, [input.idempotencyKey, target.id, requestHash, actor, now, JSON.stringify(evidence.review), JSON.stringify(receipt)]);
-    await client.query(`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context) VALUES($1,'AUDIT',$2,'inventory_availability.listing_mapping.prepared',$3,$4::jsonb,$5::jsonb)`, [now, actor, `inventory.inventory_publication_target:${target.id}`, JSON.stringify(receipt), JSON.stringify({ idempotencyKey: input.idempotencyKey, requestHash, selectionFingerprint: evidence.review.selectionFingerprint })]);
+    await insertAuditEventPgQuery(client, {
+      timestamp: now,
+      actor,
+      action: "inventory_availability.listing_mapping.prepared",
+      target: `inventory.inventory_publication_target:${target.id}`,
+      changesJson: JSON.stringify(receipt),
+      contextJson: JSON.stringify({ idempotencyKey: input.idempotencyKey, requestHash, selectionFingerprint: evidence.review.selectionFingerprint }),
+      inlineAction: true,
+    });
     return receipt;
 }

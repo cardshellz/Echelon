@@ -11,6 +11,7 @@ function harness(options: {
   coverageFailure?: Error;
   frozenMismatch?: boolean;
   multipleShipments?: boolean;
+  malformedDirectCustody?: boolean;
 } = {}) {
   const sourceLines = [
     { id: 11, inboundShipmentId: 1, purchaseOrderId: 10, purchaseOrderLineId: 21, productVariantId: 201, qtyShipped: 100, sku: "ONE" },
@@ -22,14 +23,18 @@ function harness(options: {
   const coverageReads: unknown[] = [];
   const execute = vi.fn(async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
     const { sql, params } = dialect.sqlToQuery(query);
+    if (sql.includes("WITH purchase_lines AS MATERIALIZED")) return { rows: options.malformedDirectCustody ? [] : [{ observations: [], acceptances: [], unidentifiedAcceptances: [] }] };
     if (sql.includes("FROM procurement.inbound_shipments") && sql.includes("FOR UPDATE")) return { rows: [{ id: 1 }] };
     if (sql.includes("rl.units_per_variant_snapshot")) {
       coverageReads.push(query);
       if (options.coverageFailure) throw options.coverageFailure;
-      if (options.reuseAfterLock || params[0] !== 1 || params[1] !== 10) return { rows: [] };
-      return { rows: [{ id: 501, receivingOrderId: 54, purchaseOrderId: 10, inboundShipmentId: 1,
+      const inScope = !options.reuseAfterLock && params[0] === 1 && params[1] === 10;
+      return { rows: [{ receivingLines: inScope ? [{ id: 501, receivingOrderId: 54, purchaseOrderId: 10, inboundShipmentId: 1,
         purchaseOrderLineId: 21, inboundShipmentLineId: options.frozenMismatch ? 11 : null, unitsPerVariantSnapshot: options.frozenMismatch ? 100 : null,
-        receivedQty: 1, reversedQty: 0, receiptStatus: "closed" }] };
+        receivedQty: 1, reversedQty: 0, receiptStatus: "closed" }] : [],
+        postedReceipts: inScope && options.frozenMismatch ? [{ receivingLineId: 501, receivingOrderId: 54,
+          purchaseOrderId: 10, purchaseOrderLineId: 21, qtyReceived: 50 }] : [],
+        reversals: [], custodyObservations: [], custodyAcceptances: [] }] };
     }
     if (options.frozenMismatch && sql.includes("FROM procurement.po_receipts") && !sql.includes("AS line_count")) return { rows: [{ receivingLineId: 501, receivingOrderId: 54, purchaseOrderId: 10, purchaseOrderLineId: 21, qtyReceived: 50 }] };
     if (sql.includes("AS line_count")) return { rows: [{ line_count: 1, expected_qty: 1,
@@ -66,6 +71,12 @@ function harness(options: {
 }
 
 describe("existing receiving navigation with unprovable historical coverage", () => {
+  it("blocks unprovable PO-direct custody without hiding the existing shipment receipt", async () => {
+    const test = harness({ existing: "active", malformedDirectCustody: true });
+    const result = await test.service.getPurchaseOrderReceiveOptions(10);
+    expect(result.shipmentOptions).toMatchObject([{ action: "open_existing_receipt", existingReceiptId: 55 }]);
+    expect(result.poDirect).toMatchObject({ allowed: false, reason: expect.stringContaining("Custody evidence is incomplete") });
+  });
   it("reuses an active receipt without inspecting ambiguous older quantities", async () => {
     const test = harness({ existing: "active" });
     expect(await test.service.createReceiptFromShipment(1, "operator", { purchaseOrderId: 10 }))
@@ -79,12 +90,12 @@ describe("existing receiving navigation with unprovable historical coverage", ()
     ["active", "open_existing_receipt", 55],
     ["empty", "repair_empty_receipt", 55],
     ["zero", "void_zero_post_receipt", 54],
-  ] as const)("keeps %s receipt actions visible without claiming known quantities", async (existing, action, id) => {
+  ] as const)("keeps %s receipt actions visible when the coverage snapshot needs review", async (existing, action, id) => {
     const test = harness({ existing });
     const result = await test.service.getPurchaseOrderReceiveOptions(10);
     expect(result.shipmentOptions).toEqual([expect.objectContaining({ action, existingReceiptId: id,
       receivedBaseQty: null, remainingBaseQty: null })]);
-    expect(test.coverageReads).toHaveLength(0);
+    expect(test.coverageReads).toHaveLength(1);
   });
 
   it.each([

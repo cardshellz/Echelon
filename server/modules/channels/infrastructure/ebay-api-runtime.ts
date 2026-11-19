@@ -188,6 +188,7 @@ export function ebayApiRequest(
             res.statusCode,
             `eBay API ${method} ${path} failed (${res.statusCode}): ${data.substring(0, 1000)}`,
             data,
+            method === "GET" ? "listing_resource" : undefined,
           ),
         );
       });

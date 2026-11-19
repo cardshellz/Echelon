@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 /**
  * Dropship wallet rewards — the rules for the third, spend-only balance
  * (funding design phase 7, owner decisions of 2026-09-23).
@@ -86,7 +87,7 @@ export function rewardsRateForRail(rates: DropshipWalletRewardsRates, rail: Drop
 export function calculateRewardsEarnedCents(amountCents: number, rateBps: number): number {
   assertCents(amountCents, "amountCents");
   assertRateBps(rateBps, "rateBps");
-  return Number((BigInt(amountCents) * BigInt(rateBps)) / BigInt(BASIS_POINTS_PER_WHOLE));
+  return readIntegerCents((BigInt(amountCents) * BigInt(rateBps)) / BigInt(BASIS_POINTS_PER_WHOLE), "computed amount", true);
 }
 
 export interface DropshipRewardsAccrualDecision {
@@ -176,9 +177,7 @@ export function decideRewardsClawback(input: {
       creditAmountCents: input.creditAmountCents,
     });
   }
-  const clawbackCents = Number(
-    (BigInt(input.earnedCents) * BigInt(input.reversalCents)) / BigInt(input.creditAmountCents),
-  );
+  const clawbackCents = readIntegerCents((BigInt(input.earnedCents) * BigInt(input.reversalCents)) / BigInt(input.creditAmountCents), "clawback", true);
   const fromRewardsCents = Math.min(clawbackCents, input.rewardsBalanceCents);
   return { clawbackCents, fromRewardsCents, fromCashCents: clawbackCents - fromRewardsCents };
 }

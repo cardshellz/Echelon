@@ -1,6 +1,9 @@
 import { z } from "zod";
-import { SYSTEM_ROLES } from "../identity/domain/identity.domain";
-import { purchaseApprovalActorSchema, type PurchaseApprovalActor } from "../identity/domain/purchase-approval-authority";
+import {
+  SYSTEM_ROLES,
+  purchaseApprovalActorSchema,
+  type PurchaseApprovalActor,
+} from "../identity/authority-contracts.api";
 
 const id = z.number().int().positive().safe();
 const amount = z.number().int().nonnegative().safe();

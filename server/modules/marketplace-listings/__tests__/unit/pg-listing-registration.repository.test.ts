@@ -15,7 +15,10 @@ import { PgMarketplaceListingRegistrationRepository } from "../../infrastructure
 describe("PgMarketplaceListingRegistrationRepository", () => {
   it("loads the current active publication and registration receipt for a Channel owner", async () => {
     const owner = persistenceInput().plan.owner;
-    const poolQuery = vi.fn(async () => result([currentStatusRow(owner)]));
+    const poolQuery = vi.fn(
+      async (_sql: string, _params?: unknown[]) =>
+        result([currentStatusRow(owner)]),
+    );
     const repository = new PgMarketplaceListingRegistrationRepository({
       query: poolQuery,
     } as unknown as Pool);
@@ -55,7 +58,10 @@ describe("PgMarketplaceListingRegistrationRepository", () => {
       provider: "ebay",
       marketplaceId: "EBAY_US",
     };
-    const poolQuery = vi.fn(async () => result([currentStatusRow(owner)]));
+    const poolQuery = vi.fn(
+      async (_sql: string, _params?: unknown[]) =>
+        result([currentStatusRow(owner)]),
+    );
     const repository = new PgMarketplaceListingRegistrationRepository({
       query: poolQuery,
     } as unknown as Pool);
@@ -71,7 +77,7 @@ describe("PgMarketplaceListingRegistrationRepository", () => {
   it("loads multiple product statuses with one owner-scoped query", async () => {
     const firstOwner = persistenceInput().plan.owner;
     const secondOwner = { ...firstOwner, productId: 44 };
-    const poolQuery = vi.fn(async () =>
+    const poolQuery = vi.fn(async (_sql: string, _params?: unknown[]) =>
       result([
         currentStatusRow(secondOwner),
         currentStatusRow(firstOwner),

@@ -82,6 +82,7 @@ export function createQuantityCorrectionClient(
           saved.sourceVersion !== body.sourceVersion ||
           saved.reason !== body.reason ||
           saved.summary.shipmentPieces.after !== body.shippedPieces ||
+          (body.repairCostLinks === true && !saved.summary.costLinkRepair) ||
           (receiptInput !== null &&
             receiptInput.receipts.some(
               (receipt) =>

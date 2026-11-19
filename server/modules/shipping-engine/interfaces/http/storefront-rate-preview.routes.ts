@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import type { Express } from "express";
 import { z } from "zod";
 import { requireInternalApiKey } from "../../../../routes/middleware";
@@ -100,7 +101,7 @@ export function registerStorefrontRatePreviewRoutes(
             rates: result.rates.map((rate) => ({
               serviceCode: rate.service_code,
               displayName: rate.service_name,
-              totalCents: Number(rate.total_price),
+              totalCents: readIntegerCents(rate.total_price, "shipping rate"),
               currency: rate.currency,
               ...(rate.description ? { description: rate.description } : {}),
             })),

@@ -1,3 +1,10 @@
+import { readIntegerCents } from "@shared/money-read";
+import { captureDocumentNumberTime } from "../../platform/document-numbering/document-number";
+import { readCommandAuthorityActor } from "../identity";
+import { recordReceivingEntryAudit, type ReceivingEntryTransaction } from "./receiving-entry.repository";
+import { assertReceivingEntryAuthority } from "./domain/receiving-entry";
+import type { ReceivingEntryCommand } from "@shared/procurement/receiving-entry-command";
+import { receivingEntryLineFields } from "@shared/procurement/receiving-entry-command";
 import { enqueueReceiptCostRequests, processReceiptCostRequests } from "./receipt-cost-queue.service";
 import { RECEIPT_COST_RECOVERY_ACTOR } from "./receipt-cost-recovery.domain";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
@@ -7,6 +14,11 @@ import {
   readReceiptCustodyPresence, completeReceivingQuarantineAcceptances,
 } from "./receiving-quarantine.repository";
 import { lockReceivingCustodyFence } from "./receiving-custody-public";
+import { assertShipmentReceiptCustodyAdmission } from "./shipment-receipt-custody.repository";
+import { assertPoDirectReceiptCustodyAdmission } from "./po-direct-receipt-custody.repository";
+import { PoDirectCustodySourceError } from "./domain/po-direct-receipt-custody";
+import { ShipmentReceiptCoverageError } from "./receiving-shipment-coverage";
+import { insertAuditEventSql } from "../../infrastructure/transactional-audit";
 import { receivingQuarantineSourceVersion } from "./receiving-quarantine-receiving.port";
 import { ReceivingQuarantineError } from "./domain/receiving-quarantine";
 import type {
@@ -35,6 +47,7 @@ import { receivingImportRowSchema } from "@shared/procurement/receiving-import";
 import { planReceivingImportIdentities } from "./domain/receiving-import-identity";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { convertReceiptCounts, receiptInteger, receivingUnitVersion, withReceivingUnitVersion } from "./receiving-unit-contract";
+import { toBasePieces, UnitQuantityError } from "@shared/procurement/unit-quantity";
 import { Decimal } from "decimal.js";
 import { resolveReceiptCostEvidence } from "./receipt-cost-evidence.service";
 import {
@@ -73,6 +86,7 @@ interface InventoryCore {
     purchaseOrderLineId?: number;
     inboundShipmentId?: number;
     costProvisional?: number;
+    deferUntilCommit?: (effect: () => Promise<void>) => void;
   }, tx?: any): Promise<void>;
   adjustInventory(params: {
     productVariantId: number;
@@ -88,27 +102,7 @@ interface ChannelSync {
   queueSyncAfterInventoryChange(variantId: number): Promise<void>;
 }
 
-interface Purchasing extends ReceivingOrchestrationPurchasing {
-  // Typed-lines allocator (Option C, 2026-04-28). Returns per-product-line
-  // landed unit cost after spreading non-product line totals
-  // (discount / fee / tax / rebate / adjustment) across the product lines.
-  // Used at receive time so inventory lots are stamped with the true
-  // cost-per-unit, not the raw line cost. Returns null if the PO has no
-  // typed-line allocation to apply (no non-product lines, or no products).
-  getAllocatedLineCostsForPo?(poId: number): Promise<{
-    perLine: Array<{
-      purchaseOrderLineId: number;
-      lineTotalCents: number;
-      allocatedCents: number;
-      landedLineTotalCents: number;
-      landedUnitCostMills: number;
-      landedUnitCostCents: number;
-    }>;
-    pooledCents: number;
-    productSubtotalCents: number;
-    unallocatedCents: number;
-  }>;
-}
+interface Purchasing extends ReceivingOrchestrationPurchasing {}
 
 interface ShipmentTracking {
   getLandedCostForPoLine(purchaseOrderLineId: number): Promise<number | null>;
@@ -157,7 +151,7 @@ interface Storage {
   // Receiving orders
   getReceivingOrderById(id: number, tx?: any): Promise<any>;
   getReceivingLines(orderId: number, tx?: any): Promise<any[]>;
-  generateReceiptNumber(tx?: any): Promise<string>;
+  generateReceiptNumber(tx: any, recordedAt?: Date): Promise<string>;
   createReceivingOrder(data: any, tx?: any): Promise<any>;
   getReceivingLineById(lineId: number, tx?: any): Promise<any>;
   createReceivingLine(data: any, tx?: any): Promise<any>;
@@ -176,9 +170,9 @@ interface Storage {
   getProductVariantById(id: number, tx?: any): Promise<any>;
   getProductVariantsByProductId(productId: number): Promise<any[]>;
   getAllProductVariants(): Promise<any[]>;
-  getProductBySku(sku: string): Promise<any>;
-  createProduct(data: any): Promise<any>;
-  createProductVariant(data: any): Promise<any>;
+  getProductBySku(sku: string, tx?: any): Promise<any>;
+  createProduct(data: any, tx?: any): Promise<any>;
+  createProductVariant(data: any, tx?: any): Promise<any>;
   // Location lookups
   getAllWarehouseLocations(): Promise<any[]>;
   getAllProductLocations(): Promise<any[]>;
@@ -367,10 +361,10 @@ async function resolveReceivingLineCost(
       if (poLine && ((poLine.lineType ?? "product") === "product")) {
         const qty = Number(poLine.orderQty) || 1;
         const productCostCents = qty > 0
-          ? Math.round(Number(poLine.totalProductCostCents || 0) / qty)
+          ? Math.round(readIntegerCents(poLine.totalProductCostCents ?? 0, "product cost", true) / qty)
           : 0;
         const packagingCostCents = qty > 0
-          ? Math.round(Number(poLine.packagingCostCents || 0) / qty)
+          ? Math.round(readIntegerCents(poLine.packagingCostCents ?? 0, "packaging cost", true) / qty)
           : 0;
 
         if (
@@ -675,12 +669,14 @@ export class ReceivingService {
         );
       }
       const discardedAt = this.clock();
-      await tx.execute(sql`
-        INSERT INTO public.audit_events (timestamp, level, actor, action, target, changes, context)
-        VALUES (${discardedAt}, 'AUDIT', ${userId ?? null}, 'procurement.receiving.discard', ${`receiving-order:${receivingOrderId}`},
-          ${JSON.stringify({ before: { order, lines }, after: null })}::jsonb,
-          ${JSON.stringify({ receivingOrderId, purchaseOrderId: order.purchaseOrderId ?? null })}::jsonb)
-      `);
+      await insertAuditEventSql(tx, {
+        timestamp: discardedAt,
+        actor: userId ?? null,
+        action: "procurement.receiving.discard",
+        target: `receiving-order:${receivingOrderId}`,
+        changesJson: JSON.stringify({ before: { order, lines }, after: null }),
+        contextJson: JSON.stringify({ receivingOrderId, purchaseOrderId: order.purchaseOrderId ?? null }),
+      });
 
       // Explicit line deletion before order (defense-in-depth; the DB
       // schema also has ON DELETE CASCADE but we make the intent clear).
@@ -885,10 +881,14 @@ export class ReceivingService {
       status: this.receivingLineStatus(input.acceptedQty, line.expectedQty),
     }, tx);
     await this.updateReceivingOrderTotals(order.id, tx);
-    await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-      VALUES(${recordedAt},'AUDIT',${actorId},'procurement.receiving.quarantine_recount',${`receiving-line:${line.id}`},
-        ${JSON.stringify({ before: line, after: updated })}::jsonb,
-        ${JSON.stringify({ receivingOrderId: order.id, reviewedAcceptedQty: input.acceptedQty, reviewedHeldQty: input.heldQty })}::jsonb)`);
+    await insertAuditEventSql(tx, {
+      timestamp: recordedAt,
+      actor: actorId,
+      action: "procurement.receiving.quarantine_recount",
+      target: `receiving-line:${line.id}`,
+      changesJson: JSON.stringify({ before: line, after: updated }),
+      contextJson: JSON.stringify({ receivingOrderId: order.id, reviewedAcceptedQty: input.acceptedQty, reviewedHeldQty: input.heldQty }),
+    });
     return { order, lineBefore: line, lineAfter: updated, productId: variant.productId,
       productVariantId: variant.id, unitsPerVariantSnapshot: variant.unitsPerVariant };
   }
@@ -970,7 +970,7 @@ export class ReceivingService {
           { receivingOrderIds: active.rows.map((row) => (row as { id: number }).id) });
       }
       target = await this.storage.createReceivingOrder({
-        receiptNumber: await this.storage.generateReceiptNumber(tx), sourceType: source.sourceType,
+        receiptNumber: await this.storage.generateReceiptNumber(tx, recordedAt), sourceType: source.sourceType,
         vendorId: source.vendorId ?? null, warehouseId: source.warehouseId,
         poNumber: source.poNumber ?? null, purchaseOrderId: source.purchaseOrderId ?? null,
         inboundShipmentId: source.inboundShipmentId ?? null, asnNumber: source.asnNumber ?? null,
@@ -999,10 +999,14 @@ export class ReceivingService {
       createdAt: recordedAt, updatedAt: recordedAt,
     }, tx);
     await this.updateReceivingOrderTotals(target.id, tx);
-    await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-      VALUES(${recordedAt},'AUDIT',${actorId},'procurement.receiving.quarantine_acceptance_prepared',${`receiving-line:${line.id}`},
-        ${JSON.stringify({ before: null, after: line })}::jsonb,
-        ${JSON.stringify({ observationId: input.observationId, sourceReceivingOrderId: source.id, receivingOrderId: target.id })}::jsonb)`);
+    await insertAuditEventSql(tx, {
+      timestamp: recordedAt,
+      actor: actorId,
+      action: "procurement.receiving.quarantine_acceptance_prepared",
+      target: `receiving-line:${line.id}`,
+      changesJson: JSON.stringify({ before: null, after: line }),
+      contextJson: JSON.stringify({ observationId: input.observationId, sourceReceivingOrderId: source.id, receivingOrderId: target.id }),
+    });
     return { receivingOrderId: target.id, receivingLineId: line.id, productId: variant.productId,
       productVariantId: variant.id, unitsPerVariantSnapshot: variant.unitsPerVariant, acceptedVariantQty: input.acceptedVariantQty };
   }
@@ -1024,10 +1028,14 @@ export class ReceivingService {
       receivedQty: 0, expectedQty: 0, damagedQty: 0, status: "pending", updatedAt: recordedAt,
     }, tx);
     await this.updateReceivingOrderTotals(order.id, tx);
-    await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-      VALUES(${recordedAt},'AUDIT',${actorId},'procurement.receiving.quarantine_acceptance_cancelled',${`receiving-line:${line.id}`},
-        ${JSON.stringify({ before: line, after: updated })}::jsonb,
-        ${JSON.stringify({ acceptanceId: input.acceptanceId, receivingOrderId: order.id })}::jsonb)`);
+    await insertAuditEventSql(tx, {
+      timestamp: recordedAt,
+      actor: actorId,
+      action: "procurement.receiving.quarantine_acceptance_cancelled",
+      target: `receiving-line:${line.id}`,
+      changesJson: JSON.stringify({ before: line, after: updated }),
+      contextJson: JSON.stringify({ acceptanceId: input.acceptanceId, receivingOrderId: order.id }),
+    });
   }
 
   private assertQuarantineAuditContext(actorId: string, recordedAt: Date): void {
@@ -1037,7 +1045,19 @@ export class ReceivingService {
     }
   }
 
+  /** Trusted in-process callers retain their existing contract. HTTP entry uses
+   * executeEntryInTransaction so intent, actor, mutation and audit commit together. */
   async createOrder(input: Record<string, unknown>, userId?: string | null) {
+    const normalized = this.normalizeOrderCreate(input, userId);
+    const recordedAt = captureDocumentNumberTime(this.clock());
+    return this.db.transaction(tx => this.insertOrderInTransaction(tx, normalized, recordedAt));
+  }
+
+  private async createOrderInTransaction(tx: ReceivingEntryTransaction, input: Record<string, unknown>, recordedAt: Date, userId?: string | null) {
+    return this.insertOrderInTransaction(tx, this.normalizeOrderCreate(input, userId), recordedAt);
+  }
+
+  private normalizeOrderCreate(input: Record<string, unknown>, userId?: string | null) {
     assertOnlyAllowedFields(input, RECEIVING_ORDER_CREATE_FIELDS, "Receiving order create");
 
     const sourceType = normalizeOptionalString(input.sourceType, "sourceType", 20) ?? "blind";
@@ -1067,24 +1087,43 @@ export class ReceivingService {
       createdBy: userId ?? null,
     };
 
+    return normalized;
+  }
+
+  private async insertOrderInTransaction(tx: ReceivingEntryTransaction, normalized: ReturnType<ReceivingService["normalizeOrderCreate"]>, recordedAt: Date) {
     let receiptNumber: string | null = null;
     try {
-      return await this.db.transaction(async (tx) => {
-        receiptNumber = await this.storage.generateReceiptNumber(tx);
-        return await this.storage.createReceivingOrder({
-          receiptNumber,
-          ...normalized,
-        }, tx);
-      });
+      receiptNumber = await this.storage.generateReceiptNumber(tx, recordedAt);
+      return await this.storage.createReceivingOrder({ receiptNumber, ...normalized, createdAt: recordedAt, updatedAt: recordedAt }, tx);
     } catch (error: any) {
       if (error?.code === "23505" || error?.cause?.code === "23505") {
         throw new ReceivingError("Receiving order creation conflicted with an existing active receipt", 409, {
-          code: "RECEIVING_ORDER_CREATE_CONFLICT",
-          receiptNumber,
+          code: "RECEIVING_ORDER_CREATE_CONFLICT", receiptNumber,
         });
       }
       throw error;
     }
+  }
+
+  /** Recovery still requires current authority, including when the saved result
+   * is already terminal. The mutation repeats this check under its own locks. */
+  async assertEntryAuthority(actorId: string): Promise<void> {
+    await this.db.transaction(async tx => assertReceivingEntryAuthority(await readCommandAuthorityActor(tx, actorId)));
+  }
+
+  async executeEntryInTransaction(tx: ReceivingEntryTransaction, command: ReceivingEntryCommand, actorId: string, commandKey: string) {
+    assertReceivingEntryAuthority(await readCommandAuthorityActor(tx, actorId));
+    const recordedAt = captureDocumentNumberTime(this.clock());
+    if (command.action === "create") {
+      const order = await this.createOrderInTransaction(tx, command.payload, recordedAt, actorId);
+      await recordReceivingEntryAudit(tx, { action: command.action, actorId, commandKey, recordedAt,
+        receivingOrderId: order.id, before: null, after: order });
+      return { order, receivingLineId: null };
+    }
+    const result = await this.addLineInTransaction(tx, command.targetId, receivingEntryLineFields(command.payload));
+    await recordReceivingEntryAudit(tx, { action: command.action, actorId, commandKey, recordedAt,
+      receivingOrderId: result.order.id, before: result.before, after: { order: result.order, line: result.line } });
+    return { order: { ...result.order, lines: result.lines.map(withReceivingUnitVersion) }, receivingLineId: result.line.id };
   }
 
   async updateOrderDetails(orderId: number, input: Record<string, unknown>, actorId?: string | null) {
@@ -1152,16 +1191,26 @@ export class ReceivingService {
       }
       const updated = await this.storage.updateReceivingOrder(orderId, updates, tx);
       if (applyDefaultToUnassigned === true) {
-        await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-          VALUES(${this.clock()},'AUDIT',${actorId},'procurement.receiving.default_location_applied',${`receiving-order:${orderId}`},
-            ${JSON.stringify({ before: previousFields, after: Object.fromEntries(Object.keys(updates).map((key) => [key, updated[key]])), lines: assigned })}::jsonb,
-            ${JSON.stringify({ receivingOrderId: orderId })}::jsonb)`);
+        await insertAuditEventSql(tx, {
+          timestamp: this.clock(),
+          actor: actorId,
+          action: "procurement.receiving.default_location_applied",
+          target: `receiving-order:${orderId}`,
+          changesJson: JSON.stringify({ before: previousFields, after: Object.fromEntries(Object.keys(updates).map((key) => [key, updated[key]])), lines: assigned }),
+          contextJson: JSON.stringify({ receivingOrderId: orderId }),
+        });
       }
       return updated;
     });
   }
 
   async addLine(orderId: number, input: Record<string, unknown>) {
+    const result = await this.db.transaction(tx => this.addLineInTransaction(tx, orderId, input));
+    const vendor = result.order?.vendorId ? await this.storage.getVendorById(result.order.vendorId) : null;
+    return { ...result.order, lines: result.lines.map(withReceivingUnitVersion), vendor };
+  }
+
+  private async addLineInTransaction(tx: ReceivingEntryTransaction, orderId: number, input: Record<string, unknown>) {
     const { expectedUnitsPerVariant, ...fields } = input;
     assertOnlyAllowedFields(fields, RECEIVING_LINE_EDITABLE_FIELDS, "Receiving line create");
     const lineData = this.normalizeLineMutation(fields, null);
@@ -1172,48 +1221,41 @@ export class ReceivingService {
       throw new ReceivingError("A reviewed pack size requires a selected receive variant.", 400);
     }
 
-    const result = await this.db.transaction(async (tx) => {
-      const order = await this.lockReceivingOrder(tx, orderId);
-      this.assertReceivingOrderMutable(order);
-      const productVariantId = lineData.productVariantId;
-      const unitData = productVariantId
-        ? await this.loadReceiveVariant(tx, Number(productVariantId), lineData.productId)
-        : null;
-      if (unitData && unitData.unitsPerVariant !== expectedFactor) {
-        throw new ReceivingError("The selected catalog pack changed. Select the receive unit again and review its counts before adding the line.", 409, {
-          code: "RECEIVING_UNIT_CHANGED", productVariantId,
-        });
-      }
-      const unitsPerVariantSnapshot = unitData?.unitsPerVariant ?? null;
-      if (lineData.putawayLocationId) await this.validateLocations(tx, order, [{ putawayLocationId: Number(lineData.putawayLocationId) }]);
-      const counts = { expectedQty: 0, receivedQty: 0, damagedQty: 0, ...lineData };
-      for (const field of ["expectedQty", "receivedQty", "damagedQty"] as const) receiptInteger(counts[field], field);
-      if (unitsPerVariantSnapshot !== null) this.validateReceiptBaseCounts(counts, unitsPerVariantSnapshot);
-      const line = await this.storage.createReceivingLine({
-        ...lineData,
-        productId: unitData?.productId ?? lineData.productId,
-        unitsPerVariantSnapshot,
-        receivingOrderId: orderId,
-        status: this.receivingLineStatus(
-          Number(lineData.receivedQty) || 0,
-          Number(lineData.expectedQty) || 0,
-        ),
-      }, tx);
-      const lines = await this.updateReceivingOrderTotals(orderId, tx);
-      const updatedOrder = await this.storage.getReceivingOrderById(orderId, tx);
-      return { order: updatedOrder, lines, line };
-    });
-
-    const vendor = result.order?.vendorId
-      ? await this.storage.getVendorById(result.order.vendorId)
+    const order = await this.lockReceivingOrder(tx, orderId);
+    this.assertReceivingOrderMutable(order);
+    const productVariantId = lineData.productVariantId;
+    const unitData = productVariantId
+      ? await this.loadReceiveVariant(tx, Number(productVariantId), lineData.productId)
       : null;
-    return { ...result.order, lines: result.lines.map(withReceivingUnitVersion), vendor };
+    if (unitData && unitData.unitsPerVariant !== expectedFactor) {
+      throw new ReceivingError("The selected catalog pack changed. Select the receive unit again and review its counts before adding the line.", 409, {
+        code: "RECEIVING_UNIT_CHANGED", productVariantId,
+      });
+    }
+    const unitsPerVariantSnapshot = unitData?.unitsPerVariant ?? null;
+    if (lineData.putawayLocationId) await this.validateLocations(tx, order, [{ putawayLocationId: Number(lineData.putawayLocationId) }]);
+    const counts = { expectedQty: 0, receivedQty: 0, damagedQty: 0, ...lineData };
+    for (const field of ["expectedQty", "receivedQty", "damagedQty"] as const) receiptInteger(counts[field], field);
+    if (unitsPerVariantSnapshot !== null) this.validateReceiptBaseCounts(counts, unitsPerVariantSnapshot);
+    const line = await this.storage.createReceivingLine({
+      ...lineData,
+      productId: unitData?.productId ?? lineData.productId,
+      unitsPerVariantSnapshot,
+      receivingOrderId: orderId,
+      status: this.receivingLineStatus(
+        Number(lineData.receivedQty) || 0,
+        Number(lineData.expectedQty) || 0,
+      ),
+    }, tx);
+    const lines = await this.updateReceivingOrderTotals(orderId, tx);
+    const updatedOrder = await this.storage.getReceivingOrderById(orderId, tx);
+    return { order: updatedOrder, lines, line, before: order };
   }
 
-  private async loadReceiveVariant(tx: any, variantId: number, expectedProductId?: unknown): Promise<{ id: number; productId: number; unitsPerVariant: number }> {
+  private async loadReceiveVariant(tx: any, variantId: number, expectedProductId?: unknown): Promise<{ id: number; productId: number; unitsPerVariant: number; sku: string | null }> {
     receiptInteger(variantId, "Receive variant ID", true);
     const rows = await tx.execute(sql`
-      SELECT id, product_id, units_per_variant, is_active
+      SELECT id, product_id, units_per_variant, is_active, sku
       FROM catalog.product_variants WHERE id = ${variantId} FOR SHARE
     `);
     const variant = rows.rows?.[0];
@@ -1225,7 +1267,7 @@ export class ReceivingService {
     if (expectedProductId != null && Number(expectedProductId) !== productId) {
       throw new ReceivingError("The receive variant belongs to a different product than this receipt line.", 409, { code: "RECEIVING_VARIANT_PRODUCT_MISMATCH", productVariantId: variantId });
     }
-    return { id: variantId, productId, unitsPerVariant };
+    return { id: variantId, productId, unitsPerVariant, sku: typeof variant.sku === "string" ? variant.sku : null };
   }
 
   private validateReceiptBaseCounts(line: Record<string, unknown>, factor: number): void {
@@ -1309,6 +1351,9 @@ export class ReceivingService {
         }
         updates.productId = variant.productId;
         updates.unitsPerVariantSnapshot = variant.unitsPerVariant;
+        // The receipt's scan/display identity must follow its saved count
+        // configuration too. The unit audit retains the original source label.
+        if (variant.sku !== null) updates.sku = variant.sku;
       } else if (confirmLegacyUnit) {
         throw new ReceivingError("Unit confirmation requires an explicit receive variant.", 400);
       }
@@ -1333,12 +1378,14 @@ export class ReceivingService {
       const updated = await this.storage.updateReceivingLine(lineId, updates, tx);
       await this.updateReceivingOrderTotals(line.receivingOrderId, tx);
       if (changesUnits || changesCost) {
-        await tx.execute(sql`
-          INSERT INTO public.audit_events (timestamp, level, actor, action, target, changes, context)
-          VALUES (${now}, 'AUDIT', ${actorId}, ${changesCost ? 'procurement.receiving.cost_override' : 'procurement.receiving.units'}, ${`receiving-line:${lineId}`},
-            ${JSON.stringify({ before: line, after: updated })}::jsonb,
-            ${JSON.stringify({ receivingOrderId: line.receivingOrderId, receivingLineId: lineId, legacyUnitConfirmed: confirmLegacyUnit === true })}::jsonb)
-        `);
+        await insertAuditEventSql(tx, {
+          timestamp: now,
+          actor: actorId,
+          action: changesCost ? "procurement.receiving.cost_override" : "procurement.receiving.units",
+          target: `receiving-line:${lineId}`,
+          changesJson: JSON.stringify({ before: line, after: updated }),
+          contextJson: JSON.stringify({ receivingOrderId: line.receivingOrderId, receivingLineId: lineId, legacyUnitConfirmed: confirmLegacyUnit === true }),
+        });
       }
       return withReceivingUnitVersion(updated);
     });
@@ -1509,6 +1556,7 @@ export class ReceivingService {
     let linesReceived = 0;
     const receivedVariantIds = new Set<number>();
     const putawayLocationIds = new Set<number>();
+    const postCommitInventoryEffects: Array<() => Promise<void>> = [];
     const receivedPurchaseOrderLineIds = new Set<number>();
 
     const closeResult = await this.db.transaction(async (tx) => {
@@ -1584,15 +1632,35 @@ export class ReceivingService {
         const before = { purchaseOrderLineId: line.purchaseOrderLineId ?? null, inboundShipmentLineId: line.inboundShipmentLineId ?? null };
         const after = { purchaseOrderLineId: source.purchaseOrderLineId, inboundShipmentLineId: source.inboundShipmentLineId };
         await this.storage.updateReceivingLine(line.id, after, tx);
-        await tx.execute(sql`INSERT INTO public.audit_events(timestamp,level,actor,action,target,changes,context)
-          VALUES(${closeAt},'AUDIT',${userId || "system:receiving"},'procurement.receiving.source_resolved',${`receiving-line:${line.id}`},
-            ${JSON.stringify({ before, after })}::jsonb,${JSON.stringify({ receivingOrderId: orderId })}::jsonb)`);
+        await insertAuditEventSql(tx, {
+          timestamp: closeAt,
+          actor: userId || "system:receiving",
+          action: "procurement.receiving.source_resolved",
+          target: `receiving-line:${line.id}`,
+          changesJson: JSON.stringify({ before, after }),
+          contextJson: JSON.stringify({ receivingOrderId: orderId }),
+        });
       }
       // Re-read our persisted source assignments before cost origin and inventory
       // posting. No temporary DTO-only source can reach the physical owner.
       lines = await this.storage.getReceivingLines(orderId, tx);
       for (const line of lines.filter((line: any) => line.receivedQty > 0)) {
         await this.assertReceiptSourceProduct(tx, line, order, receiveVariants.get(line.productVariantId)!.productId);
+      }
+      try {
+        await assertShipmentReceiptCustodyAdmission(tx, { receivingOrderId: orderId,
+          purchaseOrderId: order.purchaseOrderId ?? null, inboundShipmentId: order.inboundShipmentId ?? null, lines });
+        if (order.purchaseOrderId && !order.inboundShipmentId) {
+          await assertPoDirectReceiptCustodyAdmission(tx, { receivingOrderId: orderId,
+            purchaseOrderId: order.purchaseOrderId, lines });
+        }
+      } catch (error) {
+        if (error instanceof ShipmentReceiptCoverageError || error instanceof PoDirectCustodySourceError) {
+          console.warn(JSON.stringify({ event: "procurement.receiving.custody_admission_rejected", command: "close_receipt",
+            actorId: userId ?? null, receivingOrderId: orderId, purchaseOrderId: order.purchaseOrderId ?? null,
+            inboundShipmentId: order.inboundShipmentId ?? null, code: error.details.code }));
+        }
+        throw error;
       }
 
       for (const line of lines) {
@@ -1657,6 +1725,7 @@ export class ReceivingService {
           purchaseOrderLineId: line.purchaseOrderLineId || undefined,
           inboundShipmentId,
           costProvisional,
+          deferUntilCommit: (effect) => postCommitInventoryEffects.push(effect),
         }, tx);
         if (line.purchaseOrderLineId) {
           receivedPurchaseOrderLineIds.add(Number(line.purchaseOrderLineId));
@@ -1729,6 +1798,10 @@ export class ReceivingService {
     });
 
     const updated = closeResult.updated;
+
+    for (const effect of postCommitInventoryEffects) {
+      await effect();
+    }
 
     // Queue channel publication only after the inventory/receiving transaction
     // commits. The durable inventory ledger remains authoritative if a channel
@@ -1831,11 +1904,14 @@ export class ReceivingService {
       }
       const updatedLines = await this.updateReceivingOrderTotals(orderId, tx);
       const updatedOrder = await this.storage.getReceivingOrderById(orderId, tx);
-      await tx.execute(sql`
-        INSERT INTO public.audit_events (timestamp, level, actor, action, target, changes, context)
-        VALUES (${now}, 'AUDIT', ${actorId}, 'procurement.receiving.complete_counts', ${`receiving:${orderId}`},
-          ${JSON.stringify({ before: lines, after: updatedLines })}::jsonb, ${JSON.stringify({ receivingOrderId: orderId })}::jsonb)
-      `);
+      await insertAuditEventSql(tx, {
+        timestamp: now,
+        actor: actorId,
+        action: "procurement.receiving.complete_counts",
+        target: `receiving:${orderId}`,
+        changesJson: JSON.stringify({ before: lines, after: updatedLines }),
+        contextJson: JSON.stringify({ receivingOrderId: orderId }),
+      });
       return { updated, order: updatedOrder, updatedLines };
     });
     const vendor = result.order?.vendorId ? await this.storage.getVendorById(result.order.vendorId) : null;
@@ -1843,74 +1919,81 @@ export class ReceivingService {
   }
 
   async createVariantFromLine(lineId: number) {
-    const line = await this.db.transaction(async (tx) => {
-      const locked = await this.lockReceivingLineAndOrder(tx, lineId);
-      return locked.line;
-    });
-    if (!line) throw new ReceivingError("Receiving line not found", 404);
-    if (!line.sku) throw new ReceivingError("Line has no SKU");
-    if (line.productVariantId) throw new ReceivingError("Line already has a linked product variant");
+    return this.db.transaction(async (tx) => {
+      const { line } = await this.lockReceivingLineAndOrder(tx, lineId);
+      if (!line) throw new ReceivingError("Receiving line not found", 404);
+      if (!line.sku) throw new ReceivingError("Line has no SKU");
+      if (line.productVariantId) throw new ReceivingError("Line already has a linked product variant");
 
-    const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
-    const match = line.sku.match(variantPattern);
+      const variantPattern = /^(.+)-(P|B|C)(\d+)$/i;
+      const match = line.sku.match(variantPattern);
 
-    let baseSku: string;
-    let variantType: string;
-    let unitsPerVariant: number;
-    let hierarchyLevel: number;
-    let variantName: string;
+      let baseSku: string;
+      let variantType: string;
+      let unitsPerVariant: number;
+      let hierarchyLevel: number;
+      let variantName: string;
 
-    if (match) {
-      baseSku = match[1].toUpperCase();
-      variantType = match[2].toUpperCase();
-      unitsPerVariant = parseInt(match[3], 10);
-      hierarchyLevel = variantType === "P" ? 1 : variantType === "B" ? 2 : 3;
-      const typeName = variantType === "P" ? "Pack" : variantType === "B" ? "Box" : "Case";
-      variantName = `${typeName} of ${unitsPerVariant}`;
-    } else {
-      // Standalone SKU — single unit
-      baseSku = line.sku.toUpperCase();
-      variantType = "EA";
-      unitsPerVariant = 1;
-      hierarchyLevel = 1;
-      variantName = "Each";
-    }
-
-    // Find or create the parent product
-    let product = await this.storage.getProductBySku(baseSku);
-    if (!product) {
-      product = await this.storage.createProduct({
-        sku: baseSku,
-        name: baseSku,
-        baseUnit: "EA",
-      });
-    }
-
-    // Create the variant
-    let variant;
-    try {
-      variant = await this.storage.createProductVariant({
-        productId: product.id,
-        sku: line.sku.toUpperCase(),
-        name: variantName,
-        unitsPerVariant,
-        hierarchyLevel,
-      });
-    } catch (error: any) {
-      if (error.code === "23505" || error.message?.includes("unique")) {
-        throw new ReceivingError("A variant with this SKU already exists. Use the search to link it instead.", 409);
+      if (match) {
+        baseSku = match[1].toUpperCase();
+        variantType = match[2].toUpperCase();
+        unitsPerVariant = parseInt(match[3], 10);
+        hierarchyLevel = variantType === "P" ? 1 : variantType === "B" ? 2 : 3;
+        const typeName = variantType === "P" ? "Pack" : variantType === "B" ? "Box" : "Case";
+        variantName = `${typeName} of ${unitsPerVariant}`;
+      } else {
+        // Standalone SKU — single unit
+        baseSku = line.sku.toUpperCase();
+        variantType = "EA";
+        unitsPerVariant = 1;
+        hierarchyLevel = 1;
+        variantName = "Each";
       }
-      throw error;
-    }
 
-    // Catalog creation does not establish the count unit of a legacy line.
-    // The caller explicitly confirms/converts units with its content version.
-    return {
-      line: withReceivingUnitVersion(line),
-      requiresUnitConfirmation: true,
-      product: { id: product.id, sku: product.sku, name: product.name },
-      variant: { id: variant.id, sku: variant.sku, name: variant.name, unitsPerVariant: variant.unitsPerVariant },
-    };
+      // Reuse the quantity owner before creating either catalog record. A zero
+      // or oversized SKU suffix must not create an unusable pack or orphan parent.
+      try { toBasePieces(1, unitsPerVariant); }
+      catch (error) {
+        if (error instanceof UnitQuantityError) throw new ReceivingError(error.message, 400, { code: error.code });
+        throw error;
+      }
+
+      // Keep the parent and variant under the receipt lock and one transaction:
+      // a failed variant insert must roll back a newly created parent as well.
+      let product = await this.storage.getProductBySku(baseSku, tx);
+      if (!product) {
+        product = await this.storage.createProduct({
+          sku: baseSku,
+          name: baseSku,
+          baseUnit: "EA",
+        }, tx);
+      }
+
+      let variant;
+      try {
+        variant = await this.storage.createProductVariant({
+          productId: product.id,
+          sku: line.sku.toUpperCase(),
+          name: variantName,
+          unitsPerVariant,
+          hierarchyLevel,
+        }, tx);
+      } catch (error: any) {
+        if (error.code === "23505" || error.message?.includes("unique")) {
+          throw new ReceivingError("A variant with this SKU already exists. Use the search to link it instead.", 409);
+        }
+        throw error;
+      }
+
+      // Catalog creation does not establish the count unit of a legacy line.
+      // The caller explicitly confirms/converts units with its content version.
+      return {
+        line: withReceivingUnitVersion(line),
+        requiresUnitConfirmation: true,
+        product: { id: product.id, sku: product.sku, name: product.name },
+        variant: { id: variant.id, sku: variant.sku, name: variant.name, unitsPerVariant: variant.unitsPerVariant },
+      };
+    });
   }
 
   // ─── Bulk Import Lines (CSV) ──────────────────────────────────

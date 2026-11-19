@@ -17,6 +17,8 @@ export const generateVendorListingPreviewForMemberInputSchema = generateVendorLi
 export const createListingPushJobForMemberInputSchema = createListingPushJobInputSchema.omit({
   vendorId: true,
   requestedBy: true,
+  // Only the push sweep names a publish run's chunk (step 1 plan S2-5, §4.3).
+  run: true,
 }).extend({
   requestedRetailPriceCents: CentsSchema.optional(),
   requestedRetailPricesByVariantId: generateVendorListingPreviewInputSchema.shape.requestedRetailPricesByVariantId,

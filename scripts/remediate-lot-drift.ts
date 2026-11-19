@@ -1,3 +1,4 @@
+import { readIntegerCents } from "../shared/money-read";
 /**
  * Reconcile FIFO lot projections to the operational inventory-level spine.
  *
@@ -198,7 +199,7 @@ export async function loadSnapshot(client: pg.Pool | pg.PoolClient): Promise<Sna
     notes: row.notes == null ? null : String(row.notes),
   }));
   const costs = new Map<number, number>(
-    costsResult.rows.map((row) => [Number(row.id), Number(row.costCents)]),
+    costsResult.rows.map((row) => [Number(row.id), readIntegerCents(row.costCents, "lot unit cost", true)]),
   );
 
   return { levels, lots, costs };

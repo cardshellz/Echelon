@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
@@ -40,7 +41,7 @@ import { replenishmentTaskPatchSchema } from "@shared/types/replenishment-task-c
 function buildApp(services: Record<string, any> = {}): Express {
   const app = express();
   app.use(express.json());
-  app.locals.services = services;
+  app.locals.services = services as unknown as typeof app.locals.services;
   registerReplenishmentRoutes(app);
   return app;
 }
@@ -58,7 +59,7 @@ function startServer(app: Express): Promise<{ url: string; close: () => Promise<
 }
 
 async function requestJson(baseUrl: string, method: string, path: string, body?: any) {
-  const res = await fetch(`${baseUrl}${path}`, {
+  const res = await requestLocalHttp(`${baseUrl}${path}`, {
     method,
     headers: { "content-type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),

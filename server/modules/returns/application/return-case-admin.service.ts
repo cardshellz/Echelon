@@ -75,8 +75,8 @@ export interface ReturnCaseItemRow {
   receivedQuantity: number;
   remainingQuantity: number;
   receiptStatus: ReturnCaseReceiptStatus;
-  unitPaidPriceCents: number;
-  sourceLineTotalCents: number;
+  unitPaidPriceCents: number | null;
+  sourceLineTotalCents: number | null;
   createdAt: Date;
 }
 

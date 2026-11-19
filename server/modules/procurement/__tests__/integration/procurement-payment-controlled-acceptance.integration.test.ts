@@ -1,3 +1,4 @@
+import { registerApPaymentClockAndNumberCases } from "./ap-payment-clock.cases";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { hashHttpFinancialCommand } from "../../../../platform/commands/http-command";
@@ -23,6 +24,8 @@ acceptance.sequential("procurement payment controlled acceptance", () => {
   beforeAll(async () => fixture.start(testUrl!));
   beforeEach(async () => fixture.reset());
   afterAll(async () => fixture.stop());
+
+  registerApPaymentClockAndNumberCases(fixture);
 
   const pay = (amount: number, key = randomUUID(), actor: string | null = PAYMENT_ACTORS.owner) =>
     fixture.request("/api/ap-payments", { body: flowPayment(amount), key, actor });
@@ -295,9 +298,9 @@ acceptance.sequential("procurement payment controlled acceptance", () => {
     const id = paymentId(accepted);
     expect(await identity.getUserPermissions(PAYMENT_ACTORS.delegate)).toContain("purchasing:approve");
     const before = await fixture.graph();
-    // Use the same identity owner as PATCH /api/users/:id. Its persisted session
-    // remains intact, so the permission read must reject the now inactive user.
-    await identity.updateUser(PAYMENT_ACTORS.delegate, { active: 0 });
+    // Synthetic fixture revocation; administration command authorization/audit is
+    // covered by Identity's real-PG suite. Retain this actual session cookie.
+    await fixture.pool.query("UPDATE identity.users SET active=0 WHERE id=$1", [PAYMENT_ACTORS.delegate]);
     const nextKey = randomUUID(), voidKey = randomUUID();
     expect(await fixture.request("/api/ap-payments", { body: flowPayment(110_000), key: nextKey, cookie }))
       .toMatchObject({ status: 403 });
@@ -306,14 +309,13 @@ acceptance.sequential("procurement payment controlled acceptance", () => {
       .toMatchObject({ status: 403 });
     expect(await identity.getUserPermissions(PAYMENT_ACTORS.delegate)).toEqual([]);
     const session = await fixture.request("/api/auth/me", { cookie });
-    expect(session.status).toBe(200);
-    expect(session.body).toMatchObject({ user: { id: PAYMENT_ACTORS.delegate, active: 1 }, permissions: [] });
+    expect(session.status).toBe(401);
     expect(await fixture.graph()).toEqual(before);
     expect(await command(key)).toMatchObject({ status: "succeeded", attempt_count: 1, response_body: accepted.body });
     expect((await fixture.pool.query("SELECT * FROM public.financial_command_results WHERE idempotency_key=ANY($1::text[])",
       [[nextKey, voidKey]])).rows).toEqual([]);
 
-    await identity.updateUser(PAYMENT_ACTORS.delegate, { active: 1 });
+    await fixture.pool.query("UPDATE identity.users SET active=1 WHERE id=$1", [PAYMENT_ACTORS.delegate]);
     expect(await fixture.request("/api/ap-payments", { body, key, cookie })).toEqual({ ...accepted, replayed: "true" });
     paymentId(await fixture.request("/api/ap-payments", { body: flowPayment(110_000), key: nextKey, cookie }));
     await expectBalances(210_000, 0, "paid", "paid");

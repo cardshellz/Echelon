@@ -3,23 +3,23 @@ import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool } from "pg";
 import * as schema from "@shared/schema";
-import { PackageAllocationBootstrapPersistenceService } from "../modules/shipping/package-allocation-bootstrap.service";
+import { PackageAllocationBootstrapPersistenceService } from "../modules/shipping/package-allocation-authority.api";
 import {
   createTransactionBoundPackageAllocationLedgerRepository,
   PackageAllocationLedgerRepositoryError,
-} from "../modules/shipping/package-allocation-ledger.repository";
-import type { PackageAllocationLabelCommercialWorkflow } from "../modules/shipping/package-allocation-label-commercial-fulfillment.service";
+} from "../modules/shipping/package-allocation-authority.api";
+import type { PackageAllocationLabelCommercialWorkflow } from "../modules/shipping/package-allocation-authority.api";
 import {
   adaptPersistedDeclaredPackageLifecycleEvidence,
   projectPersistedDeclaredPackageLifecycleShadow,
-} from "../modules/shipping/declared-package-lifecycle-shadow.domain";
-import { createChannelFulfillmentAuthorityRepository } from "../modules/oms/channel-fulfillment-authority.repository";
+} from "../modules/shipping/declared-package-lifecycle.api";
 import {
+  createChannelFulfillmentAuthorityRepository,
   createChannelFulfillmentAuthorityService,
+  createChannelFulfillmentProjector,
   type ChannelFulfillmentAuthorityClock,
   type ChannelFulfillmentAuthorityLogger,
-} from "../modules/oms/channel-fulfillment-authority.service";
-import { createChannelFulfillmentProjector } from "../modules/oms/channel-fulfillment-projection.repository";
+} from "../modules/oms/channel-fulfillment-authority.api";
 
 // Preserve three total attempts, with at most 150ms of backoff. Immediate
 // retries can exhaust the budget while a competing label transaction commits.
@@ -83,10 +83,13 @@ export function createPackageAllocationLabelCommercialWorkflow(dependencies: {
                 const exactLabelId = Number(shippingProviderLabelId);
                 if (!Number.isSafeInteger(exactLabelId) || exactLabelId <= 0
                   || String(exactLabelId) !== String(shippingProviderLabelId)) return null;
-                const locked = await ledger.withSerializableTransaction((transaction) =>
-                  transaction.lockAuthorityReadinessPackages([exactLabelId]));
-                if (locked.length !== 1) return null;
-                const persistedEvidence = locked[0].persistedEvidence;
+                // Read initial contents without taking a single-label lock ahead
+                // of bootstrap's canonical Group -> Source -> Labels(sorted) lock
+                // hierarchy; persistDiscovered locks all selected labels in order
+                // inside this same SERIALIZABLE transaction.
+                const loaded = await ledger.readAuthorityReadinessPackages([exactLabelId]);
+                if (loaded.length !== 1) return null;
+                const persistedEvidence = loaded[0].persistedEvidence;
                 const adapted = adaptPersistedDeclaredPackageLifecycleEvidence(persistedEvidence);
                 const projected = projectPersistedDeclaredPackageLifecycleShadow(persistedEvidence);
                 if (adapted.outcome !== "adapted" || projected.outcome !== "projected") return null;

@@ -38,7 +38,8 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
       CREATE TABLE catalog.product_line_products (product_id int);
       CREATE TABLE catalog.product_categories (id integer PRIMARY KEY, name varchar(100) NOT NULL);
       CREATE TABLE dropship.dropship_catalog_rules (id int);
-      CREATE TABLE dropship.dropship_vendor_selection_rules (id int);
+      -- The vendor's picks, which the selection SHARE lock names (PLAN-B v4.1 §9 row 11); reduced.
+      CREATE TABLE dropship.dropship_vendor_selected_variants (vendor_id int, product_variant_id int);
       CREATE TABLE dropship.dropship_vendor_variant_overrides (id int);
       CREATE TABLE dropship.dropship_audit_events (id int GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         vendor_id int, store_connection_id int, entity_type text, entity_id text, event_type text,
@@ -66,7 +67,7 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
           entitlementStatus: "active", storeStatus: "connected", setupStatus: "ready", platform: "ebay", storeLaunchReady: true }),
         listCatalogCandidates: async (ids) => ids.map((id) => ({ ...contentCandidate(), productVariantId: id, categoryId: candidateCategoryId })),
         listCatalogExposureRules: async () => [{ id: 1, scopeType: "catalog", action: "include" }],
-        listSelectionRules: async () => [{ id: 1, scopeType: "catalog", action: "include" }],
+        listPickedVariantIds: async (_vendorId: number, ids: readonly number[]) => new Set(ids),
         listVariantOverrides: async () => [], listExistingListings: async () => [],
       },
     })) };

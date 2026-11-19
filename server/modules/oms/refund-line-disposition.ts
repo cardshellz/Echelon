@@ -99,6 +99,8 @@ export function extractRefundLineAdjustments(refundLineItems: unknown): ShopifyR
 }
 
 export interface RefundAuthorityInput {
+  /** Verified channel merchandise. Refund counters remain history, not a second subtraction. */
+  channelCurrentQuantity?: number | null;
   paidQuantity: number;
   previousAuthorityFulfillableQuantity: number;
   cancelledQuantity: number;
@@ -137,6 +139,16 @@ export function deriveRefundAuthority(input: RefundAuthorityInput): RefundAuthor
   );
 
   const refundedQuantity = refundCancelQuantity + refundOtherQuantity;
+  if (input.channelCurrentQuantity != null) {
+    const current = requireNonNegativeInteger(input.channelCurrentQuantity, "channelCurrentQuantity");
+    return {
+      authorityFulfillableQuantity: Math.min(previousAuthority, current),
+      refundedQuantity,
+      authorizationStatus: current === 0 ? "cancelled" : paidQuantity === 0 ? "seen"
+        : current < paidQuantity ? "partially_cancelled" : "authorized",
+      overDispositionQuantity: 0,
+    };
+  }
   const rawDispositionQuantity = Math.max(cancelledQuantity, refundCancelQuantity) + refundOtherQuantity;
   const overDispositionQuantity = Math.max(rawDispositionQuantity - paidQuantity, 0);
   const quantityAfterDisposition = Math.max(paidQuantity - rawDispositionQuantity, 0);

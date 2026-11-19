@@ -3,13 +3,13 @@ import { resolve } from "node:path";
 
 import { pool } from "../db";
 import { createHistoricalShipStationContentsClient } from
-  "../modules/shipping/historical-shipstation-contents-audit.client";
+  "../modules/shipping/historical-shipstation-contents.api";
 import { PgHistoricalShipStationContentsReviewRepository } from
-  "../modules/shipping/historical-shipstation-contents-review.repository";
+  "../modules/shipping/historical-shipstation-contents.api";
 import { HistoricalShipStationContentsReviewService } from
-  "../modules/shipping/historical-shipstation-contents-review.service";
+  "../modules/shipping/historical-shipstation-contents.api";
 import { classifyReviewedShipStationContents } from
-  "../modules/shipping/historical-shipstation-contents-review.service";
+  "../modules/shipping/historical-shipstation-contents.api";
 
 interface Options {
   readonly shippingProviderLabelId: string;

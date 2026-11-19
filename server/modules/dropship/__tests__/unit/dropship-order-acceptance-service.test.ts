@@ -69,6 +69,44 @@ describe("DropshipOrderAcceptanceService", () => {
     });
   });
 
+  it("OR-3: warns the vendor of a below-cost sale after the acceptance commits, as a best-effort side channel", async () => {
+    const lines = [{ listingId: 501, retailUnitPriceCents: 700, unitCostCents: 809, itemLabel: "Pack of 50 (SKU ARM-ENV-SGL-P50)" }];
+    const warnings: unknown[] = [];
+    const logs: DropshipLogEvent[] = [];
+    const logger = { info: (event: DropshipLogEvent) => logs.push(event), warn: (event: DropshipLogEvent) => logs.push(event),
+      error: (event: DropshipLogEvent) => logs.push(event) };
+    const make = (overrides: Partial<DropshipOrderAcceptanceResult>, fail = false) => new DropshipOrderAcceptanceService({
+      repository: new FakeAcceptanceRepository({ belowCostSaleLines: lines, ...overrides }),
+      inventoryAuthority: new FakeInventoryAuthority("legacy"),
+      canonicalFulfillment: new FakeCanonicalFulfillment(),
+      belowCostSaleNotices: { async enqueue(input) { if (fail) throw new Error("outbox down"); warnings.push(input); return 1; } },
+      clock: { now: () => now },
+      logger,
+    });
+
+    await make({}).acceptOrder(validAcceptanceInput());
+    expect(warnings).toEqual([{ vendorId: 10, storeConnectionId: 22, intakeId: 1, lines, at: now }]);
+
+    await make({ idempotentReplay: true }).acceptOrder(validAcceptanceInput());
+    expect(warnings).toHaveLength(1);
+
+    await expect(make({}, true).acceptOrder(validAcceptanceInput())).resolves.toMatchObject({ outcome: "accepted" });
+    expect(logs).toContainEqual(expect.objectContaining({ code: "DROPSHIP_ORDER_BELOW_COST_NOTICE_FAILED" }));
+  });
+
+  it("OR-3: carries a canonical order's below-cost lines from its preparation to the finalized acceptance", async () => {
+    const lines = [{ listingId: 501, retailUnitPriceCents: 700, unitCostCents: 809, itemLabel: "Armalope Envelope" }];
+    const repository = new FakeAcceptanceRepository();
+    repository.preparedBelowCostSaleLines = lines;
+    const warnings: unknown[] = [];
+    const service = new DropshipOrderAcceptanceService({
+      repository, inventoryAuthority: new FakeInventoryAuthority("canonical"), canonicalFulfillment: new FakeCanonicalFulfillment(),
+      belowCostSaleNotices: { async enqueue(input) { warnings.push(input); return 1; } }, clock: { now: () => now }, logger: noopLogger,
+    });
+    await expect(service.acceptOrder(validAcceptanceInput())).resolves.toMatchObject({ outcome: "accepted", belowCostSaleLines: lines });
+    expect(warnings).toEqual([expect.objectContaining({ intakeId: 1, lines })]);
+  });
+
   it("rejects invalid acceptance input before repository calls", async () => {
     const repository = new FakeAcceptanceRepository();
     const service = new DropshipOrderAcceptanceService({
@@ -771,6 +809,7 @@ class FakeAcceptanceRepository implements DropshipOrderAcceptanceRepository {
   ) {}
 
   private compensationState: "none" | "pending" | "released" = "none";
+  preparedBelowCostSaleLines: DropshipOrderAcceptanceResult["belowCostSaleLines"] = undefined;
   private fundedRetry = false;
   private currentInventoryClaimId: string | null = null;
 
@@ -824,6 +863,7 @@ class FakeAcceptanceRepository implements DropshipOrderAcceptanceRepository {
       warehouseId: 3,
       omsOrderId: 1001,
       idempotentReplay: this.preparationReplay,
+      ...(this.preparedBelowCostSaleLines ? { belowCostSaleLines: this.preparedBelowCostSaleLines } : {}),
     };
   }
 

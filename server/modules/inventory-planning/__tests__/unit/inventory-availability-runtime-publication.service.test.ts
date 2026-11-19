@@ -4,6 +4,7 @@ import type { InventoryChannelExposureRuntimePlan } from "@shared/types/inventor
 import {
   AuthorityAwareInventoryPublicationService,
   type ActiveInventoryPublicationTarget,
+  type CanonicalInventoryPublicationIntent,
   type InventoryAvailabilityRuntimePublicationContext,
   type InventoryAvailabilityRuntimePublicationExecutor,
 } from "../../application/inventory-availability-runtime-publication.service";
@@ -483,11 +484,13 @@ describe("AuthorityAwareInventoryPublicationService", () => {
       const routed = await service.publishProduct({ productId: 10, dryRun: false, blockedTargets: "isolate" }, vi.fn());
 
       if (routed.authority !== "canonical") throw new Error("Expected canonical publication");
-      // 102 has no mapping on either target: both are blocked for it, and
-      // target 5 withholds its whole projection rather than a partial one.
-      expect(routed.publication.rows).toEqual([]);
-      expect(routed.publication.blockedTargets?.map(entry => [entry.publicationTargetId, entry.productVariantIds]))
-        .toEqual([[5, [102]], [34, [101, 102]]]);
+      // 102 has no mapping on either target. Walmart (34) links nothing, so it sends
+      // nothing, not even its retained zero. Channels PR1 (PLAN-CH-v3 section 7): the
+      // Shopify destination (5) is row-isolable, so its linked 101 still publishes and
+      // only the unlinked retained 102 is withheld.
+      expect(routed.publication.rows).toEqual([expect.objectContaining({ publicationTargetId: 5, productVariantId: 101, desiredQuantity: "4" })]);
+      expect(routed.publication.blockedTargets?.map(entry => [entry.publicationTargetId, entry.productVariantIds, entry.isolation]))
+        .toEqual([[5, [102], "rows"], [34, [101, 102], "rows"]]);
     });
 
     it("keeps rejecting by default so listing setup still gets its exact answer", async () => {
@@ -526,7 +529,7 @@ function runtimeContext(
     listActivePublicationProductIds: vi.fn(async () => [10]),
     planProduct: vi.fn(async () => runtimePlan(targets)),
     loadActivePublicationTargets: vi.fn(async () => targets),
-    enqueueFullPublications: vi.fn(async (_runId, intents) => ({
+    enqueueFullPublications: vi.fn(async (_runId: string, intents: readonly CanonicalInventoryPublicationIntent[]) => ({
       enqueuedRows: intents.length,
       coalescedRows: 0,
       enqueuedPublicationKeys: intents.map((row) =>
@@ -581,6 +584,7 @@ function runtimePlan(targets: ActiveInventoryPublicationTarget[]): InventoryChan
         externalScopeId: target.externalScopeId,
         publicationAuthority: "echelon" as const,
         publicationTargetState: "live" as const,
+        hold: null,
         sourceBinding: {
           bindingId: target.sourceBindingId ?? 7,
           version: 1,
@@ -627,6 +631,7 @@ function runtimePlan(targets: ActiveInventoryPublicationTarget[]): InventoryChan
             externalInventoryItemId: mapping.externalInventoryItemId,
             externalSku: mapping.externalSku,
           } : null,
+          hold: null,
           blockers: mapping ? [] : [{
             code: "PUBLICATION_TARGET_VARIANT_MAPPING_MISSING",
             message: "The target has no active provider inventory identity for this SKU.",

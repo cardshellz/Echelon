@@ -17,7 +17,7 @@ export function useProcurementNavigation() {
   const search = useSearch();
   const current = parseProcurementRecord(path, search);
   const journey = parseProcurementJourney(search);
-  const parent = journey.trail.at(-1) ?? journey.purchase;
+  const parent = journey.trail.at(-1) ?? (journey.shipmentList ? null : journey.purchase);
   return {
     record: current,
     workspace: parsePurchaseWorkspaceSelection(search),
@@ -31,9 +31,10 @@ export function useProcurementNavigation() {
     },
     childHref: (destination: string, options?: ProcurementChildNavigationOptions) => procurementChildHref(path, search, destination, options),
     backHref: (fallback: string) => procurementBackHref(search, fallback),
-    backLabel: parent ? `Back to ${procurementRecordLabel(parent)}` : null,
+    backLabel: parent ? `Back to ${procurementRecordLabel(parent)}` : journey.shipmentList ? "Back to shipments" : null,
     purchaseHref: journey.purchase ? procurementRecordHref(journey.purchase) : null,
     purchaseId: journey.purchase?.id ?? null,
+    purchaseLabel: journey.purchase ? procurementRecordLabel(journey.purchase) : null,
   };
 }
 

@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import {
   ORDER_EDIT_CATALOG_HEADER,
@@ -212,22 +213,17 @@ async function installFixtures(
     const method = request.method();
     if (path === "/api/auth/me")
       return route.fulfill({
-        json: {
-          user: {
+        json: staffAuthorityFixture({ user: {
             id: "staff-1",
             username: "Staff fixture",
             role: "admin",
             active: 1,
-          },
-          roles: ["Administrator"],
-          permissions:
-            options.canEdit === false
+          }, permissions: options.canEdit === false
               ? []
               : [
                   "orders:edit",
                   ...(options.canConfigure === false ? [] : ["settings:edit"]),
-                ],
-        },
+                ], systemRoles: ["admin"] }),
       });
     if (!path.startsWith(ORDER_EDIT_API)) {
       if (method !== "GET") {
@@ -1785,7 +1781,8 @@ test("route permission denies the editor without loading any order-edit data", a
 }) => {
   const fixture = await installFixtures(page, { canEdit: false });
   await page.goto("/order-edits");
-  await expect(page).toHaveURL(/\/picking$/);
+  await expect(page).toHaveURL(/\/order-edits$/);
+  await expect(page.getByTestId("staff-access-notice")).toContainText("Your assigned roles do not provide access to this page.");
   await expect(page.getByLabel("Find an order")).toHaveCount(0);
   expect(fixture.requests).toEqual([]);
   expect(fixture.failures).toEqual([]);

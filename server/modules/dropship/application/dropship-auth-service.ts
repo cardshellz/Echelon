@@ -201,6 +201,14 @@ export class DropshipAuthService {
 
     const member = await this.requireMemberByEmail(email);
     const entitlementStatus = await this.requireLoginEntitlement(member.memberId);
+    const existingIdentity = await this.deps.authIdentities.findAuthIdentityByMemberId(member.memberId);
+    if (existingIdentity && existingIdentity.status !== "active") {
+      throw new DropshipError(
+        "DROPSHIP_AUTH_IDENTITY_INACTIVE",
+        "Dropship auth identity is not active.",
+        { memberId: member.memberId, status: existingIdentity.status },
+      );
+    }
 
     const challengeHash = this.hashEmailCode({
       memberId: member.memberId,
@@ -242,6 +250,13 @@ export class DropshipAuthService {
         cardShellzEmail: member.cardShellzEmail,
         verifiedAt: this.deps.clock.now(),
       });
+    }
+    if (identity.status !== "active") {
+      throw new DropshipError(
+        "DROPSHIP_AUTH_IDENTITY_INACTIVE",
+        "Dropship auth identity is not active.",
+        { memberId: member.memberId, status: identity.status },
+      );
     }
 
     return this.buildSessionPrincipal(identity, entitlementStatus, authMethod);
@@ -315,6 +330,14 @@ export class DropshipAuthService {
 
     const member = await this.requireMemberByEmail(email);
     const entitlementStatus = await this.requireLoginEntitlement(member.memberId);
+    const existingIdentity = await this.deps.authIdentities.findAuthIdentityByMemberId(member.memberId);
+    if (existingIdentity && existingIdentity.status !== "active") {
+      throw new DropshipError(
+        "DROPSHIP_AUTH_IDENTITY_INACTIVE",
+        "Dropship auth identity is not active.",
+        { memberId: member.memberId, status: existingIdentity.status },
+      );
+    }
 
     const challengeHash = this.hashEmailCode({
       memberId: member.memberId,
@@ -344,6 +367,13 @@ export class DropshipAuthService {
       passwordHashAlgorithm: this.deps.passwordHasher.algorithm,
       verifiedAt: this.deps.clock.now(),
     });
+    if (identity.status !== "active") {
+      throw new DropshipError(
+        "DROPSHIP_AUTH_IDENTITY_INACTIVE",
+        "Dropship auth identity is not active.",
+        { memberId: member.memberId, status: identity.status },
+      );
+    }
 
     return this.buildSessionPrincipal(identity, entitlementStatus, "password");
   }

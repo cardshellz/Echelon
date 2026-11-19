@@ -1,4 +1,6 @@
 import { protectEbayPolicyWriteBoundary } from "../channels/interfaces/ebay-policy-write-boundary";
+import { readIntegerCents, MoneyInputError } from "@shared/money-read";
+import { dollarsToMills } from "@shared/utils/money";
 import { lotCostFollowUpQuerySchema } from "@shared/inventory/lot-cost-follow-up";
 import { returnCommandRequestSchema, returnCommandResultFor } from "@shared/inventory/return-command";
 import { isLevelDeleteForbiddenError, isRetiredEmptyLevel } from "./domain/retired-inventory-level";
@@ -22,9 +24,11 @@ import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eli
 import { requireLegacyQuantityImport, sendInventoryQuantityError, validateInventoryCommandKey } from "./interfaces/quantity-command.middleware";
 import { readInventoryQuantityCapabilities } from "./infrastructure/quantity-authority.query";
 import { OrderCOGSCurrencyError } from "./domain/order-cogs-read";
-import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
-import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
-import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+import {
+  createInventoryLegacyAdminControlService,
+  INVENTORY_LEGACY_ADMIN_CONTROLS,
+  sendInventoryLegacyAdminControlError,
+} from "../inventory-planning/legacy-admin-control.api";
 import { projectCanonicalVariantsInsideRuntimeTransaction } from "../inventory-planning/application/inventory-availability-runtime-atp.service";
 import type { InventoryAvailabilityRuntimeAtpContext } from "../inventory-planning/application/inventory-availability-runtime-atp.service";
 import { createChannelSyncService } from "../channels/sync.service";
@@ -32,6 +36,8 @@ import { AppError } from "@shared/errors";
 import { ZodError } from "zod";
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { ReturnRestockError, CostEvidenceError, LotCostError } from "./return-inventory.api";
+import { InventoryQuantityError } from "./domain/quantity-ledger";
+import { inventoryQuantityErrorStatus } from "./application/inventory-quantity-error-status";
 
 type InventoryRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
@@ -165,6 +171,88 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
+  // Cross-building inventory has a durable two-leg lifecycle. Dispatch removes
+  // source ATP into isolated transit custody; receive is a separate atomic post.
+  const sendInterwarehouseError = (res: any, error: any, commandKey?: unknown) => {
+    console.error("Inter-warehouse transfer error:", error);
+    const receipt = typeof commandKey === "string" && commandKey.trim().length >= 8 && commandKey.trim().length <= 120
+      ? { interwarehouseCommandReceipt: { contractVersion: "interwarehouse_transfer_v1", commandKey: commandKey.trim(), outcome: "rejected" } }
+      : {};
+    if (error instanceof AppError) {
+      res.status(error.statusCode).json({ code: error.code, error: error.message, context: { ...error.context, ...receipt } });
+      return;
+    }
+    if (error instanceof InventoryQuantityError) {
+      res.status(inventoryQuantityErrorStatus(error))
+        .json({ code: error.code, error: error.message, context: { ...error.context, ...receipt } });
+      return;
+    }
+    if (error instanceof ZodError) {
+      res.status(400).json({ code: "INTERWAREHOUSE_INPUT_INVALID", error: "Invalid warehouse transfer request", issues: error.issues, context: receipt });
+      return;
+    }
+    res.status(500).json({ code: "INTERWAREHOUSE_TRANSFER_FAILED", error: "The warehouse transfer could not be completed" });
+  };
+
+  app.get("/api/inventory/interwarehouse-transfers", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      const limit = req.query.limit == null ? 50 : Number(req.query.limit);
+      res.json(await req.app.locals.services.interwarehouseTransfers.list(limit));
+    } catch (error) {
+      sendInterwarehouseError(res, error);
+    }
+  });
+
+  app.get("/api/inventory/interwarehouse-transfers/:id", requirePermission("inventory", "view"), async (req, res) => {
+    try {
+      res.json(await req.app.locals.services.interwarehouseTransfers.getById(Number(req.params.id)));
+    } catch (error) {
+      sendInterwarehouseError(res, error);
+    }
+  });
+
+  app.post("/api/inventory/interwarehouse-transfers", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
+    try {
+      const result = await req.app.locals.services.interwarehouseTransfers.createAndDispatch(
+        req.body,
+        req.session.user?.id || "system",
+      );
+      res.status(201).json(result);
+    } catch (error) {
+      sendInterwarehouseError(res, error, req.body?.commandKey);
+    }
+  });
+
+  app.post("/api/inventory/interwarehouse-transfers/:id/receive", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
+    try {
+      res.json(await req.app.locals.services.interwarehouseTransfers.receive(
+        Number(req.params.id), req.body, req.session.user?.id || "system",
+      ));
+    } catch (error) {
+      sendInterwarehouseError(res, error, req.body?.commandKey);
+    }
+  });
+
+  app.post("/api/inventory/interwarehouse-transfers/:id/reconcile", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
+    try {
+      res.json(await req.app.locals.services.interwarehouseTransfers.reconcileMissing(
+        Number(req.params.id), req.body, req.session.user?.id || "system",
+      ));
+    } catch (error) {
+      sendInterwarehouseError(res, error, req.body?.commandKey);
+    }
+  });
+
+  app.post("/api/inventory/interwarehouse-transfers/:id/cancel", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
+    try {
+      res.json(await req.app.locals.services.interwarehouseTransfers.cancel(
+        Number(req.params.id), req.body, req.session.user?.id || "system",
+      ));
+    } catch (error) {
+      sendInterwarehouseError(res, error, req.body?.commandKey);
+    }
+  });
+
   // SKU Conversion — move inventory from one variant to another across all locations
   // Delegates to InventoryUseCases.convertSku which handles tx + ledger atomically.
   app.post("/api/inventory/convert-sku", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
@@ -238,10 +326,11 @@ export function registerInventoryRoutes(app: Express) {
   
   app.post("/api/inventory/transfer/:id/undo", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
+      const { inventoryCore } = req.app.locals.services;
       const transactionId = parseInt(req.params.id);
       const userId = req.session.user?.id || "system";
       
-      const transaction = await storage.undoTransfer(transactionId, userId);
+      const transaction = await inventoryCore.undoTransfer(transactionId, userId);
       res.json({ success: true, transaction });
     } catch (error) {
       console.error("Undo transfer error:", error);
@@ -250,7 +339,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // Inventory Transactions History
-  app.get("/api/inventory/transactions", requireAuth, limitPageRead(async (req, res) => {
+  app.get("/api/inventory/transactions", requirePermission("inventory", "audit"), limitPageRead(async (req, res) => {
     try {
       const { batchId, transactionType, startDate, endDate, locationCode } = req.query;
       const pageQuery = offsetPageQuerySchema.safeParse(req.query);
@@ -306,9 +395,9 @@ export function registerInventoryRoutes(app: Express) {
   }));
 
   // CSV Inventory Upload - bulk update inventory levels
-  app.post("/api/inventory/upload-csv", requireAuth, requireLegacyQuantityImport, upload.single("file"), async (req, res) => {
+  app.post("/api/inventory/upload-csv", requirePermission("inventory", "upload"), requireLegacyQuantityImport, upload.single("file"), async (req, res) => {
     try {
-      if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
 
@@ -494,7 +583,7 @@ export function registerInventoryRoutes(app: Express) {
     res.send(template);
   });
 
-  app.post("/api/inventory/receive", requireAuth, validateInventoryCommandKey, async (req, res) => {
+  app.post("/api/inventory/receive", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     if (!req.session.user) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -616,24 +705,14 @@ export function registerInventoryRoutes(app: Express) {
   // Delete an orphan inventory_levels row (0 qty, not assigned)
   app.delete("/api/inventory/levels/:id", requirePermission("inventory", "edit"), async (req, res) => {
     try {
+      const { inventoryCore } = req.app.locals.services;
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
 
-      const level = await storage.getInventoryLevelById(id);
-      if (!level) return res.status(404).json({ error: "Inventory level not found" });
-
-      // Safety: only allow deletion of fully empty rows
-      if (level.variantQty !== 0 || level.reservedQty !== 0) {
-        return res.status(400).json({ error: "Cannot delete — row still has quantity or reservations" });
+      const outcome = await inventoryCore.deleteEmptyUnassignedLevel(id);
+      if (!outcome.deleted) {
+        return res.status(outcome.statusCode ?? 400).json({ error: outcome.error });
       }
-
-      // Safety: don't delete if variant is assigned to this location
-      const hasAssignment = await storage.hasProductLocationAssignment(level.productVariantId, level.warehouseLocationId);
-      if (hasAssignment) {
-        return res.status(400).json({ error: "Cannot delete — variant is assigned to this location" });
-      }
-
-      await storage.deleteInventoryLevel(id);
       res.json({ success: true });
     } catch (error: any) {
       if (isLevelDeleteForbiddenError(error)) {
@@ -833,7 +912,7 @@ export function registerInventoryRoutes(app: Express) {
 
       const { replenishment: breakReplen } = req.app.locals.services;
       if (breakReplen) {
-        const targetLocId = (result as any).targetLocationId || targetLocationId || warehouseLocationId;
+        const targetLocId = result.targetLocationId ?? targetLocationId ?? warehouseLocationId;
         breakReplen.checkReplenForLocation(targetLocId).catch((err: any) =>
           console.warn(`[Replen] Post-break check failed for loc ${targetLocId}:`, err)
         );
@@ -1299,10 +1378,10 @@ export function registerInventoryRoutes(app: Express) {
   // BOOTSTRAP ROUTES
   // ============================================
 
-  app.post("/api/inventory/bootstrap/dry-run", requireAuth, async (req, res) => {
+  app.post("/api/inventory/bootstrap/dry-run", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const user = req.session?.user;
-      if (!user || user.role !== "admin") {
+      if (!user) {
         return res.status(403).json({ error: "Admin access required" });
       }
 
@@ -1433,10 +1512,10 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/bootstrap", requireAuth, async (req, res) => {
+  app.post("/api/inventory/bootstrap", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const user = req.session?.user;
-      if (!user || user.role !== "admin") {
+      if (!user) {
         return res.status(403).json({ error: "Admin access required" });
       }
 
@@ -1661,7 +1740,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/locations", requireAuth, async (req, res) => {
+  app.post("/api/inventory/locations", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const parsed = insertWarehouseLocationSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1848,7 +1927,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/items", requireAuth, protectEbayPolicyWriteBoundary("create"), async (req, res) => {
+  app.post("/api/inventory/items", requirePermission("inventory", "create"), protectEbayPolicyWriteBoundary("create"), async (req, res) => {
     try {
       const parsed = insertProductSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -1940,9 +2019,9 @@ export function registerInventoryRoutes(app: Express) {
   // MIGRATE LOCATIONS & SYNC/DEBUG ROUTES
   // ============================================
 
-  app.post("/api/inventory/migrate-locations", requireAuth, async (req, res) => {
+  app.post("/api/inventory/migrate-locations", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
-      if (!req.session.user || req.session.user.role !== "admin") {
+      if (!req.session.user) {
         return res.status(403).json({ error: "Admin access required" });
       }
       
@@ -2215,6 +2294,32 @@ export function registerInventoryRoutes(app: Express) {
     } catch (error) {
       console.error("Error fetching inventory levels:", error);
       res.status(500).json({ error: "Failed to fetch inventory levels" });
+    }
+  });
+
+  // Active, saved conversion directions for one product (read-only). Manual
+  // case-break forms offer only these; the server re-authorizes on execution.
+  app.get("/api/inventory/products/:productId/allowed-conversions", requirePermission("inventory", "view"), async (req, res) => {
+    const productId = Number(req.params.productId);
+    if (!Number.isSafeInteger(productId) || productId <= 0) {
+      return res.status(400).json({
+        error: "INVALID_PRODUCT_ID",
+        message: "productId must be a positive integer",
+      });
+    }
+    try {
+      const conversions = await req.app.locals.services.inventoryConversions.getAllowedConversions(productId);
+      res.json(conversions);
+    } catch (error) {
+      console.error(JSON.stringify({
+        level: "error",
+        action: "inventory.allowed_conversions.read_failed",
+        outcome: "failed",
+        error_code: "INVENTORY_ALLOWED_CONVERSIONS_READ_FAILED",
+        product_id: productId,
+        message: error instanceof Error ? error.message : String(error),
+      }));
+      res.status(500).json({ error: "INVENTORY_ALLOWED_CONVERSIONS_READ_FAILED", message: "Failed to read allowed conversions" });
     }
   });
 
@@ -2762,8 +2867,8 @@ export function registerInventoryRoutes(app: Express) {
         productVariantId,
         warehouseLocationId,
         qty: parseInt(qty),
-        unitCostCents: parseFloat(unitCostCents),
-        landedCostCents: landedCostCents ? parseFloat(landedCostCents) : undefined,
+        unitCostCents: readIntegerCents(unitCostCents, "unitCostCents"),
+        landedCostCents: landedCostCents == null ? undefined : readIntegerCents(landedCostCents, "landedCostCents"),
         batchNumber,
         receivedAt,
         notes,
@@ -2772,6 +2877,8 @@ export function registerInventoryRoutes(app: Express) {
       res.json({ success: true, lot });
     } catch (error: any) {
       console.error("Error creating manual cost entry:", error);
+      if (error instanceof MoneyInputError)
+        return res.status(400).json({ error: error.message, code: error.code, context: error.context });
       if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to create manual cost entry" });
     }
@@ -2876,12 +2983,19 @@ export function registerInventoryRoutes(app: Express) {
     try {
       const { cogs } = req.app.locals.services;
       const lotId = parseInt(req.params.lotId);
-      const dollars = Number(String(req.body?.cost_per_piece ?? "").replace(/[$,\s]/g, ""));
       if (!Number.isInteger(lotId) || lotId <= 0) return res.status(400).json({ error: "Invalid lotId" });
-      if (!Number.isFinite(dollars) || dollars < 0) return res.status(400).json({ error: "Invalid cost_per_piece" });
+      const rawCost = req.body?.cost_per_piece;
+      if ((typeof rawCost !== "string" && typeof rawCost !== "number") || String(rawCost).trim() === "")
+        return res.status(400).json({ error: "Invalid cost_per_piece" });
+      let perPieceMills: number;
+      try {
+        perPieceMills = dollarsToMills(String(rawCost).replace(/[$,\s]/g, ""));
+      } catch (error) {
+        if (!(error instanceof RangeError)) throw error;
+        return res.status(400).json({ error: "Invalid cost_per_piece" });
+      }
       const note = String(req.body?.reason ?? "").trim();
       const reason = note ? `manual_recost: ${note}` : "manual_recost";
-      const perPieceMills = Math.round(dollars * 10000);
       const result = await cogs.recostLotPerPiece(lotId, perPieceMills, reason, req.session.user?.id);
       if (!result) return res.status(404).json({ error: "Lot not found" });
       res.json(result);

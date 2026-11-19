@@ -11,7 +11,7 @@ import {
   type ReturnRateCandidate,
   type ReturnRateResult,
   returnRateShipmentSchema, type ReturnRateInput,
-} from "../../shipping-engine/application/return-rate-provider.port";
+} from "../../shipping-engine/return-shipping-and-labels.api";
 
 export class CustomerReturnRateSelectionError extends Error {
   constructor(

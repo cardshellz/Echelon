@@ -1,12 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
   buildRfqBatchRequestHash,
+  buildRfqCreationRequestHash,
   evaluateRfqAllocationOverride,
 } from "../../purchasing-rfq-allocation";
 
 const approvedAt = new Date("2026-07-21T12:00:00.000Z");
 
 describe("RFQ allocation overrides", () => {
+  it("preserves the deployed interactive request hash bytes with and without an explicit mapping", () => {
+    // Fixed vectors captured from the previous purchasing owner's ordered JSON.
+    expect(buildRfqCreationRequestHash({ lines: [{ requestedPieces: 100, vendorProductId: 20, vendorId: 2, recommendationLineId: 901 }] }, "operator-a"))
+      .toBe("7e521d6c4d12f1409cf8d76220c9b143257eab999658be70a6208f17200e2275");
+    expect(buildRfqCreationRequestHash({ requestNote: "  ", lines: [{ requestedPieces: 100, vendorSku: " SUP-1 ", vendorId: 2,
+      recommendationLineId: 901, quantityOverrideReason: " Reviewed excess ", allocationOverrideApproved: true }] }, "operator-a"))
+      .toBe("98738c43910b78d832104206107e9b8a12c1fe9f426d812e2cb3c31a0644df47");
+  });
   it("uses the remaining recommendation without override evidence", () => {
     expect(evaluateRfqAllocationOverride({
       requestedPieces: 100,

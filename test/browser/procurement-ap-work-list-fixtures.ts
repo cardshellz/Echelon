@@ -1,3 +1,4 @@
+import type { ApSummary } from "../../shared/procurement/ap-summary";
 export function invoiceListItem(value: Record<string, unknown>) {
   return { id: value.id, vendorId: value.vendorId ?? 2, invoiceNumber: value.invoiceNumber, ourReference: value.ourReference ?? null,
     vendorName: value.vendorName ?? "Test vendor", vendorCode: value.vendorCode ?? "TEST", status: value.status ?? "approved",
@@ -20,4 +21,16 @@ export function workListPage<T>(items: T[], url: string) {
   const params = new URL(url).searchParams; const limit = Number(params.get("limit") ?? 50); const offset = Number(params.get("offset") ?? 0);
   const page = items.slice(offset, offset + limit);
   return { items: page, total: items.length, limit, offset, nextOffset: offset + page.length < items.length ? offset + page.length : null };
+}
+
+
+/** Complete fictional summary matching the actual AP read owner. */
+export function apSummaryFixture(overrides: Partial<ApSummary> = {}): ApSummary {
+  return {
+    totalOutstandingCents: 0, disputedOutstandingCents: 0, disputedInvoiceCount: 0,
+    overdueCents: 0, dueSoonCents: 0, paidThisMonthCents: 0, paidAllTimeCents: 0,
+    creditedAllTimeCents: 0, openInvoiceCount: 0,
+    agingBuckets: { current: 0, days1_30: 0, days31_60: 0, days61_90: 0, days90plus: 0 },
+    vendorAging: [], recentPayments: [], recentlyPaid: [], ...overrides,
+  };
 }

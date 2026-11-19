@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -25,15 +26,11 @@ async function setup(page: Page) {
       return route.fulfill({ json: null });
     }
     if (request.method() === "GET" && path === "/api/auth/me") {
-      return route.fulfill({ json: {
-        user: { id: "operator-1", username: "operator", role: "admin" },
-        permissions: [
+      return route.fulfill({ json: staffAuthorityFixture({ user: { id: "operator-1", username: "operator", role: "admin" }, permissions: [
           "inventory_planning:view",
           "inventory_planning:edit",
           "inventory_planning:activate",
-        ],
-        roles: ["admin"],
-      } });
+        ], systemRoles: ["admin"] }) });
     }
     if (request.method() === "GET" && path === "/api/inventory-planning/runtime-authority") {
       return route.fulfill({ json: {
@@ -80,6 +77,10 @@ async function setup(page: Page) {
       state.targetState = "live"; state.targetRevision = "4";
       return route.fulfill({ json: { publicationTargetId: 5, revision: "4", state: "live", publicationRows: 1,
         initialDefinitionsApplied: 0, alreadyApplied: false, runtimeAuthorityChanged: false, providerWriteAttempted: false } });
+    }
+    // Stock linking is not under test here; a 404 is the server-side "not supported" answer, which hides its controls.
+    if (request.method() === "GET" && path === "/api/inventory-planning/admin/channel-exposure/stock-link-status") {
+      return route.fulfill({ status: 404, json: { error: { message: "Not found" } } });
     }
     state.unexpected.push(`${request.method()} ${path}`);
     return route.fulfill({ status: 500, json: { error: { message: "Unexpected request" } } });

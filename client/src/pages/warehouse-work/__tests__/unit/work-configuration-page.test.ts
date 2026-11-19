@@ -14,7 +14,7 @@ function setup(): WorkSetup {
 }
 function render(data: WorkSetup) {
   return renderToStaticMarkup(createElement(QueryClientProvider, { client: new QueryClient() },
-    createElement(Router, { ssrPath: "/warehouse/workflows/1" }, createElement(ConfigurationEditor, { setup: data, url: "/test" }))));
+    createElement(Router, { ssrPath: "/warehouse/workflows/1", children: createElement(ConfigurationEditor, { setup: data, url: "/test" }) })));
 }
 describe("warehouse work draft UI", () => {
   it("clearly labels inactive execution, combined defaults, and real physical stations", () => {

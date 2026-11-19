@@ -157,7 +157,7 @@ function executor(input: {
       activationRunId: input.authority === "canonical" ? "44" : null,
       legacy: input.legacy,
       readProductBalances: input.readProductBalances ?? vi.fn(async () => ({
-        productId: 10, sku: "PRODUCT", name: "Product", inventoryStrategy: "recipe_managed",
+        productId: 10, sku: "PRODUCT", name: "Product", inventoryStrategy: "recipe_managed" as const,
         variants: [
           { productVariantId: 101, sku: "EA", name: "Each", isActive: true, unitsPerVariant: 1,
             physicalQty: 25, reservedQty: 0, pickedQty: 0 },
@@ -167,13 +167,13 @@ function executor(input: {
       })),
       captureActiveSupplySnapshot: input.captureActiveSupplySnapshot,
       getProductIdsByVariantIds: input.getProductIdsByVariantIds ?? vi.fn(async () => new Map()),
-    }),
+    }, undefined),
   };
 }
 
 function fakeLegacy(): InventoryAtpServiceContract {
   return {
-    getProductInventoryStrategy: vi.fn(async () => "physical_fungible"),
+    getProductInventoryStrategy: vi.fn(async () => "physical_fungible" as const),
     getTotalBaseUnits: vi.fn(async () => ({
       onHand: 35,
       reserved: 0,
@@ -189,7 +189,7 @@ function fakeLegacy(): InventoryAtpServiceContract {
       sku: "EA",
       name: "Each",
       unitsPerVariant: 1,
-      salesEligibility: "sellable",
+      salesEligibility: "sellable" as const,
       atpUnits: 35,
       atpBase: 35,
     }]),
@@ -198,7 +198,7 @@ function fakeLegacy(): InventoryAtpServiceContract {
       sku: "EA",
       name: "Each",
       unitsPerVariant: 1,
-      salesEligibility: "sellable",
+      salesEligibility: "sellable" as const,
       atpUnits: 35,
       atpBase: 35,
     }]),

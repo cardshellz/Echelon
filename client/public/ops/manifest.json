@@ -1,0 +1,15 @@
+{
+  "name": "Card Shellz .ops",
+  "short_name": ".ops",
+  "description": "Card Shellz dropship portal",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#581C87",
+  "icons": [
+    { "src": "/ops/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/ops/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/ops/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

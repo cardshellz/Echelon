@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { quantityPublicationScopeSchema, type QuantityPublicationScope } from "./quantity-publication-admission";
+import { MAX_PUBLICATION_REPLACEMENT_REQUESTS, supportsCurrentValueReplacement, type LegacyMaintenanceEvidence, type PublicationEffect } from "./publication-replacement-policy";
 
 export const publicationBigint = z.string().regex(/^[1-9][0-9]{0,18}$/)
   .refine(value => BigInt(value) <= BigInt("9223372036854775807"));
@@ -25,16 +26,19 @@ export type EbayAutomaticRecoveryInput = z.infer<typeof ebayAutomaticRecoveryCom
 export interface SavedEbayRequestOperation { ordinal: number; method: string; path: string }
 
 /** This authorizes a fresh replacement, never a claim that the old request ended.
- * No request row is usable only when the immutable outbox proves stock-only intent. */
+ * Without a request row, immutable stock intent or retained maintenance evidence
+ * must identify a repeatable update to the same exact existing resources. */
 export function supportsAutomaticEbayReplacement(input: {
   owner: string; outboxScopeProven: boolean; requests: readonly SavedEbayRequestOperation[];
+  legacyMaintenance?: LegacyMaintenanceEvidence;
 }): boolean {
-  if (!["legacy", "outbox"].includes(input.owner) || input.requests.length > 2000) return false;
-  if (input.requests.length === 0) return input.owner === "outbox" && input.outboxScopeProven;
-  return input.requests.every((request, index) => request.ordinal === index + 1 && (
+  if (input.requests.length > MAX_PUBLICATION_REPLACEMENT_REQUESTS) return false;
+  const effects: PublicationEffect[] = input.requests.map((request, index) => request.ordinal === index + 1 && (
     request.method === "POST" && request.path === "/sell/inventory/v1/bulk_update_price_quantity"
     || request.method === "PUT" && /^\/sell\/inventory\/v1\/(inventory_item|inventory_item_group|offer)\/[^/?#\s]+$/.test(request.path)
-  ));
+  ) ? "replace_existing" : "unknown");
+  return supportsCurrentValueReplacement({ owner: input.owner, effects, stockIntentProven: input.outboxScopeProven,
+    legacyMaintenance: input.legacyMaintenance });
 }
 
 // UUIDv5 with a fixed application namespace: a replay of one durable cycle must

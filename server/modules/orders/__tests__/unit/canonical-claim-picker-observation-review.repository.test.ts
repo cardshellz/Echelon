@@ -7,7 +7,11 @@ import {
 
 const OCCURRED_AT = new Date("2026-09-03T11:00:00.000Z");
 
-function reviewInput(client: { query: ReturnType<typeof vi.fn> }) {
+type ReviewTransactionClient = Parameters<
+  PostgresCanonicalClaimPickerObservationReviewRepository["recordReview"]
+>[0]["client"];
+
+function reviewInput(client: ReviewTransactionClient) {
   return {
     client,
     orderId: 70,
@@ -42,7 +46,12 @@ function reviewInput(client: { query: ReturnType<typeof vi.fn> }) {
 
 describe("PostgresCanonicalClaimPickerObservationReviewRepository", () => {
   it("records one open nonblocking review through the supplied transaction client", async () => {
-    const client = { query: vi.fn().mockResolvedValue({ rows: [{ id: 88 }], rowCount: 1 }) };
+    const client = {
+      query: vi.fn(async (_text: string, _values?: unknown[]) => ({
+        rows: [{ id: 88 }],
+        rowCount: 1,
+      })),
+    };
     const repository = new PostgresCanonicalClaimPickerObservationReviewRepository();
 
     await expect(repository.recordReview(reviewInput(client))).resolves.toBe(88);
@@ -65,11 +74,16 @@ describe("PostgresCanonicalClaimPickerObservationReviewRepository", () => {
   });
 
   it("fails when the order item or selected location cannot be resolved", async () => {
-    const client = { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }) };
+    const client = {
+      query: vi.fn(async (_text: string, _values?: unknown[]) => ({
+        rows: [],
+        rowCount: 0,
+      })),
+    };
     const repository = new PostgresCanonicalClaimPickerObservationReviewRepository();
 
-    await expect(repository.recordReview(reviewInput(client))).rejects.toMatchObject<
-      Partial<CanonicalClaimPickerObservationReviewError>
-    >({ code: "PICKER_OBSERVATION_REVIEW_TARGET_MISSING" });
+    await expect(repository.recordReview(reviewInput(client))).rejects.toMatchObject({
+      code: "PICKER_OBSERVATION_REVIEW_TARGET_MISSING",
+    } satisfies Partial<CanonicalClaimPickerObservationReviewError>);
   });
 });

@@ -234,13 +234,16 @@ describe("Catalog page wiring of the Listing settings step", () => {
     expect(tag).toContain("summary={listingSettingsSummaryQuery}");
     expect(tag).toContain("shelves={ebayStoreCategoryQuery}");
     expect(tag).toContain("saveCallbacks={listingSettingsSaveCallbacks}");
-    expect(tag).toContain("onSettingsSaved={() => { invalidateListingPreview(true); refreshListingSettings(); }}");
+    // Step 1 plan S2-5 PR A: a save marks step 3's Check out of date (its settings version moves), and never checks again.
+    expect(tag).toContain("onSettingsSaved={() => { setSettingsVersion((version) => version + 1); refreshListingSettings(); }}");
     expect(tag).toContain("goToStep={(target) => leaveGuard(() => navigate(stepHref(target)))}");
     // D9, D10: the counter stays; the step never posts a new preview after a save. One callback object (PR 12, D6).
     const start = source.indexOf("const listingSettingsSaveCallbacks: ListingSettingsStepSaveCallbacks = {");
     expect(start).toBeGreaterThan(-1);
     const callbacks = source.slice(start, source.indexOf("\n  };\n", start));
-    expect(callbacks).toContain("disabled: pendingListingAction !== null && pendingListingAction !== \"preview\",");
+    // Step 1 plan S2-5 PR A: a verification or a publish being sent on step 3 holds the saves, as a push did (a Check never does).
+    expect(callbacks).toContain("disabled: publishBusy,");
+    expect(callbacks).toContain("setSettingsVersion((version) => version + 1);");
     expect(callbacks).toContain("onSaveStarted: () => {");
     expect(callbacks).toContain("onSaveSettled: () => {");
     expect(callbacks).not.toContain("onSaved");

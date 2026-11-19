@@ -6,6 +6,7 @@ vi.hoisted(() => {
 });
 
 import { PgDropshipOrderProcessingRepository } from "../../infrastructure/dropship-order-processing.repository";
+import { logger } from "../../../../platform/observability/logger";
 import type { DropshipOrderProcessingIntakeRecord } from "../../application/dropship-order-processing-service";
 
 const now = new Date("2026-05-09T18:00:00.000Z");
@@ -111,6 +112,103 @@ describe("PgDropshipOrderProcessingRepository", () => {
     });
   });
 
+  // Step 1 plan S2-5 §4.7: a listing being re-sent is live on the marketplace.
+  it.each([
+    { listingStatus: "queued", externalListingId: "listing-44" },
+    { listingStatus: "pushing", externalListingId: "listing-44" },
+    { listingStatus: "failed", externalListingId: "listing-44" },
+    { listingStatus: "blocked", externalListingId: "listing-44" },
+  ])("quotes a $listingStatus listing that carries its marketplace id, and logs why", async (listing) => {
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+    try {
+      const { repository } = makeQuoteRepository({ catalogRules: [catalogRuleRow()], listing });
+
+      await expect(repository.resolveQuoteItems({ intake: makeQuoteIntake(), now })).resolves.toEqual([
+        expect.objectContaining({ productVariantId: 101 }),
+      ]);
+      expect(info).toHaveBeenCalledWith("dropship.order.listing_acceptable_while_pushing", expect.objectContaining({
+        listing_id: 44, status: listing.listingStatus, intake_id: 91, path: "quote",
+      }));
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  it.each([
+    { listingStatus: "queued", externalListingId: null },
+    { listingStatus: "failed", externalListingId: " " },
+    { listingStatus: "not_listed", externalListingId: null },
+  ])("refuses a $listingStatus listing with id $externalListingId, as before", async (listing) => {
+    const { repository } = makeQuoteRepository({ catalogRules: [catalogRuleRow()], listing });
+
+    await expect(repository.resolveQuoteItems({ intake: makeQuoteIntake(), now })).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_PROCESSING_LISTING_NOT_QUOTABLE",
+      context: expect.objectContaining({ listingId: 44, listingStatus: listing.listingStatus }),
+    });
+  });
+
+  // DC14 (PLAN-C v4.1 §8 step 3): an ended listing's refusal is the review code, logged at ERROR, whichever end it was.
+  it.each([
+    { label: "with no end time (no proof)", times: {}, endSource: "unknown" },
+    { label: "after the vendor ended it on eBay", times: { marketplace_ended_at: new Date("2026-01-01T00:00:00.000Z") },
+      endSource: "marketplace_end" },
+    { label: "after Card Shellz ended it", times: { listing_end_ended_at: new Date("2026-01-01T00:00:00.000Z") }, endSource: "card_shellz_end" },
+  ])("refuses an ended listing $label for review, never retried", async ({ times, endSource }) => {
+    const error = vi.spyOn(logger, "error").mockImplementation(() => undefined);
+    try {
+      const { repository } = makeQuoteRepository({ catalogRules: [catalogRuleRow()],
+        listing: { listingStatus: "ended", externalListingId: "listing-44" }, extra: times });
+
+      await expect(repository.resolveQuoteItems({ intake: quoteIntakeOrderedAt("2026-06-01T00:00:00.000Z"), now })).rejects.toMatchObject({
+        code: "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER",
+        message: "This order is for an eBay listing that was ended before the order was placed. Card Shellz will review it.",
+        context: expect.objectContaining({ intakeId: 91, listingId: 44, listingStatus: "ended", endSource, requiresReview: true,
+          retryable: false, classification: "permanent", orderedAt: "2026-06-01T00:00:00.000Z" }),
+      });
+      expect(error).toHaveBeenCalledWith("dropship.order.listing_ended_before_order", expect.objectContaining({
+        outcome: "requires_review", error_code: "DROPSHIP_ORDER_LISTING_ENDED_BEFORE_ORDER", listing_id: 44, intake_id: 91,
+        end_source: endSource, path: "quote" }));
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it("quotes an order placed before Card Shellz ended its listing, and reads the end time in the candidate SQL", async () => {
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+    const { repository, query } = makeQuoteRepository({ catalogRules: [catalogRuleRow()],
+      listing: { listingStatus: "ended", externalListingId: "listing-44" }, extra: { listing_end_ended_at: new Date("2099-01-01T00:00:00.000Z") } });
+
+    try {
+      await expect(repository.resolveQuoteItems({ intake: quoteIntakeOrderedAt("2026-06-01T00:00:00.000Z"), now })).resolves.toEqual([
+        expect.objectContaining({ productVariantId: 101 }),
+      ]);
+      expect(info).toHaveBeenCalledWith("dropship.order.listing_acceptable_before_end", expect.objectContaining({
+        listing_id: 44, marketplace_ended_at: null, listing_end_ended_at: "2099-01-01T00:00:00.000Z", path: "quote" }));
+    } finally {
+      info.mockRestore();
+    }
+    const candidateSql = String(query.mock.calls.find(([statement]) => String(statement).includes("FROM dropship.dropship_vendor_listings"))?.[0])
+      .replace(/\s+/g, " ");
+    expect(candidateSql).toContain("(SELECT er.ended_at FROM dropship.dropship_listing_end_requests er WHERE er.listing_id = dl.id AND er.state = 'ended' ORDER BY er.ended_at DESC, er.id DESC LIMIT 1) AS listing_end_ended_at");
+  });
+
+  it("still refuses a re-sent listing whose size the catalog no longer offers, and logs nothing", async () => {
+    const info = vi.spyOn(logger, "info").mockImplementation(() => undefined);
+    try {
+      const { repository } = makeQuoteRepository({
+        catalogRules: [],
+        listing: { listingStatus: "queued", externalListingId: "listing-44" },
+      });
+
+      await expect(repository.resolveQuoteItems({ intake: makeQuoteIntake(), now })).rejects.toMatchObject({
+        code: "DROPSHIP_ORDER_PROCESSING_VARIANT_NOT_ELIGIBLE",
+      });
+      expect(info).not.toHaveBeenCalledWith("dropship.order.listing_acceptable_while_pushing", expect.anything());
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it("rejects an internal-only listing before generating a shipping quote", async () => {
     const query = vi.fn(async (statement: string) => ({
       rows: String(statement).includes("FROM dropship.dropship_vendor_listings")
@@ -138,6 +236,7 @@ describe("PgDropshipOrderProcessingRepository", () => {
       externalOrderId: source.external_order_id,
       status: "processing",
       paymentHoldExpiresAt: source.payment_hold_expires_at,
+      processingAttemptCount: 0,
       normalizedPayload: source.normalized_payload,
     };
 
@@ -149,7 +248,12 @@ describe("PgDropshipOrderProcessingRepository", () => {
   });
 });
 
-function makeQuoteRepository(input: { catalogRules: Array<ReturnType<typeof catalogRuleRow>> }) {
+function makeQuoteRepository(input: {
+  catalogRules: Array<ReturnType<typeof catalogRuleRow>>;
+  listing?: { listingStatus: string; externalListingId: string | null };
+  /** Extra candidate columns (the end times). */
+  extra?: Record<string, unknown>;
+}) {
   const query = vi.fn(async (statement: string) => {
     if (String(statement).includes("FROM dropship.dropship_vendor_listings")) {
       return {
@@ -159,14 +263,15 @@ function makeQuoteRepository(input: { catalogRules: Array<ReturnType<typeof cata
           product_variant_id: 101,
           product_line_ids: [],
           category: "supplies",
-          listing_status: "active",
-          external_listing_id: "listing-44",
+          listing_status: input.listing?.listingStatus ?? "active",
+          external_listing_id: input.listing ? input.listing.externalListingId : "listing-44",
           external_offer_id: "offer-44",
           product_sku: "PRODUCT-101",
           variant_sku: "SKU-101",
           product_is_active: true,
           variant_is_active: true,
           sales_eligibility: "sellable",
+          ...input.extra,
         }],
       };
     }
@@ -176,6 +281,12 @@ function makeQuoteRepository(input: { catalogRules: Array<ReturnType<typeof cata
     return { rows: [] };
   });
   return { repository: new PgDropshipOrderProcessingRepository({ query } as unknown as Pool), query };
+}
+
+/** The quote intake with the order's own time (the listing rule's proof for an ended listing). */
+function quoteIntakeOrderedAt(orderedAt: string): DropshipOrderProcessingIntakeRecord {
+  const intake = makeQuoteIntake();
+  return { ...intake, normalizedPayload: { ...intake.normalizedPayload, orderedAt } };
 }
 
 function makeQuoteIntake(): DropshipOrderProcessingIntakeRecord {
@@ -188,6 +299,7 @@ function makeQuoteIntake(): DropshipOrderProcessingIntakeRecord {
     externalOrderId: source.external_order_id,
     status: "processing",
     paymentHoldExpiresAt: source.payment_hold_expires_at,
+    processingAttemptCount: 0,
     normalizedPayload: source.normalized_payload,
   };
 }

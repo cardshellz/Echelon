@@ -172,6 +172,34 @@ export function evaluateCustomerReturnEligibility(rawInput: unknown): CustomerRe
   });
 }
 
+/** Purchased units, rather than an optional outbound warehouse projection, own
+ * customer return entitlement. Physical claims still consume purchased units;
+ * delivery observations remain informational and refunds are not physical claims. */
+export function evaluatePurchasedCustomerReturnEligibility(rawInput: unknown): CustomerReturnEligibilityOutput {
+  const parsed = customerReturnEligibilityInputSchema.safeParse(rawInput);
+  if (!parsed.success) throw new CustomerReturnEligibilityError(parsed.error);
+  const input = parsed.data;
+  const deadline = Date.parse(input.order.purchasedAt) + input.policy.returnWindowDays * MILLISECONDS_PER_DAY;
+  const reasons = orderReasons(input, deadline);
+  const lines = input.order.lines.map(line => {
+    const blockers = [...reasons];
+    if (!line.requiresShipping) blockers.push("non_physical_item");
+    if (line.purchasedQuantity === 0) blockers.push("no_purchased_quantity");
+    const claimedQuantity = sumQuantities(line.claims);
+    const remainingPurchasedQuantity = line.purchasedQuantity - claimedQuantity;
+    if (remainingPurchasedQuantity === 0 && claimedQuantity > 0) blockers.push("all_quantity_claimed");
+    return { lineId: line.lineId, sku: line.sku, purchasedQuantity: line.purchasedQuantity,
+      deliveredQuantity: 0, claimedQuantity, remainingPurchasedQuantity,
+      eligibleQuantity: blockers.length === 0 ? remainingPurchasedQuantity : 0,
+      reasons: blockers, allocations: [] };
+  });
+  const eligibleQuantity = lines.reduce((total, line) => total + line.eligibleQuantity, 0);
+  return customerReturnEligibilityOutputSchema.parse({ orderId: input.order.orderId,
+    policyVersion: input.policy.version, evaluatedAt: input.now,
+    returnWindowEndsAt: new Date(deadline).toISOString(), eligibleQuantity,
+    hasEligibleItems: eligibleQuantity > 0, reasons, lines });
+}
+
 function orderReasons(input: EligibilityFacts, deadline: number): CustomerReturnEligibilityReason[] {
   const reasons: CustomerReturnEligibilityReason[] = [];
   if (input.order.provider !== "shopify") reasons.push("provider_not_supported");

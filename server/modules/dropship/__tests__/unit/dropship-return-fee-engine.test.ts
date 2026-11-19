@@ -47,26 +47,26 @@ describe("dropship return fee engine (D2 matrix + D5 netting)", () => {
   it("computeReturnFeeCents: flat_cents passes through, percent floors against the basis", () => {
     expect(
       computeReturnFeeCents(
-        { feeType: "restocking_fee", amountType: "flat_cents", amount: 300 },
+        { feeType: "restocking_fee", amountType: "flat_cents", amount: 300, responsibility: "customer" },
         2_500,
       ),
     ).toBe(300);
     expect(
       computeReturnFeeCents(
-        { feeType: "restocking_fee", amountType: "percent", amount: 10 },
+        { feeType: "restocking_fee", amountType: "percent", amount: 10, responsibility: "customer" },
         2_500,
       ),
     ).toBe(250);
     // floor rounding: 15% of 199 = 29.85 -> 29
     expect(
       computeReturnFeeCents(
-        { feeType: "processing_fee", amountType: "percent", amount: 15 },
+        { feeType: "processing_fee", amountType: "percent", amount: 15, responsibility: "customer" },
         199,
       ),
     ).toBe(29);
     expect(
       computeReturnFeeCents(
-        { feeType: "processing_fee", amountType: "percent", amount: 100 },
+        { feeType: "processing_fee", amountType: "percent", amount: 100, responsibility: "customer" },
         199,
       ),
     ).toBe(199);

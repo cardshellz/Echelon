@@ -17,6 +17,22 @@ import {
   type HistoricalSplitRetryCandidate,
 } from "./historical-shipstation-split-repair.service";
 import type { ShipStationShipment } from "./shipstation.service";
+import {
+  activateRecoveredProviderTargetOutboundShipmentInWms,
+  adoptHistoricalSplitTargetOutboundShipmentInWms,
+  archiveDuplicateSourceShipmentItemInWms,
+  cancelRepartitionedAggregateOutboundShipmentsInWms,
+  clearHistoricalSplitUnmappedReviewFlagsInWms,
+  displaceExactTargetCopyShipmentItemToArchiveInWms,
+  insertHistoricalSplitCopiedShipmentItemInWms,
+  insertHistoricalSplitDuplicateArchiveOutboundShipmentInWms,
+  insertHistoricalSplitTargetOutboundShipmentInWms,
+  moveHistoricalSplitSourceShipmentItemInWms,
+  reduceHistoricalSplitSourceShipmentItemQtyInWms,
+  retireHistoricalSplitDuplicateOutboundShipmentInWms,
+  setHistoricalSplitSourceRemainingQtyInWms,
+  updateHistoricalSplitResidentShipmentItemInWms,
+} from "../wms/outbound-shipment-mutations.api";
 
 const FAILURE_INDEX_PATTERN =
   'uq_outbound_shipments_active_(?:shipstation_order_key|shipstation_order_id|engine_order_ref)';
@@ -839,37 +855,12 @@ async function resolveOrCreateTarget(
     target.exactBeforeApply = await exactTargetMembership(client, target);
     if (target.retiredDuplicateShipmentId !== null) {
       const retiredIdentity = `historical_retired:shipstation:${target.providerPackage.providerShipmentId}:shipment:${target.retiredDuplicateShipmentId}`;
-      const retired = await client.query(
-        `UPDATE wms.outbound_shipments
-         SET external_fulfillment_id = $2,
-             requires_review = false,
-             review_reason = 'historical_provider_identity_duplicate_retired',
-             updated_at = $4
-         WHERE id = $1
-           AND external_fulfillment_id = $3
-           AND status IN ('voided', 'cancelled')
-           AND NOT EXISTS (
-             SELECT 1
-             FROM wms.outbound_shipment_items AS item
-             JOIN wms.effective_physical_shipment_items AS physical_item
-               ON physical_item.legacy_wms_shipment_item_id = item.id
-             WHERE item.shipment_id = wms.outbound_shipments.id
-           )
-           AND NOT EXISTS (
-             SELECT 1
-             FROM wms.outbound_shipment_items AS item
-             JOIN oms.channel_fulfillment_receipt_items AS receipt_item
-               ON receipt_item.legacy_wms_shipment_item_id = item.id
-             WHERE item.shipment_id = wms.outbound_shipments.id
-           )
-         RETURNING id`,
-        [
-          target.retiredDuplicateShipmentId,
-          retiredIdentity,
-          target.identity,
-          audit.occurredAt,
-        ],
-      );
+      const retired = await retireHistoricalSplitDuplicateOutboundShipmentInWms(client, {
+        retiredDuplicateShipmentId: target.retiredDuplicateShipmentId,
+        retiredIdentity,
+        expectedIdentity: target.identity,
+        occurredAt: audit.occurredAt,
+      });
       if (rowsOf(retired).length !== 1) {
         throw repairError(
           "TARGET_RETIRED_DUPLICATE_CHANGED",
@@ -877,42 +868,31 @@ async function resolveOrCreateTarget(
         );
       }
     }
-    await client.query(
-      `UPDATE wms.outbound_shipments
-       SET external_fulfillment_id = COALESCE(external_fulfillment_id, $2),
-           shipping_engine = COALESCE(NULLIF(BTRIM(shipping_engine), ''), 'shipstation'),
-           engine_order_ref = COALESCE(NULLIF(BTRIM(engine_order_ref), ''), $3),
-           engine_shipment_ref = COALESCE(NULLIF(BTRIM(engine_shipment_ref), ''), $4),
-           shipstation_order_id = COALESCE(shipstation_order_id, $5),
-           shipstation_order_key = COALESCE(NULLIF(BTRIM(shipstation_order_key), ''), $6),
-           requires_review = false, review_reason = NULL, updated_at = $7
-       WHERE id = $1`,
-      [id, target.identity, String(target.providerPackage.providerOrderId),
-       String(target.providerPackage.providerShipmentId), target.providerPackage.providerOrderId,
-       target.providerPackage.providerOrderKey, audit.occurredAt],
-    );
+    await adoptHistoricalSplitTargetOutboundShipmentInWms(client, {
+      shipmentId: id,
+      identity: target.identity,
+      providerOrderId: target.providerPackage.providerOrderId,
+      providerShipmentId: target.providerPackage.providerShipmentId,
+      providerOrderKey: target.providerPackage.providerOrderKey,
+      occurredAt: audit.occurredAt,
+    });
     return id;
   }
 
-  const inserted = await client.query(
-    `INSERT INTO wms.outbound_shipments (
-       order_id, channel_id, external_fulfillment_id, source, status,
-       carrier, service_code, tracking_number, shipped_at,
-       shipping_engine, engine_order_ref, engine_shipment_ref,
-       shipstation_order_id, shipstation_order_key,
-       shipment_purpose, requires_review, review_reason, created_at, updated_at
-     ) VALUES (
-       $1, $2, $3, $4, 'shipped', $5, $6, $7, $8,
-       'shipstation', $9, $10, $11, $12,
-       'customer_fulfillment', false, NULL, $13, $13
-     ) RETURNING id`,
-    [target.orderId, target.channelId, target.identity, HISTORICAL_SPLIT_REPAIR_SOURCE,
-     target.providerPackage.carrierCode, target.providerPackage.serviceCode,
-     target.providerPackage.trackingNumber, target.providerPackage.shippedAt,
-     String(target.providerPackage.providerOrderId), String(target.providerPackage.providerShipmentId),
-     target.providerPackage.providerOrderId, target.providerPackage.providerOrderKey,
-     audit.occurredAt],
-  );
+  const inserted = await insertHistoricalSplitTargetOutboundShipmentInWms(client, {
+    orderId: target.orderId,
+    channelId: target.channelId,
+    identity: target.identity,
+    source: HISTORICAL_SPLIT_REPAIR_SOURCE,
+    carrierCode: target.providerPackage.carrierCode,
+    serviceCode: target.providerPackage.serviceCode,
+    trackingNumber: target.providerPackage.trackingNumber,
+    shippedAt: target.providerPackage.shippedAt,
+    providerOrderId: target.providerPackage.providerOrderId,
+    providerShipmentId: target.providerPackage.providerShipmentId,
+    providerOrderKey: target.providerPackage.providerOrderKey,
+    occurredAt: audit.occurredAt,
+  });
   target.exactBeforeApply = false;
   return asPositiveInteger(rowsOf<Record<string, unknown>>(inserted)[0]?.id, "inserted shipment id");
 }
@@ -946,55 +926,21 @@ async function activateRecoveredProviderTarget(
     );
   }
 
-  const recovered = await client.query(
-    `UPDATE wms.outbound_shipments AS shipment
-     SET status = 'shipped',
-         carrier = $2, service_code = $3, tracking_number = $4, shipped_at = $5,
-         tracking_url = NULL,
-         shipping_engine = 'shipstation', engine_order_ref = $6,
-         engine_shipment_ref = $7, shipstation_order_id = $8,
-         shipstation_order_key = $9, requires_review = false,
-         review_reason = NULL, cancelled_at = NULL, voided_at = NULL,
-         voided_reason = NULL, held = false, held_at = NULL,
-         on_hold_reason = NULL, updated_at = $10
-     WHERE shipment.id = $1
-       AND shipment.order_id = $11
-       AND shipment.external_fulfillment_id = $12
-       AND shipment.status::text = $13
-       AND shipment.tracking_number IS NOT DISTINCT FROM $14::varchar
-       AND shipment.status IN ('queued', 'voided', 'cancelled')
-       AND NOT EXISTS (
-         SELECT 1
-         FROM wms.outbound_shipment_items AS item
-         JOIN wms.effective_physical_shipment_items AS physical_item
-           ON physical_item.legacy_wms_shipment_item_id = item.id
-         WHERE item.shipment_id = shipment.id
-       )
-       AND NOT EXISTS (
-         SELECT 1
-         FROM wms.outbound_shipment_items AS item
-         JOIN oms.channel_fulfillment_receipt_items AS receipt_item
-           ON receipt_item.legacy_wms_shipment_item_id = item.id
-         WHERE item.shipment_id = shipment.id
-       )
-     RETURNING shipment.id`,
-    [
-      recovery.shipmentId,
-      target.providerPackage.carrierCode,
-      target.providerPackage.serviceCode,
-      target.providerPackage.trackingNumber,
-      target.providerPackage.shippedAt,
-      String(target.providerPackage.providerOrderId),
-      String(target.providerPackage.providerShipmentId),
-      target.providerPackage.providerOrderId,
-      target.providerPackage.providerOrderKey,
-      audit.occurredAt,
-      target.orderId,
-      target.identity,
-      recovery.expectedStatus,
-      recovery.expectedTrackingNumber,
-    ],
-  );
+  const recovered = await activateRecoveredProviderTargetOutboundShipmentInWms(client, {
+    shipmentId: recovery.shipmentId,
+    orderId: target.orderId,
+    identity: target.identity,
+    expectedStatus: recovery.expectedStatus,
+    expectedTrackingNumber: recovery.expectedTrackingNumber,
+    carrierCode: target.providerPackage.carrierCode,
+    serviceCode: target.providerPackage.serviceCode,
+    trackingNumber: target.providerPackage.trackingNumber,
+    shippedAt: target.providerPackage.shippedAt,
+    providerOrderId: target.providerPackage.providerOrderId,
+    providerShipmentId: target.providerPackage.providerShipmentId,
+    providerOrderKey: target.providerPackage.providerOrderKey,
+    occurredAt: audit.occurredAt,
+  });
   if (rowsOf(recovered).length !== 1) {
     throw repairError(
       "TARGET_PROVIDER_STATE_CHANGED",
@@ -1009,20 +955,12 @@ async function insertCopiedAllocation(
   quantity: number,
   providerShipmentId: number,
 ): Promise<void> {
-  const inserted = await client.query(
-    `INSERT INTO wms.outbound_shipment_items (
-       shipment_id, order_item_id, replacement_for_order_item_id,
-       shipment_item_purpose, product_variant_id, qty,
-       from_location_id, box_id, weight_oz, tracking_id,
-       provider_membership_state, created_at
-     )
-     SELECT $2, order_item_id, replacement_for_order_item_id,
-       shipment_item_purpose, product_variant_id, $3,
-       from_location_id, box_id, weight_oz, $4, 'authoritative', NOW()
-     FROM wms.outbound_shipment_items WHERE id = $1
-     RETURNING id`,
-    [sourceItemId, targetShipmentId, quantity, String(providerShipmentId)],
-  );
+  const inserted = await insertHistoricalSplitCopiedShipmentItemInWms(client, {
+    sourceItemId,
+    targetShipmentId,
+    quantity,
+    providerShipmentId,
+  });
   if (rowsOf(inserted).length !== 1) {
     throw repairError("SOURCE_ITEM_COPY_FAILED", `WMS shipment item ${sourceItemId} could not be copied atomically`);
   }
@@ -1057,12 +995,11 @@ async function applySourceAllocations(
       await insertCopiedAllocation(client, source.id, allocation.targetShipmentId,
         allocation.quantity, allocation.providerShipmentId);
     }
-    await client.query(
-      `UPDATE wms.outbound_shipment_items
-       SET qty = $2, tracking_id = $3, provider_membership_state = 'authoritative'
-       WHERE id = $1`,
-      [source.id, resident.quantity, String(resident.providerShipmentId)],
-    );
+    await updateHistoricalSplitResidentShipmentItemInWms(client, {
+      sourceItemId: source.id,
+      quantity: resident.quantity,
+      providerShipmentId: resident.providerShipmentId,
+    });
     return;
   }
 
@@ -1071,11 +1008,11 @@ async function applySourceAllocations(
       await insertCopiedAllocation(client, source.id, allocation.targetShipmentId,
         allocation.quantity, allocation.providerShipmentId);
     }
-    const reduced = await client.query(
-      `UPDATE wms.outbound_shipment_items SET qty = qty - $2
-       WHERE id = $1 AND qty = $3 AND qty > $2 RETURNING id`,
-      [source.id, total, source.qty],
-    );
+    const reduced = await reduceHistoricalSplitSourceShipmentItemQtyInWms(client, {
+      sourceItemId: source.id,
+      subtractQty: total,
+      expectedQty: source.qty,
+    });
     if (rowsOf(reduced).length !== 1) {
       throw repairError("SOURCE_ITEM_REDUCTION_FAILED", `WMS shipment item ${source.id} could not be reduced atomically`);
     }
@@ -1087,14 +1024,14 @@ async function applySourceAllocations(
     await insertCopiedAllocation(client, source.id, allocation.targetShipmentId,
       allocation.quantity, allocation.providerShipmentId);
   }
-  const moved = await client.query(
-    `UPDATE wms.outbound_shipment_items
-     SET shipment_id = $2, qty = $3, tracking_id = $4,
-         provider_membership_state = 'authoritative'
-     WHERE id = $1 AND shipment_id = $5 AND qty = $6 RETURNING id`,
-    [source.id, primary.targetShipmentId, primary.quantity, String(primary.providerShipmentId),
-     source.shipment_id, source.qty],
-  );
+  const moved = await moveHistoricalSplitSourceShipmentItemInWms(client, {
+    sourceItemId: source.id,
+    targetShipmentId: primary.targetShipmentId,
+    quantity: primary.quantity,
+    providerShipmentId: primary.providerShipmentId,
+    expectedShipmentId: source.shipment_id,
+    expectedQty: source.qty,
+  });
   if (rowsOf(moved).length !== 1) {
     throw repairError("SOURCE_ITEM_MOVE_FAILED", `WMS shipment item ${source.id} could not be moved atomically`);
   }
@@ -1189,38 +1126,25 @@ async function replaceExactTargetCopyWithSource(
       `Retired WMS shipment ${archiveShipmentId} already contains source item identity ${source.id}`,
     );
   }
-  const displaced = await client.query(
-    `UPDATE wms.outbound_shipment_items
-     SET shipment_id = $2
-     WHERE id = $1 AND shipment_id = $3
-     RETURNING id`,
-    [
-      copied.id,
-      archiveShipmentId,
-      target.targetShipmentId,
-    ],
-  );
+  const displaced = await displaceExactTargetCopyShipmentItemToArchiveInWms(client, {
+    copiedItemId: copied.id,
+    archiveShipmentId,
+    expectedShipmentId: target.targetShipmentId,
+  });
   if (rowsOf(displaced).length !== 1) {
     throw repairError(
       "EXACT_TARGET_COPY_ARCHIVE_FAILED",
       `Historical copy for provider package ${target.providerShipmentId} changed during repair`,
     );
   }
-  const moved = await client.query(
-    `UPDATE wms.outbound_shipment_items
-     SET shipment_id = $2, qty = $3, tracking_id = $4,
-         provider_membership_state = 'authoritative'
-     WHERE id = $1 AND shipment_id = $5 AND qty = $6
-     RETURNING id`,
-    [
-      source.id,
-      target.targetShipmentId,
-      target.quantity,
-      String(target.providerShipmentId),
-      source.shipment_id,
-      source.qty,
-    ],
-  );
+  const moved = await moveHistoricalSplitSourceShipmentItemInWms(client, {
+    sourceItemId: source.id,
+    targetShipmentId: target.targetShipmentId,
+    quantity: target.quantity,
+    providerShipmentId: target.providerShipmentId,
+    expectedShipmentId: source.shipment_id,
+    expectedQty: source.qty,
+  });
   if (rowsOf(moved).length !== 1) {
     throw repairError(
       "SOURCE_ITEM_EXACT_TARGET_ADOPTION_FAILED",
@@ -1290,13 +1214,12 @@ async function archiveCanonicalDuplicateSource(
     );
   }
 
-  const archived = await client.query(
-    `UPDATE wms.outbound_shipment_items
-     SET shipment_id = $2
-     WHERE id = $1 AND shipment_id = $3 AND qty = $4
-     RETURNING id`,
-    [source.id, archiveShipmentId, source.shipment_id, source.qty],
-  );
+  const archived = await archiveDuplicateSourceShipmentItemInWms(client, {
+    sourceItemId: source.id,
+    archiveShipmentId,
+    expectedShipmentId: source.shipment_id,
+    expectedQty: source.qty,
+  });
   if (rowsOf(archived).length !== 1) {
     throw repairError(
       "DUPLICATE_SOURCE_ARCHIVE_FAILED",
@@ -1346,26 +1269,14 @@ async function resolveOrCreateDuplicateArchive(
     return asPositiveInteger(row.id, "historical split duplicate archive id");
   }
 
-  const inserted = await client.query(
-    `INSERT INTO wms.outbound_shipments (
-       order_id, channel_id, external_fulfillment_id, source, status,
-       shipping_engine, shipment_purpose, requires_review, review_reason,
-       cancelled_at, created_at, updated_at
-     ) VALUES (
-       $1, $2, $3, $4, 'cancelled',
-       'shipstation', 'customer_fulfillment', false, $5,
-       $6, $6, $6
-     )
-     RETURNING id`,
-    [
-      source.order_id,
-      source.channel_id,
-      archiveIdentity,
-      HISTORICAL_SPLIT_REPAIR_SOURCE,
-      HISTORICAL_SPLIT_DUPLICATE_ARCHIVE_REASON,
-      audit.occurredAt,
-    ],
-  );
+  const inserted = await insertHistoricalSplitDuplicateArchiveOutboundShipmentInWms(client, {
+    orderId: source.order_id,
+    channelId: source.channel_id,
+    archiveIdentity,
+    source: HISTORICAL_SPLIT_REPAIR_SOURCE,
+    reviewReason: HISTORICAL_SPLIT_DUPLICATE_ARCHIVE_REASON,
+    occurredAt: audit.occurredAt,
+  });
   return asPositiveInteger(
     rowsOf<Record<string, unknown>>(inserted)[0]?.id,
     "inserted historical split duplicate archive id",
@@ -1466,13 +1377,12 @@ async function applySourceAllocationsWithPersistedTargets(
     return;
   }
 
-  const reduced = await client.query(
-    `UPDATE wms.outbound_shipment_items
-     SET qty = $2
-     WHERE id = $1 AND shipment_id = $3 AND qty = $4 AND $2 > 0
-     RETURNING id`,
-    [source.id, remainingQuantity, source.shipment_id, source.qty],
-  );
+  const reduced = await setHistoricalSplitSourceRemainingQtyInWms(client, {
+    sourceItemId: source.id,
+    remainingQuantity,
+    expectedShipmentId: source.shipment_id,
+    expectedQty: source.qty,
+  });
   if (rowsOf(reduced).length !== 1) {
     throw repairError(
       "SOURCE_ITEM_PERSISTED_TARGET_REDUCTION_FAILED",
@@ -2526,20 +2436,11 @@ export function createHistoricalShipStationSplitRepairRepository(
 
       const targetIds = targets.map((target) => target.targetShipmentId!);
       const sourceShipmentIds = [...new Set([...sources.values()].map((source) => source.shipment_id))];
-      await client.query(
-        `UPDATE wms.outbound_shipments AS shipment
-         SET status = 'cancelled', requires_review = false,
-             review_reason = 'historical_aggregate_repartitioned',
-             cancelled_at = COALESCE(cancelled_at, $3), updated_at = $3
-         WHERE shipment.id = ANY($1::int[])
-           AND NOT (shipment.id = ANY($2::int[]))
-           AND shipment.status = 'shipped'
-           AND NOT EXISTS (
-             SELECT 1 FROM wms.outbound_shipment_items AS item
-             WHERE item.shipment_id = shipment.id
-           )`,
-        [sourceShipmentIds, targetIds, audit.occurredAt],
-      );
+      await cancelRepartitionedAggregateOutboundShipmentsInWms(client, {
+        sourceShipmentIds,
+        targetIds,
+        occurredAt: audit.occurredAt,
+      });
 
       for (const target of repairTargets) {
         await activateRecoveredProviderTarget(client, target, audit);
@@ -2629,14 +2530,11 @@ export function createHistoricalShipStationSplitRepairRepository(
         physicalShipmentId,
       );
       if (applied.legacyWmsShipmentIds.length > 0) {
-        await client.query(
-          `UPDATE wms.outbound_shipments
-           SET requires_review = false, review_reason = NULL, updated_at = $2
-           WHERE id = ANY($1::int[])
-             AND review_reason = ANY($3::text[])`,
-          [applied.legacyWmsShipmentIds, audit.occurredAt,
-           ["shipstation_unmapped_physical_shipment", "ship_notify_no_match"]],
-        );
+        await clearHistoricalSplitUnmappedReviewFlagsInWms(client, {
+          legacyWmsShipmentIds: applied.legacyWmsShipmentIds,
+          occurredAt: audit.occurredAt,
+          reasons: ["shipstation_unmapped_physical_shipment", "ship_notify_no_match"],
+        });
       }
       await insertAuditEvents(
         client, applied.wmsOrderIds, applied.providerShipmentId,
@@ -2679,14 +2577,11 @@ export function createHistoricalShipStationSplitRepairRepository(
         null,
       );
       if (applied.legacyWmsShipmentIds.length > 0) {
-        await client.query(
-          `UPDATE wms.outbound_shipments
-           SET requires_review = false, review_reason = NULL, updated_at = $2
-           WHERE id = ANY($1::int[])
-             AND review_reason = ANY($3::text[])`,
-          [applied.legacyWmsShipmentIds, audit.occurredAt,
-           ["shipstation_unmapped_physical_shipment", "ship_notify_no_match"]],
-        );
+        await clearHistoricalSplitUnmappedReviewFlagsInWms(client, {
+          legacyWmsShipmentIds: applied.legacyWmsShipmentIds,
+          occurredAt: audit.occurredAt,
+          reasons: ["shipstation_unmapped_physical_shipment", "ship_notify_no_match"],
+        });
       }
       await insertAuditEvents(
         client, applied.wmsOrderIds, applied.providerShipmentId,

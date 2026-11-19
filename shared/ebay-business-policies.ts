@@ -1,6 +1,15 @@
 import { z } from "zod";
 export const EBAY_BUSINESS_POLICY_CHANNEL_ID = 67;
 
+/**
+ * Where a seller makes or edits eBay business policies (eBay Seller Hub >
+ * Account > Business policies), on eBay's production site. Shared so the
+ * portal (client/src/lib/dropship-listing-settings-store-requests.ts) and the
+ * vendor notices (server/modules/dropship/domain/marketplace-sync-words.ts)
+ * link the same page.
+ */
+export const EBAY_SELLER_HUB_POLICIES_URL = "https://www.ebay.com/sh/sell-preferences/business-policies";
+
 export const EBAY_POLICY_KINDS = ["fulfillment", "return", "payment"] as const;
 export type EbayPolicyKind = (typeof EBAY_POLICY_KINDS)[number];
 export const EBAY_POLICY_LABELS: Readonly<Record<EbayPolicyKind, string>> = {
@@ -73,6 +82,7 @@ export interface EbayPolicyOption {
   name: string;
   description?: string;
   marketplaceId?: string;
+  packageRequirements?: import("./catalog/shipping-package").ChannelPackageRequirements;
 }
 export interface EbayPolicyCatalog {
   scope: EbayPolicyScope;

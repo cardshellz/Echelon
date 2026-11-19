@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000070000021140001_interwarehouse_transfer_orders.sql",
+  "generation": 70,
+  "pr": 2114,
+  "ordinal": 1,
+  "after": [
+    "900000069000021040001_ebay_category_aspects_table.sql"
+  ]
+}

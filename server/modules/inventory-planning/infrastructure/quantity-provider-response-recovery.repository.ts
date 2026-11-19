@@ -45,6 +45,25 @@ export class PostgresQuantityProviderResponseRecovery {
     private readonly now: () => Date,
   ) {}
 
+  /** A read-only inspection cannot replace a saved Sync while an exact
+   * publication request still needs the response-recovery owner. */
+  async hasOutstanding(scopes: readonly QuantityPublicationScope[]): Promise<boolean> {
+    if (scopes.length === 0 || scopes.length > 251)
+      throw new Error("An exact bounded recovery scope is required.");
+    const keys = [...new Set(scopes.map(scope => quantityPublicationScopeLockKey(quantityPublicationScopeSchema.parse(scope))))];
+    const client = await this.pool.connect();
+    try {
+      const row = (await client.query<{ present: boolean }>(
+        "SELECT EXISTS(SELECT 1 FROM inventory.quantity_publication_attempts WHERE state IN ('running','uncertain') AND affected_scope_keys && $1::text[]) AS present",
+        [keys],
+      )).rows[0];
+      if (!row || typeof row.present !== "boolean") throw new Error("Publication recovery status is unavailable.");
+      return row.present;
+    } finally {
+      client.release();
+    }
+  }
+
   async reconcile(
     scopes?: readonly QuantityPublicationScope[],
     limit = 25,

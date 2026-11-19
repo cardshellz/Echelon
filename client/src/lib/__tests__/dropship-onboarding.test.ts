@@ -3,6 +3,7 @@ import type { DropshipOnboardingState, DropshipOnboardingStep } from "../dropshi
 import {
   describeAccountSummary,
   describeActivation,
+  describeChosenItems,
   describeOnboardingProgress,
   describeOnboardingStep,
   isOnboardingVendor,
@@ -102,10 +103,26 @@ describe("describeOnboardingStep", () => {
     const openCatalog = describeOnboardingStep(step("catalog_selection"), state({ catalog: { adminCatalogAvailable: true } }));
     expect(openCatalog).toMatchObject({ tone: "todo", detail: "Pick the products you want to sell.", action: { kind: "navigate", label: "Choose products", path: "/catalog" } });
 
-    const done = describeOnboardingStep(step("catalog_selection", "complete"), state({ catalog: { vendorSelectionRuleCount: 1, hasVendorSelection: true } }));
-    expect(done.detail).toBe("1 product selection rule saved. Change them any time in Catalog.");
+    // One-time picks (PLAN-B v4.1 V18): the chosen sizes, not rules.
+    const done = describeOnboardingStep(step("catalog_selection", "complete"),
+      state({ catalog: { vendorSelectedItemCount: 1, vendorSelectionRuleCount: 1, hasVendorSelection: true } }));
+    expect(done.detail).toBe("1 item chosen to sell. Change them any time in Catalog.");
     expect(done.action).toEqual({ kind: "navigate", label: "Open catalog", path: "/catalog" });
-    expect(describeOnboardingStep(step("catalog_selection", "complete"), state({ catalog: { vendorSelectionRuleCount: 3 } })).detail).toContain("3 product selection rules saved");
+    expect(describeOnboardingStep(step("catalog_selection", "complete"), state({ catalog: { vendorSelectedItemCount: 1_250, vendorSelectionRuleCount: 1_250 } })).detail)
+      .toBe("1,250 items chosen to sell. Change them any time in Catalog.");
+    // An older server sends only the rule count: no number, never "undefined" (FIDELITY-10).
+    const older = describeOnboardingStep(step("catalog_selection", "complete"), state({ catalog: { vendorSelectionRuleCount: 3, hasVendorSelection: true } }));
+    expect(older.detail).toBe("Items chosen to sell. Change them any time in Catalog.");
+    expect(older.detail).not.toContain("undefined");
+    expect(older.detail).not.toContain("rule");
+  });
+
+  it("(PLAN-B v4.1 V18) says the chosen items in one helper the dashboard shares, with no number when none is known", () => {
+    expect(describeChosenItems(2)).toBe("2 items chosen to sell");
+    expect(describeChosenItems(1)).toBe("1 item chosen to sell");
+    expect(describeChosenItems(0)).toBe("0 items chosen to sell");
+    expect(describeChosenItems(10_050)).toBe("10,050 items chosen to sell");
+    for (const unknown of [undefined, -1, 1.5, Number.NaN] as const) expect(describeChosenItems(unknown)).toBe("Items chosen to sell");
   });
 
   it("names the first missing wallet piece in the new order: source, backup card, authorize, terms", () => {

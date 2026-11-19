@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import type { AddressInfo } from "node:net";
 import { createServer, type Server } from "node:http";
 import express, {
@@ -67,7 +68,7 @@ describe("purchase order financial evidence HTTP boundary", () => {
     );
   });
   const request = (id = "10") =>
-    fetch(`${base}/api/purchase-orders/${id}/financial-evidence`);
+    requestLocalHttp(`${base}/api/purchase-orders/${id}/financial-evidence`);
 
   it("returns validated known PO amounts under purchasing view permission", async () => {
     read.mockResolvedValue(complete());

@@ -1,12 +1,12 @@
 import type { ProgramChargeEvidence } from "@shared/shipping/configuration";
 import type {
   ProductRateTraceStep,
-} from "../../shipping-engine/domain/product-rate-policy";
+} from "../../shipping-engine/rate-quoting-and-policy.api";
 import type {
   ShippingFulfillmentMode,
   ShippingPricingBasis,
   ShippingRateChargeModel,
-} from "../../shipping-engine/domain/rate-selection";
+} from "../../shipping-engine/rate-quoting-and-policy.api";
 import type {
   NormalizedDropshipShippingDestination,
 } from "../domain/shipping-quote";

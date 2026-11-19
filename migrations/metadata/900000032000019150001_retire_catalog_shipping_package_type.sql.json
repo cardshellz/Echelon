@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000032000019150001_retire_catalog_shipping_package_type.sql",
+  "generation": 32,
+  "pr": 1915,
+  "ordinal": 1,
+  "after": [
+    "900000030000019110001_catalog_shipping_package_type.sql",
+    "900000031000019120001_procurement_document_number_prefix_indexes.sql"
+  ]
+}

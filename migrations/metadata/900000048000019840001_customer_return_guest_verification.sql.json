@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "migration": "900000048000019840001_customer_return_guest_verification.sql",
+  "generation": 48,
+  "pr": 1984,
+  "ordinal": 1,
+  "after": [
+    "900000043000019600002_customer_return_workflow.sql",
+    "900000047000019790001_receipt_invoice_cost_allocations.sql"
+  ]
+}

@@ -59,13 +59,13 @@ function canonicalContext(canonical: Record<string, unknown>): InventoryAvailabi
     getLatestClaim: vi.fn(async () => ({
       claimId: "9",
       revision: 1,
-      status: "active",
+      status: "active" as const,
       plan: {} as any,
     })),
     getClaimOwningPickedLine: vi.fn(async () => ({
       claimId: "9",
       revision: 1,
-      status: "active",
+      status: "active" as const,
       plan: {} as any,
     })),
     getClaimLinePickMovementCursor: vi.fn(async () => "31"),
@@ -148,7 +148,12 @@ describe("PickingUseCases canonical authority routing", () => {
     const beforeItem = item({ quantity: 3, pickedQuantity: 0, status: "pending" });
     const updatedItem = item({ quantity: 3, pickedQuantity: 1, status: "in_progress", pickedAt: new Date() });
     const canonical = {
-      pickClaimLine: vi.fn(async () => ({ outcome: "picked", warehouseLocationIds: [1] })),
+      pickClaimLine: vi.fn(
+        async (_command: { idempotencyKey?: string; [key: string]: unknown }) => ({
+          outcome: "picked",
+          warehouseLocationIds: [1],
+        }),
+      ),
       unpickClaimLine: vi.fn(),
     };
     const runtimeExecutor = executor(canonicalContext(canonical));
@@ -489,7 +494,12 @@ describe("PickingUseCases canonical authority routing", () => {
     const beforeItem = item();
     const completedItem = item({ status: "completed", pickedQuantity: 1, pickedAt: new Date() });
     const canonical = {
-      pickClaimLine: vi.fn(async () => ({ outcome: "picked", warehouseLocationIds: [1] })),
+      pickClaimLine: vi.fn(
+        async (_command: { idempotencyKey?: string; [key: string]: unknown }) => ({
+          outcome: "picked",
+          warehouseLocationIds: [1],
+        }),
+      ),
       unpickClaimLine: vi.fn(),
     };
     const context = canonicalContext(canonical);
@@ -552,7 +562,7 @@ describe("PickingUseCases canonical authority routing", () => {
       ...canonicalContext({ pickClaimLine: vi.fn(), unpickClaimLine: vi.fn() }),
       authority: "legacy" as const,
       activationRunId: null,
-      legacyDb,
+      legacyDb: legacyDb as any,
     };
     const runtimeExecutor = executor(context);
     const db = { transaction: vi.fn(), execute: vi.fn(async () => ({ rows: [] })) };
@@ -909,7 +919,7 @@ describe("PickingUseCases canonical authority routing", () => {
       ...canonicalContext({ pickClaimLine: vi.fn(), unpickClaimLine: vi.fn() }),
       authority: "legacy" as const,
       activationRunId: null,
-      legacyDb,
+      legacyDb: legacyDb as any,
     };
     const runtimeExecutor = executor(context);
     const txInventoryCore = {
@@ -1000,7 +1010,7 @@ describe("PickingUseCases canonical authority routing", () => {
       ...canonicalContext({ pickClaimLine: vi.fn(), unpickClaimLine: vi.fn() }),
       authority: "legacy" as const,
       activationRunId: null,
-      legacyDb,
+      legacyDb: legacyDb as any,
     };
     const runtimeExecutor = executor(context);
     const txInventoryCore = {

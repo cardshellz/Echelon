@@ -2,11 +2,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Pool } from "pg";
 
-import { runControlTowerProjectionJob } from "../server/modules/operations/control-tower-v2.job";
 import {
   CONTROL_TOWER_SOURCE_ADAPTERS,
   getControlTowerSourceAdapter,
-} from "../server/modules/operations/control-tower-v2.sources";
+  runControlTowerProjectionJob,
+} from "../server/modules/operations/projection-runner.api";
 
 interface ProjectionFlags {
   help: boolean;

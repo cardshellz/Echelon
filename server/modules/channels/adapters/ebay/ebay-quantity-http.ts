@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { channelProviderWriteDiagnosticSchema } from "@shared/channel-provider-write";
 import { isEbayProviderRefusalCategory } from "@shared/ebay-provider-rejection";
 import { createProviderRequestDeadline } from "../../provider-request-limits";
 import { readEbayBulkQuantityResponse } from "./ebay-quantity-update";
@@ -155,9 +156,16 @@ export async function executeEbayQuantityHttpResponse<T>(input: EbayQuantityHttp
     // Preserve owning adapters' credential-health/error contracts. The captured
     // response remains independently available if an adapter wraps this failure.
     if (!response.ok) await input.onFailure?.(response.status,text);
-    if (classification.rejected) throw new QuantityProviderRejectionError(
-      classification.rejectionCode,
-      `eBay rejected this update (HTTP ${response.status}; codes ${classification.errorCodes.join(",") || "not supplied"}).${diagnostics}`);
+    if (classification.rejected) {
+      // Preserve the publication evidence/error contract. Listing recovery also
+      // receives provider-neutral refusal evidence, without changing ATP logic.
+      const error = new QuantityProviderRejectionError(classification.rejectionCode,
+        `eBay rejected this update (HTTP ${response.status}; codes ${classification.errorCodes.join(",") || "not supplied"}).${diagnostics}`);
+      throw Object.assign(error, { providerWrite: channelProviderWriteDiagnosticSchema.parse({ provider: "ebay",
+        kind: classification.dailyLimit || response.status === 429 ? "throttled" : response.status === 401 ? "authentication"
+          : response.status === 403 ? "access_denied" : "validation",
+        httpStatus: response.status, errorCodes: classification.errorCodes }) });
+    }
     if (!completed) {
       throw new EbayQuantityResponseUncertainError(response.status,
         `eBay quantity request has an uncertain outcome (HTTP ${response.status}; codes ${classification.errorCodes.join(",") || "not supplied"}).${diagnostics}`);

@@ -277,7 +277,7 @@ interface ScriptedDb {
  * Path A drops step 7 (no back-writes). Idempotency hits return after step 1.
  */
 function makeDb(
-  scripted: Array<{ rows: any[] }>,
+  scripted: Array<{ rows: any[]; rowCount?: number }>,
   options: { lockScopeRows?: any[] } = {},
 ): ScriptedDb {
   const remaining = [...scripted];
@@ -1668,9 +1668,11 @@ describe("normaliseShopifyLocationId", () => {
 
 describe("Shopify package completion signature", () => {
   const item = (overrides: Record<string, unknown> = {}) => ({
+    shipment_id: 1,
     shipment_item_id: 20,
     order_item_id: 200,
     oms_order_line_id: 2,
+    oms_order_id: 100,
     fulfillment_provider: "shopify",
     sku: "SKU-2",
     external_line_item_id: "2000",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { decideDropshipStockPublicationSelection } from "../../domain/stock-publication-selection";
+import { stockPublicationSelectionSchema } from "../../../../../shared/types/stock-publication-selection";
 
 type Input = Parameters<typeof decideDropshipStockPublicationSelection>[0];
 const now = new Date("2026-10-12T12:00:00Z");
@@ -10,7 +11,7 @@ function input(overrides: Partial<Input> = {}): Input {
       productIsActive: true, variantIsActive: true, variantUomType: "pack",
       requiresShipping: true, trackInventory: true, salesEligibility: "sellable" },
     rules: [{ id: 1, scopeType: "catalog", action: "include" }],
-    vendorRules: [{ id: 2, scopeType: "catalog", action: "include" }],
+    picked: true,
     override: null,
     listing: { id: 50, productVariantId: 101, status: "active", externalListingId: "listing-1",
       externalOfferId: "offer-1", livePushItemId: null },
@@ -37,9 +38,15 @@ describe("Dropship listing intent owns stock selection", () => {
       expect(decide({ listing })).toMatchObject({ action: "read_only", reason: "selected_catalog_preview" });
     });
 
-  it("does not make autolist selection alone into a saved publish command", () => {
-    expect(decide({ listing: null, vendorRules: [{ id: 2, scopeType: "catalog", action: "include", autoListNewSkus: true }] }).action)
-      .toBe("read_only");
+  it("does not make a pick alone into a saved publish command", () => {
+    expect(decide({ listing: null, picked: true }).action).toBe("read_only");
+  });
+
+  // PLAN-B v4.1 §7.2: between PR B and PR C a removed (unpicked) size keeps today's zero duty and reason.
+  it("zeroes a retained listing the vendor no longer picks, with the retained not-picked reason", () => {
+    expect(decide({ picked: false })).toMatchObject({ action: "zero", reason: "missing_vendor_include_rule", listingSelected: false });
+    expect(decide({ picked: false, listing: null })).toMatchObject({ action: "none", reason: "missing_vendor_include_rule" });
+    expect(decide({ picked: true })).toMatchObject({ action: "publish", reason: "selected_existing_listing", listingSelected: true });
   });
 
   it("excludes archived members immediately while the shared listing lifecycle owns removal", () => {
@@ -48,11 +55,10 @@ describe("Dropship listing intent owns stock selection", () => {
     expect(decideDropshipStockPublicationSelection(value)).toMatchObject({ action: "none", blockers: [] });
   });
 
-  it.each(["vendor_rule", "vendor_override", "admin_rule", "internal_variant", "untracked_variant"])(
+  it.each(["vendor_unpick", "vendor_override", "admin_rule", "internal_variant", "untracked_variant"])(
     "retains zero duty for %s deselection", reason => {
       const value = input();
-      if (reason === "vendor_rule") value.vendorRules = [...value.vendorRules,
-        { id: 3, scopeType: "variant", action: "exclude", productVariantId: 101 }];
+      if (reason === "vendor_unpick") value.picked = false;
       if (reason === "vendor_override") value.override = { productVariantId: 101, enabledOverride: false };
       if (reason === "admin_rule") value.rules = [...value.rules,
         { id: 4, scopeType: "product", action: "exclude", productId: 20 }];
@@ -62,8 +68,8 @@ describe("Dropship listing intent owns stock selection", () => {
     });
 
   it("keeps deselection zero duty after managed sync is disabled", () => {
-    expect(decide({ vendorRules: [], config: { ...input().config!, inventoryMode: "disabled" } }).action).toBe("zero");
-    expect(decide({ vendorRules: [], listing: null }).action).toBe("none");
+    expect(decide({ picked: false, config: { ...input().config!, inventoryMode: "disabled" } }).action).toBe("zero");
+    expect(decide({ picked: false, listing: null }).action).toBe("none");
   });
 
   it.each(["listing", "store", "config"])("zeroes a retained %s pause", source => {
@@ -105,5 +111,81 @@ describe("Dropship listing intent owns stock selection", () => {
   it("reports missing catalog identity without silently dropping a retained listing", () => {
     expect(decide({ candidate: null })).toMatchObject({ action: "zero", blockers: [{ code: "DROPSHIP_STOCK_CATALOG_IDENTITY_MISSING" }] });
     expect(decide({ candidate: null, listing: null }).action).toBe("none");
+  });
+});
+
+// eBay sync-back owner rule 1 (plan v4 SB29): the listing's vendor limit travels on a publish decision only.
+describe("the vendor's quantity limit on a publish decision", () => {
+  const withLimit = (vendorQuantityLimit: number | null | undefined, patch: Partial<NonNullable<Input["listing"]>> = {}) =>
+    decide({ listing: { ...input().listing!, vendorQuantityLimit, ...patch } });
+
+  it("carries the limit on a publish, 0 included", () => {
+    expect(withLimit(5)).toMatchObject({ action: "publish", publishLimitUnits: 5 });
+    expect(withLimit(0)).toMatchObject({ action: "publish", publishLimitUnits: 0 });
+  });
+
+  it("is exactly today's decision without a limit", () => {
+    expect(withLimit(null)).toEqual(decide());
+    expect(withLimit(undefined)).toEqual(decide());
+    expect(decide()).not.toHaveProperty("publishLimitUnits");
+  });
+
+  it("never carries a limit on a zero, read-only or ended decision", () => {
+    expect(withLimit(5, { status: "paused" })).toMatchObject({ action: "zero" });
+    expect(withLimit(5, { status: "paused" })).not.toHaveProperty("publishLimitUnits");
+    expect(withLimit(5, { status: "ended" })).not.toHaveProperty("publishLimitUnits");
+    expect(withLimit(5, { status: "preview_ready", externalListingId: null, externalOfferId: null })).not.toHaveProperty("publishLimitUnits");
+  });
+
+  it("the shared contract refuses a limit on anything but a publish, and a limit that is not a whole number of units", () => {
+    const selection = (variant: Record<string, unknown>) => stockPublicationSelectionSchema.safeParse({ productId: 20, fingerprint: "a".repeat(64),
+      variants: [{ productVariantId: 101, action: "publish", reason: "selected_existing_listing", blockers: [], ...variant }] });
+    expect(selection({ publishLimitUnits: 5 }).success).toBe(true);
+    expect(selection({}).success).toBe(true);
+    expect(selection({ action: "zero", publishLimitUnits: 5 }).success).toBe(false);
+    expect(selection({ publishLimitUnits: -1 }).success).toBe(false);
+    expect(selection({ publishLimitUnits: 2.5 }).success).toBe(false);
+  });
+});
+
+// PR C (PLAN-C v4.1 §7, D42): while Card Shellz ends a listing on eBay nothing sells on it, whatever the vendor picks.
+describe("a listing with an open end request", () => {
+  const open = (patch: Partial<NonNullable<Input["listing"]>> = {}, overrides: Partial<Input> = {}) =>
+    decide({ listing: { ...input().listing!, endOpen: true, ...patch }, ...overrides });
+
+  it("zeroes a listing with eBay identity or a saved live push, even when the size is picked again", () => {
+    expect(open()).toEqual({ productVariantId: 101, action: "zero", reason: "listing_end_in_progress", blockers: [],
+      listingSelected: true });
+    expect(open({ externalListingId: null, externalOfferId: null, livePushItemId: 77 }))
+      .toMatchObject({ action: "zero", reason: "listing_end_in_progress" });
+    expect(open({}, { picked: false })).toMatchObject({ action: "zero", reason: "listing_end_in_progress", listingSelected: false });
+  });
+
+  it("asks for nothing on a listing with no duty to clear", () => {
+    expect(open({ externalListingId: null, externalOfferId: null, livePushItemId: null }))
+      .toMatchObject({ action: "none", reason: "listing_end_in_progress" });
+  });
+
+  it("carries no publish limit, so the vendor's limit pauses with it", () => {
+    expect(open({ vendorQuantityLimit: 4 })).not.toHaveProperty("publishLimitUnits");
+  });
+
+  it("leaves retirement and a finished end their own outcomes (the archived and ended rules come first)", () => {
+    const archived = input({ listing: { ...input().listing!, endOpen: true } });
+    archived.candidate!.productIsActive = false;
+    expect(decideDropshipStockPublicationSelection(archived)).toEqual(decideDropshipStockPublicationSelection({
+      ...archived, listing: { ...archived.listing!, endOpen: false } }));
+    expect(open({ status: "ended" })).toMatchObject({ action: "none", reason: "listing_ended" });
+    expect(open({}, { candidate: null })).toMatchObject({ reason: "catalog_identity_missing" });
+  });
+
+  it("is exactly today's decision without an open end", () => {
+    expect(decide({ listing: { ...input().listing!, endOpen: false } })).toEqual(decide());
+    expect(decide({ listing: { ...input().listing!, endOpen: undefined } })).toEqual(decide());
+  });
+
+  it("parses through the shared stock selection contract", () => {
+    const variant = open();
+    expect(stockPublicationSelectionSchema.safeParse({ productId: 20, fingerprint: "a".repeat(64), variants: [variant] }).success).toBe(true);
   });
 });

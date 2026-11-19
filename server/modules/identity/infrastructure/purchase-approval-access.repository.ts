@@ -18,7 +18,7 @@ export async function readPurchaseApproverName(tx: PurchaseApprovalIdentityTrans
 /** Identity owns these reads. Share locks hold current account, membership and
  * grant evidence through the purchase transaction; session role strings never
  * authorize a financial command. No password leaves this reader. */
-export async function readPurchaseApprovalActor(tx: PurchaseApprovalIdentityTransaction, userId: string): Promise<PurchaseApprovalActor> {
+async function readPurchasePermissionActor(tx: PurchaseApprovalIdentityTransaction, userId: string, action: "approve" | "edit"): Promise<PurchaseApprovalActor> {
   const actorId = purchaseApprovalActorSchema.shape.userId.parse(userId);
   const userResult = await tx.execute(sql`SELECT id,active FROM identity.users WHERE id=${actorId} FOR SHARE`);
   const user = z.object({ id: z.string(), active: z.number().int() }).optional().parse(userResult.rows[0]);
@@ -31,22 +31,35 @@ export async function readPurchaseApprovalActor(tx: PurchaseApprovalIdentityTran
     FOR SHARE OF role,assignment
   `);
   const grantsResult = await tx.execute(sql`
-    SELECT grant_row.id,grant_row.constraints
+    SELECT grant_row.id,(grant_row.constraints IS NULL) AS unscoped
     FROM identity.auth_user_roles assignment
     JOIN identity.auth_role_permissions grant_row ON grant_row.role_id=assignment.role_id
     JOIN identity.auth_permissions permission ON permission.id=grant_row.permission_id
-    WHERE assignment.user_id=${actorId} AND permission.resource='purchasing' AND permission.action='approve'
+    WHERE assignment.user_id=${actorId} AND permission.resource='purchasing' AND permission.action=${action}
     ORDER BY assignment.id,grant_row.id,permission.id
     FOR SHARE OF assignment,grant_row,permission
   `);
   const roleRows = z.array(z.object({ id: resourceId, name: z.string(), isSystem: z.number().int().min(0).max(1) })).parse(rolesResult.rows);
-  const grants = z.array(z.object({ id: resourceId, constraints: z.unknown() })).parse(grantsResult.rows);
+  const grants = z.array(z.object({ id: resourceId, unscoped: z.boolean() })).parse(grantsResult.rows);
   return purchaseApprovalActorSchema.parse({
     userId: user.id, active: true,
     roles: roleRows.map((role) => ({ ...role, isSystem: role.isSystem === 1 })),
     // Identity's generic constraints have no implemented scope contract. Follow
     // readWarehouseWorkActor: a restricted grant cannot become a global grant.
-    approvalGrantIds: grants.filter((grant) => grant.constraints === null).map((grant) => grant.id),
-    hasScopedApprovalGrant: grants.some((grant) => grant.constraints !== null),
+    // SQL NULL is distinct from a JSONB null constraint, even after pg decoding.
+    approvalGrantIds: grants.filter((grant) => grant.unscoped).map((grant) => grant.id),
+    hasScopedApprovalGrant: grants.some((grant) => !grant.unscoped),
   });
+}
+
+export function readPurchaseApprovalActor(tx: PurchaseApprovalIdentityTransaction, userId: string): Promise<PurchaseApprovalActor> {
+  return readPurchasePermissionActor(tx, userId, "approve");
+}
+
+/** Ordinary AP actions retain their established action permissions. Unlike
+ * financial corrections, initial invoice approval does not require an admin role. */
+export async function readPurchaseInvoiceActionActor(tx: PurchaseApprovalIdentityTransaction, userId: string, action: "approve" | "edit") {
+  const actor = await readPurchasePermissionActor(tx, userId, action);
+  return { userId: actor.userId, active: actor.active, roles: actor.roles,
+    permissionAction: action, grantIds: actor.approvalGrantIds, hasScopedGrant: actor.hasScopedApprovalGrant };
 }

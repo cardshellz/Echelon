@@ -15,6 +15,7 @@ export function shipmentCostVersion(cost: InboundFreightCost): string {
     const value = cost[field];
     return [field, value instanceof Date ? value.toISOString() : value ?? null];
   }));
+  if (cost.taxTypeId != null) values.taxTypeId = cost.taxTypeId;
   for (const field of ["estimatedCents", "actualCents"] as const) {
     if (cost[field] !== null && cost[field] !== undefined && !Number.isSafeInteger(cost[field])) {
       throw new RangeError(`Shipment cost ${field} is not safe integer cents`);

@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "migration": "900000039000019450001_historical_return_sources.sql",
+  "generation": 39,
+  "pr": 1945,
+  "ordinal": 1,
+  "after": [
+    "900000038000019430001_catalog_variant_mpn_listing_intent.sql"
+  ]
+}

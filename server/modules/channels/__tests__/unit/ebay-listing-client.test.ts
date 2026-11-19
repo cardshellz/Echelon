@@ -15,6 +15,14 @@ import type { EbayQuantityRequestAdmission } from "../../quantity-publication-re
 
 describe("eBay inventory group read response contract", () => {
   beforeEach(() => api.request.mockReset());
+  it("reads the exact offer endpoint when a collection omits its shipping policy", async () => {
+    const response = { offerId: "offer-6", sku: "PACK", marketplaceId: "EBAY_US", status: "PUBLISHED",
+      listing: { listingId: "listing-6" }, listingPolicies: { fulfillmentPolicyId: "shipping-6" } };
+    api.request.mockResolvedValue(response);
+    const client = createEbayRouteListingLifecycleClient({ accessToken: "mock-access-token" });
+    expect(await client.getOffer!("offer-6")).toMatchObject(response);
+    expect(api.request).toHaveBeenCalledExactlyOnceWith("GET", "/sell/inventory/v1/offer/offer-6", "mock-access-token", undefined);
+  });
   it("withdrawal composes the real reducing request owner without requiring positive-stock target mappings", async () => {
     const reducing = vi.fn((_identity: string, _members?: readonly string[]) => undefined);
     const positive = vi.fn(async (): Promise<never> => { throw new Error("PUBLICATION_LISTING_TARGET_UNMAPPED"); });

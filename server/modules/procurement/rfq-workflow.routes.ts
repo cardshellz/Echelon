@@ -1,8 +1,9 @@
 import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { rfqResourceIdSchema } from "@shared/procurement/rfq-workflow";
+import { RFQ_RECEIPT_VERSION_HEADER, rfqCommandReceiptSchema } from "@shared/procurement/rfq-command";
 import { db } from "../../db";
-import { requirePermission } from "../../routes/middleware";
+import { requireAnyPermission, requirePermission } from "../../routes/middleware";
 import { financialCommandFromRequest } from "../../platform/commands/http-command";
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { createRfqWorkflowService, RfqWorkflowError, type RfqWorkflowCommand } from "./rfq-workflow.service";
@@ -28,6 +29,8 @@ export function registerRfqWorkflowRoutes(app: Express): void {
 
   async function execute(req: Request, res: Response, operation: RfqWorkflowCommand["operation"]): Promise<Response> {
     try {
+      const receiptVersion = req.header(RFQ_RECEIPT_VERSION_HEADER);
+      if (receiptVersion !== undefined && receiptVersion !== "1") throw new FinancialCommandError("Unsupported RFQ receipt version.", 400, "RFQ_RECEIPT_VERSION_UNSUPPORTED");
       const rfqId = pathId.parse(req.params.rfqId);
       const actorId = actor(req);
       if (!actorId) throw new FinancialCommandError("An authenticated actor is required", 401, "RFQ_ACTOR_REQUIRED");
@@ -37,14 +40,19 @@ export function registerRfqWorkflowRoutes(app: Express): void {
       const descriptor = financialCommandFromRequest(req, { actorType: "service", actorId: RFQ_WORKFLOW_COMMAND_PRINCIPAL, ...rfqWorkflowCommandScope(command) });
       const result = await commands.execute(command, actorId, descriptor);
       res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+      if (result.terminalState === "succeeded" && receiptVersion === undefined) {
+        const receipt = rfqCommandReceiptSchema.safeParse(result.body);
+        if (!receipt.success) throw new FinancialCommandError("The RFQ command response could not be verified.", 500, "RFQ_COMMAND_RECEIPT_INVALID");
+        return res.status(result.httpStatus).json(receipt.data.result);
+      }
       return res.status(result.httpStatus).json(result.body);
     } catch (error) { return failure(error, req, res); }
   }
 
-  app.get("/api/purchasing/rfqs/:rfqId", requirePermission("inventory", "view"), async (req, res) => {
+  app.get("/api/purchasing/rfqs/:rfqId", requireAnyPermission(["inventory", "view"], ["purchasing", "view"]), async (req, res) => {
     try { res.json(await service.getDetail(pathId.parse(req.params.rfqId))); } catch (error) { failure(error, req, res); }
   });
-  app.get("/api/purchasing/rfqs/:rfqId/lines/:lineId/quotes", requirePermission("inventory", "view"), async (req, res) => {
+  app.get("/api/purchasing/rfqs/:rfqId/lines/:lineId/quotes", requireAnyPermission(["inventory", "view"], ["purchasing", "view"]), async (req, res) => {
     try { res.json(await service.getQuoteHistory(pathId.parse(req.params.rfqId), pathId.parse(req.params.lineId), req.query.beforeRevision === undefined ? null : pathId.parse(req.query.beforeRevision))); } catch (error) { failure(error, req, res); }
   });
   app.post("/api/purchasing/rfqs/:rfqId/lines/:lineId/quotes", requirePermission("purchasing", "edit"), (req, res) => execute(req, res, "capture_quote"));

@@ -26,6 +26,8 @@ import {
   setEbayVariantListingIntent,
   zeroEbayVariantListing,
 } from "./ebay-listing-state";
+import { updateCatalogProductEbayBrowseCategory } from "../../modules/catalog/ebay-product-metadata.api";
+import { upsertEbayCategoryTypeListingEnabled } from "../../modules/channels/ebay-route-admin.api";
 
 export const router = express.Router();
 
@@ -288,16 +290,13 @@ ${categoriesXml}
         ebayBrowseCategoryId: string | null;
         ebayBrowseCategoryName: string | null;
       };
-      const client = await pool.connect();
-      try {
-        await client.query(
-          "UPDATE catalog.products SET ebay_browse_category_id = $1, ebay_browse_category_name = $2 WHERE id = $3",
-          [ebayBrowseCategoryId || null, ebayBrowseCategoryName || null, productId]
-        );
-        res.json({ success: true, productId, ebayBrowseCategoryId: ebayBrowseCategoryId || null, ebayBrowseCategoryName: ebayBrowseCategoryName || null });
-      } finally {
-        client.release();
-      }
+      await updateCatalogProductEbayBrowseCategory(
+        productId,
+        ebayBrowseCategoryId || null,
+        ebayBrowseCategoryName || null,
+        pool,
+      );
+      res.json({ success: true, productId, ebayBrowseCategoryId: ebayBrowseCategoryId || null, ebayBrowseCategoryName: ebayBrowseCategoryName || null });
     } catch (err: any) {
       console.error("[eBay Product Category Override] Error:", err.message);
       res.status(500).json({ error: err.message });
@@ -369,20 +368,8 @@ ${categoriesXml}
         return;
       }
 
-      const client = await pool.connect();
-      try {
-        await client.query(`
-          INSERT INTO ebay_category_mappings (
-            channel_id, product_type_slug, listing_enabled, created_at, updated_at
-          ) VALUES ($1, $2, $3, NOW(), NOW())
-          ON CONFLICT (channel_id, product_type_slug)
-          DO UPDATE SET listing_enabled = EXCLUDED.listing_enabled, updated_at = NOW()
-        `, [EBAY_CHANNEL_ID, productTypeSlug, listingEnabled]);
-
-        res.json({ success: true, productTypeSlug, listingEnabled });
-      } finally {
-        client.release();
-      }
+      await upsertEbayCategoryTypeListingEnabled(EBAY_CHANNEL_ID, productTypeSlug, listingEnabled, pool);
+      res.json({ success: true, productTypeSlug, listingEnabled });
     } catch (err: any) {
       console.error("[eBay Toggle Type Listing] Error:", err.message);
       const busy = publicationSelectionBusyIssue(err);

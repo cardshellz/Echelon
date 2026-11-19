@@ -1,3 +1,4 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, po } from "./procurement-fixtures";
 import { expectFinancialRetryBoundaries, installFinancialRetryClock } from "./procurement-retry-clock";
@@ -13,7 +14,7 @@ async function setup(page: Page, options: { admin?: boolean; lost?: boolean; sta
   const results = new Map<string, unknown>();
   await page.route("**/api/**", async route => {
     const req = route.request(), url = new URL(req.url()), path = url.pathname;
-    if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: "test-user", username: "test", role: "admin" }, roles: ["Administrator"], permissions: ["purchasing:view", "purchasing:approve"] } });
+    if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: "test-user", username: "test", role: "admin" }, systemRoles: ["admin"], permissions: ["purchasing:view", "purchasing:approve"] }) });
     if (path === "/api/purchase-orders/17") return route.fulfill({ json: { ...po(17), status: "received", physicalStatus: "received", financialStatus: "paid" } });
     if (path === "/api/purchase-orders/17/exceptions") return route.fulfill({ json: { exceptions: resolved && !url.searchParams.has("includeResolved") ? [] : [
       { id: 81, poId: 17, kind: "match_mismatch", severity: "warn", status: resolved ? "resolved" : "open", title: "Current invoice quantity mismatch", payload: { invoiceId: 71 }, resolutionNote: resolved ? "Supplier variance reviewed by admin" : null }

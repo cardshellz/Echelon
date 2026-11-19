@@ -121,7 +121,7 @@ audit.sequential("AUDIT ONLY: current receipt/AP/freight cost defects with real 
       }
       reconcile = apModule.reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction;
       cogs = new cogsModule.COGSService(database);
-      const inventory = new inventoryModule.InventoryUseCases(database,
+      const inventory = new inventoryModule.InventoryUseCases(database as any,
         repositoryModule.createInventoryMethods(database), new lotModule.InventoryLotService(database), cogs);
       purchasing = purchasingModule.createPurchasingService(database, storage, {
         reconcileApprovedInvoiceCost: (id, tx, actor) => reconcile(id, tx, actor),

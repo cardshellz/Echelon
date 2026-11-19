@@ -1,5 +1,7 @@
+import { staffAuthorityFixture } from "./fixtures/staff-authority.fixture";
 import { expect, test, type Page } from "@playwright/test";
 import { installFixtures, receipt } from "./procurement-fixtures";
+import { openReceivingLineOptions } from "./procurement-receiving-helpers";
 
 const STORAGE_KEY = "echelon:receipt-reversal:v1:test-user";
 type Request = { path: string; key: string; body: { qty?: number; reason: string; allowNegative: boolean } };
@@ -17,7 +19,7 @@ async function setup(page: Page, options: Options = {}) {
   await page.route("**/api/**", async route => {
     const req = route.request(), path = new URL(req.url()).pathname;
     if (req.method() === "GET") {
-      if (path === "/api/auth/me") return route.fulfill({ json: { user: { id: state.actorId, username: "test", role: "admin" }, roles: ["admin"], permissions: options.permitted === false ? [] : ["purchasing:approve"] } });
+      if (path === "/api/auth/me") return route.fulfill({ json: staffAuthorityFixture({ user: { id: state.actorId, username: "test", role: "admin" }, systemRoles: ["admin"], permissions: ["purchasing:view", ...(options.permitted === false ? [] : ["purchasing:approve"])] }) });
       if (path === "/api/receiving/31") {
         state.reads++;
         if (state.detailUnavailable) return route.fulfill({ status: 503, json: { error: "Detail unavailable" } });
@@ -61,6 +63,7 @@ async function setup(page: Page, options: Options = {}) {
 async function open(page: Page, action: "line" | "order" = "line") {
   await page.goto("/receiving?open=31");
   await expect(page.getByRole("heading", { name: /Receipt TEST-RECEIPT-31/ })).toBeVisible();
+  if (action === "line") await openReceivingLineOptions(page, 7);
   await (action === "line" ? page.locator('[data-testid="btn-reverse-line-7"]:visible,[data-testid="btn-reverse-line-mobile-7"]:visible') : page.getByTestId("btn-reverse-order")).click();
   await page.getByTestId("input-reverse-reason").fill("Correct reviewed receipt count");
   if (action === "line") await page.getByTestId("input-reverse-qty").fill("2");
@@ -156,6 +159,7 @@ test("another operator cannot recover the previous operator's saved request", as
 });
 test("approval permission is required before either reversal can start", async ({ page }) => {
   const { state, failures } = await setup(page, { permitted: false }); await page.goto("/receiving?open=31");
+  await openReceivingLineOptions(page, 7);
   await expect(page.getByTestId("btn-reverse-order")).toBeDisabled();
   await expect(page.locator('[data-testid="btn-reverse-line-7"]:visible,[data-testid="btn-reverse-line-mobile-7"]:visible')).toBeDisabled();
   expect(state.requests).toEqual([]); expect(failures).toEqual([]);
@@ -224,6 +228,8 @@ for (const failure of ["unavailable", "malformed", "wrong_receipt"] as const) {
 for (const missing of [false, true]) test(`supplier return history ${missing ? "unavailable" : "retained"} blocks the affected reversal without blocking saved recovery`, async ({ page }) => {
   const { state } = await setup(page, { returnHistory: !missing, missingReturnHistory: missing });
   await page.goto("/receiving?open=31");
+  await openReceivingLineOptions(page, 7);
+  await openReceivingLineOptions(page, 8);
   await expect(page.getByTestId("btn-reverse-order")).toBeDisabled();
   await expect(page.locator('[data-testid="btn-reverse-line-7"]:visible,[data-testid="btn-reverse-line-mobile-7"]:visible')).toBeDisabled();
   await expect(page.getByText(missing ? /Supplier return history could not be verified/ : /This receipt has recorded supplier returns/).first()).toBeVisible();

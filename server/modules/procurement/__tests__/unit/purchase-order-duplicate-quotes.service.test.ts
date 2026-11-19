@@ -82,7 +82,9 @@ function buildDb(context: {
   return { db, inserts, updates };
 }
 
-function baseSourceLine(overrides: Record<string, unknown> = {}) {
+function baseSourceLine<T extends Record<string, unknown> = Record<string, never>>(
+  overrides: T = {} as T,
+) {
   return {
     id: 10,
     lineNumber: 1,
@@ -327,7 +329,7 @@ describe("duplicatePurchaseOrder quote provenance", () => {
       vendorId: 2,
       productId: 100,
       isActive: 1,
-    });
+    }, undefined);
   });
 
   it("blocks a vendor change when the only UOM quote would alter the source quantity", async () => {

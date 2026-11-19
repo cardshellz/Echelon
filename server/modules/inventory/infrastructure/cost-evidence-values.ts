@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
-import { canonicalJson } from "@shared/utils/canonical-json";
+// Compatibility export: persisted fingerprint bytes and existing callers stay unchanged.
+export { costFingerprint } from "../domain/cost-fingerprint";
 
 export class CostEvidenceError extends Error {
   readonly statusCode = 409;
@@ -7,10 +7,6 @@ export class CostEvidenceError extends Error {
     super(message);
     this.name = "CostEvidenceError";
   }
-}
-
-export function costFingerprint(value: unknown): string {
-  return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
 export function costInteger(value: unknown, field: string, minimum = 0): number {

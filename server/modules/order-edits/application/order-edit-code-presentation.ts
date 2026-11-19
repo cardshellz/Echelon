@@ -1,3 +1,4 @@
+import { readIntegerCents } from "@shared/money-read";
 import type { OrderEditSnapshot, OrderEditQuote } from "./order-edit-provider";
 import type { OrderEditCodePricing } from "@shared/order-edits/order-edit-codes";
 import { presentOrderEditCodeFinancials } from "../domain/order-edit-code-pricing";
@@ -116,10 +117,8 @@ export function quoteProductPrices(quote: OrderEditQuote | null) {
       );
     return {
       id: line.calculatedLineId,
-      productNetCents: Number(
-        BigInt(line.originalUnitPriceCents) * BigInt(line.quantity) -
-          numerator / BigInt(original.quantity),
-      ),
+      productNetCents: readIntegerCents(BigInt(line.originalUnitPriceCents) * BigInt(line.quantity) -
+          numerator / BigInt(original.quantity), "product net", true),
     };
   });
 }
@@ -160,10 +159,8 @@ export function withOrderEditCodePricing(
     financials: presentOrderEditCodeFinancials(snapshot.financials, pricing),
     previewProductDiscounts: pricing.lines.map((line) => ({
       lineId: line.id,
-      amountCents: Number(
-        BigInt(line.retailCents) * BigInt(line.quantity) -
-          BigInt(line.productNetCents),
-      ),
+      amountCents: readIntegerCents(BigInt(line.retailCents) * BigInt(line.quantity) -
+          BigInt(line.productNetCents), "amount", true),
       automaticCents: line.preserveAutomaticDiscount
         ? automaticByLine.get(line.id)!
         : 0,

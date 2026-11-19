@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { MoneyInputError, formatCentsExact, parseDecimalCents, readIntegerCents, sumCents } from "@shared/money-read";
 import { useDebounce } from "@/hooks/use-debounce";
 import { QueryLoadError } from "@/components/query-load-error";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -42,6 +43,7 @@ import { Progress } from "@/components/ui/progress";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { isWmsOrderOnHold, isWmsOrderTerminal } from "@shared/wms-order-listing";
 import {
   Card,
   CardContent,
@@ -419,22 +421,13 @@ function CombineOrderItems({ orderId }: { orderId: number }) {
   );
 }
 
-// --- Priority Control Card (Lead/Admin only) ---
+// --- Priority Control Card (explicitly assigned Administrator/Team Lead) ---
 
 function PriorityControlCard({ order, onUpdated }: { order: OrderDetail; onUpdated: () => void }) {
   const { toast } = useToast();
-  const { data: authData } = useQuery<{ user: { id: string; role: string; username: string } }>({
-    queryKey: ["/api/auth/me"],
-    queryFn: async () => {
-      const res = await fetch("/api/auth/me", { credentials: "include" });
-      if (!res.ok) return null;
-      return res.json();
-    },
-  });
-
-  const permissions = (authData as any)?.permissions || (authData as any)?.user?.permissions || {};
-  const isAuthorized = authData?.user?.role === "admin" || permissions?.orders?.includes("override_priority");
-  if (!isAuthorized) return null;
+  const { hasPermission } = useAuth();
+  const isAuthorized = hasPermission("orders", "priority");
+  if (!isAuthorized || isWmsOrderTerminal(order)) return null;
 
   const isBumped = order.priority >= 9999;
   const isHeld = order.priority < 0;
@@ -582,10 +575,18 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
   ].filter(Boolean);
 
   // Calculate order total from items if totalAmount not available
-  const itemsTotal = order.items?.reduce((s, i) => s + (i.totalPriceCents || 0), 0) ?? 0;
-  const displayTotal = order.totalAmount
-    ? `$${parseFloat(order.totalAmount).toFixed(2)}`
-    : itemsTotal > 0 ? `$${(itemsTotal / 100).toFixed(2)}` : null;
+  let displayTotal: string | null = null;
+  try {
+    if (order.totalAmount != null) {
+      displayTotal = `$${formatCentsExact(parseDecimalCents(order.totalAmount, "order total"))}`;
+    } else {
+      const itemsTotal = sumCents(order.items?.map(item => readIntegerCents(item.totalPriceCents ?? 0, "item total")) ?? []);
+      displayTotal = itemsTotal > 0 ? `$${formatCentsExact(itemsTotal)}` : null;
+    }
+  } catch (error) {
+    if (!(error instanceof MoneyInputError)) throw error;
+    // Invalid evidence stays unavailable; it must not display a partial price.
+  }
 
   return (
     <div className="space-y-4 sticky top-6">
@@ -625,13 +626,13 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
             {order.priority >= 9999 && (
               <Badge className="text-xs bg-red-500 text-white">🔼 BUMPED</Badge>
             )}
-            {order.priority < 0 && (
+            {order.priority < 0 && !isWmsOrderTerminal(order) && (
               <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>
             )}
             {order.priority >= 300 && order.priority < 9999 && (
               <Badge className="text-xs bg-orange-500 text-white">P{order.priority}</Badge>
             )}
-            {order.onHold === 1 && <Badge variant="destructive" className="text-xs">ON HOLD</Badge>}
+            {isWmsOrderOnHold(order) && <Badge variant="destructive" className="text-xs">ON HOLD</Badge>}
             {order.batchId && (
               <Badge variant="outline" className="text-xs bg-violet-50 text-violet-700 border-violet-200">
                 Batch: {order.batchId}
@@ -665,7 +666,7 @@ function OrderDetailPanel({ orderId, onClose }: { orderId: number; onClose: () =
         </CardContent>
       </Card>
 
-      {/* Priority Management — Lead/Admin only */}
+      {/* Priority management matches the assigned-system-role command boundary. */}
       <PriorityControlCard order={order} onUpdated={() => refetch()} />
 
       {/* Customer & Shipping */}
@@ -1442,7 +1443,7 @@ export default function Orders() {
                                   {order.combinedOrders.length} Orders Combined
                                 </Badge>
                                 {order.priority >= 9999 && <Badge className="text-xs bg-red-500 text-white">🔼 BUMPED</Badge>}
-                                {order.priority < 0 && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
+                                {order.priority < 0 && !isWmsOrderTerminal(order) && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
                                 {order.priority >= 300 && order.priority < 9999 && <Badge className="text-xs bg-orange-500 text-white">P{order.priority}</Badge>}
                                 <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
                                   {getWmsStatusLabel(order.warehouseStatus)}
@@ -1471,7 +1472,7 @@ export default function Orders() {
                                   <Badge variant="outline" className="text-xs">Manual</Badge>
                                 )}
                                 {order.priority >= 9999 && <Badge className="text-xs bg-red-500 text-white">🔼 BUMPED</Badge>}
-                                {order.priority < 0 && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
+                                {order.priority < 0 && !isWmsOrderTerminal(order) && <Badge className="text-xs bg-gray-500 text-white">⏸ HELD</Badge>}
                                 {order.priority >= 300 && order.priority < 9999 && <Badge className="text-xs bg-orange-500 text-white">P{order.priority}</Badge>}
                                 <Badge variant="outline" className={cn("text-xs", statusColors[order.warehouseStatus] || "")}>
                                   {getWmsStatusLabel(order.warehouseStatus)}
@@ -1493,7 +1494,7 @@ export default function Orders() {
                                     {order.slaStatus === "overdue" ? "SLA Overdue" : "SLA At Risk"}
                                   </Badge>
                                 )}
-                                {order.onHold === 1 && (
+                                {isWmsOrderOnHold(order) && (
                                   <Badge variant="destructive" className="text-xs">ON HOLD</Badge>
                                 )}
                               </div>

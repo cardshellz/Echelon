@@ -1,5 +1,5 @@
 import { sql, type SQL } from "drizzle-orm";
-import { assertReceiptNotRetired, CutoverRetiredWorkError } from "../inventory-planning/infrastructure/inventory-cutover-retired-work";
+import { assertReceiptNotRetired, CutoverRetiredWorkError } from "../inventory-planning/cutover-retired-work.api";
 import { z } from "zod";
 import { db } from "../../db";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";

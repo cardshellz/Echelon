@@ -1,3 +1,4 @@
+import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
 import { supplierReturnReadFixtureTables } from "./supplier-return-fixture";
 import { readFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
@@ -32,7 +33,7 @@ const TABLES = [
   schema.users, schema.authRoles, schema.authPermissions, schema.authUserRoles, schema.authRolePermissions,
   schema.products, schema.productVariants, schema.vendors, schema.purchaseOrders, schema.purchaseOrderLines,
   schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.vendorInvoiceAttachments,
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines, schema.vendorInvoicePoLinks, schema.vendorInvoiceAttachments,
   // Invoice detail reads the freight footprint for replacement eligibility even
   // when this payment fixture's product invoice has no shipment or freight rows.
   schema.inboundFreightCosts,
@@ -47,7 +48,7 @@ const CREDIT_TABLES = [schema.inboundShipments, schema.inboundShipmentLines, sch
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
   schema.purchasingRecommendationPoHandoffs, schema.poApprovalTiers, schema.warehouseSettings,
 ] as const;
-const CREDIT_HISTORY_TABLES = ["procurement.supplier_credits", "procurement.supplier_credit_lines",
+const CREDIT_HISTORY_TABLES = ["procurement.supplier_header_cost_reviews","procurement.supplier_credits", "procurement.supplier_credit_lines",
   "procurement.supplier_credit_applications", "procurement.supplier_credit_application_reversals",
   "procurement.receiving_quarantine_observations", "procurement.receiving_quarantine_acceptances",
   "procurement.receiving_quarantine_dispositions", "inventory.cost_reconciliation_approvals",
@@ -146,7 +147,7 @@ export class PaymentAcceptanceFixture {
       CREATE UNIQUE INDEX payment_fixture_role_assignment ON identity.auth_user_roles(user_id,role_id);
     `);
     this.ownsPublicTables = true;
-    for (const migration of ["0107_audit_events.sql", "136_financial_command_results.sql",
+    for (const migration of ["900000056000020040001_staff_credential_state.sql", "0107_audit_events.sql", "136_financial_command_results.sql",
       "140_financial_command_operations.sql", "157_procurement_usd_financial_authority.sql"]) {
       await this.pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
@@ -273,10 +274,14 @@ export class PaymentAcceptanceFixture {
     // Low bcrypt work factor is solely for synthetic local login fixtures.
     const passwordHash = await bcrypt.hash(DELEGATE_PASSWORD, 4);
     await this.pool.query("UPDATE identity.users SET password=$1 WHERE id=$2", [passwordHash, PAYMENT_ACTORS.delegate]);
+    // reset() recreates only synthetic users; users' CASCADE truncation also
+    // clears credential state. Supply the real login owner's required metadata
+    // without altering the grants, password or deactivation assertions.
+    await this.pool.query("INSERT INTO identity.staff_credentials(user_id) SELECT id FROM identity.users");
   }
 
   async loginDelegate(): Promise<string> {
-    const response = await fetch(`${this.baseUrl}/api/auth/login`, {
+    const response = await requestLocalHttp(`${this.baseUrl}/api/auth/login`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username: "payment-delegate", password: DELEGATE_PASSWORD }),
     });
@@ -294,7 +299,7 @@ export class PaymentAcceptanceFixture {
     if (actor) headers["X-Payment-Fixture-Actor"] = actor;
     if (options.cookie) headers.Cookie = options.cookie;
     if (options.key) headers["Idempotency-Key"] = options.key;
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await requestLocalHttp(`${this.baseUrl}${path}`, {
       method: options.body === undefined ? "GET" : "POST", headers,
       ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
     });

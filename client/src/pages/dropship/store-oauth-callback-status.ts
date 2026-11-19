@@ -50,8 +50,7 @@ export function storeOAuthCallbackMessage(
     case "DROPSHIP_STORE_OAUTH_TARGET_CHANGED":
       return "The authorization was not saved because the selected store connection changed or is no longer available. Refresh the page and start again from that store's card.";
     default:
-      return status.errorCode
-        ? `Store connection failed. No connection changes were saved. Reference: ${status.errorCode}.`
-        : "Store connection failed. No connection changes were saved.";
+      // The error code is for Card Shellz support, not the vendor; the message is the same with or without one.
+      return "Store connection failed. No connection changes were saved.";
   }
 }

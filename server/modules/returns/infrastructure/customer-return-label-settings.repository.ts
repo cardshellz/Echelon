@@ -33,6 +33,11 @@ export class PostgresCustomerReturnSettingsStore
 {
   constructor(private readonly database: Database) {}
 
+  async customerVersion(channelId: number): Promise<number | null> {
+    const [current, control] = await Promise.all([this.read(channelId), this.readControl(channelId)]);
+    return current?.enabled && !control.paused ? current.version : null;
+  }
+
   async read(channelId: number) {
     return this.database.transaction(async tx => {
       await acquireReturnPolicyCatalogLock(tx, "shared");

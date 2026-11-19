@@ -1,5 +1,5 @@
 import { historicalCostComponentLabels } from "@shared/procurement/cost-reconciliation";
-import { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   originRepairContextSchema,
@@ -39,18 +39,28 @@ const money = (mills: number) => formatShipmentExceptionAmount(mills, "USD");
 export function CostOriginRepair({
   lotId,
   repaired = false,
+  buttonLabel,
+  open: controlledOpen,
+  onOpenChange,
+  hideTrigger = false,
 }: {
   lotId: number;
   repaired?: boolean;
+  buttonLabel?: string;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  hideTrigger?: boolean;
 }) {
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen ?? internalOpen;
+  function setOpen(value: boolean) { setInternalOpen(value); onOpenChange?.(value); }
   return (
     <>
-      <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
-        {repaired
+      {!hideTrigger && <Button size="sm" variant="outline" onClick={() => setOpen(true)}>
+        {buttonLabel ?? (repaired
           ? "View origin repair and approval"
-          : "Repair historical cost origin"}
-      </Button>
+          : "Repair historical cost origin")}
+      </Button>}
       <Dialog open={open} onOpenChange={setOpen}>
         <DialogContent className="w-[calc(100vw-2rem)] sm:max-w-3xl max-h-[90dvh] flex flex-col overflow-hidden">
           {open && (

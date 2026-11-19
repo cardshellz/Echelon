@@ -106,7 +106,7 @@ describe("PgDropshipPricingRulesRepository store default review loader (migratio
     expect(client.sql[3]).toContain("FROM dropship.dropship_pricing_applications");
     // The same SHARE locks W9 and the listing-settings wrapper take (one statement, exported once).
     expect(client.sql[4]).toBe(normalized(LISTING_SELECTION_LOCK_SQL));
-    expect(client.sql[4]).toBe("LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selection_rules, "
+    expect(client.sql[4]).toBe("LOCK TABLE dropship.dropship_catalog_rules, dropship.dropship_vendor_selected_variants, "
       + "dropship.dropship_vendor_variant_overrides, catalog.product_line_products IN SHARE MODE");
     expect(client.sql[5]).toContain("FROM dropship.dropship_pricing_reviews");
     expect(client.sql.slice(6)).toEqual(["COMMIT"]);

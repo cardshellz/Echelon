@@ -1,24 +1,24 @@
 import type { Pool } from "pg";
 
-import { createHistoricalShipStationContentsClient } from "../shipping/historical-shipstation-contents-audit.client";
-import { HistoricalShipStationContentsCorrectionDomainError } from "../shipping/historical-shipstation-contents-correction.domain";
+import { createHistoricalShipStationContentsClient } from "../shipping/historical-shipstation-contents.api";
+import { HistoricalShipStationContentsCorrectionDomainError } from "../shipping/historical-shipstation-contents.api";
 import {
   HistoricalShipStationContentsCorrectionRepositoryError,
   PgHistoricalShipStationContentsCorrectionRepository,
-} from "../shipping/historical-shipstation-contents-correction.repository";
+} from "../shipping/historical-shipstation-contents.api";
 import {
   HistoricalShipStationContentsCorrectionService,
   HistoricalShipStationContentsCorrectionServiceError,
-} from "../shipping/historical-shipstation-contents-correction.service";
+} from "../shipping/historical-shipstation-contents.api";
 import {
   HistoricalShipStationContentsReviewRepositoryError,
   PgHistoricalShipStationContentsReviewRepository,
-} from "../shipping/historical-shipstation-contents-review.repository";
+} from "../shipping/historical-shipstation-contents.api";
 import {
   HISTORICAL_SHIPSTATION_CONTENTS_REVIEW_RULE,
   HistoricalShipStationContentsReviewService,
   HistoricalShipStationContentsReviewServiceError,
-} from "../shipping/historical-shipstation-contents-review.service";
+} from "../shipping/historical-shipstation-contents.api";
 import { ControlTowerRequestError } from "./control-tower-v2.request";
 
 interface HistoricalContentsReviewService {
@@ -132,7 +132,8 @@ async function exceptionIdForWorkItem(input: Readonly<{
   readonly pool: Pool;
   readonly workItemId: number;
   readonly version?: number;
-}>): Promise<string> {
+  readonly allowResolvedReplay?: boolean;
+}>): Promise<{ exceptionId: string; sourceStatus: string }> {
   const result = await input.pool.query<{
     source_namespace: string;
     source_type: string;
@@ -173,14 +174,20 @@ async function exceptionIdForWorkItem(input: Readonly<{
       "STALE_WORK_ITEM_VERSION",
     );
   }
-  if (item.source_status === "resolved" || item.source_status === "ignored") {
+  if (
+    item.source_status === "ignored"
+    || (item.source_status === "resolved" && !input.allowResolvedReplay)
+  ) {
     throw new ControlTowerRequestError(
       "This historical package-content review is already resolved",
       409,
       "WORK_ITEM_RESOLVED",
     );
   }
-  return item.source_key;
+  return {
+    exceptionId: item.source_key,
+    sourceStatus: item.source_status,
+  };
 }
 
 export async function getHistoricalContentsReviewPreview(input: Readonly<{
@@ -189,7 +196,7 @@ export async function getHistoricalContentsReviewPreview(input: Readonly<{
   readonly reviewService?: HistoricalContentsReviewService;
 }>): Promise<unknown> {
   try {
-    const exceptionId = await exceptionIdForWorkItem(input);
+    const { exceptionId } = await exceptionIdForWorkItem(input);
     return await (input.reviewService ?? service(input.pool)).preview(exceptionId);
   } catch (error) {
     return actionError(error);
@@ -202,7 +209,7 @@ export async function getHistoricalContentsCorrectionPreview(input: Readonly<{
   readonly correctionPreviewService?: HistoricalContentsCorrectionService;
 }>): Promise<unknown> {
   try {
-    const exceptionId = await exceptionIdForWorkItem(input);
+    const { exceptionId } = await exceptionIdForWorkItem(input);
     return await (input.correctionPreviewService ?? correctionService(input.pool))
       .preview(exceptionId);
   } catch (error) {
@@ -225,20 +232,54 @@ export async function decideHistoricalContentsReview(input: Readonly<{
   readonly enqueueReprocess?: (providerOrderId: string) => Promise<void>;
 }>): Promise<unknown> {
   try {
-    const exceptionId = await exceptionIdForWorkItem(input);
-    const result = await (input.reviewService ?? service(input.pool)).decide({
-      exceptionId,
-      expectedPreviewEvidenceHash: input.expectedPreviewEvidenceHash,
-      authenticatedActorUserId: input.actorUserId,
-      decision: input.decision,
-      reason: input.reason,
+    const { exceptionId, sourceStatus } = await exceptionIdForWorkItem({
+      ...input,
+      allowResolvedReplay: input.decision === "wms_confirmed",
     });
-    if (input.decision === "wms_confirmed") {
-      await enqueueConfirmedCurrentLabel({
-        pool: input.pool,
-        result,
-        enqueueReprocess: input.enqueueReprocess,
+    let result: unknown;
+    try {
+      result = await (input.reviewService ?? service(input.pool)).decide({
+        exceptionId,
+        expectedPreviewEvidenceHash: input.expectedPreviewEvidenceHash,
+        authenticatedActorUserId: input.actorUserId,
+        decision: input.decision,
+        reason: input.reason,
       });
+    } catch (error) {
+      if (
+        sourceStatus === "resolved"
+        && (
+          (error instanceof HistoricalShipStationContentsReviewServiceError && error.code === "REVIEW_NOT_FOUND")
+          || (error instanceof HistoricalShipStationContentsReviewRepositoryError && error.code === "REVIEW_NOT_FOUND")
+        )
+      ) {
+        throw new ControlTowerRequestError(
+          "This historical package-content review is already resolved",
+          409,
+          "WORK_ITEM_RESOLVED",
+        );
+      }
+      throw error;
+    }
+    if (input.decision === "wms_confirmed") {
+      try {
+        await enqueueConfirmedCurrentLabel({
+          pool: input.pool,
+          result,
+          enqueueReprocess: input.enqueueReprocess,
+        });
+      } catch (enqueueError) {
+        console.error("[Operations Control Tower V2] historical contents reprocess enqueue failed after decision commit", {
+          workItemId: input.workItemId,
+          exceptionId,
+          error: enqueueError instanceof Error ? enqueueError.message : String(enqueueError),
+        });
+        throw new ControlTowerRequestError(
+          "Historical WMS package-content confirmation was recorded, but queueing ShipStation order reprocessing failed. Retry with the same decision to complete queueing.",
+          503,
+          "HISTORICAL_CONTENTS_REPROCESS_ENQUEUE_FAILED",
+        );
+      }
     }
     return result;
   } catch (error) {

@@ -51,6 +51,7 @@ function okOrder(overrides: Partial<WmsOrderRow> = {}): WmsOrderRow {
     id: 42,
     order_number: "1001",
     channel_id: 7,
+    warehouse_id: null,
     oms_fulfillment_order_id: null,
     sort_rank: "0000000100",
     external_order_id: "EXT-1001",
@@ -810,7 +811,255 @@ describe("appendShipmentItems :: amend existing provider order", () => {
     expect(mock.getCallCount()).toBe(2);
   });
 });
+// #65696: an edit raised a line the queued ShipStation order already held
+// (8 -> 10). The line must be amended in place, verified, and only then
+// recorded locally.
+describe("setShipmentItemQuantity :: amend an existing provider line", () => {
+  beforeEach(() => {
+    process.env.SHIPSTATION_API_KEY = "test-key";
+    process.env.SHIPSTATION_API_SECRET = "test-secret";
+  });
+
+  afterEach(() => {
+    globalThis.fetch = ORIGINAL_FETCH;
+    vi.restoreAllMocks();
+  });
+
+  const shipmentRow = (overrides: Record<string, unknown> = {}) => ({
+    rows: [{
+      id: 20973,
+      requires_review: false,
+      review_reason: null,
+      shipstation_order_id: 816327708,
+      order_edit_operation_id: null,
+      ...overrides,
+    }],
+  });
+  const lineRow = (overrides: Record<string, unknown> = {}) => ({
+    rows: [{
+      id: 30121,
+      qty: 8,
+      provider_membership_state: "authoritative",
+      order_item_id: 328259,
+      order_item_quantity: 10,
+      order_item_status: "pending",
+      other_coverage: 0,
+      ...overrides,
+    }],
+  });
+  const liveOrder = (status: string, quantity: number) => ({
+    orderId: 816327708,
+    orderKey: "echelon-wms-shp-20973",
+    orderStatus: status,
+    carrierCode: "usps",
+    advancedOptions: { storeId: 77 },
+    items: [
+      { lineItemKey: "wms-item-30120", sku: "GLV-MAG-75PT-P50", quantity: 2 },
+      { lineItemKey: "wms-item-30121", sku: "GLV-MAG-35PT-P50", quantity },
+    ],
+  });
+
+  it("raises the provider line, verifies it, then records the new quantity", async () => {
+    const mock = makeDb([shipmentRow(), lineRow(), { rows: [{ id: 30121 }] }]);
+    const fetchMock = mockFetchQueue([
+      liveOrder("awaiting_shipment", 8),
+      { orderId: 816327708 },
+      liveOrder("awaiting_shipment", 10),
+    ]);
+    globalThis.fetch = fetchMock as any;
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    const result = await svc.setShipmentItemQuantity(20973, 30121);
+
+    expect(result).toEqual({ state: "applied", providerStatus: "awaiting_shipment" });
+    const postCall = fetchMock.mock.calls.find(([, init]: any) => init?.method === "POST");
+    const payload = JSON.parse((postCall as any)[1].body);
+    expect(payload.carrierCode).toBe("usps");
+    expect(payload.advancedOptions).toEqual({ storeId: 77 });
+    expect(payload.items).toEqual([
+      { lineItemKey: "wms-item-30120", sku: "GLV-MAG-75PT-P50", quantity: 2 },
+      { lineItemKey: "wms-item-30121", sku: "GLV-MAG-35PT-P50", quantity: 10 },
+    ]);
+    expect(mock.getCallCount()).toBe(3);
+  });
+
+  it("subtracts coverage held by the order's other packages", async () => {
+    const mock = makeDb([shipmentRow(), lineRow({ order_item_quantity: 12, other_coverage: 3 }), { rows: [{ id: 30121 }] }]);
+    const fetchMock = mockFetchQueue([
+      liveOrder("on_hold", 8),
+      { orderId: 816327708 },
+      liveOrder("on_hold", 9),
+    ]);
+    globalThis.fetch = fetchMock as any;
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    await expect(svc.setShipmentItemQuantity(20973, 30121)).resolves.toEqual({ state: "applied", providerStatus: "on_hold" });
+    const payload = JSON.parse((fetchMock.mock.calls.find(([, init]: any) => init?.method === "POST") as any)[1].body);
+    expect(payload.items[1].quantity).toBe(9);
+  });
+
+  it("is idempotent when ShipStation already has the target quantity", async () => {
+    const mock = makeDb([shipmentRow(), lineRow(), { rows: [{ id: 30121 }] }]);
+    const fetchMock = mockFetchQueue([liveOrder("awaiting_shipment", 10)]);
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    await expect(svc.setShipmentItemQuantity(20973, 30121))
+      .resolves.toEqual({ state: "already_applied", providerStatus: "awaiting_shipment" });
+    expect(fetchMock.mock.calls.some(([, init]: any) => init?.method === "POST")).toBe(false);
+    expect(mock.getCallCount()).toBe(3);
+  });
+
+  it.each([
+    ["already applied locally", { qty: 10 }],
+    ["demand fell below the row", { order_item_quantity: 6 }],
+    ["the order item was cancelled", { order_item_status: "cancelled" }],
+  ])("does nothing when %s", async (_label, overrides) => {
+    const mock = makeDb([shipmentRow(), lineRow(overrides)]);
+    const fetchMock = mockFetchQueue([]);
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    await expect(svc.setShipmentItemQuantity(20973, 30121))
+      .resolves.toEqual({ state: "already_applied", providerStatus: "not_checked" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("returns not_editable only when ShipStation positively reports a locked order", async () => {
+    const mock = makeDb([shipmentRow(), lineRow()]);
+    const fetchMock = mockFetchQueue([liveOrder("shipped", 8)]);
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    await expect(svc.setShipmentItemQuantity(20973, 30121))
+      .resolves.toEqual({ state: "not_editable", providerStatus: "shipped" });
+    expect(fetchMock.mock.calls.some(([, init]: any) => init?.method === "POST")).toBe(false);
+    expect(mock.getCallCount()).toBe(2);
+  });
+
+  it("retries an unrecognized provider state without writing", async () => {
+    const mock = makeDb([shipmentRow(), lineRow()]);
+    globalThis.fetch = mockFetchQueue([liveOrder("future_status", 8)]) as any;
+
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    const error = await svc.setShipmentItemQuantity(20973, 30121).catch((err) => err);
+    expect(error).toBeInstanceOf(ShipStationPushError);
+    expect(error.context).toMatchObject({ code: "SS_PUSH_AMENDMENT_STATE_UNKNOWN" });
+    expect(mock.getCallCount()).toBe(2);
+  });
+
+  it("does not record the local quantity when verification fails", async () => {
+    const mock = makeDb([shipmentRow(), lineRow()]);
+    globalThis.fetch = mockFetchQueue([
+      liveOrder("awaiting_shipment", 8),
+      { orderId: 816327708 },
+      liveOrder("awaiting_shipment", 8),
+    ]) as any;
+
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    const error = await svc.setShipmentItemQuantity(20973, 30121).catch((err) => err);
+    expect(error.context).toMatchObject({ code: "SS_PUSH_AMENDMENT_VERIFICATION_FAILED", value: 10 });
+    expect(mock.getCallCount()).toBe(2);
+  });
+
+  it("reports a provider order that lost an authoritative line as permanent", async () => {
+    const mock = makeDb([shipmentRow(), lineRow()]);
+    globalThis.fetch = mockFetchQueue([{ ...liveOrder("awaiting_shipment", 8), items: [] }]) as any;
+
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    const error = await svc.setShipmentItemQuantity(20973, 30121).catch((err) => err);
+    expect(error.context).toMatchObject({ code: "SS_PUSH_QUANTITY_AMEND_LINE_MISSING", value: "wms-item-30121" });
+  });
+
+  it("updates a row still waiting to be appended locally, for the append to send", async () => {
+    const mock = makeDb([shipmentRow(), lineRow({ provider_membership_state: "pending_append" }), { rows: [{ id: 30121 }] }]);
+    const fetchMock = mockFetchQueue([{ ...liveOrder("awaiting_shipment", 8), items: [] }]);
+    globalThis.fetch = fetchMock as any;
+
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    await expect(svc.setShipmentItemQuantity(20973, 30121))
+      .resolves.toEqual({ state: "applied", providerStatus: "awaiting_shipment" });
+    expect(fetchMock.mock.calls.some(([, init]: any) => init?.method === "POST")).toBe(false);
+    expect(mock.getCallCount()).toBe(3);
+  });
+
+  it("fails and retries when the local row changed during the amend", async () => {
+    const mock = makeDb([shipmentRow(), lineRow(), { rows: [] }]);
+    globalThis.fetch = mockFetchQueue([
+      liveOrder("awaiting_shipment", 8),
+      { orderId: 816327708 },
+      liveOrder("awaiting_shipment", 10),
+    ]) as any;
+
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    const error = await svc.setShipmentItemQuantity(20973, 30121).catch((err) => err);
+    expect(error.context).toMatchObject({ code: "SS_PUSH_QUANTITY_AMEND_CONFLICT" });
+  });
+
+  it.each([
+    ["requires review", shipmentRow({ requires_review: true, review_reason: "address" })],
+    ["has no ShipStation identity", shipmentRow({ shipstation_order_id: null })],
+  ])("refuses a shipment that %s", async (_label, shipment) => {
+    const mock = makeDb([shipment]);
+    globalThis.fetch = mockFetchQueue([]) as any;
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    const error = await svc.setShipmentItemQuantity(20973, 30121).catch((err) => err);
+    expect(error.context).toMatchObject({ code: SS_PUSH_INVALID_SHIPMENT });
+  });
+
+  it.each([[0, 1], [1, -1], [1.5, 1]])("rejects invalid identities (%s, %s)", async (shipmentId, shipmentItemId) => {
+    const mock = makeDb([]);
+    const svc = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock });
+    const error = await svc.setShipmentItemQuantity(shipmentId, shipmentItemId).catch((err) => err);
+    expect(error.context).toMatchObject({ code: SS_PUSH_INVALID_SHIPMENT });
+    expect(mock.getCallCount()).toBe(0);
+  });
+});
 describe("pushShipment :: happy path", () => {
+  it.each([0, 1])("preserves independent warehouse hold=%s on a new provider job", async on_hold => {
+    const mock = makeDb([{ rows: [okShipment()] }, { rows: [okOrder({ on_hold })] },
+      { rows: [{ non_shipping_total_cents: 0 }] }, { rows: [okItem()] }]);
+    const request = mockFetchForPush({ orderId: 555000 }); globalThis.fetch = request as unknown as typeof fetch;
+    await createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock }).pushShipment(9001);
+    const sent = request.mock.calls.find(([, init]) => init?.method === "POST")!;
+    expect(JSON.parse(sent[1].body).orderStatus).toBe(on_hold === 1 ? "on_hold" : "awaiting_shipment");
+  });
+  it.each(["verified", "unpaid_units", "native_cancelled", "unsupported_provider"])(
+    "ties refunded-payment shipping to channel quantities: %s", async kind => {
+      const version = "2026-10-24T12:00:00.000Z";
+      const mock = makeDb([
+        { rows: [okShipment({ channel_id: 36 })] },
+        { rows: [okOrder({ channel_id: 36, oms_fulfillment_order_id: "20", financial_status: "refunded", amount_paid_cents: 0 })] },
+        { rows: [{ non_shipping_total_cents: 0 }] }, { rows: [okItem()] },
+      ], { executeOverride: text => {
+        if (text.includes("SELECT provider FROM channels.channels")) return { rows: [{ provider: kind === "unsupported_provider" ? "ebay" : "shopify" }] };
+        if (text.includes("SELECT channel_id,external_order_id,status")) return { rows: [{ channel_id: 36, external_order_id: "1",
+          status: "confirmed", financial_status: "refunded", cancelled_at: null }] };
+        if (text.includes("FROM oms.oms_order_lines")) return { rows: [{ externalLineItemId: "101", paidQuantity: kind === "unpaid_units" ? 0 : 2,
+          authorityFulfillableQuantity: 2, channelCurrentQuantity: 2, channelQuantityUpdatedAt: version }] };
+        if (text.includes("SELECT status, fulfillment_status")) return { rows: [{ status: "confirmed", fulfillment_status: null,
+          financial_status: "refunded", channel_id: 36 }] };
+        return undefined;
+      } });
+      const read = vi.fn(async () => ({ orderId: "gid://shopify/Order/1", shopDomain: "synthetic.myshopify.com",
+        updatedAt: version, cancelled: kind === "native_cancelled",
+        lines: [{ id: "gid://shopify/LineItem/101", quantity: 2, currentQuantity: 2, unfulfilledQuantity: 2 }] }));
+      const fetchMock = mockFetchForPush({ orderId: 555000 }); globalThis.fetch = fetchMock as unknown as typeof fetch;
+      const service = createShipStationService(mock.db, undefined, { sessionLock: fakeSessionLock,
+        readChannelMerchandise: read });
+      if (kind === "verified") {
+        await service.pushShipment(9001);
+        expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+        expect(read).toHaveBeenCalledExactlyOnceWith({ channelId: 36, orderId: "1" });
+      } else {
+        await expect(service.pushShipment(9001)).rejects.toThrow();
+        expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(0);
+        if (kind === "unsupported_provider") expect(read).not.toHaveBeenCalled();
+      }
+    },
+  );
   beforeEach(() => {
     process.env.SHIPSTATION_API_KEY = "test-key";
     process.env.SHIPSTATION_API_SECRET = "test-secret";
@@ -1657,7 +1906,7 @@ describe("pushShipment :: error cases", () => {
       { rows: [okItem()] },
       { rows: [] }, // UPDATE
     ]);
-    globalThis.fetch = mockFetchOnceOk({
+    globalThis.fetch = mockFetchForPush({
       orderId: 42,
       orderStatus: "awaiting_shipment",
     }) as any;
@@ -1707,7 +1956,7 @@ describe("pushShipment :: error cases", () => {
       { rows: [okItem()] },
       { rows: [] }, // UPDATE
     ]);
-    globalThis.fetch = mockFetchOnceOk({
+    globalThis.fetch = mockFetchForPush({
       orderId: 42,
       orderNumber: shipmentRow.id,
       orderKey: `echelon-wms-shp-${shipmentRow.id}`,
@@ -1815,15 +2064,23 @@ describe("pushShipment :: error cases", () => {
 // The items query MUST filter the commercial quantity so ShipStation never receives a
 // quantity:0 line. The hand-rolled db mock stubs `.where()`, so this is a
 // source-regression guard (same pattern as the refund idempotency guard).
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 describe("pushShipment :: never sends a zeroed line to ShipStation", () => {
   it("restricts the shipment-items query to shippable AND commercially requested qty > 0", () => {
-    const src = readFileSync(
-      resolve(__dirname, "../../shipstation.service.ts"),
-      "utf-8",
-    );
+    const omsDir = resolve(__dirname, "../..");
+    const subDir = resolve(omsDir, "shipstation");
+    const subFiles = existsSync(subDir)
+      ? readdirSync(subDir)
+          .filter((f) => f.endsWith(".ts"))
+          .sort()
+          .map((f) => readFileSync(resolve(subDir, f), "utf-8"))
+      : [];
+    const src = [
+      readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf-8"),
+      ...subFiles,
+    ].join("\n");
     expect(src).toMatch(/COALESCE\(\$\{wmsOrderItems\.requiresShipping\}, 1\) = 1/);
     expect(src).toMatch(/COALESCE\(\$\{outboundShipmentItems\.commercialRequestedQty\}, \$\{outboundShipmentItems\.qty\}\) > 0/);
   });

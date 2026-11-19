@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { convertUnitQuantity, UnitQuantityError } from "@shared/procurement/unit-quantity";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { reviewReceivingConfiguration } from "@shared/procurement/receiving-configuration";
 
 export const MAX_RECEIVING_QUANTITY = 2_147_483_647;
 
@@ -36,6 +37,7 @@ export interface ReceiptUnitPlan {
   countsAsPieces: boolean;
   preferredVariantId: number | null;
   preferredUnitsPerVariant: number | null;
+  selectedVariantSku?: string | null;
 }
 
 /** Cartons describe packing, not the contents of each carton. A nondivisible
@@ -48,15 +50,37 @@ export function planReceiptUnits(input: {
   preferredVariantId: number | null;
   recordedPreferredUnits?: number | null;
   variants: readonly ReceiptVariant[];
+  selection?: { productVariantId: number; unitsPerVariant: number };
+  requireConfiguredUnit?: boolean;
 }): ReceiptUnitPlan {
   const baseQty = receiptInteger(input.baseQty, "Expected pieces", true);
   receiptInteger(input.productId, "Product ID", true);
   const variants = input.variants.filter((variant) => variant.productId === input.productId && variant.isActive !== false);
   const preferred = input.preferredVariantId === null ? null : variants.find((variant) => variant.id === input.preferredVariantId);
+  if (input.selection) {
+    receiptInteger(input.selection.productVariantId, "Selected receive variant", true);
+    receiptInteger(input.selection.unitsPerVariant, "Reviewed pieces per receiving unit", true);
+    const review = reviewReceivingConfiguration({ pieces: baseQty, variantId: input.selection.productVariantId,
+      recordedUnits: input.selection.unitsPerVariant, activeVariants: variants });
+    if (review.issue) throw new ReceivingUnitError(review.issue.message, 409, { code: review.issue.code,
+      productId: input.productId, productVariantId: input.selection.productVariantId, expectedBaseQty: baseQty });
+    const selected = variants.find(variant => variant.id === input.selection!.productVariantId)!;
+    return { productVariantId: selected.id, unitsPerVariant: selected.unitsPerVariant, expectedQty: review.count!,
+      countsAsPieces: selected.unitsPerVariant === 1, preferredVariantId: preferred?.id ?? null,
+      preferredUnitsPerVariant: preferred?.unitsPerVariant ?? null, selectedVariantSku: selected.sku ?? null };
+  }
   if (input.preferredVariantId !== null && !preferred) {
     throw new ReceivingUnitError("The recorded receive variant is missing, inactive, or belongs to another product. Review the product receive configuration.", 409, {
       code: "RECEIVING_VARIANT_REVIEW_REQUIRED", productId: input.productId, productVariantId: input.preferredVariantId,
     });
+  }
+  // Legacy PO-direct callers retain their piece fallback. A shipment's setup
+  // screen must ask which configuration arrived, even when a piece SKU exists.
+  if (input.requireConfiguredUnit && !preferred) {
+    throw new ReceivingUnitError(variants.length
+      ? "Choose the product configuration that actually arrived. No receiving configuration was saved on this shipment or purchase line."
+      : "This product has no active receiving configuration. Add its actual configuration before creating the receipt.", 409,
+    { code: variants.length ? "RECEIVING_VARIANT_SELECTION_REQUIRED" : "RECEIVING_VARIANT_REQUIRED", productId: input.productId });
   }
   const preferredUnits = preferred ? receiptInteger(preferred.unitsPerVariant, "Receive pack size", true) : null;
   if (preferredUnits !== null && input.recordedPreferredUnits != null && receiptInteger(input.recordedPreferredUnits, "Recorded receive pack size", true) !== preferredUnits) {
@@ -68,7 +92,13 @@ export function planReceiptUnits(input: {
     ? preferred
     : [...variants].filter((variant) => variant.unitsPerVariant === 1).sort((a, b) => a.id - b.id)[0];
   if (!selected) {
-    throw new ReceivingUnitError("This quantity must be counted in pieces. Configure an active one-piece variant for this product before creating the receipt.", 409, {
+    if (!variants.length) throw new ReceivingUnitError("This product has no active receiving unit. Set up a unit in the product catalog, then return to this receipt.", 409,
+      { code: "RECEIVING_VARIANT_REQUIRED", productId: input.productId, expectedBaseQty: baseQty });
+    if (!preferred || variants.some(variant => Number.isInteger(variant.unitsPerVariant) && variant.unitsPerVariant > 0 && baseQty % variant.unitsPerVariant === 0)) {
+      throw new ReceivingUnitError("Choose how to count this product when receiving. Existing packs can be used when their count represents the remaining pieces exactly.", 409,
+        { code: "RECEIVING_VARIANT_SELECTION_REQUIRED", productId: input.productId, expectedBaseQty: baseQty });
+    }
+    throw new ReceivingUnitError("No active configuration can represent these pieces as a whole count. Add the configuration that actually arrived, or a piece unit if the goods will be counted individually.", 409, {
       code: "RECEIVING_PIECE_VARIANT_REQUIRED", productId: input.productId, expectedBaseQty: baseQty,
     });
   }

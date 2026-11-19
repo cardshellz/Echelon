@@ -34,7 +34,10 @@ function harness(rows: Record<string, unknown>[] = [validAuthority]) {
     adjustInventoryLevel: vi.fn(async () => null),
     createInventoryTransaction: vi.fn(async () => undefined),
   };
-  const inventory = new InventoryUseCases(db, storage as unknown as IInventoryStorage);
+  const inventory = new InventoryUseCases(
+    db as unknown as ConstructorParameters<typeof InventoryUseCases>[0],
+    storage as unknown as IInventoryStorage,
+  );
   return { inventory, db, storage, tx, statements };
 }
 

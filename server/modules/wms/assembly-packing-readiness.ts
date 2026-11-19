@@ -2,7 +2,7 @@ import type { PoolClient } from "pg";
 import type { SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
 import { z } from "zod";
-import { transitionOrderStatus } from "../orders/order-status-core";
+import { transitionOrderStatus } from "../orders/order-lifecycle-and-cancellation.api";
 import { WmsOrderItemCommandError } from "./order-item-commands";
 import { WMS_WAREHOUSE_STATUS_VALUES } from "@shared/enums/order-status";
 

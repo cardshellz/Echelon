@@ -1,11 +1,18 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const SHIPSTATION_SRC = readFileSync(
-  resolve(__dirname, "../../../oms/shipstation.service.ts"),
-  "utf8",
-);
+const omsDir = resolve(__dirname, "../../../oms");
+const shipStationSubDir = resolve(omsDir, "shipstation");
+const SHIPSTATION_SRC = [
+  readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"),
+  ...(existsSync(shipStationSubDir)
+    ? readdirSync(shipStationSubDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(shipStationSubDir, f), "utf8"))
+    : []),
+].join("\n");
 const OMS_ROUTES_SRC = readFileSync(
   resolve(__dirname, "../../../../routes/oms.routes.ts"),
   "utf8",
@@ -30,8 +37,13 @@ describe("engine-cancel divergence P2 — clear-review-and-push override", () =>
   });
 
   it("overrideReview clears the review flag after a successful push", () => {
+    const wmsShipmentsRepoSrc = readFileSync(
+      resolve(__dirname, "../../../wms/outbound-shipments-mutations.repository.ts"),
+      "utf8",
+    );
     expect(SHIPSTATION_SRC).toMatch(/if \(opts\.overrideReview\)/);
-    expect(SHIPSTATION_SRC).toMatch(/SET requires_review = false, review_reason = NULL/);
+    expect(SHIPSTATION_SRC).toContain("clearOutboundShipmentReviewFlagByReasonInWms(");
+    expect(wmsShipmentsRepoSrc).toMatch(/SET requires_review = false, review_reason = NULL/);
   });
 
   it("the push endpoint gates overrideReview on the orders:hold permission", () => {

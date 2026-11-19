@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { readUnresolvedReceivingCustody } from "../../procurement/receiving-custody-public";
+import { readUnresolvedReceivingCustody } from "../../procurement/receiving-custody.api";
 import { InventoryQuantityError } from "../domain/quantity-ledger";
 import type { InventoryQuantityTransaction } from "./quantity-ledger.port";
 import { costEvidenceTransactionFromPg } from "../infrastructure/cost-evidence-pg";

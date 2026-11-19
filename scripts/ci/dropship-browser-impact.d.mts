@@ -1,3 +1,4 @@
+import type { ImpactSnapshot } from "./test-impact.mjs";
 import type { BrowserFileChange, BrowserSelection } from "./browser-suite-impact.mjs";
 export interface DropshipBrowserPlan {
   run: boolean;
@@ -10,6 +11,7 @@ export function selectDropshipBrowserFeatures(options: {
   files: ReadonlySet<string>;
   readSource: (file: string) => string;
   force?: boolean;
+  previous?: ImpactSnapshot;
 }): DropshipBrowserPlan;
 export function runDropshipBrowserSelection(
   environment?: Record<string, string | undefined>, root?: string,

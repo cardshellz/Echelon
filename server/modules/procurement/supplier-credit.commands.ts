@@ -168,7 +168,8 @@ export function createSupplierCreditCommands(repository: FinancialCommandReposit
             actorId: descriptor.actorId,
             creditId,
             applicationId,
-            at: clock()
+            at: clock(),
+            commandKey: descriptor.idempotencyKey,
           });
           const body = supplierCreditCommandResultSchema.parse(JSON.parse(JSON.stringify({
             ...value,

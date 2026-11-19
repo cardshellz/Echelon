@@ -5,7 +5,7 @@ import {
   createAssemblyHandoffSchema, completeAssemblyTaskSchema,
 } from "@shared/warehouse-assembly-work";
 import { lockAssemblyClaimForWork } from "../../../inventory-planning/application/assembly-work-claim-access";
-import { lockAssemblyOrderForWork } from "../../../orders/assembly-work-order-lock";
+import { lockAssemblyOrderForWork } from "../../../orders/assembly-order-authority.api";
 import { requireAssemblyScope, transitionAssemblyTask } from "../domain/assembly-work";
 import { requireWorkPermission, WarehouseWorkError } from "../domain/work-configuration";
 import { AssemblyWorkOwner } from "./assembly-work-owner";

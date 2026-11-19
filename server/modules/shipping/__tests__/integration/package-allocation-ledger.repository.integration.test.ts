@@ -36,6 +36,9 @@ import {
 import { createFulfillmentPushService } from "../../../oms/fulfillment-push.service";
 import { createShopifyLabelLifecycleRepository } from "../../../oms/shopify-label-lifecycle.repository";
 import { createShopifyLabelLifecycleService } from "../../../oms/shopify-label-lifecycle.service";
+import { findChannelWritebackCandidates } from "../../../oms/channel-writeback.service";
+import { sql } from "drizzle-orm";
+import { currentPushedShipmentItemQuantitySql } from "../../../oms/channel-fulfillment-package-coverage.sql";
 import { createChannelFulfillmentProjector } from "../../../oms/channel-fulfillment-projection.repository";
 import { createShipStationService } from "../../../oms/shipstation.service";
 import { createShipStationLabelReconciliationRepository } from "../../../oms/shipstation-label-reconciliation.repository";
@@ -78,6 +81,7 @@ import {
   PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS,
   PgPackageAllocationLedgerRepository,
   readObservedPackagesForSources,
+  type PackageAllocationAuthorityPreviewTransaction,
   type PersistedPackageAllocationEffectOutboxEntry,
   type PersistedPackageAllocationEntry,
   type PersistedPackageAllocationIntent,
@@ -86,6 +90,7 @@ import {
   PACKAGE_ALLOCATION_PLANNER_VERSION,
   packageAllocationPlanAuthoritySnapshotSchema,
   PackageAllocationPlanningService,
+  persistPackageAllocationPlanCommandSchema,
   type PersistPackageAllocationPlanCommand,
   type PersistPackageAllocationPlanResult,
 } from "../../package-allocation-planning.service";
@@ -96,7 +101,10 @@ import { HistoricalShipStationContentsAttestationService } from "../../historica
 import {
   buildHistoricalShipStationContentsRecoveryEvidence,
   buildHistoricalShipStationContentsSystemRecoveryEvent,
+  buildHistoricalShipStationWmsConfirmationEvidence,
+  historicalShipStationProviderObservationHash,
   historicalShipStationRecoverableCaseEvidenceHash,
+  normalizedHistoricalShipStationProviderLines,
 } from "../../historical-shipstation-contents-recovery.domain";
 import { PgHistoricalShipStationContentsSystemRecoveryRepository } from "../../historical-shipstation-contents-system-recovery.repository";
 import { HistoricalShipStationContentsSystemRecoveryService } from "../../historical-shipstation-contents-system-recovery.service";
@@ -967,7 +975,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         providerExecutor: { execute: vi.fn().mockRejectedValue(new Error("Provider must remain blocked")) },
       });
       expect(await worker.runDueBatch({ limit: 25 })).toMatchObject({ claimed: 0 });
-      expect(await workerRepository.findWaitingEbayLabelReplacements!(25)).toEqual([replacement.id]);
+      expect(await workerRepository.findWaitingEbayLabelReplacements!(25, clock.now())).toEqual([replacement.id]);
     }
     const results = mode === "concurrent"
       ? await Promise.all([replacement.receive(), replacement.receive()]) : [await replacement.receive()];
@@ -1041,17 +1049,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect((await pool.query("SELECT SUM(quantity_shipped)::int AS qty FROM wms.effective_physical_shipment_items")).rows).toEqual([{ qty: 3 }]);
 
     if (mode === "health") {
-      const { findChannelWritebackCandidates } = await import("../../../oms/channel-writeback.service");
-      await pool.query("ALTER TABLE wms.orders ADD COLUMN source_table_id VARCHAR(100)");
       await pool.query("UPDATE wms.orders SET source = 'oms'");
-      await pool.query(`CREATE TABLE oms.webhook_retry_queue (
-        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, provider TEXT NOT NULL,
-        status TEXT NOT NULL, topic TEXT NOT NULL, payload JSONB NOT NULL)`);
-      // Empty inbound receipt relations complete the health reader's schema;
-      // this scenario only produces outbound canonical commands.
-      await pool.query(`CREATE TABLE oms.channel_fulfillment_receipt_items (
-        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, receipt_id BIGINT NOT NULL,
-        legacy_wms_shipment_item_id INTEGER, quantity INTEGER NOT NULL)`);
       await pool.query("UPDATE wms.outbound_shipments SET shipped_at = NOW() - INTERVAL '2 hours'");
       await pool.query(`INSERT INTO oms.oms_order_events(order_id, event_type, details)
         SELECT orders.oms_fulfillment_order_id::bigint, 'tracking_pushed',
@@ -1248,7 +1246,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         expect((await pool.query("SELECT COUNT(DISTINCT replacement_batch_id)::int AS batches FROM wms.ebay_label_replacement_work WHERE state = 'applied'")).rows).toEqual([{ batches: 1 }]);
         await worker.runDueBatch();
         expect(packages.filter(pkg => pkg.status === 'SUCCESS').map(pkg => pkg.tracking).sort())
-          .toEqual(replacements.slice(0, 4).map(pkg => `TRACK${pkg.providerLabelId}`).sort());
+          .toEqual(replacements.map(pkg => `TRACK${pkg.providerLabelId}`).sort());
+        // The existing worker now also recovers the independent fifth label
+        // from its completed void; it does not require another webhook.
         expect(await replacements[4].receive()).toMatchObject({ outcome: 'replaced' });
         await worker.runDueBatch();
         expect(packages.filter(pkg => pkg.status === 'SUCCESS').map(pkg => pkg.tracking).sort())
@@ -1321,9 +1321,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       expect((await pool.query('SELECT qty FROM wms.outbound_shipment_items ORDER BY id')).rows).toEqual([{ qty: 4 }, { qty: 1 }]);
     }, 30_000);
 
-  it.each(['unsent', 'sent', 'late_void', 'missed_void_poll', 'missed_void_webhook', 'split', 'lost_cancel_response', 'claimed_before_void', 'concurrent', 'receipt_rollback', 'contents_changed'])(
+  it.each(['unsent', 'sent', 'late_void', 'missed_void_poll', 'missed_void_webhook', 'split', 'repair_only', 'split_repair_only', 'historical_repair', 'historical_void_repair', 'repair_with_legacy_receipt', 'repair_concurrent', 'repair_after_contents_resolution', 'repair_after_review_resolution', 'replacement_evidence_review', 'lost_cancel_response', 'claimed_before_void', 'concurrent', 'receipt_rollback', 'contents_changed'])(
     'corrects Shopify void/relabel end to end without changing a sibling: %s', async mode => {
-      const split = mode === 'split';
+      const split = mode === 'split' || mode === 'split_repair_only';
+      const repairOnly = ['repair_only', 'split_repair_only', 'historical_repair', 'historical_void_repair', 'repair_with_legacy_receipt', 'repair_concurrent', 'repair_after_contents_resolution', 'repair_after_review_resolution'].includes(mode);
       const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, 'SHOPIFY-RELABEL', split ? 2 : 1);
       const channelId = Number((await pool.query('SELECT channel_id FROM oms.oms_orders')).rows[0].channel_id);
       const warehouse = (await pool.query(`INSERT INTO warehouse.warehouses(code, name, shopify_location_id)
@@ -1435,6 +1436,22 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         expect(await worker.runDueBatch(), JSON.stringify(logger.error.mock.calls)).toMatchObject({ succeeded: split ? 2 : 1, reviewRequired: 0, retryScheduled: 0 });
       }
       const replacement = await label('44011');
+      async function recordContentsResolution() {
+        const observations = (await pool.query("SELECT id FROM wms.shipping_provider_label_events WHERE shipping_provider_label_id=$1 ORDER BY id",[replacement.id])).rows;
+        const correction = buildHistoricalShipStationContentsSystemRecoveryEvent({ shippingProviderLabelId:String(replacement.id),
+          providerShipmentId:44011,trackingNumber:'TRACK44011',labelStatus:'active',resolvedLabelEventIds:observations.map(row=>Number(row.id)),
+          recoveryEvidence:buildHistoricalShipStationWmsConfirmationEvidence({providerObservationHash:'a'.repeat(64),
+            expectedContents:{kind:'available',source:'legacy_wms_shipment',lines:[{wmsShipmentItemId:sourceId,sku:'SHOPIFY-RELABEL',quantity:1}]}}),
+          authorization:{actorUserId:'test-admin',actorRole:'admin',reason:'Resolve stored contents before replacement recovery'},
+        });
+        await pool.query(`INSERT INTO wms.shipping_provider_label_events(shipping_provider_label_id,event_hash,event_type,label_status,
+          tracking_number,provider_occurred_at,received_at,sanitized_payload) VALUES($1,$2,$3,$4,$5,NULL,$6,$7::jsonb)`,
+          [replacement.id,correction.eventHash,correction.eventType,correction.labelStatus,correction.trackingNumber,clock.now(),JSON.stringify(correction.sanitizedPayload)]);
+      }
+      if (mode === 'repair_after_contents_resolution') await recordContentsResolution();
+      if (mode === 'replacement_evidence_review' || mode === 'repair_after_review_resolution') {
+        await pool.query("UPDATE wms.shipping_provider_labels SET tracking_number='UNPROVEN-CURRENT-TRACKING' WHERE id=$1", [replacement.id]);
+      }
       if (mode === 'late_void') expect(await replacement.receive()).toMatchObject({ outcome: 'waiting', reason: 'awaiting_replaced_label_void' });
       const oldPayload = (await pool.query('SELECT sanitized_payload FROM wms.shipping_provider_label_events WHERE shipping_provider_label_id = $1 ORDER BY id LIMIT 1', [old.id])).rows[0].sanitized_payload;
       const payload = { ...oldPayload, voidDate: '2026-09-17T13:00:00Z' };
@@ -1471,14 +1488,15 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         label_status, tracking_number, provider_occurred_at, received_at, sanitized_payload)
         VALUES ($1, $2, 'label_voided', 'voided', $3, '2026-09-17T13:00:00Z', '2026-09-17T13:00:00Z', $4)`, [old.id, hash, payload.trackingNumber, payload]);
       await pool.query("UPDATE wms.shipping_provider_labels SET label_status = 'voided', last_observed_at = '2026-09-17T13:00:00Z' WHERE id = $1", [old.id]);
-      await lifecycle.observe(old.id); await lifecycle.observe(old.id);
+      if (mode === 'historical_void_repair') expect((await pool.query('SELECT id FROM oms.shopify_label_void_work')).rowCount).toBe(0);
+      else { await lifecycle.observe(old.id); await lifecycle.observe(old.id); }
       }
       if (claimed.length) {
         await expect(executor.execute(claimed[0])).rejects.toMatchObject({ code: 'PACKAGE_LABEL_INACTIVE' });
         await repository.completeAttempt({ commandId: claimed[0].id, leaseToken: claimed[0].leaseToken,
           outcome: 'review_required', errorCode: 'PACKAGE_LABEL_INACTIVE', startedAt: clock.now(), completedAt: clock.now() });
       }
-      expect(await replacement.receive()).toMatchObject({ outcome: 'waiting', reason: 'shopify_predecessor_void_pending' });
+      if (mode !== 'replacement_evidence_review' && mode !== 'repair_after_review_resolution' && mode !== 'historical_void_repair') expect(await replacement.receive()).toMatchObject({ outcome: 'waiting', reason: 'shopify_predecessor_void_pending' });
       if (mode === 'contents_changed') {
         packages[0].quantity = 2;
         await lifecycle.runDueBatch();
@@ -1501,17 +1519,69 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       }
       if (mode === 'concurrent') await Promise.all([worker.runLabelLifecycleBatch!(), worker.runLabelLifecycleBatch!()]);
       else await worker.runLabelLifecycleBatch!();
-      await worker.runDueBatch();
+      if (repairOnly) {
+        if (mode === 'repair_with_legacy_receipt') {
+          const receipt = await pool.query(`INSERT INTO oms.channel_fulfillment_receipts
+            (receipt_key,request_hash,source_provider,source_channel_id,source_order_id,source_fulfillment_id,
+             event_kind,source,processing_status,oms_order_id,raw_payload,processed_at)
+            SELECT 'legacy-relabel-test',$1,'shopify',$2,'640001','640030','created','test_legacy_receipt','ignored',id,
+              '{"status":"success"}'::jsonb,now() FROM oms.oms_orders RETURNING id`, ['d'.repeat(64),channelId]);
+          await pool.query(`INSERT INTO oms.channel_fulfillment_receipt_items(receipt_id,channel_order_line_id,quantity,legacy_wms_shipment_item_id)
+            VALUES($1,'640002',1,$2)`,[receipt.rows[0].id,sourceId]);
+        }
+        // Stale order summaries and old shipment dates must not hide durable
+        // correction work. Reproduce a completed cancellation with no webhook.
+        await pool.query("UPDATE oms.oms_orders SET fulfillment_status = 'fulfilled'");
+        await pool.query("UPDATE wms.outbound_shipments SET status = 'shipped', shipped_at = now() - interval '40 days', created_at = now() - interval '41 days'");
+        const candidates = await findChannelWritebackCandidates(getTestDb(), { maxAgeDays: null, limit: 25 });
+        expect(candidates).toHaveLength(1);
+        if (mode === 'historical_repair') {
+          await pool.query("DELETE FROM wms.ebay_label_replacement_work WHERE state = 'waiting'");
+          expect((await pool.query('SELECT * FROM wms.ebay_label_replacement_work')).rowCount).toBe(0);
+        }
+      }
+      if (mode === 'repair_concurrent') await Promise.all([worker.runDueBatch(), worker.runDueBatch()]);
+      else await worker.runDueBatch();
       if (mode === 'lost_cancel_response') {
         expect((await pool.query('SELECT state FROM oms.shopify_label_void_work')).rows).toEqual([{ state: 'pending' }]);
         currentTime = new Date(currentTime.getTime() + 61_000); await worker.runLabelLifecycleBatch!(); await worker.runDueBatch();
       }
       expect((await pool.query('SELECT state FROM oms.shopify_label_void_work')).rows, JSON.stringify(logger.error.mock.calls)).toEqual([{ state: 'complete' }]);
-      expect(await replacement.receive(), JSON.stringify(logger.error.mock.calls)).toMatchObject({ outcome: 'replaced' });
+      if (mode === 'replacement_evidence_review' || mode === 'repair_after_review_resolution') {
+        expect((await pool.query('SELECT state,reason FROM wms.ebay_label_replacement_work WHERE shipping_provider_label_id=$1', [replacement.id])).rows)
+          .toEqual([{ state: 'review', reason: 'replacement_contents_evidence_unproven' }]);
+        expect((await pool.query("SELECT details->>'reasonCode' AS reason FROM wms.reconciliation_exceptions WHERE details->>'shippingProviderLabelId'=$1", [String(replacement.id)])).rows)
+          .toEqual([{ reason: 'replacement_contents_evidence_unproven' }]);
+        expect(providerCalls.filter(call => call.operation === 'create')).toHaveLength(1);
+        expect((await pool.query('SELECT id FROM inventory.inventory_transactions')).rowCount).toBe(0);
+        if (mode === 'replacement_evidence_review') return;
+        await pool.query("UPDATE wms.shipping_provider_labels SET tracking_number='TRACK44011' WHERE id=$1", [replacement.id]);
+        currentTime = new Date(currentTime.getTime() + 1000);
+        await recordContentsResolution();
+        await worker.runDueBatch();
+      }
+      if (!repairOnly) expect(await replacement.receive(), JSON.stringify(logger.error.mock.calls)).toMatchObject({ outcome: 'replaced' });
       const active = packages.filter(pkg => pkg.status === 'SUCCESS');
       expect(active.map(pkg => pkg.tracking).sort(), JSON.stringify(logger.error.mock.calls)).toEqual(split ? ['TRACK44011', 'TRACK44012'] : ['TRACK44011']);
       expect(providerCalls.filter(call => call.operation === 'cancel')).toHaveLength(mode === 'unsent' || mode === 'claimed_before_void' ? 0 : 1);
       const calls = providerCalls.length; await worker.runDueBatch(); expect(providerCalls).toHaveLength(calls);
+      if (repairOnly) {
+        const after = await findChannelWritebackCandidates(getTestDb(), { maxAgeDays: null, limit: 25 });
+        if (split) {
+          // The unrelated extra demand above must remain missing, while both
+          // current portions of the original source line count exactly once.
+          expect(after).toHaveLength(1);
+          const orderId = (await pool.query('SELECT id FROM oms.oms_orders')).rows[0].id;
+          const coverage = await getTestDb().execute(sql`SELECT ${currentPushedShipmentItemQuantitySql({
+            shipmentItemId: sql`${sourceId}`, omsOrderId: sql`${orderId}`, provider: sql`'shopify'`,
+          })} AS quantity`);
+          expect(coverage.rows).toEqual([{ quantity: 2 }]);
+        } else expect(after).toEqual([]);
+        expect((await pool.query("SELECT metadata->>'notifyCustomer' AS notify FROM oms.channel_fulfillment_pushes WHERE tracking_number = 'TRACK44011'")).rows)
+          .toEqual([{ notify: 'false' }]);
+        expect((await pool.query("SELECT push_status FROM oms.channel_fulfillment_pushes WHERE tracking_number = 'TRACK44010'")).rows)
+          .toEqual([{ push_status: 'success' }]); // Preserve the original audit fact.
+      }
       if (split) {
         await pool.query("UPDATE wms.outbound_shipments SET status = 'shipped', tracking_number = 'TRACK44011'");
         const shipmentIds = (await pool.query('SELECT id FROM wms.outbound_shipments')).rows.map(row => row.id);
@@ -2307,6 +2377,17 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
             }),
           }),
           recoveryEvidenceDetails: recoveryEvidence,
+          providerObservation: Object.freeze({
+            evidenceHash: historicalShipStationProviderObservationHash({
+              providerShipmentId: 56_001,
+              providerStatus: "authoritative",
+              rawProviderItems: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 2 }],
+              expectedContents,
+            }),
+            lines: normalizedHistoricalShipStationProviderLines([
+              { lineItemKey: `wms-item-${sourceId}`, quantity: 2 },
+            ]),
+          }),
         });
       },
     };
@@ -2458,6 +2539,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
        VALUES ($1, 'historical-attestation-lead', 'test-only-password-hash', 'lead', 1)`,
       [leadUserId],
     );
+    await pool.query(`WITH assigned_role AS (
+      INSERT INTO identity.auth_roles (name, is_system) VALUES ('Team Lead', 1) RETURNING id
+    ) INSERT INTO identity.auth_user_roles (user_id, role_id) SELECT $1, id FROM assigned_role`, [leadUserId]);
     const order = await pool.query<{ id: number }>(
       `INSERT INTO wms.orders (order_number)
        VALUES ('#ATTEST-1001')
@@ -2549,6 +2633,21 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
             }),
           }),
           recoveryEvidenceDetails: recoveryEvidence,
+          providerObservation: Object.freeze({
+            evidenceHash: historicalShipStationProviderObservationHash({
+              providerShipmentId: 55_001,
+              providerStatus: "authoritative",
+              rawProviderItems: [{
+                lineItemKey: `wms-item-${shipmentItem.rows[0].id}`,
+                quantity: 2,
+              }],
+              expectedContents,
+            }),
+            lines: normalizedHistoricalShipStationProviderLines([{
+              lineItemKey: `wms-item-${shipmentItem.rows[0].id}`,
+              quantity: 2,
+            }]),
+          }),
         });
       },
     };
@@ -2661,6 +2760,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
        VALUES ($1, 'historical-review-lead', 'test-only-password-hash', 'lead', 1)`,
       [leadUserId],
     );
+    await pool.query(`WITH assigned_role AS (
+      INSERT INTO identity.auth_roles (name, is_system) VALUES ('Team Lead', 1) RETURNING id
+    ) INSERT INTO identity.auth_user_roles (user_id, role_id) SELECT $1, id FROM assigned_role`, [leadUserId]);
     const order = await pool.query<{ id: number }>(
       `INSERT INTO wms.orders (order_number)
        VALUES ('#REVIEW-1001')
@@ -3594,7 +3696,12 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       const current = await tx.loadPlanByVersion(voided.persistence!.groupId, 2);
       const { previousPlan: _previousPlan, ...plannerCommand } = resolved;
       return new PackageAllocationPlanningService(repository).persistInTransaction(tx,
-        { ...plannerCommand, expectedGroupVersion: 2, actions: [action], writeContext: { createdBy: "shipping-lead-42", reason: action.authorization.reason } },
+        persistPackageAllocationPlanCommandSchema.parse({
+          ...plannerCommand,
+          expectedGroupVersion: 2,
+          actions: [action],
+          writeContext: { createdBy: "shipping-lead-42", reason: action.authorization.reason },
+        }),
         packageAllocationPlanAuthoritySnapshotSchema.parse(current!.authoritySnapshot));
     });
     expect(saved).toMatchObject({ kind: "created", currentGroupVersion: 3 });
@@ -4131,8 +4238,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     // Historical dispatch already updated WMS. Backfill must not do it again.
     await pool.query("UPDATE wms.order_items SET fulfilled_quantity = 2 WHERE id = $1", [source.order_item_id]);
     const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
-    const firstInput = { ...await repository.resolveLegacyPhysicalPackage(source.shipment_id), source: "historical-backfill-test" };
-    const secondInput = { ...await repository.resolveLegacyPhysicalPackage(split.id), source: "historical-backfill-test" };
+    const resolvedFirst = await repository.resolveLegacyPhysicalPackage(source.shipment_id);
+    const firstInput = { ...resolvedFirst, legacyWmsShipmentIds: [...resolvedFirst.legacyWmsShipmentIds], source: "historical-backfill-test" };
+    const resolvedSecond = await repository.resolveLegacyPhysicalPackage(split.id);
+    const secondInput = { ...resolvedSecond, legacyWmsShipmentIds: [...resolvedSecond.legacyWmsShipmentIds], source: "historical-backfill-test" };
     return { source, split, repository, firstInput, secondInput };
   }
 
@@ -4222,7 +4331,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
   it("reuses a full original request for historical packages and serializes competing consumption of its last unit", async () => {
     const fixture = await seedReservedSplitPackages(2);
-    const input = { ...await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId),
+    const resolvedPkg = await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId);
+    const input = { ...resolvedPkg, legacyWmsShipmentIds: [...resolvedPkg.legacyWmsShipmentIds],
       source: "script:backfill-channel-fulfillment-authority", providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
     const before = await snapshotAliasBackfillState();
     await fixture.repository.validatePhysicalPackageIdentity(input);
@@ -4233,7 +4343,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       FROM wms.outbound_shipments WHERE id=$1 RETURNING id`, [input.legacyWmsShipmentIds[0]])).rows[0];
     await pool.query(`INSERT INTO wms.outbound_shipment_items (shipment_id,order_item_id,product_variant_id,qty)
       VALUES ($1,$2,$3,1)`, [duplicate.id, fixture.source.order_item_id, fixture.source.product_variant_id]);
-    const other = { ...await fixture.repository.resolveLegacyPhysicalPackage(duplicate.id), source: input.source,
+    const resolvedOther = await fixture.repository.resolveLegacyPhysicalPackage(duplicate.id);
+    const other = { ...resolvedOther, legacyWmsShipmentIds: [...resolvedOther.legacyWmsShipmentIds], source: input.source,
       providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
     const results = await Promise.allSettled([fixture.repository.materializePhysicalPackage(input), fixture.repository.materializePhysicalPackage(other)]);
     expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
@@ -4247,7 +4358,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
   it("rolls back split request reuse if command creation fails and succeeds on a clean retry", async () => {
     const fixture = await seedReservedSplitPackages(4);
-    const input = { ...await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId),
+    const resolvedPkg = await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId);
+    const input = { ...resolvedPkg, legacyWmsShipmentIds: [...resolvedPkg.legacyWmsShipmentIds],
       source: "script:backfill-channel-fulfillment-authority", providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
     const before = await snapshotAliasBackfillState();
     await pool.query(`CREATE FUNCTION oms.reject_test_split_command() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -4270,7 +4382,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
   it.each(["warehouse", "shipping_order", "quantity"])("rechecks changed %s allocation authority after preview", async change => {
     const fixture = await seedReservedSplitPackages(4);
-    const input = { ...await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId),
+    const resolvedPkg = await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId);
+    const input = { ...resolvedPkg, legacyWmsShipmentIds: [...resolvedPkg.legacyWmsShipmentIds],
       source: "script:backfill-channel-fulfillment-authority", providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
     await fixture.repository.validatePhysicalPackageIdentity(input);
     if (change === "warehouse") {
@@ -4728,6 +4841,37 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect((await pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows).toEqual(wmsBefore);
     expect((await pool.query("SELECT requires_review, review_reason FROM wms.outbound_shipments WHERE id = $1", [split.id])).rows)
       .toEqual([{ requires_review: true, review_reason: "physical_shipment_exceeds_current_line_authority" }]);
+  });
+
+  it("keeps channel-confirmed shipped merchandise separate from financial refunds across command retries", async () => {
+    const { source, repository, firstInput, secondInput } = await seedHistoricalSplitBackfill(3);
+    const order = (await pool.query<{ channel_id: number; id: string }>(`SELECT orders.id::text,orders.channel_id FROM oms.oms_orders orders
+      JOIN oms.oms_order_lines line ON line.order_id=orders.id WHERE line.id=$1`, [source.oms_order_line_id])).rows[0];
+    await pool.query(`ALTER TABLE oms.oms_order_lines ADD COLUMN IF NOT EXISTS channel_current_quantity integer,
+      ADD COLUMN IF NOT EXISTS channel_quantity_updated_at timestamptz;
+      UPDATE oms.oms_order_lines SET paid_quantity=2,authority_fulfillable_quantity=2,refunded_quantity=1,
+        channel_current_quantity=2,channel_quantity_updated_at='2026-10-24T12:00:00Z';
+      UPDATE oms.oms_orders SET financial_status='refunded';
+      INSERT INTO oms.order_line_adjustments(order_id,order_line_id,adjustment_type,restock_policy,quantity)
+        SELECT order_id,id,'refund','no_restock',1 FROM oms.oms_order_lines;`);
+    vi.stubEnv("OMS_CHANNEL_MERCHANDISE_AUTHORITY_ENABLED", "false");
+    try {
+      const inventoryBefore = (await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows;
+      const results = await Promise.all([repository.materializePhysicalPackage(firstInput), repository.materializePhysicalPackage(firstInput)]);
+      expect(results.map(result => result.channelCommands.length)).toEqual([1,1]);
+      expect(results.map(result => result.channelCommands[0].replayed).sort()).toEqual([false,true]);
+      const second = await repository.materializePhysicalPackage(secondInput);
+      expect(second.channelCommands).toHaveLength(1);
+      expect((await pool.query("SELECT quantity_planned,quantity_cancelled,quantity_shipped FROM wms.fulfillment_plan_lines")).rows)
+        .toEqual([{ quantity_planned: 3, quantity_cancelled: 1, quantity_shipped: 2 }]);
+      const projector = createChannelFulfillmentProjector(getTestDb());
+      await projector.projectPhysicalShipment(results[0].physicalShipmentId);
+      await projector.projectPhysicalShipment(second.physicalShipmentId);
+      await projector.projectPhysicalShipment(second.physicalShipmentId);
+      expect((await pool.query("SELECT status,fulfillment_status,financial_status FROM oms.oms_orders WHERE id=$1", [order.id])).rows)
+        .toEqual([{ status: "shipped", fulfillment_status: "fulfilled", financial_status: "refunded" }]);
+      expect((await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows).toEqual(inventoryBefore);
+    } finally { vi.unstubAllEnvs(); }
   });
 
   it.each(["cancel", "refund", "cancel_refund"] as const)("keeps historical backfill blocked by a real %s disposition", async (kind) => {
@@ -5410,7 +5554,8 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
     const repository = new PgPackageAllocationLedgerRepository(pool);
     const facts = await repository.withSerializableTransaction((transaction) =>
-      transaction.readSourceFacts([validSourceId, refundedSourceId]));
+      (transaction as unknown as PackageAllocationAuthorityPreviewTransaction)
+        .readSourceFacts([validSourceId, refundedSourceId]));
     expect(facts.map((fact) => ({ id: fact.sourceWmsShipmentItemId, cap: fact.commercialRequestedQuantity })))
       .toEqual([
         { id: validSourceId, cap: undefined },
@@ -5502,6 +5647,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
        VALUES ($1, 'current-review-lead', 'test-only-password-hash', 'lead', 1)`,
       [leadUserId],
     );
+    await pool.query(`WITH assigned_role AS (
+      INSERT INTO identity.auth_roles (name, is_system) VALUES ('Team Lead', 1) RETURNING id
+    ) INSERT INTO identity.auth_user_roles (user_id, role_id) SELECT $1, id FROM assigned_role`, [leadUserId]);
     const providerObservationHash = "b".repeat(64);
     const client: HistoricalShipStationContentsClient = {
       async loadShipmentContents(providerShipmentId, expectedContents) {
@@ -6954,8 +7102,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
 
     // As for order 22039: the package was recorded before dropship lines had a
     // writeback route, so it has no channel command.
+    const resolvedDropshipPkg = await repository.resolveLegacyPhysicalPackage(shipmentId);
     const recorded = await repository.materializePhysicalPackage({
-      ...await repository.resolveLegacyPhysicalPackage(shipmentId),
+      ...resolvedDropshipPkg,
+      legacyWmsShipmentIds: [...resolvedDropshipPkg.legacyWmsShipmentIds],
       source: "live_shipping_event",
       suppressChannelWriteback: true,
     });
@@ -7069,8 +7219,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     )).rows[0];
     await pool.query("UPDATE wms.outbound_shipments SET status = 'shipped', shipped_at = NOW() WHERE id = $1", [shipmentId]);
     const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    const resolvedVoidedPkg = await repository.resolveLegacyPhysicalPackage(shipmentId);
     const materialized = await repository.materializePhysicalPackage({
-      ...await repository.resolveLegacyPhysicalPackage(shipmentId),
+      ...resolvedVoidedPkg,
+      legacyWmsShipmentIds: [...resolvedVoidedPkg.legacyWmsShipmentIds],
       source: "live_shipping_event",
     });
     expect(materialized.channelCommands).toHaveLength(1);

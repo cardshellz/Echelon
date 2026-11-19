@@ -131,7 +131,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     await pool.query("CREATE SCHEMA inventory");
     ownsInventory = true;
     for (const table of [schema.vendors, schema.inboundShipments, schema.inboundShipmentLines, schema.vendorInvoices, schema.supplierCredits, schema.supplierCreditLines,
-  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.inboundFreightCosts, schema.inboundFreightAllocations, schema.vendorInvoiceLines, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receivingOrders, schema.inboundShipmentStatusHistory, schema.purchaseOrders, schema.purchaseOrderLines, schema.receivingLines, schema.inventoryLots]) {
+  ...supplierReturnReadFixtureTables, schema.supplierCreditApplications, schema.supplierCreditApplicationReversals, schema.inboundFreightCosts, schema.inboundFreightAllocations, schema.purchaseTaxTypes, schema.vendorInvoiceLineTaxes, schema.vendorInvoiceLines, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receivingOrders, schema.inboundShipmentStatusHistory, schema.purchaseOrders, schema.purchaseOrderLines, schema.receivingLines, schema.inventoryLots]) {
       await pool.query(fixtureTable(table));
     }
     for (const foreignKey of [
@@ -192,7 +192,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       commandFactory = commandModule.createShipmentCostCommands;
       repositoryFactory = repositoryModule.createDrizzleFinancialCommandRepository;
       defaultModulePool = databaseModule.pool;
-      service = createService(database, storage as Parameters<typeof createService>[1]);
+      service = createService(database, storage as unknown as Parameters<typeof createService>[1]);
     } finally {
       if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
       else process.env.DATABASE_URL = previousDatabaseUrl;
@@ -251,7 +251,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
   it("cancels an unreceived shipment with only estimated charges and records one transition", async () => {
     await prepareCancellableShipment();
     const before = await state();
-    const cancelling = createService(database, storage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const cancelling = createService(database, storage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     await expect(cancelling.cancel(1, actorId, "Supplier withdrew shipment")).resolves.toMatchObject({ status: "cancelled" });
     const after = await state();
     expect(after[0]).toEqual(before[0]);
@@ -357,7 +357,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
         reportPid(Number((await tx.execute(sql`SELECT pg_backend_pid() AS pid`)).rows[0].pid));
         return work(tx);
       }) };
-      cancellation = createService(cancellationDatabase, storage as Parameters<typeof createService>[1], undefined, () => NOW)
+      cancellation = createService(cancellationDatabase, storage as unknown as Parameters<typeof createService>[1], undefined, () => NOW)
         .cancel(1, actorId, "Concurrent cancellation")
         .then(value => ({ ok: true, value }), (error: unknown) => ({ ok: false, error }));
       await waitUntilBlocked(await ready);
@@ -378,7 +378,13 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     expect(result).toMatchObject({ inboundShipmentId: 1, actualCents: 125, estimatedCents: null, currency: "USD", costStatus: "finalized", createdAt: NOW, updatedAt: NOW, version: expect.stringMatching(/^[0-9a-f]{64}$/) });
     expect((await pool.query("SELECT actual_total_cost_cents FROM procurement.inbound_shipments WHERE id=1")).rows[0]).toEqual({ actual_total_cost_cents: "625" });
     expect((await pool.query("SELECT SUM(allocated_cents)::text AS total FROM procurement.inbound_freight_allocations")).rows[0].total).toBe("625");
-    const audit = (await pool.query("SELECT * FROM public.audit_events WHERE actor=$1", [actorId])).rows[0];
+    const audits = (await state())[4];
+    expect(audits.map(event => event.action)).toEqual(["procurement.shipment.allocation_refreshed", "procurement.shipment_cost.created"]);
+    expect(audits[0]).toMatchObject({ actor: actorId, timestamp: NOW, changes: {
+      before: [expect.objectContaining({ shipmentCostId: 31, allocatedCents: 500 })],
+      after: expect.arrayContaining([expect.objectContaining({ inboundShipmentLineId: 11, allocatedCents: 125 })]),
+    } });
+    const audit = audits[1];
     expect(audit).toMatchObject({ action: "procurement.shipment_cost.created", actor: actorId, timestamp: NOW, changes: { before: null, after: expect.objectContaining({ actualCents: 125, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() }) }, context: { shipmentId: 1, reason: "Insurance quote" } });
   });
 
@@ -439,7 +445,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       vendorId: 5, performedByVendorId: 6, performedByName: "Supplier B", actualCents: 125,
     });
     expect(body).toEqual(input);
-    const audit = (await state())[4][0];
+    const audit = (await state())[4].find(event => event.action === "procurement.shipment_cost.created");
     expect(audit).toMatchObject({ actor: actorId, changes: { before: null, after: { vendorId: 5, performedByVendorId: 6, performedByName: "Supplier B" } } });
   });
 
@@ -548,7 +554,12 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     expect((await pool.query("SELECT * FROM procurement.inbound_freight_costs")).rows).toEqual([]);
     expect((await pool.query("SELECT * FROM procurement.inbound_freight_allocations")).rows).toEqual([]);
     expect((await pool.query("SELECT allocated_cost_cents FROM procurement.inbound_shipment_lines WHERE id=11")).rows[0].allocated_cost_cents).toBe("0");
-    expect((await pool.query("SELECT changes FROM public.audit_events WHERE actor=$1", [actorId])).rows[0].changes).toMatchObject({ before: { id: 31 }, after: null });
+    const audits = (await state())[4];
+    expect(audits.map(event => event.action)).toEqual(["procurement.shipment.allocation_refreshed", "procurement.shipment_cost.deleted"]);
+    expect(audits[0]).toMatchObject({ actor: actorId, timestamp: NOW, changes: { after: [], lines: [
+      { lineId: 11, before: { allocatedCostCents: 500 }, after: { allocatedCostCents: 0 } },
+    ] } });
+    expect(audits[1].changes).toMatchObject({ before: { id: 31 }, after: null });
   });
 
   it("rolls back the cost and totals when the allocation write fails", async () => {
@@ -556,7 +567,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       await storage.bulkCreateInboundFreightCostAllocations(...args);
       throw new Error("Injected failure after real allocation insert");
     } };
-    const failingService = createService(database, failingStorage as Parameters<typeof createService>[1]);
+    const failingService = createService(database, failingStorage as unknown as Parameters<typeof createService>[1]);
     const before = await state();
     await expect(execute(await patch({ actualCents: 777 }), failingService)).rejects.toThrow("Injected failure after real allocation insert");
     expect(await state()).toEqual(before);
@@ -622,7 +633,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
         throw new Error("Injected failure after parent deletion");
       }),
     };
-    const abortingService = createService(abortingDatabase, storage as Parameters<typeof createService>[1]);
+    const abortingService = createService(abortingDatabase, storage as unknown as Parameters<typeof createService>[1]);
     await expect(abortingService.deleteShipment(9)).rejects.toThrow("Injected failure after parent deletion");
     expect((await pool.query("SELECT status FROM procurement.inbound_shipments WHERE id=9")).rows).toEqual([{ status: "draft" }]);
     expect(await service.deleteShipment(9)).toBe(true);
@@ -665,7 +676,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       // with explicit cost review rather than inventing an inventory source.
       async getProvisionalLotsByShipment() { return []; },
     };
-    const closingService = createService(database, closingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const closingService = createService(database, closingStorage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     const closing = closingService.close(1, actorId, "Finalize fixture shipment")
       .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
     let editing: Promise<{ ok: true; value: unknown } | { ok: false; error: unknown }> | undefined;
@@ -693,7 +704,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
           return work(tx);
         }),
       };
-      const cancellingService = createService(cancellationDatabase, storage as Parameters<typeof createService>[1], undefined, () => NOW);
+      const cancellingService = createService(cancellationDatabase, storage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
       cancelling = cancellingService.cancel(1, actorId, "Concurrent cancellation")
         .then((value) => ({ ok: true as const, value }), (error: unknown) => ({ ok: false as const, error }));
       const [editingPid, cancellationPid] = await Promise.all([ready, cancelReady]);
@@ -727,7 +738,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       ...storage,
       async getProvisionalLotsByShipment() { provisionalLookups++; return []; },
     };
-    const closingService = createService(database, closingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
+    const closingService = createService(database, closingStorage as unknown as Parameters<typeof createService>[1], undefined, () => NOW);
     const before = await state();
     await pool.query("ALTER TABLE procurement.inbound_shipment_status_history ADD CONSTRAINT shipment_cost_test_reject_close CHECK(to_status <> 'closed')");
     try {
@@ -787,12 +798,17 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     const request = descriptor("delegated-replay", command);
     const commands = commandFactory(service, repositoryFactory(database), () => NOW);
     const first = await commands.execute(command, actorId, request);
+    const committed = await state();
     const replay = await commands.execute(command, delegateId, request);
     expect(first).toMatchObject({ httpStatus: 201, terminalState: "succeeded", replayed: false,
       body: { vendorId: 5, performedByVendorId: 6, performedByName: "Supplier B" } });
     expect(replay).toMatchObject({ httpStatus: 201, replayed: true, body: JSON.parse(JSON.stringify(first.body)) });
     expect((await pool.query("SELECT * FROM procurement.inbound_freight_costs")).rows).toHaveLength(2);
-    expect((await pool.query("SELECT actor FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]])).rows).toEqual([{ actor: actorId }]);
+    expect(await state()).toEqual(committed);
+    expect(committed[4].map(event => ({ actor: event.actor, action: event.action }))).toEqual([
+      { actor: actorId, action: "procurement.shipment.allocation_refreshed" },
+      { actor: actorId, action: "procurement.shipment_cost.created" },
+    ]);
     const changed = { ...command, body: { costType: "insurance", actualCents: 126 } };
     await expect(commands.execute(changed, delegateId, { ...request, requestHash: descriptor("delegated-replay", changed).requestHash })).rejects.toMatchObject({ code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
   });

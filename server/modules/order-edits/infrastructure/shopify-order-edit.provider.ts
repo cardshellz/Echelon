@@ -1,4 +1,20 @@
 import {
+  readAccountNativeScan,
+  accountNativeScanQuery,
+  advanceAccountNativeScan,
+  serializeAccountNativeScan,
+  accountNativePageInfoSchema,
+  type AccountNativeRetainer,
+  type AccountNativeObservation,
+} from "../../customer-account/account-native-contracts.api";
+import { ORDER_EDIT_MEMBER_PRICING_DESCRIPTION, isManagedMemberPricingDescription } from "@shared/order-edits/order-edit-member-pricing";
+import {
+  accountNativeFact,
+  accountNativeNodeSchema,
+  accountNativeObservationNode,
+} from "../../customer-account/shopify-account-native.api";
+import { matchingRefund, proveRefund } from "./shopify-order-edit-refund-evidence";
+import {
   matchesOrderEditQuote as matchesQuote,
   isUnpaidRecoveryRestored,
   unchangedOrderEditSnapshot,
@@ -43,7 +59,8 @@ import {
 import { priceOrderEditPreviewItems } from "../domain/order-edit-preview-pricing";
 import { supportedVariant, stockAvailable } from "../domain/order-edit-variant";
 import { shopifyOrderEditVariantSchema as VARIANT } from "./shopify-order-edit-variant";
-import { cents } from "./shopify-order-edit-money";
+import { cents, shopifyMoneyBagCents as money } from "./shopify-order-edit-money";
+import { CUSTOMER_ACCOUNT_ORDER_PAGE_SIZE } from "@shared/customer-account/customer-account-orders";
 import {
   shopifyOrderEditTaxLineSchema,
   readShopifyOrderEditTaxLines,
@@ -176,6 +193,7 @@ const ORDER = z.object({
   id: TEXT,
   name: TEXT,
   updatedAt: z.string().datetime(),
+  displayFinancialStatus: accountNativeNodeSchema.shape.displayFinancialStatus.optional(),
   merchantEditable: z.boolean(),
   merchantEditableErrors: z.array(z.string()),
   cancelledAt: z.string().nullable(),
@@ -326,6 +344,8 @@ export class ShopifyOrderEditProvider
       memberPresentation?: MemberPlanPresentationReader;
       codeHistory?: OrderEditCodeHistory;
       rewards?: OrderEditRewards;
+      accountSummaries?: AccountNativeRetainer;
+      reportAccountSummaryFailure?: (error: import("../application/order-edit-diagnostics").OrderEditDiagnosticError) => void;
     },
   ) {
     this.fetchImpl = options.fetch ?? fetch;
@@ -349,11 +369,196 @@ export class ShopifyOrderEditProvider
       fail("INVALID_CONFIGURATION", "A positive request timeout is required.");
   }
 
+  /** Full cancellation uses Shopify's cancellation/refund owner. Do not issue
+   * a separate refundCreate or turn cancellation into a zero-line order edit. */
+  async cancelOrder(connectionId: number, externalOrderId: string, operationId: string): Promise<{ jobId: string; done: boolean }> {
+    validateOperation(operationId);
+    const credentials = await this.credentials(connectionId);
+    const raw = await this.request(credentials, `mutation EchelonCustomerOrderCancel($id: ID!, $note: String!) {
+      orderCancel(orderId: $id, reason: CUSTOMER, notifyCustomer: true, restock: true,
+        refundMethod: { originalPaymentMethodsRefund: true }, staffNote: $note) {
+        jobResult { id done } orderCancelUserErrors { code message field } userErrors { message field }
+      }
+    }`, { id: gid("Order", externalOrderId), note: `Customer cancellation ${operationId}` }, true);
+    const result = parse(z.object({ orderCancel: z.object({
+      jobResult: z.object({ id: z.string().regex(/^gid:\/\/shopify\/(?:Job|OrderCancelJobResult)\/.+$/), done: z.boolean() }).nullable(),
+      orderCancelUserErrors: USER_ERRORS, userErrors: USER_ERRORS,
+    }) }), raw, true).orderCancel;
+    if (result.orderCancelUserErrors.length || result.userErrors.length)
+      fail("ORDER_CANCELLATION_REJECTED", "Shopify could not cancel this order. Contact us for help.", result.jobResult ? "unknown" : "rejected");
+    if (!result.jobResult) fail("ORDER_CANCELLATION_RESULT_UNCERTAIN", "The cancellation result could not be verified. Check its status before trying again.", "unknown");
+    return { jobId: result.jobResult.id, done: result.jobResult.done };
+  }
+  async cancellationJob(connectionId: number, jobId: string): Promise<{ done: boolean; failed: boolean; orderId: string | null }> {
+    z.string().regex(/^gid:\/\/shopify\/(?:Job|OrderCancelJobResult)\/.+$/).parse(jobId);
+    const raw = await this.request(await this.credentials(connectionId), `query EchelonCancellationJob($id: ID!) {
+      node(id: $id) { id __typename ... on OrderCancelJobResult { done status errors { code message field } order { id } } }
+    }`, { id: jobId });
+    const job = parse(z.object({ node: z.object({ id: z.literal(jobId), __typename: z.literal("OrderCancelJobResult"), done: z.boolean(),
+      status: z.enum(["STARTED", "FAILED", "SUCCEEDED"]), errors: USER_ERRORS, order: z.object({ id: z.string().regex(/^gid:\/\/shopify\/Order\/[1-9]\d*$/) }).nullable(),
+    }) }), raw).node;
+    if (job.done !== (job.status !== "STARTED") || (job.status === "SUCCEEDED" && job.errors.length))
+      fail("ORDER_CANCELLATION_JOB_UNVERIFIED", "The cancellation job returned inconsistent status. We’re checking the request.");
+    return { done: job.done, failed: job.status === "FAILED", orderId: job.order?.id ?? null };
+  }
+
+  /** Background-only purchase facts. This performs no mutation or eligibility calculation. */
+  async accountNativeByIds(connectionId: number, externalOrderIds: string[]) {
+    const ids = z
+      .array(
+        z
+          .string()
+          .regex(/^[1-9][0-9]*$/)
+          .max(30),
+      )
+      .min(1)
+      .max(20)
+      .parse(externalOrderIds);
+    if (new Set(ids).size !== ids.length)
+      fail("ACCOUNT_ORDER_IDENTITIES_INVALID", "Duplicate order identities.");
+    const credentials = await this.credentials(connectionId);
+    const startedAt = this.options.clock();
+    const result = z
+      .object({ nodes: z.array(z.unknown().nullable()).length(ids.length) })
+      .parse(
+        await this.request(credentials, gql.ACCOUNT_SUMMARIES_QUERY, {
+          ids: ids.map((id) => gid("Order", id)),
+        }),
+      );
+    const facts: AccountNativeObservation["facts"][number][] = [];
+    const failures: NonNullable<
+      AccountNativeObservation["failures"]
+    >[number][] = [];
+    for (const [index, node] of result.nodes.entries()) {
+      if (node === null) continue;
+      const observed = accountNativeObservationNode(credentials, node);
+      if (observed.externalOrderId !== ids[index])
+        fail("ORDER_IDENTITY_MISMATCH", "Shopify returned a different order.");
+      if (observed.fact) facts.push(observed.fact);
+      if (observed.failure) failures.push(observed.failure);
+    }
+    return { facts, failures, startedAt, finishedAt: this.options.clock() };
+  }
+
+  async accountNativePage(
+    connectionId: number,
+    after: string | null,
+    since: Date | null,
+  ) {
+    const startedAt = this.options.clock();
+    let scan = readAccountNativeScan(connectionId, after, since, startedAt);
+    const credentials = await this.credentials(connectionId);
+    if (after === null && since === null) {
+      const access = z
+        .object({
+          currentAppInstallation: z.object({
+            accessScopes: z.array(z.object({ handle: z.string() })).max(250),
+          }),
+        })
+        .parse(
+          await this.request(
+            credentials,
+            `query EchelonAccountHistoryAccess { currentAppInstallation { accessScopes { handle } } }`,
+            {},
+          ),
+        );
+      const scopes = access.currentAppInstallation.accessScopes.map(
+        (scope) => scope.handle,
+      );
+      if (
+        !scopes.includes("read_all_orders") ||
+        !scopes.some(
+          (scope) => scope === "read_orders" || scope === "write_orders",
+        )
+      )
+        fail(
+          "ACCOUNT_HISTORY_SCOPE_MISSING",
+          "Historical account warming requires read_all_orders and order read access.",
+        );
+    }
+    const pageSchema = z.object({ orders: z.object({
+      nodes: z.array(z.unknown()).max(100), pageInfo: accountNativePageInfoSchema,
+    }) });
+    const readPage = async () => pageSchema.parse(await this.request(
+      credentials, gql.ACCOUNT_NATIVE_PAGE_QUERY, accountNativeScanQuery(scan),
+    ));
+    const identities = (nodes: unknown[]) => nodes.map(node =>
+      z.object({ id: z.string().regex(/^gid:\/\/shopify\/Order\/[1-9][0-9]{0,29}$/) })
+        .parse(node).id.replace("gid://shopify/Order/", ""));
+    let result = await readPage();
+    let step = advanceAccountNativeScan(scan, identities(result.orders.nodes), result.orders.pageInfo);
+    if (step.kind === "range") {
+      scan = step.scan;
+      result = await readPage();
+      step = advanceAccountNativeScan(scan, identities(result.orders.nodes), result.orders.pageInfo);
+    }
+    const observed = result.orders.nodes.map(node => accountNativeObservationNode(credentials, node));
+    return {
+      observation: {
+        facts: observed.flatMap(item => item.fact ? [item.fact] : []),
+        failures: observed.flatMap(item => item.failure ? [item.failure] : []),
+        startedAt, finishedAt: this.options.clock(),
+      },
+      after: step.kind === "complete" ? null : serializeAccountNativeScan(step.scan),
+    };
+  }
+
+  private async retainAccountObservation(
+    observation: () => AccountNativeObservation,
+  ): Promise<void> {
+    if (!this.options.accountSummaries) return;
+    try {
+      await this.options.accountSummaries.retain(observation());
+    } catch (cause) {
+      // Presentation storage must not turn an already verified order command
+      // into a financial failure. The durable delta scan repairs missed facts.
+      this.options.reportAccountSummaryFailure?.(
+        orderEditDiagnosticError(cause),
+      );
+    }
+  }
+
+  async readOrderSummaries(connectionId: number, externalOrderIds: readonly string[]) {
+    const startedAt = this.options.clock();
+    const ids = z.array(z.string().max(30).regex(/^[1-9]\d*$/)).min(1).max(CUSTOMER_ACCOUNT_ORDER_PAGE_SIZE).parse(externalOrderIds);
+    if (new Set(ids).size !== ids.length) fail("ACCOUNT_ORDER_IDENTITIES_INVALID", "Duplicate order identities are not allowed.");
+    const expected = ids.map(id => gid("Order", id));
+    const credentials = await this.credentials(connectionId);
+    const raw = parse(z.object({ nodes: z.array(z.object({
+      id: z.string().regex(/^gid:\/\/shopify\/Order\/[1-9]\d*$/), name: z.string().min(1).max(50),
+      updatedAt: z.string().datetime({ offset: true }),
+      customer: z.object({ id: z.string().regex(/^gid:\/\/shopify\/Customer\/[1-9]\d*$/) }).nullable(),
+      cancelledAt: z.string().nullable(), displayFinancialStatus: z.enum(["AUTHORIZED", "EXPIRED", "PAID", "PARTIALLY_PAID", "PARTIALLY_REFUNDED", "PENDING", "REFUNDED", "VOIDED"]),
+      currentTotalPriceSet: BAG,
+    }).nullable()).length(ids.length) }), await this.request(credentials, gql.ACCOUNT_SUMMARIES_QUERY, { ids: expected }));
+    const summaries = raw.nodes.flatMap((order, index) => {
+      if (!order) return [];
+      if (order.id !== expected[index]) fail("ORDER_IDENTITY_MISMATCH", "Shopify returned a different order.");
+      const financialStatus = order.displayFinancialStatus.toLowerCase().replaceAll("_", " ");
+      return [{ externalOrderId: ids[index], orderReference: order.name, customerId: order.customer?.id ?? null,
+        channelId: credentials.channelId, shopDomain: credentials.shopDomain,
+        currency: "USD" as const, totalCents: money(order.currentTotalPriceSet), cancelled: order.cancelledAt !== null,
+        financialStatus: financialStatus.charAt(0).toUpperCase() + financialStatus.slice(1) }];
+    });
+    // Retain only after the entire batch's identities and exact money validate.
+    // The canonical retainer owns version ordering and customer attribution.
+    await this.retainAccountObservation(() => ({
+      facts: raw.nodes.flatMap(order => order ? [accountNativeFact(credentials, order)] : []),
+      startedAt, finishedAt: this.options.clock(),
+    }));
+    return summaries;
+  }
+
   async readOrder(
     connectionId: number,
     externalOrderId: string,
+    expectedCustomerId?: string,
+    expectedShopDomain?: string,
   ): Promise<OrderEditSnapshot> {
+    const startedAt = this.options.clock();
     const credentials = await this.credentials(connectionId);
+    if (expectedShopDomain !== undefined && credentials.shopDomain !== expectedShopDomain)
+      fail("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.");
     const orderId = gid("Order", externalOrderId);
     const raw = parse(
       READ,
@@ -367,6 +572,12 @@ export class ShopifyOrderEditProvider
     const order = raw.order;
     if (order.id !== orderId)
       fail("ORDER_IDENTITY_MISMATCH", "Shopify returned a different order.");
+    // Customer reads must prove ownership before reward/code-history enrichment.
+    if (expectedCustomerId !== undefined && order.customer?.id !== expectedCustomerId)
+      fail("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.");
+    if (order.displayFinancialStatus) await this.retainAccountObservation(() => ({
+      facts: [accountNativeFact(credentials, order)], startedAt, finishedAt: this.options.clock(),
+    }));
     complete(order.lineItems);
     complete(order.discountApplications);
     complete(order.shippingLines);
@@ -1736,7 +1947,7 @@ export class ShopifyOrderEditProvider
                 id: calculated.id,
                 lineItemId: calcId,
                 discount: {
-                  description: "Echelon member pricing",
+                  description: ORDER_EDIT_MEMBER_PRICING_DESCRIPTION,
                   fixedValue: {
                     amount: decimal(retail - member),
                     currencyCode: "USD",
@@ -2484,33 +2695,9 @@ export class ShopifyOrderEditProvider
     intent: OrderEditRefundIntent,
     firstAttemptAt: string,
   ): Promise<OrderEditRefundResult> {
-    parse(orderEditRefundIntentSchema, intent);
-    this.bind(connectionId, intent);
-    validateOperation(intent.operationId);
-    validateOperation(intent.idempotencyKey);
-    if (
-      !Number.isSafeInteger(intent.amountCents) ||
-      intent.amountCents <= 0 ||
-      intent.currency !== "USD" ||
-      intent.note !== marker(intent.operationId)
-    )
-      fail("REFUND_INTENT_INVALID", "The saved refund intent is invalid.");
-    const current = await this.readOrder(connectionId, intent.orderId);
-    if (current.channelId !== intent.channelId)
-      fail(
-        "CONNECTION_MISMATCH",
-        "The refund's channel does not match the connection.",
-      );
-    const matches = current.refunds.filter(
-      (entry) => entry.note === intent.note,
-    );
-    if (matches.length > 1)
-      fail(
-        "REFUND_AMBIGUOUS",
-        "Multiple refunds match this command. Manual reconciliation is required.",
-        "unknown",
-      );
-    if (matches.length === 1) return proveRefund(matches[0], intent);
+    const current = await this.readRefundSource(connectionId, intent);
+    const existing = matchingRefund(current.refunds, intent);
+    if (existing) return proveRefund(existing, intent);
     const started = Date.parse(firstAttemptAt);
     const age = this.now().getTime() - started;
     if (!Number.isFinite(started) || age < 0 || age >= IDEMPOTENCY_RETENTION_MS)
@@ -2554,7 +2741,64 @@ export class ShopifyOrderEditProvider
       },
       "refundCreate",
     );
-    return proveRefund(refund(parse(REFUND, result.refund, true)), intent);
+    const observed = refund(parse(REFUND, result.refund, true));
+    // Creation responses can precede the note/transaction projection. Retain
+    // the original intent and let readback prove settlement on the next pass.
+    if (observed.note !== intent.note || observed.transactions.length === 0)
+      fail(
+        "REFUND_READBACK_PENDING",
+        "Waiting for Shopify to confirm the saved refund.",
+        "unknown",
+      );
+    return proveRefund(observed, intent);
+  }
+
+  async observeRefund(
+    connectionId: number,
+    intent: OrderEditRefundIntent,
+  ): Promise<OrderEditRefundResult | null> {
+    const current = await this.readRefundSource(connectionId, intent);
+    const existing = matchingRefund(current.refunds, intent);
+    if (!existing) return null;
+    try {
+      return proveRefund(existing, intent);
+    } catch (error) {
+      if (
+        error instanceof OrderEditProviderError &&
+        error.code === "REFUND_UNCONFIRMED"
+      )
+        throw new OrderEditProviderError(
+          "REFUND_REVIEW_EVIDENCE_MISMATCH",
+          error.message,
+          "unknown",
+          error.context,
+        );
+      throw error;
+    }
+  }
+
+  private async readRefundSource(
+    connectionId: number,
+    intent: OrderEditRefundIntent,
+  ): Promise<OrderEditSnapshot> {
+    parse(orderEditRefundIntentSchema, intent);
+    this.bind(connectionId, intent);
+    validateOperation(intent.operationId);
+    validateOperation(intent.idempotencyKey);
+    if (
+      !Number.isSafeInteger(intent.amountCents) ||
+      intent.amountCents <= 0 ||
+      intent.currency !== "USD" ||
+      intent.note !== marker(intent.operationId)
+    )
+      fail("REFUND_INTENT_INVALID", "The saved refund intent is invalid.");
+    const current = await this.readOrder(connectionId, intent.orderId);
+    if (current.channelId !== intent.channelId)
+      fail(
+        "CONNECTION_MISMATCH",
+        "The refund's channel does not match the connection.",
+      );
+    return current;
   }
 
   async recoverUnpaid(
@@ -2804,7 +3048,7 @@ export class ShopifyOrderEditProvider
                   discount: {
                     description:
                       baseline.codePricing?.description ??
-                      "Echelon member pricing",
+                      ORDER_EDIT_MEMBER_PRICING_DESCRIPTION,
                     fixedValue: {
                       amount: decimal(discountCents),
                       currencyCode: "USD",
@@ -3212,16 +3456,6 @@ function decimal(value: number): string {
     fail("MONEY_INVALID", "A nonnegative integer-cents amount is required.");
   const exact = BigInt(value);
   return `${exact / BigInt(100)}.${String(exact % BigInt(100)).padStart(2, "0")}`;
-}
-function money(value: z.infer<typeof BAG>, signed = false): number {
-  const presentment = cents(value.presentmentMoney.amount, signed);
-  const shop = cents(value.shopMoney.amount, signed);
-  if (presentment !== shop)
-    fail(
-      "CURRENCY_CONVERSION_UNSUPPORTED",
-      "Shop and presentment amounts must match for this pilot.",
-    );
-  return presentment;
 }
 function subtract(left: number, right: number) {
   const result = left - right;
@@ -4157,7 +4391,7 @@ function verifyCalculatedFinancials(
     itemDiscountLabels: [
       ...baseline.financials.itemDiscountLabels,
       ...calculatedPromotions(calculated)
-        .filter((entry) => entry.description === "Echelon member pricing")
+        .filter((entry) => isManagedMemberPricingDescription(entry.description))
         .map((entry) => entry.description!),
     ],
     shippingGrossCents: shipping.grossCents,
@@ -4227,57 +4461,4 @@ function assertRecoveryLineage(quote: OrderEditQuote): void {
       "These same-product quantities cannot be distinguished safely if payment expires. Use a different added quantity or ask staff to handle this edit.",
     );
   }
-}
-function proveRefund(
-  actual: OrderEditRefund,
-  intent: OrderEditRefundIntent,
-): OrderEditRefundResult {
-  if (actual.note !== intent.note || actual.transactions.length !== 1)
-    fail(
-      "REFUND_UNCONFIRMED",
-      "The refund record does not match the saved request.",
-      "unknown",
-    );
-  const entry = actual.transactions[0];
-  if (
-    entry.kind !== "REFUND" ||
-    entry.parentId !== intent.parentTransactionId ||
-    entry.gateway !== intent.gateway ||
-    entry.amountCents !== intent.amountCents
-  )
-    fail(
-      "REFUND_UNCONFIRMED",
-      "The refund transaction does not match the saved payment evidence.",
-      "unknown",
-    );
-  if (["FAILURE", "ERROR"].includes(entry.status))
-    fail(
-      "REFUND_FAILED",
-      "Shopify recorded a failed refund. Manual reconciliation is required.",
-      "unknown",
-      { refundId: actual.id, transactionId: entry.id },
-    );
-  const pending = ["PENDING", "AWAITING_RESPONSE", "UNKNOWN"].includes(
-    entry.status,
-  );
-  // Shopify can report zero in totalRefundedSet while the matching, full-value
-  // transaction is pending. That aggregate measures settled money, not the
-  // requested refund. Never resend it or report success before settlement.
-  if (
-    (entry.status !== "SUCCESS" && !pending) ||
-    (entry.status === "SUCCESS" && actual.amountCents !== intent.amountCents) ||
-    (pending &&
-      actual.amountCents !== 0 &&
-      actual.amountCents !== intent.amountCents)
-  )
-    fail(
-      "REFUND_UNCONFIRMED",
-      "The refund settlement does not match the saved payment evidence.",
-      "unknown",
-    );
-  return {
-    status: pending ? "pending" : "succeeded",
-    refundId: actual.id,
-    evidence: actual,
-  };
 }

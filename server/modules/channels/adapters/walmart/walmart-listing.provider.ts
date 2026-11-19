@@ -38,6 +38,7 @@ import {
   sameProductIdentifier,
   schemaIssues,
   validProductIdentifier,
+  walmartShippingWeightAttributes,
 } from "./walmart-listing-schema";
 import {
   assertListingSetupAdmission,
@@ -303,7 +304,7 @@ export class WalmartListingProvider implements ListingPublicationProvider {
         ),
       );
     const offer = {
-      ...orderable,
+      ...walmartShippingWeightAttributes(orderable),
       sku,
       productIdentifiers: {
         productIdType: identifier.type,

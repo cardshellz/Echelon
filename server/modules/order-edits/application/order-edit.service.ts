@@ -17,7 +17,7 @@ import type {
   OrderEditPreviewInput,
 } from "@shared/order-edits/order-edit-preview";
 import { createHash } from "node:crypto";
-import { presentOrderEditSettlement } from "../domain/order-edit-financials";
+import { presentOrderEditSettlement, presentOrderEditFinancialStatus } from "../domain/order-edit-financials";
 import {
   orderEditOperationSchema,
   orderEditOrderSchema,
@@ -32,6 +32,7 @@ import type {
 import type {
   OrderEditProvider,
   OrderEditSnapshot,
+  OrderEditRefundResult,
 } from "./order-edit-provider";
 import {
   OrderEditCommitNotSentError,
@@ -45,6 +46,7 @@ import type {
 } from "./order-edit-store";
 import { OrderEditError } from "../domain/order-edit-error";
 import { sameOrderEditPlan } from "../domain/order-edit-plan-identity";
+import { resolveOrderEditLinePlan } from "../domain/order-edit-line-plan";
 import { orderEditHasSubmissionEvidence } from "./order-edit-submission";
 import type { OrderEditCodeRedemptions } from "./order-edit-code-redemptions";
 import { requiresOrderEditCodeReceipt } from "../domain/order-edit-coupon-boundary";
@@ -54,8 +56,19 @@ import {
   orderEditDiagnosticError,
   type OrderEditDiagnosticEvent,
 } from "./order-edit-diagnostics";
+import type { OrderCancellationService } from "../../customer-account/order-cancellation-contracts.api";
+import { orderCancellationEligibilityReasons } from "../domain/order-cancellation-eligibility";
+import { presentCustomerOrderLifecycle } from "@shared/customer-account/order-fulfillment";
+import { customerAccountOrderDetailsSchema } from "@shared/customer-account/customer-account-orders";
+import { orderAddressEligibility } from "../domain/order-address-eligibility";
+import { canObserveOrderEditRefundReview } from "../domain/order-edit-refund-recovery";
 
 const terminal = new Set(["completed", "recovered", "failed", "expired"]);
+// Reported when opening an order cannot read warehouse availability.
+const ORDER_EDIT_INSPECTION_UNAVAILABLE_CODE =
+  "ORDER_EDIT_WAREHOUSE_INSPECTION_UNAVAILABLE";
+const ORDER_EDIT_INSPECTION_UNAVAILABLE_REASON =
+  "Online changes are temporarily unavailable. Please try again shortly.";
 // Bound each scheduler pass so one store cannot monopolize the worker.
 const RECONCILIATION_BATCH_SIZE = 25;
 const MILLISECONDS_PER_MINUTE = 60_000;
@@ -64,6 +77,7 @@ const retryableProviderReadback = new Set([
   "SHOPIFY_HTTP_ERROR",
   "SHOPIFY_GRAPHQL_ERROR",
   "SHOPIFY_RESPONSE_INVALID",
+  "REFUND_READBACK_PENDING",
 ]);
 export class OrderEditService {
   constructor(
@@ -76,6 +90,7 @@ export class OrderEditService {
     private readonly previews?: OrderEditPreviewService,
     private readonly catalog?: OrderEditCatalog,
     private readonly codeRedemptions?: OrderEditCodeRedemptions,
+    readonly cancellations?: OrderCancellationService,
   ) {}
 
   async warmPreview(input: OrderEditPreviewScope, actorId: string) {
@@ -250,7 +265,7 @@ export class OrderEditService {
     );
     assertOrderEditIdentity(reference, snapshot);
     const active =
-      reference.activeOperationId && actorId
+      reference.activeOperationId
         ? await this.store.get(reference.activeOperationId)
         : null;
     // Only the authenticated owner can treat this operation's hold as its own.
@@ -264,14 +279,22 @@ export class OrderEditService {
         ? active.id
         : undefined;
     if (ownedOperationId) assertOrderEditIdentity(reference, active!.baseline);
-    const warehouse = await this.warehouse.inspect(
+    const warehouse = await this.inspectForDisplay(
+      connectionId,
       omsOrderId,
       ownedOperationId,
+      actorId,
     );
     const reasons = [
       ...warehouse.reasons,
       ...orderEditEligibilityReasons(snapshot),
     ];
+    const cancellationEnabled = this.cancellations ? (await this.store.settings(connectionId)).enabled : false;
+    const fulfillment = warehouse.fulfillment && presentCustomerOrderLifecycle(warehouse.fulfillment, snapshot.cancelled);
+    const cancellationReasons = orderCancellationEligibilityReasons({ snapshot, warehouseReasons: warehouse.cancellationReasons ?? warehouse.reasons,
+      activeOperationId: reference.activeOperationId, activeOperationStatus: active?.status, enabled: cancellationEnabled });
+    const addressEligibility = orderAddressEligibility({ editEligible: warehouse.editable && reasons.length === 0,
+      editReasons: reasons, activeOperationId: reference.activeOperationId, activeOperationStatus: active?.status });
     return orderEditOrderSchema.parse({
       ...(codeEntryVersion === "v1"
         ? {
@@ -285,13 +308,22 @@ export class OrderEditService {
       customerName: reference.customerName,
       customerEmail: reference.customerEmail,
       activeOperationId: reference.activeOperationId,
+      ...(active ? { activeOperationKind: active.kind ?? "edit", activeOperationStatus: active.status } : {}),
+      addressEligibility,
+      cancellation: {
+        canReview: cancellationReasons.length === 0,
+        reasons: cancellationReasons,
+        requestKey: active?.kind === "cancel_order" && active.actorId === actorId ? active.requestKey : null,
+      },
       currency: snapshot.currency,
       revision: snapshot.fingerprint,
       eligibility: {
         editable: warehouse.editable && reasons.length === 0,
         reasons,
       },
-      lines: snapshot.lines.map((line) => ({
+      // Removed Shopify lines remain in the source snapshot and audit evidence,
+      // but cannot be edited as current purchased units.
+      lines: snapshot.lines.filter((line) => line.quantity > 0).map((line) => ({
         lineItemId: line.id,
         variantId: line.variantId,
         title: line.title,
@@ -310,10 +342,70 @@ export class OrderEditService {
         snapshotProductPrices(snapshot),
       ),
       settlement: presentOrderEditSettlement(snapshot),
-      financialStatus: snapshot.fullyPaid ? "Paid" : "Payment outstanding",
-      warehouseStatus: warehouse.editable
-        ? "Not yet picking"
-        : "Editing unavailable",
+      financialStatus: presentOrderEditFinancialStatus(snapshot),
+      warehouseStatus: fulfillment?.label ?? "Status unavailable",
+      ...(fulfillment ? { fulfillment } : {}),
+    });
+  }
+  /** Opening an order must not fail because warehouse availability could not be
+   * read. An unexpected inspection fault presents the order with every change
+   * closed and is reported for staff. Business refusals (OrderEditError) still
+   * propagate, and every command re-inspects under row locks, so this can only
+   * narrow what a customer may change, never widen it. */
+  private async inspectForDisplay(
+    connectionId: number,
+    omsOrderId: number,
+    ownedOperationId: string | undefined,
+    actorId: string | undefined,
+  ): Promise<Awaited<ReturnType<OrderEditWarehouse["inspect"]>>> {
+    try {
+      return await this.warehouse.inspect(omsOrderId, ownedOperationId);
+    } catch (error) {
+      if (error instanceof OrderEditError) throw error;
+      this.report({
+        ...(ownedOperationId ? { operationId: ownedOperationId } : {}),
+        code: ORDER_EDIT_INSPECTION_UNAVAILABLE_CODE,
+        phase: "order_read_warehouse_inspection",
+        omsOrderId,
+        connectionId,
+        ...(actorId
+          ? { actorFingerprint: orderEditActorFingerprint(actorId) }
+          : {}),
+        occurredAt: this.clock().toISOString(),
+        error: orderEditDiagnosticError(error),
+      });
+      return {
+        editable: false,
+        reasons: [ORDER_EDIT_INSPECTION_UNAVAILABLE_REASON],
+        wmsOrderIds: [],
+      };
+    }
+  }
+  /** Query-only account reads deliberately do not resolve OMS, inspect warehouse
+   * eligibility, prepare calculated orders, or create an operation/hold. */
+  async orderSummaries(connectionId: number, externalOrderIds: readonly string[]) {
+    if (!this.provider.readOrderSummaries)
+      throw new OrderEditError("CUSTOMER_ACCOUNT_HISTORY_UNAVAILABLE", "Order history is temporarily unavailable. Please try again.", 503);
+    return this.provider.readOrderSummaries(connectionId, externalOrderIds);
+  }
+  async customerOrderDetails(connectionId: number, externalOrderId: string, expectedCustomerId: string, scope: { channelId: number; shopDomain: string }) {
+    if (!/^gid:\/\/shopify\/Customer\/[1-9]\d*$/.test(expectedCustomerId) || !Number.isSafeInteger(scope.channelId) || scope.channelId <= 0 || !/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/.test(scope.shopDomain))
+      throw new OrderEditError("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.", 404);
+    let snapshot: OrderEditSnapshot;
+    try { snapshot = await this.provider.readOrder(connectionId, externalOrderId, expectedCustomerId, scope.shopDomain); }
+    catch (cause) {
+      if (cause instanceof OrderEditProviderError && ["ORDER_NOT_FOUND", "CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE"].includes(cause.code))
+        throw new OrderEditError("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.", 404);
+      throw cause;
+    }
+    if (snapshot.connectionId !== connectionId || snapshot.channelId !== scope.channelId || snapshot.orderId !== `gid://shopify/Order/${externalOrderId}` || snapshot.customerId !== expectedCustomerId)
+      throw new OrderEditError("CUSTOMER_ACCOUNT_ORDER_UNAVAILABLE", "This order is unavailable.", 404);
+    return customerAccountOrderDetailsSchema.parse({
+      externalOrderId, orderReference: snapshot.name, currency: snapshot.currency, totalCents: snapshot.totalCents,
+      lines: snapshot.lines.map(line => ({ lineItemId: line.id, variantId: line.variantId, title: line.title,
+        variantTitle: line.variantTitle, sku: line.sku, quantity: line.quantity, unitPriceCents: line.discountedUnitPriceCents,
+        totalCents: snapshot.financials?.lines.find(entry => entry.id === line.id)?.netCents ?? line.totalCents })),
+      financials: presentOrderEditCodeBreakdown(snapshot.financials, snapshot.codePricing, snapshotProductPrices(snapshot)),
     });
   }
   async quote(
@@ -357,6 +449,15 @@ export class OrderEditService {
       const reasons = orderEditEligibilityReasons(baseline);
       if (reasons.length)
         throw new OrderEditError("ORDER_EDIT_INELIGIBLE", reasons.join(" "));
+      // Reject stale clients targeting historical removed lines before creating
+      // a saved attempt or asking Shopify to prepare a calculated order.
+      resolveOrderEditLinePlan({
+        originals: baseline.lines.filter(line => line.quantity > 0)
+          .map(({id, variantId, quantity}) => ({id, variantId, quantity})),
+        changes: input.changes,
+        additions: input.additions,
+        protectedLineIds: [],
+      });
       const now = this.clock();
       let record: OrderEditRecord = {
         id: this.uuid(),
@@ -570,8 +671,25 @@ export class OrderEditService {
     }
     return this.present(record, codeEntryVersion);
   }
-  async get(id: string, codeEntryVersion?: "v1") {
-    return this.present(await this.store.get(id), codeEntryVersion);
+  async get(id: string, codeEntryVersion?: "v1", observationVersion?: "v1") {
+    const record = await this.store.get(id);
+    this.requireEdit(record);
+    if (!observationVersion) return this.present(record, codeEntryVersion);
+    try {
+      // Observe the same nonblocking order lock as submission. Reading a stale
+      // ready document while its command owns that lock must not re-enable Apply.
+      return await this.store.withOrderLock(record.omsOrderId, async () => ({
+        ...this.present(await this.store.get(id), codeEntryVersion),
+        commandInProgress: false,
+      }));
+    } catch (error) {
+      if (!(error instanceof OrderEditError) || error.code !== "ORDER_EDIT_BUSY")
+        throw error;
+      return {
+        ...this.present(await this.store.get(id), codeEntryVersion),
+        commandInProgress: true,
+      };
+    }
   }
   async commit(id: string, key: string, actorId: string) {
     return this.locked(id, async (initial) => {
@@ -693,7 +811,11 @@ export class OrderEditService {
       this.clock(),
     )) {
       try {
-        await this.reconcile(id);
+        const record = await this.store.get(id);
+        if (record.kind === "cancel_order") {
+          if (!this.cancellations) throw new OrderEditError("ORDER_CANCELLATION_UNAVAILABLE", "Cancellation reconciliation is unavailable.");
+          await this.cancellations.reconcile(id);
+        } else await this.reconcile(id);
       } catch (error) {
         const known = this.failure(error);
         this.report({ operationId: id, code: known.code });
@@ -706,6 +828,17 @@ export class OrderEditService {
   ): Promise<OrderEditRecord> {
     let record = initial;
     if (terminal.has(record.status)) return record;
+    if (
+      canObserveOrderEditRefundReview({
+        status: record.status,
+        errorCode: record.error?.code ?? null,
+        cancellation: record.kind === "cancel_order",
+        submitted: record.commitStartedAt !== null,
+        refundRequested:
+          record.refundIntent !== null && record.refundStartedAt !== null,
+      })
+    )
+      return this.observeRefundReview(record, actorId);
     if (!orderEditHasSubmissionEvidence(record)) {
       record = await this.releaseUnsubmitted(record, actorId);
       if (record.error?.code === "ORDER_EDIT_HOLD_RELEASE_PENDING")
@@ -802,7 +935,17 @@ export class OrderEditService {
         );
       // Even if the balance is now zero, reconcile OUR persisted refund before
       // releasing. An unrelated refund is not proof this command succeeded.
-      if (record.refundIntent) return await this.settleRefund(record, actorId);
+      if (record.refundIntent) {
+        if (record.status === "synchronizing") {
+          // Success was already persisted before entering warehouse sync.
+          // A retry may observe that refund, but must never reopen submission
+          // merely because a provider read temporarily omits the record.
+          const refund = await this.provider.observeRefund(record.connectionId, record.refundIntent);
+          if (!refund) throw new OrderEditProviderError("REFUND_READBACK_PENDING", "Waiting to verify the already-settled refund; no new refund will be submitted.", "unknown");
+          return await this.settleRefund(record, actorId, refund);
+        }
+        return await this.settleRefund(record, actorId);
+      }
       if (orderEditHasUnresolvedPayment(snapshot)) {
         if (
           snapshot.transactions.some(
@@ -1001,9 +1144,61 @@ export class OrderEditService {
       return this.review(record, actorId, error);
     }
   }
+  private async observeRefundReview(
+    record: OrderEditRecord,
+    actorId: string | null,
+  ): Promise<OrderEditRecord> {
+    try {
+      const observed = await this.provider.observeRefund(
+        record.connectionId,
+        record.refundIntent!,
+      );
+      if (observed) {
+        try {
+          await this.warehouse.assertHeld(record.omsOrderId, record.id);
+        } catch (error) {
+          // Only this legacy cutoff proceeds to financial verification. The
+          // stopped-work recovery independently checks picking, labels, exact
+          // contents and ownership before code finalization or hold release.
+          if (!(error instanceof OrderEditError) || error.code !== "ORDER_EDIT_PICKING_CUTOFF") throw error;
+        }
+        return await this.settleRefund(record, actorId, observed);
+      }
+      return this.refundReviewReadbackPending(record, actorId);
+    } catch (error) {
+      if (
+        error instanceof OrderEditProviderError &&
+        retryableProviderReadback.has(error.code)
+      )
+        return this.refundReviewReadbackPending(record, actorId);
+      return this.review(record, actorId, error);
+    }
+  }
+
+  private refundReviewReadbackPending(
+    record: OrderEditRecord,
+    actorId: string | null,
+  ): Promise<OrderEditRecord> {
+    // Touch the durable observation and audit timestamp so an unresolved old
+    // refund cannot monopolize the scheduler's oldest-first bounded batch.
+    return this.update(
+      record,
+      {
+        error: {
+          code: "ORDER_EDIT_REFUND_REVIEW_READBACK_PENDING",
+          message:
+            "Waiting to verify the existing refund. No new refund will be submitted.",
+        },
+      },
+      actorId,
+      "refund_review_readback_pending",
+    );
+  }
+
   private async settleRefund(
     initial: OrderEditRecord,
     actorId: string | null,
+    observedRefund?: OrderEditRefundResult,
   ): Promise<OrderEditRecord> {
     let record = initial;
     if (!record.refundIntent || !record.refundStartedAt || !record.quote)
@@ -1011,15 +1206,17 @@ export class OrderEditService {
         "ORDER_EDIT_REFUND_INTENT_MISSING",
         "The saved refund intent requires staff review.",
       );
-    const result = await this.provider.refund(
-      record.connectionId,
-      record.refundIntent,
-      record.refundStartedAt,
-    );
+    const result =
+      observedRefund ??
+      (await this.provider.refund(
+        record.connectionId,
+        record.refundIntent,
+        record.refundStartedAt,
+      ));
     if (result.status !== "succeeded")
       return this.update(
         record,
-        { status: "refunding" },
+        { status: "refunding", error: null },
         actorId,
         "refund_pending",
       );
@@ -1067,6 +1264,7 @@ export class OrderEditService {
       "refund_confirmed",
     );
     try {
+      await this.warehouse.assertHeld(record.omsOrderId, record.id, refunded);
       await this.codes(record, "finalize");
       const proof = await this.warehouse.reconcileAndRelease(
         record.omsOrderId,
@@ -1190,9 +1388,13 @@ export class OrderEditService {
     work: (record: OrderEditRecord) => Promise<T>,
   ) {
     const record = await this.store.get(id);
+    this.requireEdit(record);
     return this.store.withOrderLock(record.omsOrderId, async () =>
       work(await this.store.get(id)),
     );
+  }
+  private requireEdit(record: OrderEditRecord): void {
+    if (record.kind === "cancel_order") throw new OrderEditError("ORDER_CANCELLATION_SEPARATE_FLOW", "Open Manage order to check this cancellation.");
   }
   private reportSubmissionFailure(
     record: OrderEditRecord,
@@ -1276,9 +1478,12 @@ export class OrderEditService {
     const presentedTotal = useCurrent
       ? snapshot.totalCents
       : (quote?.totalCents ?? snapshot.totalCents);
-    const presentedPaid = useCurrent
-      ? snapshot.netPaidCents
-      : record.baseline.netPaidCents;
+    // Once submission starts, payment/refund observations are authoritative
+    // even while fulfillment synchronization still prevents terminal closure.
+    const presentedPaid =
+      useCurrent || record.commitStartedAt !== null
+        ? snapshot.netPaidCents
+        : record.baseline.netPaidCents;
     const originalVariants = new Set(
       record.baseline.lines
         .filter((line) => line.quantity > 0 && line.variantId !== null)

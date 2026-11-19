@@ -39,6 +39,7 @@ export interface RateBookSummary {
   status: string;
   zoneSetId: number | null;
   metadata: unknown;
+  updatedAt?: string;
   assignments: RateBookAssignment[];
 }
 
@@ -147,6 +148,7 @@ export interface RateTableDetail {
   rateBook: RateBookSummary | null;
   rows: RateTableDetailRow[];
   coverages?: RateTableCoverage[];
+  draftRevision?: string | null;
   analysis: RateTableAnalysis;
 }
 
@@ -176,6 +178,7 @@ export interface CsvParseResponse {
 export interface SaveDraftResponse {
   rateTable: { id: number; status: string };
   draftLayout: DraftLayout | null;
+  draftRevision?: string | null;
   coverages: RateTableCoverage[];
   rowCount: number;
   warnings: string[];
@@ -422,6 +425,7 @@ export function invalidateShippingAdmin(queryClient: QueryClient): void {
 
 export interface SaveDraftInput {
   draftId: number | null;
+  expectedDraftRevision?: string | null;
   rateBookCode: string;
   serviceLevelCode: string;
   pricingBasis: PricingBasis;
@@ -440,6 +444,9 @@ export function saveDraft(input: SaveDraftInput): Promise<SaveDraftResponse> {
     rows: input.rows,
     allowIncomplete: input.allowIncomplete,
     draftLayout: input.draftLayout,
+    ...(input.draftId !== null && input.expectedDraftRevision
+      ? { expectedDraftRevision: input.expectedDraftRevision }
+      : {}),
   };
   return input.draftId === null
     ? postJson<SaveDraftResponse>("/api/shipping/admin/rate-tables/drafts", payload)

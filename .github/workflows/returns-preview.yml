@@ -17,7 +17,10 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-    name: Returns migration preflight
+    name: Returns migration and impact preflight
+    outputs:
+      run: ${{ steps.impact.outputs.run }}
+      matrix: ${{ steps.impact.outputs.matrix }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -29,16 +32,35 @@ jobs:
         run: node scripts/migrations/check-migrations.mjs --ci
         env:
           GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Select affected browser coverage
+        id: impact
+        env:
+          BROWSER_SUITE: returns
+          BROWSER_EVENT_NAME: ${{ github.event_name }}
+          BROWSER_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BROWSER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci/browser-feature-impact.mjs
 
   browser-shard:
-    name: Returns preview browser journeys (${{ matrix.shard }}/4)
+    name: Returns preview browser journeys (${{ matrix.feature }} ${{ matrix.shard }}/${{ matrix.shards }})
     needs: preflight
+    if: ${{ needs.preflight.outputs.run == 'true' }}
+    env:
+      BROWSER_FEATURE: ${{ matrix.feature }}
     runs-on: ubuntu-latest
+    # Match package-lock.json; browsers and OS libraries are already installed.
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
+      options: --user 1001 --ipc=host
     timeout-minutes: 15
     strategy:
       fail-fast: false
-      matrix:
-        shard: [1, 2, 3, 4]
+      matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -48,20 +70,81 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      - run: npx playwright test --config playwright.returns-preview.config.ts --shard=${{ matrix.shard }}/4
+      - name: Build the storefront bundle for embedded returns coverage
+        run: |
+          npx vite build --config vite.customer-account.config.ts
+          npx vite build --config vite.customer-account-preload.config.ts
+      - name: Build the native storefront returns page
+        run: npx vite build --config vite.customer-return-portal.config.ts
+      - run: npx playwright test --config playwright.returns-preview.config.ts --shard=${{ matrix.shard }}/${{ matrix.shards }} --forbid-only
       - name: Upload browser traces and screenshots
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
-          name: returns-preview-browser-results-${{ matrix.shard }}
+          name: returns-preview-browser-results-${{ matrix.feature }}-${{ matrix.shard }}
+          path: test-results/
+          if-no-files-found: warn
+          retention-days: 7
+
+  workflow-acceptance:
+    name: Connected returns workflow acceptance
+    needs: preflight
+    if: ${{ needs.preflight.outputs.run == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: echelon_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d echelon_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      ECHELON_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/echelon_test
+      ECHELON_TEST_DATABASE_DISPOSABLE: "true"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Install Chromium and OS dependencies with mirror retry
+        run: |
+          echo 'APT::Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/80-retries >/dev/null
+          for attempt in 1 2 3; do
+            if npx playwright install --with-deps chromium; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep 5
+            sudo apt-get update --fix-missing || true
+          done
+      - name: Require the complete durable customer journey
+        run: node --import tsx scripts/ci/returns-workflow-acceptance.ts
+      - name: Upload connected acceptance evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: returns-workflow-acceptance-results
           path: test-results/
           if-no-files-found: warn
           retention-days: 7
 
   browser:
     name: Returns preview browser journeys
-    needs: [preflight, browser-shard]
+    needs: [preflight, browser-shard, workflow-acceptance]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -70,4 +153,4 @@ jobs:
       - name: Require every Returns shard
         env:
           CI_NEEDS: ${{ toJSON(needs) }}
-        run: node scripts/ci/require-success.mjs preflight browser-shard
+        run: node scripts/ci/require-returns-success.mjs

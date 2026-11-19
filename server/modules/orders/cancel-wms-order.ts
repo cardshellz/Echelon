@@ -21,8 +21,8 @@
  * so the reservation reconciler / weekly drift check can finish the job.
  * Callers get `releaseFailed` to surface `requires_review` events.
  */
-import { sql } from "drizzle-orm";
-import { cancelOrder, completeOrder, type TransitionResult } from "./order-status-core";
+import { cancelOrder, completeOrder, type TransitionResult, type TransitionRequest } from "./order-status-core";
+import { clearWmsOrderAssignedPickerInWms } from "../wms/wms-order-mutations.api";
 
 export interface ReservationReleaser {
   releaseOrderReservation(
@@ -49,15 +49,14 @@ export async function cancelWmsOrderAndRelease(
   orderId: number,
   reason: string,
   userId?: string,
+  guards?: Pick<TransitionRequest, "requireNoOrderEdit">,
 ): Promise<CancelWmsOrderOutcome> {
-  const trans = await cancelOrder(db, orderId, reason);
+  const trans = await cancelOrder(db, orderId, reason, guards);
   if (!trans.transitioned) {
     return { ...trans, releasedItems: 0, releaseFailed: false };
   }
 
-  await db.execute(
-    sql`UPDATE wms.orders SET assigned_picker_id = NULL WHERE id = ${orderId}`,
-  );
+  await clearWmsOrderAssignedPickerInWms(db, orderId);
 
   const release = await releaseOrderReservationBestEffort(
     reservation, orderId, reason, userId, "cancel", "WMS Cancel",
@@ -83,8 +82,9 @@ export async function completeWmsOrderAndRelease(
   orderId: number,
   reason: string,
   userId?: string,
+  guards?: Pick<TransitionRequest, "requireNoOrderEdit">,
 ): Promise<CancelWmsOrderOutcome> {
-  const trans = await completeOrder(db, orderId, reason);
+  const trans = await completeOrder(db, orderId, reason, guards);
   if (!trans.transitioned) {
     return { ...trans, releasedItems: 0, releaseFailed: false };
   }

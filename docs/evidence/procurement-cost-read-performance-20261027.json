@@ -1,0 +1,1397 @@
+{
+  "version": 1,
+  "status": "locally_verified",
+  "baselineMain": "198543a220a790ab115c995fef203816d6b6e44c",
+  "codeCommit": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+  "deployment": {
+    "pullRequestUrl": "https://github.com/cardshellz/Echelon/pull/1925",
+    "headBranch": "codex/procurement-ap-summary-snapshot-20261027",
+    "headSha": "9b4e6bf15578af30f0b9d84964228c29280adbdd",
+    "mergeSha": "df740f856bd611dcd97ac03f211616e27a2d235c",
+    "mergedAt": "2026-10-27T23:15:29Z",
+    "workflowQueryCommit": "9b4e6bf15578af30f0b9d84964228c29280adbdd",
+    "allWorkflowRunsCompletedSuccessfully": true,
+    "runs": [
+      {
+        "id": 40598571653,
+        "name": "Returns portal admin preview",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/cardshellz/Echelon/actions/runs/40598571653"
+      },
+      {
+        "id": 40598571527,
+        "name": "Procurement connected acceptance",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/cardshellz/Echelon/actions/runs/40598571527"
+      },
+      {
+        "id": 40598571710,
+        "name": "Inventory availability",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/cardshellz/Echelon/actions/runs/40598571710"
+      },
+      {
+        "id": 40598571703,
+        "name": "Order editor browser coverage",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/cardshellz/Echelon/actions/runs/40598571703"
+      },
+      {
+        "id": 40598571599,
+        "name": "CI",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/cardshellz/Echelon/actions/runs/40598571599"
+      },
+      {
+        "id": 40598571562,
+        "name": "Feature browser coverage",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/cardshellz/Echelon/actions/runs/40598571562"
+      },
+      {
+        "id": 40598571584,
+        "name": "Procurement navigation",
+        "status": "completed",
+        "conclusion": "success",
+        "url": "https://github.com/cardshellz/Echelon/actions/runs/40598571584"
+      }
+    ],
+    "releaseObservation": {
+      "observedAt": "2026-10-28T00:13:42.8455219Z",
+      "app": "cardshellz-echelon",
+      "version": 3394,
+      "status": "succeeded",
+      "description": "Deploy 198543a2",
+      "createdAt": "2026-10-27T23:47:05Z",
+      "updatedAt": "2026-10-27T23:47:20Z",
+      "processes": [
+        {
+          "name": "inventory-capture.1",
+          "state": "up",
+          "releaseVersion": 3394
+        },
+        {
+          "name": "web.1",
+          "state": "up",
+          "releaseVersion": 3394
+        }
+      ]
+    },
+    "releaseObservationSha256": "1ba5f729281861707fd980d97ad2ef64881f723face95f1c1d8e5dd851d0c5b0",
+    "fullSlugCommitAvailable": false,
+    "productionOperatorAcceptance": false
+  },
+  "changes": [
+    "Batch complete shipment economic sources without changing fingerprints or domain decisions.",
+    "Project compact health decisions and transfer complete provisional-lot counts instead of wide lot rows."
+  ],
+  "noSqlMigration": true,
+  "noLiveBusinessRecordsReadOrChanged": true,
+  "historicalCleanupIncluded": false,
+  "functional": {
+    "unitCases": 6086,
+    "postgresCases": 356,
+    "guardCases": 424,
+    "connectedCases": 46,
+    "connectedProjects": [
+      "desktop",
+      "mobile"
+    ],
+    "connectedCaseIdentitySha256": "83ef54cd5533506c8d5a636b72c7f51e81b0896148157572f1f4e00750cddb0d",
+    "testRecords": [
+      {
+        "name": "db-01-receiving-cost-application",
+        "cases": 221,
+        "files": 1,
+        "report": "db-01-receiving-cost-application-1793146334292.json",
+        "sha256": "91150e452064b441211346336b5d734a2dd439605d27b189e14509135a93f381",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9"
+      },
+      {
+        "name": "db-01-shipment-cost-read-batching",
+        "cases": 6,
+        "files": 1,
+        "report": "db-01-shipment-cost-read-batching-1793146332913.json",
+        "sha256": "384031a88620e9cce0b7bb08a8137e781341dd0f6a71ec8aa98cc8b99f311e29",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9"
+      },
+      {
+        "name": "db-02-procurement-flow-cost-controlled-acceptance",
+        "cases": 4,
+        "files": 1,
+        "report": "db-02-procurement-flow-cost-controlled-acceptance-1793146332913.json",
+        "sha256": "05cba55b282335ff75c5c40614be7867704e6a3229f3de1895dc7f3f8b9c57ea",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9"
+      },
+      {
+        "name": "db-03-shipment-work-list",
+        "cases": 7,
+        "files": 1,
+        "report": "db-03-shipment-work-list-1793146332913.json",
+        "sha256": "1526e8a37c60aab9b94db82d1fde643009216fa31b49d2f67b48dd392036530f",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9"
+      },
+      {
+        "name": "db-04-cost-reporting",
+        "cases": 25,
+        "files": 1,
+        "report": "db-04-cost-reporting-1793146332913.json",
+        "sha256": "04ce8cbb7f1a2e1ebd2c0680875692dc173302b005b78d51bcd9bb4a23d29fe9",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9"
+      },
+      {
+        "name": "db-05-supplier-credit",
+        "cases": 34,
+        "files": 1,
+        "report": "db-05-supplier-credit-1793146332913.json",
+        "sha256": "b56bdf61eca082f8685724bda73b8209add6b0c700805c27853110ed1b8b52ab",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9"
+      },
+      {
+        "name": "db-06-shipment-cost-commands",
+        "cases": 59,
+        "files": 1,
+        "report": "db-06-shipment-cost-commands-1793146332913.json",
+        "sha256": "f9eefba1ba5492e3c6ac6c0c62ee820ac72163bc8ff2643450593faa17c4b34c",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9"
+      },
+      {
+        "name": "unit",
+        "cases": 6086,
+        "files": 390,
+        "report": "unit-1793146332095.json",
+        "sha256": "f16d31fe2d2fb83e77e11774948fbbb3e67bc8cada14b4d095f50ab8e285b9f1",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9"
+      }
+    ],
+    "connected": [
+      {
+        "report": "connected-1793146938004-15812.json",
+        "sha256": "eaad8d4984799c97187728b5fd9ed65e18e1c00d431d09936e949486624a58b9",
+        "cases": 46,
+        "wrapper": "connected-wrapper-1793146938004-15812.json",
+        "wrapperSha256": "e73fa4f5987462325ff9f132ba76f037085b6ba6a8d635e047e9c5bea7b9d1c6",
+        "frontendIndexSha256": "7e599787fc9cc9e0328582453d4111a398393bb92f5a2634f271cb56a3621f71"
+      }
+    ],
+    "checks": [
+      {
+        "name": "build",
+        "exitCode": 0,
+        "elapsedMs": 56590,
+        "wrapper": "build-1793146334028-result.json",
+        "wrapperSha256": "8df55ea29151bd6eb53c907923fb9674440c9d54fdb0ef708fc2e9808ab3bcb1",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "db-01-receiving-cost-application",
+        "exitCode": 0,
+        "elapsedMs": 392538,
+        "wrapper": "db-01-receiving-cost-application-1793146334292-result.json",
+        "wrapperSha256": "4ffd358a06f392deb05b721233980466bde60dbbc54586e9610e38e7284c0fbc",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "db-01-shipment-cost-read-batching",
+        "exitCode": 0,
+        "elapsedMs": 30461,
+        "wrapper": "db-01-shipment-cost-read-batching-1793146332913-result.json",
+        "wrapperSha256": "d571d3dc0d67d32e472977a73f842f8451da67e2e088f7af5d053a5b4444f8ba",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "db-02-procurement-flow-cost-controlled-acceptance",
+        "exitCode": 0,
+        "elapsedMs": 35009,
+        "wrapper": "db-02-procurement-flow-cost-controlled-acceptance-1793146332913-result.json",
+        "wrapperSha256": "a2269bbd943c074dbbfa47bd424e0b96cb206cf0bd8908988be25518571e9e81",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "db-03-shipment-work-list",
+        "exitCode": 0,
+        "elapsedMs": 4355,
+        "wrapper": "db-03-shipment-work-list-1793146332913-result.json",
+        "wrapperSha256": "def51e2b12118eed073368f86c221a277708f25067b71f8a3b1b03817ca31b31",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "db-04-cost-reporting",
+        "exitCode": 0,
+        "elapsedMs": 24073,
+        "wrapper": "db-04-cost-reporting-1793146332913-result.json",
+        "wrapperSha256": "b2e161ac3167922e1bda64f0b59301a6bf4a2860ee85d6a07ce53d4f88f41262",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "db-05-supplier-credit",
+        "exitCode": 0,
+        "elapsedMs": 62890,
+        "wrapper": "db-05-supplier-credit-1793146332913-result.json",
+        "wrapperSha256": "4d818d7f6d08571016a575feb62b15f27c5b4f956d0b42de73412cccb034fe2f",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "db-06-shipment-cost-commands",
+        "exitCode": 0,
+        "elapsedMs": 32794,
+        "wrapper": "db-06-shipment-cost-commands-1793146332913-result.json",
+        "wrapperSha256": "739a06af8ea01087b36ebdb8e562dc47fd56dbc5a305339b8cd091431164cf45",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "guards",
+        "exitCode": 0,
+        "elapsedMs": 300882,
+        "wrapper": "guards-1793146332949-result.json",
+        "wrapperSha256": "cbbdc6c4f3645acb72bf9aadb1e521ad18841509d79eb19cce1622c229621cc8",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "tsconfig",
+        "exitCode": 0,
+        "elapsedMs": 252048,
+        "wrapper": "tsconfig-1793146332918-result.json",
+        "wrapperSha256": "3411d6edcc1c9fc9b084f6cff1c6f7a83840faf2960fd1e38227e9ee8dd1797d",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "tsconfig.tests.connected",
+        "exitCode": 0,
+        "elapsedMs": 148497,
+        "wrapper": "tsconfig.tests.connected-1793146332913-result.json",
+        "wrapperSha256": "a89b3ef31bce8989ebd19741bc9fd63874ad375c55a539ab886b4087421acc0c",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "tsconfig.tests.server",
+        "exitCode": 0,
+        "elapsedMs": 215806,
+        "wrapper": "tsconfig.tests.server-1793146333412-result.json",
+        "wrapperSha256": "1a6206b277f34fb1551185e74053cc5c4888ab6ac9fb1b3179025a0a9b88c27a",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      },
+      {
+        "name": "unit",
+        "exitCode": 0,
+        "elapsedMs": 265014,
+        "wrapper": "unit-1793146332095-result.json",
+        "wrapperSha256": "7f0c7165fd869a1975d254ca3f5b4d2a96c1dba55d8d3f9ea9e96af9b99b9bf8",
+        "sourceHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "sourceStable": true
+      }
+    ],
+    "manifestSha256": "23cd972a67284027aa5b053a4a7a0c555677a794f16fa64ea1810479396cc70b"
+  },
+  "initialConnectedAttempt": {
+    "passed": 35,
+    "failed": 11,
+    "failuresOnlyInTeardown": true,
+    "failureManifestSha256": "9d85577a21ba7157f16c6e48c32eb1daa8d9aaa74a566fda6e2d6b78c54eca79",
+    "changedAssertionsOrShutdownDeadlines": false,
+    "resolution": "A complete 46-case serial run passed after concurrent financial suite cleanup finished.",
+    "evidence": "Server logs reached database shutdown; local PostgreSQL logs show DROP DATABASE waiting for checkpointer ProcSignalBarrier. Existing timers killed those children during deletion."
+  },
+  "financialPreparation": {
+    "base": "198543a220a790ab115c995fef203816d6b6e44c",
+    "head": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+    "purePreparationStatements": 12,
+    "purePreparationStatementHash": "4269082e89bdceeaf5cb607295c19cbb52d2b10a73332c3710fd58f131d54458",
+    "purePreparationUnchanged": true,
+    "unchangedFunctions": [
+      "recordShipmentCostRevisions",
+      "applyShipmentCostRevisions"
+    ],
+    "sqlChangeScope": "Complete source reads are batched/routed; original domain preparation and posting/application orchestration are unchanged.",
+    "manifestSha256": "18105874d2d7010c77cfede289ea6c49f58a318bbaa63242f86d059145677e5d"
+  },
+  "performance": {
+    "profiles": [
+      {
+        "profile": "posted",
+        "baselineHead": "198543a220a790ab115c995fef203816d6b6e44c",
+        "candidateHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "measurements": 5,
+        "allCompleteOutputsEqual": true,
+        "readOnlyFingerprintsUnchanged": true,
+        "databasesRemoved": true,
+        "metadataSha256": "54326210f3689d1359898c4102e244926d0fba972f0044fe8d63f773de0196e5",
+        "reportSha256": {
+          "baseline": "d79925a4d311adc941b3e61d8f155c86491f595847a4e1fe4f8bf0b3ae92f0db",
+          "candidate": "2f45a65250423db93adf9d0fdd9912bd049cab9e9e8d96b4e80ce59ca4cf8aed"
+        },
+        "baselineSources": {
+          "server/modules/procurement/shipment-cost-application.service.ts": "4b89b4d36fc09b88086ffd2b5967fec95c07271a6b0c3e44af06bf42cb328c50",
+          "server/modules/procurement/shipment-cost-exception.repository.ts": "6898bfd0ee3094621d819f69ecdce5e6c51fd38c4342b63f4b6b7674a0a7698b",
+          "server/modules/procurement/shipment-cost-posting-read.repository.ts": "d1a0ce7f77fed2e1f25e15ac12a0ea4dabdd0c8f445fde5973a3497f11915032",
+          "server/modules/procurement/shipment-cost-review.repository.ts": "3ce468cb5201535bff6085ee5d50da6e5adbdd01f7209cb1b256eb4a367208b8",
+          "server/modules/procurement/shipment-health-evidence.repository.ts": "b49300d95d222d866af0ac17f11730fd33864bcd315bf1fa163e1778994a3850",
+          "server/modules/procurement/shipment-tracking.service.ts": "4dd4d43d0628dccdbc47e7e88eb6968e486de8c17a0f121895b74c54e5dcfbc2",
+          "server/modules/procurement/supplier-credit-source.repository.ts": "15188b347438291b7c2b746f4dd0a2944cc0980bcedb31e91f47890926646e73",
+          "server/modules/procurement/shipment-cost-read-scope.ts": null,
+          "server/modules/procurement/shipment-cost-revision-proposals.ts": null,
+          "server/modules/procurement/shipment-cost-revision-read.repository.ts": null,
+          "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+          "server/modules/procurement/purchase-cost-status.repository.ts": "bdee7f351eae946695179df1a19e92303d8caaec32acd24de02149583b6e751b",
+          "server/modules/procurement/purchase-cost-status-snapshot.repository.ts": "ac1536888898f6ce289de4e3cd20f129b881761dbc5842b3aa59e9c1f8949ef4",
+          "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+          "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+          "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+          "test/performance/procurement/run-health-cost.ts": "2bb97df3dba750d77db7c9fdc353ce3e85a70b3ea2888ed04e4b56813dfe9b43"
+        },
+        "candidateSources": {
+          "server/modules/procurement/shipment-cost-application.service.ts": "3fd1d51df42ed1950cd6e9a932fea9e392eba0e8cde49ddd6c8b0dadae3289f3",
+          "server/modules/procurement/shipment-cost-exception.repository.ts": "8df6e7b9a07045de6c95ad455bd2a6beaca6e26ee127aa9ccaa85b7a9b7aa840",
+          "server/modules/procurement/shipment-cost-posting-read.repository.ts": "4fc9f40e4fbb743550447f7306b63462f6173631869dc2d848ca0fd82bdbca62",
+          "server/modules/procurement/shipment-cost-review.repository.ts": "1567a045aa70ed9e186e63cd95937b3372e9dbd8b013aa0fc891f45be19432b3",
+          "server/modules/procurement/shipment-health-evidence.repository.ts": "62f29b395885fcc4625da7d436965a6b0bf4f438b5f7325630e146eea37c6cfa",
+          "server/modules/procurement/shipment-tracking.service.ts": "bf99588474e92476af75407e5d5d8768043b8b5c890767b99f150fc2fddf4e3d",
+          "server/modules/procurement/supplier-credit-source.repository.ts": "81ecdd2b18311eef83a4c2b9cdeed18e814dae983672be0d78e3cdd548d8e5e2",
+          "server/modules/procurement/shipment-cost-read-scope.ts": "b40b1eae8df2e732b64695e49274c225b62820565a7760908dd8ee47dcbc192b",
+          "server/modules/procurement/shipment-cost-revision-proposals.ts": "8baf09c48874d7716b898ef5ec6377bc32df28cdea42753577601e2ef88765f4",
+          "server/modules/procurement/shipment-cost-revision-read.repository.ts": "6e89ea49cc800016debb977ac8fd9f4d7d4b78911af393fb45ed0a8731ef3423",
+          "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+          "server/modules/procurement/purchase-cost-status.repository.ts": "ad159b107a5230740c2d1695647aa70e600f52c3b4cab14b4a2a1663e7855d76",
+          "server/modules/procurement/purchase-cost-status-snapshot.repository.ts": "b222bef97c123e1efb8cca2fc52c101eae9792aabbfff0e0ce2b0523155a79cd",
+          "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+          "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+          "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+          "test/performance/procurement/run-health-cost.ts": "2bb97df3dba750d77db7c9fdc353ce3e85a70b3ea2888ed04e4b56813dfe9b43"
+        },
+        "sourceStable": true,
+        "childCloseConfirmed": true,
+        "externalDepthRunnerSha256": null,
+        "wrapperSha256": {
+          "baseline": "603d282f0c077f707848828d03c2336b2e164da4c87fb6213e3dbac47e7b7b44",
+          "candidate": "d23b0057e0828ad705f5f78d6522d59e6b21859ac383bd086679ef911e129953"
+        }
+      },
+      {
+        "profile": "unresolved",
+        "baselineHead": "198543a220a790ab115c995fef203816d6b6e44c",
+        "candidateHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "measurements": 6,
+        "allCompleteOutputsEqual": true,
+        "readOnlyFingerprintsUnchanged": true,
+        "databasesRemoved": true,
+        "metadataSha256": "54326210f3689d1359898c4102e244926d0fba972f0044fe8d63f773de0196e5",
+        "reportSha256": {
+          "baseline": "8ba08168e32b97651c7c9b377abad6780a897ce3d6cdad2fe120867865d7eac5",
+          "candidate": "98ec7891c2967315c006f8399ecb13566145625d6c6a4074da7b9c76e28944f6"
+        },
+        "baselineSources": {
+          "server/modules/procurement/shipment-cost-application.service.ts": "4b89b4d36fc09b88086ffd2b5967fec95c07271a6b0c3e44af06bf42cb328c50",
+          "server/modules/procurement/shipment-cost-exception.repository.ts": "6898bfd0ee3094621d819f69ecdce5e6c51fd38c4342b63f4b6b7674a0a7698b",
+          "server/modules/procurement/shipment-cost-posting-read.repository.ts": "d1a0ce7f77fed2e1f25e15ac12a0ea4dabdd0c8f445fde5973a3497f11915032",
+          "server/modules/procurement/shipment-cost-review.repository.ts": "3ce468cb5201535bff6085ee5d50da6e5adbdd01f7209cb1b256eb4a367208b8",
+          "server/modules/procurement/shipment-health-evidence.repository.ts": "b49300d95d222d866af0ac17f11730fd33864bcd315bf1fa163e1778994a3850",
+          "server/modules/procurement/shipment-tracking.service.ts": "4dd4d43d0628dccdbc47e7e88eb6968e486de8c17a0f121895b74c54e5dcfbc2",
+          "server/modules/procurement/supplier-credit-source.repository.ts": "15188b347438291b7c2b746f4dd0a2944cc0980bcedb31e91f47890926646e73",
+          "server/modules/procurement/shipment-cost-read-scope.ts": null,
+          "server/modules/procurement/shipment-cost-revision-proposals.ts": null,
+          "server/modules/procurement/shipment-cost-revision-read.repository.ts": null,
+          "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+          "server/modules/procurement/purchase-cost-status.repository.ts": "bdee7f351eae946695179df1a19e92303d8caaec32acd24de02149583b6e751b",
+          "server/modules/procurement/purchase-cost-status-snapshot.repository.ts": "ac1536888898f6ce289de4e3cd20f129b881761dbc5842b3aa59e9c1f8949ef4",
+          "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+          "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+          "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+          "test/performance/procurement/run-health-cost.ts": "2bb97df3dba750d77db7c9fdc353ce3e85a70b3ea2888ed04e4b56813dfe9b43"
+        },
+        "candidateSources": {
+          "server/modules/procurement/shipment-cost-application.service.ts": "3fd1d51df42ed1950cd6e9a932fea9e392eba0e8cde49ddd6c8b0dadae3289f3",
+          "server/modules/procurement/shipment-cost-exception.repository.ts": "8df6e7b9a07045de6c95ad455bd2a6beaca6e26ee127aa9ccaa85b7a9b7aa840",
+          "server/modules/procurement/shipment-cost-posting-read.repository.ts": "4fc9f40e4fbb743550447f7306b63462f6173631869dc2d848ca0fd82bdbca62",
+          "server/modules/procurement/shipment-cost-review.repository.ts": "1567a045aa70ed9e186e63cd95937b3372e9dbd8b013aa0fc891f45be19432b3",
+          "server/modules/procurement/shipment-health-evidence.repository.ts": "62f29b395885fcc4625da7d436965a6b0bf4f438b5f7325630e146eea37c6cfa",
+          "server/modules/procurement/shipment-tracking.service.ts": "bf99588474e92476af75407e5d5d8768043b8b5c890767b99f150fc2fddf4e3d",
+          "server/modules/procurement/supplier-credit-source.repository.ts": "81ecdd2b18311eef83a4c2b9cdeed18e814dae983672be0d78e3cdd548d8e5e2",
+          "server/modules/procurement/shipment-cost-read-scope.ts": "b40b1eae8df2e732b64695e49274c225b62820565a7760908dd8ee47dcbc192b",
+          "server/modules/procurement/shipment-cost-revision-proposals.ts": "8baf09c48874d7716b898ef5ec6377bc32df28cdea42753577601e2ef88765f4",
+          "server/modules/procurement/shipment-cost-revision-read.repository.ts": "6e89ea49cc800016debb977ac8fd9f4d7d4b78911af393fb45ed0a8731ef3423",
+          "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+          "server/modules/procurement/purchase-cost-status.repository.ts": "ad159b107a5230740c2d1695647aa70e600f52c3b4cab14b4a2a1663e7855d76",
+          "server/modules/procurement/purchase-cost-status-snapshot.repository.ts": "b222bef97c123e1efb8cca2fc52c101eae9792aabbfff0e0ce2b0523155a79cd",
+          "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+          "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+          "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+          "test/performance/procurement/run-health-cost.ts": "2bb97df3dba750d77db7c9fdc353ce3e85a70b3ea2888ed04e4b56813dfe9b43"
+        },
+        "sourceStable": true,
+        "childCloseConfirmed": true,
+        "externalDepthRunnerSha256": null,
+        "wrapperSha256": {
+          "baseline": "b074f68d5e287fc8288d605647f1b4e28717f541fd1ba44d6d7693a959684c45",
+          "candidate": "7dea930ecb6355279d33c61d5496c285bc1e00d48b97e9f573ea54f1b1451a63"
+        }
+      },
+      {
+        "profile": "depth",
+        "baselineHead": "198543a220a790ab115c995fef203816d6b6e44c",
+        "candidateHead": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "measurements": 4,
+        "allCompleteOutputsEqual": true,
+        "readOnlyFingerprintsUnchanged": true,
+        "databasesRemoved": true,
+        "metadataSha256": "54326210f3689d1359898c4102e244926d0fba972f0044fe8d63f773de0196e5",
+        "reportSha256": {
+          "baseline": "1f661d9913f6ce67a934d4f6c2f8b9244c2af305a45d3e26da0a9adee919b189",
+          "candidate": "15184392634074d928fa7f46d3dbdf68859ab690a5f7eab8399a9b7a0cb84d68"
+        },
+        "baselineSources": {
+          "server/modules/procurement/shipment-cost-application.service.ts": "4b89b4d36fc09b88086ffd2b5967fec95c07271a6b0c3e44af06bf42cb328c50",
+          "server/modules/procurement/shipment-cost-exception.repository.ts": "6898bfd0ee3094621d819f69ecdce5e6c51fd38c4342b63f4b6b7674a0a7698b",
+          "server/modules/procurement/shipment-cost-posting-read.repository.ts": "d1a0ce7f77fed2e1f25e15ac12a0ea4dabdd0c8f445fde5973a3497f11915032",
+          "server/modules/procurement/shipment-cost-review.repository.ts": "3ce468cb5201535bff6085ee5d50da6e5adbdd01f7209cb1b256eb4a367208b8",
+          "server/modules/procurement/shipment-health-evidence.repository.ts": "b49300d95d222d866af0ac17f11730fd33864bcd315bf1fa163e1778994a3850",
+          "server/modules/procurement/shipment-tracking.service.ts": "4dd4d43d0628dccdbc47e7e88eb6968e486de8c17a0f121895b74c54e5dcfbc2",
+          "server/modules/procurement/supplier-credit-source.repository.ts": "15188b347438291b7c2b746f4dd0a2944cc0980bcedb31e91f47890926646e73",
+          "server/modules/procurement/shipment-cost-read-scope.ts": null,
+          "server/modules/procurement/shipment-cost-revision-proposals.ts": null,
+          "server/modules/procurement/shipment-cost-revision-read.repository.ts": null,
+          "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+          "server/modules/procurement/purchase-cost-status.repository.ts": "bdee7f351eae946695179df1a19e92303d8caaec32acd24de02149583b6e751b",
+          "server/modules/procurement/purchase-cost-status-snapshot.repository.ts": "ac1536888898f6ce289de4e3cd20f129b881761dbc5842b3aa59e9c1f8949ef4",
+          "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+          "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+          "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+          "test/performance/procurement/run-health-cost.ts": "2bb97df3dba750d77db7c9fdc353ce3e85a70b3ea2888ed04e4b56813dfe9b43"
+        },
+        "candidateSources": {
+          "server/modules/procurement/shipment-cost-application.service.ts": "3fd1d51df42ed1950cd6e9a932fea9e392eba0e8cde49ddd6c8b0dadae3289f3",
+          "server/modules/procurement/shipment-cost-exception.repository.ts": "8df6e7b9a07045de6c95ad455bd2a6beaca6e26ee127aa9ccaa85b7a9b7aa840",
+          "server/modules/procurement/shipment-cost-posting-read.repository.ts": "4fc9f40e4fbb743550447f7306b63462f6173631869dc2d848ca0fd82bdbca62",
+          "server/modules/procurement/shipment-cost-review.repository.ts": "1567a045aa70ed9e186e63cd95937b3372e9dbd8b013aa0fc891f45be19432b3",
+          "server/modules/procurement/shipment-health-evidence.repository.ts": "62f29b395885fcc4625da7d436965a6b0bf4f438b5f7325630e146eea37c6cfa",
+          "server/modules/procurement/shipment-tracking.service.ts": "bf99588474e92476af75407e5d5d8768043b8b5c890767b99f150fc2fddf4e3d",
+          "server/modules/procurement/supplier-credit-source.repository.ts": "81ecdd2b18311eef83a4c2b9cdeed18e814dae983672be0d78e3cdd548d8e5e2",
+          "server/modules/procurement/shipment-cost-read-scope.ts": "b40b1eae8df2e732b64695e49274c225b62820565a7760908dd8ee47dcbc192b",
+          "server/modules/procurement/shipment-cost-revision-proposals.ts": "8baf09c48874d7716b898ef5ec6377bc32df28cdea42753577601e2ef88765f4",
+          "server/modules/procurement/shipment-cost-revision-read.repository.ts": "6e89ea49cc800016debb977ac8fd9f4d7d4b78911af393fb45ed0a8731ef3423",
+          "server/modules/procurement/po-shipment-cost-summary.repository.ts": "e861691c4cb6d8ed30eb8c9fc95b0c5f90c8dd424259e2aa06ef7ae835dcd048",
+          "server/modules/procurement/purchase-cost-status.repository.ts": "ad159b107a5230740c2d1695647aa70e600f52c3b4cab14b4a2a1663e7855d76",
+          "server/modules/procurement/purchase-cost-status-snapshot.repository.ts": "b222bef97c123e1efb8cca2fc52c101eae9792aabbfff0e0ce2b0523155a79cd",
+          "server/modules/procurement/procurement-health-summary.service.ts": "097c15ef95101279a40f4c36b4f400d638ae9c5256e386d0904c8519e6e07d77",
+          "test/performance/procurement/health-cost.fixture.ts": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+          "test/performance/procurement/query-measurement.ts": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+          "test/performance/procurement/run-health-cost.ts": "2bb97df3dba750d77db7c9fdc353ce3e85a70b3ea2888ed04e4b56813dfe9b43"
+        },
+        "sourceStable": true,
+        "childCloseConfirmed": true,
+        "externalDepthRunnerSha256": "ac98e393d6c08c2e71f926ce2423be9933b7338fa6072634801263f6c3dd0b16",
+        "wrapperSha256": {
+          "baseline": "bfd1930b49416819f64ad3302e9e140b951c97ed47e68e4f146fdf2dd150c348",
+          "candidate": "ff0c2aae1c1bc2c89f6c6912b768a616d925070a4ea48cbd51d531f346a38a9c"
+        }
+      }
+    ],
+    "rows": [
+      {
+        "profile": "posted",
+        "tier": 100,
+        "owner": "landed-health",
+        "completeOutputSha256": "8933e6140e81e59300b7b52ef7f5fa41c6b1f64ecc49a18e807d1ba2739008f2",
+        "baseline": {
+          "queries": [
+            921,
+            921,
+            921
+          ],
+          "medianElapsedMs": 1218.344599999953,
+          "elapsedMs": [
+            1373.9960000000428,
+            1218.344599999953,
+            1157.0616000000155
+          ],
+          "driverRows": [
+            6926,
+            6926,
+            6926
+          ],
+          "peakSampledRssBytes": [
+            511135744,
+            510976000,
+            515522560
+          ]
+        },
+        "candidate": {
+          "queries": [
+            30,
+            30,
+            30
+          ],
+          "medianElapsedMs": 634.0319000000018,
+          "elapsedMs": [
+            634.0319000000018,
+            593.4205000000075,
+            653.2304000000004
+          ],
+          "driverRows": [
+            6526,
+            6526,
+            6526
+          ],
+          "peakSampledRssBytes": [
+            515416064,
+            517890048,
+            517767168
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 100,
+        "owner": "unfiltered-shipments",
+        "completeOutputSha256": "1d45e51ea473811e07b4205c1b66b1193246e4217ec4cc993eabdd7f5ed61f1a",
+        "baseline": {
+          "queries": [
+            472,
+            472,
+            472
+          ],
+          "medianElapsedMs": 596.5962000000291,
+          "elapsedMs": [
+            596.5962000000291,
+            582.6306999999797,
+            605.382099999988
+          ],
+          "driverRows": [
+            4527,
+            4527,
+            4527
+          ],
+          "peakSampledRssBytes": [
+            516907008,
+            515760128,
+            515989504
+          ]
+        },
+        "candidate": {
+          "queries": [
+            31,
+            31,
+            31
+          ],
+          "medianElapsedMs": 381.0820999999996,
+          "elapsedMs": [
+            381.0820999999996,
+            405.30649999994785,
+            372.10680000000866
+          ],
+          "driverRows": [
+            4327,
+            4327,
+            4327
+          ],
+          "peakSampledRssBytes": [
+            518705152,
+            518209536,
+            517783552
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 100,
+        "owner": "filtered-shipments",
+        "completeOutputSha256": "1d45e51ea473811e07b4205c1b66b1193246e4217ec4cc993eabdd7f5ed61f1a",
+        "baseline": {
+          "queries": [
+            922,
+            922,
+            922
+          ],
+          "medianElapsedMs": 1123.9820000000182,
+          "elapsedMs": [
+            1123.9820000000182,
+            1111.6794000000227,
+            1199.920299999998
+          ],
+          "driverRows": [
+            6976,
+            6976,
+            6976
+          ],
+          "peakSampledRssBytes": [
+            519368704,
+            516702208,
+            517070848
+          ]
+        },
+        "candidate": {
+          "queries": [
+            31,
+            31,
+            31
+          ],
+          "medianElapsedMs": 688.024700000009,
+          "elapsedMs": [
+            688.024700000009,
+            642.4405999999726,
+            699.8475000000326
+          ],
+          "driverRows": [
+            6576,
+            6576,
+            6576
+          ],
+          "peakSampledRssBytes": [
+            520265728,
+            521428992,
+            518983680
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 100,
+        "owner": "purchasing-health",
+        "completeOutputSha256": "b4f4f0376a6bf5373c353ee143095bdbd494ab2bdc951da04463cdd92ef20d9c",
+        "baseline": {
+          "queries": [
+            942,
+            942,
+            942
+          ],
+          "medianElapsedMs": 1183.3054999999586,
+          "elapsedMs": [
+            1246.4006999999983,
+            1146.0895000000019,
+            1183.3054999999586
+          ],
+          "driverRows": [
+            6939,
+            6939,
+            6939
+          ],
+          "peakSampledRssBytes": [
+            518348800,
+            534462464,
+            538976256
+          ]
+        },
+        "candidate": {
+          "queries": [
+            51,
+            51,
+            51
+          ],
+          "medianElapsedMs": 749.8817000000272,
+          "elapsedMs": [
+            756.7712000000174,
+            749.8817000000272,
+            715.5142999999807
+          ],
+          "driverRows": [
+            6539,
+            6539,
+            6539
+          ],
+          "peakSampledRssBytes": [
+            523509760,
+            522342400,
+            521502720
+          ]
+        }
+      },
+      {
+        "profile": "posted",
+        "tier": 100,
+        "owner": "po-cost-fanout",
+        "completeOutputSha256": "85acc032657c603599b51eaab769591136a809964b0057a2be05573ae88f783e",
+        "baseline": {
+          "queries": [
+            620,
+            620,
+            620
+          ],
+          "medianElapsedMs": 665.5072999999975,
+          "elapsedMs": [
+            677.8792000000249,
+            665.5072999999975,
+            653.6272999999928
+          ],
+          "driverRows": [
+            5721,
+            5721,
+            5721
+          ],
+          "peakSampledRssBytes": [
+            542142464,
+            539492352,
+            539516928
+          ]
+        },
+        "candidate": {
+          "queries": [
+            26,
+            26,
+            26
+          ],
+          "medianElapsedMs": 404.6399000000092,
+          "elapsedMs": [
+            413.98589999997057,
+            373.553899999999,
+            404.6399000000092
+          ],
+          "driverRows": [
+            5721,
+            5721,
+            5721
+          ],
+          "peakSampledRssBytes": [
+            531615744,
+            529739776,
+            531271680
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "landed-health",
+        "completeOutputSha256": "d744d835f110eddd2c224401f3a345b1c355e14b6b20f98355037efeecfe9b4a",
+        "baseline": {
+          "queries": [
+            5152,
+            5152,
+            5152
+          ],
+          "medianElapsedMs": 4355.921400000001,
+          "elapsedMs": [
+            4867.4928,
+            4355.921400000001,
+            4070.5747999999985
+          ],
+          "driverRows": [
+            15416,
+            15416,
+            15416
+          ],
+          "peakSampledRssBytes": [
+            480751616,
+            537268224,
+            473206784
+          ]
+        },
+        "candidate": {
+          "queries": [
+            3667,
+            3667,
+            3667
+          ],
+          "medianElapsedMs": 3048.464799999998,
+          "elapsedMs": [
+            3513.540000000001,
+            2932.7222,
+            3048.464799999998
+          ],
+          "driverRows": [
+            15416,
+            15416,
+            15416
+          ],
+          "peakSampledRssBytes": [
+            506380288,
+            594096128,
+            614330368
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "unfiltered-shipments",
+        "completeOutputSha256": "476f43b5acf3fe2b56198dc5bfa1f469a354c4bf1229f016ece415f55d598e2a",
+        "baseline": {
+          "queries": [
+            612,
+            612,
+            612
+          ],
+          "medianElapsedMs": 487.85280000000057,
+          "elapsedMs": [
+            526.3091999999997,
+            473.9828000000016,
+            487.85280000000057
+          ],
+          "driverRows": [
+            1751,
+            1751,
+            1751
+          ],
+          "peakSampledRssBytes": [
+            475717632,
+            473907200,
+            473600000
+          ]
+        },
+        "candidate": {
+          "queries": [
+            465,
+            465,
+            465
+          ],
+          "medianElapsedMs": 357.98489999999947,
+          "elapsedMs": [
+            357.98489999999947,
+            351.0133999999998,
+            360.4982000000018
+          ],
+          "driverRows": [
+            1751,
+            1751,
+            1751
+          ],
+          "peakSampledRssBytes": [
+            502448128,
+            502685696,
+            502702080
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "filtered-shipments",
+        "completeOutputSha256": "476f43b5acf3fe2b56198dc5bfa1f469a354c4bf1229f016ece415f55d598e2a",
+        "baseline": {
+          "queries": [
+            5153,
+            5153,
+            5153
+          ],
+          "medianElapsedMs": 4004.572299999996,
+          "elapsedMs": [
+            4174.5497,
+            3971.978500000001,
+            4004.572299999996
+          ],
+          "driverRows": [
+            15466,
+            15466,
+            15466
+          ],
+          "peakSampledRssBytes": [
+            479113216,
+            488747008,
+            502517760
+          ]
+        },
+        "candidate": {
+          "queries": [
+            3668,
+            3668,
+            3668
+          ],
+          "medianElapsedMs": 3135.8021999999983,
+          "elapsedMs": [
+            3277.3519000000015,
+            3135.8021999999983,
+            2838.6139999999978
+          ],
+          "driverRows": [
+            15466,
+            15466,
+            15466
+          ],
+          "peakSampledRssBytes": [
+            508588032,
+            502484992,
+            538894336
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "purchasing-health",
+        "completeOutputSha256": "cd02fd395640d0cae87fa932da6dcc12f7c55daa4192796afea7b968cff76044",
+        "baseline": {
+          "queries": [
+            5174,
+            5174,
+            5174
+          ],
+          "medianElapsedMs": 4659.4139,
+          "elapsedMs": [
+            4232.879000000001,
+            4659.4139,
+            4807.932700000005
+          ],
+          "driverRows": [
+            17835,
+            17835,
+            17835
+          ],
+          "peakSampledRssBytes": [
+            523104256,
+            527323136,
+            532787200
+          ]
+        },
+        "candidate": {
+          "queries": [
+            3689,
+            3689,
+            3689
+          ],
+          "medianElapsedMs": 2805.8320999999996,
+          "elapsedMs": [
+            2805.8320999999996,
+            2788.0531999999985,
+            2874.266199999998
+          ],
+          "driverRows": [
+            17835,
+            17835,
+            17835
+          ],
+          "peakSampledRssBytes": [
+            543113216,
+            540540928,
+            544628736
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "po-cost-fanout",
+        "completeOutputSha256": "60e9f82a341533702c6c4fdab064b3b8a6dfd7f015618f0a3365c79140fa3451",
+        "baseline": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "medianElapsedMs": 47.720299999993586,
+          "elapsedMs": [
+            60.197000000000116,
+            47.720299999993586,
+            47.18609999999899
+          ],
+          "driverRows": [
+            1611,
+            1611,
+            1611
+          ],
+          "peakSampledRssBytes": [
+            535343104,
+            531173376,
+            531324928
+          ]
+        },
+        "candidate": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "medianElapsedMs": 47.848900000004505,
+          "elapsedMs": [
+            50.21020000000135,
+            37.54200000000128,
+            47.848900000004505
+          ],
+          "driverRows": [
+            1611,
+            1611,
+            1611
+          ],
+          "peakSampledRssBytes": [
+            548175872,
+            544477184,
+            544534528
+          ]
+        }
+      },
+      {
+        "profile": "unresolved",
+        "tier": 500,
+        "owner": "po-cost-single",
+        "completeOutputSha256": "7096d1ad5f73a42faca1d9ec8fcaba5d834f9c6127cc65a6a0698cb56224d70f",
+        "baseline": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "medianElapsedMs": 18.84299999999348,
+          "elapsedMs": [
+            18.84299999999348,
+            15.533400000000256,
+            21.09880000000703
+          ],
+          "driverRows": [
+            27,
+            27,
+            27
+          ],
+          "peakSampledRssBytes": [
+            537993216,
+            537993216,
+            537993216
+          ]
+        },
+        "candidate": {
+          "queries": [
+            19,
+            19,
+            19
+          ],
+          "medianElapsedMs": 13.836300000002666,
+          "elapsedMs": [
+            15.389100000000326,
+            13.836300000002666,
+            13.17779999999766
+          ],
+          "driverRows": [
+            27,
+            27,
+            27
+          ],
+          "peakSampledRssBytes": [
+            551194624,
+            551194624,
+            551194624
+          ]
+        }
+      },
+      {
+        "profile": "depth",
+        "tier": 10,
+        "owner": "landed-health",
+        "completeOutputSha256": "099b67327364018f0bd53c9acd766593b896e50d061ba7996396a8ef01762adb",
+        "baseline": {
+          "queries": [
+            49,
+            49,
+            49
+          ],
+          "medianElapsedMs": 1390.0692000000017,
+          "elapsedMs": [
+            1452.9745999999996,
+            1316.6111999999994,
+            1390.0692000000017
+          ],
+          "driverRows": [
+            100196,
+            100196,
+            100196
+          ],
+          "peakSampledRssBytes": [
+            536408064,
+            619835392,
+            619835392
+          ]
+        },
+        "candidate": {
+          "queries": [
+            22,
+            22,
+            22
+          ],
+          "medianElapsedMs": 182.86349999999948,
+          "elapsedMs": [
+            222.1164000000008,
+            182.86349999999948,
+            176.372800000001
+          ],
+          "driverRows": [
+            197,
+            197,
+            197
+          ],
+          "peakSampledRssBytes": [
+            230567936,
+            230842368,
+            239738880
+          ]
+        }
+      },
+      {
+        "profile": "depth",
+        "tier": 10,
+        "owner": "unfiltered-shipments",
+        "completeOutputSha256": "6a0253e6c415e8ad7c048c6dbb06518a0b52241bada98b199a03d0614f444df9",
+        "baseline": {
+          "queries": [
+            51,
+            51,
+            51
+          ],
+          "medianElapsedMs": 1524.7082999999984,
+          "elapsedMs": [
+            1524.7082999999984,
+            1548.7410000000018,
+            1419.4220000000023
+          ],
+          "driverRows": [
+            100207,
+            100207,
+            100207
+          ],
+          "peakSampledRssBytes": [
+            721932288,
+            835137536,
+            828436480
+          ]
+        },
+        "candidate": {
+          "queries": [
+            24,
+            24,
+            24
+          ],
+          "medianElapsedMs": 169.37480000000141,
+          "elapsedMs": [
+            184.65419999999722,
+            169.37480000000141,
+            162.85290000000168
+          ],
+          "driverRows": [
+            208,
+            208,
+            208
+          ],
+          "peakSampledRssBytes": [
+            249171968,
+            251985920,
+            257359872
+          ]
+        }
+      },
+      {
+        "profile": "depth",
+        "tier": 10,
+        "owner": "filtered-shipments",
+        "completeOutputSha256": "6a0253e6c415e8ad7c048c6dbb06518a0b52241bada98b199a03d0614f444df9",
+        "baseline": {
+          "queries": [
+            50,
+            50,
+            50
+          ],
+          "medianElapsedMs": 1341.5581999999995,
+          "elapsedMs": [
+            1354.2078000000001,
+            1326.3868000000002,
+            1341.5581999999995
+          ],
+          "driverRows": [
+            100206,
+            100206,
+            100206
+          ],
+          "peakSampledRssBytes": [
+            831066112,
+            834920448,
+            840417280
+          ]
+        },
+        "candidate": {
+          "queries": [
+            23,
+            23,
+            23
+          ],
+          "medianElapsedMs": 166.4399999999987,
+          "elapsedMs": [
+            165.60320000000138,
+            166.4399999999987,
+            169.4867000000013
+          ],
+          "driverRows": [
+            207,
+            207,
+            207
+          ],
+          "peakSampledRssBytes": [
+            259268608,
+            267632640,
+            275529728
+          ]
+        }
+      },
+      {
+        "profile": "depth",
+        "tier": 10,
+        "owner": "purchasing-health",
+        "completeOutputSha256": "87f7bcb70d728f97dfb414cd2f6c318410fefe91720e0bd3f480a46213608864",
+        "baseline": {
+          "queries": [
+            71,
+            71,
+            71
+          ],
+          "medianElapsedMs": 1298.0324,
+          "elapsedMs": [
+            1383.4804000000004,
+            1298.0324,
+            1189.8693999999996
+          ],
+          "driverRows": [
+            100215,
+            100215,
+            100215
+          ],
+          "peakSampledRssBytes": [
+            832991232,
+            837681152,
+            840716288
+          ]
+        },
+        "candidate": {
+          "queries": [
+            44,
+            44,
+            44
+          ],
+          "medianElapsedMs": 193.11739999999918,
+          "elapsedMs": [
+            247.01790000000256,
+            193.11739999999918,
+            191.40039999999863
+          ],
+          "driverRows": [
+            216,
+            216,
+            216
+          ],
+          "peakSampledRssBytes": [
+            284798976,
+            283959296,
+            284295168
+          ]
+        }
+      }
+    ],
+    "completeOutputComparisonPassed": true,
+    "manifestSha256": "7e6166591cb18552f2d99d41ec7ced494a9e8014ec6c51abb3849b039746fe45",
+    "schema": {
+      "tables": 114,
+      "indexes": 235,
+      "configuration": {
+        "version": "PostgreSQL 17.11 on x86_64-windows, compiled by msvc-19.44.35228, 64-bit",
+        "shared_buffers": "64MB",
+        "work_mem": "8MB",
+        "max_connections": "80"
+      },
+      "metadataSha256": "54326210f3689d1359898c4102e244926d0fba972f0044fe8d63f773de0196e5"
+    },
+    "environment": {
+      "node": "v24.19.0",
+      "platform": "win32",
+      "arch": "x64",
+      "commonDependencyInstallation": true,
+      "identicalBenchmarkHelpers": true
+    },
+    "helperCheckoutLineEndings": [
+      {
+        "file": "test/performance/procurement/health-cost.fixture.ts",
+        "baselineBeforeSha256": "771444149dd62e3f2a628d39494077f1024f1f3ae582f6f385be4fcac582f680",
+        "commonAfterSha256": "d90d4bc1b86757e6268fcb6791b1049c63385db3ed2578290d278e8f5489dfb7",
+        "differenceOnlyCheckoutLineEndings": true,
+        "baselineCRLF": 187,
+        "candidateCRLF": 1
+      },
+      {
+        "file": "test/performance/procurement/query-measurement.ts",
+        "baselineBeforeSha256": "faa7f832953c5b6d4dbf890cae46584d0b9edeb6e8418a7ab1effe1b55314d2b",
+        "commonAfterSha256": "b33d8cb44728528036927ebd7d20735699974b6d8d34408fb23cd95303ef6685",
+        "differenceOnlyCheckoutLineEndings": true,
+        "baselineCRLF": 117,
+        "candidateCRLF": 1
+      },
+      {
+        "file": "test/performance/procurement/run-health-cost.ts",
+        "baselineBeforeSha256": "445846588e7485cf96a03a9f0e3e165ddc50b94c13d9060ba56ab270b7b934a7",
+        "commonAfterSha256": "2bb97df3dba750d77db7c9fdc353ce3e85a70b3ea2888ed04e4b56813dfe9b43",
+        "differenceOnlyCheckoutLineEndings": true,
+        "baselineCRLF": 180,
+        "candidateCRLF": 0
+      }
+    ],
+    "serialSequence": [
+      {
+        "side": "baseline",
+        "profile": "posted",
+        "head": "198543a220a790ab115c995fef203816d6b6e44c",
+        "startedAt": "2026-10-28T00:34:22.224Z",
+        "finishedAt": "2026-10-28T00:40:26.448Z"
+      },
+      {
+        "side": "candidate",
+        "profile": "posted",
+        "head": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "startedAt": "2026-10-28T00:40:26.763Z",
+        "finishedAt": "2026-10-28T00:47:03.940Z"
+      },
+      {
+        "side": "baseline",
+        "profile": "unresolved",
+        "head": "198543a220a790ab115c995fef203816d6b6e44c",
+        "startedAt": "2026-10-28T00:47:04.461Z",
+        "finishedAt": "2026-10-28T00:47:56.030Z"
+      },
+      {
+        "side": "candidate",
+        "profile": "unresolved",
+        "head": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "startedAt": "2026-10-28T00:47:56.471Z",
+        "finishedAt": "2026-10-28T00:48:35.651Z"
+      },
+      {
+        "side": "baseline",
+        "profile": "depth",
+        "head": "198543a220a790ab115c995fef203816d6b6e44c",
+        "startedAt": "2026-10-28T00:48:36.040Z",
+        "finishedAt": "2026-10-28T00:49:10.145Z"
+      },
+      {
+        "side": "candidate",
+        "profile": "depth",
+        "head": "c310d6d47660714f0c1c1e20f511f2d772dd73a9",
+        "startedAt": "2026-10-28T00:49:10.540Z",
+        "finishedAt": "2026-10-28T00:49:33.471Z"
+      }
+    ]
+  },
+  "cleanup": {
+    "ownedServerStopped": true,
+    "remainingDatabases": [],
+    "otherConnections": [],
+    "manifestSha256": "ba0c1e15cf4c8a327b637f592818e7ab5d82aadd27a43ceaa3746e8a2e663262",
+    "comparisonCheckout": "retained_app_protected",
+    "forcedWorktreeRemovalAttempted": false
+  },
+  "limitations": [
+    "Synthetic local tests, not production SLOs.",
+    "Timings and sampled RSS are diagnostic; three serial samples per owner.",
+    "This does not certify unbounded shipment-line, allocation, sales-history or supplier-lineage volume.",
+    "Selected actual schema/migrations/indexes, not a full release/bootstrap replay.",
+    "Connected navigation starts a shipment in transit; posted payment/credit/return detail journeys and a connected draft-to-booked journey are not established.",
+    "Production role assignments, external dispatch, operator acceptance and production latency are unverified.",
+    "Hosted CI for this new payload remains pending."
+  ],
+  "rawReports": "Exact reports and wrapper logs are retained in the local procurement-cost-read-performance-20261027 output directory; hashes bind them here."
+}

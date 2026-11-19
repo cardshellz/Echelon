@@ -144,6 +144,10 @@ describe("shared eBay marketplace registration observer", () => {
     expect(channelAdapters.observer.constructor).toBe(
       dropshipAdapters.observer.constructor,
     );
+    // Both factories hand out the same observer's read-only inspection (Dropship's listing end worker reads
+    // it, PR C PLAN-C v4.1 §5.5 step 4, FID-15).
+    expect(dropshipAdapters.inspector).toBe(dropshipAdapters.observer);
+    expect(channelAdapters.inspector).toBe(channelAdapters.observer);
   });
 
   it("rejects identity namespace values outside the closed contract", () => {

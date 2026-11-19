@@ -5,7 +5,7 @@ export interface ExpectedReturnExecutor {
 }
 
 export interface ExpectedReturnItemInput {
-  orderItemId: number;
+  orderItemId: number | null;
   omsOrderLineId: number | null;
   externalLineItemId: string | null;
   sku?: string | null;
@@ -15,7 +15,8 @@ export interface ExpectedReturnItemInput {
 }
 
 export interface CreateExpectedWmsReturnInput {
-  orderId: number;
+  orderId: number | null;
+  sourceAuthorizationId?: number;
   shipmentId?: number | null;
   source: string;
   sourceEventKey: string;
@@ -29,7 +30,8 @@ export interface CreateExpectedWmsReturnInput {
 
 export interface ExpectedReturnItemResult {
   id: number;
-  orderItemId: number;
+  omsOrderLineId?: number | null;
+  orderItemId: number | null;
   created: boolean;
 }
 
@@ -89,7 +91,13 @@ function readId(result: unknown, field: string): number | null {
 }
 
 function validateInput(input: CreateExpectedWmsReturnInput): CreateExpectedWmsReturnInput {
-  requirePositiveInteger(input.orderId, "orderId");
+  if (input.orderId === null) {
+    if (input.source !== "customer_portal" || input.sourceAuthorizationId == null) throw new Error("Purchase-based receiving requires a customer authorization.");
+    requirePositiveInteger(input.sourceAuthorizationId, "sourceAuthorizationId");
+  } else {
+    requirePositiveInteger(input.orderId, "orderId");
+    if (input.sourceAuthorizationId !== undefined) throw new Error("Legacy outbound and purchase receiving sources cannot be mixed.");
+  }
   if (input.shipmentId != null) requirePositiveInteger(input.shipmentId, "shipmentId");
   requireText(input.source, "source", 64);
   requireText(input.sourceEventKey, "sourceEventKey", 255);
@@ -101,13 +109,15 @@ function validateInput(input: CreateExpectedWmsReturnInput): CreateExpectedWmsRe
   if (input.items.length === 0 || input.items.length > 200) {
     throw new Error("items must contain 1-200 entries");
   }
-  const orderItemIds = new Set<number>();
+  const orderItemIds = new Set<string>();
   for (const item of input.items) {
-    requirePositiveInteger(item.orderItemId, "item.orderItemId");
-    if (orderItemIds.has(item.orderItemId)) {
-      throw new Error(`items contains duplicate orderItemId ${item.orderItemId}`);
-    }
-    orderItemIds.add(item.orderItemId);
+    if (input.orderId === null) {
+      if (item.orderItemId !== null || item.omsOrderLineId === null || !item.externalLineItemId) throw new Error("Purchased-line receiving requires exact purchased-line identity.");
+    } else if (item.orderItemId === null) throw new Error("An outbound return requires its original order item.");
+    if (item.orderItemId !== null) requirePositiveInteger(item.orderItemId, "item.orderItemId");
+    const key = input.orderId === null ? `purchase:${item.omsOrderLineId}` : `outbound:${item.orderItemId}`;
+    if (orderItemIds.has(key)) throw new Error(input.orderId === null ? "Duplicate receiving source line." : `items contains duplicate orderItemId ${item.orderItemId}`);
+    orderItemIds.add(key);
     if (item.omsOrderLineId != null) requirePositiveInteger(item.omsOrderLineId, "item.omsOrderLineId");
     requirePositiveInteger(item.expectedQuantity, "item.expectedQuantity");
     requireText(item.restockPolicy, "item.restockPolicy", 32);
@@ -122,7 +132,7 @@ export async function createExpectedWmsReturn(
   executor: ExpectedReturnExecutor,
   rawInput: CreateExpectedWmsReturnInput,
 ): Promise<CreateExpectedWmsReturnResult> {
-  const input = validateInput(rawInput);
+  const input = validateInput(structuredClone(rawInput));
   const source = input.source.trim();
   const sourceEventKey = input.sourceEventKey.trim();
   const reason = input.reason.trim();
@@ -131,11 +141,11 @@ export async function createExpectedWmsReturn(
 
   const insertedReturn = await executor.execute(sql`
     INSERT INTO wms.returns (
-      shipment_id, order_id, source, source_event_key, reason,
+      shipment_id, order_id, ${input.sourceAuthorizationId === undefined ? sql`` : sql`source_authorization_id,`} source, source_event_key, reason,
       refund_external_id, restocked, status, received_at, refunded_at,
       notes, created_at, updated_at
     ) VALUES (
-      ${input.shipmentId ?? null}, ${input.orderId}, ${source}, ${sourceEventKey}, ${reason},
+      ${input.shipmentId ?? null}, ${input.orderId}, ${input.sourceAuthorizationId === undefined ? sql`` : sql`${input.sourceAuthorizationId},`} ${source}, ${sourceEventKey}, ${reason},
       ${refundExternalId}, false, 'expected', NULL, ${input.refundedAt ?? null},
       ${notes}, ${input.now}, ${input.now}
     )
@@ -150,6 +160,9 @@ export async function createExpectedWmsReturn(
       SELECT id
       FROM wms.returns
       WHERE source_event_key = ${sourceEventKey}
+        AND order_id IS NOT DISTINCT FROM ${input.orderId}
+        ${input.sourceAuthorizationId === undefined ? sql`` : sql`AND source_authorization_id=${input.sourceAuthorizationId}`}
+        AND source=${source}
       LIMIT 1
       FOR UPDATE
     `), "return id");
@@ -179,7 +192,8 @@ export async function createExpectedWmsReturn(
         SELECT 1
         FROM wms.return_items existing
         WHERE existing.return_id = ${returnId}
-          AND existing.order_item_id = ${item.orderItemId}
+          AND existing.order_item_id IS NOT DISTINCT FROM ${item.orderItemId}
+          AND (${item.orderItemId}::integer IS NOT NULL OR (existing.oms_order_line_id=${item.omsOrderLineId} AND existing.external_line_item_id=${externalLineItemId}))
       )
       RETURNING id
     `);
@@ -190,7 +204,9 @@ export async function createExpectedWmsReturn(
         SELECT id
         FROM wms.return_items
         WHERE return_id = ${returnId}
-          AND order_item_id = ${item.orderItemId}
+          AND order_item_id IS NOT DISTINCT FROM ${item.orderItemId}
+          AND (${item.orderItemId}::integer IS NOT NULL OR (oms_order_line_id=${item.omsOrderLineId} AND external_line_item_id=${externalLineItemId}))
+          AND expected_qty=${item.expectedQuantity}
         LIMIT 1
         FOR UPDATE
       `), "return item id");
@@ -198,7 +214,7 @@ export async function createExpectedWmsReturn(
     if (returnItemId == null) {
       throw new Error(`Could not resolve expected return item for order item ${item.orderItemId}`);
     }
-    itemResults.push({ id: returnItemId, orderItemId: item.orderItemId, created: itemCreated });
+    itemResults.push({ id: returnItemId, ...(input.orderId === null ? { omsOrderLineId: item.omsOrderLineId } : {}), orderItemId: item.orderItemId, created: itemCreated });
   }
 
   return { returnId, created, items: itemResults };

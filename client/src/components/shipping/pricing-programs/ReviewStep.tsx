@@ -57,6 +57,7 @@ import { DiscardRateTableDraftButton } from "./DiscardRateTableDraftButton";
 
 interface ReviewStepProps {
   draftId: number;
+  draftRevision?: string | null;
   analysis: RateTableAnalysis | null;
   groups: RateGroup[];
   savedRows: DraftRow[];
@@ -71,6 +72,7 @@ interface ReviewStepProps {
 
 export function ReviewStep({
   draftId,
+  draftRevision = null,
   analysis,
   groups,
   savedRows,
@@ -102,7 +104,10 @@ export function ReviewStep({
   const activateMutation = useMutation({
     mutationFn: (confirmWarnings: boolean) => postJson<{ rateTable: unknown; warnings: string[] }>(
       `/api/shipping/admin/rate-tables/${draftId}/activate`,
-      { confirmWarnings },
+      {
+        confirmWarnings,
+        ...(draftRevision ? { expectedDraftRevision: draftRevision } : {}),
+      },
     ),
     onSuccess: () => {
       toast({
