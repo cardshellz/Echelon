@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { enqueueShipStationShipmentPushRetry } from "../oms/webhook-retry.api";
+import { pushShipmentThroughEngine } from "./shipment-push-payload";
 
 /**
  * After an order-level hold is released, make the order actually shippable:
@@ -60,7 +61,7 @@ export async function reserveAndPushAfterHoldRelease(
     if (!Number.isInteger(shipmentId) || shipmentId <= 0) continue;
     try {
       if (useEngine) {
-        await services.shippingEngine.upsertShipment({ shipmentId } as any);
+        await pushShipmentThroughEngine(db, services.shippingEngine, shipmentId);
       } else {
         await services.shipStation.pushShipment(shipmentId);
       }

@@ -12,6 +12,9 @@ export type {
   CanonicalShipmentItem,
   CanonicalCarrier,
   ShipmentStatus,
+  EngineRefResolutionMetrics,
+  OrderEditShipmentSyncInput,
+  OrderEditShipmentSyncMode,
 } from "./types";
 export {
   normalizeCarrier,
@@ -27,6 +30,10 @@ export {
   toEngineRef,
   fromEngineRef,
   engineRefFromRow,
+  getEngineRefResolutionMetrics,
+  resetEngineRefResolutionMetricsForTest,
+  mapShipStationShipmentToCanonicalEvent,
+  normalizeShipStationWebhookPayload,
   resolveSingleShipStationRuntimeAccount,
   ShipStationAccountConfigurationError,
 } from "./adapters/shipstation.adapter";

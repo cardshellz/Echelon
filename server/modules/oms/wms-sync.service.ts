@@ -10,6 +10,7 @@
  */
 
 import { isPermanentOrderReservationDataError, reservationErrorCode } from "./reservation-error-classification";
+import { pushShipmentThroughEngine } from "../orders/shipment-rollup-and-context.api";
 import { db } from "../../db";
 import { sql, eq, and, notInArray } from "drizzle-orm";
 import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
@@ -1429,7 +1430,7 @@ export class WmsSyncService {
           }
         try {
             if (this.services.shippingEngine) {
-              await this.services.shippingEngine.upsertShipment({ shipmentId: shipmentIdForPush } as any);
+              await pushShipmentThroughEngine(db, this.services.shippingEngine, shipmentIdForPush);
             } else {
               await this.services.shipStation.pushShipment(shipmentIdForPush);
             }
@@ -3418,7 +3419,7 @@ export class WmsSyncService {
           for (const shipment of activeShipments.rows ?? []) {
             try {
               if (this.services.shippingEngine) {
-                await this.services.shippingEngine.upsertShipment({ shipmentId: shipment.id } as any);
+                await pushShipmentThroughEngine(db, this.services.shippingEngine, shipment.id);
               } else {
                 await this.services.shipStation.pushShipment(shipment.id);
               }

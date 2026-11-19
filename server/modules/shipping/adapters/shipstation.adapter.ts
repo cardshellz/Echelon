@@ -30,6 +30,8 @@ import type {
   ShipmentItemQuantityPayload,
   ShipmentPushPayload,
   CanonicalShipmentEvent,
+  EngineRefResolutionMetrics,
+  OrderEditShipmentSyncInput,
 } from "../types";
 import { normalizeCarrier, parseProviderAmountCents } from "../types";
 
@@ -130,9 +132,28 @@ export function fromEngineRef(ref: EngineRef): number {
   return id;
 }
 
+const engineRefMetrics = {
+  canonicalHits: 0,
+  legacyFallbackHits: 0,
+  unresolvedHits: 0,
+  lastLegacyFallbackAt: null as string | null,
+};
+
+export function getEngineRefResolutionMetrics(): EngineRefResolutionMetrics {
+  return { ...engineRefMetrics };
+}
+
+export function resetEngineRefResolutionMetricsForTest(): void {
+  engineRefMetrics.canonicalHits = 0;
+  engineRefMetrics.legacyFallbackHits = 0;
+  engineRefMetrics.unresolvedHits = 0;
+  engineRefMetrics.lastLegacyFallbackAt = null;
+}
+
 /**
  * Build an EngineRef from a DB row that may have the new engine columns
  * or only the legacy shipstation_order_id. Returns null if no ref found.
+ * Records resolution source telemetry for the D4 30-day legacy column soak gate (`P3.3`).
  */
 export function engineRefFromRow(row: {
   shipping_engine?: string | null;
@@ -142,6 +163,7 @@ export function engineRefFromRow(row: {
   shipstation_order_key?: string | null;
 }): EngineRef | null {
   if (row.shipping_engine && row.engine_order_ref) {
+    engineRefMetrics.canonicalHits += 1;
     return {
       engine: row.shipping_engine,
       engineOrderRef: row.engine_order_ref,
@@ -149,9 +171,120 @@ export function engineRefFromRow(row: {
     };
   }
   if (row.shipstation_order_id != null && row.shipstation_order_id > 0) {
+    engineRefMetrics.legacyFallbackHits += 1;
+    engineRefMetrics.lastLegacyFallbackAt = new Date().toISOString();
     return toEngineRef(row.shipstation_order_id, row.shipstation_order_key);
   }
+  engineRefMetrics.unresolvedHits += 1;
   return null;
+}
+
+export function mapShipStationShipmentToCanonicalEvent(
+  s: any,
+  opts: { resolveWmsShipmentIdFromOrderKey?: boolean } = {},
+): CanonicalShipmentEvent | null {
+  if (!s || typeof s !== "object") return null;
+  const wmsKeyMatch =
+    opts.resolveWmsShipmentIdFromOrderKey === true && typeof s.orderKey === "string"
+      ? /^echelon-wms-shp-([1-9]\d*)$/.exec(s.orderKey.trim())
+      : null;
+  const wmsShipmentId = wmsKeyMatch ? Number(wmsKeyMatch[1]) : null;
+  const shipmentIdRaw = Number(wmsShipmentId ?? s.shipmentId ?? s.id ?? 0);
+  const orderIdRaw = Number(s.orderId ?? 0);
+  if (!Number.isInteger(orderIdRaw) || orderIdRaw <= 0) return null;
+  const shipmentId = Number.isInteger(shipmentIdRaw) && shipmentIdRaw > 0 ? shipmentIdRaw : orderIdRaw;
+  const engineRef = toEngineRef(orderIdRaw, s.orderKey ?? null);
+
+  const voidDate = normalizeShipStationV1Date(s.voidDate, "voidDate");
+  if (voidDate.kind !== "missing" || s.voided === true) {
+    return {
+      kind: "voided" as const,
+      shipmentId,
+      engineRef,
+      reason: "voided in ShipStation",
+    };
+  }
+
+  const parsedCarrierCostCents = parseProviderAmountCents(s.shipmentCost);
+  const carrierCostCents =
+    parsedCarrierCostCents !== null && parsedCarrierCostCents > 0
+      ? parsedCarrierCostCents
+      : undefined;
+  const shipDate = normalizeShipStationV1Date(s.shipDate, "shipDate");
+  const trackingNumber =
+    typeof s.trackingNumber === "string" ? s.trackingNumber.trim() : "";
+  const carrierRaw =
+    typeof s.carrierCode === "string" && s.carrierCode.trim()
+      ? s.carrierCode.trim()
+      : "other";
+
+  if (shipDate.kind === "missing" && trackingNumber) {
+    return {
+      kind: "label_created" as const,
+      shipmentId,
+      engineRef,
+      trackingNumber,
+      carrier: normalizeCarrier(carrierRaw),
+      carrierRaw,
+    };
+  }
+
+  return {
+    kind: "shipped" as const,
+    shipmentId,
+    engineRef,
+    trackingNumber,
+    carrier: normalizeCarrier(carrierRaw),
+    carrierRaw,
+    shipDate: shipDate.kind === "timestamp" ? new Date(shipDate.iso) : null,
+    shipCalendarDate: shipDate.kind === "date" ? shipDate.date : null,
+    serviceCode:
+      typeof s.serviceCode === "string" ? s.serviceCode.trim() || null : null,
+    carrierCostCents,
+    carrierCostSource:
+      carrierCostCents === undefined
+        ? undefined
+        : SHIPSTATION_SHIPMENTS_API_COST_SOURCE,
+    items: Array.isArray(s.shipmentItems)
+      ? s.shipmentItems.map((item: any) => ({
+          sku: item.sku ?? "",
+          quantity: item.quantity ?? 0,
+          name: item.name ?? "",
+        }))
+      : undefined,
+  };
+}
+
+export function normalizeShipStationWebhookPayload(
+  rawPayload: unknown,
+): CanonicalShipmentEvent[] {
+  if (!rawPayload) return [];
+
+  let candidates: unknown[] = [];
+  if (Array.isArray(rawPayload)) {
+    candidates = rawPayload;
+  } else if (typeof rawPayload === "object") {
+    const record = rawPayload as Record<string, unknown>;
+    if (Array.isArray(record.shipments)) {
+      candidates = record.shipments;
+    } else if ("orderId" in record && ("shipmentId" in record || "trackingNumber" in record || "voidDate" in record || "voided" in record)) {
+      candidates = [record];
+    } else {
+      // Bare webhook notification envelope (e.g. { resource_type: "SHIP_NOTIFY", resource_url })
+      return [];
+    }
+  }
+
+  const events: CanonicalShipmentEvent[] = [];
+  for (const candidate of candidates) {
+    const mapped = mapShipStationShipmentToCanonicalEvent(candidate, {
+      resolveWmsShipmentIdFromOrderKey: true,
+    });
+    if (mapped) {
+      events.push(mapped);
+    }
+  }
+  return events;
 }
 
 export type ShipStationServiceHandle = {
@@ -184,6 +317,12 @@ export type ShipStationServiceHandle = {
   observeProviderLabels(shipments: any[]): Promise<void>;
   processShipNotify(resourceUrl: string): Promise<number>;
   registerWebhook(targetUrl: string): Promise<void>;
+  synchronizeOrderEditShipment?(
+    input: OrderEditShipmentSyncInput,
+  ): Promise<void | { retiredShipmentIds: number[] }>;
+  syncWmsOrderShipStationShipToAddress?(
+    wmsOrderId: number,
+  ): Promise<{ updated: number; skipped: number }>;
 };
 
 /**
@@ -296,40 +435,9 @@ export function createShipStationEngine(
       // label ledger here, before projecting dispatch events. Size is evidence
       // about this exact package, not authorization to ship units.
 
-      return ssShipments.map((s: any) => {
-        const voidDate = normalizeShipStationV1Date(s.voidDate, "voidDate");
-        if (voidDate.kind !== "missing") {
-          return {
-            kind: "voided" as const,
-            shipmentId: s.shipmentId,
-            engineRef: toEngineRef(s.orderId, s.orderKey),
-            reason: "voided in ShipStation",
-          };
-        }
-        const parsedCarrierCostCents = parseProviderAmountCents(s.shipmentCost);
-        const carrierCostCents = parsedCarrierCostCents !== null && parsedCarrierCostCents > 0
-          ? parsedCarrierCostCents
-          : undefined;
-        const shipDate = normalizeShipStationV1Date(s.shipDate, "shipDate");
-        return {
-          kind: "shipped" as const,
-          shipmentId: s.shipmentId,
-          engineRef: toEngineRef(s.orderId, s.orderKey),
-          trackingNumber: s.trackingNumber ?? "",
-          carrier: normalizeCarrier(s.carrierCode ?? "other"),
-          carrierRaw: s.carrierCode ?? "other",
-          shipDate: shipDate.kind === "timestamp" ? new Date(shipDate.iso) : null,
-          shipCalendarDate: shipDate.kind === "date" ? shipDate.date : null,
-          serviceCode: typeof s.serviceCode === "string" ? s.serviceCode.trim() || null : null,
-          carrierCostCents,
-          carrierCostSource: carrierCostCents === undefined ? undefined : SHIPSTATION_SHIPMENTS_API_COST_SOURCE,
-          items: s.shipmentItems?.map((item: any) => ({
-            sku: item.sku ?? "",
-            quantity: item.quantity ?? 0,
-            name: item.name ?? "",
-          })),
-        };
-      });
+      return ssShipments
+        .map((s: any) => mapShipStationShipmentToCanonicalEvent(s))
+        .filter((e): e is CanonicalShipmentEvent => e !== null);
     },
 
     async applyInboundShipmentAuthority({ engineRef, orderNumber }): Promise<number> {
@@ -350,10 +458,7 @@ export function createShipStationEngine(
     },
 
     async normalizeWebhook(rawPayload: unknown): Promise<CanonicalShipmentEvent[]> {
-      // SHIP_NOTIFY carries provider-label state, not carrier dispatch
-      // authority. processWebhook persists label evidence; authenticated
-      // carrier tracking owns shipment-state transitions.
-      return [];
+      return normalizeShipStationWebhookPayload(rawPayload);
     },
 
     async registerWebhook(targetUrl: string): Promise<void> {
@@ -367,6 +472,24 @@ export function createShipStationEngine(
         "../../oms/shipstation-execution.api"
       );
       await sweepShipStationQueue(account.apiKey, account.apiSecret);
+    },
+
+    async synchronizeOrderEditShipment(
+      input: OrderEditShipmentSyncInput,
+    ): Promise<void | { retiredShipmentIds: number[] }> {
+      if (!ss.synchronizeOrderEditShipment) {
+        throw new Error("ShipStation service does not expose synchronizeOrderEditShipment");
+      }
+      return ss.synchronizeOrderEditShipment(input);
+    },
+
+    async syncOrderShipToAddress(
+      wmsOrderId: number,
+    ): Promise<{ updated: number; skipped: number }> {
+      if (!ss.syncWmsOrderShipStationShipToAddress) {
+        return { updated: 0, skipped: 0 };
+      }
+      return ss.syncWmsOrderShipStationShipToAddress(wmsOrderId);
     },
   };
 }

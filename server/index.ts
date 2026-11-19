@@ -60,7 +60,6 @@ import { db } from "./db";
 import { createServices } from "./services";
 import {
   startEbayOrderPolling,
-  setShipStationService,
   setWmsServices,
   setWmsSyncService,
   createEbayOrderWebhookHandler,
@@ -135,7 +134,10 @@ import { installGlobalJsonBodyParser } from "./modules/shipping-engine/routes.ap
 import { createDefaultShipStationV2WebhookVerifier } from "./modules/shipping/shipstation-tracking-transport.api";
 import { createCarrierTrackingProjectionReader } from "./modules/shipping/carrier-tracking-and-dispatch.api";
 import { registerCarrierTrackingProjectionRoutes } from "./modules/shipping/carrier-tracking-and-dispatch.api";
-import { startWmsShipStationReconcileScheduler } from "./modules/shipping/engine-and-reconcile.api";
+import {
+  startWmsShipStationReconcileScheduler,
+  toEngineRef,
+} from "./modules/shipping/engine-and-reconcile.api";
 import { pool as dbPool } from "./db";
 import { createEbayAuthConfig, EbayAuthService } from "./modules/channels/adapters/ebay/ebay-auth.service";
 import { createEbayApiClient } from "./modules/channels/adapters/ebay/ebay-api.client";
@@ -457,8 +459,6 @@ app.use(createHttpRequestLogger());
   (db as any).__shippingEngine = services.shippingEngine;
   (db as any).__wmsSyncService = services.wmsSync;
 
-  // Inject ShipStation service into eBay ingestion for auto-push
-  setShipStationService(services.shipStation);
   setWmsServices({
     reservation: services.reservation,
     fulfillmentRouter: services.fulfillmentRouter,
@@ -471,8 +471,8 @@ app.use(createHttpRequestLogger());
     db,
     reservation: services.reservation,
     // The engine's own answer (cancelled, already cancelled, already shipped or not found) decides the stop (review MS1).
-    engine: services.shipStation
-      ? { cancelOrder: (engineOrderRef: number) => services.shipStation.cancelOrder(engineOrderRef) }
+    engine: services.shippingEngine
+      ? { cancelOrder: (engineOrderRef: number) => services.shippingEngine.cancel(toEngineRef(engineOrderRef)) }
       : undefined,
     clock: () => new Date(),
   }));

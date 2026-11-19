@@ -14,6 +14,7 @@
  */
 
 import { runReconciliationNow as shopifyReconcile } from "../orders/reconciliation-and-repair.api";
+import { pushShipmentThroughEngine } from "../orders/shipment-rollup-and-context.api";
 import { backfillShopifyOrders } from "./shopify-bridge-wrapper";
 import { sql } from "drizzle-orm";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
@@ -48,7 +49,7 @@ export class SyncRecoveryService {
 
   constructor(
     private db: any,
-    private services: { oms?: any; wmsSync?: any; shipStation?: any },
+    private services: { oms?: any; wmsSync?: any; shippingEngine?: any; shipStation?: any },
   ) {}
 
   /**
@@ -211,11 +212,12 @@ export class SyncRecoveryService {
     name = "wms_to_shipstation",
   ): Promise<StageResult> {
     try {
-      if (!this.services.shipStation) {
+      const useEngine = Boolean(this.services.shippingEngine?.upsertShipment);
+      if (!useEngine && !this.services.shipStation) {
         return {
           name,
           ok: false,
-          error: "shipStation service unavailable",
+          error: "shippingEngine service unavailable",
         };
       }
 
@@ -224,17 +226,21 @@ export class SyncRecoveryService {
         25,
       );
 
-      // Find planned outbound shipments that do NOT have a ShipStation order ID.
+      // Find planned outbound shipments that have not been pushed to any engine
+      // and are neither held nor flagged for operator review.
       const result: any = await this.db.execute(sql`
         SELECT id
         FROM wms.outbound_shipments
         WHERE status = 'planned'
           AND engine_order_ref IS NULL
+          AND shipstation_order_id IS NULL
+          AND COALESCE(held, false) = false
+          AND COALESCE(requires_review, false) = false
         ORDER BY created_at ASC
         LIMIT ${shipmentLimit}
       `);
 
-      const shipmentIds = result.rows.map((r: any) => r.id);
+      const shipmentIds = result.rows.map((r: any) => Number(r.id));
       if (shipmentIds.length === 0) {
         return { name, ok: true, data: { checked: 0, pushed: 0, failed: 0 } };
       }
@@ -244,7 +250,11 @@ export class SyncRecoveryService {
 
       for (const id of shipmentIds) {
         try {
-          await this.services.shipStation.pushShipment(id);
+          if (useEngine) {
+            await pushShipmentThroughEngine(this.db, this.services.shippingEngine, id);
+          } else {
+            await this.services.shipStation.pushShipment(id);
+          }
           pushed++;
         } catch (err: any) {
           console.warn(

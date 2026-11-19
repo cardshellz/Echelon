@@ -226,6 +226,7 @@ export function registerSyncControlRoutes(app: Express) {
       const summary = await syncSettingsSvc.getSyncLogSummary(24);
       const { getRegisteredJobsStatusSnapshot } = await import("../../infrastructure/job-registry");
       const { getSchedulerLockPoolSnapshot } = await import("../../infrastructure/scheduler-lock");
+      const { getEngineRefResolutionMetrics } = await import("../shipping/engine-and-reconcile.api");
       const registeredJobs = await getRegisteredJobsStatusSnapshot(db);
 
       res.json({
@@ -241,6 +242,7 @@ export function registerSyncControlRoutes(app: Express) {
         summary,
         registeredJobs,
         schedulerLockPool: getSchedulerLockPoolSnapshot(),
+        engineRefResolution: getEngineRefResolutionMetrics(),
       });
     } catch (error: any) {
       console.error("Error fetching sync status:", error);

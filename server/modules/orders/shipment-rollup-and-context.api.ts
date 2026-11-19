@@ -6,3 +6,4 @@
  * may consume that private same-transaction participant directly.
  */
 export * from "./shipment-rollup";
+export * from "./shipment-push-payload";

@@ -833,7 +833,7 @@ export function createServices(
   const walmartOrderPoll = new WalmartOrderPollService(walmart, oms, id => wmsSync.syncOmsOrderToWms(id),
     new PostgresChannelOrderObservationWriter(databasePool), () => new Date(),
     (channelId, skus) => walmartCatalog.linkExactSkus(channelId, skus, "walmart-order-intake"));
-  const syncRecovery = new SyncRecoveryService(db, { oms, wmsSync, shipStation });
+  const syncRecovery = new SyncRecoveryService(db, { oms, wmsSync, shippingEngine, shipStation });
 
   return {
     inventoryCore,
