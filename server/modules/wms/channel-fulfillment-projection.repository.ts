@@ -138,7 +138,8 @@ export async function projectPhysicalShipmentToWms(
       UPDATE wms.orders
       SET picked_count = ${pickedCount}, warehouse_status = ${status}, updated_at = NOW()
       WHERE id = ${orderId}
-        AND (warehouse_status NOT IN ('shipped', 'cancelled') OR ${status}::text = 'shipped')
+        AND warehouse_status = ${order.status}
+        AND (warehouse_status <> 'cancelled' OR ${status}::text = 'shipped')
     `);
   }
 }

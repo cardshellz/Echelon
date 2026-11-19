@@ -511,7 +511,7 @@ export async function applyWmsOrderShippingRollupStatusInWms(
           completed_at = ${input.now},
           updated_at = ${input.now}
         WHERE id = ${input.wmsOrderId}
-          AND (warehouse_status NOT IN ('shipped', 'cancelled') OR ${input.derived}::text = 'shipped')
+          AND (warehouse_status <> 'cancelled' OR ${input.derived}::text = 'shipped')
         RETURNING id
       ),
       closed_blockers AS (
@@ -544,7 +544,7 @@ export async function applyWmsOrderShippingRollupStatusInWms(
           warehouse_status = ${input.derived},
           updated_at = ${input.now}
         WHERE id = ${input.wmsOrderId}
-          AND (warehouse_status NOT IN ('shipped', 'cancelled') OR ${input.derived}::text = 'shipped')
+          AND (warehouse_status <> 'cancelled' OR ${input.derived}::text = 'shipped')
         RETURNING id
       ),
       closed_blockers AS (
