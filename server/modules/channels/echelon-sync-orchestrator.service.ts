@@ -542,7 +542,7 @@ class EchelonSyncOrchestrator {
         if (publicationScope && externalSku !== publicationScope.externalInventoryItemId) {
           throw new QuantityPublicationAdmissionError("PUBLICATION_CATCHUP_MAPPING_CHANGED", "The channel listing SKU changed before catch-up publication.");
         }
-        
+
         // Quarantined mapping — the external resource is gone; skip cleanly
         // instead of re-erroring every sweep (see recordPermanentPushFailure).
         if (syncState?.feedQuarantinedAt) {
@@ -710,7 +710,7 @@ class EchelonSyncOrchestrator {
         console.warn(`[SyncOrchestrator] Warehouse ${wh.warehouseId} (${wh.warehouseName}) has no shopify_location_id — skipping`);
         continue;
       }
-      
+
       whMap.set(wh.warehouseId, wh);
 
       // Verify physical product placement existence
@@ -774,7 +774,7 @@ class EchelonSyncOrchestrator {
       const breakdownItems: { warehouseId: number; externalLocationId: string; qty: number }[] = [];
       let totalPushQty = 0;
 
-      // If the engine zeroes out the item (warehouseBreakdown empty), we must manually 
+      // If the engine zeroes out the item (warehouseBreakdown empty), we must manually
       // pad 0 across all assigned locations so that Shopify properly unlists the quantity!
       let targetBreakdown = a.warehouseBreakdown;
       if (!targetBreakdown || targetBreakdown.length === 0) {
@@ -785,11 +785,11 @@ class EchelonSyncOrchestrator {
           qty: 0
         }));
       }
-      
+
       for (const loc of targetBreakdown) {
         const wh = whMap.get(loc.warehouseId);
         if (!wh?.shopifyLocationId) continue;
-        
+
         const exists = warehouseVariantExistence.get(wh.warehouseId)?.has(variantId);
         // An explicit current zero must clear the retained listing even after
         // its last physical placement disappeared. Positive quantities retain
@@ -1377,14 +1377,20 @@ class EchelonSyncOrchestrator {
                     status: pr.status,
                   });
 
-                  // Update channel_listings with external IDs
+                  // Update channel_listings with external IDs; never stamp eBay
+                  // listings as 'synced' without a confirmed live externalProductId.
+                  const isEbayWithoutPublishedId =
+                    channel.provider.toLowerCase() === "ebay" && !pr.externalProductId;
                   if (pr.externalVariantIds) {
                     for (const [variantId, extId] of Object.entries(pr.externalVariantIds)) {
                       await this.db
                         .update(channelListings)
                         .set({
                           externalVariantId: extId,
-                          syncStatus: "synced",
+                          ...(pr.externalProductId ? { externalProductId: pr.externalProductId } : {}),
+                          ...(isEbayWithoutPublishedId
+                            ? {}
+                            : { syncStatus: "synced", syncError: null }),
                           lastSyncedAt: new Date(),
                           updatedAt: new Date(),
                         })
@@ -1405,6 +1411,14 @@ class EchelonSyncOrchestrator {
                     status: "error",
                     error: pr.error,
                   });
+                  for (const variant of listingPayload.variants) {
+                    if (!variant.isListed) continue;
+                    await this.recordChannelListingSyncError(
+                      channelId,
+                      variant.variantId,
+                      pr.error || "Listing push failed",
+                    );
+                  }
                 }
               }
             } else {

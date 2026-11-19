@@ -68,8 +68,14 @@ export class PostgresEbayListingPushRepository {
     let locked = false; let discard = false;
     try {
       client = await this.pool.connect();
-      const lock = await client.query<{ locked: boolean }>(
-        "SELECT pg_try_advisory_lock($1::integer, hashtext($2)) AS locked", [EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, key]);
+      let lock: { rows: Array<{ locked: boolean }> };
+      try {
+        lock = await client.query<{ locked: boolean }>(
+          "SELECT pg_try_advisory_lock($1::integer, hashtext($2)) AS locked", [EBAY_LISTING_WORKFLOW_LOCK_NAMESPACE, key]);
+      } catch (lockError) {
+        discard = true;
+        throw lockError;
+      }
       locked = lock.rows[0]?.locked === true;
       if (!locked) throw new EbayListingSyncError("PUBLICATION_SCOPE_BUSY", "This product already has a listing update in progress. Wait for its result, then retry if needed.");
       return await work();

@@ -5,6 +5,7 @@ import {
   getPostgresPoolSnapshot,
   type PostgresPoolSnapshot,
 } from "./postgres-pool-observability";
+import { resolvePostgresPoolSslConfig } from "../database-pool-config";
 
 const { Pool } = pg;
 
@@ -166,8 +167,6 @@ function getLockPool(): AdvisoryLockPool {
   if (lockPool) return lockPool;
 
   const connectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
-  const useSSL = process.env.EXTERNAL_DATABASE_URL
-    || (process.env.DATABASE_URL && process.env.DATABASE_URL.includes("amazonaws.com"));
 
   if (!connectionString) {
     throw new Error(
@@ -177,7 +176,7 @@ function getLockPool(): AdvisoryLockPool {
 
   const pgPool = new Pool({
     connectionString,
-    ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+    ssl: resolvePostgresPoolSslConfig(connectionString),
     max: resolveSchedulerLockPoolMax(),
     idleTimeoutMillis: envPositiveInteger(
       process.env,
