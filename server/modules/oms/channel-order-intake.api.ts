@@ -18,7 +18,6 @@ export {
 export { PostgresChannelOrderObservationWriter } from "./channel-order-observation.repository";
 export {
   startEbayOrderPolling,
-  setShipStationService,
   setWmsServices,
   setWmsSyncService,
   createEbayOrderWebhookHandler,

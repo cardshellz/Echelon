@@ -17,7 +17,8 @@ import { OrderCancellationService } from "../customer-account/order-cancellation
 
 export function createOrderEditService(
   pool: Pool,
-  services: Pick<ServiceRegistry, "shipStation" | "wmsSync" | "reservation">,
+  services: Pick<ServiceRegistry, "shippingEngine" | "wmsSync" | "reservation"> &
+    Partial<Pick<ServiceRegistry, "shipStation">>,
 ): OrderEditService {
   const clock = () => new Date();
   const codeRedemptions = new ClubOrderEditCodeRedemptions(
@@ -52,9 +53,16 @@ export function createOrderEditService(
       paidProjection.project(orderId, operationId, snapshot),
   );
   const store = new PostgresOrderEditStore(pool);
+  const warehouseProvider = services.shippingEngine?.synchronizeOrderEditShipment
+    ? {
+        isConfigured: () => services.shippingEngine.isConfigured(),
+        synchronizeOrderEditShipment: (input: Parameters<NonNullable<ServiceRegistry["shippingEngine"]["synchronizeOrderEditShipment"]>>[0]) =>
+          services.shippingEngine.synchronizeOrderEditShipment!(input),
+      }
+    : services.shipStation!;
   const warehouse = new OrderEditWarehouseGateway(
     pool,
-    services.shipStation,
+    warehouseProvider,
     (id, snapshot, operationId) =>
       synchronize.synchronize(id, snapshot, operationId),
     clock,

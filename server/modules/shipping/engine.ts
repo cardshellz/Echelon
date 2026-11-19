@@ -24,6 +24,7 @@ import type {
   ShipmentItemQuantityPayload,
   ShipmentPushPayload,
   CanonicalShipmentEvent,
+  OrderEditShipmentSyncInput,
 } from "./types";
 
 export interface ShippingEngine {
@@ -143,4 +144,20 @@ export interface ShippingEngine {
    * for review. Optional — engines without queues omit this.
    */
   sweepQueue?(): Promise<void>;
+
+  /**
+   * Synchronize an in-flight customer order-edit lifecycle step against a
+   * provider shipment under theshipment push lock (`P3.3`).
+   */
+  synchronizeOrderEditShipment?(
+    input: OrderEditShipmentSyncInput,
+  ): Promise<void | { retiredShipmentIds: number[] }>;
+
+  /**
+   * Synchronize updated destination address fields onto pre-label provider
+   * orders for a WMS order (`P3.3`).
+   */
+  syncOrderShipToAddress?(
+    wmsOrderId: number,
+  ): Promise<{ updated: number; skipped: number }>;
 }

@@ -38,7 +38,11 @@ import {
   type WmsWarehouseStatus,
 } from "@shared/enums/order-status";
 import { engineRefFromRow } from "../shipping/engine-and-reconcile.api";
-import type { EngineCancelResult, EngineRef } from "../shipping/engine-and-reconcile.api";
+import type {
+  CanonicalShipmentEvent,
+  EngineCancelResult,
+  EngineRef,
+} from "../shipping/engine-and-reconcile.api";
 import { deriveWmsShippingProgress } from "@shared/wms-shipping-progress";
 import { shippingProgressLine, wmsShippingProgressQuery, type WmsShippingProgressRow } from "../wms/shipment-execution-and-projection.api";
 import { applyWmsOrderShippingRollupStatusInWms } from "../wms/wms-order-mutations.api";
@@ -936,65 +940,150 @@ async function recomputeLockedOrderShippingStatus(
 
 // ─── dispatchShipmentEvent ──────────────────────────────────────────
 
+export interface ShipmentEventDispatchOptions {
+  now?: Date;
+  fulfillmentPush?: {
+    cancelShopifyFulfillment?: (fulfillmentId: string) => Promise<void>;
+    cancelShopifyFulfillmentsForShipment?: (shipmentId: number) => Promise<unknown>;
+    reconcileShopifyFulfillment?: (
+      shipmentId: number,
+      trackingInfo: { number: string; company: string; url?: string },
+    ) => Promise<unknown>;
+  };
+}
+
 /**
- * Thin typed wrapper that routes a `ShipmentEvent` to the correct
- * mark-* helper. Kept separate from the mark-* functions themselves
+ * Normalizes a `CanonicalShipmentEvent` (emitted by `ShippingEngine.normalizeWebhook`
+ * or `getShipments`) or legacy `ShipmentEvent` into the rollup `ShipmentEvent`
+ * vocabulary. Returns `null` for `label_created`, which is observational and
+ * does not advance shipped/cancelled/voided rollup state on its own.
+ */
+export function canonicalShipmentEventToRollupEvent(
+  event: ShipmentEvent | CanonicalShipmentEvent,
+  opts: { now?: Date } = {},
+): ShipmentEvent | null {
+  if (event.kind === "label_created") {
+    return null;
+  }
+  if (event.kind === "shipped") {
+    const resolvedShipDate =
+      event.shipDate instanceof Date && !Number.isNaN(event.shipDate.getTime())
+        ? event.shipDate
+        : "shipCalendarDate" in event &&
+            typeof event.shipCalendarDate === "string" &&
+            /^\d{4}-\d{2}-\d{2}$/.test(event.shipCalendarDate)
+          ? new Date(`${event.shipCalendarDate}T00:00:00.000Z`)
+          : (opts.now ?? new Date());
+    return {
+      kind: "shipped",
+      trackingNumber: event.trackingNumber,
+      carrier: event.carrier,
+      shipDate: resolvedShipDate,
+      trackingUrl: event.trackingUrl ?? null,
+      serviceCode: event.serviceCode ?? null,
+      carrierCostCents: event.carrierCostCents,
+      carrierCostSource: event.carrierCostSource,
+    };
+  }
+  if (event.kind === "cancelled") {
+    return {
+      kind: "cancelled",
+      reason: event.reason,
+    };
+  }
+  return {
+    kind: "voided",
+    reason: event.reason,
+    trackingNumber: "trackingNumber" in event ? event.trackingNumber : undefined,
+  };
+}
+
+/**
+ * Thin typed wrapper that routes a `ShipmentEvent` or `CanonicalShipmentEvent`
+ * to the correct mark-* helper. Kept separate from the mark-* functions themselves
  * so they remain single-purpose and individually testable.
  *
  * Does NOT call `recomputeOrderStatusFromShipments`; the caller is
- * expected to do that after a `changed=true` result so it can also
- * orchestrate the OMS-derived update and event insert in the same
- * transaction-of-intent. Splitting the responsibilities here keeps
- * the dispatch purely mechanical.
+ * expected to do that after a `changed=true` result (or use
+ * `applyCanonicalShipmentEvent` for combined dispatch + rollup).
  */
 export async function dispatchShipmentEvent(
   db: any,
   shipmentId: number,
-  event: ShipmentEvent,
-  opts: {
-    now?: Date;
-    fulfillmentPush?: {
-      cancelShopifyFulfillment?: (fulfillmentId: string) => Promise<void>;
-      cancelShopifyFulfillmentsForShipment?: (shipmentId: number) => Promise<unknown>;
-      reconcileShopifyFulfillment?: (
-        shipmentId: number,
-        trackingInfo: { number: string; company: string; url?: string },
-      ) => Promise<unknown>;
-    };
-  } = {},
+  event: ShipmentEvent | CanonicalShipmentEvent,
+  opts: ShipmentEventDispatchOptions = {},
 ): Promise<MarkShipmentResult> {
-  switch (event.kind) {
+  const rollupEvent = canonicalShipmentEventToRollupEvent(event, { now: opts.now });
+  if (!rollupEvent) {
+    assertPositiveInt(shipmentId, "shipmentId");
+    const current = await loadShipment(db, shipmentId);
+    return { wmsOrderId: current.order_id, changed: false };
+  }
+
+  switch (rollupEvent.kind) {
     case "shipped":
       return markShipmentShipped(
         db,
         shipmentId,
         {
-          trackingNumber: event.trackingNumber,
-          carrier: event.carrier,
-          shipDate: event.shipDate,
-          trackingUrl: event.trackingUrl ?? null,
-          serviceCode: event.serviceCode ?? null,
-          carrierCostCents: event.carrierCostCents,
-          carrierCostSource: event.carrierCostSource,
+          trackingNumber: rollupEvent.trackingNumber,
+          carrier: rollupEvent.carrier,
+          shipDate: rollupEvent.shipDate,
+          trackingUrl: rollupEvent.trackingUrl ?? null,
+          serviceCode: rollupEvent.serviceCode ?? null,
+          carrierCostCents: rollupEvent.carrierCostCents,
+          carrierCostSource: rollupEvent.carrierCostSource,
         },
         { now: opts.now, fulfillmentPush: opts.fulfillmentPush },
       );
     case "cancelled":
-      return markShipmentCancelled(db, shipmentId, event.reason, {
+      return markShipmentCancelled(db, shipmentId, rollupEvent.reason, {
         now: opts.now,
       });
     case "voided":
-      return markShipmentVoided(db, shipmentId, event.reason, {
+      return markShipmentVoided(db, shipmentId, rollupEvent.reason, {
         ...opts,
-        voidedTrackingNumber: event.trackingNumber ?? null,
+        voidedTrackingNumber: rollupEvent.trackingNumber ?? null,
       });
     default: {
       // Exhaustiveness guard — new ShipmentEvent variants must add a
       // case above, or TypeScript will fail to compile here.
-      const _never: never = event;
+      const _never: never = rollupEvent;
       return _never;
     }
   }
+}
+
+export interface ApplyCanonicalShipmentEventResult extends MarkShipmentResult {
+  warehouseStatus: WmsWarehouseStatus | null;
+}
+
+/**
+ * WMS-owned canonical shipment event applier (`P3.3`).
+ * Applies a normalized `CanonicalShipmentEvent` from any `ShippingEngine`
+ * adapter and recomputes the owning WMS order's `warehouse_status` when the
+ * shipment state changed.
+ */
+export async function applyCanonicalShipmentEvent(
+  db: any,
+  event: CanonicalShipmentEvent,
+  opts: ShipmentEventDispatchOptions = {},
+): Promise<ApplyCanonicalShipmentEventResult> {
+  const { wmsOrderId, changed } = await dispatchShipmentEvent(
+    db,
+    event.shipmentId,
+    event,
+    opts,
+  );
+  if (!changed) {
+    return { wmsOrderId, changed: false, warehouseStatus: null };
+  }
+  const rollup = await recomputeOrderStatusFromShipments(db, wmsOrderId);
+  return {
+    wmsOrderId,
+    changed: true,
+    warehouseStatus: rollup.warehouseStatus,
+  };
 }
 
 // ─── cancelStaleShipmentsIfFullyCovered ─────────────────────────────

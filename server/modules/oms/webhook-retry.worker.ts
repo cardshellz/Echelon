@@ -18,6 +18,7 @@ import {
 // Imported (not string-literal'd) so a rename stays in sync. shipstation.service
 // only imports this worker via dynamic import(), so this static import is cycle-safe.
 import { SS_PUSH_INVALID_SHIPMENT } from "./shipstation.service";
+import { pushShipmentThroughEngine } from "../orders/shipment-rollup-and-context.api";
 import {
   handoffOmsOrderShipmentsToChannelFulfillment,
   requireChannelFulfillmentAuthority,
@@ -1313,7 +1314,7 @@ export async function dispatchShipStationShipmentPushRetry(
 
   try {
     if (eng) {
-      await eng.upsertShipment({ shipmentId } as any);
+      await pushShipmentThroughEngine(dbArg, eng, shipmentId);
     } else {
       await ssSvc!.pushShipment!(shipmentId);
     }

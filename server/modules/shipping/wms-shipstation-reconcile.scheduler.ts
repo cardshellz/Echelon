@@ -184,7 +184,7 @@ export function startWmsShipStationReconcileScheduler(
           }
 
           // 2. Derive reconcile event from canonical types
-          const event: { kind: string; [key: string]: any } | null =
+          const event =
             deriveReconcileEvent({
               engineState,
               currentWmsShipmentStatus: row.wms_shipment_status,
@@ -305,7 +305,7 @@ export function startWmsShipStationReconcileScheduler(
           const { wmsOrderId, changed } = await dispatchShipmentEvent(
             db,
             shipmentId,
-            event as any,
+            event,
           );
 
           if (changed) {
@@ -319,10 +319,9 @@ export function startWmsShipStationReconcileScheduler(
                 `order ${wmsOrderId} warehouse_status=${rollup.warehouseStatus}`,
             );
 
-            // 6. Track operational cancellation/void repair counts. Shipped
-            //    fulfillment is projected by the canonical authority below.
-            if (event.kind === "cancelled") markedCancelled++;
-            if (event.kind === "voided") markedVoided++;
+            // 6. Track operational cancellation repair counts. Shipped/voided
+            //    fulfillment is projected by the canonical authority above.
+            markedCancelled++;
 
             // Record audit event
             if (row.oms_id && row.oms_id.match(/^[0-9]+$/)) {
@@ -331,17 +330,11 @@ export function startWmsShipStationReconcileScheduler(
                 await recordOmsReconcileReviewEvent(
                   db,
                   omsId,
-                  event.kind === "shipped"
-                    ? "shipped_via_shipstation"
-                    : event.kind === "cancelled"
-                      ? "cancelled_via_shipstation"
-                      : "voided_via_shipstation",
+                  "cancelled_via_shipstation",
                   {
                     wmsShipmentId: shipmentId,
                     engineOrderRef: ref.engineOrderRef,
-                    ...(event.kind === "shipped"
-                      ? { trackingNumber: event.trackingNumber, carrier: event.carrier }
-                      : { reason: (event as any).reason }),
+                    reason: event.reason,
                   },
                 );
               } catch (auditErr: any) {
