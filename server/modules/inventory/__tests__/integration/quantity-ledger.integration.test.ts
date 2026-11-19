@@ -398,23 +398,37 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     // The reduced cutover fixture uses timestamptz here; production inventoryLots
     // defines a timestamp without time zone. Exercise Drizzle against that type.
     await pool.query("ALTER TABLE inventory.inventory_lots ALTER COLUMN received_at TYPE timestamp USING received_at AT TIME ZONE 'UTC'");
-    await pool.query(`INSERT INTO warehouse.warehouses(id,code,is_active) VALUES(2,'REMOTE',${active ? 1 : 0});
-      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code,is_active,is_pickable)
-        VALUES(102,2,'REMOTE-FLOOR',1,1)`);
+    await pool.query(`INSERT INTO warehouse.warehouses(id,code,is_active,warehouse_type) VALUES
+        (2,'SYSTEM-TRANSIT',${active ? 1 : 0},'system_transit'),(3,'DESTINATION',1,'operations');
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code,is_active,is_pickable,location_type)
+        VALUES(102,2,'IWT-TEST',1,0,'in_transit'),(103,3,'DEST',1,1,'pick');
+      CREATE TABLE inventory.interwarehouse_transfers(
+        id integer PRIMARY KEY,status text NOT NULL,source_location_id integer NOT NULL,
+        destination_location_id integer NOT NULL,transit_location_id integer NOT NULL
+      );
+      CREATE TABLE inventory.interwarehouse_transfer_lines(
+        transfer_id integer NOT NULL,product_variant_id integer NOT NULL
+      );
+      INSERT INTO inventory.interwarehouse_transfers(id,status,source_location_id,destination_location_id,transit_location_id)
+        VALUES(1,'ready',100,103,102);
+      INSERT INTO inventory.interwarehouse_transfer_lines(transfer_id,product_variant_id) VALUES(1,101)`);
     await prepareOperationalMetadata();
     return { commandKey: "operational:cross-warehouse:1", productVariantId: 101,
-      fromLocationId: 100, toLocationId: 102, qty: 7, userId: "operator", crossWarehouseArrivalConfirmed: true };
+      fromLocationId: 100, toLocationId: 102, qty: 7, userId: "operator",
+      referenceType: "interwarehouse_transfer", referenceId: "1:dispatch",
+      interwarehouseTransfer: { transferId: 1, stage: "dispatch" as const } };
   }
 
-  it("requires explicit arrival confirmation before a cross-warehouse transfer", async () => {
+  it("requires the durable workflow owner before a cross-warehouse transfer", async () => {
     const input = await prepareCrossWarehouseTransfer();
     const before = await state();
-    await expect(transaction(client => operationalOwner(client).transfer({ ...input, crossWarehouseArrivalConfirmed: false })))
-      .rejects.toMatchObject({ code: "TRANSFER_ARRIVAL_CONFIRMATION_REQUIRED" });
+    const { interwarehouseTransfer: _workflow, ...manualInput } = input;
+    await expect(transaction(client => operationalOwner(client).transfer(manualInput)))
+      .rejects.toMatchObject({ code: "INTERWAREHOUSE_TRANSFER_WORKFLOW_REQUIRED" });
     expect(await state()).toEqual(before);
   });
 
-  it("posts a cross-warehouse transfer once with exact warehouse, quantity and cost identities", async () => {
+  it("posts a workflow-owned dispatch once with exact warehouse, quantity and cost identities", async () => {
     const input = await prepareCrossWarehouseTransfer();
     await transaction(client => operationalOwner(client).transfer(input));
     await transaction(client => operationalOwner(client).transfer(input));

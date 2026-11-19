@@ -1,11 +1,18 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const SHIPSTATION_SRC = readFileSync(
-  resolve(__dirname, "../../../oms/shipstation.service.ts"),
-  "utf8",
-);
+const omsDir = resolve(__dirname, "../../../oms");
+const shipStationSubDir = resolve(omsDir, "shipstation");
+const SHIPSTATION_SRC = [
+  readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"),
+  ...(existsSync(shipStationSubDir)
+    ? readdirSync(shipStationSubDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(shipStationSubDir, f), "utf8"))
+    : []),
+].join("\n");
 const OMS_ROUTES_SRC = readFileSync(
   resolve(__dirname, "../../../../routes/oms.routes.ts"),
   "utf8",

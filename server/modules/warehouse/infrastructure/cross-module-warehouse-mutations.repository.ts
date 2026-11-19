@@ -242,6 +242,37 @@ export async function insertVirtual3plWarehouseLocationInWarehouse(
   return createdLoc;
 }
 
+export async function insertInterwarehouseTransitLocationInWarehouse(
+  executor: { execute: (...args: any[]) => any },
+  input: {
+    warehouseId: number;
+    code: string;
+    name: string;
+    occurredAt: Date;
+  },
+): Promise<unknown> {
+  const result = await executor.execute(sql`
+    INSERT INTO warehouse.warehouse_locations(
+      warehouse_id,code,name,zone,location_type,bin_type,is_pickable,is_active,created_at,updated_at
+    ) VALUES (
+      ${input.warehouseId},${input.code},${input.name},'TRANSIT','in_transit','virtual',0,1,${input.occurredAt},${input.occurredAt}
+    ) RETURNING id
+  `);
+  return result.rows[0]?.id;
+}
+
+export async function closeInterwarehouseTransitLocationInWarehouse(
+  executor: { execute: (...args: any[]) => any },
+  input: { transitLocationId: number; occurredAt: Date },
+): Promise<boolean> {
+  const result = await executor.execute(sql`
+    UPDATE warehouse.warehouse_locations SET is_active=0,updated_at=${input.occurredAt}
+    WHERE id=${input.transitLocationId} AND location_type='in_transit' AND is_active=1
+    RETURNING id
+  `);
+  return result.rows.length === 1;
+}
+
 export async function updateWarehouseFeedEnabledInWarehouse(
   executor: { update: (...args: any[]) => any },
   warehouseId: number,

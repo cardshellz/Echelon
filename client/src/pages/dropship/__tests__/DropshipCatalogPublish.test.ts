@@ -361,7 +361,9 @@ describe("review round 2 (step 1 plan S2-5, PR A)", () => {
     expect(page).toContain("throw new Error(PUBLISH_WORDS.waitForPublishStart);");
     expect(page).not.toContain("Wait for publishing to start before saving listing changes.");
     const alerts = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipPortalNotifications.tsx"), "utf8");
-    expect(alerts).toContain('<p className="mt-1 whitespace-pre-line text-sm text-zinc-600">{notification.message}</p>');
+    // The message keeps its lines; its eBay and portal URLs are links (owner report, NotificationMessage).
+    expect(alerts).toContain("{notification.message && <NotificationMessage message={notification.message} />}");
+    expect(alerts).toContain('<p className="mt-1 whitespace-pre-line break-words text-sm text-zinc-600">');
   });
 
   it("DUX2 a checked row has no empty image box, and its sheet reads the size's full preview", () => {

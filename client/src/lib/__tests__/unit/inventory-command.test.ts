@@ -185,3 +185,30 @@ describe("persisted transfer rejection receipts", () => {
     expect(fetchMock.mock.calls[1][1].body).toBe(fetchMock.mock.calls[0][1].body);
   });
 });
+
+describe("persisted inter-warehouse rejection receipts", () => {
+  it("retires a rejected dispatch intent only when the workflow returns matching durable proof", async () => {
+    const transfer = { fromLocationId: 1, toLocationId: 2, variantId: 3, quantity: 1 };
+    const store = retainedStore();
+    const persistence = { actorId: "operator-1", storage: () => store };
+    const rejection = {
+      contractVersion: "interwarehouse_transfer_v1",
+      commandKey: "warehouse:first",
+      outcome: "rejected",
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        code: "INTERWAREHOUSE_ROUTE_UNAVAILABLE",
+        error: "Route unavailable",
+        context: { interwarehouseCommandReceipt: rejection },
+      }), { status: 409 }))
+      .mockResolvedValueOnce(ok());
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(createInventoryCommandRequester(() => "warehouse:first", undefined, persistence)
+      ("/api/inventory/interwarehouse-transfers", transfer)).rejects.toThrow("Route unavailable");
+    await createInventoryCommandRequester(() => "warehouse:second", undefined, persistence)
+      ("/api/inventory/interwarehouse-transfers", transfer);
+    expect(fetchMock.mock.calls.map(call => JSON.parse(call[1].body).commandKey))
+      .toEqual(["warehouse:first", "warehouse:second"]);
+  });
+});

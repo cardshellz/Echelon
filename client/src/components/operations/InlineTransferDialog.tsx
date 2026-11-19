@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
@@ -53,7 +52,6 @@ export default function InlineTransferDialog({
   const [variantId, setVariantId] = useState<number | null>(null);
   const [quantity, setQuantity] = useState("");
   const [notes, setNotes] = useState("");
-  const [arrivalConfirmed, setArrivalConfirmed] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -64,7 +62,6 @@ export default function InlineTransferDialog({
     setVariantId(defaultVariantId ?? null);
     setQuantity(defaultQty ? String(defaultQty) : "");
     setNotes("");
-    setArrivalConfirmed(false);
   }, [open, defaultFromLocationId, defaultToLocationId, defaultVariantId, defaultQty]);
 
   const locationsQuery = useQuery({
@@ -99,20 +96,25 @@ export default function InlineTransferDialog({
   const isValid = optionsReady && isActionableWarehouseLocation(from) && isActionableWarehouseLocation(to)
     && activeWarehouse(from?.warehouseId) && activeWarehouse(to?.warehouseId)
     && variantId !== null && Number.isSafeInteger(qtyNum) && qtyNum > 0 && !overMax
-    && fromLocationId !== toLocationId && (!crossWarehouse || arrivalConfirmed);
+    && fromLocationId !== toLocationId;
 
   const transferMutation = useMutation({
     mutationFn: async () => {
       if (!isValid) throw new Error("Choose valid warehouses, locations and a whole-number quantity before transferring.");
-      return inventoryCommand("/api/inventory/transfer", {
+      return inventoryCommand(crossWarehouse
+        ? "/api/inventory/interwarehouse-transfers"
+        : "/api/inventory/transfer", {
         fromLocationId, toLocationId, variantId, quantity: qtyNum, notes: notes || undefined,
-        // Omitting this for same-building transfers preserves their existing command identity.
-        crossWarehouseArrivalConfirmed: crossWarehouse ? true : undefined,
       });
     },
     onSuccess: () => {
       const sku = defaultSku || selectedSku?.sku || "";
-      toast({ title: "Transfer complete", description: `Moved ${quantity} ${sku} units to ${to ? transferLocationLabel(to, warehouses) : "the destination"}` });
+      toast({
+        title: crossWarehouse ? "Transfer dispatched" : "Transfer complete",
+        description: crossWarehouse
+          ? `${quantity} ${sku} unit(s) are now in transit to ${to ? transferLocationLabel(to, warehouses) : "the destination"}.`
+          : `Moved ${quantity} ${sku} units to ${to ? transferLocationLabel(to, warehouses) : "the destination"}`,
+      });
       queryClient.invalidateQueries({ predicate: (query) => {
         const key = query.queryKey[0];
         return typeof key === "string" && (key.startsWith("/api/inventory/") || key.startsWith("/api/operations/"));
@@ -140,12 +142,12 @@ export default function InlineTransferDialog({
         <TransferLocationField key={`${open}-from`} direction="From" locations={locations} warehouses={warehouses}
           locationId={fromLocationId} warehouseId={fromWarehouseId} fixed={defaultFromLocationId != null}
           fallbackCode={defaultFromLocationCode} disabled={!optionsReady || busy}
-          onWarehouseChange={(value) => { setFromWarehouseId(value); setFromLocationId(null); if (!defaultVariantId) setVariantId(null); setArrivalConfirmed(false); }}
-          onLocationChange={(value) => { setFromLocationId(value); if (!defaultVariantId) setVariantId(null); setArrivalConfirmed(false); }} />
+          onWarehouseChange={(value) => { setFromWarehouseId(value); setFromLocationId(null); if (!defaultVariantId) setVariantId(null); }}
+          onLocationChange={(value) => { setFromLocationId(value); if (!defaultVariantId) setVariantId(null); }} />
         <div className="space-y-2">
           <Label htmlFor={`${id}-sku`}>SKU</Label>
           {defaultSku ? <Input id={`${id}-sku`} value={defaultSku} readOnly className="font-mono" /> : (
-            <Select value={variantId?.toString() ?? ""} onValueChange={(value) => { setVariantId(Number(value)); setArrivalConfirmed(false); }} disabled={!fromLocationId || busy}>
+            <Select value={variantId?.toString() ?? ""} onValueChange={(value) => setVariantId(Number(value))} disabled={!fromLocationId || busy}>
               <SelectTrigger id={`${id}-sku`}><SelectValue placeholder={fromLocationId ? "Select SKU" : "Select source first"} /></SelectTrigger>
               <SelectContent className="max-h-[200px]">{skusQuery.data?.map((sku) =>
                 <SelectItem key={sku.variantId} value={String(sku.variantId)}>{sku.sku} — {sku.name} (on hand: {sku.available})</SelectItem>)}
@@ -157,27 +159,23 @@ export default function InlineTransferDialog({
           <Label htmlFor={`${id}-qty`}>Quantity {maxQty !== undefined && <span className="text-muted-foreground">(on hand {maxQty})</span>}</Label>
           <div className="flex gap-2">
             <Input id={`${id}-qty`} type="number" min="1" step="1" max={maxQty} value={quantity} disabled={busy}
-              onChange={(event) => { setQuantity(event.target.value); setArrivalConfirmed(false); }} placeholder="Enter quantity" className="font-mono" />
+              onChange={(event) => setQuantity(event.target.value)} placeholder="Enter quantity" className="font-mono" />
             {maxQty !== undefined && maxQty > 0 && <Button variant="outline" size="sm" disabled={busy}
-              onClick={() => { setQuantity(String(maxQty)); setArrivalConfirmed(false); }}>All</Button>}
+              onClick={() => setQuantity(String(maxQty))}>All</Button>}
           </div>
           {overMax && <p className="text-xs text-destructive">Exceeds on-hand quantity ({maxQty}). Reserved stock cannot be moved.</p>}
         </div>
         <TransferLocationField key={`${open}-to`} direction="To" locations={locations} warehouses={warehouses}
           locationId={toLocationId} warehouseId={toWarehouseId} fixed={defaultToLocationId != null}
           fallbackCode={defaultToLocationCode} excludeLocationId={fromLocationId} disabled={!optionsReady || busy}
-          onWarehouseChange={(value) => { setToWarehouseId(value); setToLocationId(null); setArrivalConfirmed(false); }}
-          onLocationChange={(value) => { setToLocationId(value); setArrivalConfirmed(false); }} />
+          onWarehouseChange={(value) => { setToWarehouseId(value); setToLocationId(null); }}
+          onLocationChange={setToLocationId} />
         {from && to && <div className="rounded-md border bg-muted/30 p-3 text-sm space-y-2" data-testid="transfer-route">
           <p><span className="font-medium">From:</span> {transferLocationLabel(from, warehouses)}</p>
           <p><span className="font-medium">To:</span> {transferLocationLabel(to, warehouses)}</p>
-          {crossWarehouse && <>
-            <p>This updates both warehouses immediately. Record it after the stock arrives, not while it is in transit.</p>
-            <div className="flex items-start gap-2">
-              <Checkbox id={`${id}-arrival`} checked={arrivalConfirmed} disabled={busy} onCheckedChange={(value) => setArrivalConfirmed(value === true)} />
-              <Label htmlFor={`${id}-arrival`} className="leading-5">The stock has arrived at the destination location.</Label>
-            </div>
-          </>}
+          {crossWarehouse && <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-blue-900">
+            This dispatches stock into <span className="font-medium">In Transit</span>. It will not become available at the destination until a receiver posts the physical count.
+          </div>}
         </div>}
         <div className="space-y-2">
           <Label htmlFor={`${id}-notes`}>Notes (optional)</Label>
@@ -187,7 +185,7 @@ export default function InlineTransferDialog({
       <DialogFooter className="shrink-0 border-t pt-3">
         <Button variant="outline" disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button>
         <Button onClick={() => transferMutation.mutate()} disabled={!isValid || busy}>
-          {busy ? "Transferring…" : <><ArrowRight className="h-4 w-4 mr-2" />Transfer</>}
+          {busy ? "Posting…" : <><ArrowRight className="h-4 w-4 mr-2" />{crossWarehouse ? "Dispatch transfer" : "Move inventory"}</>}
         </Button>
       </DialogFooter>
     </DialogContent>

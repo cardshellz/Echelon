@@ -6,7 +6,6 @@ import {
   channelFeeds,
   warehouseLocations,
 } from "@shared/schema";
-import { calculateFungibleAtpBase } from "./domain/inventory.domain";
 import { createRecipeCapacityService, type RecipeCapacityService } from "./recipe-capacity.service";
 import {
   calculateSellableVariantAtp,
@@ -269,8 +268,17 @@ class InventoryAtpService implements InventoryAtpServiceContract {
    * already left on-hand and remain visible only as workflow counters.
    */
   async getAtpBase(productId: number, dbOverride: any = this.db): Promise<number> {
-    const totals = await this.getTotalBaseUnits(productId, dbOverride);
-    return calculateFungibleAtpBase(totals);
+    const result = await dbOverride.execute(sql`
+      SELECT COALESCE(SUM((level.variant_qty - level.reserved_qty) * variant.units_per_variant), 0)::bigint AS atp
+      FROM inventory.inventory_levels level
+      JOIN catalog.product_variants variant ON variant.id=level.product_variant_id
+      JOIN warehouse.warehouse_locations location ON location.id=level.warehouse_location_id
+      WHERE variant.product_id=${productId}
+        AND variant.requires_shipping=true
+        AND COALESCE(variant.track_inventory,true)=true
+        AND location.location_type <> 'in_transit'
+    `);
+    return Number(result.rows[0]?.atp ?? 0);
   }
 
   // --------------------------------------------------------------------------
@@ -300,6 +308,7 @@ class InventoryAtpService implements InventoryAtpServiceContract {
       WHERE pv.product_id = ${productId}
         AND pv.requires_shipping = true
         AND COALESCE(pv.track_inventory, true) = true
+        AND wl.location_type <> 'in_transit'
         AND (
         wl.warehouse_id = ${warehouseId}
         OR wl.warehouse_id IN (
@@ -355,6 +364,7 @@ class InventoryAtpService implements InventoryAtpServiceContract {
       WHERE il.product_variant_id IN (${idList})
         AND pv.requires_shipping = true
         AND COALESCE(pv.track_inventory, true) = true
+        AND wl.location_type <> 'in_transit'
         AND (
           wl.warehouse_id = ${warehouseId}
           OR wl.warehouse_id IN (
@@ -391,10 +401,12 @@ class InventoryAtpService implements InventoryAtpServiceContract {
       })
       .from(inventoryLevels)
       .innerJoin(productVariants, eq(inventoryLevels.productVariantId, productVariants.id))
+      .innerJoin(warehouseLocations, eq(inventoryLevels.warehouseLocationId, warehouseLocations.id))
       .where(and(
         inArray(inventoryLevels.productVariantId, variantIds),
         eq(productVariants.requiresShipping, true),
         sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+        sql`${warehouseLocations.locationType} <> 'in_transit'`,
       ))
       .groupBy(inventoryLevels.productVariantId);
     const result = new Map<number, number>();
@@ -738,26 +750,21 @@ class InventoryAtpService implements InventoryAtpServiceContract {
         productVariants.unitsPerVariant,
       );
 
-    // Compute the shared ATP pool across all variants in base units.
+    // Preserve physical network totals for display; the sellable projection
+    // below is computed separately so transit custody cannot leak into ATP.
     const totalOnHand = variantRows.reduce((s: number, v: any) => s + Number(v.onHandPieces), 0);
     const totalReserved = variantRows.reduce((s: number, v: any) => s + Number(v.reservedPieces), 0);
-    const totalPicked = variantRows.reduce((s: number, v: any) => s + Number(v.pickedPieces), 0);
-    const totalPacked = variantRows.reduce((s: number, v: any) => s + Number(v.packedPieces), 0);
-    const sharedAtpBase = totalOnHand - totalReserved - totalPicked - totalPacked;
-
-    const recipeAvailability = product.inventoryStrategy === "recipe_managed"
-      ? new Map((await this.getAtpPerVariant(productId)).map((variant) => [variant.productVariantId, variant]))
-      : null;
+    const sellableAvailability = new Map(
+      (await this.getAtpPerVariant(productId)).map((variant) => [variant.productVariantId, variant]),
+    );
     const variants: InventoryItemVariantSummary[] = variantRows.map((variant: any) => {
       const variantQty = Number(variant.variantQty);
       const reservedQty = Number(variant.reservedQty);
-      const atp = recipeAvailability?.get(variant.productVariantId)
-        ?? calculateSellableVariantAtp({
-          strategy: product.inventoryStrategy,
-          unitsPerVariant: variant.unitsPerVariant,
-          sharedAtpBase,
-          directAtpUnits: Math.max(0, variantQty - reservedQty),
-        });
+      // The ATP owner has already removed non-promise custody such as in-transit
+      // locations. Aggregate physical totals remain useful display metadata, but
+      // they must never be reused to make those units sellable.
+      const atp = sellableAvailability.get(variant.productVariantId)
+        ?? { atpUnits: 0, atpBase: 0 };
       return {
         variantId: variant.productVariantId,
         sku: variant.sku ?? "",
@@ -771,7 +778,7 @@ class InventoryAtpService implements InventoryAtpServiceContract {
       };
     });
     const totalAtpBase = usesFungibleBaseUnitPool(product.inventoryStrategy)
-      ? sharedAtpBase
+      ? variants.reduce((maximum, variant) => Math.max(maximum, variant.atpPieces), 0)
       : variants.reduce((sum, variant) => sum + variant.atpPieces, 0);
 
     return {
@@ -807,10 +814,15 @@ class InventoryAtpService implements InventoryAtpServiceContract {
         productVariants,
         eq(inventoryLevels.productVariantId, productVariants.id),
       )
+      .innerJoin(
+        warehouseLocations,
+        eq(inventoryLevels.warehouseLocationId, warehouseLocations.id),
+      )
       .where(and(
         inArray(productVariants.productId, productIds),
         eq(productVariants.requiresShipping, true),
         sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+        sql`${warehouseLocations.locationType} <> 'in_transit'`,
       ))
       .groupBy(productVariants.productId);
 

@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
@@ -21,7 +22,17 @@ const read = (p: string) =>
   readFileSync(fileURLToPath(new URL(p, import.meta.url)), "utf8");
 
 const INDEX_SRC = read("../../../../index.ts");
-const SS_SRC = read("../../../oms/shipstation.service.ts");
+const omsDir = fileURLToPath(new URL("../../../oms", import.meta.url));
+const shipStationSubDir = resolve(omsDir, "shipstation");
+const SS_SRC = [
+  read("../../../oms/shipstation.service.ts"),
+  ...(existsSync(shipStationSubDir)
+    ? readdirSync(shipStationSubDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(shipStationSubDir, f), "utf8"))
+    : []),
+].join("\n");
 const FLOW_SRC = read("../../../oms/oms-flow-reconciliation.service.ts");
 const AUTHORITY_POLICY_SRC = read("../../../oms/channel-fulfillment-authority.policy.ts");
 const TYPES_SRC = read("../../types.ts");

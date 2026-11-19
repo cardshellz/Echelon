@@ -12,6 +12,9 @@ const doubles = vi.hoisted(() => ({
   acquireLock: vi.fn<() => Promise<void>>(),
   releaseLock: vi.fn<() => Promise<void>>(),
   execute: vi.fn<(input: { file: string; sql: string; contentHash: string }) => Promise<{ attempts: number }>>(),
+  baseline: vi.fn<(input: { files: readonly string[]; migrationsDir: string }) => Promise<
+    { applied: false; reason: string } | { applied: true; recorded: number; capturedAt: string }
+  >>(),
 }));
 
 vi.mock("pg", () => ({
@@ -33,6 +36,10 @@ vi.mock("../../../migrations/migration-executor", () => ({
   }),
   migrationErrorMessage: (error: unknown) => error instanceof Error ? error.message : String(error),
   migrationSqlState: () => null,
+  migrationSslFromEnv: () => ({ rejectUnauthorized: false }),
+}));
+vi.mock("../../../migrations/baseline-bootstrap", () => ({
+  applyBaselineToEmptyDatabase: doubles.baseline,
 }));
 
 const firstFile = "900000001000017770001_first.sql";
@@ -58,6 +65,8 @@ describe("release migration runner policy boundary", () => {
     doubles.acquireLock.mockResolvedValue(undefined);
     doubles.releaseLock.mockResolvedValue(undefined);
     doubles.execute.mockResolvedValue({ attempts: 1 });
+    // The default is a database that already has migration records (production).
+    doubles.baseline.mockResolvedValue({ applied: false, reason: "database_has_migration_records" });
     doubles.validateMigrationDirectory.mockReturnValue([firstFile, secondFile]);
     doubles.readFileSync.mockImplementation((path) => {
       if (basename(path) === firstFile) return firstSql;
@@ -231,6 +240,62 @@ describe("release migration runner policy boundary", () => {
     await vi.waitFor(() => expect(doubles.end).toHaveBeenCalledOnce());
 
     expect(doubles.releaseClient).toHaveBeenCalledWith(unlockFailure);
+  });
+
+  it("offers the schema baseline the validated catalog before it creates the tracking table", async () => {
+    const order: string[] = [];
+    doubles.baseline.mockImplementation(async () => {
+      order.push("baseline");
+      return { applied: false, reason: "database_has_migration_records" };
+    });
+    doubles.query.mockImplementation(async (sql) => {
+      if (sql.includes("CREATE TABLE IF NOT EXISTS _migrations")) order.push("tracking_table");
+      return { rows: [] };
+    });
+
+    await import("../../../migrations/run-migrations");
+    await vi.waitFor(() => expect(doubles.end).toHaveBeenCalledOnce());
+
+    expect(order).toEqual(["baseline", "tracking_table"]);
+    expect(doubles.baseline).toHaveBeenCalledWith(expect.objectContaining({ files: [firstFile, secondFile] }));
+    // Nothing is logged for a database that already has migration records.
+    expect(vi.mocked(console.log).mock.calls.flat().join("\n")).not.toContain("migration_baseline");
+    expectCleanup();
+  });
+
+  it("logs a structured line when the baseline builds an empty database, then applies what it does not cover", async () => {
+    doubles.baseline.mockResolvedValue({ applied: true, recorded: 1, capturedAt: "2026-11-17" });
+    doubles.query.mockImplementation(async (sql) => ({
+      rows: sql === "SELECT filename, content_hash FROM _migrations"
+        ? [{ filename: firstFile, content_hash: sqlHash(firstSql) }]
+        : [],
+    }));
+
+    await import("../../../migrations/run-migrations");
+    await vi.waitFor(() => expect(doubles.end).toHaveBeenCalledOnce());
+
+    expect(console.log).toHaveBeenCalledWith(JSON.stringify({
+      level: "info", action: "migration_baseline", outcome: "applied",
+      recorded: 1, capturedAt: "2026-11-17", error_code: null,
+    }));
+    expect(doubles.execute.mock.calls.map(([input]) => input.file)).toEqual([secondFile]);
+    expect(process.exit).not.toHaveBeenCalled();
+    expectCleanup();
+  });
+
+  it("fails the release without running any migration when the baseline refuses the database", async () => {
+    const refusal = Object.assign(new Error("The target database has objects but no migration records."), {
+      code: "MIGRATION_BASELINE_DATABASE_NOT_EMPTY",
+    });
+    doubles.baseline.mockRejectedValueOnce(refusal);
+
+    await import("../../../migrations/run-migrations");
+    await vi.waitFor(() => expect(process.exit).toHaveBeenCalledWith(1));
+
+    expect(doubles.query).not.toHaveBeenCalled();
+    expect(doubles.execute).not.toHaveBeenCalled();
+    expect(console.error).toHaveBeenCalledWith("Migration error:", refusal);
+    expectCleanup();
   });
 
   it("fails the release and stops before later migrations when execution rejects", async () => {

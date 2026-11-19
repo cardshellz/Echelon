@@ -7,14 +7,21 @@
  * shipped orders had open demand, and triggered duplicate SS pushes.
  */
 
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const SS_SRC = readFileSync(
-  resolve(__dirname, "../../shipstation.service.ts"),
-  "utf-8",
-);
+const omsDir = resolve(__dirname, "../..");
+const subDir = resolve(omsDir, "shipstation");
+const SS_SRC = [
+  readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf-8"),
+  ...(existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(subDir, f), "utf-8"))
+    : []),
+].join("\n");
 const PROJECTION_SRC = readFileSync(
   resolve(__dirname, "../../../wms/channel-fulfillment-projection.repository.ts"),
   "utf-8",

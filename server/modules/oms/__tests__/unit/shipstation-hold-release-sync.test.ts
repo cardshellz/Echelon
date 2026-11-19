@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-const SHIPSTATION_SERVICE_SRC = readFileSync(
-  resolve(__dirname, "../../shipstation.service.ts"),
-  "utf8",
-);
+const omsDir = resolve(__dirname, "../..");
+const subDir = resolve(omsDir, "shipstation");
+const SHIPSTATION_SERVICE_SRC = [
+  readFileSync(resolve(omsDir, "shipstation.service.ts"), "utf8"),
+  ...(existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(subDir, f), "utf8"))
+    : []),
+].join("\n");
 const WEBHOOK_RETRY_WORKER_SRC = readFileSync(
   resolve(__dirname, "../../webhook-retry.worker.ts"),
   "utf8",

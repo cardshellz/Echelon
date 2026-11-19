@@ -437,6 +437,27 @@ scope (order/line), released_by; picking + push + release all consult it; boot w
   **Separate item, same phase:** make a new empty database buildable from tracked migrations
   (a baseline schema file plus the migrations after it), and have CI build one. Until that exists
   there is no tested way to create an Echelon database from the repository.
+
+  **Status 2026-11-17: step 1 done.** `migrations/baseline/schema.sql` is a structure-only
+  snapshot of production (793 tables, PostgreSQL 17.10) and `manifest.json` lists the 604
+  migrations it covers. The release runner loads it only into a database with no objects and no
+  migration records (`migrations/baseline-bootstrap.ts`), records the covered migrations as
+  applied, then runs the rest. CI job "Build database from repository" does this on every PR.
+  Checked by hand on 2026-11-17: a database built this way has the same structure as production.
+  The snapshot declares the objects the Progress table marks as having no tracked CREATE.
+  - Owner decision (2026-11-17): one snapshot of the whole shared database for now, `membership`
+    and shellz-club's `public` tables included, because foreign keys cross both ways. Split it by
+    owner when the database roles are separated (`DB-ROLE-SEPARATION-RUNBOOK.md`). A plain
+    four-part split was tried and fails on 6 foreign keys and 1 view; it needs tables, then keys
+    and indexes, then cross-application links. `public` has 33 tables and no current owner list;
+    the runbook's §2b list is out of date.
+  - Still owed: (a) reference rows. The snapshot holds no rows, and 75 legacy migrations insert
+    some (notification types, permissions, shipping configuration, settings); which tables are
+    reference data needs a table-by-table review. (b) A repeatable drift check that builds from
+    the repository and compares with production's structure. (c) Retiring the legacy files the
+    baseline covers, once CI has built from it for a while; that needs the frozen-legacy rule in
+    `migration-policy.mjs` changed. (d) The integration suites still build their own fixtures on
+    PostgreSQL 16; the baseline has not been tried on 16.
 - **P4.2 Logging:** adopt `server/platform/observability` everywhere (~1,600 console.* sites,
   mechanical/codemod-able); every log line carries `{oms_order_id, wms_order_id, shipment_id,
   channel_event_id, engine_ref}` per CLAUDE.md §10; DropshipLogger/AuditLogger fold in or wrap.

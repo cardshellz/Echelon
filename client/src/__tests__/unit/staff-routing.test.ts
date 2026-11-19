@@ -1,5 +1,6 @@
+import { PassThrough } from "node:stream";
 import React, { createElement, type ReactNode } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
+import { renderToPipeableStream } from "react-dom/server";
 import { Router as WouterRouter } from "wouter";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -49,8 +50,38 @@ vi.mock("@/components/returns/CustomerReturnSurface", async () => {
 });
 import App from "../../App";
 
-function renderAt(path: string) {
-  return renderToStaticMarkup(createElement(WouterRouter, { ssrPath: path, children: createElement(App) }));
+function renderAt(path: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    const output = new PassThrough();
+    output.on("data", (chunk: Buffer | string) =>
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)),
+    );
+    output.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    output.on("error", reject);
+    let ready = false;
+    let piped = false;
+    let stream: ReturnType<typeof renderToPipeableStream> | undefined;
+    stream = renderToPipeableStream(
+      createElement(WouterRouter, { ssrPath: path, children: createElement(App) }),
+      {
+        onAllReady() {
+          ready = true;
+          if (stream && !piped) {
+            piped = true;
+            stream.pipe(output);
+          }
+        },
+        onError(error) {
+          reject(error);
+        },
+      },
+    );
+    if (ready && !piped) {
+      piped = true;
+      stream.pipe(output);
+    }
+  });
 }
 beforeEach(() => {
   vi.clearAllMocks();
@@ -58,60 +89,60 @@ beforeEach(() => {
   fixture.accessStatus = "authenticated"; fixture.role = "admin";
 });
 describe("staff router authority before operational surfaces", () => {
-  it.each(["/", "/users", "/packing", "/picking", "/channels/walmart/1"])("does not mount operational work for zero roles at %s", path => {
-    const html = renderAt(path);
+  it.each(["/", "/users", "/packing", "/picking", "/channels/walmart/1"])("does not mount operational work for zero roles at %s", async path => {
+    const html = await renderAt(path);
     expect(html).toContain("You have no assigned roles");
     expect(html).toContain("Sign out");
     expect(fixture.layout).not.toHaveBeenCalled();
     expect(fixture.walmart).not.toHaveBeenCalled();
   });
-  it("blocks unverified metadata before an operational shell even if a user remains", () => {
+  it("blocks unverified metadata before an operational shell even if a user remains", async () => {
     fixture.accessStatus = "unverified";
-    expect(renderAt("/users")).toContain("Access verification unavailable");
+    expect(await renderAt("/users")).toContain("Access verification unavailable");
     expect(fixture.layout).not.toHaveBeenCalled();
   });
-  it("allows a custom user-reader despite the legacy picker label", () => {
+  it("allows a custom user-reader despite the legacy picker label", async () => {
     fixture.role = "picker"; fixture.assignedRoles = [{ id: 99, name: "User reader", isSystem: false }];
     fixture.permissions = ["users:view"];
-    expect(renderAt("/users")).toContain("Users surface");
+    expect(await renderAt("/users")).toContain("Users surface");
   });
-  it("does not treat a legacy admin label as permission to view users", () => {
+  it("does not treat a legacy admin label as permission to view users", async () => {
     fixture.assignedRoles = [{ id: 99, name: "Stock reader", isSystem: false }];
     fixture.permissions = ["inventory:view"];
-    expect(renderAt("/users")).not.toContain("Users surface");
-    expect(renderAt("/users")).toContain("assigned roles do not provide access to this page");
+    expect(await renderAt("/users")).not.toContain("Users surface");
+    expect(await renderAt("/users")).toContain("assigned roles do not provide access to this page");
   });
-  it("gates /orders on its explicit orders:view capability rather than assigned system-role membership", () => {
+  it("gates /orders on its explicit orders:view capability rather than assigned system-role membership", async () => {
     fixture.assignedRoles = [{ id: 1, name: "Team Lead", isSystem: true }]; fixture.systemRoles = ["lead", "admin"]; fixture.permissions = [];
-    expect(renderAt("/orders")).not.toContain("Orders surface");
+    expect(await renderAt("/orders")).not.toContain("Orders surface");
     fixture.systemRoles = []; fixture.assignedRoles = [{ id: 99, name: "Custom order reader", isSystem: false }]; fixture.permissions = ["orders:view"]; fixture.role = "picker";
-    expect(renderAt("/orders")).toContain("Orders surface");
+    expect(await renderAt("/orders")).toContain("Orders surface");
   });
-  it("allows Dashboard via its established read permission, independently of the compatibility label", () => {
+  it("allows Dashboard via its established read permission, independently of the compatibility label", async () => {
     fixture.assignedRoles = [{ id: 99, name: "Inventory reader", isSystem: false }]; fixture.permissions = ["inventory:view"]; fixture.role = "picker";
-    expect(renderAt("/")).toContain("Dashboard surface");
+    expect(await renderAt("/")).toContain("Dashboard surface");
   });
   it.each([
     ["/picking", "picking:view"],
     ["/picking/logs", "picking:view_logs"],
     ["/picking/metrics", "picking:view_metrics"],
     ["/picking/settings", "picking:manage_settings"],
-  ])("gates %s on its explicit capability (%s) rather than assigned system-role membership", (path, grant) => {
+  ])("gates %s on its explicit capability (%s) rather than assigned system-role membership", async (path, grant) => {
     fixture.assignedRoles = [{ id: 3, name: "Picker", isSystem: true }];
     fixture.systemRoles = ["picker", "lead", "admin"];
     fixture.permissions = [];
-    expect(renderAt(path)).not.toContain("Picking surface");
-    expect(renderAt(path)).toContain("assigned roles do not provide access to this page");
+    expect(await renderAt(path)).not.toContain("Picking surface");
+    expect(await renderAt(path)).toContain("assigned roles do not provide access to this page");
     fixture.systemRoles = [];
     fixture.assignedRoles = [{ id: 99, name: "Custom picking role", isSystem: false }];
     fixture.permissions = [grant];
-    expect(renderAt(path)).toContain("Picking surface");
+    expect(await renderAt(path)).toContain("Picking surface");
   });
-  it("denies non-live /packing even when a staff member has assigned roles and picking permissions", () => {
+  it("denies non-live /packing even when a staff member has assigned roles and picking permissions", async () => {
     fixture.assignedRoles = [{ id: 3, name: "Picker", isSystem: true }];
     fixture.systemRoles = ["picker", "admin"];
     fixture.permissions = ["picking:view", "picking:perform", "picking:complete"];
-    const html = renderAt("/packing");
+    const html = await renderAt("/packing");
     expect(html).not.toContain("Non-live packing surface");
     expect(html).toContain("assigned roles do not provide access to this page");
   });

@@ -65,6 +65,7 @@ import { createReturnsService } from "../modules/orders/runtime-services.api";
 import { createFulfillmentRouterService } from "../modules/orders/runtime-services.api";
 import { createSLAMonitorService } from "../modules/orders/runtime-services.api";
 import { ManualInventoryTransferService } from "../modules/inventory/application/manual-inventory-transfer.service";
+import { InterwarehouseTransferService } from "../modules/inventory/application/interwarehouse-transfer.service";
 import { SupplierReturnFollowupService } from "../modules/inventory/application/supplier-return-followup.service";
 import { createPickingService } from "../modules/orders/runtime-services.api";
 import { createPickCorrectionService } from "../modules/orders/runtime-services.api";
@@ -630,6 +631,17 @@ export function createServices(
       await inventoryCore.publishInventoryChange(transfer.productVariantId, "transfer");
     },
   }, () => new Date());
+  const interwarehouseTransfers = new InterwarehouseTransferService(db, inventoryCore, {
+    deliver: async event => {
+      await inventoryCore.publishInventoryChange(event.productVariantId, `interwarehouse-transfer:${event.eventType}`);
+      if (event.eventType === "dispatched") {
+        await replenishment.checkReplenForLocation(event.sourceLocationId, `interwarehouse-transfer:${event.transferId}`);
+      }
+      if (event.eventType === "received") {
+        await replenishment.checkReplenForLocation(event.destinationLocationId, `interwarehouse-transfer:${event.transferId}`);
+      }
+    },
+  }, () => new Date());
 
   builds.onInventoryChange((variantId, trigger) => {
     inventoryCore.triggerNotifyChange(variantId, trigger);
@@ -832,6 +844,7 @@ export function createServices(
     dropshipInventoryRuntimeAuthority,
     replenishment,
     inventoryTransfers,
+    interwarehouseTransfers,
     supplierReturnFollowups,
     picking,
     pickCorrections,

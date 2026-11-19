@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, beforeAll } from "vitest";
-import { readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { resolve, dirname } from "node:path";
 
@@ -19,6 +19,17 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../../../../..");
 
 function readSrc(relPath: string): string {
   return readFileSync(resolve(ROOT, relPath), "utf8");
+}
+
+function readShipStationSrc(): string {
+  const subDir = resolve(ROOT, "server/modules/oms/shipstation");
+  const subFiles = existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((f) => f.endsWith(".ts"))
+        .sort()
+        .map((f) => readFileSync(resolve(subDir, f), "utf8"))
+    : [];
+  return [readSrc("server/modules/oms/shipstation.service.ts"), ...subFiles].join("\n");
 }
 
 function sourceBetween(source: string, startMarker: string, endMarker: string): string {
@@ -77,7 +88,7 @@ describe("D-NOENGINE: migration adds engine columns", () => {
 // ─── pushShipment dual-writes ────────────────────────────────────────
 
 describe("D-NOENGINE: pushShipment writes engine columns", () => {
-  const ssSrc = readSrc("server/modules/oms/shipstation.service.ts");
+  const ssSrc = readShipStationSrc();
   const wmsShipmentsRepoSrc = readSrc("server/modules/wms/outbound-shipments-mutations.repository.ts");
 
   it("writes shipping_engine in the same UPDATE as shipstation_order_id", () => {
@@ -100,7 +111,7 @@ describe("D-NOENGINE: pushShipment writes engine columns", () => {
 // ─── Split/combined shipment INSERTs ─────────────────────────────────
 
 describe("D-NOENGINE: split/combined shipment creation includes engine columns", () => {
-  const ssSrc = readSrc("server/modules/oms/shipstation.service.ts");
+  const ssSrc = readShipStationSrc();
   const wmsShipmentsRepoSrc = readSrc("server/modules/wms/outbound-shipments-mutations.repository.ts");
 
   it("split shipment INSERT includes engine triple", () => {

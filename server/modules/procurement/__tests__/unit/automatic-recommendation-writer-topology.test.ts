@@ -1,9 +1,20 @@
-import { readFileSync } from "fs";
+import { existsSync, readdirSync, readFileSync } from "fs";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
 
 function source(relativePath: string): string {
   return readFileSync(join(process.cwd(), relativePath), "utf8");
+}
+
+function purchasingServiceSource(): string {
+  const subDir = join(process.cwd(), "server/modules/procurement/purchasing");
+  const subFiles = existsSync(subDir)
+    ? readdirSync(subDir)
+        .filter((name) => name.endsWith(".ts"))
+        .sort()
+        .map((name) => readFileSync(join(subDir, name), "utf8"))
+    : [];
+  return [source("server/modules/procurement/purchasing.service.ts"), ...subFiles].join("\n");
 }
 
 describe("automatic recommendation writer topology", () => {
@@ -21,7 +32,7 @@ describe("automatic recommendation writer topology", () => {
   });
 
   it("removes the legacy reorder writer from the purchasing service", () => {
-    const purchasing = source("server/modules/procurement/purchasing.service.ts");
+    const purchasing = purchasingServiceSource();
     expect(purchasing).not.toContain("createPOFromReorder");
   });
 });

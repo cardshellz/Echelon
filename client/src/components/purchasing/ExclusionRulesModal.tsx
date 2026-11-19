@@ -1,127 +1,72 @@
-import { useEffect, useState } from "react";
-import { PurchasePlanningPolicyEditor } from "./PurchasePlanningPolicyEditor";
+import React, { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Filter } from "lucide-react";
 import {
   DEFAULT_STALE_PO_THRESHOLDS,
-  STALE_PO_THRESHOLD_ROWS,
   validateCandidateScoreThresholds,
   validateStalePoThresholds,
   type AutoDraftStalePoThresholds,
 } from "@/features/purchasing/autoDraftSettingsValidation";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Trash2, Plus, Filter } from "lucide-react";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
-  DialogDescription,
 } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
-import { Badge } from "@/components/ui/badge";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
+import { PurchasePlanningPolicyEditor } from "./PurchasePlanningPolicyEditor";
+import { PurchasingAutomationGuardrailsTab } from "./planning-policy/PurchasingAutomationGuardrailsTab";
+import { PurchasingExclusionRulesTab } from "./planning-policy/PurchasingExclusionRulesTab";
+import { PurchasingForecastPolicyTab } from "./planning-policy/PurchasingForecastPolicyTab";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+  DEFAULT_FORECAST_POLICY,
+  PLANNING_POLICY_TABS,
+  mergeForecastPolicy,
+  thresholdInputDefaults,
+  validateForecastPolicyDraft,
+  type AutoDraftSettings,
+  type PlanningPolicyTab,
+  type PurchasingForecastPolicy,
+  type RulesData,
+} from "./planning-policy/planningPolicyTypes";
 
-interface ExclusionRule {
-  id: number;
-  field: string;
-  value: string;
-  matchCount: number;
-  createdAt: string;
-}
+export type { PlanningPolicyTab };
 
-interface RulesData {
-  rules: ExclusionRule[];
-  totalExcluded: number;
-}
-
-interface AutoDraftSettings {
-  autoDraftMode: "draft_po" | "review_only";
-  approvalPolicy: "high_confidence_only" | "high_confidence_and_strong_candidate";
-  includeOrderSoon: boolean;
-  skipOnOpenPo: boolean;
-  skipNoVendor: boolean;
-  candidateScoreStrongThreshold: number;
-  candidateScoreReviewThreshold: number;
-  rfqDraftAutomationMode: "manual" | "preferred_vendor";
-  rfqDraftMinimumConfidence: "high" | "medium";
-  rfqDraftRequireTrustedForecast: boolean;
-  rfqDraftMaximumLinesPerRun: number;
-  stalePoThresholds: AutoDraftStalePoThresholds;
-  forecastPolicy: PurchasingForecastPolicy;
-}
-
-interface PurchasingForecastPolicy {
-  method: "recent_order_velocity_v1" | "weighted_blend_v1";
-  shortWindowDays: number;
-  standardWindowDays: number;
-  longWindowDays: number;
-  seasonalEnabled: boolean;
-  seasonalWindowDays: number;
-  weights: { short: number; standard: number; long: number; seasonal: number };
-  forwardDemandEnabled: boolean;
-  forwardDemandHorizonDays: number;
-  forwardDemandConfidenceWeights: { high: number; medium: number; low: number };
-  automationMinimumOrderCount: number;
-  automationMinimumActiveDays: number;
-}
-
-const DEFAULT_FORECAST_POLICY: PurchasingForecastPolicy = {
-  method: "weighted_blend_v1",
-  shortWindowDays: 7,
-  standardWindowDays: 30,
-  longWindowDays: 90,
-  seasonalEnabled: true,
-  seasonalWindowDays: 30,
-  weights: { short: 30, standard: 35, long: 20, seasonal: 15 },
-  forwardDemandEnabled: true,
-  forwardDemandHorizonDays: 90,
-  forwardDemandConfidenceWeights: { high: 100, medium: 70, low: 40 },
-  automationMinimumOrderCount: 2,
-  automationMinimumActiveDays: 2,
-};
-
-const FIELD_LABELS: Record<string, string> = {
-  category: "Category",
-  brand: "Brand",
-  product_type: "Product Type",
-  sku_prefix: "SKU Prefix",
-  sku_exact: "SKU (exact)",
-  tag: "Tag",
-};
-
-function thresholdInputDefaults(): Record<keyof AutoDraftStalePoThresholds, string> {
-  return Object.fromEntries(
-    Object.entries(DEFAULT_STALE_PO_THRESHOLDS).map(([key, value]) => [key, String(value)]),
-  ) as Record<keyof AutoDraftStalePoThresholds, string>;
-}
-
-interface Props {
+export interface ExclusionRulesModalProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  initialTab?: PlanningPolicyTab;
 }
 
-export function ExclusionRulesModal({ open, onOpenChange }: Props) {
+export function ExclusionRulesModal({
+  open,
+  onOpenChange,
+  initialTab,
+}: ExclusionRulesModalProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const { hasPermission } = useAuth();
   const canAdjustPlanning = hasPermission("inventory", "adjust");
-  const [newField, setNewField] = useState("category");
-  const [newValue, setNewValue] = useState("");
+
+  const [activeTab, setActiveTab] = useState<PlanningPolicyTab>(initialTab ?? "all");
   const [candidateScoreStrongThreshold, setCandidateScoreStrongThreshold] = useState("80");
   const [candidateScoreReviewThreshold, setCandidateScoreReviewThreshold] = useState("60");
-  const [stalePoThresholdInputs, setStalePoThresholdInputs] = useState<Record<keyof AutoDraftStalePoThresholds, string>>(thresholdInputDefaults());
-  const [forecastPolicyDraft, setForecastPolicyDraft] = useState<PurchasingForecastPolicy>(DEFAULT_FORECAST_POLICY);
+  const [stalePoThresholdInputs, setStalePoThresholdInputs] = useState<
+    Record<keyof AutoDraftStalePoThresholds, string>
+  >(thresholdInputDefaults);
+  const [forecastPolicyDraft, setForecastPolicyDraft] =
+    useState<PurchasingForecastPolicy>(DEFAULT_FORECAST_POLICY);
 
-  const { data: rulesData, isLoading } = useQuery<RulesData>({
+  useEffect(() => {
+    if (open && initialTab) {
+      setActiveTab(initialTab);
+    }
+  }, [open, initialTab]);
+
+  const { data: rulesData, isLoading: isRulesLoading } = useQuery<RulesData>({
     queryKey: ["/api/purchasing/exclusion-rules"],
     enabled: open,
   });
@@ -131,62 +76,13 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
     enabled: open,
   });
 
-  const { data: fieldValues } = useQuery<{ field: string; values: string[] }>({
-    queryKey: ["/api/purchasing/exclusion-rules/field-values", newField],
-    queryFn: async () => {
-      const res = await fetch(`/api/purchasing/exclusion-rules/field-values?field=${newField}`);
-      if (!res.ok) return { field: newField, values: [] };
-      return res.json();
-    },
-    enabled: open,
-  });
-
-  const addRuleMutation = useMutation({
-    mutationFn: async ({ field, value }: { field: string; value: string }) => {
-      if (!canAdjustPlanning) throw new Error("Inventory adjustment permission is required to change exclusions.");
-      const res = await fetch("/api/purchasing/exclusion-rules", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ field, value }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => null);
-        if (res.status === 409) throw new Error("Rule already exists");
-        throw new Error(err?.error || "Failed to add rule");
-      }
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/exclusion-rules"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
-      setNewValue("");
-      toast({ title: "Rule added" });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Failed to add rule", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const deleteRuleMutation = useMutation({
-    mutationFn: async (id: number) => {
-      if (!canAdjustPlanning) throw new Error("Inventory adjustment permission is required to change exclusions.");
-      const res = await fetch(`/api/purchasing/exclusion-rules/${id}`, { method: "DELETE" });
-      if (!res.ok) throw new Error("Failed to delete rule");
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/exclusion-rules"] });
-      queryClient.invalidateQueries({ queryKey: ["/api/purchasing/dashboard"] });
-      toast({ title: "Rule deleted" });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Failed to delete rule", description: err.message, variant: "destructive" });
-    },
-  });
-
   const updateSettingsMutation = useMutation({
     mutationFn: async (updates: Partial<AutoDraftSettings>) => {
-      if (!canAdjustPlanning) throw new Error("Inventory adjustment permission is required to change automation settings.");
+      if (!canAdjustPlanning) {
+        throw new Error(
+          "Inventory adjustment permission is required to change automation settings.",
+        );
+      }
       const res = await fetch("/api/purchasing/auto-draft-settings", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
@@ -206,7 +102,11 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
       queryClient.invalidateQueries({ queryKey: ["/api/purchasing/auto-draft/stale-pos?limit=25"] });
     },
     onError: (err: Error) => {
-      toast({ title: "Failed to update settings", description: err.message, variant: "destructive" });
+      toast({
+        title: "Failed to update settings",
+        description: err.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -214,25 +114,17 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
     if (!settings) return;
     setCandidateScoreStrongThreshold(String(settings.candidateScoreStrongThreshold ?? 80));
     setCandidateScoreReviewThreshold(String(settings.candidateScoreReviewThreshold ?? 60));
-    const stalePoThresholds = { ...DEFAULT_STALE_PO_THRESHOLDS, ...(settings.stalePoThresholds ?? {}) };
-    setStalePoThresholdInputs(Object.fromEntries(
-      Object.entries(stalePoThresholds).map(([key, value]) => [key, String(value)]),
-    ) as Record<keyof AutoDraftStalePoThresholds, string>);
-    setForecastPolicyDraft({
-      ...DEFAULT_FORECAST_POLICY,
-      ...(settings.forecastPolicy ?? {}),
-      weights: { ...DEFAULT_FORECAST_POLICY.weights, ...(settings.forecastPolicy?.weights ?? {}) },
-      forwardDemandConfidenceWeights: {
-        ...DEFAULT_FORECAST_POLICY.forwardDemandConfidenceWeights,
-        ...(settings.forecastPolicy?.forwardDemandConfidenceWeights ?? {}),
-      },
-    });
+    const stalePoThresholds = {
+      ...DEFAULT_STALE_PO_THRESHOLDS,
+      ...(settings.stalePoThresholds ?? {}),
+    };
+    setStalePoThresholdInputs(
+      Object.fromEntries(
+        Object.entries(stalePoThresholds).map(([key, value]) => [key, String(value)]),
+      ) as Record<keyof AutoDraftStalePoThresholds, string>,
+    );
+    setForecastPolicyDraft(mergeForecastPolicy(settings.forecastPolicy));
   }, [settings]);
-
-  const handleAddRule = () => {
-    if (!newValue.trim()) return;
-    addRuleMutation.mutate({ field: newField, value: newValue.trim() });
-  };
 
   const saveCandidateThresholds = () => {
     const result = validateCandidateScoreThresholds(
@@ -267,23 +159,17 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
       });
       return;
     }
-    const parsed = result.value;
-    updateSettingsMutation.mutate({ stalePoThresholds: parsed });
+    updateSettingsMutation.mutate({ stalePoThresholds: result.value });
   };
 
   const saveForecastPolicy = () => {
-    const weightTotal = Object.values(forecastPolicyDraft.weights).reduce((sum, value) => sum + value, 0);
-    if (weightTotal !== 100) {
-      toast({ title: "Invalid forecast weights", description: "Short, standard, long, and seasonal weights must total 100.", variant: "destructive" });
-      return;
-    }
-    if (!(forecastPolicyDraft.shortWindowDays <= forecastPolicyDraft.standardWindowDays && forecastPolicyDraft.standardWindowDays <= forecastPolicyDraft.longWindowDays)) {
-      toast({ title: "Invalid forecast windows", description: "Window lengths must run from short to standard to long.", variant: "destructive" });
-      return;
-    }
-    const confidence = forecastPolicyDraft.forwardDemandConfidenceWeights;
-    if (!(confidence.high >= confidence.medium && confidence.medium >= confidence.low)) {
-      toast({ title: "Invalid confidence weights", description: "High must be at least medium, and medium at least low.", variant: "destructive" });
+    const validation = validateForecastPolicyDraft(forecastPolicyDraft);
+    if (!validation.ok) {
+      toast({
+        title: validation.error.title,
+        description: validation.error.description,
+        variant: "destructive",
+      });
       return;
     }
     updateSettingsMutation.mutate({ forecastPolicy: forecastPolicyDraft });
@@ -291,527 +177,86 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[760px] max-h-[88vh] overflow-y-auto">
-        <DialogHeader>
+      <DialogContent className="max-w-[780px] max-h-[88vh] flex flex-col overflow-hidden">
+        <DialogHeader className="shrink-0">
           <DialogTitle className="flex items-center gap-2">
             <Filter className="h-4 w-4" />
             Purchasing Planning Policy
           </DialogTitle>
           <DialogDescription>
-            Configure demand forecasting, future-demand overlays, automation guardrails, and reorder exclusions.
+            Configure stock targets, reorder exclusions, demand forecasting, and automation
+            guardrails.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-5 py-2">
-          <PurchasePlanningPolicyEditor />
-          {!canAdjustPlanning && <p className="text-sm text-muted-foreground">Inventory adjustment permission is required to change exclusions and automation settings.</p>}
-          <fieldset disabled={!canAdjustPlanning} className="space-y-5">
-          {/* Active Rules */}
-          <div>
-            <div className="flex items-center gap-2 mb-2">
-              <span className="text-xs font-semibold">Active Rules</span>
-              {rulesData && (
-                <Badge variant="outline" className="text-[10px] bg-muted text-muted-foreground">
-                  {rulesData.rules.length} rules · {rulesData.totalExcluded} products excluded
-                </Badge>
-              )}
-            </div>
-            <div className="space-y-1.5">
-              {rulesData?.rules.map((rule) => (
-                <div key={rule.id} className="flex items-center gap-2 p-2 bg-muted/50 border rounded-md text-sm">
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground w-[80px] flex-shrink-0">
-                    {FIELD_LABELS[rule.field] || rule.field}
-                  </span>
-                  <span className="flex-1 text-sm">{rule.value}</span>
-                  <span className="text-[11px] text-muted-foreground flex-shrink-0">{rule.matchCount} products</span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-6 w-6 p-0 text-muted-foreground hover:text-red-500 hover:bg-red-50"
-                    aria-label={`Delete exclusion rule ${rule.value}`}
-                    onClick={() => deleteRuleMutation.mutate(rule.id)}
-                    disabled={deleteRuleMutation.isPending}
-                  >
-                    <Trash2 className="h-3 w-3" />
-                  </Button>
-                </div>
-              ))}
-              {rulesData?.rules.length === 0 && (
-                <div className="text-xs text-muted-foreground text-center py-3">No exclusion rules yet</div>
-              )}
-            </div>
-          </div>
+        <Tabs
+          defaultValue="all"
+          value={activeTab}
+          onValueChange={(value) => setActiveTab(value as PlanningPolicyTab)}
+          className="flex min-h-0 flex-1 flex-col"
+        >
+          <TabsList
+            aria-label="Purchasing planning policy sections"
+            className="grid w-full grid-cols-5 shrink-0"
+          >
+            {PLANNING_POLICY_TABS.map((tab) => (
+              <TabsTrigger key={tab.value} value={tab.value} className="text-xs">
+                {tab.label}
+              </TabsTrigger>
+            ))}
+          </TabsList>
 
-          <div className="border-t" />
-
-          {/* Add Rule */}
-          <div>
-            <span className="text-xs font-semibold block mb-2">Add Rule</span>
-            <div className="bg-muted/50 border rounded-md p-3 space-y-2">
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Match Field</label>
-                  <Select value={newField} onValueChange={(v) => { setNewField(v); setNewValue(""); }}>
-                    <SelectTrigger className="h-8 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {Object.entries(FIELD_LABELS).map(([val, label]) => (
-                        <SelectItem key={val} value={val}>{label}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Value</label>
-                  <Select value={newValue} onValueChange={setNewValue}>
-                    <SelectTrigger className="h-8 text-xs">
-                      <SelectValue placeholder={`Select ${FIELD_LABELS[newField] || newField}...`} />
-                    </SelectTrigger>
-                    <SelectContent className="max-h-[200px]">
-                      {(fieldValues?.values || []).map((v) => (
-                        <SelectItem key={v} value={v}>{v}</SelectItem>
-                      ))}
-                      {(!fieldValues?.values || fieldValues.values.length === 0) && (
-                        <div className="px-2 py-1.5 text-xs text-muted-foreground">No values found</div>
-                      )}
-                    </SelectContent>
-                  </Select>
-                </div>
+          <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+            {(activeTab === "all" || activeTab === "stock-targets") && (
+              <div className={activeTab === "all" ? "pb-5" : undefined}>
+                <PurchasePlanningPolicyEditor />
               </div>
-              <div className="flex justify-end gap-2">
-                <Button size="sm" className="h-7 text-xs" onClick={handleAddRule} disabled={!newValue.trim() || addRuleMutation.isPending}>
-                  <Plus className="h-3 w-3 mr-1" />
-                  Add Rule
-                </Button>
-              </div>
-            </div>
-          </div>
+            )}
 
-          <div className="border-t" />
-
-          {/* Per-Product Note */}
-          <div>
-            <span className="text-xs font-semibold block mb-1">Per-Product Overrides</span>
-            <p className="text-xs text-muted-foreground leading-relaxed">
-              Individual products can be excluded from the Reorder Analysis table using the{" "}
-              <strong className="text-foreground">⋯ menu → Exclude from reorder</strong> on any row.
-              Per-product exclusions are tracked separately and survive rule changes.
-            </p>
-          </div>
-
-          <div className="border-t" />
-
-          <div className="space-y-3">
-            <div>
-              <span className="text-xs font-semibold block">Demand Forecast Policy</span>
-              <p className="text-[11px] text-muted-foreground mt-1">
-                These settings drive the required-piece quantity shown in the RFQ queue. Every RFQ stores the applied calculation as immutable evidence.
-              </p>
-            </div>
-            <div className="rounded-md border bg-muted/40 p-3 space-y-4">
-              <div>
-                <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Forecast method</label>
-                <Select
-                  value={forecastPolicyDraft.method}
-                  onValueChange={(method) => setForecastPolicyDraft((current) => ({
-                    ...current,
-                    method: method as PurchasingForecastPolicy["method"],
-                  }))}
-                >
-                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="weighted_blend_v1">Weighted multi-window forecast</SelectItem>
-                    <SelectItem value="recent_order_velocity_v1">Standard-window velocity only</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-
-              <div>
-                <div className="text-xs font-medium mb-2">Demand windows (days)</div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {([
-                    ["Short", "shortWindowDays", 1, 60],
-                    ["Standard", "standardWindowDays", 7, 180],
-                    ["Long", "longWindowDays", 30, 730],
-                    ["Last-year period", "seasonalWindowDays", 7, 120],
-                  ] as const).map(([label, key, min, max]) => (
-                    <div key={key}>
-                      <label className="text-[10px] text-muted-foreground block mb-1">{label}</label>
-                      <Input
-                        type="number"
-                        min={min}
-                        max={max}
-                        step={1}
-                        value={forecastPolicyDraft[key]}
-                        onChange={(event) => setForecastPolicyDraft((current) => ({
-                          ...current,
-                          [key]: Number(event.target.value),
-                        }))}
-                        className="h-8 text-xs"
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div>
-                <div className="flex items-center justify-between gap-4 mb-2">
-                  <div>
-                    <div className="text-xs font-medium">Same-period-last-year seasonality</div>
-                    <p className="text-[10px] text-muted-foreground">When history is unavailable, its weight is automatically redistributed.</p>
-                  </div>
-                  <Switch
-                    checked={forecastPolicyDraft.seasonalEnabled}
-                    onCheckedChange={(seasonalEnabled) => setForecastPolicyDraft((current) => ({ ...current, seasonalEnabled }))}
-                  />
-                </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  {(Object.keys(forecastPolicyDraft.weights) as Array<keyof PurchasingForecastPolicy["weights"]>).map((key) => (
-                    <div key={key}>
-                      <label className="text-[10px] capitalize text-muted-foreground block mb-1">{key} weight %</label>
-                      <Input
-                        type="number"
-                        min={0}
-                        max={100}
-                        step={1}
-                        value={forecastPolicyDraft.weights[key]}
-                        onChange={(event) => setForecastPolicyDraft((current) => ({
-                          ...current,
-                          weights: { ...current.weights, [key]: Number(event.target.value) },
-                        }))}
-                        className="h-8 text-xs"
-                      />
-                    </div>
-                  ))}
-                </div>
-                <p className="text-[10px] text-muted-foreground mt-1">
-                  Total: {Object.values(forecastPolicyDraft.weights).reduce((sum, value) => sum + value, 0)}%
-                </p>
-              </div>
-
-              <div className="border-t pt-3 space-y-2">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <div className="text-xs font-medium">Future-demand overlays</div>
-                    <p className="text-[10px] text-muted-foreground">Adds planned drops, preorders, promotions, wholesale commitments, seasonal plans, and manual forecasts.</p>
-                  </div>
-                  <Switch
-                    checked={forecastPolicyDraft.forwardDemandEnabled}
-                    onCheckedChange={(forwardDemandEnabled) => setForecastPolicyDraft((current) => ({ ...current, forwardDemandEnabled }))}
-                  />
-                </div>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                  <div>
-                    <label className="text-[10px] text-muted-foreground block mb-1">Horizon days</label>
-                    <Input
-                      type="number" min={1} max={365} step={1}
-                      value={forecastPolicyDraft.forwardDemandHorizonDays}
-                      onChange={(event) => setForecastPolicyDraft((current) => ({ ...current, forwardDemandHorizonDays: Number(event.target.value) }))}
-                      className="h-8 text-xs"
-                    />
-                  </div>
-                  {(Object.keys(forecastPolicyDraft.forwardDemandConfidenceWeights) as Array<keyof PurchasingForecastPolicy["forwardDemandConfidenceWeights"]>).map((key) => (
-                    <div key={key}>
-                      <label className="text-[10px] capitalize text-muted-foreground block mb-1">{key} confidence %</label>
-                      <Input
-                        type="number" min={0} max={100} step={1}
-                        value={forecastPolicyDraft.forwardDemandConfidenceWeights[key]}
-                        onChange={(event) => setForecastPolicyDraft((current) => ({
-                          ...current,
-                          forwardDemandConfidenceWeights: {
-                            ...current.forwardDemandConfidenceWeights,
-                            [key]: Number(event.target.value),
-                          },
-                        }))}
-                        className="h-8 text-xs"
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <div className="border-t pt-3">
-                <div className="text-xs font-medium mb-2">Automation sample guardrail</div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[10px] text-muted-foreground block mb-1">Minimum orders</label>
-                    <Input
-                      type="number" min={1} max={100} step={1}
-                      value={forecastPolicyDraft.automationMinimumOrderCount}
-                      onChange={(event) => setForecastPolicyDraft((current) => ({ ...current, automationMinimumOrderCount: Number(event.target.value) }))}
-                      className="h-8 text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] text-muted-foreground block mb-1">Minimum active demand days</label>
-                    <Input
-                      type="number" min={1} max={100} step={1}
-                      value={forecastPolicyDraft.automationMinimumActiveDays}
-                      onChange={(event) => setForecastPolicyDraft((current) => ({ ...current, automationMinimumActiveDays: Number(event.target.value) }))}
-                      className="h-8 text-xs"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex justify-end">
-                <Button size="sm" onClick={saveForecastPolicy} disabled={updateSettingsMutation.isPending}>
-                  Save forecast policy
-                </Button>
-              </div>
-            </div>
-          </div>
-
-          <div className="border-t" />
-
-          <div className="space-y-3">
-            <div>
-              <span className="text-xs font-semibold block">RFQ Draft Automation</span>
-              <p className="text-[11px] text-muted-foreground mt-1">
-                Scheduled recommendation runs can prepare price-free RFQ drafts for trusted requirements with an existing preferred supplier. Drafts are never sent automatically.
-              </p>
-            </div>
-            <div className="grid grid-cols-1 gap-3 rounded-md border bg-muted/40 p-3 sm:grid-cols-2">
-              <div>
-                <label className="text-[10px] text-muted-foreground block mb-1">Draft mode</label>
-                <Select
-                  value={settings?.rfqDraftAutomationMode ?? "manual"}
-                  onValueChange={(value) => updateSettingsMutation.mutate({ rfqDraftAutomationMode: value as AutoDraftSettings["rfqDraftAutomationMode"] })}
-                >
-                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="manual">Manual selection only</SelectItem>
-                    <SelectItem value="preferred_vendor">Draft for preferred suppliers</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <label className="text-[10px] text-muted-foreground block mb-1">Minimum demand confidence</label>
-                <Select
-                  value={settings?.rfqDraftMinimumConfidence ?? "high"}
-                  onValueChange={(value) => updateSettingsMutation.mutate({ rfqDraftMinimumConfidence: value as AutoDraftSettings["rfqDraftMinimumConfidence"] })}
-                >
-                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="high">High only</SelectItem>
-                    <SelectItem value="medium">Medium or high</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <label className="text-[10px] text-muted-foreground block mb-1">Maximum lines per run</label>
-                <Select
-                  value={String(settings?.rfqDraftMaximumLinesPerRun ?? 100)}
-                  onValueChange={(value) => updateSettingsMutation.mutate({ rfqDraftMaximumLinesPerRun: Number(value) })}
-                >
-                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {[25, 50, 100, 250, 500].map((value) => <SelectItem key={value} value={String(value)}>{value} lines</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex items-center justify-between gap-4 rounded-md border bg-background px-3 py-2">
-                <div>
-                  <div className="text-xs font-medium">Require trusted forecast</div>
-                  <p className="text-[10px] text-muted-foreground">Hold watch/review demand signals for an operator.</p>
-                </div>
-                <Switch
-                  checked={settings?.rfqDraftRequireTrustedForecast ?? true}
-                  onCheckedChange={(value) => updateSettingsMutation.mutate({ rfqDraftRequireTrustedForecast: value })}
+            {(activeTab === "all" || activeTab === "exclusions") && (
+              <div className={activeTab === "all" ? "border-t pt-5 pb-5" : undefined}>
+                <PurchasingExclusionRulesTab
+                  open={open}
+                  canAdjustPlanning={canAdjustPlanning}
+                  rulesData={rulesData}
+                  isLoading={isRulesLoading}
                 />
               </div>
-            </div>
-          </div>
+            )}
 
-          <div className="border-t" />
+            {(activeTab === "all" || activeTab === "forecasting") && (
+              <div className={activeTab === "all" ? "border-t pt-5 pb-5" : undefined}>
+                <PurchasingForecastPolicyTab
+                  canAdjustPlanning={canAdjustPlanning}
+                  draft={forecastPolicyDraft}
+                  onDraftChange={setForecastPolicyDraft}
+                  onSave={saveForecastPolicy}
+                  isSaving={updateSettingsMutation.isPending}
+                />
+              </div>
+            )}
 
-          {/* Downstream priced-PO automation */}
-          <div>
-            <span className="text-xs font-semibold block">Downstream Priced-PO Automation</span>
-            <p className="text-[11px] text-muted-foreground mt-1 mb-3">
-              RFQ requirements are always calculated without price. These controls apply only after a supplier and usable quote exist.
-            </p>
-            <div className="space-y-3">
-              <div>
-                <h4 className="text-sm font-medium mb-1">Run mode</h4>
-                <p className="text-[11px] text-muted-foreground mb-2">
-                  Create draft POs only for priced recommendations that pass the quality gate. Recommendation only records an auditable run without PO changes.
-                </p>
-                <Select
-                  value={settings?.autoDraftMode ?? "draft_po"}
-                  onValueChange={(v) => updateSettingsMutation.mutate({ autoDraftMode: v as AutoDraftSettings["autoDraftMode"] })}
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="draft_po">Create draft POs</SelectItem>
-                    <SelectItem value="review_only">Recommendation only</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="rounded-md border bg-muted/40 p-3">
-                <h4 className="text-sm font-medium mb-1">Approval policy</h4>
-                <p className="text-[11px] text-muted-foreground mb-2">
-                  Controls which actionable recommendations are allowed to create or update draft POs.
-                </p>
-                <Select
-                  value={settings?.approvalPolicy ?? "high_confidence_only"}
-                  onValueChange={(value) => updateSettingsMutation.mutate({
-                    approvalPolicy: value as AutoDraftSettings["approvalPolicy"],
-                  })}
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="high_confidence_only">High confidence only</SelectItem>
-                    <SelectItem value="high_confidence_and_strong_candidate">
-                      High confidence + strong candidate
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
-                <p className="text-[11px] text-muted-foreground mt-2">
-                  {settings?.approvalPolicy === "high_confidence_and_strong_candidate"
-                    ? "Draft POs require the high-confidence quality gate and the strong candidate score band."
-                    : "Draft POs require the high-confidence quality gate. Candidate score stays review-only."}
-                </p>
-              </div>
-              <div className="rounded-md border bg-muted/40 p-3 space-y-3">
-                <div>
-                  <h4 className="text-sm font-medium">Candidate score thresholds</h4>
-                  <p className="text-[11px] text-muted-foreground mt-1">
-                    Controls strong and review candidate bands. The stricter approval policy also uses the strong band.
-                  </p>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Review candidate at</label>
-                    <Input
-                      type="number"
-                      min={0}
-                      max={100}
-                      step={1}
-                      value={candidateScoreReviewThreshold}
-                      onChange={(event) => setCandidateScoreReviewThreshold(event.target.value)}
-                      className="h-8 text-xs"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[11px] font-semibold text-muted-foreground block mb-1">Strong candidate at</label>
-                    <Input
-                      type="number"
-                      min={0}
-                      max={100}
-                      step={1}
-                      value={candidateScoreStrongThreshold}
-                      onChange={(event) => setCandidateScoreStrongThreshold(event.target.value)}
-                      className="h-8 text-xs"
-                    />
-                  </div>
-                </div>
-                <div className="flex justify-end">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 text-xs"
-                    onClick={saveCandidateThresholds}
-                    disabled={updateSettingsMutation.isPending}
-                  >
-                    Save thresholds
-                  </Button>
-                </div>
-              </div>
-              <div className="rounded-md border bg-muted/40 p-3 space-y-3">
-                <div>
-                  <h4 className="text-sm font-medium">Stale PO aging thresholds</h4>
-                  <p className="text-[11px] text-muted-foreground mt-1">
-                    Controls when auto-draft POs appear in stale aging diagnostics. Values are days in the current PO stage.
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <div className="grid grid-cols-[1fr_74px_74px] gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    <span>Stage</span>
-                    <span>Warn</span>
-                    <span>Critical</span>
-                  </div>
-                  {STALE_PO_THRESHOLD_ROWS.map((row) => (
-                    <div key={row.label} className="grid grid-cols-[1fr_74px_74px] gap-2 items-center">
-                      <span className="text-xs font-medium">{row.label}</span>
-                      <Input
-                        type="number"
-                        min={0}
-                        max={365}
-                        step={1}
-                        value={stalePoThresholdInputs[row.warningKey]}
-                        onChange={(event) => setStalePoThresholdInputs((current) => ({
-                          ...current,
-                          [row.warningKey]: event.target.value,
-                        }))}
-                        className="h-8 text-xs"
-                      />
-                      <Input
-                        type="number"
-                        min={0}
-                        max={365}
-                        step={1}
-                        value={stalePoThresholdInputs[row.criticalKey]}
-                        onChange={(event) => setStalePoThresholdInputs((current) => ({
-                          ...current,
-                          [row.criticalKey]: event.target.value,
-                        }))}
-                        className="h-8 text-xs"
-                      />
-                    </div>
-                  ))}
-                </div>
-                <div className="flex justify-end">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="h-7 text-xs"
-                    onClick={saveStalePoThresholds}
-                    disabled={updateSettingsMutation.isPending}
-                  >
-                    Save aging thresholds
-                  </Button>
-                </div>
-              </div>
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <h4 className="text-sm font-medium">Include "Order Soon" items in auto-draft</h4>
-                  <p className="text-[11px] text-muted-foreground mt-0.5">Default: only Order Now and Stockout. Enable to also draft Order Soon items.</p>
-                </div>
-                <Switch
-                  checked={settings?.includeOrderSoon ?? false}
-                  onCheckedChange={(v) => updateSettingsMutation.mutate({ includeOrderSoon: v })}
+            {(activeTab === "all" || activeTab === "automation") && (
+              <div className={activeTab === "all" ? "border-t pt-5" : undefined}>
+                <PurchasingAutomationGuardrailsTab
+                  canAdjustPlanning={canAdjustPlanning}
+                  settings={settings}
+                  candidateScoreStrongThreshold={candidateScoreStrongThreshold}
+                  onCandidateScoreStrongThresholdChange={setCandidateScoreStrongThreshold}
+                  candidateScoreReviewThreshold={candidateScoreReviewThreshold}
+                  onCandidateScoreReviewThresholdChange={setCandidateScoreReviewThreshold}
+                  stalePoThresholdInputs={stalePoThresholdInputs}
+                  onStalePoThresholdInputsChange={setStalePoThresholdInputs}
+                  onUpdateSettings={(updates) => updateSettingsMutation.mutate(updates)}
+                  onSaveCandidateThresholds={saveCandidateThresholds}
+                  onSaveStalePoThresholds={saveStalePoThresholds}
+                  isSaving={updateSettingsMutation.isPending}
+                  onOpenChange={onOpenChange}
                 />
               </div>
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <h4 className="text-sm font-medium">Skip items already on an open PO</h4>
-                  <p className="text-[11px] text-muted-foreground mt-0.5">Recommended on. Prevents duplicate orders when a PO is already sent/acknowledged.</p>
-                </div>
-                <Switch
-                  checked={settings?.skipOnOpenPo ?? true}
-                  onCheckedChange={(v) => updateSettingsMutation.mutate({ skipOnOpenPo: v })}
-                />
-              </div>
-              <div className="flex items-center justify-between gap-4">
-                <div>
-                  <h4 className="text-sm font-medium">Skip items with no preferred vendor</h4>
-                  <p className="text-[11px] text-muted-foreground mt-0.5">When off, unassigned items go to a catch-all "Unassigned" draft PO instead of being skipped.</p>
-                </div>
-                <Switch
-                  checked={settings?.skipNoVendor ?? true}
-                  onCheckedChange={(v) => updateSettingsMutation.mutate({ skipNoVendor: v })}
-                />
-              </div>
-            </div>
+            )}
           </div>
-          </fieldset>
-        </div>
+        </Tabs>
       </DialogContent>
     </Dialog>
   );

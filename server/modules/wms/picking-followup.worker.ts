@@ -30,6 +30,7 @@ export function startPickingFollowupWorker(
     recoverPendingPickingCommands(): Promise<void>;
     recoverReplenishmentFollowups(): Promise<void>;
     recoverInventoryTransfers(): Promise<void>;
+    recoverInterwarehouseTransfers(): Promise<void>;
     recoverSupplierReturns(): Promise<void>;
   },
   options?: { operationTimeoutMs?: number },
@@ -45,6 +46,7 @@ export function startPickingFollowupWorker(
         "recoverPendingPickingCommands",
         "recoverReplenishmentFollowups",
         "recoverInventoryTransfers",
+        "recoverInterwarehouseTransfers",
         "recoverSupplierReturns",
       ] as const) {
         try {

@@ -15,6 +15,7 @@ import type { MarketplaceSyncNoticeKind } from "./marketplace-sync-decision";
 export const MARKETPLACE_SYNC_NOTICE_TITLES: Readonly<Record<MarketplaceSyncNoticeKind, string>> = {
   price_below_cost: "An eBay price is below your Card Shellz cost",
   policy_incompatible: "Card Shellz can't ship under an eBay shipping policy",
+  policy_fixed: "Your eBay shipping policy works with Card Shellz again",
   sku_changed: "An eBay custom label changed",
   offer_missing: "We can't find an eBay listing",
   variation_unsupported: "An eBay listing changed to a kind Card Shellz can't update",
@@ -57,13 +58,19 @@ const NO_LINKS: MarketplaceSyncNoticeLinks = { listingSettingsUrl: null };
 const MAX_LINE_ITEM_LABEL = 120;
 /** A policy notice names at most this many of the policy's listings, then "and N more" (the payload keeps the total). */
 export const MARKETPLACE_POLICY_NOTICE_LISTINGS_SHOWN = 5;
-/** At most this many of Card Shellz's shipping services are named as examples ("such as ..."). */
+/** At most this many of Card Shellz's shipping services are named ("by USPS Ground Advantage, UPS Ground or FedEx Ground"). */
 const SUPPORTED_SERVICES_NAMED = 3;
 const MAX_POLICY_NAME = 100;
 const MAX_SERVICE_NAME = 60;
 /** eBay shipping service codes (e.g. USPSPriority) are letters, digits and underscores; anything else is not echoed. */
 const EBAY_SERVICE_CODE_PATTERN = /^[A-Za-z0-9_]{1,60}$/;
 const UNSUPPORTED_SERVICE_PREFIX = "shipping_service_unsupported:";
+/**
+ * How soon the sweep checks the policy again (domain/marketplace-sync-sweep.ts
+ * MARKETPLACE_SYNC_INTERVAL_MS, 15 minutes by default; the worker's interval
+ * can be configured and a store checks at most 20 policies a tick, hence "usually").
+ */
+const RECHECK_WORDS = "Card Shellz checks the policy again, usually within about 15 minutes. You don't need to do anything else.";
 
 /** One listing a policy notice names: its eBay item number, title (product and size) and SKU. */
 export interface MarketplacePolicyNoticeListing {
@@ -74,39 +81,87 @@ export interface MarketplacePolicyNoticeListing {
 
 /** The facts a policy reason's words may use, from the notice payload. */
 interface PolicyReasonFacts {
-  /** "such as USPS Ground Advantage or UPS Ground", or "" when Card Shellz's services are unknown. */
-  suchAs: string;
+  /** The store's own shipping services (capability), at most SUPPORTED_SERVICES_NAMED; empty when unknown. */
+  services: string[];
   handlingDays: number | null;
 }
 
 /**
- * // PROPOSED (sync-back): why a shipping policy cannot be served, by the
- * policy guard's issue code (domain/ebay-fulfillment-policy-compatibility.ts):
- * what the policy does, then what to change. Services are only ever named
- * from the store's own capability (the payload's supportedServiceNames).
+ * One reason, in an eBay seller's terms: `problem` finishes "Your eBay
+ * shipping policy "X" ..."; `why` says what Card Shellz does instead; `fix`
+ * is the click in the policy's eBay page, or null when there is nothing for
+ * the vendor to change (Card Shellz's side).
  */
-const POLICY_REASON_WORDS: Readonly<Record<string, (facts: PolicyReasonFacts) => string>> = {
-  domestic_shipping_service_required: ({ suchAs }) =>
-    `It has no US shipping service. Add a standard US service${suchAs}, or pick a different policy.`,
-  international_direct_shipping_unsupported: () =>
-    "It offers international shipping, and Card Shellz ships only within the US. Remove the international shipping services from it.",
-  local_pickup_unsupported: () => "It offers local pickup, which Card Shellz can't do. Turn off local pickup in it.",
-  pickup_drop_off_unsupported: () => "It offers pickup or drop-off, which Card Shellz can't do. Turn off pickup and drop-off in it.",
-  freight_shipping_unsupported: ({ suchAs }) =>
-    `It uses freight shipping, which Card Shellz can't do. Use a standard package service instead${suchAs}.`,
-  handling_time_too_short: ({ handlingDays }) =>
-    `Its handling time is shorter than Card Shellz needs. ${handlingDaysStep(handlingDays, "Set it to")}`,
-  handling_time_missing: ({ handlingDays }) => `It has no handling time. ${handlingDaysStep(handlingDays, "Set one of")}`,
-  handling_time_unit_unsupported: ({ handlingDays }) =>
-    `Its handling time isn't set in business days. ${handlingDaysStep(handlingDays, "Set it in business days, to")}`,
-  shipping_option_type_unsupported: () =>
-    "It has a kind of shipping option Card Shellz doesn't offer. Keep only US (domestic) shipping options in it.",
-  marketplace_missing: () => "eBay didn't say which eBay site it is for. Use a policy made for the eBay site your store sells on.",
-  marketplace_mismatch: () => "It is for a different eBay site than your store. Use a policy made for the eBay site your store sells on.",
-  // Card Shellz's side, not the vendor's: the words say so rather than ask for a change that would not help.
-  destination_coverage_incomplete: () =>
-    "Card Shellz couldn't confirm every US place it ships to, so it couldn't check this policy. This part is on Card Shellz's side, "
-    + "and it checks again on its own.",
+interface PolicyReasonWords { problem: string; why: string; fix: string | null }
+
+/**
+ * // PROPOSED (sync-back): every issue the policy guard can raise
+ * (domain/ebay-fulfillment-policy-compatibility.ts), worded for a seller.
+ * Services are only ever named from the store's own capability (the payload's
+ * supportedServiceNames); eBay's on-page labels are named in words, never as codes.
+ */
+const POLICY_REASON_WORDS: Readonly<Record<string, (facts: PolicyReasonFacts) => PolicyReasonWords>> = {
+  domestic_shipping_service_required: ({ services }) => ({
+    problem: "doesn't offer any shipping to buyers in the US",
+    why: `Card Shellz ships every order from the US ${byServices(services)}`,
+    fix: `Under Domestic shipping, add a service${forExample(services)}.`,
+  }),
+  international_direct_shipping_unsupported: () => ({
+    problem: "offers shipping to buyers outside the US",
+    why: "Card Shellz only ships to addresses in the US",
+    fix: "Under International shipping, remove every international service.",
+  }),
+  local_pickup_unsupported: () => ({
+    problem: "offers local pickup",
+    why: "Card Shellz ships every order from its warehouse, so a buyer can't pick it up in person",
+    fix: "Turn off local pickup.",
+  }),
+  pickup_drop_off_unsupported: () => ({
+    problem: "offers pickup or drop-off at a store",
+    why: "Card Shellz ships every order from its warehouse and can't hand items over at a store",
+    fix: "Turn off the pickup and drop-off option.",
+  }),
+  freight_shipping_unsupported: ({ services }) => ({
+    problem: "uses freight shipping",
+    why: `Card Shellz ships orders as packages ${byServices(services)}, not by freight`,
+    fix: `Under Domestic shipping, replace freight with a package service${forExample(services)}.`,
+  }),
+  handling_time_too_short: ({ handlingDays }) => ({
+    problem: "promises to ship faster than Card Shellz can",
+    why: `Card Shellz needs ${handlingDaysWords(handlingDays)} to get an order out`,
+    fix: `Set Handling time to ${handlingDaysWords(handlingDays)} or more.`,
+  }),
+  handling_time_missing: ({ handlingDays }) => ({
+    problem: "doesn't have a handling time",
+    why: `Card Shellz needs ${handlingDaysWords(handlingDays)} to get an order out`,
+    fix: `Set Handling time to ${handlingDaysWords(handlingDays)} or more.`,
+  }),
+  handling_time_unit_unsupported: ({ handlingDays }) => ({
+    problem: "sets its handling time in something other than business days",
+    why: `Card Shellz counts handling time in business days and needs ${handlingDaysWords(handlingDays)}`,
+    fix: `Set Handling time in business days, ${handlingDaysWords(handlingDays)} or more.`,
+  }),
+  shipping_option_type_unsupported: () => ({
+    problem: "has a kind of shipping option Card Shellz doesn't offer",
+    why: "Card Shellz only ships with US (domestic) shipping services",
+    fix: "Keep only Domestic shipping services in the policy.",
+  }),
+  marketplace_missing: () => ({
+    problem: "doesn't say which eBay site it's for",
+    why: "Card Shellz can only check a policy made for the eBay site your store sells on",
+    fix: "Use a shipping policy made for the same eBay site as your store.",
+  }),
+  marketplace_mismatch: () => ({
+    problem: "is for a different eBay site than the one your store sells on",
+    why: "Card Shellz can only ship under a policy made for your store's eBay site",
+    fix: "Use a shipping policy made for the same eBay site as your store.",
+  }),
+  // Card Shellz's side, not the vendor's: no change is asked for.
+  destination_coverage_incomplete: () => ({
+    problem: "couldn't be checked",
+    why: "Card Shellz's own list of the US places it ships to is incomplete right now. This part is on Card Shellz's side",
+    fix: null,
+  }),
 };
 
 /** The words of one notice row. Unknown or missing facts fall back to plain words, never to a code. */
@@ -123,6 +178,8 @@ export function describeMarketplaceSyncNotice(kind: MarketplaceSyncNoticeKind, p
     }
     case "policy_incompatible":
       return describePolicyIncompatible(payload, links);
+    case "policy_fixed":
+      return describePolicyFixed(payload);
     case "sku_changed": {
       const ours = textOr(payload.ours, "the Card Shellz custom label");
       return `The custom label of ${item} on eBay changed from ${ours} to ${textOr(payload.theirs, "another one")}. Card Shellz can't update `
@@ -222,80 +279,127 @@ function textOr(value: unknown, fallback: string): string {
 }
 
 /**
- * The policy notice (owner report): what is wrong with which policy, the
- * listings it is on (each with its eBay item page), the exact places to fix
- * it, and what happens meanwhile. Links are plain URLs at a line's end: the
- * email makes them links (dropship-notification-email.sender.ts).
+ * The policy notice as a guided fix (owner report): what is wrong in a
+ * seller's words, the listings it is on (each with its eBay item page), the
+ * clicks that fix it, the Listing settings alternative, and what happens
+ * meanwhile. Links are plain URLs: the email and the portal Alerts page make
+ * them links.
+ *
+ * The Listing settings alternative is real (verified for the owner report): a
+ * product or category shipping policy saved in Listing settings clears the
+ * size's adopted eBay policy (dropship-listing-product-settings-service.ts,
+ * clearSizeLeftovers), the vendor's eBay policy is then the synced baseline,
+ * so a later read does not adopt it again (decideVendorOwnedField), and the
+ * next push sends the saved one. It is not sent on save, hence the timing words.
  */
 function describePolicyIncompatible(payload: Readonly<Record<string, unknown>>, links: MarketplaceSyncNoticeLinks): string {
   const name = policyNameOf(payload.policyName);
   const count = numberOrNull(payload.listingCount);
-  const policy = name === null ? "your eBay shipping policy" : `your eBay shipping policy "${name}"`;
-  const usedBy = count === null || count < 1 ? ""
-    : name === null ? ` that ${formatCount(count)} of your listings ${count === 1 ? "uses" : "use"}`
-      : `, which ${formatCount(count)} of your listings ${count === 1 ? "uses" : "use"}`;
-  const lines = [`Card Shellz can't ship orders under ${policy}${usedBy}:`];
-  for (const reason of policyReasonLines(payload)) lines.push(`- ${reason}`);
+  const environment = parseMarketplaceEnvironment(payload.marketplaceEnvironment);
+  const reasons = policyReasonsOf(payload);
+  const policy = name === null ? "Your eBay shipping policy" : `Your eBay shipping policy "${name}"`;
+  const listingsWords = count === null || count < 1 ? "these listings" : count === 1 ? "the listing below" : `the ${formatCount(count)} listings below`;
+
+  const lines: string[] = [];
+  if (reasons.length === 1) {
+    lines.push(`${policy} ${reasons[0]!.problem}. ${reasons[0]!.why}, so orders on ${listingsWords} can't be shipped.`);
+  } else {
+    lines.push(`${policy} has settings Card Shellz can't ship under:`);
+    for (const reason of reasons) lines.push(`- It ${reason.problem}. ${reason.why}.`);
+    lines.push(`So orders on ${listingsWords} can't be shipped.`);
+  }
 
   const listings = policyListingsOf(payload.listings);
   if (listings.length > 0) {
-    const environment = parseMarketplaceEnvironment(payload.marketplaceEnvironment);
     lines.push("", "Affected listings:");
     for (const listing of listings) {
       const url = marketplaceListingUrl("ebay", listing.externalListingId, environment);
-      const label = listing.title ?? "A listing";
       const sku = listing.sku ? ` (SKU ${listing.sku})` : "";
-      lines.push(`- ${label}${sku}, eBay item ${listing.externalListingId}${url ? `: ${url}` : ""}`);
+      lines.push(`- ${listing.title ?? "A listing"}${sku}, eBay item ${listing.externalListingId}${url ? `: ${url}` : ""}`);
     }
     const more = count === null ? 0 : count - listings.length;
     if (more > 0) lines.push(`- and ${formatCount(more)} more`);
   }
 
-  // eBay's business policies page is linked only on eBay's production site: the code has no sandbox address for it.
-  const policiesUrl = parseMarketplaceEnvironment(payload.marketplaceEnvironment) === "sandbox" ? null : EBAY_SELLER_HUB_POLICIES_URL;
-  const thePolicy = name === null ? "the policy" : `the policy "${name}"`;
-  lines.push("", "To fix it:",
-    `1. Edit ${thePolicy} in eBay Seller Hub > Account > Business policies${policiesUrl ? `: ${policiesUrl}` : "."}`,
-    `2. Or choose a shipping policy Card Shellz can ship for these products in Card Shellz, Catalog > Listing settings${
-      links.listingSettingsUrl ? `: ${links.listingSettingsUrl}` : ", in your Card Shellz dropship portal."}`,
-    "",
-    "Until then, your listings stay up on eBay and Card Shellz keeps updating them, but orders that need this shipping can't be filled.");
+  const fixes = [...new Set(reasons.map((reason) => reason.fix).filter((fix): fix is string => fix !== null))];
+  if (fixes.length === 0) {
+    lines.push("", `You don't need to change anything. ${RECHECK_WORDS}`);
+  } else {
+    // eBay's business policies page is linked only on eBay's production site: the code has no sandbox address,
+    // and none that opens one policy, so the vendor finds it by name in the list.
+    const policiesUrl = environment === "sandbox" ? null : EBAY_SELLER_HUB_POLICIES_URL;
+    const find = name === null ? "find the shipping policy these listings use" : `find "${name}" in the list`;
+    const steps = [
+      `Open your shipping policies on eBay: Seller Hub > Account > Business policies${policiesUrl ? ` (${policiesUrl})` : ""}, and ${find}.`,
+      ...fixes,
+      "Save. eBay updates every listing that uses this policy.",
+    ];
+    lines.push("", "How to fix it (about 2 minutes):", ...steps.map((step, index) => `${index + 1}. ${step}`), RECHECK_WORDS);
+    lines.push("", "Or, instead: in Card Shellz, go to Catalog > Listing settings"
+      + `${links.listingSettingsUrl ? ` (${links.listingSettingsUrl})` : " in your Card Shellz dropship portal"} and choose a shipping `
+      + "policy Card Shellz can ship for these products or their category. Card Shellz sends it to these listings the next time "
+      + "it sends them to eBay: when you publish them, or when Card Shellz updates them.");
+  }
+
+  lines.push("", "Until it's fixed: your listings stay up on eBay and Card Shellz keeps updating them, but orders that need this "
+    + "shipping can't be filled.");
   return lines.join("\n");
 }
 
-/** One sentence per reason, known reasons in the guard's order, duplicates once; none known: one plain sentence. */
-function policyReasonLines(payload: Readonly<Record<string, unknown>>): string[] {
-  const facts: PolicyReasonFacts = { suchAs: suchAsServices(payload.supportedServiceNames),
+/** The fixed notice (owner report): short, no action. */
+function describePolicyFixed(payload: Readonly<Record<string, unknown>>): string {
+  const name = policyNameOf(payload.policyName);
+  return `${name === null ? "Your eBay shipping policy" : `Your eBay shipping policy "${name}"`} now works with Card Shellz. No action needed.`;
+}
+
+/** Each reason once, in the guard's order; none known: one plain reason. A stored "toString" never reaches Object.prototype. */
+function policyReasonsOf(payload: Readonly<Record<string, unknown>>): PolicyReasonWords[] {
+  const facts: PolicyReasonFacts = { services: serviceNamesOf(payload.supportedServiceNames),
     handlingDays: positiveIntegerOrNull(payload.requiredHandlingTimeBusinessDays) };
   const reasons = Array.isArray(payload.reasons) ? payload.reasons.filter((reason): reason is string => typeof reason === "string") : [];
-  const lines: string[] = [];
+  const words: PolicyReasonWords[] = [];
   for (const reason of new Set(reasons)) {
     if (reason.startsWith(UNSUPPORTED_SERVICE_PREFIX)) {
       const code = reason.slice(UNSUPPORTED_SERVICE_PREFIX.length);
-      const service = EBAY_SERVICE_CODE_PATTERN.test(code) ? `the shipping service ${code}` : "a shipping service";
-      lines.push(`It uses ${service}, which Card Shellz doesn't ship with. Replace it with a service Card Shellz ships with${facts.suchAs}.`);
+      const named = EBAY_SERVICE_CODE_PATTERN.test(code) ? ` (eBay calls it "${code}")` : "";
+      words.push({ problem: `uses a shipping service Card Shellz doesn't ship with${named}`,
+        why: `Card Shellz ships every order ${byServices(facts.services)}`,
+        fix: `Under Domestic shipping, remove that service and add one Card Shellz ships with${forExample(facts.services)}.` });
       continue;
     }
-    // Own keys only: a stored reason such as "toString" must never reach Object.prototype.
-    if (Object.prototype.hasOwnProperty.call(POLICY_REASON_WORDS, reason)) lines.push(POLICY_REASON_WORDS[reason]!(facts));
+    if (Object.prototype.hasOwnProperty.call(POLICY_REASON_WORDS, reason)) words.push(POLICY_REASON_WORDS[reason]!(facts));
   }
-  if (lines.length === 0) lines.push("It has a setting Card Shellz can't ship under. Check its shipping services, handling time and pickup options.");
-  return lines;
+  if (words.length === 0) {
+    words.push({ problem: "has a setting Card Shellz can't ship under", why: "Card Shellz couldn't match it to how it ships orders",
+      fix: "Check the policy's shipping services, handling time and pickup options." });
+  }
+  return words;
 }
 
-function handlingDaysStep(days: number | null, verb: string): string {
-  return days === null ? "Set a longer handling time, or pick a different policy."
-    : `${verb} at least ${formatCount(days)} business day${days === 1 ? "" : "s"}, or pick a different policy.`;
+/** "by USPS Ground Advantage, UPS Ground or FedEx Ground", or "with a US shipping service" when the store's services are unknown. */
+function byServices(services: readonly string[]): string {
+  if (services.length === 0) return "with a US shipping service";
+  return `by ${orWords(services)}`;
 }
 
-/** " such as USPS Ground Advantage or UPS Ground", from the store's capability only; "" when unknown. */
-function suchAsServices(value: unknown): string {
-  if (!Array.isArray(value)) return "";
-  const names = [...new Set(value.filter((name): name is string => typeof name === "string")
+/** ", for example USPS Ground Advantage" (the first of the store's services), or "" when unknown. */
+function forExample(services: readonly string[]): string {
+  return services.length === 0 ? "" : `, for example ${services[0]}`;
+}
+
+function handlingDaysWords(days: number | null): string {
+  return days === null ? "a few business days" : `${formatCount(days)} business day${days === 1 ? "" : "s"}`;
+}
+
+function orWords(words: readonly string[]): string {
+  return words.length === 1 ? words[0]! : `${words.slice(0, -1).join(", ")} or ${words[words.length - 1]}`;
+}
+
+/** The store's own service names, trimmed, once each, at most SUPPORTED_SERVICES_NAMED. */
+function serviceNamesOf(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((name): name is string => typeof name === "string")
     .map((name) => name.trim()).filter((name) => name.length > 0 && name.length <= MAX_SERVICE_NAME))].slice(0, SUPPORTED_SERVICES_NAMED);
-  if (names.length === 0) return "";
-  const listed = names.length === 1 ? names[0] : `${names.slice(0, -1).join(", ")} or ${names[names.length - 1]}`;
-  return ` such as ${listed}`;
 }
 
 function policyNameOf(value: unknown): string | null {
