@@ -16,7 +16,7 @@ import {
   isUsablePickFace,
   selectPickBinCandidate,
   type PickBinCandidate,
-} from "../../pick-bin-candidate";
+} from "../../domain/pick-bin-candidate";
 
 function candidate(overrides: Partial<PickBinCandidate> & { slotId: number }): PickBinCandidate {
   return {

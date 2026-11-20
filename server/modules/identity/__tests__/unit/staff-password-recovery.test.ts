@@ -8,7 +8,7 @@ import {
   resetStaffPasswordWithToken,
   resolveStaffRecoveryEmail,
 } from "../../application/staff-credentials";
-import { onStaffAuthorityChanged, notifyStaffAuthorityChanged } from "../../authority-events";
+import { onStaffAuthorityChanged, notifyStaffAuthorityChanged } from "../../application/authority-events";
 import { parseBreakGlassCliArgs, runBreakGlassCli } from "../../../../../scripts/identity/recover-admin-password";
 import { STAFF_PASSWORD_RESET_TTL_MS } from "@shared/staff-credentials";
 

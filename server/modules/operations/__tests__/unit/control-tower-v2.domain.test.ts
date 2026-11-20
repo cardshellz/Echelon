@@ -6,14 +6,14 @@ import {
   projectSourceRows,
   type ControlTowerSourceAdapter,
   type ProjectedControlTowerWorkItem,
-} from "../../control-tower-v2.domain";
+} from "../../domain/control-tower-v2.domain";
 import {
   carrierTrackingSource,
   channelFulfillmentSource,
   inventoryIntegritySource,
   resolveCarrierAcceptanceGraceMinutes,
   wmsReconciliationSource,
-} from "../../control-tower-v2.sources";
+} from "../../infrastructure/control-tower-v2.sources";
 
 function projectedItem(sourceKey: string): ProjectedControlTowerWorkItem {
   const base = {

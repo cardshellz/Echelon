@@ -23,7 +23,7 @@ vi.mock("../../../inventory", () => ({ inventoryStorage: {
 vi.mock("../../../inventory-planning/infrastructure/inventory-legacy-admin-control.repository", () => ({
   createInventoryLegacyAdminControlService: () => ({ executeGuardedLegacyWrite: h.guarded, executeLegacyWrite: h.legacy }),
 }));
-import { registerWarehouseRoutes } from "../../warehouse.routes";
+import { registerWarehouseRoutes } from "../../interfaces/http/warehouse.routes";
 
 describe("warehouse settings HTTP ownership", () => {
   let server: http.Server;

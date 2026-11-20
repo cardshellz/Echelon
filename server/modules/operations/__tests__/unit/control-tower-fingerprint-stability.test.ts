@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { inventoryIntegritySource } from "../../control-tower-v2.sources";
+import { inventoryIntegritySource } from "../../infrastructure/control-tower-v2.sources";
 
 /**
  * The source fingerprint answers "is this the same problem as last run?", and a

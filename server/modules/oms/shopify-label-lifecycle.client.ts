@@ -1,4 +1,4 @@
-import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
+import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client.api";
 import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
 import { labelLifecycleConflict, type ShopifyLabelPackage } from "./shopify-label-lifecycle.domain";
 

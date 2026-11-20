@@ -15,8 +15,8 @@ vi.mock("../../../orders/bin-location-backfill", () => ({
   backfillOpenOrderItemBinAssignment: vi.fn(async () => 0),
 }));
 
-import { BinAssignmentService } from "../../bin-assignment.service";
-import { BinAssignmentValidationError } from "../../bin-assignment-contracts";
+import { BinAssignmentService } from "../../application/bin-assignment.service";
+import { BinAssignmentValidationError } from "../../domain/bin-assignment-contracts";
 import { backfillOpenOrderItemBinAssignment } from "../../../orders/bin-location-backfill";
 
 function sqlTextOf(query: any): string {

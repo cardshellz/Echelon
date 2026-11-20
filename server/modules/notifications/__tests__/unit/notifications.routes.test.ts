@@ -29,9 +29,9 @@ vi.mock("../../../../routes/middleware", () => {
   };
 });
 
-vi.mock("../../notifications.service", () => mocks.service);
+vi.mock("../../application/notifications.service", () => mocks.service);
 
-import { registerNotificationRoutes } from "../../notifications.routes";
+import { registerNotificationRoutes } from "../../interfaces/http/notifications.routes";
 
 function buildApp(): Express {
   const app = express();

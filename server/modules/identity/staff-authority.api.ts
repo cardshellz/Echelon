@@ -9,9 +9,9 @@ export {
   type CurrentStaffAccess,
   type StaffSystemRole,
   type StaffSystemRoleAuthority,
-} from "./staff-authority";
+} from "./application/staff-authority";
 export {
   onStaffAuthorityChanged,
   notifyStaffAuthorityChanged,
   type StaffAuthorityChangeListener,
-} from "./authority-events";
+} from "./application/authority-events";

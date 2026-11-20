@@ -12,11 +12,11 @@ import {
   fetchOrdersFulfillmentStatus,
   fetchUnfulfilledOrders,
   resolveShopifyRetryDelayMs,
-} from "../../../integrations/shopify";
+} from "../../../integrations/shopify.api";
 import {
   createDefaultShopifyAdminClient,
   shopifyGraphQL,
-} from "../../../shopify/admin-gql-client";
+} from "../../../shopify/admin-gql-client.api";
 import { shopifyGraphQL as subscriptionReExportedGraphQL } from "../../../subscriptions/infrastructure/shopify.adapter";
 
 describe("CHN-1 Sales Channels and Listings Safeguards (COM-03, COM-04, COM-05, COM-06, COM-07)", () => {
@@ -231,10 +231,10 @@ describe("CHN-1 Sales Channels and Listings Safeguards (COM-03, COM-04, COM-05, 
   });
 
   describe("COM-06 (C-B5): Neutral technical Shopify Admin GraphQL Client without subscriptions coupling", () => {
-    it("executes GraphQL in server/modules/shopify/admin-gql-client.ts with zero import of modules/subscriptions", () => {
+    it("executes GraphQL in server/modules/shopify/infrastructure/admin-gql-client.ts with zero import of modules/subscriptions", () => {
       const adminClientPath = path.resolve(
         __dirname,
-        "../../../shopify/admin-gql-client.ts",
+        "../../../shopify/infrastructure/admin-gql-client.ts",
       );
       const source = fs.readFileSync(adminClientPath, "utf8");
       expect(source).not.toContain("subscriptions");

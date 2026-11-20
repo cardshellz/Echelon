@@ -70,8 +70,8 @@ import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import { omsOrderEvents } from "@shared/schema/oms.schema";
 import type { ServiceRegistry } from "../../services";
 import { computeSortRank, getShippingBase, resolveSlaDueAt, type ShippingServiceLevel } from "../orders/sort-rank-and-priority.api";
-import { getSlaCutoffConfig } from "../warehouse/settings.resolver";
-import { selectPickBinCandidate } from "../warehouse/pick-bin-candidate";
+import { getSlaCutoffConfig } from "../warehouse/settings.api";
+import { selectPickBinCandidate } from "../warehouse/pick-bin-candidate.api";
 import {
   validateOmsOrderFinancials,
   buildWmsOrderFinancialSnapshot,

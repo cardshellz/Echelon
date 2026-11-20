@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   SyncRecoveryService,
   type StageResult,
-} from "../../sync-recovery.service";
+} from "../../application/sync-recovery.service";
 
 function stage(name: string, data: Record<string, number> = {}): StageResult {
   return { name, ok: true, data };

@@ -1,4 +1,4 @@
-import type { PlanRecord, ContractWebhookPayload } from "../subscription.types";
+import type { PlanRecord, ContractWebhookPayload } from "./subscription.types";
 
 /**
  * Calculates the next billing period end date based on interval and count.
@@ -63,7 +63,7 @@ export function resolveTargetPlan(
   if (billingPolicy?.interval) {
     const interval = billingPolicy.interval.toLowerCase();
     const normalizedInterval = interval === "year" ? "yearly" : interval === "month" ? "monthly" : interval;
-    
+
     // Find a standard tier plan that matches the billing interval
     const plan = activePlans.find(p => p.billing_interval === normalizedInterval);
     if (plan) return plan;

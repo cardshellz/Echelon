@@ -16,7 +16,7 @@ import type {
   BillingLogRecord,
   SubscriptionEvent,
   SubscriptionDashboardStats,
-} from "../subscription.types";
+} from "../domain/subscription.types";
 
 export type SubscriptionDbExecutor = Pick<
   typeof db,
@@ -587,8 +587,8 @@ export async function reconcileCurrentMemberships(): Promise<{ upserted: number 
     FROM membership.member_subscriptions ms
     JOIN membership.plans p ON p.id = ms.plan_id
     WHERE ms.status = 'active'
-    ON CONFLICT (member_id) DO UPDATE 
-      SET plan_id = EXCLUDED.plan_id, 
+    ON CONFLICT (member_id) DO UPDATE
+      SET plan_id = EXCLUDED.plan_id,
           updated_at = EXCLUDED.updated_at
   `);
   return { upserted: (result as any).rowCount || 0 };
@@ -627,7 +627,7 @@ export async function insertBillingLog(
     processedAt: new Date(),
     createdAt: new Date(),
   }).returning({ id: subscriptionBillingAttempts.id });
-  
+
   return Number(result[0]?.id || 0);
 }
 
@@ -662,7 +662,7 @@ export async function getBillingLogs(filters?: {
 
   const limit = filters?.limit || 50;
   const offset = filters?.offset || 0;
-  
+
   // Total Count Query
   let countQuery = db.select({ total: sql<number>`COUNT(*)` }).from(subscriptionBillingAttempts)
     .leftJoin(memberSubscriptions, eq(memberSubscriptions.id, subscriptionBillingAttempts.contractId))

@@ -80,7 +80,7 @@ async function main() {
   }
 
   const { db, pool } = await import("../server/db");
-  const { createBinAssignmentService } = await import("../server/modules/warehouse/bin-assignment.service");
+  const { createBinAssignmentService } = await import("../server/modules/warehouse/bin-assignment.api");
   const { catalogStorage } = await import("../server/modules/catalog");
   const { warehouseStorage } = await import("../server/modules/warehouse");
 

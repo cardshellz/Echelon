@@ -87,7 +87,7 @@ import { createProductImportService } from "../modules/catalog/product-import.se
 import { createChannelProductPushService } from "../modules/channels/product-push.service";
 import { createSyncSettingsService } from "../modules/channels/sync-settings.service";
 import { InventoryPublicationWorkCoordinator } from "../modules/inventory-planning/application/inventory-publication-work-coordinator.service";
-import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
+import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.api";
 import {
   CostReportingRepository,
   createCostReportingService,
@@ -153,7 +153,7 @@ import {
 } from "../modules/shipping/carrier-tracking-and-dispatch.api";
 import { createShipStationTrackingEventsClient } from "../modules/shipping/shipstation-tracking-transport.api";
 import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shipstation-provider-reconciliation.api";
-import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client";
+import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client.api";
 import { ChannelIdentityService } from "../modules/channels/channel-identity.service";
 import { createShopifyStockLinkAdapter, createShopifyStockLinkSource } from "../modules/channels/shopify-stock-link-source";
 import { createStockLinkService } from "../modules/inventory-planning/infrastructure/stock-link.factory";
@@ -946,8 +946,8 @@ export type { ProductImportService, ContentSyncResult, ProductSyncResult } from 
 export type { ChannelProductPushService, ResolvedChannelProduct, ProductPushResult, BulkPushResult } from "../modules/channels/product-push.service";
 export { createSyncSettingsService } from "../modules/channels/sync-settings.service";
 export type { SyncSettingsService, SyncLogWriteParams } from "../modules/channels/sync-settings.service";
-export { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
-export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "../modules/warehouse/bin-assignment.service";
+export { createBinAssignmentService } from "../modules/warehouse/bin-assignment.api";
+export type { BinAssignmentService, BinAssignmentRow, AssignmentFilters, ImportResult } from "../modules/warehouse/bin-assignment.api";
 export { createPurchasingService } from "../modules/procurement/runtime-services.api";
 export type { PurchasingService, PurchasingError } from "../modules/procurement/runtime-services.api";
 export { createVendorService } from "../modules/procurement/runtime-services.api";

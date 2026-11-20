@@ -25,7 +25,7 @@ import {
   parseWarehouseSettingsId,
   parseWarehouseSettingsWrite,
 } from "../../warehouse/inventory-governance.api";
-import { getSettingsForWarehouse } from "../../warehouse/settings.resolver";
+import { getSettingsForWarehouse } from "../../warehouse/settings.api";
 
 type ReplenTaskWithDemand = ReplenTask & {
   activePendingLines: number;

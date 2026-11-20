@@ -23,7 +23,7 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, {
   },
 }) }));
 import { getUserPermissions, hasPermission } from "../../index";
-import { registerAuthRoutes } from "../../identity.routes";
+import { registerAuthRoutes } from "../../interfaces/http/identity.routes";
 import { readCommandAuthorityActor } from "../../infrastructure/command-authority.repository";
 import { readPurchaseApprovalActor, readPurchaseInvoiceActionActor } from "../../infrastructure/purchase-approval-access.repository";
 import { readWarehouseWorkActor } from "../../infrastructure/work-access.repository";

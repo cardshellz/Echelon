@@ -3,4 +3,4 @@
  *
  * Domain-specific email composition and outbox state belong in their owning domain modules.
  */
-export { isSmtpConfigured, sendEmail, type EmailDeliveryResult } from "./email.service";
+export { isSmtpConfigured, sendEmail, type EmailDeliveryResult } from "./infrastructure/email.service";

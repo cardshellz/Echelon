@@ -1,7 +1,7 @@
 import {
   createDefaultShopifyAdminClient,
   type ShopifyAdminGraphQLClient,
-} from "../shopify/admin-gql-client";
+} from "../shopify/admin-gql-client.api";
 
 const MAX_FULFILLMENTS_PER_ORDER = 250;
 const MAX_LINES_PER_FULFILLMENT = 250;

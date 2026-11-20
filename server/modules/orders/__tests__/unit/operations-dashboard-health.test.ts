@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../warehouse/settings.resolver", () => ({
+vi.mock("../../../warehouse/settings.api", () => ({
   getSettingsForWarehouse: vi.fn(async () => null),
 }));
 

@@ -13,7 +13,7 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, {
   get() { throw new Error("Staff access tests require their explicit disposable executor"); },
 }) }));
 import { readCurrentStaffAccess } from "../../infrastructure/staff-access.repository";
-import { readStaffSystemRoleAuthority, readStaffSystemRoleAuthorityPg } from "../../staff-authority";
+import { readStaffSystemRoleAuthority, readStaffSystemRoleAuthorityPg } from "../../application/staff-authority";
 import { hasAssignedSystemRole } from "../../domain/staff-access";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;

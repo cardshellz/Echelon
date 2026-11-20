@@ -52,7 +52,7 @@ import type {
   ChannelFulfillmentIngressService,
 } from "./channel-fulfillment-ingress.service";
 import rateLimit from "express-rate-limit";
-import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
+import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client.api";
 import type { EngineCancelResult, ShippingEngine } from "../shipping/engine-and-reconcile.api";
 import { toEngineRef } from "../shipping/engine-and-reconcile.api";
 import { pushShipmentThroughEngine } from "../orders/shipment-rollup-and-context.api";

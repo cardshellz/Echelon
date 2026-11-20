@@ -1,17 +1,17 @@
 import { describe, expect, it } from "vitest";
 
-import type { QueryClient } from "../../control-tower-v2.domain";
+import type { QueryClient } from "../../domain/control-tower-v2.domain";
 import {
   getControlTowerV2Sources,
   loadControlTowerV2Groups,
   parseControlTowerV2GroupKey,
   parseControlTowerV2QueueFilters,
-} from "../../control-tower-v2.query";
+} from "../../infrastructure/control-tower-v2.query";
 import {
   ControlTowerRequestError,
   parsePositiveWorkItemId,
   parseWorkItemVersion,
-} from "../../control-tower-v2.request";
+} from "../../interfaces/http/control-tower-v2.request";
 
 describe("Control Tower V2 request validation", () => {
   it("uses bounded queue defaults", () => {

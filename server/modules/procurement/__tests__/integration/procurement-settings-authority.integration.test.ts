@@ -20,8 +20,8 @@ vi.mock("../../purchase-planning-policy.runtime", () => ({
     read: async () => ({ policy: defaultPurchasePlanningPolicy(), revision: 12 }),
   }),
 }));
-vi.mock("../../../warehouse/settings.resolver", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../../warehouse/settings.resolver")>();
+vi.mock("../../../warehouse/settings.api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../warehouse/settings.api")>();
   return {
     ...actual,
     // Defer only after the actual resolver's SQL, preserving Drizzle's real

@@ -3,7 +3,7 @@ import { z } from "zod";
 import {
   createDefaultShopifyAdminClient,
   type ShopifyAdminGraphQLClient,
-} from "../../shopify/admin-gql-client";
+} from "../../shopify/admin-gql-client.api";
 import { readShopifyMerchandiseSnapshot } from "./shopify-merchandise-snapshot";
 
 const MERCHANDISE_API_VERSION = "2026-10";

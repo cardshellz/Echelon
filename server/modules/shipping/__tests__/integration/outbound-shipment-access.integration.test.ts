@@ -13,7 +13,7 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, { get(_target,key) {
   if (!connection.database) throw new Error("Synthetic shipment fixture not ready");
   const value = Reflect.get(connection.database,key); return typeof value === "function" ? value.bind(connection.database) : value;
 } }) }));
-import { registerOutboundShipmentRoutes } from "../../../shipping-engine/outbound-shipments.routes";
+import { registerOutboundShipmentRoutes } from "../../../shipping-engine/routes.api";
 import { queryShipmentOrderContext, withShipmentAccess } from "../../outbound-shipment-access.query";
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 if (databaseUrl) validatePostgresTestEnvironment(process.env);

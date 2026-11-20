@@ -1,5 +1,5 @@
 import { eq, and, sql, inArray } from "drizzle-orm";
-import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
+import { getSettingsForWarehouse } from "../warehouse/settings.api";
 import {
   channelFeeds,
   channelSyncLog,

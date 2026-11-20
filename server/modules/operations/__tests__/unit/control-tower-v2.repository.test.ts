@@ -5,8 +5,8 @@ import {
   type ControlTowerSourceAdapter,
   type ProjectedControlTowerWorkItem,
   type QueryClient,
-} from "../../control-tower-v2.domain";
-import { runControlTowerSourceProjection } from "../../control-tower-v2.repository";
+} from "../../domain/control-tower-v2.domain";
+import { runControlTowerSourceProjection } from "../../infrastructure/control-tower-v2.repository";
 
 function item(sourceKey: string): ProjectedControlTowerWorkItem {
   const base = {

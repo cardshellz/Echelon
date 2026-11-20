@@ -4,7 +4,7 @@ import { hasAssignedSystemRole, assignedSystemRoleKeys, type CurrentStaffAccess 
 const execute = vi.hoisted(() => vi.fn());
 vi.mock("../../../../db", () => ({ db: { execute } }));
 import { readCurrentStaffAccess } from "../../infrastructure/staff-access.repository";
-import { readStaffSystemRoleAuthority, readStaffSystemRoleAuthorityPg } from "../../staff-authority";
+import { readStaffSystemRoleAuthority, readStaffSystemRoleAuthorityPg } from "../../application/staff-authority";
 
 const user = { id: "staff", username: "Staff", role: "admin", displayName: null,
   active: 1, createdAt: new Date("2026-11-04T00:00:00Z"), lastLoginAt: null };

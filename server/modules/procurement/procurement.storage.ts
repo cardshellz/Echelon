@@ -10,7 +10,7 @@ import type { ShipmentPurchaseOrderReference } from "@shared/procurement/shipmen
 import { readPurchasePlanningSnapshot } from "./purchase-planning-snapshot.repository";
 import { purchaseInventorySnapshotQuery } from "./purchase-inventory-snapshot.query";
 import { getPurchasePlanningPolicyService } from "./purchase-planning-policy.runtime";
-import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
+import { getSettingsForWarehouse } from "../warehouse/settings.api";
 import { setProductReorderExcludedInCatalog } from "../catalog/cross-module-product-mutations.api";
 import { updateWarehouseAutoDraftAndForecastSettingsInTx } from "../inventory/cross-module-inventory-mutations.api";
 import {
