@@ -3,5 +3,7 @@
  */
 export { registerLocationRoutes } from "./interfaces/http/locations.routes";
 export { registerPickZoneRoutes } from "./interfaces/http/pick-zones.routes";
-export { registerSettingsRoutes } from "./interfaces/http/settings.routes";
-export { registerWarehouseRoutes } from "./interfaces/http/warehouse.routes";
+export {
+  registerSettingsRoutes,
+  registerWarehouseRoutes,
+} from "./warehouse-settings-routes.api";

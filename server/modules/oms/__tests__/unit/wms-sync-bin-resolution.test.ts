@@ -19,7 +19,7 @@ describe("wms-sync.service :: order-line bin resolution", () => {
     expect(RESOLVER).not.toMatch(/eq\(productLocations\.isPrimary,\s*1\)/);
     expect(RESOLVER).toContain("selectPickBinCandidate(rows)");
     expect(RESOLVER).not.toContain(".limit(1)");
-    expect(SRC).toContain('import { selectPickBinCandidate } from "../warehouse/pick-bin-candidate"');
+    expect(SRC).toContain('import { selectPickBinCandidate } from "../warehouse/pick-bin-candidate.api"');
   });
 
   it("only considers slot rows that point at a real warehouse location", () => {

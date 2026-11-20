@@ -18,4 +18,3 @@ export * from "./inventory-governance.api";
 export * from "./cutover-work.api";
 export * from "./settings.api";
 export * from "./pick-bin-candidate.api";
-export * from "./routes.api";
