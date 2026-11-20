@@ -17,9 +17,12 @@ import { join } from 'path';
 import {
   BASELINE_DIRECTORY,
   BASELINE_MANIFEST_FILENAME,
+  BASELINE_REFERENCE_AUDIT_FILENAME,
+  BASELINE_REFERENCE_DATA_FILENAME,
   BASELINE_SCHEMA_FILENAME,
   baselineSha256,
   validateBaselineManifest,
+  validateBaselineReferenceAudit,
 } from '../scripts/migrations/baseline-format.mjs';
 import type { MigrationQueryClient } from './migration-executor';
 
@@ -27,6 +30,7 @@ export type BaselineErrorCode =
   | 'MIGRATION_BASELINE_STATE_UNREADABLE'
   | 'MIGRATION_BASELINE_DATABASE_NOT_EMPTY'
   | 'MIGRATION_BASELINE_HASH_MISMATCH'
+  | 'MIGRATION_BASELINE_REFERENCE_HASH_MISMATCH'
   | 'MIGRATION_BASELINE_COVERS_MISSING_FILE';
 
 /** Permanent: retrying cannot help; the operator must fix the input or the target. */
@@ -148,6 +152,18 @@ export async function applyBaselineToEmptyDatabase(input: BaselineBootstrapInput
       { expected: manifest.schemaSha256, actual: schemaHash },
     );
   }
+  const referenceAudit = validateBaselineReferenceAudit(
+    JSON.parse(read(join(baselineDir, BASELINE_REFERENCE_AUDIT_FILENAME))),
+  );
+  const referenceDataSql = read(join(baselineDir, BASELINE_REFERENCE_DATA_FILENAME));
+  const referenceDataHash = baselineSha256(referenceDataSql);
+  if (referenceDataHash !== referenceAudit.referenceDataSha256) {
+    throw new BaselineBootstrapError(
+      'MIGRATION_BASELINE_REFERENCE_HASH_MISMATCH',
+      'migrations/baseline/reference-data.sql does not match migrations/baseline/reference-data-audit.json.',
+      { expected: referenceAudit.referenceDataSha256, actual: referenceDataHash },
+    );
+  }
   const present = new Set(input.files);
   const missing = manifest.covers.filter((filename) => !present.has(filename));
   if (missing.length > 0) {
@@ -163,6 +179,7 @@ export async function applyBaselineToEmptyDatabase(input: BaselineBootstrapInput
   await input.client.query('BEGIN');
   try {
     await input.client.query(schemaSql);
+    await input.client.query(referenceDataSql);
     await input.client.query(RECORD_COVERED_SQL, [manifest.covers, hashes]);
     await input.client.query('COMMIT');
   } catch (error) {
