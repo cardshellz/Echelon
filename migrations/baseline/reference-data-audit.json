@@ -1,0 +1,807 @@
+{
+  "version": 1,
+  "reviewedAt": "2026-11-19",
+  "baselineCapturedAt": "2026-11-17",
+  "referenceDataSha256": "22be2b3e0e62ca374d133dde75412be447928a6acf04592a39e0b85703404daf",
+  "coveredInsertMigrations": [
+    "0072_override_priority_permission.sql",
+    "0081_pick_zones_infrastructure.sql",
+    "0095_dropship_listing_config_backfill.sql",
+    "0106_dropship_internal_channel_seed.sql",
+    "0108_catalog_product_categories.sql",
+    "019_consolidate_products.sql",
+    "020_seed_channel_listings.sql",
+    "035_notification_system.sql",
+    "037_product_lines.sql",
+    "039_fix_cancelled_order_picked_qty.sql",
+    "043_parallel_allocation_engine.sql",
+    "046_fix_negative_inventory.sql",
+    "0559_pick_priority_settings.sql",
+    "0588_dropship_vendor_rate_book.sql",
+    "0590_shipping_service_level_pricing.sql",
+    "0593_fulfillment_authority_cutover_foundation.sql",
+    "0597_shipping_military_zone_rules.sql",
+    "0605_shipping_destination_scope_library.sql",
+    "0606_channel_variant_availability_sync.sql",
+    "0620_vendor_invoice_unit_cost_mills_repair.sql",
+    "0635_package_allocation_effect_outbox.sql",
+    "0637_declared_package_business_shipments.sql",
+    "0638_inventory_availability_cutover.sql",
+    "0643_shipping_fulfillment_provider_connections.sql",
+    "0669_inventory_publication_global_control_singleton.sql",
+    "0672_archon_order_projection.sql",
+    "0682_dropship_wallet_policy.sql",
+    "0683_dropship_wallet_funding_tiers.sql",
+    "0687_inventory_channel_definition_completion.sql",
+    "0695_catalog_forecast_identity_history.sql",
+    "0710_dropship_cost_change_policy.sql",
+    "0711_dropship_cost_schedule.sql",
+    "0730_catalog_existing_photo_defaults.sql",
+    "0743_publication_selection_work.sql",
+    "075_wms_allocation_exceptions.sql",
+    "078_pick_replen_health_notification.sql",
+    "088_auto_draft_stale_po_notification.sql",
+    "089_procurement_health_critical_notification.sql",
+    "092_ebay_listing_intent_overrides.sql",
+    "105_shipping_groups.sql",
+    "117_shipping_engine_foundation.sql",
+    "119_shipping_zone_seed.sql",
+    "120_shipping_transit_seed.sql",
+    "137_shipping_rate_books.sql",
+    "139_shipping_state_zip_pricing.sql",
+    "147_shopify_order_bridge_checkpoint.sql",
+    "152_channel_order_intake_ledger.sql",
+    "153_channel_order_intake_oms_linkage.sql",
+    "173_shipping_engine_order_provider_refs.sql",
+    "186_dropship_return_policy_foundation.sql",
+    "191_dropship_collection_sweep_noinspection.sql",
+    "213_inventory_availability_admin_permissions.sql",
+    "223_purchase_planning_policy.sql",
+    "236_inventory_cutover_admission.sql",
+    "237_inventory_quantity_publication_admission.sql",
+    "238_shared_packaging_and_program_charges.sql",
+    "246_correct_legacy_box_dimensions.sql",
+    "249_walmart_channel_status_authority.sql",
+    "251_customer_return_label_settings.sql",
+    "255_return_policy_shipping.sql",
+    "258_order_country_integrity.sql",
+    "900000004000017890001_receiving_quarantine.sql",
+    "900000017000018580001_catalog_publication_media_versions.sql",
+    "900000018000018580002_listing_intent_propagation.sql",
+    "900000024000018880004_settle_proven_historical_listing_work.sql",
+    "900000030000019100001_dropship_vendor_selected_variants.sql",
+    "900000033000019220001_customer_order_action_projection.sql",
+    "900000034000019260001_refresh_failed_return_options.sql",
+    "900000035000019280001_retire_obsolete_receive_pack_warnings.sql",
+    "900000036000019300001_shipping_package_history.sql",
+    "900000040000019450002_purchase_return_receiving.sql",
+    "900000045000019690001_customer_order_progress_capture.sql",
+    "900000056000020040001_staff_credential_state.sql",
+    "900000067000020940001_product_types_seed_and_listing_rule_scope_check.sql"
+  ],
+  "tables": [
+    {
+      "table": "catalog.channel_product_lines",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Cross-product join populated when active channels and lines are configured.",
+      "sourceMigrations": [
+        "037_product_lines.sql"
+      ]
+    },
+    {
+      "table": "catalog.forecast_product_identities",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0695_catalog_forecast_identity_history.sql"
+      ]
+    },
+    {
+      "table": "catalog.product_asset_versions",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000017000018580001_catalog_publication_media_versions.sql"
+      ]
+    },
+    {
+      "table": "catalog.product_assets",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "019_consolidate_products.sql"
+      ]
+    },
+    {
+      "table": "catalog.product_categories",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0108_catalog_product_categories.sql"
+      ]
+    },
+    {
+      "table": "catalog.product_line_products",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "037_product_lines.sql"
+      ]
+    },
+    {
+      "table": "catalog.product_lines",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Default 'TRADING_CARD_SUPPLIES' product line.",
+      "sourceMigrations": [
+        "037_product_lines.sql"
+      ]
+    },
+    {
+      "table": "catalog.product_types",
+      "disposition": "baseline_reference_seed",
+      "rationale": "16 canonical catalog product types (toploaders through other).",
+      "sourceMigrations": [
+        "900000067000020940001_product_types_seed_and_listing_rule_scope_check.sql"
+      ]
+    },
+    {
+      "table": "catalog.shipping_groups",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Default combinability shipping groups ('protection', 'storage_boxes').",
+      "sourceMigrations": [
+        "105_shipping_groups.sql"
+      ]
+    },
+    {
+      "table": "channels.channel_allocation_rules",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "043_parallel_allocation_engine.sql"
+      ]
+    },
+    {
+      "table": "channels.channel_listings",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "020_seed_channel_listings.sql"
+      ]
+    },
+    {
+      "table": "channels.channel_product_overrides",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "092_ebay_listing_intent_overrides.sql"
+      ]
+    },
+    {
+      "table": "channels.channel_variant_availability_sync",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0606_channel_variant_availability_sync.sql"
+      ]
+    },
+    {
+      "table": "channels.channel_variant_overrides",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "092_ebay_listing_intent_overrides.sql"
+      ]
+    },
+    {
+      "table": "channels.channels",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Internal 'Dropship OMS' manual channel row.",
+      "sourceMigrations": [
+        "0106_dropship_internal_channel_seed.sql"
+      ]
+    },
+    {
+      "table": "channels.ebay_listing_sync_settlements",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000024000018880004_settle_proven_historical_listing_work.sql"
+      ]
+    },
+    {
+      "table": "channels.sync_settings",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Singleton global channel sync control row (disabled by default until operator command).",
+      "sourceMigrations": [
+        "0669_inventory_publication_global_control_singleton.sql"
+      ]
+    },
+    {
+      "table": "channels.walmart_connection_events",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "249_walmart_channel_status_authority.sql"
+      ]
+    },
+    {
+      "table": "dropship.dropship_audit_events",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000030000019100001_dropship_vendor_selected_variants.sql"
+      ]
+    },
+    {
+      "table": "dropship.dropship_collection_config",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Active v1 collection sweep policy singleton.",
+      "sourceMigrations": [
+        "191_dropship_collection_sweep_noinspection.sql"
+      ]
+    },
+    {
+      "table": "dropship.dropship_cost_change_policies",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Active v1 cost-change notice & reprice policy singleton.",
+      "sourceMigrations": [
+        "0710_dropship_cost_change_policy.sql"
+      ]
+    },
+    {
+      "table": "dropship.dropship_cost_detection_state",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Singleton cost-detection cursor row (id=1).",
+      "sourceMigrations": [
+        "0711_dropship_cost_schedule.sql"
+      ]
+    },
+    {
+      "table": "dropship.dropship_return_policies",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Default global 30-day active dropship return policy.",
+      "sourceMigrations": [
+        "186_dropship_return_policy_foundation.sql"
+      ]
+    },
+    {
+      "table": "dropship.dropship_selection_conversion_sizes",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000030000019100001_dropship_vendor_selected_variants.sql"
+      ]
+    },
+    {
+      "table": "dropship.dropship_selection_conversions",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000030000019100001_dropship_vendor_selected_variants.sql"
+      ]
+    },
+    {
+      "table": "dropship.dropship_store_listing_configs",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0095_dropship_listing_config_backfill.sql"
+      ]
+    },
+    {
+      "table": "dropship.dropship_vendor_selected_variants",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000030000019100001_dropship_vendor_selected_variants.sql"
+      ]
+    },
+    {
+      "table": "dropship.dropship_vendor_selection_rule_set_revisions",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000030000019100001_dropship_vendor_selected_variants.sql"
+      ]
+    },
+    {
+      "table": "dropship.dropship_wallet_policies",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Active v2 vendor wallet funding, fee, and rewards policy singleton.",
+      "sourceMigrations": [
+        "0682_dropship_wallet_policy.sql",
+        "0683_dropship_wallet_funding_tiers.sql"
+      ]
+    },
+    {
+      "table": "identity.auth_permissions",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Static RBAC permissions added by migrations (orders:override_priority, inventory_planning:view|edit|activate).",
+      "sourceMigrations": [
+        "0072_override_priority_permission.sql",
+        "213_inventory_availability_admin_permissions.sql"
+      ]
+    },
+    {
+      "table": "identity.auth_role_permissions",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Role-permission bindings depend on auth_roles seeded at runtime startup by seedRBACUseCase().",
+      "sourceMigrations": [
+        "0072_override_priority_permission.sql",
+        "213_inventory_availability_admin_permissions.sql"
+      ]
+    },
+    {
+      "table": "identity.staff_credentials",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000056000020040001_staff_credential_state.sql"
+      ]
+    },
+    {
+      "table": "inventory.availability_runtime_authority",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Singleton cutover runtime authority ('legacy') required by inventory cutover guards.",
+      "sourceMigrations": [
+        "0638_inventory_availability_cutover.sql"
+      ]
+    },
+    {
+      "table": "inventory.channel_policy_source_node_references",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0687_inventory_channel_definition_completion.sql"
+      ]
+    },
+    {
+      "table": "inventory.cutover_admission_fence",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Singleton writer-admission fence (epoch=1) required by BEFORE INSERT triggers on catalog/channels/wms tables.",
+      "sourceMigrations": [
+        "236_inventory_cutover_admission.sql"
+      ]
+    },
+    {
+      "table": "inventory.inventory_transactions",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "039_fix_cancelled_order_picked_qty.sql",
+        "046_fix_negative_inventory.sql"
+      ]
+    },
+    {
+      "table": "inventory.publication_selection_work",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0743_publication_selection_work.sql"
+      ]
+    },
+    {
+      "table": "inventory.quantity_publication_gate",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Singleton quantity publication gate row required by publication admission checks.",
+      "sourceMigrations": [
+        "237_inventory_quantity_publication_admission.sql"
+      ]
+    },
+    {
+      "table": "inventory.warehouse_pick_zones",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Per-warehouse DEFAULT pick zone seeded when warehouses are created.",
+      "sourceMigrations": [
+        "0081_pick_zones_infrastructure.sql"
+      ]
+    },
+    {
+      "table": "marketplace.listing_intent_changes",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000018000018580002_listing_intent_propagation.sql"
+      ]
+    },
+    {
+      "table": "notifications.notification_preferences",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Role-level notification preferences depend on auth_roles seeded at runtime startup.",
+      "sourceMigrations": [
+        "075_wms_allocation_exceptions.sql",
+        "078_pick_replen_health_notification.sql",
+        "088_auto_draft_stale_po_notification.sql",
+        "089_procurement_health_critical_notification.sql"
+      ]
+    },
+    {
+      "table": "notifications.notification_types",
+      "disposition": "baseline_reference_seed",
+      "rationale": "12 canonical operational notification type definitions.",
+      "sourceMigrations": [
+        "075_wms_allocation_exceptions.sql",
+        "078_pick_replen_health_notification.sql",
+        "088_auto_draft_stale_po_notification.sql",
+        "089_procurement_health_critical_notification.sql"
+      ]
+    },
+    {
+      "table": "oms.archon_order_outbox",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0672_archon_order_projection.sql"
+      ]
+    },
+    {
+      "table": "oms.channel_order_intakes",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "152_channel_order_intake_ledger.sql",
+        "153_channel_order_intake_oms_linkage.sql"
+      ]
+    },
+    {
+      "table": "oms.customer_order_action_invalidations",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000033000019220001_customer_order_action_projection.sql",
+        "900000034000019260001_refresh_failed_return_options.sql",
+        "900000040000019450002_purchase_return_receiving.sql"
+      ]
+    },
+    {
+      "table": "oms.order_country_aliases",
+      "disposition": "baseline_reference_seed",
+      "rationale": "115 lowercase country aliases referencing oms.order_country_codes.",
+      "sourceMigrations": [
+        "258_order_country_integrity.sql"
+      ]
+    },
+    {
+      "table": "oms.order_country_codes",
+      "disposition": "baseline_reference_seed",
+      "rationale": "249 ISO-3166-1 alpha-2 country codes required by oms/wms order_country_integrity FK & triggers.",
+      "sourceMigrations": [
+        "258_order_country_integrity.sql"
+      ]
+    },
+    {
+      "table": "oms.shopify_order_bridge_checkpoints",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Singleton Shopify raw-to-OMS bridge checkpoint row (id=1).",
+      "sourceMigrations": [
+        "147_shopify_order_bridge_checkpoint.sql"
+      ]
+    },
+    {
+      "table": "procurement.po_status_history",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000035000019280001_retire_obsolete_receive_pack_warnings.sql"
+      ]
+    },
+    {
+      "table": "procurement.purchase_planning_policy",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Singleton purchase planning policy row (id=1, revision=0).",
+      "sourceMigrations": [
+        "223_purchase_planning_policy.sql"
+      ]
+    },
+    {
+      "table": "procurement.receiving_custody_fence",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Singleton receiving custody fence row (revision=0) required by receiving quarantine guards.",
+      "sourceMigrations": [
+        "900000004000017890001_receiving_quarantine.sql"
+      ]
+    },
+    {
+      "table": "procurement.vendor_invoice_unit_cost_repairs",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0620_vendor_invoice_unit_cost_mills_repair.sql"
+      ]
+    },
+    {
+      "table": "public.audit_events",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0730_catalog_existing_photo_defaults.sql"
+      ]
+    },
+    {
+      "table": "public.notification_preferences",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Legacy pre-namespace table superseded by notifications.notification_preferences.",
+      "sourceMigrations": [
+        "035_notification_system.sql"
+      ]
+    },
+    {
+      "table": "public.notification_types",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Legacy pre-namespace table superseded by notifications.notification_types.",
+      "sourceMigrations": [
+        "035_notification_system.sql"
+      ]
+    },
+    {
+      "table": "returns.customer_return_label_control_events",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "255_return_policy_shipping.sql"
+      ]
+    },
+    {
+      "table": "returns.customer_return_label_controls",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "255_return_policy_shipping.sql"
+      ]
+    },
+    {
+      "table": "returns.customer_return_submission_events",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "251_customer_return_label_settings.sql"
+      ]
+    },
+    {
+      "table": "returns.return_policies",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "255_return_policy_shipping.sql"
+      ]
+    },
+    {
+      "table": "returns.return_policy_shipping",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "255_return_policy_shipping.sql"
+      ]
+    },
+    {
+      "table": "returns.return_policy_shipping_migrations",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "255_return_policy_shipping.sql"
+      ]
+    },
+    {
+      "table": "shipping.box_catalog",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "238_shared_packaging_and_program_charges.sql"
+      ]
+    },
+    {
+      "table": "shipping.box_suite_members",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Box-to-suite membership rows populated when box_catalog entries exist.",
+      "sourceMigrations": [
+        "238_shared_packaging_and_program_charges.sql"
+      ]
+    },
+    {
+      "table": "shipping.box_suite_revisions",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Append-only suite revision rows paired with shipping.box_suites.",
+      "sourceMigrations": [
+        "238_shared_packaging_and_program_charges.sql"
+      ]
+    },
+    {
+      "table": "shipping.box_suites",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Shared packaging suites created from operator/migrated box catalog.",
+      "sourceMigrations": [
+        "238_shared_packaging_and_program_charges.sql"
+      ]
+    },
+    {
+      "table": "shipping.channel_packing_preferences",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "238_shared_packaging_and_program_charges.sql"
+      ]
+    },
+    {
+      "table": "shipping.configuration_commands",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "246_correct_legacy_box_dimensions.sql"
+      ]
+    },
+    {
+      "table": "shipping.destination_scope_members",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0605_shipping_destination_scope_library.sql"
+      ]
+    },
+    {
+      "table": "shipping.destination_scopes",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0605_shipping_destination_scope_library.sql"
+      ]
+    },
+    {
+      "table": "shipping.fulfillment_channel_services",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Channel service-level bindings configured alongside active shipping policies.",
+      "sourceMigrations": [
+        "238_shared_packaging_and_program_charges.sql"
+      ]
+    },
+    {
+      "table": "shipping.fulfillment_provider_connection_events",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0643_shipping_fulfillment_provider_connections.sql"
+      ]
+    },
+    {
+      "table": "shipping.fulfillment_provider_connections",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0643_shipping_fulfillment_provider_connections.sql"
+      ]
+    },
+    {
+      "table": "shipping.legacy_dropship_box_map",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "238_shared_packaging_and_program_charges.sql"
+      ]
+    },
+    {
+      "table": "shipping.packaging_assignments",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Channel packaging suite assignments created once box_suites exist.",
+      "sourceMigrations": [
+        "238_shared_packaging_and_program_charges.sql"
+      ]
+    },
+    {
+      "table": "shipping.rate_book_assignments",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Channel rate-book assignments configured per active pricing channel.",
+      "sourceMigrations": [
+        "0588_dropship_vendor_rate_book.sql",
+        "137_shipping_rate_books.sql"
+      ]
+    },
+    {
+      "table": "shipping.rate_book_charge_revisions",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "238_shared_packaging_and_program_charges.sql"
+      ]
+    },
+    {
+      "table": "shipping.rate_books",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Default retail and dropship vendor rate books.",
+      "sourceMigrations": [
+        "0588_dropship_vendor_rate_book.sql",
+        "137_shipping_rate_books.sql"
+      ]
+    },
+    {
+      "table": "shipping.service_levels",
+      "disposition": "baseline_reference_seed",
+      "rationale": "4 canonical shipping service levels (standard, expedited, express, pallet_freight).",
+      "sourceMigrations": [
+        "0590_shipping_service_level_pricing.sql",
+        "117_shipping_engine_foundation.sql"
+      ]
+    },
+    {
+      "table": "shipping.transit_matrix",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Per-warehouse carrier transit matrix populated once origin warehouse rows exist.",
+      "sourceMigrations": [
+        "120_shipping_transit_seed.sql"
+      ]
+    },
+    {
+      "table": "shipping.zone_rules",
+      "disposition": "dependent_or_runtime_seeded",
+      "rationale": "Per-warehouse US/military/state-ZIP zone rules populated once origin warehouse rows exist.",
+      "sourceMigrations": [
+        "0597_shipping_military_zone_rules.sql",
+        "119_shipping_zone_seed.sql",
+        "139_shipping_state_zip_pricing.sql"
+      ]
+    },
+    {
+      "table": "shipping.zone_sets",
+      "disposition": "baseline_reference_seed",
+      "rationale": "Default US retail zone sets (retail-us-default, retail-us-state-zip).",
+      "sourceMigrations": [
+        "137_shipping_rate_books.sql",
+        "139_shipping_state_zip_pricing.sql"
+      ]
+    },
+    {
+      "table": "warehouse.echelon_settings",
+      "disposition": "baseline_reference_seed",
+      "rationale": "4 pick-priority base score and SLA default settings ('priority.*').",
+      "sourceMigrations": [
+        "0559_pick_priority_settings.sql"
+      ]
+    },
+    {
+      "table": "wms.declared_package_business_shipments",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0637_declared_package_business_shipments.sql"
+      ]
+    },
+    {
+      "table": "wms.package_allocation_effect_outbox",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0635_package_allocation_effect_outbox.sql"
+      ]
+    },
+    {
+      "table": "wms.saved_label_status_jobs",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000045000019690001_customer_order_progress_capture.sql"
+      ]
+    },
+    {
+      "table": "wms.shipping_engine_order_provider_refs",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "173_shipping_engine_order_provider_refs.sql"
+      ]
+    },
+    {
+      "table": "wms.shipping_engine_order_requests",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "0593_fulfillment_authority_cutover_foundation.sql"
+      ]
+    },
+    {
+      "table": "wms.shipping_package_history_invalidations",
+      "disposition": "historical_backfill_or_event",
+      "rationale": "One-time historical data backfill, repair audit record, or outbox/invalidation sweep over pre-existing production rows; intentionally omitted on empty-database bootstrap.",
+      "sourceMigrations": [
+        "900000036000019300001_shipping_package_history.sql"
+      ]
+    }
+  ]
+}
