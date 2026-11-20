@@ -2,7 +2,7 @@
 import {
   shopifyGraphQL,
   type ShopifyGraphQLRequestOptions,
-} from "../../shopify/admin-gql-client";
+} from "../../shopify/admin-gql-client.api";
 
 export { shopifyGraphQL, type ShopifyGraphQLRequestOptions };
 

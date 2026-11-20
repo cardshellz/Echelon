@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { Request,Response } from "express";
 import { describe,it,expect,vi } from "vitest";
 vi.mock("../../db",()=>({db:{}}));
-import { createStaffStreamObserver,STAFF_STREAM_QUEUE_LIMIT } from "../../modules/identity/staff-stream";
+import { createStaffStreamObserver,STAFF_STREAM_QUEUE_LIMIT } from "../../modules/identity/staff-session.api";
 function response(){return Object.assign(new EventEmitter(),{write:vi.fn(),writableEnded:false}) as unknown as Response;}
 describe("staff observer delivery remains separate from business execution",()=>{
   it("permits current output but suppresses post-revocation progress/completion",async()=>{

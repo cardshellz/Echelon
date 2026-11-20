@@ -9,7 +9,7 @@ import { createChannelFulfillmentAuthorityRepository, type MaterializePhysicalPa
 import { createChannelFulfillmentAuthorityService, createCompatibilityChannelFulfillmentProviderExecutor } from "../../../oms/channel-fulfillment-authority.service";
 import { createChannelFulfillmentProjector } from "../../../oms/channel-fulfillment-projection.repository";
 import { createFulfillmentPushService } from "../../../oms/fulfillment-push.service";
-import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client";
+import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client.api";
 import { CarrierTrackingService } from "../../carrier-tracking.service";
 import { createDrizzleCarrierTrackingRepository } from "../../carrier-tracking.repository";
 import { PackageAllocationLabelCommercialFulfillmentService } from "../../package-allocation-label-commercial-fulfillment.service";

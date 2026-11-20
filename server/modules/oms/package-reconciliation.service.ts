@@ -10,7 +10,7 @@ import { packageReconciliationInputFromProof, PackageReconciliationError, type P
 import { planPackageReconciliation } from "./package-reconciliation.domain";
 import { readShopifyLabelPackages } from "./shopify-label-lifecycle.client";
 import { shopifyOrderFulfillmentLockId } from "./shopify-fulfillment-lock";
-import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
+import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client.api";
 import type { ShopifyLabelPackage } from "./shopify-label-lifecycle.domain";
 
 const requestSchema = z.object({ sourceItemIds: z.array(z.number().int().positive().safe()).min(1).max(500),

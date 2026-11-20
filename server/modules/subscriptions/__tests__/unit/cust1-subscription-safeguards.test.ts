@@ -47,15 +47,15 @@ vi.mock("../../../../infrastructure/scheduler-lock", () => ({
   withAdvisoryLock: withAdvisoryLockMock,
 }));
 
-vi.mock("../../../shopify/admin-gql-client", () => ({
+vi.mock("../../../shopify/admin-gql-client.api", () => ({
   shopifyGraphQL: shopifyGraphQLMock,
 }));
 
 import * as storage from "../../infrastructure/subscription.repository";
 import * as shopifyAdapter from "../../infrastructure/shopify.adapter";
 import * as useCases from "../../application/subscription.use-cases";
-import { processDueBillings, runBillingPassWithLock } from "../../subscription.scheduler";
-import { registerSubscriptionWebhookRoutes } from "../../subscription.webhooks";
+import { processDueBillings, runBillingPassWithLock } from "../../application/subscription.scheduler";
+import { registerSubscriptionWebhookRoutes } from "../../interfaces/http/subscription.webhooks";
 
 describe("Priority 13 Batch CUST-1 — Subscription Safeguards (CUST-02, CUST-03, CUST-05)", () => {
   beforeEach(() => {

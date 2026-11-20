@@ -45,7 +45,7 @@ import type { EbayShippingFulfillmentRequest } from "../channels/ebay-connector.
 import type {
   ShopifyAdminGraphQLClient,
   ShopifyUserError,
-} from "../shopify/admin-gql-client";
+} from "../shopify/admin-gql-client.api";
 import { normalizeEbayTrackingNumber } from "../channels/ebay-connector.api";
 import {
   EbayTrackingConflictError,

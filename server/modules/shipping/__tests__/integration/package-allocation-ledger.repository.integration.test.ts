@@ -48,7 +48,7 @@ import { CarrierTrackingService } from "../../carrier-tracking.service";
 import { createDrizzleCarrierTrackingRepository } from "../../carrier-tracking.repository";
 import { createShipStationRelatedLabelReader } from "../../shipstation-related-labels.reader";
 import { EbayApiClient } from "../../../channels/adapters/ebay/ebay-api.client";
-import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client";
+import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client.api";
 import { PackageAllocationLabelCommercialFulfillmentService } from "../../package-allocation-label-commercial-fulfillment.service";
 import type {
   PackageAllocationEffectIntentV1,

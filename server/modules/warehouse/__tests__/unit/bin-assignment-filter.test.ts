@@ -5,8 +5,8 @@ import {
   BinAssignmentFilterError,
   MAX_BIN_ASSIGNMENT_VARIANT_IDS,
   parseBinAssignmentVariantIdsQuery,
-} from "../../bin-assignment-filter";
-import { BinAssignmentService } from "../../bin-assignment.service";
+} from "../../domain/bin-assignment-filter";
+import { BinAssignmentService } from "../../application/bin-assignment.service";
 
 const dialect = new PgDialect();
 

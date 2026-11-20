@@ -173,7 +173,7 @@ describe("PostgreSQL coverage selection", () => {
       "server/modules/identity/__tests__/integration/role-assignments.integration.test.ts",
       "server/modules/identity/__tests__/integration/role-permissions.integration.test.ts",
     ] },
-    { source: "identity.routes.ts", required: [
+    { source: "interfaces/http/identity.routes.ts", required: [
       "server/modules/identity/__tests__/integration/role-assignments.integration.test.ts",
       "server/modules/identity/__tests__/integration/role-permissions.integration.test.ts",
     ] },

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createDefaultShopifyAdminClient } from "../../admin-gql-client";
+import { createDefaultShopifyAdminClient } from "../../infrastructure/admin-gql-client";
 
-vi.mock("../../../integrations/shopify", () => ({
+vi.mock("../../../integrations/shopify.api", () => ({
   getShopifyConfig: () => ({
     domain: "synthetic.myshopify.com",
     accessToken: "synthetic-token",

@@ -1,4 +1,4 @@
-import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
+import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client.api";
 import type { ChannelIdentityService } from "./channel-identity.service";
 import type { IChannelStorage } from "./channels.storage";
 import { ChannelIdentityError } from "./channel-identity.domain";

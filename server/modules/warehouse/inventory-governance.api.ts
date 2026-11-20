@@ -12,7 +12,7 @@ export {
   normalizeLocationPatchInput,
   normalizeLocationType,
   validateWarehouseLocationIntegrity,
-} from "./location-integrity";
+} from "./domain/location-integrity";
 
 export {
   assertWarehouseSettingsCreation,

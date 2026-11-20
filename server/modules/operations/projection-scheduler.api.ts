@@ -6,4 +6,4 @@ export {
   runControlTowerProjectionOnce,
   startControlTowerProjectionScheduler,
   type ControlTowerProjectionSchedulerHandle,
-} from "./control-tower-v2.scheduler";
+} from "./application/control-tower-v2.scheduler";

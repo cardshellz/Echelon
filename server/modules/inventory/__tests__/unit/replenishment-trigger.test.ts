@@ -4,7 +4,7 @@ import { validateReplenishmentTrigger } from "../../domain/replenishment-trigger
 import { insertReplenTaskSchema } from "@shared/schema";
 
 vi.mock("../../../notifications/in-app-notifications.api", () => ({ notify: vi.fn() }));
-vi.mock("../../../warehouse/settings.resolver", () => ({ getSettingsForWarehouse: vi.fn() }));
+vi.mock("../../../warehouse/settings.api", () => ({ getSettingsForWarehouse: vi.fn() }));
 import { ReplenishmentUseCases } from "../../application/replenishment.use-cases";
 
 describe("replenishment trigger contract", () => {

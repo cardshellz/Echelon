@@ -30,7 +30,7 @@ import {
 } from "@shared/schema";
 import { calculateRemainingCapacity, findOverflowBin } from "../inventory-utils";
 import { notify } from "../../notifications/in-app-notifications.api";
-import { getSettingsForWarehouse as sharedGetSettingsForWarehouse } from "../../warehouse/settings.resolver";
+import { getSettingsForWarehouse as sharedGetSettingsForWarehouse } from "../../warehouse/settings.api";
 import type {
   ReplenTask,
   InsertReplenTask,
@@ -1287,7 +1287,7 @@ export class ReplenishmentUseCases {
           notes: `${task.notes || ""}\nCancelled to re-evaluate due to inventory change.`.trim()
         })
         .where(and(eq(replenTasks.id, task.id), eq(replenTasks.status, task.status), eq(replenTasks.revision, task.revision), inArray(replenTasks.status, ["pending", "assigned", "in_progress", "blocked"])));
-      
+
       // Also call checkReplenForLocation on the target destination, because we just cancelled a task for it
       try {
         await this.checkReplenForLocation(task.toLocationId);
@@ -3825,7 +3825,7 @@ export class ReplenishmentUseCases {
    */
   async getSettingsForWarehouse(warehouseId?: number, database: DrizzleDb = this.db): Promise<WarehouseSettings | null> {
     // Delegates to the shared resolver so every service gets identical
-    // fallback behavior. See server/modules/warehouse/settings.resolver.ts.
+    // fallback behavior. See server/modules/warehouse/settings.api.ts.
     return sharedGetSettingsForWarehouse(warehouseId, database as any);
   }
 

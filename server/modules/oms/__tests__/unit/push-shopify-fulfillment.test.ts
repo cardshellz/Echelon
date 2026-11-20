@@ -38,7 +38,7 @@ import {
   SHOPIFY_PUSH_INCOMPLETE,
   __test__,
 } from "../../fulfillment-push.service";
-import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client";
+import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client.api";
 
 // ─── Fixtures ────────────────────────────────────────────────────────
 

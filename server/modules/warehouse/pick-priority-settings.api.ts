@@ -5,4 +5,4 @@ export {
   readPickPrioritySettings,
   upsertPickPrioritySetting,
   type PickPriorityShippingLevel,
-} from "./pick-priority-settings.repository";
+} from "./infrastructure/pick-priority-settings.repository";

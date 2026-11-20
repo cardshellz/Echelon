@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../../db";
-import type { ShopifyCatalogProduct } from "../integrations/shopify";
+import type { ShopifyCatalogProduct } from "../integrations/shopify.api";
 
 const ownershipRows = z.array(z.object({
   command_key: z.string().uuid(), remote_product_id: z.string().nullable(), state: z.string(), product_only: z.boolean(),

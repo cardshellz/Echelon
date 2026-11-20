@@ -3,7 +3,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import type { PoolClient } from "pg";
 import { productVariants, replenRules, replenTierDefaults } from "@shared/schema";
 import type { db } from "../../../db";
-import { getReplenishmentSettingsForWarehouse } from "../../warehouse/settings.resolver";
+import { getReplenishmentSettingsForWarehouse } from "../../warehouse/settings.api";
 import { resolveReplenishmentAutoExecution } from "../domain/replenishment-auto-execution";
 import { ReplenishmentExecutionDomainError } from "../domain/replenishment-execution.domain";
 

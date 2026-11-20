@@ -25,7 +25,7 @@ import {
 } from "../oms/shopify-intake.api";
 import { normalizeShopifyRepairOrderId, normalizeShopifyRepairShopDomain, type ShopifyCustomerRepairScope } from "./shopify-customer-repair";
 import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
-import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.resolver";
+import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.api";
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/order-intake-and-items.api";
 import { recomputeOrderStatusFromShipments } from "./shipment-rollup";
 import { transitionOrderStatus, completeOrder } from "./order-status-core";

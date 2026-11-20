@@ -15,7 +15,7 @@ const SHOPIFY_RECONCILIATION_SRC = readFileSync(
   "utf8",
 );
 const SYNC_RECOVERY_SRC = readFileSync(
-  resolve(__dirname, "../../../sync/sync-recovery.service.ts"),
+  resolve(__dirname, "../../../sync/application/sync-recovery.service.ts"),
   "utf8",
 );
 

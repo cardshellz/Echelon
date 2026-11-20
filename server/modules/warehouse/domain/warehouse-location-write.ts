@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { locationTypeEnum } from "@shared/schema/warehouse.schema";
-import { normalizeLocationType } from "../location-integrity";
+import { normalizeLocationType } from "./location-integrity";
 
 export const WAREHOUSE_BIN_TYPES = [
   "bin",

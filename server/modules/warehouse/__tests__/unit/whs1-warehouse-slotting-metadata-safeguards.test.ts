@@ -11,12 +11,12 @@ import {
   assertPickFaceAssignmentEligible,
   normalizeLocationPatchInput,
   validateWarehouseLocationIntegrity,
-} from "../../location-integrity";
+} from "../../domain/location-integrity";
 import {
   bulkReassignProducts,
   updateWarehouseLocation,
 } from "../../infrastructure/warehouse.repository";
-import { BinAssignmentService } from "../../bin-assignment.service";
+import { BinAssignmentService } from "../../application/bin-assignment.service";
 import { backfillOpenOrderItemBinAssignment } from "../../../orders/bin-location-backfill";
 import {
   backfillUnassignedWmsOrderItemBin,
@@ -342,11 +342,11 @@ describe("Priority 5 Batch WHS-1 — Warehouse Setup, Slotting & Metadata Safegu
 
   describe("WHM-03, WHM-05, CI-02, CI-07: Route-level safeguards in warehouse.routes.ts and locations.routes.ts", () => {
     const warehouseRoutesSrc = readFileSync(
-      resolve(__dirname, "../../warehouse.routes.ts"),
+      resolve(__dirname, "../../interfaces/http/warehouse.routes.ts"),
       "utf-8",
     );
     const locationsRoutesSrc = readFileSync(
-      resolve(__dirname, "../../locations.routes.ts"),
+      resolve(__dirname, "../../interfaces/http/locations.routes.ts"),
       "utf-8",
     );
 

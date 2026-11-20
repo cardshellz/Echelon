@@ -8,5 +8,8 @@ export {
   staffSessionActor,
   clearStaffSession,
   readStaffLifecycleAccess,
-} from "./staff-session";
-export { createStaffStreamObserver } from "./staff-stream";
+} from "./application/staff-session";
+export {
+  createStaffStreamObserver,
+  STAFF_STREAM_QUEUE_LIMIT,
+} from "./interfaces/http/staff-stream";

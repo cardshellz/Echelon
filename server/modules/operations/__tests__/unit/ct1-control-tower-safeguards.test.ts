@@ -17,22 +17,22 @@ import {
 } from "../../../../../scripts/cleanup-control-tower-observations";
 import { withAdvisoryLock } from "../../../../infrastructure/scheduler-lock";
 import { HistoricalShipStationContentsReviewServiceError } from "../../../shipping/historical-shipstation-contents.api";
-import { decideHistoricalContentsReview } from "../../control-tower-historical-contents.actions";
+import { decideHistoricalContentsReview } from "../../application/control-tower-historical-contents.actions";
 import {
   controlTowerFingerprint,
   type ControlTowerSourceAdapter,
   type ProjectedControlTowerWorkItem,
   type QueryClient,
-} from "../../control-tower-v2.domain";
+} from "../../domain/control-tower-v2.domain";
 import {
   previewControlTowerSource,
   resolveControlTowerMaxSourcePages,
   resolveControlTowerSourceStatementTimeoutMs,
   runControlTowerSourceProjection,
-} from "../../control-tower-v2.repository";
-import { startControlTowerProjectionScheduler } from "../../control-tower-v2.scheduler";
-import { registerOperationsControlTowerRoutes } from "../../control-tower.routes";
-import { ControlTowerActionError, executeOperationsControlTowerAction } from "../../control-tower.service";
+} from "../../infrastructure/control-tower-v2.repository";
+import { startControlTowerProjectionScheduler } from "../../application/control-tower-v2.scheduler";
+import { registerOperationsControlTowerRoutes } from "../../interfaces/http/control-tower.routes";
+import { ControlTowerActionError, executeOperationsControlTowerAction } from "../../application/control-tower.service";
 
 interface SimRow {
   id: number;

@@ -8,7 +8,7 @@
 
 import { sql, inArray } from "drizzle-orm";
 import { inventoryLevels } from "@shared/schema";
-import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
+import { getSettingsForWarehouse } from "../warehouse/settings.api";
 import { interpretInventoryShipmentQuantity } from "@shared/inventory/shipment-quantity";
 import { shipmentQuantityEvidenceProjection } from "../inventory/shipment-evidence.api";
 

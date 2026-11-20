@@ -12,7 +12,7 @@
 import { catalogStorage, createSharedProductPhotoImporter } from "../catalog";
 import { warehouseStorage } from "../warehouse";
 const importStorage = { ...catalogStorage, ...warehouseStorage };
-import { fetchShopifyCatalogProducts, type ShopifyCatalogProduct } from "../integrations/shopify";
+import { fetchShopifyCatalogProducts, type ShopifyCatalogProduct } from "../integrations/shopify.api";
 import { db, productCategories, eq, and } from "../../storage/base";
 import {
   decideImportedShopifyProductMapping,
@@ -50,7 +50,7 @@ function resolveProductTypeSlug(shopifyType: string | null | undefined, sku?: st
   if (!shopifyType || shopifyType.trim() === "") return "other";
   const key = shopifyType.toLowerCase().trim();
   let slug = PRODUCT_TYPE_SLUG_MAP[key] || "other";
-  
+
   // Refine glove-fit by SKU prefix
   if (slug === "glove-fit-toploader" && sku) {
     const skuUp = sku.toUpperCase();
@@ -58,7 +58,7 @@ function resolveProductTypeSlug(shopifyType: string | null | undefined, sku?: st
     else if (skuUp.startsWith("GLV-GRD")) slug = "glove-fit-graded";
     else if (skuUp.startsWith("GLV-SR") || skuUp.startsWith("GLV-SLV-SEMI")) slug = "glove-fit-semi";
   }
-  
+
   return slug;
 }
 

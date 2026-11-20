@@ -3,7 +3,7 @@ import { readIntegerCents } from "@shared/money-read";
 import * as storage from "../infrastructure/subscription.repository";
 import * as shopifyAdapter from "../infrastructure/shopify.adapter";
 import * as domain from "../domain/subscription.domain";
-import type { ContractWebhookPayload, BillingWebhookPayload, PlanRecord } from "../subscription.types";
+import type { ContractWebhookPayload, BillingWebhookPayload, PlanRecord } from "../domain/subscription.types";
 import { AuditLogger } from "../../../infrastructure/auditLogger";
 
 const DUNNING_MAX_RETRIES = parseInt(process.env.SUBSCRIPTION_DUNNING_MAX_RETRIES || "4", 10);

@@ -27,7 +27,7 @@ import {
   normalizeLocationInput,
   normalizeLocationPatchInput,
   validateWarehouseLocationIntegrity,
-} from "../location-integrity";
+} from "../domain/location-integrity";
 
 type Tx = typeof db | any;
 
@@ -178,7 +178,7 @@ export async function createWarehouseLocation(location: InsertWarehouseLocation 
 
   const conditions = [eq(warehouseLocations.code, code.toUpperCase())];
   if (normalized.warehouseId) conditions.push(eq(warehouseLocations.warehouseId, normalized.warehouseId));
-  
+
   const [existing] = await tx.select().from(warehouseLocations).where(and(...conditions));
   if (existing) throw new Error(`Location code "${code}" already exists in this warehouse`);
 
@@ -190,11 +190,11 @@ export async function updateWarehouseLocation(id: number, updates: Partial<Omit<
   const normalizedUpdates = normalizeLocationPatchInput(updates);
   const existing = await getWarehouseLocationById(id, tx);
   if (!existing) return null;
-  
+
   const merged = { ...existing, ...normalizedUpdates };
   const newCode = generateLocationCode(merged as any);
   validateWarehouseLocationIntegrity({ ...merged, code: newCode });
-  
+
   if (newCode !== existing.code) {
     const whId = normalizedUpdates.warehouseId ?? existing.warehouseId;
     const conditions = [eq(warehouseLocations.code, newCode.toUpperCase())];
@@ -202,7 +202,7 @@ export async function updateWarehouseLocation(id: number, updates: Partial<Omit<
     const [conflict] = await tx.select().from(warehouseLocations).where(and(...conditions));
     if (conflict && conflict.id !== id) throw new Error(`Location code "${newCode}" already exists in this warehouse`);
   }
-  
+
   const result = await tx.update(warehouseLocations).set({ ...normalizedUpdates, code: newCode, updatedAt: new Date() }).where(eq(warehouseLocations.id, id)).returning();
   return result[0] || null;
 }
@@ -418,7 +418,7 @@ export async function updateProductLocation(id: number, location: UpdateProductL
   if (updates.location) updates.location = updates.location.toUpperCase();
   if (updates.zone) updates.zone = updates.zone.toUpperCase();
   updates.updatedAt = new Date();
-  
+
   const result = await tx.update(productLocations).set(updates).where(eq(productLocations.id, id)).returning();
   // Bin moved (or row re-activated at a bin): stamp still-unassigned open items.
   if (result[0] && (updates.location || updates.warehouseLocationId || updates.status === "active")) {
@@ -528,7 +528,7 @@ export async function deleteProductLocation(id: number, tx: Tx = db): Promise<bo
 export async function upsertProductLocationBySku(sku: string, name: string, status?: string, imageUrl?: string, barcode?: string, tx: Tx = db): Promise<ProductLocation> {
   const upperSku = sku.toUpperCase();
   const existing = await getProductLocationBySku(upperSku, tx);
-  
+
   if (existing) {
     const updates: any = { name, updatedAt: new Date() };
     if (status) updates.status = status;

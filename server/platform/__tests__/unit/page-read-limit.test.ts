@@ -176,7 +176,7 @@ describe("page protection wiring", () => {
     ["server/modules/orders/picking-history.routes.ts", ["/api/picking/history"]],
     ["server/modules/inventory/inventory.routes.ts", ["/api/inventory/transactions"]],
     ["server/routes/oms.routes.ts", ["/api/oms/orders"]],
-    ["server/modules/shipping-engine/outbound-shipments.routes.ts", ["/api/outbound-shipments"]],
+    ["server/modules/shipping-engine/interfaces/http/outbound-shipments.routes.ts", ["/api/outbound-shipments"]],
   ] as const)("places the shared limiter after authentication in %s", (path, routes) => {
     const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true);
     const protectedRoutes: string[] = [];

@@ -213,10 +213,10 @@ async function main(): Promise<void> {
       res.json({ stopping: true });
       res.once("finish", () => { void stop().then(() => process.exit(0), error => { console.error(error); process.exit(1); }); });
     });
-    const { registerAuthRoutes } = await import("../../../server/modules/identity/identity.routes");
+    const { registerAuthRoutes } = await import("../../../server/modules/identity/routes.api");
     const { registerPurchasingRoutes } = await import("../../../server/modules/procurement/procurement.routes");
-    const { registerWarehouseRoutes } = await import("../../../server/modules/warehouse/warehouse.routes");
-    const { registerSettingsRoutes } = await import("../../../server/modules/warehouse/settings.routes");
+    const { registerWarehouseRoutes } = await import("../../../server/modules/warehouse/routes.api");
+    const { registerSettingsRoutes } = await import("../../../server/modules/warehouse/routes.api");
     const { registerProductRoutes } = await import("../../../server/modules/catalog/catalog.routes");
     const { registerInventoryRoutes } = await import("../../../server/modules/inventory/inventory.routes");
     const { registerNotificationRoutes } = await import("../../../server/modules/notifications/routes.api");

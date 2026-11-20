@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { BinAssignmentService } from "../../bin-assignment.service";
-import { validateWarehouseLocationIntegrity } from "../../location-integrity";
+import { BinAssignmentService } from "../../application/bin-assignment.service";
+import { validateWarehouseLocationIntegrity } from "../../domain/location-integrity";
 
 describe("warehouse location integrity", () => {
   it("requires active operational locations to belong to a warehouse", () => {

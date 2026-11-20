@@ -474,7 +474,7 @@ describe("P3.3 ShippingEngine Port Completion", () => {
 
     it("routes OrderEditWarehouseGateway through services.shippingEngine.synchronizeOrderEditShipment", () => {
       const compositionSrc = readSrc(
-        "server/modules/order-edits/order-edit.composition.ts",
+        "server/modules/order-edits/application/order-edit.composition.ts",
       );
       expect(compositionSrc).toContain(
         "services.shippingEngine?.synchronizeOrderEditShipment",
@@ -483,7 +483,7 @@ describe("P3.3 ShippingEngine Port Completion", () => {
 
     it("guards SyncRecoveryService WMS->ShipStation backfill against held, review, and legacy-linked shipments", () => {
       const recoverySrc = readSrc(
-        "server/modules/sync/sync-recovery.service.ts",
+        "server/modules/sync/application/sync-recovery.service.ts",
       );
       expect(recoverySrc).toContain("pushShipmentThroughEngine");
       expect(recoverySrc).toContain("AND shipstation_order_id IS NULL");

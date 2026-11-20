@@ -181,7 +181,7 @@ export class PaymentAcceptanceFixture {
       this.modulePool.query = this.pool.query.bind(this.pool) as typeof this.modulePool.query;
       this.modulePool.connect = this.pool.connect.bind(this.pool) as typeof this.modulePool.connect;
       const { registerApLedgerRoutes } = await import("../../ap-ledger.routes");
-      const { registerAuthRoutes } = await import("../../../identity/identity.routes");
+      const { registerAuthRoutes } = await import("../../../identity/routes.api");
       const app = express();
       app.use(express.json());
       app.use(session({

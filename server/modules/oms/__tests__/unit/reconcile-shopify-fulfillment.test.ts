@@ -27,7 +27,7 @@ import {
   ShopifyFulfillmentPushError,
   SHOPIFY_TRACKING_UPDATE_NETWORK_ERROR,
 } from "../../fulfillment-push.service";
-import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client";
+import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client.api";
 
 // ─── Fixtures ────────────────────────────────────────────────────────
 
