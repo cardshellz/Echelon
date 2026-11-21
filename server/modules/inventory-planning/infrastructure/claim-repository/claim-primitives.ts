@@ -117,15 +117,6 @@ export type ClaimRepositoryDependencies = {
   readonly observationReviewWriter?: CanonicalClaimPickerObservationReviewPort;
   readonly workOwner?: AssemblyWorkOwner;
   readonly lockCostGraph: (client: PoolClient) => Promise<void>;
-  readonly isPackageConversionInline: (
-    client: PoolClient,
-    input: {
-      destinationVariantId: number;
-      warehouseId: number;
-      outputQty: bigint;
-      method: "case_break" | "package_conversion";
-    },
-  ) => Promise<boolean>;
 };
 
 export class InventoryAvailabilityClaimRepositoryError extends Error {

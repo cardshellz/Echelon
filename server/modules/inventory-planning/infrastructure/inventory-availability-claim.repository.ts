@@ -25,7 +25,6 @@ import { pool } from "../../../db";
 import { InventoryQuantityError } from "../../inventory/domain/quantity-ledger";
 import { costEvidenceTransactionFromPg } from "../../inventory/infrastructure/cost-evidence-pg";
 import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
-import { isClaimPackageConversionInline } from "../../inventory/infrastructure/replenishment-policy.reader";
 import type { AssemblyWorkOwner } from "../../warehouse/cutover-work.api";
 import type { CanonicalClaimBuildMutationPort } from "../application/canonical-claim-build.port";
 import type {
@@ -172,7 +171,6 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
       observationReviewWriter: this.observationReviewWriter,
       workOwner: this.workOwner,
       lockCostGraph: (client) => lockInventoryCostGraph(costEvidenceTransactionFromPg(client)),
-      isPackageConversionInline: isClaimPackageConversionInline,
     };
   }
 
