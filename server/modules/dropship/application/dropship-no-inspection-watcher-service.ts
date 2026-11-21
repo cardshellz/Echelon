@@ -2,12 +2,8 @@ import { z } from "zod";
 import { DropshipError } from "../domain/errors";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 /**
  * No-inspection watcher (design spec D3; build spec B2 "No-inspection branch").
@@ -297,11 +293,7 @@ export function isLostCarrierStatus(status: string): boolean {
 }
 
 export function makeDropshipNoInspectionWatcherLogger(): DropshipLogger {
-  return {
-    info: (event) => logNoInspectionEvent("info", event),
-    warn: (event) => logNoInspectionEvent("warn", event),
-    error: (event) => logNoInspectionEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.no_inspection_watcher");
 }
 
 export const systemDropshipNoInspectionWatcherClock: DropshipClock = {
@@ -326,17 +318,3 @@ function parseWatcherInput(input: unknown): z.infer<typeof runDropshipNoInspecti
   return result.data;
 }
 
-function logNoInspectionEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

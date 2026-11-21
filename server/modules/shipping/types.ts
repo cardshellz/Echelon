@@ -229,3 +229,26 @@ export interface EngineOrderState {
   shipDate?: Date | null;
   shipCalendarDate?: string | null;
 }
+
+export type OrderEditShipmentSyncMode =
+  | "hold"
+  | "verify"
+  | "synchronize"
+  | "release"
+  | "verify_shipped"
+  | "verify_cancelled"
+  | "verify_retired"
+  | "release_unsubmitted";
+
+export interface OrderEditShipmentSyncInput {
+  shipmentId: number;
+  operationId: string;
+  mode: OrderEditShipmentSyncMode;
+}
+
+export interface EngineRefResolutionMetrics {
+  canonicalHits: number;
+  legacyFallbackHits: number;
+  unresolvedHits: number;
+  lastLegacyFallbackAt: string | null;
+}

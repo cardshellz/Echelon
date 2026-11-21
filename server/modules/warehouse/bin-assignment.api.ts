@@ -12,14 +12,14 @@ export {
   type BinAssignmentRow,
   type AssignmentFilters,
   type ImportResult,
-} from "./bin-assignment.service";
+} from "./application/bin-assignment.service";
 
 export {
   BinAssignmentFilterError,
   MAX_BIN_ASSIGNMENT_VARIANT_IDS,
   normalizeBinAssignmentVariantIds,
   parseBinAssignmentVariantIdsQuery,
-} from "./bin-assignment-filter";
+} from "./domain/bin-assignment-filter";
 
 export {
   BinAssignmentValidationError,
@@ -27,4 +27,4 @@ export {
   parseBinAssignmentWriteRequest,
   parseSlotPrimaryFlag,
   type BinAssignmentWriteRequest,
-} from "./bin-assignment-contracts";
+} from "./domain/bin-assignment-contracts";

@@ -3,14 +3,14 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { requestLocalHttp } from "../../../../__tests__/helpers/local-http";
-import type { CurrentStaffAccess } from "../../../identity/staff-authority";
+import type { CurrentStaffAccess } from "../../../identity/staff-authority.api";
 
 const state = vi.hoisted(() => ({ readCurrentStaffAccess: vi.fn(), createAdjustmentReason: vi.fn() }));
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 vi.mock("../../../inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../../warehouse", () => ({ warehouseStorage: { createAdjustmentReason: state.createAdjustmentReason } }));
 vi.mock("../../../identity", async () => {
-  const actual = await import("../../../identity/staff-authority");
+  const actual = await import("../../../identity/staff-authority.api");
   return {
     readCurrentStaffAccess: state.readCurrentStaffAccess,
     hasAssignedSystemRole: actual.hasAssignedSystemRole,
@@ -20,7 +20,7 @@ vi.mock("../../../identity", async () => {
     }),
   };
 });
-import { registerSettingsRoutes } from "../../settings.routes";
+import { registerSettingsRoutes } from "../../interfaces/http/settings.routes";
 
 const current: CurrentStaffAccess = {
   user: { id: "operator", username: "synthetic", displayName: null, role: "picker", active: 1,

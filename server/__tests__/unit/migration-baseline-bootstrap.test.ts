@@ -10,6 +10,7 @@ import { baselineSha256 } from "../../../scripts/migrations/baseline-format.mjs"
 
 const MIGRATIONS_DIR = join("repo", "migrations");
 const SCHEMA_SQL = "SET LOCAL statement_timeout = 0;\nCREATE TABLE public._migrations (id integer);\n";
+const REFERENCE_SQL = "INSERT INTO oms.order_country_codes (code) VALUES ('US') ON CONFLICT (code) DO NOTHING;\n";
 const FIRST = "0001_first.sql";
 const SECOND = "900000001000017770001_second.sql";
 const LATER = "900000002000017780001_after_baseline.sql";
@@ -30,6 +31,25 @@ function manifestJson(overrides: Record<string, unknown> = {}): string {
   });
 }
 
+function referenceAuditJson(overrides: Record<string, unknown> = {}): string {
+  return JSON.stringify({
+    version: 1,
+    reviewedAt: "2026-11-19",
+    baselineCapturedAt: "2026-11-17",
+    referenceDataSha256: baselineSha256(REFERENCE_SQL),
+    coveredInsertMigrations: [FIRST],
+    tables: [
+      {
+        table: "oms.order_country_codes",
+        disposition: "baseline_reference_seed",
+        rationale: "ISO country lookup",
+        sourceMigrations: [FIRST],
+      },
+    ],
+    ...overrides,
+  });
+}
+
 function readFileFrom(files: Record<string, string>) {
   return (path: string): string => {
     const content = files[path];
@@ -42,6 +62,8 @@ function repositoryFiles(overrides: Record<string, string> = {}): Record<string,
   return {
     [join(MIGRATIONS_DIR, "baseline", "manifest.json")]: manifestJson(),
     [join(MIGRATIONS_DIR, "baseline", "schema.sql")]: SCHEMA_SQL,
+    [join(MIGRATIONS_DIR, "baseline", "reference-data-audit.json")]: referenceAuditJson(),
+    [join(MIGRATIONS_DIR, "baseline", "reference-data.sql")]: REFERENCE_SQL,
     [join(MIGRATIONS_DIR, FIRST)]: MIGRATION_SQL[FIRST],
     [join(MIGRATIONS_DIR, SECOND)]: MIGRATION_SQL[SECOND],
     ...overrides,
@@ -83,7 +105,7 @@ describe("schema baseline bootstrap", () => {
     expect(readFile).not.toHaveBeenCalled();
   });
 
-  it("loads the baseline into an empty database and records every covered migration, in one transaction", async () => {
+  it("loads the baseline and reference data into an empty database and records every covered migration, in one transaction", async () => {
     const { client, statements, writes } = clientWith(EMPTY);
 
     await expect(applyBaselineToEmptyDatabase(input(client)))
@@ -91,12 +113,13 @@ describe("schema baseline bootstrap", () => {
 
     expect(writes()[0]).toBe("BEGIN");
     expect(writes()[1]).toBe(SCHEMA_SQL.trim());
-    expect(writes()[2]).toContain("INSERT INTO public._migrations (filename, content_hash)");
-    expect(writes()[3]).toBe("COMMIT");
-    expect(writes()).toHaveLength(4);
+    expect(writes()[2]).toBe(REFERENCE_SQL.trim());
+    expect(writes()[3]).toContain("INSERT INTO public._migrations (filename, content_hash)");
+    expect(writes()[4]).toBe("COMMIT");
+    expect(writes()).toHaveLength(5);
     // Hashes are of the files exactly as the runner reads them (no line-ending
     // normalization), so its later already-applied check agrees.
-    expect(statements[3].values).toEqual([
+    expect(statements[4].values).toEqual([
       [FIRST, SECOND],
       [sha256(MIGRATION_SQL[FIRST]), sha256(MIGRATION_SQL[SECOND])],
     ]);
@@ -105,7 +128,7 @@ describe("schema baseline bootstrap", () => {
   it("does not record migrations the baseline does not cover", async () => {
     const { client, statements } = clientWith(EMPTY);
     await applyBaselineToEmptyDatabase(input(client));
-    expect((statements[3].values as string[][])[0]).not.toContain(LATER);
+    expect((statements[4].values as string[][])[0]).not.toContain(LATER);
   });
 
   it.each([
@@ -164,6 +187,25 @@ describe("schema baseline bootstrap", () => {
     const files = repositoryFiles({ [join(MIGRATIONS_DIR, "baseline", "manifest.json")]: manifestJson({ covers: [] }) });
     await expect(applyBaselineToEmptyDatabase(input(client, files))).rejects.toMatchObject({ code: "INVALID_BASELINE_MANIFEST" });
     expect(writes()).toEqual([]);
+  });
+
+  it("refuses a reference-data file that does not match its audit manifest", async () => {
+    const { client, writes } = clientWith(EMPTY);
+    const files = repositoryFiles({
+      [join(MIGRATIONS_DIR, "baseline", "reference-data.sql")]: `${REFERENCE_SQL}DELETE FROM oms.order_country_codes;\n`,
+    });
+    await expect(applyBaselineToEmptyDatabase(input(client, files))).rejects.toMatchObject({
+      code: "MIGRATION_BASELINE_REFERENCE_HASH_MISMATCH",
+      context: { expected: baselineSha256(REFERENCE_SQL) },
+    });
+    expect(writes()).toEqual([]);
+  });
+
+  it("rolls back and rethrows when reference data fails to load", async () => {
+    const failure = new Error("violates check constraint");
+    const { client, writes } = clientWith(EMPTY, (sql) => (sql === REFERENCE_SQL ? failure : undefined));
+    await expect(applyBaselineToEmptyDatabase(input(client))).rejects.toBe(failure);
+    expect(writes()).toEqual(["BEGIN", SCHEMA_SQL.trim(), REFERENCE_SQL.trim(), "ROLLBACK"]);
   });
 
   it("rolls back and rethrows when the schema fails to load", async () => {

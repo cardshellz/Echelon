@@ -3,7 +3,7 @@ import {
   extractOrderFromWebhookPayload,
   type ShopifyAddress,
   type ShopifyOrder,
-} from "../../../integrations/shopify";
+} from "../../../integrations/shopify.api";
 
 function payload(address: Partial<ShopifyAddress> | null): ShopifyOrder {
   return {

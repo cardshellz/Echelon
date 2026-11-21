@@ -304,7 +304,7 @@ export class InterwarehouseTransferService {
       await tx.execute(sql`
         UPDATE inventory.interwarehouse_transfers SET status=${status},
           exception_notes=CASE WHEN ${input.damagedQuantity} > 0 THEN
-            concat_ws(E'\n',NULLIF(exception_notes,''),${input.notes ?? "Damaged inventory reported"}) ELSE exception_notes END,
+            concat_ws(E'\n',NULLIF(exception_notes,''),${input.notes ?? "Damaged inventory reported"}::text) ELSE exception_notes END,
           completed_by=CASE WHEN ${isClosed} THEN ${actor} ELSE completed_by END,
           completed_at=CASE WHEN ${isClosed} THEN ${occurredAt} ELSE completed_at END,
           updated_at=${occurredAt},revision=revision+1 WHERE id=${transferId}
@@ -367,7 +367,7 @@ export class InterwarehouseTransferService {
       await tx.execute(sql`UPDATE inventory.interwarehouse_transfer_lines SET lost_qty=${nextLost} WHERE transfer_id=${transferId}`);
       await tx.execute(sql`
         UPDATE inventory.interwarehouse_transfers SET status=${status},
-          exception_notes=concat_ws(E'\n',NULLIF(exception_notes,''),${input.reason}),
+          exception_notes=concat_ws(E'\n',NULLIF(exception_notes,''),${input.reason}::text),
           completed_by=CASE WHEN ${isClosed} THEN ${actor} ELSE completed_by END,
           completed_at=CASE WHEN ${isClosed} THEN ${occurredAt} ELSE completed_at END,
           updated_at=${occurredAt},revision=revision+1 WHERE id=${transferId}
@@ -410,7 +410,7 @@ export class InterwarehouseTransferService {
       await tx.execute(sql`UPDATE inventory.interwarehouse_transfer_lines SET cancelled_qty=${cancelledQty} WHERE transfer_id=${transferId}`);
       await tx.execute(sql`
         UPDATE inventory.interwarehouse_transfers SET status=${status},cancelled_by=${actor},cancelled_at=${occurredAt},
-          completed_by=${actor},completed_at=${occurredAt},exception_notes=concat_ws(E'\n',NULLIF(exception_notes,''),${input.reason}),
+          completed_by=${actor},completed_at=${occurredAt},exception_notes=concat_ws(E'\n',NULLIF(exception_notes,''),${input.reason}::text),
           updated_at=${occurredAt},revision=revision+1 WHERE id=${transferId}
       `);
       await this.closeTransitLocation(tx, current.transitLocationId, occurredAt);

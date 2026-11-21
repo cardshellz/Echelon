@@ -10,6 +10,7 @@
  */
 
 import { isPermanentOrderReservationDataError, reservationErrorCode } from "./reservation-error-classification";
+import { pushShipmentThroughEngine } from "../orders/shipment-rollup-and-context.api";
 import { db } from "../../db";
 import { sql, eq, and, notInArray } from "drizzle-orm";
 import { CountryCodeValidationError, parseCountryCode } from "@shared/country-code";
@@ -26,6 +27,7 @@ import {
   wmsOrderItems,
 } from "@shared/schema";
 import { logger } from "../../platform/observability/logger";
+import { enrichContext } from "../../platform/observability";
 import { readChannelMerchandiseCapability, type ChannelMerchandiseCapabilityReader } from "./infrastructure/channel-merchandise-policy";
 import { isMerchandiseOrderCancelled } from "./domain/order-merchandise-state";
 import { assertChannelMerchandiseDispatchQuantities } from "./domain/channel-merchandise-dispatch";
@@ -68,8 +70,8 @@ import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import { omsOrderEvents } from "@shared/schema/oms.schema";
 import type { ServiceRegistry } from "../../services";
 import { computeSortRank, getShippingBase, resolveSlaDueAt, type ShippingServiceLevel } from "../orders/sort-rank-and-priority.api";
-import { getSlaCutoffConfig } from "../warehouse/settings.resolver";
-import { selectPickBinCandidate } from "../warehouse/pick-bin-candidate";
+import { getSlaCutoffConfig } from "../warehouse/settings.api";
+import { selectPickBinCandidate } from "../warehouse/pick-bin-candidate.api";
 import {
   validateOmsOrderFinancials,
   buildWmsOrderFinancialSnapshot,
@@ -852,6 +854,7 @@ export class WmsSyncService {
     mode: WmsSyncMode,
     expectedDropshipWarehouseId?: number,
   ): Promise<number | null> {
+    enrichContext({ omsOrderId });
     try {
       const omsOrderResult = await db
         .select()
@@ -930,6 +933,7 @@ export class WmsSyncService {
           throw new WmsShipmentPrerequisiteError("Existing warehouse order differs from the channel's configured fulfillment center", { omsOrderId });
         }
         const wmsOrderId = existingWmsOrder[0].id;
+        enrichContext({ wmsOrderId });
         if (isTerminalResidualRecovery) {
           await this.refreshOmsLineMaterializedQuantities(omsOrderId);
           console.log(
@@ -1410,6 +1414,10 @@ export class WmsSyncService {
       // so the row is inserted with its warehouse_id and a warehouse-correct
       // SLA, instead of being patched afterward.)
       await this.refreshOmsLineMaterializedQuantities(omsOrderId);
+      enrichContext({
+        wmsOrderId: newWmsOrder.id,
+        ...(shipmentIdForPush !== null ? { shipmentId: shipmentIdForPush } : {}),
+      });
 
       if (isDropshipAcceptanceClaim) {
         return newWmsOrder.id;
@@ -1429,7 +1437,7 @@ export class WmsSyncService {
           }
         try {
             if (this.services.shippingEngine) {
-              await this.services.shippingEngine.upsertShipment({ shipmentId: shipmentIdForPush } as any);
+              await pushShipmentThroughEngine(db, this.services.shippingEngine, shipmentIdForPush);
             } else {
               await this.services.shipStation.pushShipment(shipmentIdForPush);
             }
@@ -3418,7 +3426,7 @@ export class WmsSyncService {
           for (const shipment of activeShipments.rows ?? []) {
             try {
               if (this.services.shippingEngine) {
-                await this.services.shippingEngine.upsertShipment({ shipmentId: shipment.id } as any);
+                await pushShipmentThroughEngine(db, this.services.shippingEngine, shipment.id);
               } else {
                 await this.services.shipStation.pushShipment(shipment.id);
               }

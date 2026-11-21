@@ -52,8 +52,10 @@ import type {
   ChannelFulfillmentIngressService,
 } from "./channel-fulfillment-ingress.service";
 import rateLimit from "express-rate-limit";
-import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
-import type { EngineCancelResult } from "../shipping/engine-and-reconcile.api";
+import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client.api";
+import type { EngineCancelResult, ShippingEngine } from "../shipping/engine-and-reconcile.api";
+import { toEngineRef } from "../shipping/engine-and-reconcile.api";
+import { pushShipmentThroughEngine } from "../orders/shipment-rollup-and-context.api";
 import {
   buildShopifyWebhookInboxInput,
   enqueueWebhookInboxRetry,
@@ -67,7 +69,6 @@ import {
   enqueueOmsWmsSyncRetry,
   enqueueShipStationShipmentPushRetry,
 } from "./webhook-retry.worker";
-import type { ShippingEngine } from "../shipping/engine-and-reconcile.api";
 import { recordShopifyRefundReturnCase } from "../returns/shopify-return-intake.api";
 import { deriveShopifyRefundFinancialStatus } from "./domain/shopify-refund-financial-status";
 import { readChannelShopifyMerchandise } from "./infrastructure/channel-shopify-merchandise-reader";
@@ -300,7 +301,8 @@ export async function cancelOrderCascade(
   omsOrderId: number,
   opts: {
     wmsServices: WmsServices | null;
-    shipStationService: ShipStationService | null;
+    shipStationService?: ShipStationService | null;
+    shippingEngine?: Pick<ShippingEngine, "cancel"> | null;
     source: string;
     reason: string;
     logPrefix?: string;
@@ -324,18 +326,29 @@ export async function cancelOrderCascade(
   const rollupModule = await import("../orders/shipment-rollup-and-context.api");
   const { cancelOrder: cancelWmsOrder } = await import("../orders/order-lifecycle-and-cancellation.api");
 
-  const ssAdapter = opts.shipStationService
+  const ssAdapter = opts.shippingEngine
     ? {
         removeFromList: async (ssOrderId: number) => {
           try {
-            return await opts.shipStationService!.cancelOrder(ssOrderId);
+            return await opts.shippingEngine!.cancel(toEngineRef(ssOrderId));
           } catch (e: any) {
-            console.error(`${LOG} SS cancel failed for ssOrderId=${ssOrderId}: ${e.message}`);
+            console.error(`${LOG} Engine cancel failed for orderRef=${ssOrderId}: ${e.message}`);
             throw e;
           }
         },
       }
-    : undefined;
+    : opts.shipStationService
+      ? {
+          removeFromList: async (ssOrderId: number) => {
+            try {
+              return await opts.shipStationService!.cancelOrder(ssOrderId);
+            } catch (e: any) {
+              console.error(`${LOG} SS cancel failed for ssOrderId=${ssOrderId}: ${e.message}`);
+              throw e;
+            }
+          },
+        }
+      : undefined;
 
   let hadShipmentCancelError = false;
   for (const wmsRow of wmsOrderRows) {
@@ -583,7 +596,10 @@ export function registerOmsWebhooks(
   wmsServices: WmsServices | null,
   shipStationService: ShipStationService | null,
   wmsSyncService?: any, // WmsSyncService - will be set from server/index.ts
-  shippingEngine?: Pick<ShippingEngine, "cancel" | "isConfigured" | "markShipped"> | null,
+  shippingEngine?:
+    | (Pick<ShippingEngine, "cancel" | "isConfigured" | "markShipped"> &
+        Partial<Pick<ShippingEngine, "upsertShipment" | "syncOrderShipToAddress">>)
+    | null,
   channelFulfillmentIngress?: ChannelFulfillmentIngressService | null,
 ) {
   const webhookLimiter = rateLimit({
@@ -717,9 +733,24 @@ export function registerOmsWebhooks(
         continue;
       }
 
-      if (shipStationService?.isConfigured() && typeof shipStationService.pushShipment === "function") {
+      const useEnginePush =
+        shippingEngine?.isConfigured() === true &&
+        typeof shippingEngine.upsertShipment === "function";
+      const useLegacyPush =
+        !useEnginePush &&
+        shipStationService?.isConfigured() === true &&
+        typeof shipStationService.pushShipment === "function";
+      if (useEnginePush || useLegacyPush) {
         try {
-          await shipStationService.pushShipment(shipment.id);
+          if (useEnginePush) {
+            await pushShipmentThroughEngine(
+              db,
+              { upsertShipment: shippingEngine!.upsertShipment!.bind(shippingEngine) },
+              shipment.id,
+            );
+          } else {
+            await shipStationService!.pushShipment!(shipment.id);
+          }
           console.log(
             `${LOG_PREFIX} re-pushed shipment ${shipment.id} after address change for ${label}`,
           );
@@ -734,7 +765,7 @@ export function registerOmsWebhooks(
         await enqueueShipStationShipmentPushRetry(
           db,
           shipment.id,
-          new Error(`address changed for ${label}; ShipStation push unavailable`),
+          new Error(`address changed for ${label}; shipping engine push unavailable`),
         );
       }
     }
@@ -745,19 +776,23 @@ export function registerOmsWebhooks(
     // to strand the stale address in ShipStation behind an advisory flag).
     // Best-effort: on failure the requires_review flag set above remains as
     // the operator-facing fallback, so we log rather than fail the webhook.
-    if (
-      anyRequiresReview &&
-      shipStationService?.isConfigured() &&
-      typeof (shipStationService as any).syncWmsOrderShipStationShipToAddress === "function"
-    ) {
+    const syncShipToViaEngine =
+      shippingEngine?.isConfigured() === true &&
+      typeof shippingEngine.syncOrderShipToAddress === "function"
+        ? (id: number) => shippingEngine.syncOrderShipToAddress!(id)
+        : shipStationService?.isConfigured() === true &&
+            typeof (shipStationService as any).syncWmsOrderShipStationShipToAddress === "function"
+          ? (id: number) => (shipStationService as any).syncWmsOrderShipStationShipToAddress(id)
+          : null;
+    if (anyRequiresReview && syncShipToViaEngine) {
       try {
-        const sync = await (shipStationService as any).syncWmsOrderShipStationShipToAddress(wmsOrderId);
+        const sync = await syncShipToViaEngine(wmsOrderId);
         console.log(
-          `${LOG_PREFIX} address change for ${label}: ShipStation ship-to sync updated=${sync.updated} skipped=${sync.skipped}`,
+          `${LOG_PREFIX} address change for ${label}: shipping engine ship-to sync updated=${sync.updated} skipped=${sync.skipped}`,
         );
       } catch (err: any) {
         console.warn(
-          `${LOG_PREFIX} address change for ${label}: ShipStation ship-to sync failed (requires_review flag remains): ${err?.message ?? err}`,
+          `${LOG_PREFIX} address change for ${label}: shipping engine ship-to sync failed (requires_review flag remains): ${err?.message ?? err}`,
         );
       }
     }
@@ -1101,6 +1136,7 @@ export function registerOmsWebhooks(
           await cancelOrderCascade(db, existing.id, {
             wmsServices,
             shipStationService,
+            shippingEngine,
             source: "shopify_order_update_final",
             reason: shopifyOrder.cancel_reason || "order_updated_final_state",
             logPrefix: LOG_PREFIX,
@@ -1559,6 +1595,7 @@ export function registerOmsWebhooks(
         await cancelOrderCascade(db, existing.id, {
           wmsServices,
           shipStationService,
+          shippingEngine,
           source: "shopify_cancel_webhook_retry",
           reason: shopifyOrder.cancel_reason || "cancelled_by_shopify",
           logPrefix: LOG_PREFIX,
@@ -1599,6 +1636,7 @@ export function registerOmsWebhooks(
       await cancelOrderCascade(db, existing.id, {
         wmsServices,
         shipStationService,
+        shippingEngine,
         source: "shopify_cancel_webhook",
         reason: cancelReason,
         logPrefix: LOG_PREFIX,
@@ -1896,18 +1934,24 @@ export function registerOmsWebhooks(
           reconcileRefundOrderDemand: wmsServices
             ? async (args) => wmsServices.reservation.reconcileRefundOrderDemand(args)
             : undefined,
-          shipstation: shipStationService
-            ? {
-                cancelOrder: async (shipstationOrderId: number) =>
-                  shipStationService.cancelOrder(shipstationOrderId),
-              }
-            : undefined,
+          shipstation:
+            !shippingEngine && shipStationService
+              ? {
+                  cancelOrder: async (shipstationOrderId: number) =>
+                    shipStationService.cancelOrder(shipstationOrderId),
+                }
+              : undefined,
           shippingEngine: shippingEngine ?? undefined,
           pushShipment:
-            shipStationService?.isConfigured() && typeof shipStationService.pushShipment === "function"
+            shippingEngine?.isConfigured() === true &&
+            typeof shippingEngine.upsertShipment === "function"
               ? async (shipmentId: number) => {
                   try {
-                    await shipStationService!.pushShipment!(shipmentId);
+                    await pushShipmentThroughEngine(
+                      db,
+                      { upsertShipment: shippingEngine.upsertShipment!.bind(shippingEngine) },
+                      shipmentId,
+                    );
                   } catch (err: any) {
                     await enqueueShipStationShipmentPushRetry(
                       db,
@@ -1916,7 +1960,20 @@ export function registerOmsWebhooks(
                     );
                   }
                 }
-              : undefined,
+              : shipStationService?.isConfigured() === true &&
+                  typeof shipStationService.pushShipment === "function"
+                ? async (shipmentId: number) => {
+                    try {
+                      await shipStationService!.pushShipment!(shipmentId);
+                    } catch (err: any) {
+                      await enqueueShipStationShipmentPushRetry(
+                        db,
+                        shipmentId,
+                        err instanceof Error ? err : new Error(err?.message ?? String(err)),
+                      );
+                    }
+                  }
+                : undefined,
           recordReturnCase: RETURN_CASE_SHOPIFY_RUNTIME_ENABLED
             ? recordShopifyRefundReturnCase
             : undefined,

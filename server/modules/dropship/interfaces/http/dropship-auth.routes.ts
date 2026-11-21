@@ -33,7 +33,8 @@ import {
   verifyDropshipSensitiveActionChallengeInputSchema,
   verifyDropshipSensitiveActionPasskeyInputSchema,
 } from "../../application/dropship-auth-dtos";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "../../application/dropship-ports";
+import type { DropshipClock, DropshipLogger } from "../../application/dropship-ports";
+import { createDropshipPlatformLogger } from "../../application/dropship-platform-logger";
 import { DropshipError } from "../../domain/errors";
 import {
   evaluateSensitiveActionProof,
@@ -658,15 +659,21 @@ class CryptoSixDigitCodeGenerator implements DropshipAuthCodeGenerator {
 }
 
 class ConsoleDropshipLogger implements DropshipLogger {
-  info(event: DropshipLogEvent): void {
-    console.info(JSON.stringify({ level: "info", ...event }));
+  private readonly delegate = createDropshipPlatformLogger("dropship.auth");
+
+  debug(event: Parameters<NonNullable<DropshipLogger["debug"]>>[0]): void {
+    this.delegate.debug?.(event);
   }
 
-  warn(event: DropshipLogEvent): void {
-    console.warn(JSON.stringify({ level: "warn", ...event }));
+  info(event: Parameters<DropshipLogger["info"]>[0]): void {
+    this.delegate.info(event);
   }
 
-  error(event: DropshipLogEvent): void {
-    console.error(JSON.stringify({ level: "error", ...event }));
+  warn(event: Parameters<DropshipLogger["warn"]>[0]): void {
+    this.delegate.warn(event);
+  }
+
+  error(event: Parameters<DropshipLogger["error"]>[0]): void {
+    this.delegate.error(event);
   }
 }

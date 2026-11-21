@@ -8,7 +8,7 @@ vi.mock("../..", async () => ({ readCurrentStaffAccess,
   hasAssignedSystemRole: (await import("../../domain/staff-access")).hasAssignedSystemRole }));
 vi.mock("../../infrastructure/identity.repository", () => ({}));
 vi.mock("../../application/identity.use-cases", () => ({}));
-import { registerAuthRoutes } from "../../identity.routes";
+import { registerAuthRoutes } from "../../interfaces/http/identity.routes";
 
 const user = { id: "staff", username: "Current name", role: "picker", displayName: null,
   active: 1, createdAt: new Date(), lastLoginAt: null };

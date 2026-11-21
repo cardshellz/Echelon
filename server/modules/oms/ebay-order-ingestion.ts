@@ -11,7 +11,6 @@ import { parseDecimalCents } from "@shared/money-read";
 
 import type { Request, Response } from "express";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
-import type { ShipStationService } from "./shipstation.service";
 import type { WmsSyncService } from "./wms-sync.service";
 import type { EbayApiClient } from "../channels/ebay-connector.api";
 import type { EbayAuthService } from "../channels/ebay-connector.api";
@@ -285,17 +284,12 @@ export function dollarsToCents(value: string | undefined | null): number {
 
 let pollInterval: ReturnType<typeof setInterval> | null = null;
 let pollInFlight = false;
-let _shipStationService: ShipStationService | null = null;
 let _wmsSyncService: WmsSyncService | null = null;
 let _wmsServices: {
   reservation: { reserveOrder: (orderId: number) => Promise<ReservationResult> };
   fulfillmentRouter: { routeOrder: (ctx: any) => Promise<any>; assignWarehouseToOrder: (orderId: number, routing: any) => Promise<void> };
   slaMonitor: { setSLAForOrder: (orderId: number) => Promise<void> };
 } | null = null;
-
-export function setShipStationService(svc: ShipStationService) {
-  _shipStationService = svc;
-}
 
 export function setWmsServices(svc: typeof _wmsServices) {
   _wmsServices = svc;

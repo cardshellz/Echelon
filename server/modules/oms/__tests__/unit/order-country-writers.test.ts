@@ -17,7 +17,7 @@ vi.mock("../../../../db", () => ({ db: harness.database }));
 vi.mock("../../../orders", () => ({
   ordersStorage: { createOrderWithItems: harness.createOrderWithItems },
 }));
-vi.mock("../../../warehouse/settings.resolver", () => ({
+vi.mock("../../../warehouse/settings.api", () => ({
   getSlaCutoffConfig: async () => ({ timezone: "UTC", cutoffLocal: "12:00" }),
 }));
 vi.mock("../../../orders/sort-rank", async (importOriginal) => ({

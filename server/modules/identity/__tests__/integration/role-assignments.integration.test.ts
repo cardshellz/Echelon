@@ -24,7 +24,7 @@ vi.mock("../../../../db", () => ({ db: new Proxy({}, {
     return typeof value === "function" ? value.bind(connection.database) : value;
   },
 }) }));
-import { registerAuthRoutes } from "../../identity.routes";
+import { registerAuthRoutes } from "../../interfaces/http/identity.routes";
 import { assignUserRolesUseCase } from "../../application/identity.use-cases";
 import { assignUserRoles, getUserPermissions } from "../../infrastructure/identity.repository";
 import { readCommandAuthorityActor } from "../../infrastructure/command-authority.repository";

@@ -1,5 +1,5 @@
 import { idempotencyKeys } from "@shared/schema";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 
 /**
  * Sole persistence owner for `public.idempotency_keys` writes across HTTP
@@ -34,6 +34,35 @@ export async function deleteUnclaimedIdempotencyKeyDrizzle(
   await executor
     .delete(idempotencyKeys)
     .where(and(eq(idempotencyKeys.key, key), isNull(idempotencyKeys.responseBody)));
+}
+
+export async function deleteIdempotencyKeyDrizzle(
+  executor: { delete: (...args: any[]) => any },
+  key: string,
+): Promise<void> {
+  await executor
+    .delete(idempotencyKeys)
+    .where(eq(idempotencyKeys.key, key));
+}
+
+export async function purgeExpiredIdempotencyKeysDrizzle(
+  executor: { execute?: (...args: any[]) => any },
+  now: Date = new Date(),
+  limit = 200,
+): Promise<void> {
+  if (typeof executor.execute !== "function") {
+    return;
+  }
+  await executor.execute(sql`
+    DELETE FROM public.idempotency_keys
+    WHERE key IN (
+      SELECT key
+      FROM public.idempotency_keys
+      WHERE expires_at IS NOT NULL
+        AND expires_at <= ${now}
+      LIMIT ${limit}
+    )
+  `);
 }
 
 export async function insertIdempotencyKeyPgQuery(
@@ -74,4 +103,34 @@ export async function completeIdempotencyKeyPgQuery(
      WHERE key=$1`,
     [key, responseBodyJson],
   );
+}
+
+/**
+ * Atomically claim a single-use cryptographic nonce (e.g. OAuth `state.nonce`)
+ * in `public.idempotency_keys` (`P3.2`). Returns `true` on first use and `false`
+ * on any concurrent or subsequent replay.
+ */
+export async function claimSingleUseNoncePgQuery(
+  client: {
+    query: (
+      text: string,
+      values?: unknown[],
+    ) => Promise<{ rowCount?: number | null; rows?: unknown[] }>;
+  },
+  input: {
+    key: string;
+    requestHash: string;
+    createdAt: Date;
+    expiresAt: Date;
+  },
+): Promise<boolean> {
+  const result = await client.query(
+    `INSERT INTO public.idempotency_keys(
+       key, request_hash, response_body, created_at, expires_at
+     ) VALUES ($1, $2, '{"consumed":true}'::jsonb, $3, $4)
+     ON CONFLICT (key) DO NOTHING
+     RETURNING key`,
+    [input.key, input.requestHash, input.createdAt, input.expiresAt],
+  );
+  return (result.rows?.length ?? result.rowCount ?? 0) > 0;
 }

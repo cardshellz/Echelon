@@ -3,17 +3,17 @@ import { createServer, type Server } from "http";
 import { seedRBAC, seedDefaultChannels, seedAdjustmentReasons } from "./modules/identity";
 
 import { registerAuthRoutes } from "./modules/identity/routes.api";
-import { registerLocationRoutes } from "./modules/warehouse/locations.routes";
+import { registerLocationRoutes } from "./modules/warehouse/routes.api";
 import { registerPickingRoutes } from "./modules/orders/routes.api";
 import { registerOperationsDashboardRoutes } from "./modules/orders/routes.api";
 import { registerOperationsControlTowerRoutes } from "./modules/operations/routes.api";
 import { registerFinancialCommandOperationsRoutes } from "./platform/commands/financial-command-operations.routes";
 import { registerShopifyRoutes } from "./routes/shopify.routes";
-import { registerWarehouseRoutes } from "./modules/warehouse/warehouse.routes";
+import { registerWarehouseRoutes } from "./modules/warehouse/routes.api";
 import { registerWorkConfigurationRoutes } from "./modules/warehouse/work/interfaces/work-configuration.routes";
 import { registerAssemblyWorkRoutes } from "./modules/warehouse/work/interfaces/assembly-work.routes";
 import { registerProductRoutes } from "./modules/catalog/catalog.routes";
-import { registerCatalogExportRoutes } from "./modules/catalog-export/interfaces/http/catalog-export.routes";
+import { registerCatalogExportRoutes } from "./modules/catalog-export/routes.api";
 import { registerInventoryRoutes } from "./modules/inventory/inventory.routes";
 import { registerReplenishmentRoutes } from "./modules/inventory";
 import { registerBuildRoutes } from "./modules/inventory/build.routes";
@@ -27,8 +27,8 @@ import { registerListingLifecycleRoutes } from "./modules/marketplace-listings/i
 import { registerInventoryPublicationMembershipRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-membership.routes";
 import { registerInventoryPublicationInitialScopeRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-initial-scope.routes";
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
-import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
-import { registerPickZoneRoutes } from "./modules/warehouse/pick-zones.routes";
+import { registerSettingsRoutes } from "./modules/warehouse/routes.api";
+import { registerPickZoneRoutes } from "./modules/warehouse/routes.api";
 import {
   registerCostReportingRoutes,
   registerInboundTrackingRoutes,

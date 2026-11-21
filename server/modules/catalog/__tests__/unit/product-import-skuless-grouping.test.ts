@@ -41,7 +41,7 @@ vi.mock("../../../warehouse", () => ({
   },
 }));
 
-vi.mock("../../../integrations/shopify", () => ({
+vi.mock("../../../integrations/shopify.api", () => ({
   fetchShopifyCatalogProducts: mocks.fetchShopifyCatalogProducts,
 }));
 

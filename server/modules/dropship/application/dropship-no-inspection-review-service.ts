@@ -3,12 +3,8 @@ import { z } from "zod";
 import { DropshipError } from "../domain/errors";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 /**
  * No-inspection review (design spec D3; build spec B2 "No-inspection branch").
@@ -359,11 +355,7 @@ export class DropshipNoInspectionReviewService {
 }
 
 export function makeDropshipNoInspectionReviewLogger(): DropshipLogger {
-  return {
-    info: (event) => logReviewEvent("info", event),
-    warn: (event) => logReviewEvent("warn", event),
-    error: (event) => logReviewEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.no_inspection_review");
 }
 
 export const systemDropshipNoInspectionReviewClock: DropshipClock = {
@@ -419,17 +411,3 @@ function parseReplenishmentInput(input: unknown): z.infer<typeof recordClaimRepl
   return result.data;
 }
 
-function logReviewEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

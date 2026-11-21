@@ -65,7 +65,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../../../../modules/identity", async () => ({
   hasPermission: mocks.hasPermission,
   readCurrentStaffAccess: mocks.readCurrentStaffAccess,
-  hasAssignedSystemRole: (await import("../../../../modules/identity/staff-authority")).hasAssignedSystemRole,
+  hasAssignedSystemRole: (await import("../../../identity/staff-authority.api")).hasAssignedSystemRole,
 }));
 vi.mock("../../../../routes/middleware", async importOriginal => {
   const actual = await importOriginal<typeof import("../../../../routes/middleware")>();

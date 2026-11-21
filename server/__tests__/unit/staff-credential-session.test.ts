@@ -1,7 +1,7 @@
 import { describe,it,expect,vi } from "vitest";
 import type { Request,Response } from "express";
 vi.mock("../../db",()=>({db:{}}));
-import { createStaffSessionGate } from "../../modules/identity/staff-session";
+import { createStaffSessionGate } from "../../modules/identity/staff-session.api";
 import { isCurrentStaffCredential,newStaffPasswordSchema } from "@shared/staff-credentials";
 const version="a760c267-283a-43bd-9bfb-c8a6d1048033";
 const state={userId:"synthetic",credentialVersion:version,mustChangePassword:false,lastOperationId:null};

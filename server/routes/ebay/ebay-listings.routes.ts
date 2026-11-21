@@ -232,100 +232,96 @@ const ebayListingRecovery = new EbayListingRecoveryService(ebayListingSyncServic
         : EBAY_LISTING_DEFAULT_MARKETPLACE_ID;
       const ebayClient = createEbayRouteListingClient({ accessToken });
 
-      const client = await pool.connect();
-      try {
-        // Get all synced listings for eBay channel
-        const listingsResult = await client.query(`
-          SELECT cl.id, cl.product_variant_id, cl.external_product_id, cl.external_variant_id,
-                 cl.external_sku, cl.sync_status,
-                 pv.sku AS variant_sku, pv.is_active AS variant_is_active,
-                 pv.sales_eligibility AS variant_sales_eligibility,
-                 p.name AS product_name
-          FROM channels.channel_listings cl
-          LEFT JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
-          LEFT JOIN catalog.products p ON p.id = pv.product_id
-          WHERE cl.channel_id = $1 AND cl.sync_status = 'synced'
-        `, [EBAY_CHANNEL_ID]);
+      // Query synced listings using pool.query so no PoolClient is pinned across
+      // external eBay REST calls and per-SKU rate-limit sleeps (`P4.5`).
+      const listingsResult = await pool.query(`
+        SELECT cl.id, cl.product_variant_id, cl.external_product_id, cl.external_variant_id,
+               cl.external_sku, cl.sync_status,
+               pv.sku AS variant_sku, pv.is_active AS variant_is_active,
+               pv.sales_eligibility AS variant_sales_eligibility,
+               p.name AS product_name
+        FROM channels.channel_listings cl
+        LEFT JOIN catalog.product_variants pv ON pv.id = cl.product_variant_id
+        LEFT JOIN catalog.products p ON p.id = pv.product_id
+        WHERE cl.channel_id = $1 AND cl.sync_status = 'synced'
+      `, [EBAY_CHANNEL_ID]);
 
-        const listings = listingsResult.rows;
-        if (listings.length === 0) {
-          res.json({ checked: 0, active: 0, ended: 0, deleted: 0, quantityDrift: 0, errors: 0 });
-          return;
+      const listings = listingsResult.rows;
+      if (listings.length === 0) {
+        res.json({ checked: 0, active: 0, ended: 0, deleted: 0, quantityDrift: 0, errors: 0 });
+        return;
+      }
+
+      let active = 0;
+      let ended = 0;
+      let deleted = 0;
+      let quantityDrift = 0;
+      let errors = 0;
+      const changes: Array<{ id: number; sku: string; product: string; oldStatus: string; newStatus: string }> = [];
+
+      // Check each listing against eBay
+      for (const listing of listings) {
+        const sku = listing.external_sku || listing.variant_sku;
+        if (!sku) {
+          errors++;
+          continue;
         }
 
-        let active = 0;
-        let ended = 0;
-        let deleted = 0;
-        let quantityDrift = 0;
-        let errors = 0;
-        const changes: Array<{ id: number; sku: string; product: string; oldStatus: string; newStatus: string }> = [];
+        try {
+          const inspection = await ebayListingConnector.inspectListingStatus({
+            client: ebayClient,
+            sku,
+            marketplaceId,
+          });
 
-        // Check each listing against eBay
-        for (const listing of listings) {
-          const sku = listing.external_sku || listing.variant_sku;
-          if (!sku) {
-            errors++;
+          if (!inspection.inventoryItemExists) {
+            // Inventory item gone — mark as deleted
+            await markChannelListingReconcileDeleted(listing.id, pool);
+            deleted++;
+            changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "deleted" });
             continue;
           }
 
-          try {
-            const inspection = await ebayListingConnector.inspectListingStatus({
-              client: ebayClient,
-              sku,
-              marketplaceId,
-            });
-
-            if (!inspection.inventoryItemExists) {
-              // Inventory item gone — mark as deleted
-              await markChannelListingReconcileDeleted(listing.id, client);
-              deleted++;
-              changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "deleted" });
-              continue;
+          if (inspection.hasActiveOffer) {
+            if (
+              (listing.variant_is_active === false || listing.variant_sales_eligibility === "internal_only")
+              && (inspection.availableQuantity ?? 0) > 0
+            ) {
+              await queueVariantAvailabilityRepair({
+                channelId: EBAY_CHANNEL_ID,
+                productVariantId: listing.product_variant_id,
+              });
+              quantityDrift++;
+              changes.push({
+                id: listing.id,
+                sku,
+                product: listing.product_name || "Unknown",
+                oldStatus: `inactive with eBay quantity ${inspection.availableQuantity}`,
+                newStatus: "availability repair queued",
+              });
             }
-
-            if (inspection.hasActiveOffer) {
-              if (
-                (listing.variant_is_active === false || listing.variant_sales_eligibility === "internal_only")
-                && (inspection.availableQuantity ?? 0) > 0
-              ) {
-                await queueVariantAvailabilityRepair({
-                  channelId: EBAY_CHANNEL_ID,
-                  productVariantId: listing.product_variant_id,
-                });
-                quantityDrift++;
-                changes.push({
-                  id: listing.id,
-                  sku,
-                  product: listing.product_name || "Unknown",
-                  oldStatus: `inactive with eBay quantity ${inspection.availableQuantity}`,
-                  newStatus: "availability repair queued",
-                });
-              }
-              active++;
-            } else {
-              // Offer ended/withdrawn
-              await markChannelListingReconcileEnded(listing.id, client);
-              ended++;
-              changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "ended" });
-            }
-          } catch (err: any) {
-            console.error(`[eBay Reconcile] Error checking SKU ${sku}:`, err.message);
-            errors++;
+            active++;
+          } else {
+            // Offer ended/withdrawn
+            await markChannelListingReconcileEnded(listing.id, pool);
+            ended++;
+            changes.push({ id: listing.id, sku, product: listing.product_name || "Unknown", oldStatus: "synced", newStatus: "ended" });
           }
-
-          // Small delay between API calls to respect rate limits
-          await new Promise((resolve) => setTimeout(resolve, 200));
+        } catch (err: any) {
+          console.error(`[eBay Reconcile] Error checking SKU ${sku}:`, err.message);
+          errors++;
         }
 
-        if (changes.length > 0) {
-          console.log(`[eBay Reconcile] Status changes:`, changes.map((c) => `${c.sku}: ${c.oldStatus} → ${c.newStatus}`).join(", "));
-        }
-        console.log(`[eBay Reconcile] Complete: checked=${listings.length} active=${active} ended=${ended} deleted=${deleted} quantityDrift=${quantityDrift} errors=${errors}`);
-
-        res.json({ checked: listings.length, active, ended, deleted, quantityDrift, errors, changes });
-      } finally {
-        client.release();
+        // Small delay between API calls to respect rate limits
+        await new Promise((resolve) => setTimeout(resolve, 200));
       }
+
+      if (changes.length > 0) {
+        console.log(`[eBay Reconcile] Status changes:`, changes.map((c) => `${c.sku}: ${c.oldStatus} → ${c.newStatus}`).join(", "));
+      }
+      console.log(`[eBay Reconcile] Complete: checked=${listings.length} active=${active} ended=${ended} deleted=${deleted} quantityDrift=${quantityDrift} errors=${errors}`);
+
+      res.json({ checked: listings.length, active, ended, deleted, quantityDrift, errors, changes });
     } catch (err: any) {
       console.error("[eBay Reconcile] Error:", err.message);
       res.status(500).json({ error: err.message });

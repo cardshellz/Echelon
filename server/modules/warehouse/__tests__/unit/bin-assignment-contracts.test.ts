@@ -14,7 +14,7 @@ import {
   BinAssignmentValidationError,
   parseBinAssignmentWriteRequest,
   parseSlotPrimaryFlag,
-} from "../../bin-assignment-contracts";
+} from "../../domain/bin-assignment-contracts";
 
 describe("parseSlotPrimaryFlag", () => {
   it("defaults an omitted flag to primary", () => {

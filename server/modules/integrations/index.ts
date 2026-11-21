@@ -5,17 +5,4 @@
  * Depends on: nothing (leaf module)
  */
 
-export {
-  fetchShopifyCatalogProducts,
-  fetchUnfulfilledOrders,
-  fetchOrdersFulfillmentStatus,
-  verifyShopifyWebhook,
-  verifyWebhookWithSecret,
-  extractSkusFromWebhookPayload,
-  extractOrderFromWebhookPayload,
-  type ShopifyVariant,
-  type ShopifyImage,
-  type ShopifyProduct,
-  type ShopifyOrder,
-  type ShopifyCatalogProduct,
-} from "./shopify";
+export * from "./shopify.api";

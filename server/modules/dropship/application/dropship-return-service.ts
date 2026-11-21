@@ -16,12 +16,8 @@ import {
 } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type { DropshipOrderIntakeStatus } from "./dropship-order-intake-service";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 import type { DropshipWalletLedgerRecord } from "./dropship-wallet-service";
 import type {
@@ -1455,11 +1451,7 @@ export function hashDropshipReturnPolicyCreate(
 }
 
 export function makeDropshipReturnLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipReturnEvent("info", event),
-    warn: (event) => logDropshipReturnEvent("warn", event),
-    error: (event) => logDropshipReturnEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.return");
 }
 
 export const systemDropshipReturnClock: DropshipClock = {
@@ -2021,20 +2013,3 @@ function allocateProRata(
   return allocated;
 }
 
-function logDropshipReturnEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

@@ -6,7 +6,7 @@ import { catalogStorage } from "../modules/catalog";
 import { inventoryStorage } from "../modules/inventory";
 import { warehouseStorage } from "../modules/warehouse";
 const storage = { ...ordersStorage, ...channelsStorage, ...catalogStorage, ...inventoryStorage, ...warehouseStorage };
-import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "../modules/integrations/shopify";
+import { fetchUnfulfilledOrders, fetchOrdersFulfillmentStatus, verifyShopifyWebhook, verifyWebhookWithSecret, extractSkusFromWebhookPayload, extractOrderFromWebhookPayload, type ShopifyOrder } from "../modules/integrations/shopify.api";
 import { broadcastOrdersUpdated } from "../websocket";
 import type { InsertOrderItem } from "@shared/schema";
 import { registerShopifyOAuthRoutes } from "./shopify-oauth.routes";

@@ -1,4 +1,5 @@
 import { DropshipError } from "../domain/errors";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import { STOCK_LINK_ERROR_SOURCE } from "../domain/stock-link-readiness";
 import {
   STOCK_LINK_AWARE_FAILURE_FIELD,
@@ -912,12 +913,7 @@ export function summarizeWorkerItems(
 }
 
 export function makeDropshipListingPushWorkerLogger(): DropshipLogger {
-  return {
-    debug: (event) => logDropshipListingPushWorkerEvent("debug", event),
-    info: (event) => logDropshipListingPushWorkerEvent("info", event),
-    warn: (event) => logDropshipListingPushWorkerEvent("warn", event),
-    error: (event) => logDropshipListingPushWorkerEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.listing_push_worker");
 }
 
 export const systemDropshipListingPushWorkerClock: DropshipClock = {
@@ -1212,30 +1208,6 @@ function providerErrorEntries(value: unknown): ReadonlyArray<Record<string, unkn
   const entries = value.filter((entry): entry is Record<string, unknown> =>
     typeof entry === "object" && entry !== null && !Array.isArray(entry));
   return entries.length > 0 ? entries : undefined;
-}
-
-function logDropshipListingPushWorkerEvent(
-  level: "debug" | "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-    return;
-  }
-  if (level === "warn") {
-    console.warn(payload);
-    return;
-  }
-  if (level === "debug") {
-    console.debug(payload);
-    return;
-  }
-  console.info(payload);
 }
 
 /** The code a queue-time blocked preview gives its item (dropship-listing-preview.repository insertJobItemForPreview). */

@@ -4,7 +4,7 @@ import {
   warehouses,
 } from "@shared/schema";
 import { resolveSlaDueAt } from "./sort-rank";
-import { getSlaCutoffConfig } from "../warehouse/settings.resolver";
+import { getSlaCutoffConfig } from "../warehouse/settings.api";
 import {
   sweepWmsOrderSlaStatusesInWms,
   updateWmsOrderByIdInWms,

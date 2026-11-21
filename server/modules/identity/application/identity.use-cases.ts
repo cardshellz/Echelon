@@ -16,7 +16,7 @@ import { staffCredentials } from "@shared/schema";
 import { runIdentityAdministration, type IdentityAdministrationMutation } from "../infrastructure/access-administration.repository";
 import { IdentityAdministrationError, parseAdministrationActor, parseAdministrationInput, userProfileEditSchema,
   type IdentityAdministrationActor } from "../domain/access-administration";
-import { notifyStaffAuthorityChanged } from "../authority-events";
+import { notifyStaffAuthorityChanged } from "./authority-events";
 import { seedDefaultAdjustmentReasonsInInventory } from "../../inventory/cross-module-inventory-mutations.api";
 
 function safeUser(user: User): SafeUser {

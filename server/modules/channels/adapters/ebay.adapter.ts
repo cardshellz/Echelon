@@ -250,6 +250,16 @@ export class EbayAdapter implements IChannelAdapter {
       },
     });
 
+    if (pushResult.published === false || !pushResult.externalProductId) {
+      return {
+        productId: listing.productId,
+        status: "error",
+        error:
+          "eBay listing push did not complete live offer publication; refusing to report listing as synced.",
+        ...(pushResult.warnings?.length ? { warnings: pushResult.warnings } : {}),
+      };
+    }
+
     return {
       productId: listing.productId,
       status: pushResult.status,

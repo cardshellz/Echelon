@@ -4,13 +4,36 @@ import { idempotencyKeys } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import crypto from "crypto";
 import {
+  deleteIdempotencyKeyDrizzle,
   deleteUnclaimedIdempotencyKeyDrizzle,
   insertIdempotencyKeyDrizzle,
+  purgeExpiredIdempotencyKeysDrizzle,
   updateIdempotencyKeyDrizzle,
 } from "../infrastructure/idempotency-keys.repository";
 
 export const IDEMPOTENCY_IN_PROGRESS_LEASE_MS = 2 * 60 * 1000;
 export const IDEMPOTENCY_COMPLETED_TTL_MS = 24 * 60 * 60 * 1000;
+export const IDEMPOTENCY_PRUNE_INTERVAL_MS = 10 * 60 * 1000;
+
+let lastExpiredPruneAtMs = 0;
+
+export function resetIdempotencyPruneThrottleForTest(): void {
+  lastExpiredPruneAtMs = 0;
+}
+
+export function isIdempotencyRecordExpired(
+  expiresAt: Date | string | null | undefined,
+  nowMs: number = Date.now(),
+): boolean {
+  if (expiresAt instanceof Date) {
+    return !Number.isNaN(expiresAt.getTime()) && expiresAt.getTime() <= nowMs;
+  }
+  if (typeof expiresAt === "string" && expiresAt.trim().length > 0) {
+    const parsed = new Date(expiresAt).getTime();
+    return !Number.isNaN(parsed) && parsed <= nowMs;
+  }
+  return false;
+}
 
 interface IdempotencyEnvelope {
   __idempotencyEnvelope: 1;
@@ -92,7 +115,31 @@ export function requireIdempotency() {
       }
     };
 
+    const releaseExpiredKey = async () => {
+      try {
+        await deleteIdempotencyKeyDrizzle(db, idempotencyKey);
+      } catch (cleanupErr) {
+        console.error(`[Idempotency] Failed to release expired key ${idempotencyKey}:`, cleanupErr);
+      }
+    };
+
+    const maybePurgeExpiredKeys = () => {
+      const nowMs = Date.now();
+      if (nowMs - lastExpiredPruneAtMs < IDEMPOTENCY_PRUNE_INTERVAL_MS) {
+        return;
+      }
+      lastExpiredPruneAtMs = nowMs;
+      void purgeExpiredIdempotencyKeysDrizzle(db, new Date(nowMs)).catch((err) => {
+        console.warn("[Idempotency] Opportunistic expired-key prune failed:", err);
+      });
+    };
+
     const evaluateExistingRecord = async (record: typeof idempotencyKeys.$inferSelect): Promise<"reclaimed" | "handled"> => {
+      if (isIdempotencyRecordExpired(record.expiresAt)) {
+        await releaseExpiredKey();
+        return "reclaimed";
+      }
+
       if (record.requestHash !== requestHash) {
         res.status(409).json({
           error: "Conflict: Idempotency-Key is already used with a different request payload",
@@ -101,16 +148,6 @@ export function requireIdempotency() {
       }
 
       if (record.responseBody === null) {
-        const leaseExpired =
-          record.expiresAt instanceof Date
-            ? record.expiresAt.getTime() <= Date.now()
-            : typeof record.expiresAt === "string"
-              ? new Date(record.expiresAt).getTime() <= Date.now()
-              : false;
-        if (leaseExpired) {
-          await releaseUnclaimedKey();
-          return "reclaimed";
-        }
         res.status(409).json({
           error: "Conflict: Request with this Idempotency-Key is currently being processed",
         });
@@ -127,6 +164,7 @@ export function requireIdempotency() {
     };
 
     try {
+      maybePurgeExpiredKeys();
       const existing = await db
         .select()
         .from(idempotencyKeys)

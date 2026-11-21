@@ -2,14 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../../db", () => ({ db: {}, pool: {} }));
 vi.mock("../../../../infrastructure/scheduler-lock", () => ({ withAdvisoryLock: vi.fn() }));
-vi.mock("../../control-tower-flow-snapshot.service", () => ({ refreshControlTowerFlowSnapshotIfDue: vi.fn() }));
-vi.mock("../../control-tower-v2.job", () => ({ runControlTowerProjectionJob: vi.fn() }));
+vi.mock("../../application/control-tower-flow-snapshot.service", () => ({ refreshControlTowerFlowSnapshotIfDue: vi.fn() }));
+vi.mock("../../application/control-tower-v2.job", () => ({ runControlTowerProjectionJob: vi.fn() }));
 
 import { withAdvisoryLock } from "../../../../infrastructure/scheduler-lock";
 import {
   controlTowerProjectorInitialDelayMs,
   startControlTowerProjectionScheduler,
-} from "../../control-tower-v2.scheduler";
+} from "../../application/control-tower-v2.scheduler";
 
 afterEach(() => {
   vi.useRealTimers();

@@ -25,7 +25,7 @@ vi.mock("../..", () => ({
 
 vi.mock("../../../warehouse", () => ({ warehouseStorage: {} }));
 
-vi.mock("../../../integrations/shopify", () => ({
+vi.mock("../../../integrations/shopify.api", () => ({
   fetchShopifyCatalogProducts: mocks.fetchShopifyCatalogProducts,
 }));
 

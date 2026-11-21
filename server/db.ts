@@ -2,7 +2,10 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pkg from "pg";
 const { Pool } = pkg;
 import * as schema from "@shared/schema";
-import { createDatabasePoolConfig } from "./database-pool-config";
+import {
+  createDatabasePoolConfig,
+  resolvePostgresPoolSslConfig,
+} from "./database-pool-config";
 import {
   getPostgresPoolSnapshot,
   type PostgresPoolSnapshot,
@@ -16,16 +19,14 @@ if (!connectionString && !process.env.VITEST) {
   );
 }
 
-// Always use SSL for external/production databases
-// Heroku and most cloud databases require SSL connections
-const useSSL = process.env.EXTERNAL_DATABASE_URL || (process.env.DATABASE_URL && process.env.DATABASE_URL.includes("amazonaws.com"));
+const poolSsl = resolvePostgresPoolSslConfig(connectionString);
 
 // In test environments without a DB connection, create a stub pool so
 // modules that import db.ts don't crash at load time. Actual DB calls
 // will fail at runtime (tests should mock them).
 const poolConfig = createDatabasePoolConfig({
   connectionString: connectionString || "postgresql://stub:stub@localhost:5432/stub",
-  ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+  ssl: poolSsl,
   // Pool size per process. The old max:3 throttled the app to 3 connections and made
   // the reconcile sweep saturate and throw "timeout exceeded when trying to connect"
   // (the pool-acquire timeout). Heroku PG allows 200 (≈19 in use, single web dyno), so
@@ -68,7 +69,7 @@ export function createSideChannelPool(config: {
   return new Pool({
     ...createDatabasePoolConfig({
       connectionString: connectionString || "postgresql://stub:stub@localhost:5432/stub",
-      ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+      ssl: poolSsl,
       max: connectionString ? config.max : 0,
       idleTimeoutMillis: config.idleTimeoutMs,
       connectionTimeoutMillis: config.connectionTimeoutMs,

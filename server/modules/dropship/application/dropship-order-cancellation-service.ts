@@ -1,7 +1,8 @@
 import { createHash } from "crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type {
   DropshipMarketplaceOrderCancellationProvider,
   DropshipMarketplaceOrderCancellationReason,
@@ -218,11 +219,7 @@ export function deriveOrderCancellationIdempotencyKey(
 }
 
 export function makeDropshipOrderCancellationLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipOrderCancellationEvent("info", event),
-    warn: (event) => logDropshipOrderCancellationEvent("warn", event),
-    error: (event) => logDropshipOrderCancellationEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.order_cancellation");
 }
 
 export const systemDropshipOrderCancellationClock: DropshipClock = {
@@ -289,17 +286,3 @@ function classifyCancellationError(error: unknown): {
   };
 }
 
-function logDropshipOrderCancellationEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

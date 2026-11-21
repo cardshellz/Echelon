@@ -28,7 +28,7 @@ import {
   resolveEffectiveNotificationPreference,
   resolveNotificationRecipients,
   setUserPreference,
-} from "../../notifications.service";
+} from "../../application/notifications.service";
 
 function makePref(overrides: Partial<NotificationPreference> & { id: number; notificationTypeId: number }): NotificationPreference {
   return {

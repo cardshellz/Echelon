@@ -2,6 +2,11 @@ import { db } from "../../../server/db";
 import { sql } from "drizzle-orm";
 import { enqueueShipStationShipmentPushRetry } from "./webhook-retry.worker";
 import {
+  createShipStationApiRequester,
+  type ShipStationApiRequester,
+} from "./shipstation-api-request";
+import { buildShipStationUrl } from "./shipstation/shipstation-contracts";
+import {
   clearResolvedShipStationQueueReviewFlagsInWms,
   setOutboundShipmentReviewFlagInWms,
 } from "../wms/outbound-shipment-mutations.api";
@@ -198,6 +203,12 @@ async function isOmsOrderFinal(orderId: number): Promise<boolean> {
   );
 }
 
+interface ShipStationOrdersPage {
+  page: number;
+  pages: number;
+  orders?: ShipStationQueueOrder[];
+}
+
 /**
  * Sweeps ShipStation queues and flags Echelon-owned stragglers for review.
  *
@@ -208,6 +219,10 @@ async function isOmsOrderFinal(orderId: number): Promise<boolean> {
 export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
   const baseUrl = "https://ssapi.shipstation.com";
   const encodedAuth = Buffer.from(`${apiKey}:${apiSecret}`).toString("base64");
+  const apiRequest = createShipStationApiRequester({
+    buildUrl: (path) => buildShipStationUrl(baseUrl, path),
+    getAuthHeader: () => `Basic ${encodedAuth}`,
+  });
 
   console.log("[ShipStation Sweeper] Fetching all awaiting_shipment orders...");
 
@@ -218,21 +233,21 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
   const activeCanonicalShipmentIds = new Set<number>();
 
   while (true) {
-    const res = await fetch(
-      `${baseUrl}/orders?orderStatus=awaiting_shipment&pageSize=${pageSize}&page=${page}`,
-      {
-        method: "GET",
-        headers: { Authorization: `Basic ${encodedAuth}` },
-      },
-    );
-
-    if (!res.ok) {
-      console.warn("[ShipStation Sweeper] Failed to fetch SS queue", await res.text());
+    let data: ShipStationOrdersPage;
+    try {
+      data = await apiRequest<ShipStationOrdersPage>(
+        "GET",
+        `/orders?orderStatus=awaiting_shipment&pageSize=${pageSize}&page=${page}`,
+      );
+    } catch (err: any) {
+      console.warn(
+        "[ShipStation Sweeper] Failed to fetch SS queue",
+        err?.message ?? String(err),
+      );
       awaitingShipmentScanComplete = false;
       break;
     }
 
-    const data = await res.json();
     const ssOrders: ShipStationQueueOrder[] = data.orders || [];
 
     if (ssOrders.length === 0) break;
@@ -333,8 +348,7 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
   }
 
   const awaitingPaymentFlagged = await flagAwaitingPaymentOrdersForReview(
-    baseUrl,
-    encodedAuth,
+    apiRequest,
   );
   totalFlagged += awaitingPaymentFlagged;
 
@@ -350,8 +364,7 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
 }
 
 async function flagAwaitingPaymentOrdersForReview(
-  baseUrl: string,
-  encodedAuth: string,
+  apiRequest: ShipStationApiRequester,
 ): Promise<number> {
   console.log("[ShipStation Sweeper] Checking for Echelon orders stuck in awaiting_payment...");
 
@@ -360,26 +373,19 @@ async function flagAwaitingPaymentOrdersForReview(
   let flagged = 0;
 
   while (true) {
-    let res: Response;
+    let data: ShipStationOrdersPage;
     try {
-      res = await fetch(
-        `${baseUrl}/orders?orderStatus=awaiting_payment&pageSize=${pageSize}&page=${page}`,
-        {
-          method: "GET",
-          headers: { Authorization: `Basic ${encodedAuth}` },
-        },
+      data = await apiRequest<ShipStationOrdersPage>(
+        "GET",
+        `/orders?orderStatus=awaiting_payment&pageSize=${pageSize}&page=${page}`,
       );
     } catch (err: any) {
-      console.warn(`[ShipStation Sweeper] Failed to fetch awaiting_payment page ${page}: ${err.message}`);
+      console.warn(
+        `[ShipStation Sweeper] Failed to fetch awaiting_payment page ${page}: ${err?.message ?? String(err)}`,
+      );
       break;
     }
 
-    if (!res.ok) {
-      console.warn("[ShipStation Sweeper] Failed to fetch awaiting_payment queue", await res.text());
-      break;
-    }
-
-    const data = await res.json();
     const ssOrders: ShipStationQueueOrder[] = data.orders || [];
     if (ssOrders.length === 0) break;
 

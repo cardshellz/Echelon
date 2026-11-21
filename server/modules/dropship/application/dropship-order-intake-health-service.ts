@@ -11,6 +11,7 @@ import type {
   DropshipLogger,
   DropshipNotificationSender,
 } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import { vendorPlatformName } from "../domain/vendor-platform-name";
 
 const positiveIdSchema = z.number().int().positive();
@@ -269,9 +270,5 @@ export const systemDropshipOrderIntakeHealthClock: DropshipClock = {
 };
 
 export function makeDropshipOrderIntakeHealthLogger(): DropshipLogger {
-  return {
-    info: (event) => console.info(JSON.stringify(event)),
-    warn: (event) => console.warn(JSON.stringify(event)),
-    error: (event) => console.error(JSON.stringify(event)),
-  };
+  return createDropshipPlatformLogger("dropship.order_intake_health");
 }

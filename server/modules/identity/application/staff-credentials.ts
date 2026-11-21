@@ -23,7 +23,7 @@ import { readAccessConfiguration } from "../infrastructure/access-configuration.
 import { getUser, getUserByUsername, updateUser, updateUserLastLogin } from "../infrastructure/identity.repository";
 import { readCommandAuthorityActor } from "../infrastructure/command-authority.repository";
 import { persistAuditEvent } from "../../../infrastructure/transactional-audit";
-import { notifyStaffAuthorityChanged } from "../authority-events";
+import { notifyStaffAuthorityChanged } from "./authority-events";
 import type { User } from "@shared/schema";
 
 function forbidden(): never { throw new IdentityAdministrationError("IDENTITY_ADMINISTRATION_FORBIDDEN",403,"Current credential authority is required."); }

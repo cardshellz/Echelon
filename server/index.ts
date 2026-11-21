@@ -43,7 +43,7 @@ import { createStaffSessionGate } from "./modules/identity/staff-session.api";
 import connectPgSimple from "connect-pg-simple";
 import { Pool } from "pg";
 import cookieParser from "cookie-parser";
-import { timingSafeEqual } from "crypto";
+import { randomUUID, timingSafeEqual } from "crypto";
 import { registerRoutes } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "http";
@@ -56,11 +56,11 @@ import {
   startOmsWmsCancelReconcileScheduler,
   startShopifyReconciliation,
 } from "./modules/orders/reconciliation-and-repair.api";
-import { db } from "./db";
+import { db, pool as dbPool } from "./db";
+import { resolvePostgresPoolSslConfig } from "./database-pool-config";
 import { createServices } from "./services";
 import {
   startEbayOrderPolling,
-  setShipStationService,
   setWmsServices,
   setWmsSyncService,
   createEbayOrderWebhookHandler,
@@ -135,8 +135,10 @@ import { installGlobalJsonBodyParser } from "./modules/shipping-engine/routes.ap
 import { createDefaultShipStationV2WebhookVerifier } from "./modules/shipping/shipstation-tracking-transport.api";
 import { createCarrierTrackingProjectionReader } from "./modules/shipping/carrier-tracking-and-dispatch.api";
 import { registerCarrierTrackingProjectionRoutes } from "./modules/shipping/carrier-tracking-and-dispatch.api";
-import { startWmsShipStationReconcileScheduler } from "./modules/shipping/engine-and-reconcile.api";
-import { pool as dbPool } from "./db";
+import {
+  startWmsShipStationReconcileScheduler,
+  toEngineRef,
+} from "./modules/shipping/engine-and-reconcile.api";
 import { createEbayAuthConfig, EbayAuthService } from "./modules/channels/adapters/ebay/ebay-auth.service";
 import { createEbayApiClient } from "./modules/channels/adapters/ebay/ebay-api.client";
 import { requirePermission } from "./routes/middleware";
@@ -147,11 +149,19 @@ import {
   schedulerIsDisabled,
 } from "./infrastructure/scheduler-config";
 import { registerScheduledJob } from "./infrastructure/job-registry";
-import { reportError, runWithContext } from "./platform/observability";
+import {
+  installStructuredConsoleBridge,
+  reportError,
+  runWithContext,
+} from "./platform/observability";
 import { createHttpRequestLogger } from "./platform/observability/http-request-log";
 import { observeRuntimeRequests, startRuntimeMemoryTelemetry } from "./platform/observability/runtime-memory";
 import { getPostgresPoolSnapshot } from "./infrastructure/postgres-pool-observability";
 import { getSchedulerLockPoolSnapshot } from "./infrastructure/scheduler-lock";
+
+if (!process.env.VITEST && process.env.DISABLE_STRUCTURED_CONSOLE_BRIDGE !== "true") {
+  installStructuredConsoleBridge();
+}
 
 const app = express();
 const httpServer = createServer(app);
@@ -174,11 +184,25 @@ app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser());
 
 // Per-request correlation context via AsyncLocalStorage.
-// Reads x-request-id from upstream (load balancer) or generates one.
+// Reads x-correlation-id / x-request-id from upstream (load balancer) or generates one,
+// and captures inbound webhook event identifiers (`channel_event_id`).
 app.use((req: Request, res: Response, next: NextFunction) => {
-  const correlationId = (req.headers["x-request-id"] as string) ?? require("node:crypto").randomUUID();
+  const correlationId =
+    (req.headers["x-correlation-id"] as string | undefined)?.trim() ||
+    (req.headers["x-request-id"] as string | undefined)?.trim() ||
+    randomUUID();
+  const channelEventId =
+    (req.headers["x-shopify-webhook-id"] as string | undefined)?.trim() ||
+    (req.headers["x-ebay-notification-id"] as string | undefined)?.trim() ||
+    undefined;
   res.setHeader("x-correlation-id", correlationId);
-  runWithContext({ correlationId }, () => next());
+  runWithContext(
+    {
+      correlationId,
+      ...(channelEventId ? { channelEventId } : {}),
+    },
+    () => next(),
+  );
 });
 
 // Trust proxy for Heroku (needed for secure cookies behind load balancer)
@@ -193,10 +217,9 @@ if (!process.env.SESSION_SECRET) {
 // Set up PostgreSQL session store for persistent sessions
 const PgSession = connectPgSimple(session);
 const dbConnectionString = process.env.EXTERNAL_DATABASE_URL || process.env.DATABASE_URL;
-const useSSL = process.env.EXTERNAL_DATABASE_URL || process.env.NODE_ENV === "production";
 const sessionPool = new Pool({
   connectionString: dbConnectionString,
-  ssl: useSSL ? { rejectUnauthorized: false } : undefined,
+  ssl: resolvePostgresPoolSslConfig(dbConnectionString),
   max: 2, // Limit session pool connections (Heroku Hobby = 20 total)
 });
 
@@ -457,8 +480,6 @@ app.use(createHttpRequestLogger());
   (db as any).__shippingEngine = services.shippingEngine;
   (db as any).__wmsSyncService = services.wmsSync;
 
-  // Inject ShipStation service into eBay ingestion for auto-push
-  setShipStationService(services.shipStation);
   setWmsServices({
     reservation: services.reservation,
     fulfillmentRouter: services.fulfillmentRouter,
@@ -471,8 +492,8 @@ app.use(createHttpRequestLogger());
     db,
     reservation: services.reservation,
     // The engine's own answer (cancelled, already cancelled, already shipped or not found) decides the stop (review MS1).
-    engine: services.shipStation
-      ? { cancelOrder: (engineOrderRef: number) => services.shipStation.cancelOrder(engineOrderRef) }
+    engine: services.shippingEngine
+      ? { cancelOrder: (engineOrderRef: number) => services.shippingEngine.cancel(toEngineRef(engineOrderRef)) }
       : undefined,
     clock: () => new Date(),
   }));

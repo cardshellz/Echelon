@@ -1,10 +1,10 @@
-import { logger as platformLogger } from "../../../platform/observability/logger";
 import type { RecordDropshipOrderIntakeInput } from "./dropship-order-intake-service";
 import type {
   DropshipOrderIntakeRepositoryResult,
   DropshipOrderIntakeService,
 } from "./dropship-order-intake-service";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type { DropshipOrderIntakeHealthService } from "./dropship-order-intake-health-service";
 import { DropshipError } from "../domain/errors";
 import { salesLedgerSinceFor } from "../domain/marketplace-quantity-decision";
@@ -570,13 +570,7 @@ export function resolvePollSince(input: {
 }
 
 export function makeDropshipEbayOrderIntakeLogger(): DropshipLogger {
-  return {
-    // Expected repeats (CLAUDE.md §10): the platform logger's debug level, off at the default LOG_LEVEL (review ARCH-5).
-    debug: (event) => platformLogger.debug(event.code, { message: event.message, context: event.context ?? {} }),
-    info: (event) => logDropshipEbayOrderIntakeEvent("info", event),
-    warn: (event) => logDropshipEbayOrderIntakeEvent("warn", event),
-    error: (event) => logDropshipEbayOrderIntakeEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.ebay_order_intake_poll");
 }
 
 export const systemDropshipEbayOrderIntakeClock: DropshipClock = {
@@ -655,17 +649,3 @@ function applyIntakeResult(
   }
 }
 
-function logDropshipEbayOrderIntakeEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

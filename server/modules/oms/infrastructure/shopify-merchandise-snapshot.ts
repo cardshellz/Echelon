@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { ShopifyAdminGraphQLClient } from "../../shopify/admin-gql-client";
+import type { ShopifyAdminGraphQLClient } from "../../shopify/admin-gql-client.api";
 
 const quantity = z.number().int().min(0).max(2_147_483_647);
 const lineSchema = z

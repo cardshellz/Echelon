@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   acknowledgeControlTowerV2Item,
   snoozeControlTowerV2Item,
-} from "../../control-tower-v2.triage";
+} from "../../domain/control-tower-v2.triage";
 
 function fakePool(workItem: Record<string, unknown>) {
   const statements: Array<{ sql: string; values: unknown[] }> = [];

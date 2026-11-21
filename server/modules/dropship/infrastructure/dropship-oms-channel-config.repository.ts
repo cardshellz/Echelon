@@ -14,6 +14,9 @@ import {
   insertDropshipDefaultOmsChannelInTx,
   clearExistingDropshipOmsChannelAndConnectionMarkersInTx,
   markChannelAsDropshipOmsInTx,
+  listDropshipOmsChannelOptionsInTx,
+  findDropshipDefaultOmsChannelIdInTx,
+  lockDropshipOmsChannelByIdInTx,
 } from "../../channels/channel-registry-mutations.api";
 
 interface OmsChannelRow {
@@ -177,46 +180,12 @@ function isValidDropshipOmsSource(channel: DropshipOmsChannelOption): boolean {
 }
 
 async function listChannelOptionsWithClient(client: PoolClient): Promise<DropshipOmsChannelOption[]> {
-  const result = await client.query<OmsChannelRow>(
-    `SELECT
-       c.id,
-       c.name,
-       c.type,
-       c.provider,
-       c.status,
-       c.updated_at,
-       LOWER(c.name) = LOWER($1)
-         AND c.type = $2
-         AND c.provider = $3 AS internal_dropship_channel,
-       LOWER(COALESCE(c.shipping_config #>> '{dropship,role}', '')) = 'oms' AS channel_role_marked,
-       COALESCE(c.shipping_config #>> '{dropship,omsChannel}', 'false') = 'true' AS channel_flag_marked,
-       EXISTS (
-         SELECT 1
-         FROM channels.channel_connections cc
-         WHERE cc.channel_id = c.id
-           AND LOWER(COALESCE(cc.metadata #>> '{dropship,role}', '')) = 'oms'
-       ) AS connection_role_marked,
-       EXISTS (
-         SELECT 1
-         FROM channels.channel_connections cc
-         WHERE cc.channel_id = c.id
-           AND (
-             COALESCE(cc.metadata #>> '{features,dropshipOms}', 'false') = 'true'
-             OR COALESCE(cc.metadata #>> '{features,dropship_oms}', 'false') = 'true'
-           )
-       ) AS connection_feature_marked
-     FROM channels.channels c
-     ORDER BY
-       CASE WHEN c.status = 'active' THEN 0 ELSE 1 END,
-       c.name ASC,
-       c.id ASC`,
-    [
-      DEFAULT_DROPSHIP_OMS_CHANNEL_NAME,
-      DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE,
-      DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER,
-    ],
-  );
-  return result.rows.map(mapOmsChannelRow);
+  const rows = await listDropshipOmsChannelOptionsInTx<OmsChannelRow>(client, {
+    defaultName: DEFAULT_DROPSHIP_OMS_CHANNEL_NAME,
+    defaultType: DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE,
+    defaultProvider: DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER,
+  });
+  return rows.map(mapOmsChannelRow);
 }
 
 async function loadChannelOptionByIdWithClient(
@@ -234,21 +203,11 @@ async function loadChannelOptionByIdWithClient(
 async function ensureDefaultDropshipOmsChannel(client: PoolClient, now: Date): Promise<number> {
   await client.query("SELECT pg_advisory_xact_lock(hashtext('dropship_oms_default_channel'))");
 
-  const existing = await client.query<{ id: number }>(
-    `SELECT id
-     FROM channels.channels
-     WHERE LOWER(name) = LOWER($1)
-       AND type = $2
-       AND provider = $3
-     ORDER BY id ASC
-     LIMIT 1`,
-    [
-      DEFAULT_DROPSHIP_OMS_CHANNEL_NAME,
-      DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE,
-      DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER,
-    ],
-  );
-  const existingId = existing.rows[0]?.id;
+  const existingId = await findDropshipDefaultOmsChannelIdInTx(client, {
+    name: DEFAULT_DROPSHIP_OMS_CHANNEL_NAME,
+    type: DEFAULT_DROPSHIP_OMS_CHANNEL_TYPE,
+    provider: DEFAULT_DROPSHIP_OMS_CHANNEL_PROVIDER,
+  });
   if (existingId) {
     const updatedId = await repairDropshipDefaultOmsChannelInTx(client, existingId, now);
     return requiredRow(
@@ -276,20 +235,7 @@ async function lockConfiguredChannel(client: PoolClient, channelId: number): Pro
   provider: string;
   status: string;
 }> {
-  const result = await client.query<{
-    id: number;
-    name: string;
-    type: string;
-    provider: string;
-    status: string;
-  }>(
-    `SELECT id, name, type, provider, status
-     FROM channels.channels
-     WHERE id = $1
-     FOR UPDATE`,
-    [channelId],
-  );
-  const row = result.rows[0];
+  const row = await lockDropshipOmsChannelByIdInTx(client, channelId);
   if (!row) {
     throw new DropshipError("DROPSHIP_OMS_CHANNEL_NOT_FOUND", "Dropship OMS channel was not found.", { channelId });
   }

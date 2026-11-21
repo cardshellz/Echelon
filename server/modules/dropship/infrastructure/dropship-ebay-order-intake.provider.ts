@@ -9,7 +9,12 @@ import type {
   DropshipMarketplaceCredentialRepository,
   DropshipMarketplaceStoreCredentials,
 } from "./dropship-marketplace-credentials";
-import type { EbayOrder, EbayOrdersResponse } from "../../channels/ebay-connector.api";
+import {
+  fetchEbayFulfillmentResource,
+  paginateEbayFulfillmentOrders,
+  type EbayOrder,
+  type EbayRestEnvironment,
+} from "../../channels/ebay-connector.api";
 import {
   buildEbayDropshipOrderIntakeInput,
   isEbayOrderCancelled,
@@ -21,19 +26,16 @@ import {
   isEbayResourceAuthFailureStatus,
   recordEbayAccessTokenRejection,
 } from "./dropship-ebay-auth-failure";
-import { DropshipEbayTokenOwner, resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-token-owner";
+import {
+  DropshipEbayTokenOwner,
+  resolveDropshipEbayProviderEnvironment,
+} from "./dropship-ebay-token-owner";
 
 type FetchLike = typeof fetch;
-type EbayEnvironment = "sandbox" | "production";
 
 interface Clock {
   now(): Date;
 }
-
-const EBAY_BASE_URLS: Record<EbayEnvironment, string> = {
-  sandbox: "https://api.sandbox.ebay.com",
-  production: "https://api.ebay.com",
-};
 
 const EBAY_MAX_ATTEMPTS = 3;
 const EBAY_PAGE_SIZE = 50;
@@ -58,11 +60,15 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
     since: Date;
     until: Date;
   }): Promise<DropshipEbayOrderIntakeFetchResult> {
-    // A store with no dropship listing can have no dropship order: the vendor's
-    // own sales on it are none of intake's business, so eBay is not even asked.
     const dropshipListingIds = new Set(input.connection.dropshipListingIds);
     if (dropshipListingIds.size === 0) {
-      return { orders: [], ignored: 0, saleLines: [], cancelledOrders: [], unmatchedLines: [] };
+      return {
+        orders: [],
+        ignored: 0,
+        saleLines: [],
+        cancelledOrders: [],
+        unmatchedLines: [],
+      };
     }
 
     const credential = await this.tokenOwner.loadFreshForStoreConnection({
@@ -73,23 +79,27 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
     const environment = resolveDropshipEbayProviderEnvironment(credential);
     const marketplaceId = resolveMarketplaceId(credential.config);
 
-    const orders = await this.fetchAllOrders({
-      credential,
-      environment,
-      marketplaceId,
-      since: input.since,
-      until: input.until,
+    const orders = await paginateEbayFulfillmentOrders({
+      ...this.buildEbayTransportOptions(credential, environment, marketplaceId),
+      filter: `lastmodifieddate:[${input.since.toISOString()}..${input.until.toISOString()}],orderfulfillmentstatus:{NOT_STARTED|IN_PROGRESS}`,
+      pageSize: EBAY_PAGE_SIZE,
     });
 
     const index = storeItemIndex(input.connection);
-    const result: DropshipEbayOrderIntakeFetchResult = { orders: [], ignored: 0, saleLines: [], cancelledOrders: [], unmatchedLines: [] };
+    const result: DropshipEbayOrderIntakeFetchResult = {
+      orders: [],
+      ignored: 0,
+      saleLines: [],
+      cancelledOrders: [],
+      unmatchedLines: [],
+    };
     for (const order of orders) {
-      // Every order, recorded or not, feeds the sales ledger and the parked lines (plan v4 §6.4, §7.3); a cancelled
-      // one that sold through the store's listings is applied to its intake (§7.2).
       const facts = readEbayOrderPollFacts(order, index);
       result.saleLines.push(...facts.saleLines);
       result.unmatchedLines.push(...facts.unmatchedLines);
-      if (facts.cancelled && facts.hasDropshipLine) result.cancelledOrders.push({ externalOrderId: order.orderId });
+      if (facts.cancelled && facts.hasDropshipLine) {
+        result.cancelledOrders.push({ externalOrderId: order.orderId });
+      }
       const decision = shouldRecordEbayDropshipOrder({ order, dropshipListingIds });
       if (!decision.record) {
         result.ignored += 1;
@@ -110,181 +120,132 @@ export class EbayDropshipOrderIntakeProvider implements DropshipEbayOrderIntakeP
     return result;
   }
 
-  /**
-   * One order by id (plan v2 §7.2 hourly check; §7.3 parked lines): GET only.
-   * A 404 is `not_found`; any other failure throws for the caller to log and
-   * leave for the next poll.
-   */
   async fetchOrder(input: {
     connection: DropshipEbayOrderIntakeStoreConnection;
     externalOrderId: string;
   }): Promise<DropshipEbayOrderLookup> {
     const externalOrderId = input.externalOrderId.trim();
     if (!externalOrderId) {
-      throw new DropshipError("DROPSHIP_EBAY_ORDER_ID_REQUIRED", "An eBay order id is required to read the order.", { retryable: false });
+      throw new DropshipError(
+        "DROPSHIP_EBAY_ORDER_ID_REQUIRED",
+        "An eBay order id is required to read the order.",
+        { retryable: false },
+      );
     }
     const credential = await this.tokenOwner.loadFreshForStoreConnection({
       vendorId: input.connection.vendorId,
       storeConnectionId: input.connection.storeConnectionId,
       operation: "order_intake",
     });
+    const environment = resolveDropshipEbayProviderEnvironment(credential);
+    const marketplaceId = resolveMarketplaceId(credential.config);
+
     let order: EbayOrder;
     try {
-      order = await this.requestEbay<EbayOrder>({
-        environment: resolveDropshipEbayProviderEnvironment(credential),
-        credential,
-        marketplaceId: resolveMarketplaceId(credential.config),
+      order = await fetchEbayFulfillmentResource<EbayOrder, DropshipError>({
+        ...this.buildEbayTransportOptions(credential, environment, marketplaceId),
         path: `/sell/fulfillment/v1/order/${encodeURIComponent(externalOrderId)}`,
       });
     } catch (error) {
-      if (error instanceof DropshipError && error.context?.status === 404) return { kind: "not_found" };
+      if (error instanceof DropshipError && error.context?.status === 404) {
+        return { kind: "not_found" };
+      }
       throw error;
     }
-    const decision = shouldRecordEbayDropshipOrder({ order, dropshipListingIds: new Set(input.connection.dropshipListingIds) });
+
+    const decision = shouldRecordEbayDropshipOrder({
+      order,
+      dropshipListingIds: new Set(input.connection.dropshipListingIds),
+    });
     return {
       kind: "order",
       cancelled: isEbayOrderCancelled(order),
       fulfilled: order.orderFulfillmentStatus === "FULFILLED",
       recordable: decision.record
         ? {
-          externalOrderId: order.orderId,
-          input: buildDropshipOrderInputNamingTheOrder({
-            store: { vendorId: input.connection.vendorId, storeConnectionId: input.connection.storeConnectionId },
-            order,
-            lineItems: decision.lineItems,
-          }),
-        }
+            externalOrderId: order.orderId,
+            input: buildDropshipOrderInputNamingTheOrder({
+              store: {
+                vendorId: input.connection.vendorId,
+                storeConnectionId: input.connection.storeConnectionId,
+              },
+              order,
+              lineItems: decision.lineItems,
+            }),
+          }
         : null,
     };
   }
 
-  private async fetchAllOrders(input: {
-    credential: DropshipMarketplaceStoreCredentials;
-    environment: EbayEnvironment;
-    marketplaceId: string;
-    since: Date;
-    until: Date;
-  }): Promise<EbayOrder[]> {
-    const orders: EbayOrder[] = [];
-    let offset = 0;
-    while (true) {
-      const response = await this.fetchOrderPage({
-        ...input,
-        offset,
-      });
-      if (!Array.isArray(response.orders) || response.orders.length === 0) {
-        break;
-      }
-      orders.push(...response.orders);
-      offset += response.orders.length;
-      if (response.orders.length < EBAY_PAGE_SIZE || offset >= response.total) {
-        break;
-      }
-    }
-    return orders;
-  }
-
-  private async fetchOrderPage(input: {
-    credential: DropshipMarketplaceStoreCredentials;
-    environment: EbayEnvironment;
-    marketplaceId: string;
-    since: Date;
-    until: Date;
-    offset: number;
-  }): Promise<EbayOrdersResponse> {
-    const params = new URLSearchParams({
-      filter: `lastmodifieddate:[${input.since.toISOString()}..${input.until.toISOString()}],orderfulfillmentstatus:{NOT_STARTED|IN_PROGRESS}`,
-      limit: String(EBAY_PAGE_SIZE),
-      offset: String(input.offset),
-    });
-    return this.requestEbay<EbayOrdersResponse>({
-      environment: input.environment,
-      credential: input.credential,
-      marketplaceId: input.marketplaceId,
-      path: `/sell/fulfillment/v1/order?${params.toString()}`,
-    });
-  }
-
-  private async requestEbay<T>(input: {
-    environment: EbayEnvironment;
-    credential: DropshipMarketplaceStoreCredentials;
-    marketplaceId: string;
-    path: string;
-  }): Promise<T> {
-    for (let attempt = 1; attempt <= EBAY_MAX_ATTEMPTS; attempt += 1) {
-      let response: Response;
-      try {
-        response = await this.fetchImpl(`${EBAY_BASE_URLS[input.environment]}${input.path}`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${input.credential.accessToken}`,
-            Accept: "application/json",
-            "X-EBAY-C-MARKETPLACE-ID": input.marketplaceId,
-          },
-        });
-      } catch (error) {
-        if (attempt < EBAY_MAX_ATTEMPTS) {
-          await delay(resolveRetryDelayMs(null, attempt));
-          continue;
+  private buildEbayTransportOptions(
+    credential: DropshipMarketplaceStoreCredentials,
+    environment: EbayRestEnvironment,
+    marketplaceId: string,
+  ) {
+    return {
+      environment,
+      accessToken: credential.accessToken,
+      marketplaceId,
+      fetchImpl: this.fetchImpl,
+      maxAttempts: EBAY_MAX_ATTEMPTS,
+      onHttpFailure: async (status: number) => {
+        if (isEbayResourceAuthFailureStatus(status)) {
+          await recordEbayAccessTokenRejection({
+            credentials: this.credentials,
+            credential,
+            status,
+            failureCode: "DROPSHIP_EBAY_ORDER_INTAKE_HTTP_ERROR",
+            message: `eBay order intake failed with HTTP ${status}.`,
+            now: this.clock.now(),
+          });
         }
-        throw new DropshipError(
+      },
+      createNetworkError: (error: unknown) =>
+        new DropshipError(
           "DROPSHIP_EBAY_ORDER_INTAKE_NETWORK_ERROR",
           "eBay order intake failed before receiving an HTTP response.",
           {
             retryable: true,
             cause: error instanceof Error ? error.message : String(error),
           },
-        );
-      }
-
-      const text = await response.text();
-      if (response.ok) {
-        return parseEbayJson<T>({
-          text,
-          code: "DROPSHIP_EBAY_ORDER_INTAKE_INVALID_RESPONSE",
-          message: "eBay order intake returned invalid JSON.",
-        });
-      }
-      const accessTokenRejected = isEbayResourceAuthFailureStatus(response.status);
-      if (accessTokenRejected) {
-        await recordEbayAccessTokenRejection({
-          credentials: this.credentials,
-          credential: input.credential,
-          status: response.status,
-          failureCode: "DROPSHIP_EBAY_ORDER_INTAKE_HTTP_ERROR",
-          message: `eBay order intake failed with HTTP ${response.status}.`,
-          now: this.clock.now(),
-        });
-      }
-      const retryable = response.status === 429 || response.status >= 500;
-      if (retryable && attempt < EBAY_MAX_ATTEMPTS) {
-        await delay(resolveRetryDelayMs(response, attempt));
-        continue;
-      }
-      throw new DropshipError(
-        "DROPSHIP_EBAY_ORDER_INTAKE_HTTP_ERROR",
-        `eBay order intake failed with HTTP ${response.status}.`,
-        {
-          retryable: retryable || accessTokenRejected,
-          status: response.status,
-          body: text.slice(0, 1000),
-        },
-      );
-    }
-    throw new DropshipError(
-      "DROPSHIP_EBAY_ORDER_INTAKE_RETRY_EXHAUSTED",
-      "eBay order intake retry attempts were exhausted.",
-      { retryable: true },
-    );
+        ),
+      createInvalidJsonError: (text: string) =>
+        new DropshipError(
+          "DROPSHIP_EBAY_ORDER_INTAKE_INVALID_RESPONSE",
+          "eBay order intake returned invalid JSON.",
+          {
+            body: text.slice(0, 1000),
+            retryable: true,
+          },
+        ),
+      createHttpError: (status: number, text: string, retryable: boolean) =>
+        new DropshipError(
+          "DROPSHIP_EBAY_ORDER_INTAKE_HTTP_ERROR",
+          `eBay order intake failed with HTTP ${status}.`,
+          {
+            retryable: retryable || isEbayResourceAuthFailureStatus(status),
+            status,
+            body: text.slice(0, 1000),
+          },
+        ),
+      createRetryExhaustedError: () =>
+        new DropshipError(
+          "DROPSHIP_EBAY_ORDER_INTAKE_RETRY_EXHAUSTED",
+          "eBay order intake retry attempts were exhausted.",
+          { retryable: true },
+        ),
+    };
   }
-
 }
 
-function storeItemIndex(connection: DropshipEbayOrderIntakeStoreConnection): EbayStoreItemIndex {
+function storeItemIndex(
+  connection: DropshipEbayOrderIntakeStoreConnection,
+): EbayStoreItemIndex {
   const listingIdByItemNumber = new Map<string, number>();
   for (const item of connection.itemNumbers) {
-    // A current number is listed before an earlier one (the repository's order), so it wins.
-    if (!listingIdByItemNumber.has(item.externalListingId)) listingIdByItemNumber.set(item.externalListingId, item.listingId);
+    if (!listingIdByItemNumber.has(item.externalListingId)) {
+      listingIdByItemNumber.set(item.externalListingId, item.listingId);
+    }
   }
   const listingIdsBySku = new Map<string, number[]>();
   for (const listing of connection.listingSkus) {
@@ -303,37 +264,6 @@ function resolveMarketplaceId(config: Record<string, unknown>): string {
     : "EBAY_US";
 }
 
-function parseEbayJson<T>(input: { text: string; code: string; message: string }): T {
-  try {
-    return JSON.parse(input.text) as T;
-  } catch {
-    throw new DropshipError(input.code, input.message, {
-      body: input.text.slice(0, 1000),
-      retryable: true,
-    });
-  }
-}
-
-function resolveRetryDelayMs(response: Response | null, attempt: number): number {
-  const retryAfter = response?.headers.get("Retry-After");
-  if (retryAfter) {
-    const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds) && seconds > 0) {
-      return seconds * 1000;
-    }
-  }
-  return Math.min(1000 * Math.pow(2, attempt - 1), 10_000);
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Builds the intake input, and when the order cannot be read names the order and
- * the field in the error: the message is what the store's intake health records,
- * so it must be enough to find the order without the raw payload.
- */
 function buildDropshipOrderInputNamingTheOrder(
   input: Parameters<typeof buildEbayDropshipOrderIntakeInput>[0],
 ): ReturnType<typeof buildEbayDropshipOrderIntakeInput> {
@@ -341,7 +271,10 @@ function buildDropshipOrderInputNamingTheOrder(
     return buildEbayDropshipOrderIntakeInput(input);
   } catch (error) {
     if (!(error instanceof DropshipError)) throw error;
-    const field = typeof error.context?.field === "string" ? `, field ${error.context.field}` : "";
+    const field =
+      typeof error.context?.field === "string"
+        ? `, field ${error.context.field}`
+        : "";
     throw new DropshipError(
       error.code,
       `${error.message} (eBay order ${String(input.order.orderId)}${field})`,

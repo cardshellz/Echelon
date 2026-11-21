@@ -55,7 +55,8 @@ import {
   createListingPushJobForMemberInputSchema,
   generateVendorListingPreviewForMemberInputSchema,
 } from "./dropship-listing-dtos";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type {
   DropshipVendorProvisioningService,
 } from "./dropship-vendor-provisioning-service";
@@ -1267,11 +1268,7 @@ function canonicalRequestedRetailPriceRecord(input?: Readonly<Record<string, num
 }
 
 export function makeDropshipListingPreviewLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipListingEvent("info", event),
-    warn: (event) => logDropshipListingEvent("warn", event),
-    error: (event) => logDropshipListingEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.listing_preview");
 }
 
 export const systemDropshipListingPreviewClock: DropshipClock = {
@@ -1808,22 +1805,3 @@ function sortJsonValue(value: unknown): unknown {
   return value;
 }
 
-function logDropshipListingEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-    return;
-  }
-  if (level === "warn") {
-    console.warn(payload);
-    return;
-  }
-  console.info(payload);
-}

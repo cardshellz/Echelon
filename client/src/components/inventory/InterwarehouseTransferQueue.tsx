@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
+import { FinancialCommandRequestError } from "@/lib/financial-command";
 import { useInventoryCommand } from "@/lib/inventory-command";
 import type { InterwarehouseTransferStatus, InterwarehouseTransferSummary } from "@shared/types/interwarehouse-transfer";
 
@@ -31,6 +32,21 @@ function statusClass(status: InterwarehouseTransferStatus): string {
   if (status === "in_transit" || status === "partially_received") return "border-blue-200 bg-blue-50 text-blue-700";
   if (status === "exception" || status === "closed_with_variance") return "border-amber-200 bg-amber-50 text-amber-800";
   return "";
+}
+
+export function describeInterwarehouseActionError(error: Error): {
+  title: string;
+  description: string;
+  refreshTransfer: boolean;
+} {
+  if (error instanceof FinancialCommandRequestError && error.ambiguous) {
+    return {
+      title: "Transfer status not confirmed",
+      description: "The transfer list is refreshing. If the units still show in transit, open the transfer and retry; the saved command will be reused safely.",
+      refreshTransfer: true,
+    };
+  }
+  return { title: "Transfer action failed", description: error.message, refreshTransfer: false };
 }
 
 export function InterwarehouseTransferQueue({ compact = false }: { compact?: boolean }) {
@@ -84,7 +100,14 @@ export function InterwarehouseTransferQueue({ compact = false }: { compact?: boo
       void queryClient.invalidateQueries({ queryKey: ["/api/inventory/interwarehouse-transfers"] });
       void queryClient.invalidateQueries({ predicate: (item) => String(item.queryKey[0] ?? "").startsWith("/api/inventory/") });
     },
-    onError: (error: Error) => toast({ title: "Transfer action failed", description: error.message, variant: "destructive" }),
+    onError: (error: Error) => {
+      const message = describeInterwarehouseActionError(error);
+      if (message.refreshTransfer) {
+        setAction(null);
+        void queryClient.invalidateQueries({ queryKey: ["/api/inventory/interwarehouse-transfers"] });
+      }
+      toast({ title: message.title, description: message.description, variant: "destructive" });
+    },
   });
 
   const openAction = (kind: "receive" | "missing", transfer: InterwarehouseTransferSummary) => {

@@ -9,7 +9,7 @@ async function main() {
   const { db, pool } = await import("../server/db");
   try {
     const { createServices } = await import("../server/services");
-    const { createOrderEditService } = await import("../server/modules/order-edits/order-edit.composition");
+    const { createOrderEditService } = await import("../server/modules/order-edits/runtime.api");
     const { createOrderActionProjectionWorker } = await import("../server/modules/customer-account/order-action-projection.api");
     const worker = createOrderActionProjectionWorker(pool, createOrderEditService(pool, createServices(db, pool)),
       event => console.log(JSON.stringify({ ...event, actor: options.actor })), { orderIds: options.orderIds });

@@ -8,12 +8,8 @@ import type { DropshipSourcePlatform } from "../../../../shared/schema/dropship.
 import { DropshipError } from "../domain/errors";
 import { vendorOrderAdmissionFor } from "../domain/vendor-standing";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import { vendorPlatformName } from "../domain/vendor-platform-name";
 
 const positiveIdSchema = z.number().int().positive();
@@ -308,11 +304,7 @@ export function hashDropshipOrderIntakePayload(input: {
 }
 
 export function makeDropshipOrderIntakeLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipOrderIntakeEvent("info", event),
-    warn: (event) => logDropshipOrderIntakeEvent("warn", event),
-    error: (event) => logDropshipOrderIntakeEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.order_intake");
 }
 
 export const systemDropshipOrderIntakeClock: DropshipClock = {
@@ -351,17 +343,3 @@ function sortJsonValue(value: unknown): unknown {
   return value;
 }
 
-function logDropshipOrderIntakeEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

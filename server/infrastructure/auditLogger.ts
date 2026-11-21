@@ -5,14 +5,27 @@
  */
 
 import { db } from "../db";
-import {persistAuditEvent,type AuditLogPayload} from "./transactional-audit";
-export {persistAuditEvent,type AuditLogPayload,type PersistAuditEventOptions} from "./transactional-audit";
+import { logger } from "../platform/observability/logger";
+import { persistAuditEvent, type AuditLogPayload } from "./transactional-audit";
+export { persistAuditEvent, type AuditLogPayload, type PersistAuditEventOptions } from "./transactional-audit";
 
 export class AuditLogger {
   static log(payload: AuditLogPayload): void {
-    // Preserve the legacy non-blocking contract for existing callers.
-    void persistAuditEvent(db, payload).catch((err) => {
-      console.error(`[AuditLogger Error] Failed to persist audit event to postgres: ${err.message}`);
+    logger.info("audit.event_recorded", {
+      actor: payload.actor,
+      audit_action: payload.action,
+      target: payload.target,
+      before: payload.changes?.before,
+      after: payload.changes?.after,
+      context: payload.context,
+    });
+    // Preserve the legacy non-blocking DB persistence contract for existing callers.
+    void persistAuditEvent(db, payload, { emitStructuredLog: false }).catch((err: unknown) => {
+      logger.error("audit.persist_failed", {
+        audit_action: payload.action,
+        target: payload.target,
+        error: err instanceof Error ? err : String(err),
+      });
     });
   }
 }

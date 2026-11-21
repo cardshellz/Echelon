@@ -20,7 +20,7 @@ import {
   MAX_SHOPIFY_PAGINATION_PAGES,
   MAX_SHOPIFY_RATE_LIMIT_RETRIES,
   SHOPIFY_REQUEST_TIMEOUT_MS,
-} from "../../../integrations/shopify";
+} from "../../../integrations/shopify.api";
 
 describe("Catalog Archive Replenishment Participant & Shopify Transport Bounds (CAT-2)", () => {
   describe("Replenishment Archive Transaction Participant (CWF-F03 / CI-01)", () => {

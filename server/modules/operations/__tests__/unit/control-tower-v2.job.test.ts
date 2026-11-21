@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { ControlTowerSourceAdapter, QueryClient } from "../../control-tower-v2.domain";
-import { runControlTowerProjectionJob } from "../../control-tower-v2.job";
+import type { ControlTowerSourceAdapter, QueryClient } from "../../domain/control-tower-v2.domain";
+import { runControlTowerProjectionJob } from "../../application/control-tower-v2.job";
 
 describe("Control Tower V2 projection job", () => {
   it("reports a source with invalid rows as failed in dry-run mode", async () => {

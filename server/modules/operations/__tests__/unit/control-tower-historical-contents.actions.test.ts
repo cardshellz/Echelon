@@ -5,8 +5,8 @@ import {
   decideHistoricalContentsReview,
   getHistoricalContentsCorrectionPreview,
   getHistoricalContentsReviewPreview,
-} from "../../control-tower-historical-contents.actions";
-import { wmsReconciliationSource } from "../../control-tower-v2.sources";
+} from "../../application/control-tower-historical-contents.actions";
+import { wmsReconciliationSource } from "../../infrastructure/control-tower-v2.sources";
 
 function poolWithWorkItem(overrides: Record<string, unknown> = {}): Pool {
   return {

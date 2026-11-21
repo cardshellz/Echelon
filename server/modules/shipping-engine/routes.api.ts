@@ -14,5 +14,5 @@ export { registerShadowAdminRoutes } from "./interfaces/http/shadow-admin.routes
 export { registerSharedConfigurationAdminRoutes } from "./interfaces/http/shared-configuration-admin.routes";
 export { registerShippingDestinationNormalizationRoutes } from "./interfaces/http/shipping-destination-normalization.routes";
 export { registerStorefrontRatePreviewRoutes } from "./interfaces/http/storefront-rate-preview.routes";
-export { registerOutboundShipmentRoutes } from "./outbound-shipments.routes";
-export { registerShippingAdminRoutes } from "./shipping-admin.routes";
+export { registerOutboundShipmentRoutes } from "./interfaces/http/outbound-shipments.routes";
+export { registerShippingAdminRoutes } from "./interfaces/http/shipping-admin.routes";

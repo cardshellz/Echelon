@@ -7,8 +7,8 @@ vi.mock("../../../oms/flow-waterfall.service", () => ({ getFlowWaterfall }));
 import {
   getControlTowerFlowOverview,
   refreshControlTowerFlowSnapshotIfDue,
-} from "../../control-tower-flow-snapshot.service";
-import type { QueryClient } from "../../control-tower-v2.domain";
+} from "../../application/control-tower-flow-snapshot.service";
+import type { QueryClient } from "../../domain/control-tower-v2.domain";
 
 function waterfall(generatedAt = "2026-07-11T12:00:01.000Z") {
   return {

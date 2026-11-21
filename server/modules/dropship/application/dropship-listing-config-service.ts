@@ -1,7 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
 import type { DropshipSourcePlatform, DropshipStoreConnectionStatus } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import type {
   DropshipListingInventoryMode,
   DropshipListingMode,
@@ -725,11 +726,7 @@ export function normalizeListingConfigInput(
 }
 
 export function makeDropshipListingConfigLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipListingConfigEvent("info", event),
-    warn: (event) => logDropshipListingConfigEvent("warn", event),
-    error: (event) => logDropshipListingConfigEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.listing_config");
 }
 
 export const systemDropshipListingConfigClock: DropshipClock = {
@@ -759,22 +756,3 @@ function uniqueTrimmed<T extends string>(values: readonly T[]): T[] {
   return result;
 }
 
-function logDropshipListingConfigEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-    return;
-  }
-  if (level === "warn") {
-    console.warn(payload);
-    return;
-  }
-  console.info(payload);
-}

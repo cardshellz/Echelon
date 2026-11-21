@@ -4,7 +4,7 @@ import type { FulfillmentReconciler, ReconciliationStatus } from "./reconciler.i
 import {
   createDefaultShopifyAdminClient,
   type ShopifyAdminGraphQLClient,
-} from "../../shopify/admin-gql-client";
+} from "../../shopify/admin-gql-client.api";
 import {
   handoffLegacyShipmentToChannelFulfillment,
   isChannelFulfillmentHandoffComplete,

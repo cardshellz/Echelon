@@ -47,6 +47,10 @@ export class HmacDropshipOAuthStateSigner implements DropshipOAuthStateSigner {
       || payload.memberId.length === 0
       || (payload.platform !== "ebay" && payload.platform !== "shopify")
       || !["connect", "refresh_connection", "change_store"].includes(intent)
+      || typeof payload.nonce !== "string"
+      || payload.nonce.trim().length === 0
+      || typeof payload.issuedAt !== "string"
+      || Number.isNaN(new Date(payload.issuedAt).getTime())
       || typeof payload.expiresAt !== "string"
       || Number.isNaN(new Date(payload.expiresAt).getTime())
       || !isValidOptionalTargetId(payload.targetStoreConnectionId)

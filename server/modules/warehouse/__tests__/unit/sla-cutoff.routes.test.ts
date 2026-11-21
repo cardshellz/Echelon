@@ -27,9 +27,9 @@ vi.mock("../../", () => ({ createBinAssignmentService: () => ({}), warehouseStor
 vi.mock("../../../catalog", () => ({ catalogStorage: {} }));
 vi.mock("../../../inventory", () => ({ inventoryStorage: {} }));
 vi.mock("../../infrastructure/warehouse.repository", () => ({ getWarehouseById: h.getWarehouseById }));
-vi.mock("../../settings.resolver", () => ({ getSlaCutoffConfig: h.getSlaCutoffConfig }));
+vi.mock("../../application/settings.resolver", () => ({ getSlaCutoffConfig: h.getSlaCutoffConfig }));
 
-import { registerWarehouseRoutes } from "../../warehouse.routes";
+import { registerWarehouseRoutes } from "../../interfaces/http/warehouse.routes";
 
 function buildApp(): Express {
   const app = express();

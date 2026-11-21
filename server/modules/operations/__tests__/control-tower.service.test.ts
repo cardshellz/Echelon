@@ -22,7 +22,7 @@ import {
   getOperationsControlTower,
   getOperationsControlTowerDetail,
   parseControlTowerFilters,
-} from "../control-tower.service";
+} from "../application/control-tower.service";
 
 const omsHealth = {
   generatedAt: "2026-07-10T12:00:00.000Z",

@@ -4,4 +4,4 @@
  * User-scoped feed reads, read-acknowledgements, and preference mutations remain
  * internal to `server/modules/notifications`.
  */
-export { notify, type NotifyPayload } from "./notifications.service";
+export { notify, type NotifyPayload } from "./application/notifications.service";

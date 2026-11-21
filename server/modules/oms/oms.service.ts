@@ -12,7 +12,7 @@ import {
   type InsertOmsOrder, type InsertOmsOrderLine, type OmsOrder, type OmsOrderLine,
   channels,
 } from "@shared/schema";
-import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
+import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client.api";
 import {
   deriveOmsLineAuthority,
   type OmsLineAuthorityState,

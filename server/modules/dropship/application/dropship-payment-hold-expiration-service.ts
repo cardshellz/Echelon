@@ -2,12 +2,8 @@ import { z } from "zod";
 import { DropshipError } from "../domain/errors";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
-import type {
-  DropshipClock,
-  DropshipLogEvent,
-  DropshipLogger,
-  DropshipNotificationSender,
-} from "./dropship-ports";
+import type { DropshipClock, DropshipLogger, DropshipNotificationSender } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 import { DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES as DEFAULT_HOLD_EXPIRY_WARNING_MINUTES } from "../domain/wallet-policy";
 
 const DEFAULT_PAYMENT_HOLD_EXPIRATION_LIMIT = 100;
@@ -202,11 +198,7 @@ export class DropshipPaymentHoldExpirationService {
 }
 
 export function makeDropshipPaymentHoldExpirationLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipPaymentHoldExpirationEvent("info", event),
-    warn: (event) => logDropshipPaymentHoldExpirationEvent("warn", event),
-    error: (event) => logDropshipPaymentHoldExpirationEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.payment_hold_expiration");
 }
 
 export const systemDropshipPaymentHoldExpirationClock: DropshipClock = {
@@ -249,20 +241,3 @@ function parseNotifyExpiringPaymentHoldsInput(input: unknown): z.infer<typeof no
   return result.data;
 }
 
-function logDropshipPaymentHoldExpirationEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

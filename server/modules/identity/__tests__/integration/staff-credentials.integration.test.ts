@@ -19,15 +19,15 @@ vi.mock("../../../../db",()=>({db:new Proxy({},{get(_target,property){
   if(!connection.database)throw new Error("Explicit disposable fixture required");
   const value=Reflect.get(connection.database,property);return typeof value==="function"?value.bind(connection.database):value;
 }})}));
-import { registerAuthRoutes } from "../../identity.routes";
-import { createStaffSessionGate } from "../../staff-session";
+import { registerAuthRoutes } from "../../interfaces/http/identity.routes";
+import { createStaffSessionGate } from "../../application/staff-session";
 import { requirePermission } from "../../../../routes/middleware";
 import { updateUserUseCase, assignUserRolesUseCase, updateRolePermissionsUseCase } from "../../application/identity.use-cases";
 import { reviewStaffCredentialReset,resetStaffPassword,changeOwnStaffPassword,authenticateStaffSession,recoverStaffPasswordBreakGlass,requestStaffPasswordRecoveryEmail,resetStaffPasswordWithToken } from "../../application/staff-credentials";
 import { readStaffCredentialState } from "../../infrastructure/staff-credentials.repository";
 import { setupWebSocket,broadcastToUser } from "../../../../websocket";
 import { registerCustomerReturnCustomerAuthRoutes } from "../../../returns/interfaces/http/customer-return-customer-auth.routes";
-import { createStaffStreamObserver } from "../../staff-stream";
+import { createStaffStreamObserver } from "../../interfaces/http/staff-stream";
 
 const databaseUrl=process.env.ECHELON_TEST_DATABASE_URL;
 if(databaseUrl)validatePostgresTestEnvironment(process.env);

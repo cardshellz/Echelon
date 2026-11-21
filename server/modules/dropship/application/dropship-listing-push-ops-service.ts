@@ -6,7 +6,8 @@ import {
   type ListDropshipListingPushJobsInput,
   type RetryDropshipListingPushJobInput,
 } from "./dropship-listing-push-ops-dtos";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type { DropshipClock, DropshipLogger } from "./dropship-ports";
+import { createDropshipPlatformLogger } from "./dropship-platform-logger";
 
 export const DROPSHIP_LISTING_PUSH_OPS_DEFAULT_STATUSES: DropshipListingPushJobStatus[] = [
   "failed",
@@ -155,11 +156,7 @@ export class DropshipListingPushOpsService {
 }
 
 export function makeDropshipListingPushOpsLogger(): DropshipLogger {
-  return {
-    info: (event) => logDropshipListingPushOpsEvent("info", event),
-    warn: (event) => logDropshipListingPushOpsEvent("warn", event),
-    error: (event) => logDropshipListingPushOpsEvent("error", event),
-  };
+  return createDropshipPlatformLogger("dropship.listing_push_ops");
 }
 
 function parseListJobsInput(input: unknown): ListDropshipListingPushJobsInput {
@@ -202,20 +199,3 @@ export const systemDropshipListingPushOpsClock: DropshipClock = {
   now: () => new Date(),
 };
 
-function logDropshipListingPushOpsEvent(
-  level: "info" | "warn" | "error",
-  event: DropshipLogEvent,
-): void {
-  const payload = JSON.stringify({
-    code: event.code,
-    message: event.message,
-    context: event.context ?? {},
-  });
-  if (level === "error") {
-    console.error(payload);
-  } else if (level === "warn") {
-    console.warn(payload);
-  } else {
-    console.info(payload);
-  }
-}

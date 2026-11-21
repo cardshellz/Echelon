@@ -18,8 +18,23 @@ export const BASELINE_VERSION = 1;
 export const BASELINE_DIRECTORY = "baseline";
 export const BASELINE_SCHEMA_FILENAME = "schema.sql";
 export const BASELINE_MANIFEST_FILENAME = "manifest.json";
+export const BASELINE_REFERENCE_DATA_FILENAME = "reference-data.sql";
+export const BASELINE_REFERENCE_AUDIT_FILENAME = "reference-data-audit.json";
 
 const MANIFEST_KEYS = ["version", "capturedAt", "serverVersion", "schemaSha256", "covers"];
+const REFERENCE_AUDIT_KEYS = [
+  "version",
+  "reviewedAt",
+  "baselineCapturedAt",
+  "referenceDataSha256",
+  "coveredInsertMigrations",
+  "tables",
+];
+const REFERENCE_DISPOSITIONS = new Set([
+  "baseline_reference_seed",
+  "dependent_or_runtime_seeded",
+  "historical_backfill_or_event",
+]);
 const SQL_FILENAME = /^\d+_[^/\\\r\n]+\.sql$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -155,4 +170,78 @@ export function buildBaselineManifest({ schemaText, repositoryMigrations, applie
     schemaSha256: baselineSha256(schemaText),
     covers: [...repositoryMigrations].sort(),
   });
+}
+
+export function validateBaselineReferenceAudit(value) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).sort().join("\0") !== [...REFERENCE_AUDIT_KEYS].sort().join("\0")
+  ) {
+    fail(
+      "INVALID_BASELINE_REFERENCE_AUDIT",
+      `Baseline reference-data audit must contain exactly: ${REFERENCE_AUDIT_KEYS.join(", ")}.`,
+    );
+  }
+  const {
+    version,
+    reviewedAt,
+    baselineCapturedAt,
+    referenceDataSha256,
+    coveredInsertMigrations,
+    tables,
+  } = value;
+  if (
+    version !== BASELINE_VERSION ||
+    typeof reviewedAt !== "string" ||
+    !ISO_DATE.test(reviewedAt) ||
+    typeof baselineCapturedAt !== "string" ||
+    !ISO_DATE.test(baselineCapturedAt) ||
+    typeof referenceDataSha256 !== "string" ||
+    !SHA256_HEX.test(referenceDataSha256) ||
+    !Array.isArray(coveredInsertMigrations) ||
+    coveredInsertMigrations.some((name) => typeof name !== "string" || !SQL_FILENAME.test(name)) ||
+    new Set(coveredInsertMigrations).size !== coveredInsertMigrations.length ||
+    coveredInsertMigrations.join("\0") !== [...coveredInsertMigrations].sort().join("\0") ||
+    !Array.isArray(tables)
+  ) {
+    fail(
+      "INVALID_BASELINE_REFERENCE_AUDIT",
+      "Baseline reference-data audit fields are invalid.",
+    );
+  }
+  for (const entry of tables) {
+    if (
+      !entry ||
+      typeof entry !== "object" ||
+      Array.isArray(entry) ||
+      typeof entry.table !== "string" ||
+      !/^[a-z0-9_]+\.[a-z0-9_]+$/.test(entry.table) ||
+      !REFERENCE_DISPOSITIONS.has(entry.disposition) ||
+      typeof entry.rationale !== "string" ||
+      entry.rationale.trim() === "" ||
+      !Array.isArray(entry.sourceMigrations) ||
+      entry.sourceMigrations.length === 0 ||
+      entry.sourceMigrations.some((name) => typeof name !== "string" || !SQL_FILENAME.test(name))
+    ) {
+      fail(
+        "INVALID_BASELINE_REFERENCE_AUDIT",
+        "Baseline reference-data audit contains an invalid table classification entry.",
+      );
+    }
+  }
+  return {
+    version,
+    reviewedAt,
+    baselineCapturedAt,
+    referenceDataSha256,
+    coveredInsertMigrations: [...coveredInsertMigrations],
+    tables: tables.map((entry) => ({
+      table: entry.table,
+      disposition: entry.disposition,
+      rationale: entry.rationale,
+      sourceMigrations: [...entry.sourceMigrations],
+    })),
+  };
 }
