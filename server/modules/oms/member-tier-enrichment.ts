@@ -1,22 +1,13 @@
 /**
  * Member Tier Enrichment
- * 
+ *
  * Lightweight service to populate oms_orders.member_tier from Shellz Club
  * Only stores tier at time of order (historical snapshot for analytics)
  */
 
-import { db as echelonDb } from "../../db";
+import { db as echelonDb, pool as shellzClubDb } from "../../db";
 import { omsOrders } from "../../../shared/schema/oms.schema";
 import { eq, isNull } from "drizzle-orm";
-
-// Cross-database connection to Shellz Club
-// Uses same DATABASE_URL since both apps share the database
-import { Pool } from "pg";
-
-const shellzClubDb = new Pool({
-  connectionString: process.env.DATABASE_URL || process.env.EXTERNAL_DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false,
-});
 
 interface MemberTierLookup {
   tier: string | null;
