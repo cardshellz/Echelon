@@ -36,6 +36,25 @@ export {
 };
 
 export const EBAY_CHANNEL_ID = 67;
+
+/** Echelon's own, pre-assigned identity for a shipment's ShipStation order. */
+export function shipStationOrderKeyForShipment(shipmentId: number): string {
+  return `echelon-wms-shp-${shipmentId}`;
+}
+
+/**
+ * The orderNumber pushShipment sends to ShipStation. eBay keeps the "EB-"
+ * prefix so packer-facing order numbers stay stable. Shared with the key
+ * lookup, which can only search ShipStation by orderNumber.
+ */
+export function shipStationOrderNumberForWmsOrder(order: {
+  channel_id?: number | null;
+  order_number?: string | null;
+  external_order_id?: string | null;
+}): string {
+  const base = order.order_number || order.external_order_id || "";
+  return Number(order.channel_id) === EBAY_CHANNEL_ID ? `EB-${base}` : base;
+}
 // Provider hold is indefinite; the operation's payment deadline owns recovery.
 export const ORDER_EDIT_PROVIDER_HOLD_UNTIL = "2099-12-31";
 const SHIPSTATION_RESOURCE_HOST = "ssapi.shipstation.com";

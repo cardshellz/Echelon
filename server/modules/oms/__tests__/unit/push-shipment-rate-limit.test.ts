@@ -99,6 +99,10 @@ function makeDb(selects: any[][]) {
       ? chunks.map((c: any) => (typeof c === "string" ? c : c?.value?.join?.("") ?? "")).join("")
       : String(query);
     executed.push(text);
+    // The status-guarded queued write-back RETURNs the row it moved.
+    if (/status = 'queued'/.test(text) && /RETURNING id/.test(text)) {
+      return { rows: [{ id: 9001 }] };
+    }
     return { rows: [] };
   });
   const transaction = vi.fn(async (operation: (tx: any) => Promise<any>) => operation(db));

@@ -1007,10 +1007,23 @@ export async function clearOutboundShipmentReviewFlagByReasonInWms(
   executor: SqlExecutor,
   input: {
     shipmentId: number;
-    expectedReason?: "inventory_deduction_missing_item_data" | "address_changed_after_push";
+    expectedReason?:
+      | "inventory_deduction_missing_item_data"
+      | "address_changed_after_push"
+      | "shipstation_cancel_unverified";
     updatedAt?: Date;
   },
 ): Promise<void> {
+  if (input.expectedReason === "shipstation_cancel_unverified") {
+    await executor.execute(sql`
+      UPDATE wms.outbound_shipments
+      SET requires_review = false, review_reason = NULL, updated_at = ${input.updatedAt ?? new Date()}
+      WHERE id = ${input.shipmentId}
+        AND requires_review = true
+        AND review_reason = 'shipstation_cancel_unverified'
+    `);
+    return;
+  }
   if (input.expectedReason === "address_changed_after_push") {
     await executor.execute(sql`
       UPDATE wms.outbound_shipments
@@ -1039,6 +1052,15 @@ export async function clearOutboundShipmentReviewFlagByReasonInWms(
   `);
 }
 
+/**
+ * Records a successful ShipStation push and moves the shipment to `queued`.
+ *
+ * Returns false when the row was no longer pushable by the time the provider
+ * answered (e.g. a channel cancel landed while the push was in flight). The
+ * caller MUST handle that case: the provider order exists even though this
+ * status-guarded update changed nothing (root cause of #65805, where the
+ * ShipStation order id was silently dropped and the order stayed live).
+ */
 export async function markOutboundShipmentQueuedAfterShipStationPushInWms(
   executor: SqlExecutor,
   input: {
@@ -1047,8 +1069,8 @@ export async function markOutboundShipmentQueuedAfterShipStationPushInWms(
     orderKey: string;
     now: Date;
   },
-): Promise<void> {
-  await executor.execute(sql`
+): Promise<boolean> {
+  const result = await executor.execute(sql`
     UPDATE wms.outbound_shipments
     SET shipstation_order_id = ${input.shipstationOrderId},
         shipstation_order_key = ${input.orderKey},
@@ -1062,5 +1084,75 @@ export async function markOutboundShipmentQueuedAfterShipStationPushInWms(
     WHERE id = ${input.shipmentId}
       AND status IN ('planned', 'queued', 'voided')
       AND shipped_at IS NULL
+    RETURNING id
   `);
+  return Array.isArray(result?.rows) && result.rows.length > 0;
+}
+
+/**
+ * Other, still-open shipments that point at the same ShipStation order (a
+ * duplicate full shipment can adopt a sibling's order id + key). Cancelling
+ * the provider order on behalf of one cancelled shipment would kill their
+ * live work, so automatic provider cancels must check this first.
+ */
+export async function countOpenShipmentsSharingShipStationOrderInWms(
+  executor: SqlExecutor,
+  input: { shipmentId: number; providerOrderId: number; orderKey: string },
+): Promise<number> {
+  const result = await executor.execute(sql`
+    SELECT COUNT(*)::int AS n
+    FROM wms.outbound_shipments
+    WHERE id <> ${input.shipmentId}
+      AND status NOT IN ('cancelled', 'voided')
+      AND (
+        shipstation_order_id = ${input.providerOrderId}
+        OR engine_order_ref = ${String(input.providerOrderId)}
+        OR shipstation_order_key = ${input.orderKey}
+      )
+  `);
+  return Number(result?.rows?.[0]?.n ?? 0);
+}
+
+/**
+ * Records which ShipStation order belongs to a shipment WITHOUT touching its
+ * status. Used when the provider order is found by Echelon's own order key
+ * (`echelon-wms-shp-<shipmentId>`) for a shipment whose id was never saved,
+ * including cancelled shipments, so later operations can address it.
+ *
+ * Never overwrites a different saved provider id: returns the current link so
+ * the caller can detect a conflict instead of silently re-pointing the row.
+ */
+export async function linkShipStationOrderIdentityOnOutboundShipmentInWms(
+  executor: SqlExecutor,
+  input: { shipmentId: number; providerOrderId: number; orderKey: string; now: Date },
+): Promise<{ linked: boolean; existingProviderOrderId: number | null; status: string | null }> {
+  const updated = await executor.execute(sql`
+    UPDATE wms.outbound_shipments
+    SET shipstation_order_id = ${input.providerOrderId},
+        shipstation_order_key = ${input.orderKey},
+        shipping_engine = 'shipstation',
+        engine_order_ref = ${String(input.providerOrderId)},
+        engine_shipment_ref = ${input.orderKey},
+        updated_at = ${input.now}
+    WHERE id = ${input.shipmentId}
+      AND (shipstation_order_id IS NULL OR shipstation_order_id = ${input.providerOrderId})
+    RETURNING status
+  `);
+  const updatedRow = updated?.rows?.[0];
+  if (updatedRow) {
+    return { linked: true, existingProviderOrderId: input.providerOrderId, status: String(updatedRow.status) };
+  }
+  const current = await executor.execute(sql`
+    SELECT shipstation_order_id, status
+    FROM wms.outbound_shipments
+    WHERE id = ${input.shipmentId}
+    LIMIT 1
+  `);
+  const row = current?.rows?.[0];
+  const existing = Number(row?.shipstation_order_id);
+  return {
+    linked: false,
+    existingProviderOrderId: Number.isSafeInteger(existing) && existing > 0 ? existing : null,
+    status: row ? String(row.status) : null,
+  };
 }

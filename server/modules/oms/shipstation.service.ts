@@ -38,6 +38,7 @@ import { createShipStationNotifyV2Execution } from "./shipstation/shipstation-no
 import { createShipStationNotifyWebhookDispatch } from "./shipstation/shipstation-notify-webhook-dispatch";
 import { createShipStationOrderControls } from "./shipstation/shipstation-order-controls";
 import { createShipStationPushHandlers } from "./shipstation/shipstation-push-shipment";
+import { createShipStationShipmentOrderResolution } from "./shipstation/shipstation-shipment-order-resolution";
 
 export {
   normalizeCountryToIso2,
@@ -397,7 +398,22 @@ export function createShipStationService(
   const pushHandlers = createShipStationPushHandlers(
     runtimeContext,
     notifyV2.getOmsFinalOrderBlockerForShipmentPush,
+    orderControls.cancelOrder,
   );
+  const shipmentOrderResolution = createShipStationShipmentOrderResolution(runtimeContext);
+
+  /**
+   * Cancel the ShipStation order for a shipment, finding it by Echelon's
+   * order key when its id was never saved. "not_found" here means proven
+   * absent from ShipStation, not "we had no id".
+   */
+  async function cancelOrderForShipment(shipmentId: number) {
+    const resolution = await shipmentOrderResolution.resolveOrderForShipment(shipmentId);
+    if (resolution.state === "not_in_shipstation") {
+      return { alreadyInState: false, state: "not_found" as const };
+    }
+    return orderControls.cancelOrder(resolution.shipstationOrderId);
+  }
 
   return {
     pushShipment: pushHandlers.pushShipment,
@@ -420,6 +436,8 @@ export function createShipStationService(
     releaseOrderFromHold: orderControls.releaseOrderFromHold,
     markAsShipped: orderControls.markAsShipped,
     cancelOrder: orderControls.cancelOrder,
+    resolveOrderForShipment: shipmentOrderResolution.resolveOrderForShipment,
+    cancelOrderForShipment,
     updateSortRank: orderControls.updateSortRank,
     updateSortRankSingle: orderControls.updateShipStationCustomField1,
     syncWmsOrderShipStationHoldState: orderControls.syncWmsOrderShipStationHoldState,
