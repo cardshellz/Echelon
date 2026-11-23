@@ -1580,6 +1580,18 @@ export function registerOmsWebhooks(
       const channelId = await getChannelId(req, shopifyOrder);
       if (!channelId) throw new Error("Unknown Shopify channel domain");
 
+      // P3.1: Validate & normalize cancel event through the canonical ChannelOrderAdapter boundary
+      const normalizedCancel = shopifyOrderIntakeAdapter.normalizeCancel(
+        shopifyOrder.cancelled_at
+          ? shopifyOrder
+          : { ...shopifyOrder, cancelled_at: new Date().toISOString() },
+        { channelId },
+      );
+      if (!normalizedCancel) {
+        throw new Error("Shopify orders/cancelled payload failed ChannelOrderAdapter.normalizeCancel");
+      }
+      const cancelReason = normalizedCancel.reason || "cancelled_by_shopify";
+
       // Find or create existing OMS order via ingestOrder
       const orderData = {
         ...mapShopifyOrderToOrderData(shopifyOrder),
@@ -1587,7 +1599,11 @@ export function registerOmsWebhooks(
         sourceEventId: `webhook_inbox:${inbox.receipt.id}`,
         sourceInboxId: inbox.receipt.id,
       };
-      const existing = await omsService.ingestOrder(channelId, externalOrderId, orderData);
+      const existing = await omsService.ingestOrder(
+        channelId,
+        normalizedCancel.externalOrderId,
+        orderData,
+      );
 
       if (existing.status === "cancelled") {
         // P0.5 (audit F5b): "already cancelled" must NOT blind-skip. The
@@ -1618,7 +1634,7 @@ export function registerOmsWebhooks(
           shipStationService,
           shippingEngine,
           source: "shopify_cancel_webhook_retry",
-          reason: shopifyOrder.cancel_reason || "cancelled_by_shopify",
+          reason: cancelReason,
           logPrefix: LOG_PREFIX,
         });
         await markInboxSucceeded(inbox.receipt);
@@ -1627,7 +1643,6 @@ export function registerOmsWebhooks(
       }
 
       const now = new Date();
-      const cancelReason = shopifyOrder.cancel_reason || "cancelled_by_shopify";
       const nextFinancialStatus = shopifyOrder.financial_status || existing.financialStatus;
 
       // P1.2: Route OMS status transition through the state-machine chokepoint
@@ -1807,6 +1822,21 @@ export function registerOmsWebhooks(
       const channelId = await getChannelId(req, refundPayload);
       if (!channelId) throw new Error("Unknown Shopify channel domain");
 
+      // P3.1: Validate & normalize refund event through the canonical ChannelOrderAdapter boundary
+      const normalizedRefund = shopifyOrderIntakeAdapter.normalizeRefund(
+        refundPayload,
+        { channelId },
+      );
+      if (!normalizedRefund) {
+        throw new Error("Shopify refunds/create payload missing order_id");
+      }
+      const refundOrderGid = normalizedRefund.externalOrderId.startsWith("gid://shopify/Order/")
+        ? normalizedRefund.externalOrderId
+        : `gid://shopify/Order/${normalizedRefund.externalOrderId}`;
+      const refundOrderNumericId = normalizedRefund.externalOrderId.startsWith("gid://shopify/Order/")
+        ? normalizedRefund.externalOrderId.slice("gid://shopify/Order/".length)
+        : normalizedRefund.externalOrderId;
+
       // Find OMS order — try GID first, then numeric ID
       let existing = await db
         .select()
@@ -1814,7 +1844,7 @@ export function registerOmsWebhooks(
         .where(
           and(
             eq(omsOrders.channelId, channelId),
-            eq(omsOrders.externalOrderId, shopifyOrderGid),
+            eq(omsOrders.externalOrderId, refundOrderGid),
           ),
         )
         .limit(1)
@@ -1827,7 +1857,7 @@ export function registerOmsWebhooks(
           .where(
             and(
               eq(omsOrders.channelId, channelId),
-              eq(omsOrders.externalOrderId, String(shopifyOrderId)),
+              eq(omsOrders.externalOrderId, refundOrderNumericId),
             ),
           )
           .limit(1)
@@ -1849,12 +1879,8 @@ export function registerOmsWebhooks(
       // refund for its entire old quantity. Physical disposition is owned by the
       // cascade; quantities are never evidence that money was fully refunded.
 
-      // Compute refund amount from Shopify transactions (authoritative source)
-      const transactions: any[] = Array.isArray(refundPayload.transactions) ? refundPayload.transactions : [];
-      const thisRefundCents = transactions.reduce(
-        (sum: number, t: any) => sum + dollarsToCents(t.amount),
-        0,
-      );
+      // Compute refund amount from Zod-validated ChannelOrderAdapter.normalizeRefund
+      const thisRefundCents = normalizedRefund.refundAmountCents;
 
       // P0.5 (audit F5): refund financial updates are SERIALIZED per order and
       // applied ATOMICALLY in SQL.

@@ -3129,7 +3129,38 @@ describe("ShopifyOrderEditProvider", () => {
     ).toBe(false);
   });
 
-  it("rejects an edit baseline that reallocates a cent between items before any requested change", async () => {
+  it("quotes an order whose percentage code shares are a cent away from each item's own rounding", async () => {
+    // 10% of $19.96 is $1.99 or $2.00 and of $99.99 is $9.99 or $10.00, yet
+    // Shopify may record $2.01 and $9.98: the order total ($11.99) is what it
+    // rounds. The order and its edit session agree, so the edit proceeds.
+    const order = () => codeOrder(4, "17.95", "107.96", "90.01");
+    const session = codeCalculated(4, "2.01");
+    session.lineItems.nodes[1].calculatedDiscountAllocations[0].allocatedAmountSet =
+      bag("9.98");
+    const h = harness([
+      order(),
+      order(),
+      { nodes: [variant(10, "4.99")] },
+      begin(session),
+      quantity(codeCalculated(5, "2.50", "112.45")),
+    ]);
+    const snapshot = await h.provider.readOrder(4, "100");
+    const quote = await h.provider.quote(
+      4,
+      snapshot,
+      { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
+      "edit-1",
+    );
+    expect(quote).toMatchObject({
+      totalCents: 11245,
+      deltaCents: 449,
+      financials: { itemsDiscountCents: 1249, itemsNetCents: 11245 },
+    });
+  });
+
+  it("rejects an edit session whose item discounts differ from the order before any requested change", async () => {
+    // The order recorded $2.00 and $9.99; this session opens with $2.01 and
+    // $9.98. That is two Shopify reads of one order disagreeing, not rounding.
     const calculatedBaseline = codeCalculated();
     calculatedBaseline.lineItems.nodes[0].calculatedDiscountAllocations[0].allocatedAmountSet =
       bag("2.01");
@@ -3149,9 +3180,7 @@ describe("ShopifyOrderEditProvider", () => {
         { changes: [{ lineItemId: "1", quantity: 5 }], additions: [] },
         "edit-1",
       ),
-    ).rejects.toMatchObject({
-      code: "ORDER_EDIT_PERCENTAGE_DISCOUNT_MISMATCH",
-    });
+    ).rejects.toMatchObject({ code: "QUOTE_BASELINE_MISMATCH" });
     expect(
       h.requests.some((request) =>
         request.query.includes("orderEditSetQuantity"),
