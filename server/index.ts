@@ -149,6 +149,7 @@ import {
   schedulerIsDisabled,
 } from "./infrastructure/scheduler-config";
 import { registerScheduledJob } from "./infrastructure/job-registry";
+import { registerExternalRuntimeJobs } from "./infrastructure/runtime-job-catalog";
 import {
   installStructuredConsoleBridge,
   reportError,
@@ -977,6 +978,9 @@ app.use(createHttpRequestLogger());
       }
     }
   );
+
+  // Register all externally-driven background workers & schedulers in the canonical job registry (P1.5)
+  registerExternalRuntimeJobs();
 
   startEbayFulfillmentStuckOrderScheduler({
     db,
