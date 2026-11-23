@@ -213,8 +213,9 @@ function allocateFixed(
  * adapter proves each rule's identity, scope and value before invoking this engine.
  * Stacking preserves that accepted combination: percentages share the same
  * post-product-discount base; fixed credits are single budgets across the order.
- * An observed percentage may use either adjacent cent, but never a wider
- * tolerance. Fixed credit totals must match exactly, even when quantities change.
+ * An observed percentage share is the sales channel's figure and is used as
+ * given; it may not exceed what is left of the item. Fixed credit totals must
+ * match exactly, even when quantities change.
  */
 export function priceOrderEditDiscounts(
   input: OrderEditDiscountEngineInput,
@@ -329,7 +330,15 @@ export function priceOrderEditDiscounts(
           ? (approvedShares?.get(line.id) ??
             Math.min(range.nearest, line.subtotalCents - already))
           : (observed.get(allocationKey(line.id, rule.key)) ?? 0);
-      if (amount < range.floor || amount > range.ceil)
+      // The sales channel owns each item's share of an order percentage. It
+      // rounds the order total once and settles the leftover cents on whichever
+      // items it chooses, so a share can sit outside that item's own rounding
+      // (order #65231: $4.79 on a $32.00 item at 15%). Only shares this engine
+      // computes itself are held to the item's rounding bounds.
+      if (
+        observations === undefined &&
+        (amount < range.floor || amount > range.ceil)
+      )
         reject(
           "ORDER_EDIT_PERCENTAGE_DISCOUNT_MISMATCH",
           `The ${rule.label} allocation does not match its original percentage.`,

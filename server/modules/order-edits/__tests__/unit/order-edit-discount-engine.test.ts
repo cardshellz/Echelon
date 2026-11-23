@@ -162,21 +162,78 @@ describe("order-edit discount engine", () => {
     },
   );
   it.each([0, 999, 1002])(
-    "rejects an incorrect percentage allocation of %s cents",
+    "uses the sales channel's percentage share of %s cents as given",
     (amountCents) => {
-      expect(() =>
+      expect(
         priceOrderEditDiscounts({
           rules: [percentageRule()],
           lines: items(10000),
           observations: [{ lineId: "item", ruleKey: "coupon", amountCents }],
         }),
-      ).toThrow(
-        expect.objectContaining({
-          code: "ORDER_EDIT_PERCENTAGE_DISCOUNT_MISMATCH",
-        }),
-      );
+      ).toMatchObject({
+        orderDiscountCents: amountCents,
+        subtotalAfterOrderDiscountsCents: 10000 - amountCents,
+        allocations: [{ lineId: "item", ruleKey: "coupon", amountCents }],
+      });
     },
   );
+  it("accepts the shares Shopify recorded on order #65231, where one item is a cent under its own 15%", () => {
+    // Item subtotals and WELCOME15 shares as stored for the order. 15% of the
+    // $32.00 item is exactly $4.80; Shopify settled the order's rounding there.
+    const recorded: Array<[string, number, number]> = [
+      ["sleeves-tall", 1156, 174],
+      ["team-bag", 798, 120],
+      ["toploader-mini", 8499, 1275],
+      ["sleeves-standard", 18499, 2775],
+      ["sleeves-mini", 2232, 335],
+      ["holder-55pt", 3200, 479],
+      ["holder-35pt", 4499, 674],
+    ];
+    expect(
+      priceOrderEditDiscounts({
+        rules: [percentageRule("15")],
+        lines: recorded.map(([id, subtotalCents]) => ({ id, subtotalCents })),
+        observations: recorded.map(([lineId, , amountCents]) => ({
+          lineId,
+          ruleKey: "coupon",
+          amountCents,
+        })),
+      }),
+    ).toMatchObject({
+      subtotalBeforeOrderDiscountsCents: 38883,
+      orderDiscountCents: 5832,
+      subtotalAfterOrderDiscountsCents: 33051,
+    });
+  });
+  it("still rejects a percentage share larger than the item it applies to", () => {
+    expect(() =>
+      priceOrderEditDiscounts({
+        rules: [percentageRule()],
+        lines: items(10000),
+        observations: [
+          { lineId: "item", ruleKey: "coupon", amountCents: 10001 },
+        ],
+      }),
+    ).toThrow(
+      expect.objectContaining({ code: "ORDER_EDIT_DISCOUNT_OVERALLOCATED" }),
+    );
+  });
+  it("still holds a share it computes itself to the item's rounding bounds", () => {
+    // 19.9% of 13 cents is 2.587. Four codes round up to 3 cents each, which
+    // leaves 1 cent for a fifth code whose own rounding needs at least 2.
+    expect(() =>
+      priceOrderEditDiscounts({
+        rules: ["a", "b", "c", "d", "e"].map((key) =>
+          percentageRule("19.9", key),
+        ),
+        lines: items(13),
+      }),
+    ).toThrow(
+      expect.objectContaining({
+        code: "ORDER_EDIT_PERCENTAGE_DISCOUNT_MISMATCH",
+      }),
+    );
+  });
   it.each([0, 1000, 2001, 4000])(
     "rejects lost or multiplied fixed credit of %s cents",
     (amountCents) => {
