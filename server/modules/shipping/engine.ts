@@ -68,6 +68,16 @@ export interface ShippingEngine {
   cancel(engineRef: EngineRef): Promise<EngineCancelResult>;
 
   /**
+   * Find the engine order for a WMS shipment by Echelon's own identity when
+   * no engine ref was saved (the push response can be lost, or land after a
+   * cancel). Returns null only when the engine positively has no such order;
+   * lookup failures throw so callers retry instead of assuming "never pushed".
+   * Serialized with upsertShipment for the same shipment. Optional so test
+   * fakes need not implement it; production adapters must.
+   */
+  resolveShipmentRef?(shipmentId: number): Promise<EngineRef | null>;
+
+  /**
    * Place a shipment on indefinite hold in the engine.
    */
   hold(engineRef: EngineRef): Promise<void>;

@@ -1087,6 +1087,120 @@ describe("markShipmentCancelled", () => {
     expect(result.changed).toBe(true);
     expect(removeFromList).not.toHaveBeenCalled();
   });
+
+  // #65805: ShipStation created the order, but the id never reached the row
+  // (the push write-back lost the race with this cancel). "No saved ref" must
+  // not be read as "never pushed".
+  describe("no saved engine ref (lookup by the shipment's own identity)", () => {
+    const foundRef = {
+      engine: "shipstation",
+      engineOrderRef: "818595428",
+      engineShipmentRef: "echelon-wms-shp-501",
+    };
+
+    it("finds a 'planned' shipment's engine order by identity and cancels it", async () => {
+      const mock = makeDb([
+        { rows: [shipmentRow({ status: "planned" })] },
+        { rows: [{ id: 501 }] },
+      ]);
+      const resolveEngineRef = vi.fn(async () => foundRef);
+      const engineCancel = vi.fn(async () => ({ state: "cancelled" as const }));
+      const result = await markShipmentCancelled(mock.db, 501, "customer_cancel", {
+        now: NOW,
+        resolveEngineRef,
+        engineCancel,
+      });
+      expect(resolveEngineRef).toHaveBeenCalledWith(501);
+      expect(engineCancel).toHaveBeenCalledWith(foundRef);
+      expect(result).toEqual({
+        wmsOrderId: 42,
+        changed: true,
+        localOutcome: "cancelled",
+        providerOutcome: "cancelled",
+      });
+    });
+
+    it("cancels through the legacy removeFromList hook with the looked-up id", async () => {
+      const mock = makeDb([
+        { rows: [shipmentRow({ status: "queued" })] },
+        { rows: [{ id: 501 }] },
+      ]);
+      const removeFromList = vi.fn(async () => ({ state: "cancelled" as const }));
+      const result = await markShipmentCancelled(mock.db, 501, "customer_cancel", {
+        now: NOW,
+        resolveEngineRef: async () => foundRef,
+        shipstation: { removeFromList },
+      });
+      expect(removeFromList).toHaveBeenCalledWith(818595428);
+      expect(result.providerOutcome).toBe("cancelled");
+    });
+
+    it("reports not_needed when the engine positively has no order", async () => {
+      const mock = makeDb([
+        { rows: [shipmentRow({ status: "planned" })] },
+        { rows: [{ id: 501 }] },
+      ]);
+      const engineCancel = vi.fn(async () => ({ state: "cancelled" as const }));
+      const result = await markShipmentCancelled(mock.db, 501, "customer_cancel", {
+        now: NOW,
+        resolveEngineRef: async () => null,
+        engineCancel,
+      });
+      expect(engineCancel).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ changed: true, providerOutcome: "not_needed" });
+    });
+
+    it("still cancels locally but reports unverified when the lookup fails", async () => {
+      const mock = makeDb([
+        { rows: [shipmentRow({ status: "planned" })] },
+        { rows: [{ id: 501 }] },
+      ]);
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const engineCancel = vi.fn(async () => ({ state: "cancelled" as const }));
+      const result = await markShipmentCancelled(mock.db, 501, "customer_cancel", {
+        now: NOW,
+        resolveEngineRef: async () => {
+          throw new Error("ShipStation 503");
+        },
+        engineCancel,
+      });
+      expect(engineCancel).not.toHaveBeenCalled();
+      expect(result).toMatchObject({ changed: true, localOutcome: "cancelled", providerOutcome: "unverified" });
+      expect(errorSpy).toHaveBeenCalled();
+      errorSpy.mockRestore();
+    });
+
+    it("does not look up when the caller skips the engine cancel", async () => {
+      const mock = makeDb([
+        { rows: [shipmentRow({ status: "queued" })] },
+        { rows: [{ id: 501 }] },
+      ]);
+      const resolveEngineRef = vi.fn(async () => foundRef);
+      const result = await markShipmentCancelled(mock.db, 501, "superseded", {
+        now: NOW,
+        skipEngineCancel: true,
+        resolveEngineRef,
+      });
+      expect(resolveEngineRef).not.toHaveBeenCalled();
+      expect(result.providerOutcome).toBe("not_needed");
+    });
+
+    it("uses the saved ref without a lookup when one exists", async () => {
+      const mock = makeDb([
+        { rows: [shipmentRow({ status: "queued", shipstation_order_id: 7777 })] },
+        { rows: [{ id: 501 }] },
+      ]);
+      const resolveEngineRef = vi.fn(async () => foundRef);
+      const removeFromList = vi.fn(async () => ({ state: "cancelled" as const }));
+      await markShipmentCancelled(mock.db, 501, "customer_cancel", {
+        now: NOW,
+        resolveEngineRef,
+        shipstation: { removeFromList },
+      });
+      expect(resolveEngineRef).not.toHaveBeenCalled();
+      expect(removeFromList).toHaveBeenCalledWith(7777);
+    });
+  });
 });
 
 // ─── handleAddressChangeOnShipment (§6 Commit 19) ──────────────────────
@@ -1207,6 +1321,29 @@ describe("handleAddressChangeOnShipment", () => {
 // ─── handleCustomerCancelOnShipment (§6 Commit 19) ─────────────────────
 
 describe("handleCustomerCancelOnShipment", () => {
+  it("threads resolveEngineRef so a channel cancel stops an unlinked engine order (#65805)", async () => {
+    const planned = shipmentRow({ status: "planned" });
+    const mock = makeDb([
+      { rows: [planned] },
+      { rows: [planned] },
+      { rows: [{ id: 501 }] },
+    ]);
+    const resolveEngineRef = vi.fn(async () => ({
+      engine: "shipstation",
+      engineOrderRef: "818595428",
+      engineShipmentRef: "echelon-wms-shp-501",
+    }));
+    const removeFromList = vi.fn(async () => ({ state: "cancelled" as const }));
+    const result = await handleCustomerCancelOnShipment(mock.db, 501, {
+      now: NOW,
+      shipstation: { removeFromList },
+      resolveEngineRef,
+    });
+    expect(result).toEqual({ mode: "cancelled", wmsOrderId: 42 });
+    expect(resolveEngineRef).toHaveBeenCalledWith(501);
+    expect(removeFromList).toHaveBeenCalledWith(818595428);
+  });
+
   it("delegates to markShipmentCancelled when shipment is 'planned' (no SS call)", async () => {
     // Two loadShipment calls happen here: one in handleCustomerCancel,
     // one inside markShipmentCancelled. Then the UPDATE for the cancel.

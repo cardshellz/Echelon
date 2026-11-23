@@ -1035,6 +1035,45 @@ function resolveShippingEngine(dbArg: any): any | null {
   return dbArg?.__shippingEngine ?? null;
 }
 
+/**
+ * Engine refs for every open shipment of a WMS order, including shipments
+ * whose engine id was never saved (lost push response): those are found by
+ * the shipment's own identity via engine.resolveShipmentRef. A shipment the
+ * engine positively does not have is skipped. Lookup errors throw so the
+ * retry ladder retries instead of reporting a hold/priority sync that never
+ * reached the order (#65805 class of bug).
+ */
+async function loadOpenShipmentEngineRefs(
+  dbArg: any,
+  eng: any,
+  wmsOrderId: number,
+): Promise<Array<{ engine: string; engineOrderRef: string; engineShipmentRef?: string }>> {
+  const { engineRefFromRow } = await import("../shipping/engine-and-reconcile.api");
+  const shipments = await dbArg.execute(sql`
+    SELECT id, held, shipping_engine, engine_order_ref, engine_shipment_ref,
+           shipstation_order_id, shipstation_order_key
+    FROM wms.outbound_shipments
+    WHERE order_id = ${wmsOrderId}
+      AND status NOT IN ('cancelled', 'voided', 'shipped', 'returned', 'lost')
+    ORDER BY id
+  `);
+  const refs: Array<{ engine: string; engineOrderRef: string; engineShipmentRef?: string }> = [];
+  for (const row of shipments.rows ?? []) {
+    const saved = engineRefFromRow(row as any);
+    if (saved) {
+      refs.push(saved);
+      continue;
+    }
+    // A line-item-held shipment is never pushed (pushShipment refuses it), so
+    // there is nothing to find; skip the provider lookup.
+    if (row.held === true) continue;
+    if (typeof eng?.resolveShipmentRef !== "function") continue;
+    const found = await eng.resolveShipmentRef(Number(row.id));
+    if (found) refs.push(found);
+  }
+  return refs;
+}
+
 function resolveEbayWebhookReplayService(
   dbArg: any,
 ): RetryEbayWebhookReplayService | null {
@@ -1803,18 +1842,7 @@ export async function dispatchShipStationHoldSyncRetry(
   try {
     let touched = 0;
     if (eng) {
-      const { engineRefFromRow } = await import("../shipping/engine-and-reconcile.api");
-      const shipments = await dbArg.execute(sql`
-        SELECT shipping_engine, engine_order_ref, engine_shipment_ref,
-               shipstation_order_id, shipstation_order_key
-        FROM wms.outbound_shipments
-        WHERE order_id = ${wmsOrderId}
-          AND COALESCE(engine_order_ref, shipstation_order_id::text) IS NOT NULL
-          AND status NOT IN ('cancelled', 'voided', 'shipped', 'returned', 'lost')
-      `);
-      for (const row of shipments.rows ?? []) {
-        const ref = engineRefFromRow(row as any);
-        if (!ref) continue;
+      for (const ref of await loadOpenShipmentEngineRefs(dbArg, eng, wmsOrderId)) {
         if (mode === "hold") { await eng.hold(ref); } else { await eng.releaseHold(ref); }
         touched++;
       }
@@ -1925,18 +1953,7 @@ export async function dispatchShipStationSortRankSyncRetry(
   try {
     let touched2 = 0;
     if (eng2) {
-      const { engineRefFromRow } = await import("../shipping/engine-and-reconcile.api");
-      const shipments = await dbArg.execute(sql`
-        SELECT shipping_engine, engine_order_ref, engine_shipment_ref,
-               shipstation_order_id, shipstation_order_key
-        FROM wms.outbound_shipments
-        WHERE order_id = ${wmsOrderId}
-          AND COALESCE(engine_order_ref, shipstation_order_id::text) IS NOT NULL
-          AND status NOT IN ('cancelled', 'voided', 'shipped', 'returned', 'lost')
-      `);
-      for (const row of shipments.rows ?? []) {
-        const ref = engineRefFromRow(row as any);
-        if (!ref) continue;
+      for (const ref of await loadOpenShipmentEngineRefs(dbArg, eng2, wmsOrderId)) {
         await eng2.updatePriority(ref, orderRow.sort_rank);
         touched2++;
       }

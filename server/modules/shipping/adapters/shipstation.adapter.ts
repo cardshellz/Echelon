@@ -323,6 +323,11 @@ export type ShipStationServiceHandle = {
   syncWmsOrderShipStationShipToAddress?(
     wmsOrderId: number,
   ): Promise<{ updated: number; skipped: number }>;
+  resolveOrderForShipment?(shipmentId: number): Promise<
+    | { state: "linked"; shipstationOrderId: number; orderKey: string }
+    | { state: "not_in_shipstation"; orderKey: string }
+  >;
+  cancelOrderForShipment?(shipmentId: number): Promise<EngineCancelResult>;
 };
 
 /**
@@ -347,6 +352,16 @@ export function createShipStationEngine(
         engineRef: toEngineRef(result.shipstationOrderId, result.orderKey),
         alreadyExisted: !!payload.existingEngineRef,
       };
+    },
+
+    async resolveShipmentRef(shipmentId: number): Promise<EngineRef | null> {
+      if (!ss.resolveOrderForShipment) {
+        throw new Error("ShipStation service does not expose resolveOrderForShipment");
+      }
+      const resolution = await ss.resolveOrderForShipment(shipmentId);
+      return resolution.state === "linked"
+        ? toEngineRef(resolution.shipstationOrderId, resolution.orderKey)
+        : null;
     },
 
 
@@ -471,7 +486,11 @@ export function createShipStationEngine(
       const { sweepShipStationQueue } = await import(
         "../../oms/shipstation-execution.api"
       );
-      await sweepShipStationQueue(account.apiKey, account.apiSecret);
+      await sweepShipStationQueue(account.apiKey, account.apiSecret, {
+        cancelOrderForShipment: ss.cancelOrderForShipment
+          ? (shipmentId: number) => ss.cancelOrderForShipment!(shipmentId)
+          : undefined,
+      });
     },
 
     async synchronizeOrderEditShipment(
