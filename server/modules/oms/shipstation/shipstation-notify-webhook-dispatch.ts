@@ -875,11 +875,16 @@ export function createShipStationNotifyWebhookDispatch(
       : typeof source.message === "string"
         ? source.message
         : String(error);
+    // 55P03 (lock_not_available) is contention on a row another writer holds,
+    // usually inventory.cutover_admission_fence. It is transient. Treated as
+    // permanent, one occurrence ended the durable PICK_CORRECTION_REQUIRED wait
+    // for 113 shipments (prod, 2026-10-09..2026-11-23): their dispatch went to
+    // review_required and their inventory and reservations never posted.
     const retryableDatabaseCode =
       sourceCode !== null
       && (
         sourceCode.startsWith("08")
-        || ["40001", "40P01", "53300", "57P01", "57P02", "57P03"].includes(
+        || ["40001", "40P01", "53300", "55P03", "57P01", "57P02", "57P03"].includes(
           sourceCode,
         )
       );

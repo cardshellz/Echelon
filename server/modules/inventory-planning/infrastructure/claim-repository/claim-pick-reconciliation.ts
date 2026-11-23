@@ -15,6 +15,10 @@ import type {
   CanonicalClaimPickerObservationReviewMetadata,
   CanonicalClaimPickerObservationReviewPort,
 } from "../../application/canonical-claim-picker-observation-review.port";
+import {
+  selectRemoteConversionsToReplace,
+  type RemoteConversionCandidate,
+} from "../../domain/claim-remote-conversion-replacement";
 import { requirePickableLocation } from "./claim-order-and-locks";
 import {
   hash,
@@ -309,6 +313,416 @@ function selectReconciliationReleases(
   return releases;
 }
 
+type RemoteConversionRelease = {
+  inventory: CanonicalClaimInventoryReleaseResource;
+  allocations: readonly { allocationId: bigint; releaseQty: bigint }[];
+};
+
+type PlannedRemoteConversionReplacement = {
+  operations: readonly {
+    operationId: bigint;
+    operationKey: string;
+    warehouseId: number;
+    operationType: string;
+    committedOutputQty: bigint;
+  }[];
+  releases: readonly RemoteConversionRelease[];
+  replacedTargetQty: bigint;
+};
+
+/**
+ * Locks this line's conversion operations and their input resources, then asks
+ * the domain rule which remote operations the pick may replace. Returns null
+ * (no writes) when nothing qualifies; the caller keeps its existing behavior.
+ */
+async function planRemoteConversionReplacement(
+  client: PoolClient,
+  claim: FulfillmentClaim,
+  line: FulfillmentClaimLine,
+  pickWarehouseId: number,
+  requiredQty: bigint,
+): Promise<PlannedRemoteConversionReplacement | null> {
+  const operationRows = rows(await client.query(
+    `SELECT id, operation_key, parent_operation_key, warehouse_id, operation_type, status,
+            destination_variant_id, planned_executions, executed_executions,
+            released_executions, committed_output_qty
+     FROM inventory.availability_claim_operations
+     WHERE claim_id = $1 AND claim_line_id = $2
+     ORDER BY operation_key, id
+     FOR UPDATE`,
+    [claim.id.toString(), line.id.toString()],
+  ));
+  if (operationRows.length === 0) return null;
+  const operationKeys = operationRows.map((row) => String(row.operation_key));
+  const operationIds = operationRows.map((row) => positiveBigInt(row.id, "claimOperation.id").toString());
+
+  const parentsWithChildren = new Set(rows(await client.query(
+    `SELECT DISTINCT parent_operation_key
+     FROM inventory.availability_claim_operations
+     WHERE claim_id = $1 AND parent_operation_key = ANY($2::varchar[])`,
+    [claim.id.toString(), operationKeys],
+  )).map((row) => String(row.parent_operation_key)));
+  const operationIdsWithHandoff = new Set(rows(await client.query(
+    `SELECT claim_operation_id
+     FROM inventory.availability_claim_build_handoffs
+     WHERE claim_id = $1 AND claim_operation_id = ANY($2::bigint[])`,
+    [claim.id.toString(), operationIds],
+  )).map((row) => String(row.claim_operation_id)));
+  const producedOperationKeys = new Set(rows(await client.query(
+    `SELECT DISTINCT producer_operation_key
+     FROM inventory.availability_claim_resources
+     WHERE claim_id = $1 AND producer_operation_key = ANY($2::varchar[])`,
+    [claim.id.toString(), operationKeys],
+  )).map((row) => String(row.producer_operation_key)));
+  const inputRows = rows(await client.query(
+    `SELECT id, consumer_operation_key, inventory_level_id, warehouse_location_id,
+            source_variant_id, claimed_qty, released_qty, consumed_qty, picked_qty
+     FROM inventory.availability_claim_resources
+     WHERE claim_id = $1 AND claim_line_id = $2
+       AND consumer_operation_key = ANY($3::varchar[])
+     ORDER BY warehouse_id, warehouse_location_id, inventory_level_id, id
+     FOR UPDATE`,
+    [claim.id.toString(), line.id.toString(), operationKeys],
+  ));
+  const inputsByOperationKey = new Map<string, any[]>();
+  for (const row of inputRows) {
+    const key = String(row.consumer_operation_key);
+    inputsByOperationKey.set(key, [...(inputsByOperationKey.get(key) ?? []), row]);
+  }
+
+  const candidates: RemoteConversionCandidate[] = operationRows.map((row) => {
+    const operationKey = String(row.operation_key);
+    return {
+      operationKey,
+      parentOperationKey: row.parent_operation_key == null ? null : String(row.parent_operation_key),
+      warehouseId: positiveInteger(row.warehouse_id, "claimOperation.warehouseId"),
+      operationType: String(row.operation_type),
+      status: String(row.status),
+      destinationVariantId: positiveInteger(row.destination_variant_id, "claimOperation.destinationVariantId"),
+      plannedExecutions: positiveBigInt(row.planned_executions, "claimOperation.plannedExecutions"),
+      executedExecutions: nonnegativeBigInt(row.executed_executions, "claimOperation.executedExecutions"),
+      releasedExecutions: nonnegativeBigInt(row.released_executions, "claimOperation.releasedExecutions"),
+      committedOutputQty: row.committed_output_qty == null
+        ? null
+        : positiveBigInt(row.committed_output_qty, "claimOperation.committedOutputQty"),
+      hasChildOperation: parentsWithChildren.has(operationKey),
+      hasBuildHandoff: operationIdsWithHandoff.has(String(row.id)),
+      hasProducedResource: producedOperationKeys.has(operationKey),
+      inputResources: (inputsByOperationKey.get(operationKey) ?? []).map((input) => ({
+        claimedQty: positiveBigInt(input.claimed_qty, "claimResource.claimedQty"),
+        releasedQty: nonnegativeBigInt(input.released_qty, "claimResource.releasedQty"),
+        consumedQty: nonnegativeBigInt(input.consumed_qty, "claimResource.consumedQty"),
+        pickedQty: nonnegativeBigInt(input.picked_qty, "claimResource.pickedQty"),
+      })),
+    };
+  });
+  const selection = selectRemoteConversionsToReplace({
+    candidates,
+    pickWarehouseId,
+    targetVariantId: line.targetVariantId,
+    requiredQty,
+  });
+  if (!selection) return null;
+
+  const selectedKeys = new Set(selection.operationKeys);
+  const selectedInputs = inputRows.filter((row) => selectedKeys.has(String(row.consumer_operation_key)));
+  const lotRows = rows(await client.query(
+    `SELECT id, claim_resource_id, inventory_lot_id, claimed_qty, released_qty, consumed_qty, picked_qty
+     FROM inventory.availability_claim_lot_allocations
+     WHERE claim_id = $1 AND claim_resource_id = ANY($2::bigint[])
+     ORDER BY claim_resource_id, inventory_lot_id, id
+     FOR UPDATE`,
+    [claim.id.toString(), selectedInputs.map((row) => String(row.id))],
+  ));
+  const releases: RemoteConversionRelease[] = selectedInputs.map((row) => {
+    const claimResourceId = positiveBigInt(row.id, "claimResource.id");
+    // Eligibility guarantees nothing was released, consumed or picked: the whole claim is open.
+    const releaseQty = positiveBigInt(row.claimed_qty, "claimResource.claimedQty");
+    const lots = lotRows.filter((lot) => String(lot.claim_resource_id) === claimResourceId.toString());
+    const allocations = lots.map((lot) => ({
+      allocationId: positiveBigInt(lot.id, "claimLot.id"),
+      inventoryLotId: positiveInteger(lot.inventory_lot_id, "claimLot.inventoryLotId"),
+      releaseQty: positiveBigInt(lot.claimed_qty, "claimLot.claimedQty")
+        - nonnegativeBigInt(lot.released_qty, "claimLot.releasedQty")
+        - nonnegativeBigInt(lot.consumed_qty, "claimLot.consumedQty")
+        - nonnegativeBigInt(lot.picked_qty, "claimLot.pickedQty"),
+    })).filter((allocation) => allocation.releaseQty > BigInt(0));
+    const attributed = allocations.reduce((total, allocation) => total + allocation.releaseQty, BigInt(0));
+    if (attributed !== releaseQty) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_RECONCILIATION_LINEAGE_MISMATCH",
+        "The source claim resource has insufficient exact lot ownership for reconciliation.",
+        { claimResourceId: claimResourceId.toString() },
+      );
+    }
+    return {
+      inventory: {
+        claimResourceId,
+        inventoryLevelId: positiveInteger(row.inventory_level_id, "claimResource.inventoryLevelId"),
+        warehouseLocationId: positiveInteger(row.warehouse_location_id, "claimResource.warehouseLocationId"),
+        sourceVariantId: positiveInteger(row.source_variant_id, "claimResource.sourceVariantId"),
+        releaseQty,
+        lotAllocations: allocations.map(({ inventoryLotId, releaseQty: qty }) => ({ inventoryLotId, releaseQty: qty })),
+        orderItemId: line.orderItemId,
+      },
+      allocations: allocations.map(({ allocationId, releaseQty: qty }) => ({ allocationId, releaseQty: qty })),
+    };
+  });
+  const operations = operationRows
+    .filter((row) => selectedKeys.has(String(row.operation_key)))
+    .map((row) => ({
+      operationId: positiveBigInt(row.id, "claimOperation.id"),
+      operationKey: String(row.operation_key),
+      warehouseId: positiveInteger(row.warehouse_id, "claimOperation.warehouseId"),
+      operationType: String(row.operation_type),
+      committedOutputQty: positiveBigInt(row.committed_output_qty, "claimOperation.committedOutputQty"),
+    }));
+  return { operations, releases, replacedTargetQty: selection.replacedTargetQty };
+}
+
+/**
+ * Releases the selected remote conversions and reserves their committed
+ * finished units at the pick bin, in the caller's SERIALIZABLE transaction.
+ * The bin's free stock is checked first. When it is short, nothing is written
+ * and the error says which bin to count or receive.
+ */
+async function replaceRemoteConversionsAtPickLocation(
+  client: PoolClient,
+  inventoryWriter: CanonicalClaimInventoryMutationPort,
+  input: {
+    commandKey: string;
+    claim: FulfillmentClaim;
+    line: FulfillmentClaimLine;
+    pickWarehouseId: number;
+    warehouseLocationId: number;
+    targetInventoryLevelId: number;
+    requestedQty: bigint;
+    actor: string;
+    reason: string;
+    occurredAt: Date;
+  },
+  replacement: PlannedRemoteConversionReplacement,
+): Promise<void> {
+  // Same global level-then-lot lock order as the inventory writer's rebinds.
+  const levelIds = [...new Set([
+    ...replacement.releases.map((release) => release.inventory.inventoryLevelId),
+    input.targetInventoryLevelId,
+  ])];
+  const levelRows = rows(await client.query(
+    `SELECT id, variant_qty, reserved_qty
+     FROM inventory.inventory_levels
+     WHERE id = ANY($1::integer[])
+     ORDER BY warehouse_location_id, product_variant_id, id
+     FOR UPDATE`,
+    [levelIds],
+  ));
+  const targetLevel = levelRows.find((row) => Number(row.id) === input.targetInventoryLevelId);
+  const freeQty = targetLevel
+    ? BigInt(Number(targetLevel.variant_qty)) - BigInt(Number(targetLevel.reserved_qty))
+    : BigInt(0);
+  if (freeQty < replacement.replacedTargetQty) {
+    const identity = rows(await client.query(
+      `SELECT location.code AS location_code, variant.sku
+       FROM warehouse.warehouse_locations AS location
+       CROSS JOIN catalog.product_variants AS variant
+       WHERE location.id = $1 AND variant.id = $2`,
+      [input.warehouseLocationId, input.line.targetVariantId],
+    ))[0];
+    const binCode = String(identity?.location_code ?? `location ${input.warehouseLocationId}`);
+    const sku = String(identity?.sku ?? `variant ${input.line.targetVariantId}`);
+    const shownFree = freeQty < BigInt(0) ? BigInt(0) : freeQty;
+    throw new InventoryAvailabilityClaimRepositoryError(
+      "CLAIM_PICK_TARGET_STOCK_SHORTFALL",
+      `The system shows ${shownFree} free ${sku} at ${binCode}, but recording this pick needs `
+        + `${replacement.replacedTargetQty}. Count or receive ${binCode}, then retry.`,
+      {
+        claimLineId: input.line.id.toString(),
+        warehouseLocationId: input.warehouseLocationId,
+        targetVariantId: input.line.targetVariantId,
+        freeQty: shownFree.toString(),
+        requiredQty: replacement.replacedTargetQty.toString(),
+      },
+    );
+  }
+  const sourceLotIds = [...new Set(replacement.releases.flatMap((release) =>
+    release.inventory.lotAllocations.map((allocation) => allocation.inventoryLotId)))];
+  await client.query(
+    `SELECT id
+     FROM inventory.inventory_lots
+     WHERE id = ANY($1::integer[])
+        OR (product_variant_id = $2 AND warehouse_location_id = $3 AND status = 'active')
+     ORDER BY warehouse_location_id, product_variant_id, received_at, id
+     FOR UPDATE`,
+    [sourceLotIds, input.line.targetVariantId, input.warehouseLocationId],
+  );
+
+  const targetResourceRow = rows(await client.query(
+    `INSERT INTO inventory.availability_claim_resources (
+       claim_id, claim_line_id, consumer_operation_key, producer_operation_key,
+       warehouse_id, warehouse_location_id, inventory_level_id, source_variant_id, claimed_qty
+     ) VALUES ($1, $2, NULL, NULL, $3, $4, $5, $6, $7)
+     ON CONFLICT (
+       claim_line_id, warehouse_id, warehouse_location_id, inventory_level_id,
+       source_variant_id, COALESCE(consumer_operation_key, ''), COALESCE(producer_operation_key, '')
+     ) DO UPDATE
+       SET claimed_qty = inventory.availability_claim_resources.claimed_qty + EXCLUDED.claimed_qty,
+           updated_at = $8
+     RETURNING id`,
+    [
+      input.claim.id.toString(),
+      input.line.id.toString(),
+      input.pickWarehouseId,
+      input.warehouseLocationId,
+      input.targetInventoryLevelId,
+      input.line.targetVariantId,
+      replacement.replacedTargetQty.toString(),
+      input.occurredAt,
+    ],
+  ))[0];
+  const targetResourceId = positiveBigInt(targetResourceRow?.id, "targetClaimResource.id");
+
+  await inventoryWriter.releaseResources({
+    client,
+    commandKey: `${input.commandKey}:remote-conversion-release`,
+    claimId: input.claim.id,
+    resources: replacement.releases.map((release) => release.inventory),
+    orderId: input.claim.orderId,
+    actor: input.actor,
+    reason: input.reason,
+    occurredAt: input.occurredAt,
+  });
+  for (const release of replacement.releases) {
+    for (const allocation of release.allocations) {
+      const updated = await client.query(
+        `UPDATE inventory.availability_claim_lot_allocations
+         SET released_qty = released_qty + $1, updated_at = $3
+         WHERE id = $2
+           AND claimed_qty - released_qty - consumed_qty - picked_qty = $1`,
+        [allocation.releaseQty.toString(), allocation.allocationId.toString(), input.occurredAt],
+      );
+      if (updated.rowCount !== 1) {
+        throw new InventoryAvailabilityClaimRepositoryError(
+          "CLAIM_RECONCILIATION_STATE_CHANGED",
+          "A remote conversion's source claim lot changed while it was being replaced.",
+          { claimLotAllocationId: allocation.allocationId.toString() },
+        );
+      }
+    }
+    const updated = await client.query(
+      `UPDATE inventory.availability_claim_resources
+       SET released_qty = released_qty + $1, updated_at = $3
+       WHERE id = $2
+         AND claimed_qty - released_qty - consumed_qty - picked_qty = $1`,
+      [release.inventory.releaseQty.toString(), release.inventory.claimResourceId.toString(), input.occurredAt],
+    );
+    if (updated.rowCount !== 1) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_RECONCILIATION_STATE_CHANGED",
+        "A remote conversion's source claim resource changed while it was being replaced.",
+        { claimResourceId: release.inventory.claimResourceId.toString() },
+      );
+    }
+  }
+  for (const operation of replacement.operations) {
+    const updated = await client.query(
+      `UPDATE inventory.availability_claim_operations
+       SET status = 'released',
+           released_executions = planned_executions - executed_executions,
+           updated_at = $3
+       WHERE id = $1 AND claim_id = $2
+         AND status IN ('pending', 'ready')
+         AND executed_executions = 0 AND released_executions = 0`,
+      [operation.operationId.toString(), input.claim.id.toString(), input.occurredAt],
+    );
+    if (updated.rowCount !== 1) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_RECONCILIATION_STATE_CHANGED",
+        "A remote conversion changed while it was being replaced.",
+        { claimOperationId: operation.operationId.toString(), operationKey: operation.operationKey },
+      );
+    }
+  }
+
+  const allocations = await inventoryWriter.reserveResource({
+    client,
+    commandKey: `${input.commandKey}:remote-conversion-reserve`,
+    claimId: input.claim.id,
+    claimResourceId: targetResourceId,
+    inventoryLevelId: input.targetInventoryLevelId,
+    warehouseLocationId: input.warehouseLocationId,
+    sourceVariantId: input.line.targetVariantId,
+    claimedQty: positiveInteger(Number(replacement.replacedTargetQty), "replacement.replacedTargetQty"),
+    orderId: input.claim.orderId,
+    orderItemId: input.line.orderItemId,
+    consumerOperationKey: null,
+    actor: input.actor,
+    occurredAt: input.occurredAt,
+  });
+  for (const allocation of allocations) {
+    const inserted = await client.query(
+      `INSERT INTO inventory.availability_claim_lot_allocations (
+         claim_id, claim_resource_id, inventory_lot_id, claimed_qty, unit_cost_mills,
+         po_unit_cost_mills, packaging_unit_cost_mills, landed_unit_cost_mills
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (claim_resource_id, inventory_lot_id) DO UPDATE
+         SET claimed_qty = inventory.availability_claim_lot_allocations.claimed_qty + EXCLUDED.claimed_qty,
+             updated_at = $9
+         WHERE inventory.availability_claim_lot_allocations.unit_cost_mills = EXCLUDED.unit_cost_mills
+           AND inventory.availability_claim_lot_allocations.po_unit_cost_mills = EXCLUDED.po_unit_cost_mills
+           AND inventory.availability_claim_lot_allocations.packaging_unit_cost_mills = EXCLUDED.packaging_unit_cost_mills
+           AND inventory.availability_claim_lot_allocations.landed_unit_cost_mills = EXCLUDED.landed_unit_cost_mills
+       RETURNING id`,
+      [
+        input.claim.id.toString(), targetResourceId.toString(), allocation.inventoryLotId, allocation.qty,
+        allocation.unitCostMills.toString(), allocation.poUnitCostMills.toString(),
+        allocation.packagingUnitCostMills.toString(), allocation.landedUnitCostMills.toString(), input.occurredAt,
+      ],
+    );
+    if (inserted.rowCount !== 1) {
+      throw new InventoryAvailabilityClaimRepositoryError(
+        "CLAIM_RECONCILIATION_COST_CHANGED",
+        "The target FIFO lot cost no longer matches existing claim lineage.",
+        { inventoryLotId: allocation.inventoryLotId },
+      );
+    }
+  }
+
+  const evidence = {
+    schemaVersion: "inventory_availability_claim_remote_conversion_replacement_event_v1",
+    eventType: "claim_remote_conversion_replaced",
+    claimId: input.claim.id.toString(),
+    claimLineId: input.line.id.toString(),
+    orderItemId: input.line.orderItemId,
+    pickWarehouseId: input.pickWarehouseId,
+    targetWarehouseLocationId: input.warehouseLocationId,
+    targetClaimResourceId: targetResourceId.toString(),
+    requestedPickQty: input.requestedQty.toString(),
+    replacedTargetQty: replacement.replacedTargetQty.toString(),
+    releasedOperations: replacement.operations.map((operation) => ({
+      operationKey: operation.operationKey,
+      warehouseId: operation.warehouseId,
+      operationType: operation.operationType,
+      committedOutputQty: operation.committedOutputQty.toString(),
+    })),
+    releasedClaimResources: replacement.releases.map((release) => ({
+      claimResourceId: release.inventory.claimResourceId.toString(),
+      warehouseLocationId: release.inventory.warehouseLocationId,
+      sourceVariantId: release.inventory.sourceVariantId,
+      releaseQty: release.inventory.releaseQty.toString(),
+    })),
+  };
+  await client.query(
+    `INSERT INTO inventory.availability_claim_events (
+       claim_id, event_type, from_status, to_status, evidence_payload,
+       evidence_hash, actor, reason, occurred_at
+     ) VALUES ($1, 'claim_remote_conversion_replaced', 'active', 'active', $2::jsonb, $3, $4, $5, $6)`,
+    [
+      input.claim.id.toString(), JSON.stringify(evidence), hash(evidence), input.actor,
+      input.reason, input.occurredAt,
+    ],
+  );
+}
+
 export async function reconcilePickLocation(
   client: PoolClient,
   inventoryWriter: CanonicalClaimInventoryMutationPort,
@@ -346,6 +760,37 @@ export async function reconcilePickLocation(
     input.warehouseLocationId,
     input.orderWarehouseId,
   );
+  // A line whose only remaining supply is a conversion in another warehouse has
+  // no finished units to move here. Replace that conversion with the finished
+  // units picked from this bin (see claim-remote-conversion-replacement.ts).
+  // Mixed lines keep the existing rebind and its shortfall error.
+  const directOpenElsewhere = input.line.resources
+    .filter((resource) => resource.warehouseLocationId !== input.warehouseLocationId)
+    .reduce((total, resource) => total + openResourceQty(resource), BigInt(0));
+  if (directOpenElsewhere === BigInt(0)) {
+    const replacement = await planRemoteConversionReplacement(
+      client,
+      input.claim,
+      input.line,
+      targetWarehouseId,
+      input.quantity,
+    );
+    if (replacement) {
+      await replaceRemoteConversionsAtPickLocation(client, inventoryWriter, {
+        commandKey: input.commandKey,
+        claim: input.claim,
+        line: input.line,
+        pickWarehouseId: targetWarehouseId,
+        warehouseLocationId: input.warehouseLocationId,
+        targetInventoryLevelId: positiveInteger(targetRow.inventory_level_id, "inventoryLevel.id"),
+        requestedQty: input.quantity,
+        actor: input.actor,
+        reason: input.reason,
+        occurredAt: input.occurredAt,
+      }, replacement);
+      return;
+    }
+  }
   const releases = selectReconciliationReleases(input.line, input.warehouseLocationId, input.quantity);
   const targetResourceRow = rows(await client.query(
     `INSERT INTO inventory.availability_claim_resources (
