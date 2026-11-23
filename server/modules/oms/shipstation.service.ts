@@ -417,6 +417,7 @@ export function createShipStationService(
 
   return {
     pushShipment: pushHandlers.pushShipment,
+    upsertShipmentFromPayload: pushHandlers.upsertShipmentFromPayload,
     appendShipmentItems: pushHandlers.appendShipmentItems,
     setShipmentItemQuantity: pushHandlers.setShipmentItemQuantity,
     getShipments,

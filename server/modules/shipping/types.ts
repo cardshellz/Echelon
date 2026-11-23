@@ -76,6 +76,7 @@ export type CanonicalShipmentEvent =
       shipmentId: number;
       engineRef: EngineRef;
       reason?: string;
+      trackingNumber?: string | null;
     }
   | {
       kind: "label_created";
@@ -205,12 +206,16 @@ export interface ShipmentPushPayload {
   sortRank: string | null;
   isPartialShipment?: boolean;
   fulfillmentOrderId?: string | null;
+  onHold?: boolean;
+  isReplacementShipment?: boolean;
+  overrideReview?: boolean;
 
   existingEngineRef?: EngineRef;
 }
 
 export interface ShipmentPushItem {
   itemId: number;
+  shipmentItemId?: number;
   sku: string;
   name: string;
   quantity: number;

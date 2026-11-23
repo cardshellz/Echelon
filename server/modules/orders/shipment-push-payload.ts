@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { readIntegerCents } from "@shared/money-read";
 import { enrichContext } from "../../platform/observability";
+import { OrderEditError } from "../order-edits/oms-coordination.api";
 import {
   engineRefFromRow,
   type EnginePushResult,
@@ -13,11 +14,13 @@ export type ShipmentPushGuardCode =
   | "SHIPMENT_INVALID_ID"
   | "SHIPMENT_NOT_FOUND"
   | "SHIPMENT_ORDER_NOT_FOUND"
+  | "SHIPMENT_ORDER_CANCELLED"
+  | "SHIPMENT_EMPTY_ITEMS"
   | "SHIPMENT_HELD"
   | "SHIPMENT_REQUIRES_REVIEW"
   | "SHIPMENT_TERMINAL";
 
-const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued"]);
+const PUSHABLE_SHIPMENT_STATUSES = new Set(["planned", "queued", "voided"]);
 
 function readOptionalIntegerCents(value: unknown, field: string): number {
   if (value === null || value === undefined || value === "") {
@@ -115,11 +118,17 @@ async function queryShipmentHeaderRow(
       os.engine_shipment_ref,
       os.shipstation_order_id,
       os.shipstation_order_key,
+      os.shipment_purpose,
       wo.id AS wms_order_id,
       wo.order_number,
       wo.channel_id,
       wo.warehouse_id,
       wo.oms_fulfillment_order_id,
+      wo.warehouse_status,
+      wo.financial_status,
+      wo.cancelled_at,
+      wo.order_edit_operation_id,
+      wo.on_hold,
       wo.sort_rank,
       wo.external_order_id,
       wo.customer_name,
@@ -202,17 +211,45 @@ async function hydrateFromHeaderRow(
     );
   }
 
+  if (row.order_edit_operation_id != null) {
+    throw new OrderEditError(
+      "ORDER_EDIT_PROVIDER_HELD",
+      "This order is held for an edit; ordinary shipment pushes cannot resume it.",
+    );
+  }
+
+  const warehouseStatus = String(row.warehouse_status ?? "").toLowerCase();
+  const financialStatus = String(row.financial_status ?? "").toLowerCase();
+  if (
+    warehouseStatus === "cancelled" ||
+    row.cancelled_at != null ||
+    financialStatus === "voided"
+  ) {
+    throw new ShipmentPushGuardError(
+      "SHIPMENT_ORDER_CANCELLED",
+      `WMS order ${orderId} is ${row.warehouse_status ?? "cancelled"}/${row.financial_status ?? "unknown"} — refusing to push cancelled/voided order`,
+      {
+        shipmentId,
+        field: "order.warehouse_status",
+        value: row.warehouse_status ?? row.financial_status ?? "cancelled",
+      },
+    );
+  }
+
   const itemsResult: any = await db.execute(sql`
     SELECT
       osi.id AS shipment_item_id,
-      osi.order_item_id,
-      osi.qty,
+      COALESCE(osi.order_item_id, osi.replacement_for_order_item_id) AS order_item_id,
+      LEAST(COALESCE(osi.commercial_requested_qty, osi.qty), osi.qty) AS qty,
       oi.sku,
       oi.name,
       COALESCE(oi.paid_price_cents, oi.unit_price_cents, 0)::int AS unit_price_cents
     FROM wms.outbound_shipment_items osi
-    JOIN wms.order_items oi ON oi.id = osi.order_item_id
+    JOIN wms.order_items oi
+      ON oi.id = COALESCE(osi.order_item_id, osi.replacement_for_order_item_id)
     WHERE osi.shipment_id = ${shipmentId}
+      AND COALESCE(oi.requires_shipping, 1) = 1
+      AND COALESCE(osi.commercial_requested_qty, osi.qty) > 0
       AND osi.qty > 0
     ORDER BY osi.id
   `);
@@ -220,8 +257,18 @@ async function hydrateFromHeaderRow(
     ? itemsResult.rows
     : [];
 
+  if (itemRows.length === 0) {
+    throw new ShipmentPushGuardError(
+      "SHIPMENT_EMPTY_ITEMS",
+      `Shipment ${shipmentId} has no shippable items`,
+      { shipmentId, field: "items", value: 0 },
+    );
+  }
+
   const items: ShipmentPushItem[] = itemRows.map((itemRow) => ({
     itemId: Number(itemRow.order_item_id ?? itemRow.shipment_item_id),
+    shipmentItemId:
+      itemRow.shipment_item_id != null ? Number(itemRow.shipment_item_id) : undefined,
     sku: String(itemRow.sku ?? ""),
     name: String(itemRow.name ?? ""),
     quantity: Number(itemRow.qty),
@@ -232,18 +279,47 @@ async function hydrateFromHeaderRow(
   }));
 
   const siblingResult: any = await db.execute(sql`
-    SELECT COUNT(*)::int AS cnt
-    FROM wms.outbound_shipments
-    WHERE order_id = ${orderId}
-      AND status <> 'cancelled'
+    SELECT
+      (
+        SELECT COUNT(*)::int
+        FROM wms.outbound_shipments
+        WHERE order_id = ${orderId}
+          AND status <> 'cancelled'
+      ) AS cnt,
+      (
+        SELECT COALESCE(SUM(oi.total_price_cents), 0)::int
+        FROM wms.order_items oi
+        WHERE oi.order_id = ${orderId}
+          AND COALESCE(oi.requires_shipping, 1) = 0
+      ) AS non_shipping_total_cents,
+      (
+        SELECT COALESCE(SUM(oi.quantity), 0)::int
+        FROM wms.order_items oi
+        WHERE oi.order_id = ${orderId}
+          AND COALESCE(oi.requires_shipping, 1) = 1
+      ) AS order_shippable_qty
   `);
-  const activeShipmentCount = Number(siblingResult?.rows?.[0]?.cnt ?? 1);
+  const summaryRow = siblingResult?.rows?.[0] ?? {};
+  const activeShipmentCount = Number(summaryRow.cnt ?? 1);
+  const shipmentShippableQty = items.reduce((sum, item) => sum + item.quantity, 0);
+  const orderShippableQty =
+    summaryRow.order_shippable_qty != null
+      ? Number(summaryRow.order_shippable_qty)
+      : null;
+  const isPartialShipment =
+    orderShippableQty !== null && orderShippableQty > 0
+      ? shipmentShippableQty > 0 && shipmentShippableQty < orderShippableQty
+      : activeShipmentCount > 1;
 
   const amountPaidCents = readOptionalIntegerCents(row.amount_paid_cents, "order.amount_paid_cents");
   const taxCents = readOptionalIntegerCents(row.tax_cents, "order.tax_cents");
   const shippingCents = readOptionalIntegerCents(row.shipping_cents, "order.shipping_cents");
   const discountCents = readOptionalIntegerCents(row.discount_cents, "order.discount_cents");
   const totalCents = readOptionalIntegerCents(row.total_cents, "order.total_cents");
+  const nonShippingTotalCents =
+    summaryRow.non_shipping_total_cents != null
+      ? readOptionalIntegerCents(summaryRow.non_shipping_total_cents, "order.non_shipping_total_cents")
+      : Math.max(0, totalCents - shippingCents);
   const existingEngineRef = engineRefFromRow({
     shipping_engine: row.shipping_engine ?? null,
     engine_order_ref: row.engine_order_ref ?? null,
@@ -287,15 +363,18 @@ async function hydrateFromHeaderRow(
       shippingCents,
       discountCents,
       totalCents,
-      nonShippingTotalCents: Math.max(0, totalCents - shippingCents),
+      nonShippingTotalCents,
       currency: String(row.currency ?? "USD"),
     },
     items,
     orderPlacedAt: row.order_placed_at ?? null,
     externalOrderId: row.external_order_id ?? null,
     sortRank: row.sort_rank ?? null,
-    isPartialShipment: activeShipmentCount > 1,
+    isPartialShipment,
     fulfillmentOrderId: row.oms_fulfillment_order_id ?? null,
+    onHold: Number(row.on_hold ?? 0) === 1,
+    isReplacementShipment: row.shipment_purpose === "replacement",
+    overrideReview: opts?.overrideReview === true ? true : undefined,
     existingEngineRef: existingEngineRef ?? undefined,
   };
 }

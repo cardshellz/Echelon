@@ -33,10 +33,17 @@ import type {
   EngineRefResolutionMetrics,
   OrderEditShipmentSyncInput,
 } from "../types";
-import { normalizeCarrier, parseProviderAmountCents } from "../types";
+import {
+  mapShipStationShipmentToCanonicalEvent,
+  normalizeShipStationWebhookPayload,
+} from "./shipstation/shipstation-webhook-normalizer";
+
+export {
+  mapShipStationShipmentToCanonicalEvent,
+  normalizeShipStationWebhookPayload,
+} from "./shipstation/shipstation-webhook-normalizer";
 
 const ENGINE_NAME = "shipstation";
-const SHIPSTATION_SHIPMENTS_API_COST_SOURCE = "shipstation_shipments_api";
 const UNSUPPORTED_MULTI_ACCOUNT_ENV_KEYS = [
   "SHIPSTATION_SECONDARY_API_KEY",
   "SHIPSTATION_SECONDARY_API_SECRET",
@@ -179,117 +186,19 @@ export function engineRefFromRow(row: {
   return null;
 }
 
-export function mapShipStationShipmentToCanonicalEvent(
-  s: any,
-  opts: { resolveWmsShipmentIdFromOrderKey?: boolean } = {},
-): CanonicalShipmentEvent | null {
-  if (!s || typeof s !== "object") return null;
-  const wmsKeyMatch =
-    opts.resolveWmsShipmentIdFromOrderKey === true && typeof s.orderKey === "string"
-      ? /^echelon-wms-shp-([1-9]\d*)$/.exec(s.orderKey.trim())
-      : null;
-  const wmsShipmentId = wmsKeyMatch ? Number(wmsKeyMatch[1]) : null;
-  const shipmentIdRaw = Number(wmsShipmentId ?? s.shipmentId ?? s.id ?? 0);
-  const orderIdRaw = Number(s.orderId ?? 0);
-  if (!Number.isInteger(orderIdRaw) || orderIdRaw <= 0) return null;
-  const shipmentId = Number.isInteger(shipmentIdRaw) && shipmentIdRaw > 0 ? shipmentIdRaw : orderIdRaw;
-  const engineRef = toEngineRef(orderIdRaw, s.orderKey ?? null);
-
-  const voidDate = normalizeShipStationV1Date(s.voidDate, "voidDate");
-  if (voidDate.kind !== "missing" || s.voided === true) {
-    return {
-      kind: "voided" as const,
-      shipmentId,
-      engineRef,
-      reason: "voided in ShipStation",
-    };
-  }
-
-  const parsedCarrierCostCents = parseProviderAmountCents(s.shipmentCost);
-  const carrierCostCents =
-    parsedCarrierCostCents !== null && parsedCarrierCostCents > 0
-      ? parsedCarrierCostCents
-      : undefined;
-  const shipDate = normalizeShipStationV1Date(s.shipDate, "shipDate");
-  const trackingNumber =
-    typeof s.trackingNumber === "string" ? s.trackingNumber.trim() : "";
-  const carrierRaw =
-    typeof s.carrierCode === "string" && s.carrierCode.trim()
-      ? s.carrierCode.trim()
-      : "other";
-
-  if (shipDate.kind === "missing" && trackingNumber) {
-    return {
-      kind: "label_created" as const,
-      shipmentId,
-      engineRef,
-      trackingNumber,
-      carrier: normalizeCarrier(carrierRaw),
-      carrierRaw,
-    };
-  }
-
-  return {
-    kind: "shipped" as const,
-    shipmentId,
-    engineRef,
-    trackingNumber,
-    carrier: normalizeCarrier(carrierRaw),
-    carrierRaw,
-    shipDate: shipDate.kind === "timestamp" ? new Date(shipDate.iso) : null,
-    shipCalendarDate: shipDate.kind === "date" ? shipDate.date : null,
-    serviceCode:
-      typeof s.serviceCode === "string" ? s.serviceCode.trim() || null : null,
-    carrierCostCents,
-    carrierCostSource:
-      carrierCostCents === undefined
-        ? undefined
-        : SHIPSTATION_SHIPMENTS_API_COST_SOURCE,
-    items: Array.isArray(s.shipmentItems)
-      ? s.shipmentItems.map((item: any) => ({
-          sku: item.sku ?? "",
-          quantity: item.quantity ?? 0,
-          name: item.name ?? "",
-        }))
-      : undefined,
-  };
-}
-
-export function normalizeShipStationWebhookPayload(
-  rawPayload: unknown,
-): CanonicalShipmentEvent[] {
-  if (!rawPayload) return [];
-
-  let candidates: unknown[] = [];
-  if (Array.isArray(rawPayload)) {
-    candidates = rawPayload;
-  } else if (typeof rawPayload === "object") {
-    const record = rawPayload as Record<string, unknown>;
-    if (Array.isArray(record.shipments)) {
-      candidates = record.shipments;
-    } else if ("orderId" in record && ("shipmentId" in record || "trackingNumber" in record || "voidDate" in record || "voided" in record)) {
-      candidates = [record];
-    } else {
-      // Bare webhook notification envelope (e.g. { resource_type: "SHIP_NOTIFY", resource_url })
-      return [];
-    }
-  }
-
-  const events: CanonicalShipmentEvent[] = [];
-  for (const candidate of candidates) {
-    const mapped = mapShipStationShipmentToCanonicalEvent(candidate, {
-      resolveWmsShipmentIdFromOrderKey: true,
-    });
-    if (mapped) {
-      events.push(mapped);
-    }
-  }
-  return events;
-}
-
 export type ShipStationServiceHandle = {
   isConfigured(): boolean;
-  pushShipment(shipmentId: number): Promise<{ shipstationOrderId: number; orderKey: string }>;
+  pushShipment(
+    shipmentId: number,
+    opts?: { overrideReview?: boolean },
+  ): Promise<{ shipstationOrderId: number; orderKey: string }>;
+  upsertShipmentFromPayload?(
+    payload: ShipmentPushPayload,
+  ): Promise<{
+    shipstationOrderId: number;
+    orderKey: string;
+    alreadyExisted?: boolean;
+  }>;
   appendShipmentItems(
     shipmentId: number,
     shipmentItemIds: readonly number[],
@@ -347,7 +256,22 @@ export function createShipStationEngine(
     },
 
     async upsertShipment(payload: ShipmentPushPayload): Promise<EnginePushResult> {
-      const result = await ss.pushShipment(payload.shipmentId);
+      const hasHydratedPayload =
+        Array.isArray(payload.items) &&
+        payload.items.length > 0 &&
+        typeof payload.orderNumber === "string" &&
+        payload.orderNumber.trim().length > 0;
+      if (hasHydratedPayload && typeof ss.upsertShipmentFromPayload === "function") {
+        const result = await ss.upsertShipmentFromPayload(payload);
+        return {
+          engineRef: toEngineRef(result.shipstationOrderId, result.orderKey),
+          alreadyExisted: result.alreadyExisted ?? !!payload.existingEngineRef,
+        };
+      }
+      const result = await ss.pushShipment(
+        payload.shipmentId,
+        payload.overrideReview ? { overrideReview: true } : undefined,
+      );
       return {
         engineRef: toEngineRef(result.shipstationOrderId, result.orderKey),
         alreadyExisted: !!payload.existingEngineRef,

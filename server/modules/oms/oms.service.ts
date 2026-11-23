@@ -1336,6 +1336,10 @@ export async function recordOmsReconcileReviewEvent(
   eventType:
     | "engine_order_not_found"
     | "engine_cancel_flagged_for_review"
+    | "pushed_to_shipping_engine"
+    | "shipped_via_shipping_engine"
+    | "cancelled_via_shipping_engine"
+    | "voided_via_shipping_engine"
     | "shipped_via_shipstation"
     | "cancelled_via_shipstation"
     | "voided_via_shipstation",

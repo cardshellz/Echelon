@@ -578,7 +578,8 @@ export async function enqueueShipStationShipmentPushRetry(
       flaggedRow &&
       !(
         options.allowExhaustedRecovery === true &&
-        flaggedRow.review_reason === "shipstation_push_retry_exhausted"
+        (flaggedRow.review_reason === "shipstation_push_retry_exhausted" ||
+          flaggedRow.review_reason === "shipping_engine_push_retry_exhausted")
       )
     ) {
       return;
@@ -2746,13 +2747,14 @@ async function processPendingWebhooksBatch(
 
     if (
       item.provider === "internal" &&
-      item.topic === "shipstation_shipment_push"
+      (item.topic === "shipstation_shipment_push" ||
+        item.topic === "shipping_engine_shipment_push")
     ) {
       try {
         await dispatchShipStationShipmentPushRetry(defaultDb, item as any);
       } catch (branchErr: any) {
         console.error(
-          `${LOG_PREFIX} Item ${item.id} shipstation_shipment_push dispatch threw: ${branchErr?.message || branchErr}`,
+          `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
@@ -2760,13 +2762,14 @@ async function processPendingWebhooksBatch(
 
     if (
       item.provider === "internal" &&
-      item.topic === "shipstation_shipment_cancel"
+      (item.topic === "shipstation_shipment_cancel" ||
+        item.topic === "shipping_engine_shipment_cancel")
     ) {
       try {
         await dispatchShipStationShipmentCancelRetry(defaultDb, item as any);
       } catch (branchErr: any) {
         console.error(
-          `${LOG_PREFIX} Item ${item.id} shipstation_shipment_cancel dispatch threw: ${branchErr?.message || branchErr}`,
+          `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
@@ -2802,13 +2805,14 @@ async function processPendingWebhooksBatch(
 
     if (
       item.provider === "internal" &&
-      item.topic === "shipstation_hold_sync"
+      (item.topic === "shipstation_hold_sync" ||
+        item.topic === "shipping_engine_hold_sync")
     ) {
       try {
         await dispatchShipStationHoldSyncRetry(defaultDb, item as any);
       } catch (branchErr: any) {
         console.error(
-          `${LOG_PREFIX} Item ${item.id} shipstation_hold_sync dispatch threw: ${branchErr?.message || branchErr}`,
+          `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
@@ -2816,13 +2820,14 @@ async function processPendingWebhooksBatch(
 
     if (
       item.provider === "internal" &&
-      item.topic === "shipstation_sort_rank_sync"
+      (item.topic === "shipstation_sort_rank_sync" ||
+        item.topic === "shipping_engine_sort_rank_sync")
     ) {
       try {
         await dispatchShipStationSortRankSyncRetry(defaultDb, item as any);
       } catch (branchErr: any) {
         console.error(
-          `${LOG_PREFIX} Item ${item.id} shipstation_sort_rank_sync dispatch threw: ${branchErr?.message || branchErr}`,
+          `${LOG_PREFIX} Item ${item.id} ${item.topic} dispatch threw: ${branchErr?.message || branchErr}`,
         );
       }
       continue;
