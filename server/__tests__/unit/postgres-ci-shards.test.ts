@@ -651,7 +651,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(workflow).toContain("POSTGRES_SELECTED_TEST_FILES: ${{ needs.preflight.outputs.files }}");
     expect(workflow).toContain("POSTGRES_SHARD: ${{ matrix.shard }}/${{ matrix.count }}");
     expect(workflow).toContain('node --import tsx scripts/ci/postgres-tests.ts "$POSTGRES_SHARD"');
-    expect(workflow).toContain("image: postgres:16");
+    expect(workflow).toContain("image: postgres:17");
     expect(workflow).toContain('ECHELON_TEST_DATABASE_DISPOSABLE: "true"');
     expect(workflow).toContain("path: test-results/postgres-hardening-" + "$" + "{{ matrix.shard }}/");
     expect(workflow).toContain("name: PostgreSQL hardening tests");
