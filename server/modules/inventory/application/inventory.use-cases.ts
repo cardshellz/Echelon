@@ -2664,15 +2664,20 @@ export class InventoryUseCases {
           try {
             const currentLevel = await this.storage.getInventoryLevelByLocationAndVariant(virtualLocationId, variantId);
             const oldQty = currentLevel?.variantQty ?? 0;
-            const delta = qty - oldQty;
+            if (qty < 0) {
+              result.errors.push(
+                `Variant ${variantId}: 3PL reported negative quantity (${qty}); clamped to 0 and flagged shortfall`,
+              );
+            }
+            const clampedQty = Math.max(0, qty);
+            const delta = clampedQty - oldQty;
 
             if (delta !== 0) {
               await this.adjustInventory({
                 productVariantId: variantId,
                 warehouseLocationId: virtualLocationId,
                 qtyDelta: delta,
-                reason: `3PL sync (set to ${qty}, delta ${delta > 0 ? "+" : ""}${delta})`,
-                allowNegative: true,
+                reason: `3PL sync (set to ${clampedQty}${qty < 0 ? ` from raw ${qty}` : ""}, delta ${delta > 0 ? "+" : ""}${delta})`,
               });
             }
             result.synced++;
