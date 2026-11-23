@@ -7,9 +7,86 @@ import {
 } from "./shipstation-api-request";
 import { buildShipStationUrl } from "./shipstation/shipstation-contracts";
 import {
+  clearOutboundShipmentReviewFlagByReasonInWms,
   clearResolvedShipStationQueueReviewFlagsInWms,
+  countOpenShipmentsSharingShipStationOrderInWms,
   setOutboundShipmentReviewFlagInWms,
 } from "../wms/outbound-shipment-mutations.api";
+import { logger as platformLogger } from "../../platform/observability/logger";
+
+export interface ShipStationSweeperDependencies {
+  /**
+   * Cancels the ShipStation order of a shipment Echelon already cancelled,
+   * finding it by Echelon's order key when its id was never saved. Returns
+   * the provider outcome; throws when the provider could not be reached.
+   */
+  cancelOrderForShipment?: (shipmentId: number) => Promise<{ state: string }>;
+}
+
+/** Review reason when a cancelled shipment's ShipStation order could not be proven stopped. */
+const SS_REVIEW_CANCEL_UNVERIFIED = "shipstation_cancel_unverified";
+
+/**
+ * A ShipStation order is still open for a shipment Echelon has CANCELLED.
+ * Leaving it open lets a packer ship a cancelled (e.g. fraud) order, so the
+ * sweeper stops it, the same as the cancel itself would have if it had known
+ * the order existed (#65805). It never touches an order that another open
+ * shipment shares, and every non-proven outcome is flagged for review.
+ *
+ * Before this, an unlinked order here re-queued a push every sweep; the push
+ * refuses cancelled shipments, so it dead-lettered forever and the order was
+ * never stopped.
+ */
+async function stopOpenOrderForCancelledShipment(
+  order: ShipStationQueueOrder,
+  shipmentId: number,
+  cancelOrderForShipment: NonNullable<ShipStationSweeperDependencies["cancelOrderForShipment"]>,
+): Promise<"stopped" | "flagged"> {
+  const providerOrderId = Number(order.orderId);
+  const fields = {
+    action: "stop_open_order_for_cancelled_shipment",
+    wms_shipment_id: shipmentId,
+    engine_ref: Number.isSafeInteger(providerOrderId) ? providerOrderId : null,
+    order_key: String(order.orderKey ?? ""),
+    before: { provider_status: String(order.orderStatus ?? "unknown"), shipment_status: "cancelled" },
+  };
+
+  if (Number.isSafeInteger(providerOrderId) && providerOrderId > 0) {
+    const sharing = await countOpenShipmentsSharingShipStationOrderInWms(db, {
+      shipmentId,
+      providerOrderId,
+      orderKey: String(order.orderKey ?? ""),
+    });
+    if (sharing > 0) {
+      await flagWmsShipmentForShipStationReview(shipmentId, SS_REVIEW_CANCEL_UNVERIFIED);
+      platformLogger.error("shipstation.sweeper", { ...fields, outcome: "flagged_for_review",
+        error_code: SS_REVIEW_CANCEL_UNVERIFIED, shared_with_open_shipments: sharing });
+      return "flagged";
+    }
+  }
+
+  try {
+    const result = await cancelOrderForShipment(shipmentId);
+    if (result.state === "cancelled" || result.state === "already_cancelled") {
+      await clearOutboundShipmentReviewFlagByReasonInWms(db, {
+        shipmentId,
+        expectedReason: SS_REVIEW_CANCEL_UNVERIFIED,
+      });
+      platformLogger.warn("shipstation.sweeper", { ...fields, outcome: "provider_order_cancelled",
+        after: { provider_status: "cancelled" } });
+      return "stopped";
+    }
+    await flagWmsShipmentForShipStationReview(shipmentId, SS_REVIEW_CANCEL_UNVERIFIED);
+    platformLogger.error("shipstation.sweeper", { ...fields, outcome: "flagged_for_review",
+      error_code: SS_REVIEW_CANCEL_UNVERIFIED, after: { provider_state: result.state } });
+    return "flagged";
+  } catch (err: any) {
+    await flagWmsShipmentForShipStationReview(shipmentId, SS_REVIEW_CANCEL_UNVERIFIED);
+    platformLogger.error("shipstation.sweeper", { ...fields, outcome: "cancel_failed",
+      error_code: SS_REVIEW_CANCEL_UNVERIFIED, error: err?.message ?? String(err) });
+    return "flagged";
+  }
+}
 
 interface ShipStationQueueOrder {
   orderId?: number | null;
@@ -152,6 +229,21 @@ function isCanonicalShipStationOrder(
     && incomingOrderId === shipStationOrderId;
 }
 
+/**
+ * The open provider order is this cancelled shipment's OWN order: either the
+ * id Echelon saved for it, or (no id saved) an order carrying its key. An
+ * additional order under the same key while a different id is saved stays
+ * flag-only: it may be an operator reship or split.
+ */
+export function isOwnOrderOfCancelledShipment(
+  order: ShipStationQueueOrder,
+  finality: { shipmentStatus: string | null; shipStationOrderId: number | null },
+): boolean {
+  if (finality.shipmentStatus !== "cancelled") return false;
+  return finality.shipStationOrderId === null
+    || isCanonicalShipStationOrder(order, finality.shipStationOrderId);
+}
+
 async function enqueueMissingShipStationLinkRecovery(
   order: ShipStationQueueOrder,
   shipmentId: number,
@@ -212,11 +304,17 @@ interface ShipStationOrdersPage {
 /**
  * Sweeps ShipStation queues and flags Echelon-owned stragglers for review.
  *
- * This job is intentionally read-only against ShipStation. Operator-created
- * replacement labels, reships, and split orders are real external state; a
- * scheduled WMS sweep must not cancel or rewrite them through /orders/createorder.
+ * Read-only against ShipStation with ONE exception: an order carrying a
+ * shipment's own Echelon key whose shipment Echelon has CANCELLED is stopped
+ * (see stopOpenOrderForCancelledShipment). Operator-created replacement
+ * labels, reships, and split orders are real external state; they carry other
+ * keys or ids and are still only flagged, never cancelled or rewritten.
  */
-export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
+export async function sweepShipStationQueue(
+  apiKey: string,
+  apiSecret: string,
+  deps: ShipStationSweeperDependencies = {},
+) {
   const baseUrl = "https://ssapi.shipstation.com";
   const encodedAuth = Buffer.from(`${apiKey}:${apiSecret}`).toString("base64");
   const apiRequest = createShipStationApiRequester({
@@ -294,6 +392,16 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
 
         if (wmsShipmentId) {
           const finality = await getWmsShipmentFinality(wmsShipmentId);
+          if (isOwnOrderOfCancelledShipment(order, finality) && deps.cancelOrderForShipment) {
+            if (await stopOpenOrderForCancelledShipment(
+              order,
+              wmsShipmentId,
+              deps.cancelOrderForShipment,
+            ) === "flagged") {
+              totalFlagged++;
+            }
+            continue;
+          }
           if (!isCanonicalShipStationOrder(order, finality.shipStationOrderId)) {
             if (await enqueueMissingShipStationLinkRecovery(
               order,
@@ -349,6 +457,7 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
 
   const awaitingPaymentFlagged = await flagAwaitingPaymentOrdersForReview(
     apiRequest,
+    deps,
   );
   totalFlagged += awaitingPaymentFlagged;
 
@@ -365,6 +474,7 @@ export async function sweepShipStationQueue(apiKey: string, apiSecret: string) {
 
 async function flagAwaitingPaymentOrdersForReview(
   apiRequest: ShipStationApiRequester,
+  deps: ShipStationSweeperDependencies,
 ): Promise<number> {
   console.log("[ShipStation Sweeper] Checking for Echelon orders stuck in awaiting_payment...");
 
@@ -396,6 +506,16 @@ async function flagAwaitingPaymentOrdersForReview(
 
       if (wmsShipmentId) {
         const finality = await getWmsShipmentFinality(wmsShipmentId);
+        if (isOwnOrderOfCancelledShipment(order, finality) && deps.cancelOrderForShipment) {
+          if (await stopOpenOrderForCancelledShipment(
+            order,
+            wmsShipmentId,
+            deps.cancelOrderForShipment,
+          ) === "flagged") {
+            flagged++;
+          }
+          continue;
+        }
         if (!isCanonicalShipStationOrder(order, finality.shipStationOrderId)) {
           if (await enqueueMissingShipStationLinkRecovery(
             order,
