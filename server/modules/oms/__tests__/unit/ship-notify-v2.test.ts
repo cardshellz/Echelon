@@ -1947,6 +1947,9 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
 
   it.each([
     ["INVENTORY_PUBLICATION_TARGET_BUSY", true],
+    // Lock contention (e.g. on cutover_admission_fence) must keep a durable
+    // pick-correction wait alive instead of forcing operator review.
+    ["55P03", true],
     ["CLAIM_DISPATCH_SOURCE_PICKED_MISSING", false],
   ] as const)("classifies inventory failure %s at the real carrier confirmation boundary as retryable=%s", async (code, retryable) => {
     const rows = happyPathRows();
@@ -1958,8 +1961,13 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
         shipment_purpose: "customer_fulfillment", shipment_item_purpose: "customer_fulfillment" }],
     }, { rows: [] });
     const mock = makeDb(rows);
+    const messages: Record<typeof code, string> = {
+      INVENTORY_PUBLICATION_TARGET_BUSY: "Publication target is busy",
+      "55P03": "could not obtain lock on row in relation \"cutover_admission_fence\"",
+      CLAIM_DISPATCH_SOURCE_PICKED_MISSING: "Exact picked custody is missing",
+    };
     const inventoryCore = { recordShipment: vi.fn().mockRejectedValue(Object.assign(
-      new Error(code === "INVENTORY_PUBLICATION_TARGET_BUSY" ? "Publication target is busy" : "Exact picked custody is missing"), { code },
+      new Error(messages[code]), { code },
     )) };
     globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
 

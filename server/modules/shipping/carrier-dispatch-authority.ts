@@ -7,7 +7,8 @@ export type HistoricalCarrierDispatchRepairCohort =
   | "confirmed_historical_inventory_gap"
   | "publication_revision_order"
   | "label_time_package_replay"
-  | "split_sibling_relabel_misread";
+  | "split_sibling_relabel_misread"
+  | "transient_lock_not_available";
 
 export interface ReviewedCarrierDispatchRepairAuthorization {
   requeueId: number;

@@ -538,6 +538,7 @@ const HISTORICAL_CARRIER_DISPATCH_REPAIR_COHORTS = [
   "publication_revision_order",
   "label_time_package_replay",
   "split_sibling_relabel_misread",
+  "transient_lock_not_available",
 ] as const satisfies readonly HistoricalCarrierDispatchRepairCohort[];
 
 function historicalCarrierDispatchRepairCohort(
@@ -607,6 +608,13 @@ function historicalCarrierDispatchRepairCohortSql() {
         AND NULLIF(BTRIM(command.result_evidence ->> 'sourceCode'), '') IS NULL
         AND command.last_error_message = 'replaced_label_has_carrier_possession'
         THEN 'split_sibling_relabel_misread'
+      -- A Postgres lock timeout (55P03, usually on cutover_admission_fence) was
+      -- classified as permanent, which ended durable pick-correction waits
+      -- (113 commands, 2026-10-09..2026-11-23). It is retryable since
+      -- 2026-11-23. A rerun either posts the shipment or resumes that wait.
+      WHEN command.last_error_code = 'CARRIER_DISPATCH_APPLICATION_FAILED'
+        AND NULLIF(BTRIM(command.result_evidence ->> 'sourceCode'), '') = '55P03'
+        THEN 'transient_lock_not_available'
       ELSE NULL
     END
   `;
@@ -636,7 +644,8 @@ function historicalCarrierDispatchRepairEligibilitySql(
         'legacy_outbound_shipment_identity_conflict',
         'publication_revision_order',
         'label_time_package_replay',
-        'split_sibling_relabel_misread'
+        'split_sibling_relabel_misread',
+        'transient_lock_not_available'
       )
       OR (
         ${commandId}::bigint IS NOT NULL
