@@ -9,6 +9,20 @@
  */
 
 import {
+  DROPSHIP_CATALOG_ARRIVALS_INTERVAL_MS,
+  DROPSHIP_CATALOG_ARRIVALS_LOCK_ID,
+  DROPSHIP_CATEGORY_MARKS_LOCK_ID,
+  DROPSHIP_LISTING_END_INTERVAL_MS,
+  DROPSHIP_LISTING_END_LOCK_ID,
+  DROPSHIP_MARKETPLACE_SYNC_BACK_LOCK_ID,
+  DROPSHIP_RULES_CONVERSION_LOCK_ID,
+} from "../modules/dropship/runtime-workers.api";
+import {
+  STOCK_LINK_INITIAL_DELAY_MS,
+  STOCK_LINK_INTERVAL_MS,
+  STOCK_LINK_LOCK_ID,
+} from "../modules/inventory-planning/stock-link-runtime.api";
+import {
   registerScheduledJob,
   type JobConcurrencyMechanism,
   type JobDeadLetterPolicy,
@@ -100,8 +114,9 @@ export const EXTERNAL_RUNTIME_JOBS: readonly ExternalRuntimeJobDefinition[] = [
   },
   {
     name: "inventory_planning.stock_link_runner",
-    cadenceMs: 60_000,
-    advisoryLockId: 736220,
+    cadenceMs: STOCK_LINK_INTERVAL_MS,
+    initialDelayMs: STOCK_LINK_INITIAL_DELAY_MS,
+    advisoryLockId: STOCK_LINK_LOCK_ID,
     concurrencyMechanism: "session_advisory_lock",
     writableStates: ["inventory.stock_links"],
     deadLetterPolicy: "log_and_retry_next_tick",
@@ -133,8 +148,8 @@ export const EXTERNAL_RUNTIME_JOBS: readonly ExternalRuntimeJobDefinition[] = [
   },
   {
     name: "dropship.marketplace_sync_back_worker",
-    cadenceMs: 60_000,
-    advisoryLockId: 736210,
+    cadenceMs: 15 * 60_000,
+    advisoryLockId: DROPSHIP_MARKETPLACE_SYNC_BACK_LOCK_ID,
     concurrencyMechanism: "session_advisory_lock",
     writableStates: ["dropship.dropship_ebay_sync_back_runs"],
     deadLetterPolicy: "review_flag",
@@ -173,32 +188,32 @@ export const EXTERNAL_RUNTIME_JOBS: readonly ExternalRuntimeJobDefinition[] = [
   },
   {
     name: "dropship.category_marks_worker",
-    cadenceMs: 60_000,
-    advisoryLockId: 736216,
+    cadenceMs: 60 * 60_000,
+    advisoryLockId: DROPSHIP_CATEGORY_MARKS_LOCK_ID,
     concurrencyMechanism: "session_advisory_lock",
     writableStates: ["dropship.dropship_product_category_marks"],
     deadLetterPolicy: "log_and_retry_next_tick",
   },
   {
     name: "dropship.rules_conversion_worker",
-    cadenceMs: 60_000,
-    advisoryLockId: 736217,
+    cadenceMs: 60 * 60_000,
+    advisoryLockId: DROPSHIP_RULES_CONVERSION_LOCK_ID,
     concurrencyMechanism: "session_advisory_lock",
     writableStates: ["dropship.dropship_selection_conversions"],
     deadLetterPolicy: "log_and_retry_next_tick",
   },
   {
     name: "dropship.listing_end_worker",
-    cadenceMs: 60_000,
-    advisoryLockId: 736218,
+    cadenceMs: DROPSHIP_LISTING_END_INTERVAL_MS,
+    advisoryLockId: DROPSHIP_LISTING_END_LOCK_ID,
     concurrencyMechanism: "session_advisory_lock",
     writableStates: ["dropship.dropship_listing_end_jobs"],
     deadLetterPolicy: "review_flag",
   },
   {
     name: "dropship.catalog_arrivals_worker",
-    cadenceMs: 5 * 60_000,
-    advisoryLockId: 736219,
+    cadenceMs: DROPSHIP_CATALOG_ARRIVALS_INTERVAL_MS,
+    advisoryLockId: DROPSHIP_CATALOG_ARRIVALS_LOCK_ID,
     concurrencyMechanism: "session_advisory_lock",
     writableStates: ["dropship.dropship_catalog_arrivals"],
     deadLetterPolicy: "log_and_retry_next_tick",
