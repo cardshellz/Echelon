@@ -268,10 +268,9 @@ export function createShipStationEngine(
           alreadyExisted: result.alreadyExisted ?? !!payload.existingEngineRef,
         };
       }
-      const result = await ss.pushShipment(
-        payload.shipmentId,
-        payload.overrideReview ? { overrideReview: true } : undefined,
-      );
+      const result = payload.overrideReview
+        ? await ss.pushShipment(payload.shipmentId, { overrideReview: true })
+        : await ss.pushShipment(payload.shipmentId);
       return {
         engineRef: toEngineRef(result.shipstationOrderId, result.orderKey),
         alreadyExisted: !!payload.existingEngineRef,
