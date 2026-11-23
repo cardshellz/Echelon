@@ -45,16 +45,23 @@ export type RegisteredJobOutcome =
   | "failed"
   | "skipped_lock_held";
 
+export type JobConcurrencyMechanism =
+  | "session_advisory_lock"
+  | "row_skip_locked";
+
 export interface RegisteredJobSpec {
   name: string;
   cadenceMs: number;
   initialDelayMs?: number;
   advisoryLockId: number;
+  concurrencyMechanism?: JobConcurrencyMechanism;
   writableStates: readonly string[];
   deadLetterPolicy: JobDeadLetterPolicy;
   disableEnvVar?: string;
   /** Optional DB handle for `public.scheduler_runs` persistence & boot gating. */
   db?: { execute: (query: any) => Promise<any> };
+  /** Optional `public.scheduler_runs.job_key` alias when an external scheduler records under a short key. */
+  persistedRunKey?: string;
   /** Skip the initial post-boot run if `public.scheduler_runs` shows we are on schedule. */
   gateInitialRunOnSchedule?: boolean;
   /** Override lock runner in unit tests; defaults to `withAdvisoryLock`. */
@@ -76,6 +83,7 @@ export interface RegisteredJobStatusSnapshot {
   cadenceMs: number;
   initialDelayMs: number;
   advisoryLockId: number;
+  concurrencyMechanism: JobConcurrencyMechanism;
   writableStates: string[];
   deadLetterPolicy: JobDeadLetterPolicy;
   disabled: boolean;
@@ -295,7 +303,8 @@ export async function getRegisteredJobsStatusSnapshot(
     .sort((a, b) => a.spec.name.localeCompare(b.spec.name))
     .map((rec) => {
       const inMemoryCompleted = rec.lastCompletedAt?.toISOString() ?? null;
-      const persistedCompleted = persistedRuns[rec.spec.name] ?? null;
+      const runKey = rec.spec.persistedRunKey ?? rec.spec.name;
+      const persistedCompleted = persistedRuns[runKey] ?? persistedRuns[rec.spec.name] ?? null;
       const lastCompletedAt =
         inMemoryCompleted && persistedCompleted
           ? inMemoryCompleted > persistedCompleted
@@ -308,6 +317,7 @@ export async function getRegisteredJobsStatusSnapshot(
         cadenceMs: rec.spec.cadenceMs,
         initialDelayMs: rec.spec.initialDelayMs,
         advisoryLockId: rec.spec.advisoryLockId,
+        concurrencyMechanism: rec.spec.concurrencyMechanism ?? "session_advisory_lock",
         writableStates: [...rec.spec.writableStates],
         deadLetterPolicy: rec.spec.deadLetterPolicy,
         disabled: rec.disabled,
