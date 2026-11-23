@@ -53,7 +53,7 @@ import type {
 } from "./channel-fulfillment-ingress.service";
 import rateLimit from "express-rate-limit";
 import { createDefaultShopifyAdminClient, type ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client.api";
-import type { EngineCancelResult, ShippingEngine } from "../shipping/engine-and-reconcile.api";
+import type { EngineCancelResult, EngineRef, ShippingEngine } from "../shipping/engine-and-reconcile.api";
 import { toEngineRef } from "../shipping/engine-and-reconcile.api";
 import { pushShipmentThroughEngine } from "../orders/shipment-rollup-and-context.api";
 import {
@@ -169,6 +169,11 @@ interface ShipStationService {
   cancelOrder: (
     shipstationOrderId: number,
   ) => Promise<EngineCancelResult | { state: EngineCancelResult["state"]; alreadyInState?: boolean } | void>;
+  /** Finds a shipment's ShipStation order by Echelon's order key when no id was saved. */
+  resolveOrderForShipment?: (shipmentId: number) => Promise<
+    | { state: "linked"; shipstationOrderId: number; orderKey: string }
+    | { state: "not_in_shipstation"; orderKey: string }
+  >;
 }
 
 // ---------------------------------------------------------------------------
@@ -235,6 +240,8 @@ export async function cascadeShopifyCancelToShipments(
         id: number,
       ) => Promise<EngineCancelResult | { state: EngineCancelResult["state"]; alreadyInState?: boolean } | void>;
     };
+    /** Finds a shipment's engine order by its own identity when no ref was saved (#65805). */
+    resolveEngineRef?: (shipmentId: number) => Promise<EngineRef | null>;
     logPrefix?: string;
   } = {},
 ): Promise<{
@@ -264,6 +271,7 @@ export async function cascadeShopifyCancelToShipments(
     try {
       const result = await helpers.handleCustomerCancelOnShipment(db, shipmentId, {
         shipstation: opts.shipstation,
+        resolveEngineRef: opts.resolveEngineRef,
         now,
       });
       cascadeResults.push({ shipmentId, mode: result.mode });
@@ -302,7 +310,7 @@ export async function cancelOrderCascade(
   opts: {
     wmsServices: WmsServices | null;
     shipStationService?: ShipStationService | null;
-    shippingEngine?: Pick<ShippingEngine, "cancel"> | null;
+    shippingEngine?: Pick<ShippingEngine, "cancel" | "resolveShipmentRef"> | null;
     source: string;
     reason: string;
     logPrefix?: string;
@@ -350,6 +358,19 @@ export async function cancelOrderCascade(
         }
       : undefined;
 
+  // Without a saved engine ref, cancel must still find the engine order by the
+  // shipment's own identity: "no ref" is not proof it was never pushed (#65805).
+  const resolveEngineRef = opts.shippingEngine?.resolveShipmentRef
+    ? (shipmentId: number) => opts.shippingEngine!.resolveShipmentRef!(shipmentId)
+    : opts.shipStationService?.resolveOrderForShipment
+      ? async (shipmentId: number) => {
+          const resolution = await opts.shipStationService!.resolveOrderForShipment!(shipmentId);
+          return resolution.state === "linked"
+            ? toEngineRef(resolution.shipstationOrderId, resolution.orderKey)
+            : null;
+        }
+      : undefined;
+
   let hadShipmentCancelError = false;
   for (const wmsRow of wmsOrderRows) {
     if (opts.wmsServices) {
@@ -384,7 +405,7 @@ export async function cancelOrderCascade(
         handleCustomerCancelOnShipment: rollupModule.handleCustomerCancelOnShipment,
         recomputeOrderStatusFromShipments: rollupModule.recomputeOrderStatusFromShipments,
       },
-      { now, shipstation: ssAdapter, logPrefix: LOG },
+      { now, shipstation: ssAdapter, resolveEngineRef, logPrefix: LOG },
     );
 
     if (cascade.hadShipments) {

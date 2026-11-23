@@ -428,6 +428,14 @@ export async function markShipmentCancelled(
     shipstation?: {
       removeFromList?: (shipstationOrderId: number) => Promise<ShipmentCancelCallbackResult>;
     };
+    /**
+     * Finds the engine order by Echelon's own shipment identity when no ref
+     * was saved. Without it, a shipment whose push response was lost (or
+     * landed after this cancel began) is wrongly treated as never pushed and
+     * stays live in the engine (#65805). Returns null only when the engine
+     * positively has no order; throws when the lookup itself fails.
+     */
+    resolveEngineRef?: (shipmentId: number) => Promise<EngineRef | null>;
   } = {},
 ): Promise<MarkShipmentCancelledResult> {
   assertPositiveInt(shipmentId, "shipmentId");
@@ -474,18 +482,41 @@ export async function markShipmentCancelled(
     ? reason.slice(0, 200)
     : "operator_cancel";
 
-  // Engine-side removal: cancel the order in the shipping engine when the
-  // shipment was already pushed (queued/labeled) and has an engine ref.
-  // Pre-push states (planned) never touched the engine.
-  const ref = engineRefFromRow(current as any);
+  // Engine-side removal: cancel the order in the shipping engine when it
+  // exists there. A saved ref proves that for queued/labeled rows. A missing
+  // ref does NOT prove the opposite: the push response may have been lost, or
+  // a push may have created the order a moment before this cancel. So for any
+  // pre-ship row without a ref we ask the engine by the shipment's own
+  // identity (resolveEngineRef, serialized with the push).
+  let ref = engineRefFromRow(current as any);
+  let resolvedByLookup = false;
+  let lookupFailed = false;
+  const preShip =
+    current.status === "planned" ||
+    current.status === "queued" ||
+    current.status === "labeled";
+  if (!ref && !opts.skipEngineCancel && preShip && opts.resolveEngineRef) {
+    try {
+      ref = await opts.resolveEngineRef(shipmentId);
+      resolvedByLookup = ref !== null;
+    } catch (err: any) {
+      // Not swallowed: the local cancel still proceeds (the channel already
+      // cancelled; the order must stop shipping here), the outcome is reported
+      // as unverified, and the ShipStation queue sweeper retries the provider
+      // cancel for cancelled shipments.
+      lookupFailed = true;
+      console.error(
+        `[markShipmentCancelled] engine lookup failed for shipment ${shipmentId}; provider cancel unverified: ${err?.message ?? err}`,
+      );
+    }
+  }
   const needsProviderStop =
     !opts.skipEngineCancel &&
-    (current.status === "queued" || current.status === "labeled") &&
-    Boolean(ref);
+    Boolean(ref) &&
+    (current.status === "queued" || current.status === "labeled" || resolvedByLookup);
 
-  let providerOutcome: ShipmentCancelProviderOutcome = needsProviderStop
-    ? "unverified"
-    : "not_needed";
+  let providerOutcome: ShipmentCancelProviderOutcome =
+    needsProviderStop || lookupFailed ? "unverified" : "not_needed";
 
   if (needsProviderStop && ref) {
     const cancelFn = opts.engineCancel
@@ -672,6 +703,7 @@ export async function handleCustomerCancelOnShipment(
     shipstation?: {
       removeFromList?: (shipstationOrderId: number) => Promise<ShipmentCancelCallbackResult>;
     };
+    resolveEngineRef?: (shipmentId: number) => Promise<EngineRef | null>;
   } = {},
 ): Promise<
   | { mode: "cancelled"; wmsOrderId: number }
@@ -697,8 +729,8 @@ export async function handleCustomerCancelOnShipment(
       if (current.shipped_at != null) {
         return { mode: "noop", reason: "already_shipped" };
       }
-      // markShipmentCancelled also cancels the SS order / drops the label for
-      // queued/labeled rows that carry an engine ref.
+      // markShipmentCancelled also cancels the engine order, finding it by the
+      // shipment's own identity when no ref was saved.
       const result = await markShipmentCancelled(
         db,
         shipmentId,
@@ -707,6 +739,7 @@ export async function handleCustomerCancelOnShipment(
           now,
           engineCancel: opts.engineCancel,
           shipstation: opts.shipstation,
+          resolveEngineRef: opts.resolveEngineRef,
         },
       );
       if (!result.changed) {

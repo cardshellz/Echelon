@@ -80,6 +80,12 @@ export interface ShopifyRefundCascadeHelpers {
       engineOrderRef: string;
       engineShipmentRef?: string;
     }) => Promise<EngineCancelResult | unknown>;
+    /** Finds the engine order by the shipment's own identity when no ref was saved (#65805). */
+    resolveShipmentRef?: (shipmentId: number) => Promise<{
+      engine: string;
+      engineOrderRef: string;
+      engineShipmentRef?: string;
+    } | null>;
   };
   pushShipment?: (shipmentId: number) => Promise<unknown>;
   recordReturnCase?: (args: {
@@ -1422,6 +1428,9 @@ export async function applyShopifyRefundCascade(
           engineCancel: helpers.shippingEngine
             ? async (ref) =>
                 (await helpers.shippingEngine!.cancel(ref)) as EngineCancelResult | void
+            : undefined,
+          resolveEngineRef: helpers.shippingEngine?.resolveShipmentRef
+            ? (shipmentId: number) => helpers.shippingEngine!.resolveShipmentRef!(shipmentId)
             : undefined,
           shipstation: helpers.shipstation
             ? {
