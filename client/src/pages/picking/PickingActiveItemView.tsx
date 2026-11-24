@@ -75,7 +75,10 @@ export interface PickingActiveItemViewProps {
   handleScan: (value: string) => void;
   processFocusedScan: (value: string) => void;
   setMultiQtyOpen: (open: boolean) => void;
-  confirmPick: (qty: number) => void;
+  openManualMultiQty?: () => void;
+  confirmPick: (qty: number, method?: "scan" | "manual") => void;
+  selectedReplenSourceByItem?: Record<number, number>;
+  onSelectReplenSource?: (itemId: number, locationId: number) => void;
   checkReplenGuidance: (item: PickItem, listIndex: number | null) => void;
   replenGuidanceLoading: boolean;
   canManageHolds: boolean;
@@ -135,7 +138,10 @@ export function PickingActiveItemView({
   handleScan,
   processFocusedScan,
   setMultiQtyOpen,
+  openManualMultiQty,
   confirmPick,
+  selectedReplenSourceByItem,
+  onSelectReplenSource,
   checkReplenGuidance,
   replenGuidanceLoading,
   canManageHolds,
@@ -319,8 +325,65 @@ export function PickingActiveItemView({
                   </div>
                 )}
                 {currentItem.replenPrediction && (currentItem.replenPrediction.replenNeeded || currentItem.replenPrediction.existingTaskId) && (
-                  <div className="mt-2 flex justify-center">
+                  <div className="mt-2 flex flex-col items-center gap-2">
                     <ReplenPredictionBadge prediction={currentItem.replenPrediction} canOpenTask={canViewReplenTasks} />
+                    {currentItem.replenPrediction.systemQty < (currentItem.qty - currentItem.picked) &&
+                      currentItem.replenPrediction.sourceLocationCode && (
+                        <div
+                          className="w-full max-w-md rounded-lg border border-blue-300 bg-blue-50/90 dark:bg-blue-950/40 px-3 py-2 text-xs text-blue-900 dark:text-blue-200 space-y-1.5"
+                          data-testid="inline-case-break-banner"
+                        >
+                          {(() => {
+                            const sources = currentItem.replenPrediction.availableSources ?? [];
+                            const selectedId =
+                              selectedReplenSourceByItem?.[currentItem.id] ??
+                              currentItem.replenPrediction.sourceLocationId ??
+                              sources[0]?.locationId ??
+                              null;
+                            const activeSource = sources.find((s) => s.locationId === selectedId);
+                            const sourceCode =
+                              activeSource?.locationCode ?? currentItem.replenPrediction.sourceLocationCode;
+                            const qtySrc =
+                              activeSource?.qtySourceUnits ??
+                              Math.max(1, currentItem.replenPrediction.qtySourceUnits || 1);
+                            const isCaseBreak =
+                              (activeSource?.replenMethod ?? currentItem.replenPrediction.replenMethod) === "case_break";
+                            return (
+                              <>
+                                <div className="font-semibold text-center">
+                                  {isCaseBreak
+                                    ? `Auto-breaking ${qtySrc} ${currentItem.replenPrediction.sourceVariantName || "Case"} from ${sourceCode} → ${currentItem.location}`
+                                    : `Auto-pulling ${qtySrc} from ${sourceCode} → ${currentItem.location}`}
+                                </div>
+                                {sources.length > 1 && onSelectReplenSource && (
+                                  <div className="flex flex-wrap items-center justify-center gap-1 pt-0.5">
+                                    <span className="text-[11px] text-blue-700 dark:text-blue-300 mr-1">Source bin:</span>
+                                    {sources.map((src) => {
+                                      const isSelected = src.locationId === selectedId;
+                                      return (
+                                        <Button
+                                          key={`${src.locationId}:${src.variantId}`}
+                                          type="button"
+                                          size="sm"
+                                          variant={isSelected ? "default" : "outline"}
+                                          className={cn(
+                                            "h-6 px-2 text-[11px] font-mono",
+                                            isSelected && "bg-blue-600 hover:bg-blue-700 text-white",
+                                          )}
+                                          onClick={() => onSelectReplenSource(currentItem.id, src.locationId)}
+                                          data-testid={`button-case-break-source-${src.locationCode}`}
+                                        >
+                                          {src.locationCode} ({src.availableQty})
+                                        </Button>
+                                      );
+                                    })}
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
+                        </div>
+                      )}
                   </div>
                 )}
                 <div className="flex items-center justify-center gap-2 mt-2">
@@ -428,7 +491,13 @@ export function PickingActiveItemView({
                     <Button
                       variant="outline"
                       className="h-14 min-h-[44px] text-base font-medium"
-                      onClick={() => (currentItem.qty > 1 ? setMultiQtyOpen(true) : confirmPick(1))}
+                      onClick={() =>
+                        currentItem.qty > 1
+                          ? openManualMultiQty
+                            ? openManualMultiQty()
+                            : setMultiQtyOpen(true)
+                          : confirmPick(1, "manual")
+                      }
                       data-testid="button-manual-confirm"
                     >
                       <CheckCircle2 className="h-5 w-5 mr-2" />

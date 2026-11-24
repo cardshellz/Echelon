@@ -419,3 +419,43 @@ export async function commitAmendedShipmentItemQuantityInWms(
     RETURNING id
   `);
 }
+
+export async function amendPreLabelShipmentItemsForShipPartialInWms(
+  executor: SqlExecutor,
+  input: { orderId: number },
+): Promise<{ deletedItemIds: number[]; amendedItemIds: number[] }> {
+  const deleted = await executor.execute(sql`
+    DELETE FROM wms.outbound_shipment_items osi
+    USING wms.outbound_shipments os, wms.order_items oi
+    WHERE osi.shipment_id = os.id
+      AND osi.order_item_id = oi.id
+      AND os.order_id = ${input.orderId}
+      AND os.status IN ('planned', 'queued', 'on_hold')
+      AND os.shipped_at IS NULL
+      AND os.tracking_number IS NULL
+      AND (COALESCE(oi.picked_quantity, 0) <= 0 OR oi.status = 'cancelled')
+    RETURNING osi.id
+  `);
+  const amended = await executor.execute(sql`
+    UPDATE wms.outbound_shipment_items osi
+    SET qty = LEAST(osi.qty, GREATEST(oi.picked_quantity, 1)),
+        commercial_requested_qty = CASE
+          WHEN osi.commercial_requested_qty IS NULL THEN NULL
+          ELSE LEAST(osi.commercial_requested_qty, GREATEST(oi.picked_quantity, 1))
+        END
+    FROM wms.outbound_shipments os, wms.order_items oi
+    WHERE osi.shipment_id = os.id
+      AND osi.order_item_id = oi.id
+      AND os.order_id = ${input.orderId}
+      AND os.status IN ('planned', 'queued', 'on_hold')
+      AND os.shipped_at IS NULL
+      AND os.tracking_number IS NULL
+      AND COALESCE(oi.picked_quantity, 0) > 0
+      AND osi.qty > oi.picked_quantity
+    RETURNING osi.id
+  `);
+  return {
+    deletedItemIds: ((deleted?.rows ?? []) as Array<{ id: unknown }>).map((r) => Number(r.id)),
+    amendedItemIds: ((amended?.rows ?? []) as Array<{ id: unknown }>).map((r) => Number(r.id)),
+  };
+}

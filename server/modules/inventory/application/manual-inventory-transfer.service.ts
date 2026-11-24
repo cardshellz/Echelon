@@ -10,6 +10,10 @@ import { runTransactionalFinancialCommand } from "../../../platform/commands/tra
 import type { db } from "../../../db";
 import type { InventoryUseCases } from "./inventory.use-cases";
 import { logger } from "../../../platform/observability/logger";
+import {
+  formatFollowupRetryError,
+  isFollowupReadyForRetry,
+} from "../domain/followup-retry-metadata";
 
 type Database = Pick<typeof db, "transaction" | "execute">;
 type TransferFollowup = {
@@ -145,17 +149,27 @@ export class ManualInventoryTransferService {
   }
 
   async recoverPending(): Promise<void> {
+    const now = z.date().parse(this.clock());
     const result = await this.database
-      .execute(sql`SELECT transfer_id FROM inventory.transfer_followups
-      WHERE completed_at IS NULL ORDER BY created_at,transfer_id LIMIT 20`);
-    for (const row of result.rows)
+      .execute(sql`SELECT transfer_id, last_error FROM inventory.transfer_followups
+      WHERE completed_at IS NULL
+        AND (last_error IS NULL OR last_error NOT LIKE '[DEAD_LETTER%')
+      ORDER BY created_at,transfer_id LIMIT 50`);
+    let processed = 0;
+    for (const row of result.rows) {
+      if (processed >= 20) break;
+      const prevError = typeof (row as any).last_error === "string" ? (row as any).last_error : null;
+      if (!isFollowupReadyForRetry(prevError, now)) continue;
+      processed++;
       await this.recover(z.number().int().positive().parse(row.transfer_id));
+    }
   }
 
   async recover(transferId: number): Promise<boolean> {
+    let previousLastError: string | null = null;
     try {
       const result = await this.database
-        .execute(sql`SELECT f.actor,f.completed_at,t.product_variant_id,t.from_location_id,t.voided_at,
+        .execute(sql`SELECT f.actor,f.completed_at,f.last_error,t.product_variant_id,t.from_location_id,t.voided_at,
         EXISTS (SELECT 1 FROM inventory.inventory_transactions u WHERE u.transaction_type='transfer' AND u.notes=('Undo of transfer ' || t.id::text) AND u.voided_at IS NULL) AS undone
         FROM inventory.transfer_followups f JOIN inventory.inventory_transactions t ON t.id=f.transfer_id WHERE f.transfer_id=${transferId}`);
       if (!result.rows[0])
@@ -163,6 +177,7 @@ export class ManualInventoryTransferService {
           transferId,
         });
       const row = result.rows[0];
+      previousLastError = typeof (row as any).last_error === "string" ? (row as any).last_error : null;
       if (row.completed_at) return true;
       if (row.voided_at || row.undone)
         throw new IntegrityError(
@@ -198,10 +213,30 @@ export class ManualInventoryTransferService {
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      await this.database.execute(
-        sql`UPDATE inventory.transfer_followups SET last_error=${message.slice(0, 2000)} WHERE transfer_id=${transferId} AND completed_at IS NULL`,
+      const retryInfo = formatFollowupRetryError(
+        previousLastError,
+        message,
+        z.date().parse(this.clock()),
       );
-      logger.error("inventory_transfer_followup_pending", { event: "inventory_transfer_followup_pending", transferId, message });
+      await this.database.execute(
+        sql`UPDATE inventory.transfer_followups SET last_error=${retryInfo.formattedError} WHERE transfer_id=${transferId} AND completed_at IS NULL`,
+      );
+      if (retryInfo.deadLettered) {
+        logger.error("inventory_transfer_followup_dead_letter", {
+          event: "inventory_transfer_followup_dead_letter",
+          transferId,
+          attempts: retryInfo.attempts,
+          message,
+        });
+      } else {
+        logger.error("inventory_transfer_followup_pending", {
+          event: "inventory_transfer_followup_pending",
+          transferId,
+          attempts: retryInfo.attempts,
+          nextRetryAt: retryInfo.nextRetryAt?.toISOString() ?? null,
+          message,
+        });
+      }
       return false;
     }
   }

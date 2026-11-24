@@ -362,7 +362,7 @@ export function createServices(
     ...inventoryStorage,
     ...channelsStorage,
     ...identityStorage,
-  }, channelSync, undefined, undefined, reservationRuntime.executor, assemblyExecution);
+  }, channelSync, undefined, undefined, reservationRuntime.executor, assemblyExecution, reservation);
   const pickCorrections = createPickCorrectionService(db, { ...ordersStorage, ...warehouseStorage }, picking);
 
   // Standalone
@@ -602,12 +602,26 @@ export function createServices(
   // publication worker publishes. A failed mark still throws so the warehouse
   // command outboxes retain it; the scheduled sweep is the final backstop.
   const pendingReplenChecks = new Set<number>();
+  const pendingWakeupVariants = new Set<number>();
   const queueVariantInventorySync = async (productVariantId: number, triggeredBy: string): Promise<void> => {
     const productIds = await inventorySupplyDependencies.getAffectedProductIds(productVariantId);
     const recorded = await inventoryPublicationWork.recordInventoryChange(productIds, `inventory_change:${triggeredBy}`);
     if (recorded.mode === "published") {
       const failed = recorded.results.findIndex(result => result.inventory.some(work => work.variantsErrored > 0));
       if (failed >= 0) throw new Error(`Inventory publication work failed for product ${recorded.productIds[failed]}`);
+    }
+    if (!pendingWakeupVariants.has(productVariantId)) {
+      pendingWakeupVariants.add(productVariantId);
+      setTimeout(() => {
+        pendingWakeupVariants.delete(productVariantId);
+        void picking.wakeShortedExceptionOrdersForVariant(productVariantId, triggeredBy).catch(error => {
+          platformLogger.error("stock_arrival_exception_wakeup", {
+            product_variant_id: productVariantId,
+            triggered_by: triggeredBy,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }, 1000);
     }
     for (const productId of productIds) {
       // Preserve the existing debounce for general product re-evaluation. Exact

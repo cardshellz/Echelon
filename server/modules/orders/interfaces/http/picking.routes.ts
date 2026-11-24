@@ -402,6 +402,16 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
+  app.get("/api/picking/items/:id/case-break-sources", requireAuth, requirePermission("picking", "view"), async (req, res) => {
+    try {
+      const sources = await req.app.locals.services.picking.getCaseBreakSources(Number(req.params.id));
+      res.json(sources);
+    } catch (error: any) {
+      logger.error("orders.picking_routes", { message: "Error getting case-break sources:", error: error });
+      res.status(error?.statusCode || 500).json({ error: error.message || "Failed to get case-break sources" });
+    }
+  });
+
   app.post("/api/picking/orders/:id/ready-to-ship", requireAuth, requirePermission("picking", "complete"), async (req, res) => {
     try {
       const { picking } = req.app.locals.services;
@@ -923,17 +933,18 @@ export function registerPickingRoutes(app: Express) {
       }
 
       const orderBefore = await storage.getOrderById(id);
-      const order = await storage.resolveException(id, resolution, req.session.user.id, notes);
+      const resolvedOutcome = await picking.resolveOrderException(id, {
+        resolution,
+        userId: req.session.user.id,
+        notes,
+      });
+      const order = resolvedOutcome.order;
 
       if (!order) {
         return res.status(404).json({ error: "Order not found" });
       }
 
-      const closedBlockers = await picking.closeResolvedShipmentBlockers(id, {
-        resolution,
-        userId: req.session.user.id,
-        notes,
-      });
+      const closedBlockers = resolvedOutcome.closedBlockers;
 
       // Log the exception resolution (non-blocking)
       storage.createPickingLog({

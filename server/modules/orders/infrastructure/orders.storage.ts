@@ -1067,7 +1067,7 @@ export const orderMethods: IOrderStorage = {
       let newStatus: OrderStatus;
       switch (resolution) {
         case "ship_partial":
-          newStatus = "completed";
+          newStatus = "ready_to_ship";
           break;
         case "hold":
           newStatus = "exception";
@@ -1106,7 +1106,7 @@ export const orderMethods: IOrderStorage = {
       if (resolution !== "hold") {
         updates.warehouseStatus = newStatus;
       }
-      if (resolution === "resolved") {
+      if (resolution === "resolved" || resolution === "ship_partial") {
         updates.onHold = 0;
         updates.heldAt = null;
       }

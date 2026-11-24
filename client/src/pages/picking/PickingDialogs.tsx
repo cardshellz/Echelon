@@ -29,13 +29,29 @@ import type {
   SingleOrder,
 } from "./picking-types-and-helpers";
 
+export type FoundOnShelfPromptState = {
+  itemId: number;
+  sku: string;
+  locationCode: string;
+  systemQty: number;
+  status: "pending" | "in_progress" | "completed" | "short";
+  pickedQuantity: number;
+  pickMethod: "scan" | "manual" | "pick_all" | "button";
+  replenSourceLocationId?: number;
+};
+
 export interface PickingDialogsProps {
   multiQtyOpen: boolean;
   setMultiQtyOpen: (open: boolean) => void;
+  multiQtyMethod?: "scan" | "manual";
   pickQty: number;
   setPickQty: (qty: number) => void;
   currentItem: PickItem | undefined;
-  confirmPick: (qty: number) => void;
+  confirmPick: (qty: number, method?: "scan" | "manual") => void;
+  foundOnShelfPrompt?: FoundOnShelfPromptState | null;
+  setFoundOnShelfPrompt?: (prompt: FoundOnShelfPromptState | null) => void;
+  onConfirmFoundOnShelf?: () => void;
+  onShortFromFoundOnShelf?: () => void;
   editQtyOpen: boolean;
   setEditQtyOpen: (open: boolean) => void;
   editQtyIdx: number | null;
@@ -88,10 +104,15 @@ export interface PickingDialogsProps {
 export function PickingDialogs({
   multiQtyOpen,
   setMultiQtyOpen,
+  multiQtyMethod = "scan",
   pickQty,
   setPickQty,
   currentItem,
   confirmPick,
+  foundOnShelfPrompt,
+  setFoundOnShelfPrompt,
+  onConfirmFoundOnShelf,
+  onShortFromFoundOnShelf,
   editQtyOpen,
   setEditQtyOpen,
   editQtyIdx,
@@ -175,7 +196,7 @@ export function PickingDialogs({
           <DialogFooter className="flex-col gap-2 sm:flex-col">
             <Button
               className="w-full h-14 min-h-[44px] text-lg bg-emerald-600 hover:bg-emerald-700"
-              onClick={() => confirmPick(pickQty)}
+              onClick={() => confirmPick(pickQty, multiQtyMethod)}
             >
               Confirm {pickQty}
             </Button>
@@ -670,6 +691,62 @@ export function PickingDialogs({
               className="w-full h-12"
               onClick={() => setAllocationDialogOpen(false)}
               disabled={resolveAllocationMutation.isPending}
+            >
+              Cancel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Found on Shelf 1-Tap Confirmation Dialog (1=A) */}
+      <Dialog
+        open={Boolean(foundOnShelfPrompt)}
+        onOpenChange={(open) => {
+          if (!open && setFoundOnShelfPrompt) setFoundOnShelfPrompt(null);
+        }}
+      >
+        <DialogContent className="w-[95vw] max-w-sm p-4" data-testid="dialog-found-on-shelf">
+          <DialogHeader>
+            <DialogTitle className="flex items-center justify-center gap-2 text-amber-600">
+              <AlertTriangle className="h-5 w-5" />
+              Confirm Found on Shelf
+            </DialogTitle>
+            {foundOnShelfPrompt && (
+              <DialogDescription className="text-center space-y-2 pt-1">
+                <div>
+                  System shows <span className="font-bold text-foreground">{foundOnShelfPrompt.systemQty}</span> on hand in{" "}
+                  <span className="font-mono font-bold text-foreground">{foundOnShelfPrompt.locationCode}</span> for{" "}
+                  <span className="font-mono font-semibold text-foreground">{foundOnShelfPrompt.sku}</span> (and 0 in Reserve).
+                </div>
+                <div className="text-xs text-muted-foreground">
+                  Confirm physical stock was found in {foundOnShelfPrompt.locationCode} to log a positive adjustment for review and complete this pick without freezing the bin.
+                </div>
+              </DialogDescription>
+            )}
+          </DialogHeader>
+
+          <DialogFooter className="flex-col gap-2 sm:flex-col pt-2">
+            <Button
+              className="w-full h-14 min-h-[44px] text-base bg-emerald-600 hover:bg-emerald-700"
+              onClick={() => onConfirmFoundOnShelf && onConfirmFoundOnShelf()}
+              data-testid="button-confirm-found-on-shelf"
+            >
+              Confirm Found in {foundOnShelfPrompt?.locationCode || "Bin"} & Pick
+            </Button>
+            {onShortFromFoundOnShelf && (
+              <Button
+                variant="outline"
+                className="w-full h-12 min-h-[44px] text-amber-700 border-amber-300"
+                onClick={onShortFromFoundOnShelf}
+                data-testid="button-short-from-found-on-shelf"
+              >
+                Bin is Empty — Short Pick
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              className="w-full h-11 min-h-[44px]"
+              onClick={() => setFoundOnShelfPrompt && setFoundOnShelfPrompt(null)}
             >
               Cancel
             </Button>
