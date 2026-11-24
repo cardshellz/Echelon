@@ -1923,7 +1923,7 @@ describe("recordRetryFailure :: MAX_ATTEMPTS boundary", () => {
   });
 
   it("does NOT emit CRITICAL on transient failures (status=pending)", async () => {
-    const errSpy = vi.spyOn(console, "error");
+    const errSpy = spyLoggerJson("error");
     const { db } = makeDb();
     await recordRetryFailure(
       db,
@@ -1932,7 +1932,7 @@ describe("recordRetryFailure :: MAX_ATTEMPTS boundary", () => {
       { topic: "shopify_fulfillment_push", shipmentId: 9 },
     );
     const critical = errSpy.mock.calls.find((args) =>
-      String(args[0] ?? "").startsWith("CRITICAL:"),
+      String(args[0] ?? "").includes("CRITICAL:"),
     );
     expect(critical).toBeUndefined();
   });
